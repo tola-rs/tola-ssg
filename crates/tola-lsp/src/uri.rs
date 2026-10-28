@@ -7,7 +7,6 @@
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
 use lsp_types::Uri;
 use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use serde::Deserialize;
@@ -32,24 +31,49 @@ const URI_PATH_ENCODE_SET: &AsciiSet = &CONTROLS
     .add(b'|')
     .add(b'}');
 
+/// Why an editor URI or a site path has no protocol address.
+#[derive(Debug, thiserror::Error)]
+pub(super) enum UriError {
+    #[error("the editor URI is not valid")]
+    Invalid(#[source] url::ParseError),
+    #[error("the editor URI must name a local file")]
+    NotALocalFile,
+    #[error("Tola could not address this site file as an editor document")]
+    Unaddressable,
+    #[error("source URL is not a valid protocol URI")]
+    NotAProtocolUri(#[source] serde::de::value::Error),
+}
+
+/// The URL one editor URI spells.
+fn editor_url(uri: &str) -> Result<Url, UriError> {
+    Url::parse(uri).map_err(UriError::Invalid)
+}
+
 /// The local path an editor URI names, in the editor's own spelling.
 ///
 /// The spelling matters: a document URI Tola publishes back to the editor keeps the identity the
 /// editor opened, so paths compared with each other are normalized separately.
-pub(super) fn to_file_path(uri: &str) -> Result<PathBuf> {
-    Url::parse(uri)
-        .context("the editor URI is not valid")?
-        .to_file_path()
-        .map_err(|()| anyhow::anyhow!("the editor URI must name a local file"))
+pub(super) fn to_file_path(uri: &str) -> Result<PathBuf, UriError> {
+    file_path_of(&editor_url(uri)?)
 }
 
 /// The site identity an editor URI names, normalized as every other site path is.
 ///
 /// One file has several spellings (symlinks, `.` and `..`, escapes), so an identity compared or
 /// cached anywhere in the crate goes through this rule.
-pub(super) fn to_site_path(uri: &str) -> Result<PathBuf> {
+pub(super) fn to_site_path(uri: &str) -> Result<PathBuf, UriError> {
+    site_path_of(&editor_url(uri)?)
+}
+
+/// The local path one parsed editor URL names.
+pub(super) fn file_path_of(url: &Url) -> Result<PathBuf, UriError> {
+    url.to_file_path().map_err(|()| UriError::NotALocalFile)
+}
+
+/// The site identity one parsed editor URL names.
+pub(super) fn site_path_of(url: &Url) -> Result<PathBuf, UriError> {
     Ok(tola_build::filesystem::normalize_existing_prefix(
-        &to_file_path(uri)?,
+        &file_path_of(url)?,
     ))
 }
 
@@ -95,25 +119,23 @@ impl ClientRoot {
 
     /// The editor's address for one site path: the resolved root is stripped, the spelling the
     /// editor named is rejoined, and the result is encoded.
-    pub(super) fn address(&self, path: &Path) -> Result<Uri> {
+    pub(super) fn address(&self, path: &Path) -> Result<Uri, UriError> {
         from_file_path(&self.spell(path))
     }
 }
 
-pub(super) fn from_file_path(path: &Path) -> Result<Uri> {
-    let url = Url::from_file_path(path).map_err(|_| {
-        anyhow::anyhow!("Tola could not address this site file as an editor document")
-    })?;
+pub(super) fn from_file_path(path: &Path) -> Result<Uri, UriError> {
+    let url = Url::from_file_path(path).map_err(|()| UriError::Unaddressable)?;
     from_url(url)
 }
 
-pub(super) fn from_url(mut url: Url) -> Result<Uri> {
+pub(super) fn from_url(mut url: Url) -> Result<Uri, UriError> {
     let path: Cow<'_, str> = utf8_percent_encode(url.path(), URI_PATH_ENCODE_SET).into();
     if let Cow::Owned(path) = path {
         url.set_path(&path);
     }
     Uri::deserialize(StringDeserializer::<Error>::new(url.into()))
-        .context("source URL is not a valid protocol URI")
+        .map_err(UriError::NotAProtocolUri)
 }
 
 #[cfg(test)]

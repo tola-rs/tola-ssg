@@ -2,7 +2,7 @@
 
 /// Editor integration.
 pub mod editor {
-    use tola_build::diagnostic::DiagnosticCode;
+    use tola_diagnostic::DiagnosticCode;
 
     /// The site configuration an editor check needs could not be loaded.
     pub const CONFIGURATION: DiagnosticCode = DiagnosticCode::new("editor.configuration");

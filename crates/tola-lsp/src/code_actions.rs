@@ -17,19 +17,36 @@ use std::collections::BTreeSet;
 
 use lsp_types::{CodeActionKind, CodeActionOrCommand, CodeActionParams, Range, TextEdit, Uri};
 use serde::Deserialize;
-use tola_build::diagnostic::DiagnosticCause;
+use tola_diagnostic::DiagnosticCause;
 use tola_typst::typst::syntax::Source;
 use tola_typst_syntax::names::SourceNames;
 
 use crate::server::HostSections;
 
-use self::edits::{byte_range, disjoint_edits, edit_action, merged_removals};
+use self::edits::{disjoint_edits, edit_action, edit_key, merged_removals};
 use self::headings::heading_depth;
 use self::imports::{organize_imports, unread_import_removal};
 use self::near_miss::{configuration_fixes, unknown_variable_fixes};
 use self::wrapping::{equation_rewrites, figure_wrap, wrap_content_block};
+use crate::position::byte_range;
 
 pub(super) use self::narrowing::{NarrowingSource, narrowing_actions, narrowing_closure};
+
+/// A fix one diagnostic justifies: the title a client shows, and the edits applying it.
+pub(super) type Fix = (String, Vec<TextEdit>);
+
+/// The document's name index: the one the request already holds, or one parsed here and kept for
+/// the request's later diagnostics.
+fn names_index<'a>(
+    source: &Source,
+    source_names: Option<&'a SourceNames>,
+    parsed_names: &'a mut Option<SourceNames>,
+) -> &'a SourceNames {
+    match source_names {
+        Some(source_names) => source_names,
+        None => parsed_names.get_or_insert_with(|| SourceNames::new(source.clone())),
+    }
+}
 
 /// Every fix the request's diagnostics justify for the document they were reported on.
 ///
@@ -54,7 +71,7 @@ pub(super) fn diagnostic_actions(
     // once, so either one decides whether the diagnostics are read for their fixes.
     let fixable = quickfix || fix_all;
     let mut parsed_names = None;
-    let mut fixes: Vec<(String, Vec<TextEdit>)> = Vec::new();
+    let mut fixes: Vec<Vec<Fix>> = Vec::new();
     let mut organized = Vec::new();
     for diagnostic in &params.context.diagnostics {
         let Some(cause) = &diagnostic.data else {
@@ -68,7 +85,7 @@ pub(super) fn diagnostic_actions(
                 fixes.extend(configuration_fixes(source, host, &fields));
             }
             DiagnosticCause::UnknownVariable { name } if fixable => {
-                fixes.extend(unknown_variable_fixes(
+                fixes.push(unknown_variable_fixes(
                     source,
                     source_names,
                     &mut parsed_names,
@@ -77,11 +94,12 @@ pub(super) fn diagnostic_actions(
                 ));
             }
             DiagnosticCause::UnreadImport { names, removal } => {
-                let names_index = source_names.unwrap_or_else(|| {
-                    parsed_names.get_or_insert_with(|| SourceNames::new(source.clone()))
-                });
-                let Some(edits) = unread_import_removal(source, names_index, &names, &removal)
-                else {
+                let Some(edits) = unread_import_removal(
+                    source,
+                    names_index(source, source_names, &mut parsed_names),
+                    &names,
+                    &removal,
+                ) else {
                     continue;
                 };
                 if organize {
@@ -98,7 +116,7 @@ pub(super) fn diagnostic_actions(
                     } else {
                         format!("remove the unused imports of {quoted}")
                     };
-                    fixes.push((title, edits));
+                    fixes.push(vec![(title, edits)]);
                 }
             }
             _ => {}
@@ -108,6 +126,7 @@ pub(super) fn diagnostic_actions(
         disjoint_edits(
             fixes
                 .iter()
+                .filter_map(|alternatives| alternatives.first())
                 .flat_map(|(_, edits)| edits.iter().cloned())
                 .collect(),
         )
@@ -118,14 +137,8 @@ pub(super) fn diagnostic_actions(
         actions.extend(
             fixes
                 .into_iter()
-                .filter(|(_, edits)| {
-                    seen.insert(
-                        edits
-                            .iter()
-                            .map(|edit| (edit.range.start, edit.range.end, edit.new_text.clone()))
-                            .collect::<Vec<_>>(),
-                    )
-                })
+                .flatten()
+                .filter(|(_, edits)| seen.insert(edits.iter().map(edit_key).collect::<Vec<_>>()))
                 .map(|(title, edits)| edit_action(uri, title, CodeActionKind::QUICKFIX, edits)),
         );
     }
@@ -154,10 +167,10 @@ pub(super) fn selection_actions(
     source: &Source,
     span: Range,
 ) -> Vec<CodeActionOrCommand> {
-    let Some(bytes) = byte_range(source, span) else {
+    let Some(bytes) = byte_range(source.lines(), span) else {
         return Vec::new();
     };
-    let mut actions = heading_depth(uri, source, bytes.clone());
+    let mut actions = heading_depth(uri, source, &bytes);
     actions.extend(wrap_content_block(uri, source, &bytes));
     actions.extend(equation_rewrites(uri, source, &bytes));
     actions.extend(figure_wrap(uri, source, &bytes));
@@ -206,12 +219,31 @@ pub(super) fn only_names(only: Option<&[CodeActionKind]>, kind: &CodeActionKind)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lsp_types::{CodeAction, CodeActionKind, CodeActionOrCommand, Diagnostic, NumberOrString};
+    use lsp_types::{CodeActionKind, CodeActionOrCommand, Diagnostic, Position, Range};
 
     /// The document every request names: absolute on any host, and no file needs to exist.
     pub(super) fn uri() -> Uri {
         let root = std::env::current_dir().expect("the tests run in the crate's directory");
         crate::uri::from_file_path(&root.join("site/tola.toml")).expect("a file uri")
+    }
+
+    /// One code action request for `uri()`, echoing `diagnostics` over `span`.
+    fn code_action_params(
+        span: Range,
+        diagnostics: Vec<Diagnostic>,
+        only: Option<Vec<CodeActionKind>>,
+    ) -> CodeActionParams {
+        CodeActionParams {
+            text_document: lsp_types::TextDocumentIdentifier { uri: uri() },
+            range: span,
+            context: lsp_types::CodeActionContext {
+                diagnostics,
+                only,
+                trigger_kind: None,
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        }
     }
 
     /// One quick fix request for `text`, whose diagnostic covers `span`.
@@ -234,10 +266,7 @@ mod tests {
         actions_at(
             text,
             cause,
-            Range::new(
-                lsp_types::Position::new(0, 0),
-                lsp_types::Position::new(0, 0),
-            ),
+            Range::new(Position::new(0, 0), Position::new(0, 0)),
         )
     }
 
@@ -250,10 +279,7 @@ mod tests {
         actions_over(
             text,
             causes,
-            Range::new(
-                lsp_types::Position::new(0, 0),
-                lsp_types::Position::new(0, 0),
-            ),
+            Range::new(Position::new(0, 0), Position::new(0, 0)),
             Some(only),
         )
     }
@@ -265,24 +291,15 @@ mod tests {
         span: Range,
         only: Option<Vec<CodeActionKind>>,
     ) -> Vec<CodeActionOrCommand> {
-        let params = CodeActionParams {
-            text_document: lsp_types::TextDocumentIdentifier { uri: uri() },
-            range: span,
-            context: lsp_types::CodeActionContext {
-                diagnostics: causes
-                    .into_iter()
-                    .map(|data| Diagnostic {
-                        range: span,
-                        data: Some(data),
-                        ..Diagnostic::default()
-                    })
-                    .collect(),
-                only,
-                trigger_kind: None,
-            },
-            work_done_progress_params: Default::default(),
-            partial_result_params: Default::default(),
-        };
+        let diagnostics = causes
+            .into_iter()
+            .map(|data| Diagnostic {
+                range: span,
+                data: Some(data),
+                ..Diagnostic::default()
+            })
+            .collect();
+        let params = code_action_params(span, diagnostics, only);
         diagnostic_actions(&uri(), &Source::detached(text), None, &params, &[])
     }
 
@@ -316,7 +333,12 @@ mod tests {
         let source = Source::detached(text);
         let mut ranges = edits
             .into_iter()
-            .map(|(range, new_text)| (byte_range(&source, range).expect("an edit range"), new_text))
+            .map(|(range, new_text)| {
+                (
+                    byte_range(source.lines(), range).expect("an edit range"),
+                    new_text,
+                )
+            })
             .collect::<Vec<_>>();
         ranges.sort_by_key(|(range, _)| range.start);
         for pair in ranges.windows(2) {
@@ -348,63 +370,31 @@ mod tests {
         field
     }
 
-    /// The titled edits every action of `kind` has.
-    pub(super) fn edits_of_kind(
-        actions: &[CodeActionOrCommand],
-        kind: &CodeActionKind,
-    ) -> Vec<(String, Range, String)> {
+    /// The titled edits every quick fix in `actions` has.
+    pub(super) fn edits(actions: &[CodeActionOrCommand]) -> Vec<(String, Range, String)> {
         actions
             .iter()
             .map(|action| {
-                let CodeActionOrCommand::CodeAction(CodeAction {
-                    title,
-                    kind: action_kind,
-                    edit: Some(workspace),
-                    ..
-                }) = action
-                else {
+                let CodeActionOrCommand::CodeAction(action) = action else {
                     panic!("every action is a code action");
                 };
-                assert_eq!(action_kind.as_ref(), Some(kind));
-                let edit = workspace
-                    .changes
+                assert_eq!(action.kind.as_ref(), Some(&CodeActionKind::QUICKFIX));
+                let edit = action
+                    .edit
                     .as_ref()
+                    .and_then(|edit| edit.changes.as_ref())
                     .and_then(|changes| changes.get(&uri()))
                     .and_then(|edits| edits.first())
                     .expect("every action has one edit");
-                (title.clone(), edit.range, edit.new_text.clone())
+                (action.title.clone(), edit.range, edit.new_text.clone())
             })
             .collect()
     }
 
-    pub(super) fn edits(actions: &[CodeActionOrCommand]) -> Vec<(String, Range, String)> {
-        edits_of_kind(actions, &CodeActionKind::QUICKFIX)
-    }
-
     #[test]
     fn diagnostic_without_cause_offers_no_fix() {
-        let params = CodeActionParams {
-            text_document: lsp_types::TextDocumentIdentifier { uri: uri() },
-            range: Range::new(
-                lsp_types::Position::new(0, 0),
-                lsp_types::Position::new(0, 0),
-            ),
-            context: lsp_types::CodeActionContext {
-                diagnostics: vec![Diagnostic {
-                    range: Range::new(
-                        lsp_types::Position::new(0, 0),
-                        lsp_types::Position::new(0, 0),
-                    ),
-                    code: Some(NumberOrString::String("typst.compile".to_owned())),
-                    message: "unknown variable: x".to_owned(),
-                    ..Diagnostic::default()
-                }],
-                only: None,
-                trigger_kind: None,
-            },
-            work_done_progress_params: Default::default(),
-            partial_result_params: Default::default(),
-        };
+        let span = Range::new(Position::new(0, 0), Position::new(0, 0));
+        let params = code_action_params(span, vec![Diagnostic::default()], None);
         assert!(
             diagnostic_actions(
                 &uri(),
@@ -434,10 +424,7 @@ mod tests {
             edits(&actions),
             [(
                 "remove `build.minfy`".to_owned(),
-                Range::new(
-                    lsp_types::Position::new(2, 0),
-                    lsp_types::Position::new(3, 0)
-                ),
+                Range::new(Position::new(2, 0), Position::new(3, 0)),
                 String::new(),
             )]
         );
@@ -452,84 +439,79 @@ mod tests {
             "removal": {"kind": "statement", "line": 1},
         });
 
-        for (asked, wanted, refused) in [
-            (
-                CodeActionKind::QUICKFIX,
-                "remove the unused import of `sitemap`",
-                "organize imports",
-            ),
-            (
-                CodeActionKind::SOURCE_ORGANIZE_IMPORTS,
-                "organize imports",
-                "remove the unused import of `sitemap`",
-            ),
+        for kind in [
+            CodeActionKind::QUICKFIX,
+            CodeActionKind::SOURCE_ORGANIZE_IMPORTS,
         ] {
+            let asked = kind.clone();
             let actions = actions_for(text, vec![cause.clone()], vec![asked.clone()]);
-            let titles = || {
-                actions
-                    .iter()
-                    .filter_map(|action| match action {
-                        CodeActionOrCommand::CodeAction(action) => Some(action.title.as_str()),
-                        CodeActionOrCommand::Command(_) => None,
-                    })
-                    .collect::<Vec<_>>()
-            };
-            assert!(titles().contains(&wanted), "{asked:?} gave {actions:?}");
-            assert!(!titles().contains(&refused), "{asked:?} gave {actions:?}");
+            assert_eq!(
+                action_kinds(&actions),
+                [Some(kind)],
+                "asking for {asked:?} gave {actions:?}"
+            );
         }
     }
+
+    #[test]
+    fn fix_all_chooses_one_alternative() {
+        let text = "$ sym.alpha $\n";
+        let actions = actions_over(
+            text,
+            vec![serde_json::json!({"kind": "unknown-variable", "name": "sym"})],
+            Range::new(Position::new(0, 2), Position::new(0, 5)),
+            Some(vec![CodeActionKind::SOURCE_FIX_ALL]),
+        );
+        assert_eq!(
+            applied(
+                text,
+                edits_of(&actions, "fix every diagnostic in this file")
+            ),
+            "$ std.sym.alpha $\n"
+        );
+    }
+
     #[test]
     fn fix_all_applies_every_diagnostic_fix() {
         let text = "[site]\ntitel = \"Site\"\ndescriptio = \"Typo\"\n";
         let actions = actions_for(
             text,
-            vec![
-                serde_json::json!({
-                    "kind": "unknown-configuration-fields",
-                    "fields": [{
-                        "name": "site.titel",
-                        "line": 2,
-                        "written": {
-                            "start": {"line": 1, "character": 0},
-                            "end": {"line": 1, "character": 5},
-                        },
-                    }],
-                }),
-                serde_json::json!({
-                    "kind": "unknown-configuration-fields",
-                    "fields": [{
-                        "name": "site.descriptio",
-                        "line": 3,
-                        "written": {
-                            "start": {"line": 2, "character": 0},
-                            "end": {"line": 2, "character": 10},
-                        },
-                    }],
-                }),
-            ],
+            vec![serde_json::json!({
+                "kind": "unknown-configuration-fields",
+                "fields": [{
+                    "name": "site.titel",
+                    "line": 2,
+                    "written": {
+                        "start": {"line": 1, "character": 0},
+                        "end": {"line": 1, "character": 5},
+                    },
+                }, {
+                    "name": "site.descriptio",
+                    "line": 3,
+                    "written": {
+                        "start": {"line": 2, "character": 0},
+                        "end": {"line": 2, "character": 10},
+                    },
+                }],
+            })],
             vec![CodeActionKind::SOURCE_FIX_ALL],
         );
 
-        // One action answers both reports, and each field's removal yields to its correction.
         assert_eq!(
             action_kinds(&actions),
             [Some(CodeActionKind::SOURCE_FIX_ALL)]
         );
+        let mut edits = edits_of(&actions, "fix every diagnostic in this file");
+        edits.sort_by_key(|(range, _)| range.start);
         assert_eq!(
-            edits_of(&actions, "fix every diagnostic in this file"),
+            edits,
             [
                 (
-                    Range::new(
-                        lsp_types::Position::new(1, 0),
-                        lsp_types::Position::new(1, 5)
-                    ),
+                    Range::new(Position::new(1, 0), Position::new(1, 5)),
                     "title".to_owned(),
                 ),
                 (
-                    Range::new(
-                        lsp_types::Position::new(2, 0),
-                        lsp_types::Position::new(2, 10)
-                    ),
+                    Range::new(Position::new(2, 0), Position::new(2, 10)),
                     "description".to_owned(),
                 ),
             ]

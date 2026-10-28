@@ -9,6 +9,7 @@ mod refine;
 mod store;
 mod unread;
 
+pub(crate) use projection::compiler_source_range;
 pub(crate) use refine::refine_unread_configuration;
 pub(crate) use store::{ClientDiagnostics, Pulled};
 pub(crate) use unread::UnreadImports;
@@ -30,18 +31,19 @@ pub(crate) mod tests {
         Diagnostic as EditorDiagnostic, DidOpenTextDocumentParams, PublishDiagnosticsParams,
         TextDocumentItem, Uri,
     };
-    use tola_build::diagnostic::Diagnostic;
+    use tola_diagnostic::Diagnostic;
     use tola_typst_syntax::names;
 
     use crate::sources::OpenSources;
 
     use super::store::ClientDiagnostics;
 
-    pub(crate) fn open_source(open: &mut OpenSources, uri: Uri, version: i32) {
+    /// Open one document at `version` holding `text`, as the client's own notification has it.
+    pub(crate) fn open_source(open: &mut OpenSources, uri: Uri, version: i32, text: &str) {
         open.apply(Notification::new(
             DidOpenTextDocument::METHOD.into(),
             DidOpenTextDocumentParams {
-                text_document: TextDocumentItem::new(uri, "typst".into(), version, "source".into()),
+                text_document: TextDocumentItem::new(uri, "typst".into(), version, text.into()),
             },
         ))
         .unwrap();
@@ -59,6 +61,8 @@ pub(crate) mod tests {
         sent
     }
 
+    /// A client that reads report versions and related information, and declares neither
+    /// diagnostic tags nor cause payloads.
     pub(crate) fn features() -> crate::capabilities::ClientFeatures {
         crate::capabilities::ClientFeatures::new(&serde_json::from_value(serde_json::json!({
             "textDocument": { "publishDiagnostics": { "versionSupport": true, "relatedInformation": true } }
@@ -74,6 +78,7 @@ pub(crate) mod tests {
         crate::analysis::site_selected_interfaces(
             root,
             &open.view(),
+            &crate::sources::base_source_boundary(root, false),
             &mut crate::analysis::DiskSources::default(),
             &tola_build::cancellation::BuildCancellation::new(),
         )
@@ -114,20 +119,9 @@ pub(crate) mod tests {
 
         pub(crate) fn open(&mut self, path: &str, text: &str) {
             let uri = crate::uri::from_file_path(&self.physical.join(path)).unwrap();
-            self.open
-                .apply(Notification::new(
-                    lsp_types::notification::DidOpenTextDocument::METHOD.into(),
-                    lsp_types::DidOpenTextDocumentParams {
-                        text_document: lsp_types::TextDocumentItem::new(
-                            uri,
-                            "typst".into(),
-                            1,
-                            text.into(),
-                        ),
-                    },
-                ))
-                .unwrap();
+            open_source(&mut self.open, uri, 1, text);
         }
+
         pub(crate) fn check(&mut self) {
             self.publish(Vec::new());
         }

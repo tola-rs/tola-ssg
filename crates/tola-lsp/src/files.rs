@@ -2,50 +2,64 @@
 //!
 //! Completion offers them, and a site whose program did not compile scans them for the
 //! bibliographies its sources name. It is an editor affordance rather than discovery: a file the
-//! site never reads still completes, while the author's own ignore files and Tola's reserved
-//! directory keep tooling and build state out of the list.
+//! site never reads still completes. Disk candidates follow the author's ignore files and omit
+//! tooling and build state; open sources join completion through the source boundary before saving.
 
+use anyhow::Result;
+use std::path::PathBuf;
+use std::sync::Arc;
 use tola_build::cancellation::BuildCancellation;
 use tola_build::config::ResolvedSiteConfig;
 use tola_typst::typst::syntax::FileId;
 
 /// The site's own files, as the editor's file ids, in a deterministic order.
-pub(super) fn owned_file_ids(config: &ResolvedSiteConfig) -> Vec<FileId> {
+pub(super) fn owned_file_ids(
+    config: &ResolvedSiteConfig,
+    cancellation: &BuildCancellation,
+) -> Result<Vec<FileId>> {
     let root = config.get_root();
-    // An editor request holds no build attempt to cancel, and this walk answers one request.
-    let cancellation = BuildCancellation::new();
-    let paths = match tola_build::filesystem::owned_files(config, &cancellation) {
-        Ok(paths) => paths,
-        Err(error) => {
-            tracing::debug!(%error, "the site's files could not be listed");
-            return Vec::new();
-        }
-    };
-    paths
+    Ok(tola_build::filesystem::owned_files(config, cancellation)?
         .iter()
         .filter_map(|path| tola_typst::file_id_from_path(path, root))
-        .collect()
+        .collect())
+}
+
+pub(super) fn completable_file_ids(
+    config: &ResolvedSiteConfig,
+    overrides: &[(PathBuf, Arc<str>)],
+    boundary: &tola_typst::SourceBoundary,
+    cancellation: &BuildCancellation,
+) -> Result<Vec<FileId>> {
+    let root = config.get_root();
+    let mut file_ids = owned_file_ids(config, cancellation)?;
+    for (path, _) in overrides {
+        cancellation.ensure_active()?;
+        if let Some(id) = crate::identity::path_id(path, root)
+            && boundary.check(path).is_ok()
+        {
+            file_ids.push(id);
+        }
+    }
+    file_ids.sort_by(|left, right| {
+        left.vpath()
+            .get_without_slash()
+            .cmp(right.vpath().get_without_slash())
+    });
+    file_ids.dedup();
+    Ok(file_ids)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tola_build::config::loading::{BuildOverrides, load_site_config};
 
-    fn site_config(root: &std::path::Path) -> ResolvedSiteConfig {
-        let configuration = root.join("tola.toml");
-        std::fs::write(&configuration, "").expect("a configuration");
-        load_site_config(
-            Some(&configuration),
-            tola_typst::PackageLocations::default(),
-            &BuildOverrides::default(),
-        )
-        .expect("the site configuration loads")
-        .into_config()
+    fn site_config(root: &std::path::Path) -> Arc<ResolvedSiteConfig> {
+        crate::compiler::tests::site_configuration(root, "")
     }
 
     fn listed_files(root: &std::path::Path) -> Vec<String> {
-        owned_file_ids(&site_config(root))
+        owned_file_ids(&site_config(root), &BuildCancellation::new())
+            .unwrap()
             .iter()
             .map(|id| id.vpath().get_without_slash().to_owned())
             .collect()
@@ -61,6 +75,17 @@ mod tests {
         std::fs::write(root.join("public/index.html"), "published").unwrap();
 
         assert_eq!(listed_files(root), ["content/index.typ", "tola.toml"]);
+    }
+
+    #[test]
+    fn file_listing_preserves_cancellation() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = site_config(directory.path());
+        let canceller = tola_build::cancellation::BuildCanceller::new();
+        canceller.cancel();
+
+        let error = owned_file_ids(&config, &canceller.token()).unwrap_err();
+        assert!(error.is::<tola_build::cancellation::BuildCancelled>());
     }
 
     #[test]

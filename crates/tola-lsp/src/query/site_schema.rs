@@ -6,10 +6,11 @@ use std::collections::HashSet;
 use anyhow::Result;
 use tola_build::check::SourceCompilation;
 use tola_build::config::ResolvedSiteConfig;
+use tola_build::{SourceDescriptorField, SourceDescriptorFieldKind};
 use tola_typst::typst::World;
 use tola_typst::typst::foundations::Value;
 use tola_typst::typst::syntax::ast::{self, AstNode};
-use tola_typst::typst::syntax::{FileId, LinkedNode, VirtualRoot};
+use tola_typst::typst::syntax::{FileId, LinkedNode, Source, VirtualRoot};
 
 use crate::sentence::joined;
 
@@ -21,17 +22,17 @@ use super::schema;
 use super::semantic::Semantic;
 
 /// One descriptor field as an answer line: the key, and the kind of value it has.
-pub(super) fn descriptor_line(field: tola_build::SourceDescriptorField) -> String {
+pub(super) fn descriptor_line(field: SourceDescriptorField) -> String {
     format!("`{}: {}`", field.name(), descriptor_type(field.kind()))
 }
 
 /// The type a descriptor field's kind reads as, in Typst's own code spelling.
-pub(super) fn descriptor_type(kind: tola_build::SourceDescriptorFieldKind) -> &'static str {
+pub(super) fn descriptor_type(kind: SourceDescriptorFieldKind) -> &'static str {
     match kind {
-        tola_build::SourceDescriptorFieldKind::Str => "str",
-        tola_build::SourceDescriptorFieldKind::Path => "path",
-        tola_build::SourceDescriptorFieldKind::StrArray => "array",
-        tola_build::SourceDescriptorFieldKind::Metadata => "dictionary",
+        SourceDescriptorFieldKind::Str => "str",
+        SourceDescriptorFieldKind::Path => "path",
+        SourceDescriptorFieldKind::StrArray => "array",
+        SourceDescriptorFieldKind::Metadata => "dictionary",
     }
 }
 
@@ -55,19 +56,14 @@ pub(super) fn declared_schema_at(
     if !tola_typst::observation_is_complete(&observed) {
         return Ok(None);
     }
-    let mut declaration = None;
-    for (value, _) in observed {
-        match &declaration {
-            Some(previous) if previous != &value => return Ok(None),
-            Some(_) => {}
-            None => declaration = Some(value),
-        }
-    }
-    let Some(declaration) = declaration else {
+    let Some(((declaration, _), others)) = observed.split_first() else {
         return Ok(None);
     };
+    if others.iter().any(|(value, _)| value != declaration) {
+        return Ok(None);
+    }
     Ok(semantics
-        .inspect_schema(&declaration)?
+        .inspect_schema(declaration)?
         .and_then(schema::OutputDescription::read))
 }
 /// One metadata shape the site program declares for its sources' `meta` field.
@@ -126,19 +122,14 @@ pub(super) struct DeclaredKey {
     pub(super) fields: Vec<(schema::DeclaredField, String)>,
 }
 
-/// The metadata schemas the site program declares through its `parse-sources` calls.
-///
-/// The root Bundle's own program files — the entry and the modules it imports, however deep — are
-/// the one authority for what a source's metadata is: every `parse-sources` call they make
-/// declares the shape of the records it takes in. A call the world did not evaluate declares
-/// nothing here, and a call in a content source declares nothing site-wide.
+/// The metadata schemas the site program's own `parse-sources` calls declare.
 pub(super) fn site_schemas(
     compilation: &SourceCompilation,
     config: &ResolvedSiteConfig,
     semantics: &mut Semantic<'_>,
 ) -> Result<Vec<SiteSchema>> {
     let world = compilation.world();
-    let Some(entry) = crate::identity::path_id(&config.build().entry, config.get_root()) else {
+    let Some(entry) = compilation.site_entry() else {
         return Ok(Vec::new());
     };
     let mut schemas = Vec::new();
@@ -152,10 +143,7 @@ pub(super) fn site_schemas(
             continue;
         };
         let names = tola_typst_syntax::names::SourceNames::new(source.clone());
-        let site_path = tola_build::filesystem::display_path(
-            &config.get_root().join(id.vpath().get_without_slash()),
-            config.get_root(),
-        );
+        let site_path = declaration_path(id, config);
         let mut nodes = vec![LinkedNode::new(source.root())];
         while let Some(node) = nodes.pop() {
             nodes.extend(node.children());
@@ -166,29 +154,56 @@ pub(super) fn site_schemas(
                 schemas.push(schema);
             }
         }
-        // A module the entry reaches may hold the call: follow every import whose module is one of
-        // the site's own program files.
-        for import in names.imports() {
-            let Some(source_node) =
-                tola_typst_syntax::syntax::node_at_range(&source, &import.source_range)
-            else {
-                continue;
-            };
-            let Some(Value::Module(module)) = semantics.import(&source_node)? else {
-                continue;
-            };
-            let Some(file) = module.file_id() else {
-                continue;
-            };
-            let path = config.get_root().join(file.vpath().get_without_slash());
-            if file.root() == &VirtualRoot::Project
-                && !path.starts_with(&config.build().content_dir)
-            {
-                pending.push(file);
-            }
-        }
+        pending.extend(program_imports(&source, &names, semantics, config, entry)?);
     }
     Ok(schemas)
+}
+
+/// How an answer spells a declaring file: site-root relative, or the package spec supplying it.
+fn declaration_path(id: FileId, config: &ResolvedSiteConfig) -> String {
+    match id.root() {
+        VirtualRoot::Project => tola_build::filesystem::display_path(
+            &config.get_root().join(id.vpath().get_without_slash()),
+            config.get_root(),
+        ),
+        VirtualRoot::Package(package) => format!("{package}{}", id.vpath().get_with_slash()),
+    }
+}
+
+/// The imports of one program file that may themselves declare the site's source schema.
+///
+/// Only a project file outside the content directory, or one of the driver's package, is followed.
+fn program_imports(
+    source: &Source,
+    names: &tola_typst_syntax::names::SourceNames,
+    semantics: &mut Semantic<'_>,
+    config: &ResolvedSiteConfig,
+    entry: FileId,
+) -> Result<Vec<FileId>> {
+    let mut files = Vec::new();
+    for import in names.imports() {
+        let Some(source_node) =
+            tola_typst_syntax::syntax::node_at_range(source, &import.source_range)
+        else {
+            continue;
+        };
+        let Some(Value::Module(module)) = semantics.import(&source_node)? else {
+            continue;
+        };
+        let Some(file) = module.file_id() else {
+            continue;
+        };
+        if (file.root() == &VirtualRoot::Project
+            && !config
+                .get_root()
+                .join(file.vpath().get_without_slash())
+                .starts_with(&config.build().content_dir))
+            || (matches!(entry.root(), VirtualRoot::Package(_)) && file.root() == entry.root())
+        {
+            files.push(file);
+        }
+    }
+    Ok(files)
 }
 
 /// The metadata shape one `parse-sources` call declares, when the world observed its schema
@@ -238,19 +253,7 @@ pub(super) fn site_schema(
 
 /// One declaration expression as an answer names it: its own bytes, on one line and bounded.
 fn declaration_text(text: &str) -> String {
-    let mut line = String::with_capacity(text.len());
-    let mut space = false;
-    for ch in text.chars() {
-        if ch.is_whitespace() {
-            space = true;
-        } else {
-            if space && !line.is_empty() {
-                line.push(' ');
-            }
-            space = false;
-            line.push(ch);
-        }
-    }
+    let mut line = text.split_whitespace().collect::<Vec<_>>().join(" ");
     const LIMIT: usize = 40;
     if line.chars().count() > LIMIT {
         line = line.chars().take(LIMIT).collect();
@@ -259,10 +262,7 @@ fn declaration_text(text: &str) -> String {
     line
 }
 
-/// The documentation one declared key has: each distinct field's declaration and
-/// documentation, naming the declarations that write it when the site declares more than one. A
-/// source no call's records were observed to cover says so, because then the listed shapes are
-/// possible declarations rather than its own.
+/// The documentation one declared key has, naming each declaration that writes it.
 pub(super) fn declared_documentation(
     fields: &[(schema::DeclaredField, String)],
     schemas: &SourceSchemas,
@@ -316,18 +316,14 @@ pub(super) fn rejected_key_note(rejecting: usize, required: bool) -> String {
         format!("{rejecting} calls parsing this source reject this key")
     };
     let consequence = if required {
-        "while another requires it, so the site builds either way"
+        "while another requires it, so the site fails either way"
     } else {
         "so the site builds only when every call accepts it"
     };
     format!("{rejected} {consequence}.")
 }
 impl Selection<'_> {
-    /// The metadata shapes this source's records answer to.
-    ///
-    /// A call whose records cover this source is preferred; where no call covers it — no content
-    /// source exists yet, or the calls' records filtered it out — every declared shape answers,
-    /// so each field still names the declaration that has it.
+    /// The metadata shapes this source's records answer to; uncovered sources take every shape.
     pub(super) fn meta_schemas(
         &self,
         compilation: &SourceCompilation,
@@ -348,5 +344,109 @@ impl Selection<'_> {
             several,
             covered,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{fs, sync::Arc};
+    use tola_build::cancellation::BuildCancellation;
+    use tola_build::check::SourceDiagnosticSession;
+
+    use crate::query::tests::load_configuration;
+
+    #[test]
+    fn package_entry_owns_schema() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("project");
+        let module = directory.path().join("module");
+        fs::create_dir_all(root.join("content")).unwrap();
+        fs::create_dir(&module).unwrap();
+        fs::write(
+            root.join("tola.toml"),
+            "[modules.notes]\npath='../module'\n[theme]\nmodule='notes'\n",
+        )
+        .unwrap();
+        fs::write(module.join("tola-module.toml"), "schema-version=1\nname='notes'\nversion='1.0.0'\n[typst]\nentry='lib.typ'\n[site]\nentry='site.typ'\n").unwrap();
+        fs::write(module.join("lib.typ"), "").unwrap();
+        fs::write(
+            module.join("site.typ"),
+            "#import \"records.typ\": records\n#metadata(records)<records>\n",
+        )
+        .unwrap();
+        fs::write(
+            module.join("records.typ"),
+            r#"
+#import "@tola/source:0.0.0": all-sources, parse-sources
+#import "@tola/schema:0.0.0" as s
+#let declared = s.schema((title: str, category: s.optional(str)))
+#let records = parse-sources(all-sources(), declared)
+"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join("content/post.typ"),
+            "#import \"@tola/source:0.0.0\": tola-meta\n#tola-meta((title: \"A\"))",
+        )
+        .unwrap();
+        let config = load_configuration(&root).expect("site configuration");
+        assert!(config.entry_file().is_none());
+        assert!(!root.join("site.typ").exists());
+        let cancellation = BuildCancellation::default();
+        let mut session = SourceDiagnosticSession::with_resources(
+            Arc::clone(&config),
+            tola_build::BuildResources::new().with_input_scope(tola_build::InputScope::Offline),
+        );
+        let revision = session.inspect(Vec::new(), &cancellation).unwrap();
+        assert!(revision.compiled(), "{:?}", revision.diagnostics());
+        let compilation = revision.checked().unwrap();
+        assert!(matches!(
+            compilation.site_entry().unwrap().root(),
+            VirtualRoot::Package(_)
+        ));
+        let mut semantics = Semantic::new(compilation, &cancellation);
+        let schemas = site_schemas(compilation, &config, &mut semantics).unwrap();
+        assert_eq!(schemas.len(), 1);
+        assert!(schemas[0].declares("category"));
+        assert!(
+            schemas[0]
+                .declaration()
+                .contains("@tola-modules/notes:0.0.0/records.typ")
+        );
+    }
+
+    #[test]
+    fn fallback_declares_no_schema() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        fs::create_dir(root.join("content")).unwrap();
+        fs::write(root.join("tola.toml"), "").unwrap();
+        fs::write(root.join("site.typ"), "#unknown_site_program()").unwrap();
+        fs::write(
+            root.join("content/post.typ"),
+            r#"
+#import "@tola/source:0.0.0": parse-sources
+#import "@tola/schema:0.0.0" as s
+#let records = parse-sources((), s.schema((category: str)))
+#metadata(records)
+"#,
+        )
+        .unwrap();
+        let config = load_configuration(root).expect("site configuration");
+        let cancellation = BuildCancellation::default();
+        let mut session = SourceDiagnosticSession::new(Arc::clone(&config));
+        let revision = session
+            .inspect_source("content/post.typ", Vec::new(), &cancellation)
+            .unwrap();
+        assert!(revision.compiled(), "{:?}", revision.diagnostics());
+        let compilation = revision.checked().unwrap();
+        assert!(compilation.site_entry().is_none());
+        let mut semantics = Semantic::new(compilation, &cancellation);
+        assert!(
+            site_schemas(compilation, &config, &mut semantics)
+                .unwrap()
+                .is_empty()
+        );
     }
 }

@@ -16,6 +16,7 @@ mod replies;
 mod routing;
 mod scheduling;
 mod source_jobs;
+mod status;
 
 use std::collections::{BTreeMap, VecDeque};
 use std::io::Write;
@@ -25,13 +26,13 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Result;
-use lsp_server::{Message, Notification, Request, RequestId, Response};
+use lsp_server::{ErrorCode, Message, Notification, Request, RequestId, Response};
 use lsp_types::{CodeActionOrCommand, NumberOrString, Uri};
 use tola_build::cancellation::{BuildCancellation, BuildCanceller};
-use tola_build::diagnostic::Diagnostic;
+use tola_diagnostic::Diagnostic;
 
 use crate::capabilities::ClientFeatures;
-use crate::compiler::{AnalysisRequest, SourceInputs, SourceJob, SourceOverrides};
+use crate::compiler::{AnalysisRequest, SourceInputs, SourceJob};
 use crate::diagnostic::ClientDiagnostics;
 use crate::protocol::CheckMode;
 use crate::server::HostSections;
@@ -50,11 +51,33 @@ pub(crate) fn routes_as_hints(capabilities: &lsp_types::ClientCapabilities) -> b
         .is_some_and(|document| document.inlay_hint.is_some() && document.code_lens.is_none())
 }
 
-/// A check waiting for dispatch: the revision it answers and the sources it reads, before the
-/// selection evidence is frozen with them.
+/// A check waiting for dispatch: the revision it answers, the moment it may run, and the sources
+/// it reads, before the selection evidence is frozen with them.
 struct PendingCheck {
     checked_revision: u64,
+    /// A typing change sets the moment after the settle delay; every other change sets it now.
+    due: Instant,
     sources: SourceInputs,
+}
+
+/// The last completed source check: the revision it answered, and whether the worlds it resolved
+/// are usable. The check lane computes the flag (CheckedSources::compiled): the Bundle in site
+/// mode, the documents the check covered in document mode.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct CompletedCheck {
+    revision: u64,
+    usable_world: bool,
+}
+
+/// The release of the compiled site an idle connection asked the compiler lane for.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum IdleRelease {
+    /// Nothing was asked for: an idle connection may ask now.
+    Available,
+    /// The next free compiler slot releases the compiled site.
+    Requested,
+    /// The site was just released, so another release waits until a job derives it again.
+    Released,
 }
 
 struct SelectionBuild {
@@ -72,7 +95,6 @@ pub(super) struct Connection<W, D> {
     open: OpenSources,
     revision: u64,
     serial: u64,
-    overrides: SourceOverrides,
     checking: BuildCanceller,
     requests: BTreeMap<RequestId, PendingRequest>,
     queries: VecDeque<SourceJob>,
@@ -80,9 +102,6 @@ pub(super) struct Connection<W, D> {
     check: Option<PendingCheck>,
     /// One build serves the revision's waiting corrections independently of check cancellation.
     selection_build: Option<SelectionBuild>,
-    /// When the pending check may run: a typing change sets it after the settle delay, every other
-    /// change sets it now.
-    check_due: Option<Instant>,
     /// Failed reloads retain the last accepted package locations and configuration identity.
     configuration: Option<Arc<tola_build::config::ResolvedSiteConfig>>,
     /// The configuration an author named with `--config`, kept before a check resolves one, so the
@@ -90,19 +109,17 @@ pub(super) struct Connection<W, D> {
     named_configuration: Option<PathBuf>,
     /// The source revision whose check the compiler lane is running now.
     running_check: Option<u64>,
-    /// The revision and outcome of the last completed source check: whether the worlds it resolved
-    /// are usable. The check lane computes the flag (`CheckedSources::compiled`) — the Bundle in
-    /// site mode, the documents the check covered in document mode — and `CheckProgress::Failed`
-    /// reads `false` as "no usable world".
-    checked: Option<(u64, bool)>,
+    /// The last completed source check, whose progress the client was told.
+    checked: Option<CompletedCheck>,
     /// The disk paths the last completed check read: the evidence deciding whether a changed file
     /// can change what this connection answers.
     read_paths: std::collections::BTreeSet<PathBuf>,
+    /// Additional model reads accepted from editor requests in the current revision.
+    query_read_paths: std::collections::BTreeSet<PathBuf>,
     /// The check whose progress the client is being shown, while it runs.
     progress: Option<Progress>,
-    /// The report whose creation the client has not answered, and when it was asked: a creation
-    /// reply may outlive its check, so it is matched by its own id and token, and one the client
-    /// leaves unanswered past its bound is given up rather than waited on forever.
+    /// The report whose creation the client has not answered; its own id and token prevent a
+    /// late answer from opening another check's report.
     progress_create: Option<PendingCreation>,
     /// Whether this client created a progress report without an error; a client that refused one
     /// is never sent another.
@@ -112,9 +129,9 @@ pub(super) struct Connection<W, D> {
     /// author is waiting for, so it is shown at once, while a later one is shown only once it runs
     /// long.
     warm: bool,
-    /// The identifier the next request this connection sends has: request identifiers are
-    /// scoped to their sender, so this sequence never meets the client's.
-    request_serial: u64,
+    /// The number the next identifier this connection mints carries: request identifiers and
+    /// progress tokens are scoped to their sender, so this sequence never meets the client's.
+    identifier_serial: u64,
     /// The `workspace/configuration` request whose answer has this client's settings.
     settings_pull: Option<RequestId>,
     /// The origin a client named for the development server, which outranks the site's own
@@ -126,14 +143,8 @@ pub(super) struct Connection<W, D> {
     /// from.
     host_sections: HostSections,
     /// The moment this connection last had work, which an idle interval is measured from.
-    active: Instant,
-    /// Whether the compiled site is waiting to be let go, which the next free compiler slot runs.
-    release: bool,
-    /// Whether the compiler lane was already asked to let go of the compiled site, so a connection
-    /// that stays idle asks once rather than on every turn.
-    released: bool,
-    /// Whether the author was already told the site's own configuration could not be read.
-    announced_configuration_failure: bool,
+    last_work: Instant,
+    idle_release: IdleRelease,
     /// Whether the author was already told a check's own work failed, so one failing run of checks
     /// announces itself once rather than on every edit.
     announced_panic: bool,
@@ -142,7 +153,7 @@ pub(super) struct Connection<W, D> {
     /// The identifier the next token result has, which a delta request echoes.
     tokens_serial: u64,
     semantic_refresh: refresh::SemanticRefresh,
-    watched_roots: Vec<PathBuf>,
+    watched_paths: Vec<PathBuf>,
 }
 
 /// One open work-done report.
@@ -163,8 +174,6 @@ struct PendingCreation {
     id: RequestId,
     /// The report's token, which its answer must name for that report to open.
     token: NumberOrString,
-    /// When the request was sent, so a client that never answers one is not waited on forever.
-    sent: Instant,
 }
 
 impl<W, D> Connection<W, D> {
@@ -187,36 +196,33 @@ impl<W, D> Connection<W, D> {
             open: OpenSources::default(),
             revision: 0,
             serial: 0,
-            overrides: Arc::default(),
             checking: BuildCanceller::new(),
             requests: BTreeMap::new(),
             queries: VecDeque::new(),
             analyses: VecDeque::new(),
             check: None,
             selection_build: None,
-            check_due: None,
             running_check: None,
             checked: None,
             read_paths: std::collections::BTreeSet::new(),
+            query_read_paths: std::collections::BTreeSet::new(),
             progress: None,
             progress_create: None,
             progress_agreed: true,
             warm: false,
-            request_serial: 0,
+            identifier_serial: 0,
             settings_pull: None,
             named_origin: None,
             default_origin,
             host_sections,
-            active: Instant::now(),
-            release: false,
-            released: false,
-            announced_configuration_failure: false,
+            last_work: Instant::now(),
+            idle_release: IdleRelease::Available,
             announced_panic: false,
             configuration: None,
             tokens: std::collections::HashMap::new(),
             tokens_serial: 0,
             semantic_refresh: refresh::SemanticRefresh::default(),
-            watched_roots: Vec::new(),
+            watched_paths: Vec::new(),
         }
     }
 
@@ -244,12 +250,12 @@ impl<W, D> Connection<W, D> {
         }
     }
 
-    /// The inputs one source job reads: this connection's overrides at the revision its tracked
-    /// sources hold.
+    /// The inputs one source job reads: the workspace root a job resolves against, this
+    /// connection's overrides at the revision its tracked sources hold.
     fn source_inputs(&self, root: PathBuf, cancellation: BuildCancellation) -> SourceInputs {
         SourceInputs {
             root,
-            overrides: Arc::clone(&self.overrides),
+            overrides: Arc::clone(self.open.overrides()),
             source_revision: self.open.revision(),
             cancellation,
         }
@@ -295,7 +301,7 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
         match message {
             Err(invalid) => write_invalid(&mut self.writer, invalid)?,
             Ok(Message::Request(request)) => self.request(request)?,
-            Ok(Message::Notification(message)) => return self.notification(message),
+            Ok(Message::Notification(message)) => return Ok(self.notification(message)?),
             Ok(Message::Response(response)) => self.response(response)?,
         }
         Ok(ControlFlow::Continue(()))
@@ -325,11 +331,29 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
         method: &str,
         parameters: impl serde::Serialize,
     ) -> Result<RequestId> {
-        self.request_serial += 1;
-        let id = RequestId::from(format!("tola-{}", self.request_serial));
+        let id = RequestId::from(format!("tola-{}", self.next_identifier()));
         let message: Message = Request::new(id.clone(), method.to_owned(), parameters).into();
         message.write(&mut self.writer)?;
         Ok(id)
+    }
+
+    /// The next number of this connection's own identifier sequence.
+    fn next_identifier(&mut self) -> u64 {
+        self.identifier_serial += 1;
+        self.identifier_serial
+    }
+
+    /// Stop every job this revision owns, refusing its admitted requests with `refusal`: the
+    /// check, the waiting selection build, the queued lane work, and the report the check opened.
+    fn cancel_pending_work(&mut self, refusal: (ErrorCode, &str)) -> Result<()> {
+        self.checking.cancel();
+        self.cancel_selection();
+        self.cancel_requests(refusal)?;
+        self.end_progress()?;
+        self.queries.clear();
+        self.analyses.clear();
+        self.check = None;
+        Ok(())
     }
 }
 
@@ -364,7 +388,6 @@ enum Phase {
 struct Workspace {
     root: PathBuf,
     diagnostics: ClientDiagnostics,
-    package_sources: Option<Arc<PathBuf>>,
     /// When a source change reruns the site's check, which the client states for this site.
     check_mode: CheckMode,
     source_check_status: bool,
@@ -401,6 +424,26 @@ pub(crate) mod tests {
         workspace
     }
 
+    pub(crate) fn finish_analysis(connection: &mut Connection<Vec<u8>, impl Fn(&[Diagnostic])>) {
+        let request = connection
+            .next_analysis()
+            .expect("a queued source analysis");
+        answer_analysis(connection, request);
+    }
+
+    pub(crate) fn answer_analysis(
+        connection: &mut Connection<Vec<u8>, impl Fn(&[Diagnostic])>,
+        request: AnalysisRequest,
+    ) {
+        connection
+            .completed(crate::compiler::analyze(
+                &mut crate::analysis::DiskSources::default(),
+                &mut crate::analysis::GraphCache::default(),
+                request,
+            ))
+            .expect("the analysis answered");
+    }
+
     pub(crate) fn dynamic_import_position(
         connection: &mut Connection<Vec<u8>, impl Fn(&[Diagnostic])>,
         directory: &Path,
@@ -413,12 +456,16 @@ pub(crate) mod tests {
             connection.next_job(Instant::now()),
             Some(SourceJob::Check(_))
         ));
-        let source = Source::detached(text);
-        let byte = text.rfind("greet").unwrap();
-        let position = crate::position::utf16_range(source.lines(), byte..byte)
-            .unwrap()
-            .start;
+        let position = last_position(text, "greet");
         (uri, position)
+    }
+
+    pub(crate) fn last_position(text: &str, needle: &str) -> lsp_types::Position {
+        let source = Source::detached(text);
+        let byte = text.rfind(needle).unwrap();
+        crate::position::utf16_range(source.lines(), byte..byte)
+            .unwrap()
+            .start
     }
 
     pub(crate) fn references_request(uri: &Uri, position: lsp_types::Position) -> Request {
@@ -453,7 +500,6 @@ pub(crate) mod tests {
         connection.phase = Phase::Ready(Workspace {
             diagnostics: ClientDiagnostics::new(root.clone()),
             root,
-            package_sources: None,
             check_mode: CheckMode::default(),
             source_check_status: false,
             preview_origin: None,

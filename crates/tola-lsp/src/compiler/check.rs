@@ -8,7 +8,7 @@ use anyhow::Result;
 use tola_build::cancellation::BuildCancellation;
 use tola_build::check::{SourceDiagnosticSession, SourceRevision};
 use tola_build::config::ResolvedSiteConfig;
-use tola_build::diagnostic::{Diagnostic, Severity};
+use tola_diagnostic::{Diagnostic, Severity};
 use tola_typst::typst::syntax::Source;
 use tola_typst_syntax::names::{SelectedInterfaces, SourceNames};
 
@@ -54,15 +54,16 @@ fn checked_selection(
     sources: &SourceInputs,
     view: &SourceView,
     configuration: Option<&Arc<ResolvedSiteConfig>>,
+    resources: &tola_build::BuildResources,
     disk: &mut DiskSources,
 ) -> Result<Arc<SelectedInterfaces>, SourceFailure> {
-    crate::analysis::site_selected_interfaces(
-        checked_root(configuration, &sources.root),
-        view,
-        disk,
-        &sources.cancellation,
-    )
-    .map_err(SourceFailure::of)
+    let root = checked_root(configuration, &sources.root);
+    let boundary = configuration.map_or_else(
+        || crate::sources::base_source_boundary(root, false),
+        |configuration| resources.source_boundary(configuration),
+    );
+    crate::analysis::site_selected_interfaces(root, view, &boundary, disk, &sources.cancellation)
+        .map_err(SourceFailure::of)
 }
 
 impl<F> SourceCompiler<F>
@@ -74,9 +75,10 @@ where
         sources: &SourceInputs,
         view: &SourceView,
     ) -> Result<CheckedSources, SourceFailure> {
-        if let Err(error) = self.prepare(sources).map(|_| ()) {
+        if let Err(error) = self.prepare(sources) {
             return match SourceFailure::of(error) {
-                failure @ SourceFailure::Cancelled => Err(failure),
+                SourceFailure::Cancelled => Err(SourceFailure::Cancelled),
+                SourceFailure::Panicked => Err(SourceFailure::Panicked),
                 SourceFailure::Failed(error) => {
                     // A broken edit retains the last usable workspace configuration.
                     let configuration = self
@@ -88,6 +90,7 @@ where
                             sources,
                             view,
                             configuration.as_ref(),
+                            &self.resources,
                             &mut self.disk,
                         )?,
                         configuration,
@@ -102,7 +105,13 @@ where
         }
         let (served, session) = Self::prepared_session(&mut self.session);
         let configuration = Arc::clone(served.configuration());
-        let selected = checked_selection(sources, view, Some(&configuration), &mut self.disk)?;
+        let selected = checked_selection(
+            sources,
+            view,
+            Some(&configuration),
+            &self.resources,
+            &mut self.disk,
+        )?;
         if !served.compiles_site() {
             return check_documents(session, &configuration, sources, view, &selected);
         }
@@ -308,10 +317,10 @@ fn disk_reads(revision: &SourceRevision) -> Option<Vec<PathBuf>> {
 }
 
 fn configuration_diagnostics(error: anyhow::Error) -> Vec<Diagnostic> {
-    if let Some(attached) = tola_build::diagnostic::attached(&error) {
+    if let Some(attached) = tola_diagnostic::attached(&error) {
         return attached.to_vec();
     }
-    let fallback = tola_build::diagnostic::fallback(crate::codes::editor::CONFIGURATION, &error);
+    let fallback = tola_diagnostic::fallback(crate::codes::editor::CONFIGURATION, &error);
     vec![Diagnostic::at_path(
         crate::codes::editor::CONFIGURATION,
         Severity::Error,
@@ -325,6 +334,54 @@ mod tests {
     use super::*;
     use crate::compiler::tests::{compiler, inputs_at, site_configuration};
     use crate::compiler::{CheckRequest, SourceCompilation, SourceCompiler, SourceJob};
+
+    #[test]
+    fn selection_excludes_generated_consumers() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        std::fs::create_dir(root.join("public")).unwrap();
+        std::fs::write(root.join("library.typ"), "#let value = 1").unwrap();
+        let consumer = root.join("public/consumer.typ");
+        let text = "#import \"../library.typ\": value\n#value";
+        std::fs::write(&consumer, text).unwrap();
+        std::fs::write(root.join("site.typ"), "#document(\"index.html\")[Body]").unwrap();
+        let configuration = site_configuration(&root, "");
+        let mut compiler = compiler(&configuration);
+        let library = crate::identity::path_id(&root.join("library.typ"), &root).unwrap();
+        for opened in [false, true] {
+            let mut open = crate::sources::OpenSources::new(&root);
+            if opened {
+                open.apply(lsp_server::Notification::new(
+                    "textDocument/didOpen".into(),
+                    lsp_types::DidOpenTextDocumentParams {
+                        text_document: lsp_types::TextDocumentItem {
+                            uri: crate::uri::from_file_path(&consumer).unwrap(),
+                            language_id: "typst".into(),
+                            version: 1,
+                            text: text.into(),
+                        },
+                    },
+                ))
+                .unwrap();
+            }
+            let SourceCompilation::Checked { checked, .. } =
+                compiler.compile(SourceJob::Check(CheckRequest {
+                    checked_revision: 1,
+                    sources: inputs_at(&root, 1, Arc::default()),
+                    view: open.view(),
+                }))
+            else {
+                panic!("expected a check completion");
+            };
+            assert!(
+                checked
+                    .unwrap()
+                    .selected
+                    .reads_nothing_from(library, "value"),
+                "generated consumer open: {opened}"
+            );
+        }
+    }
 
     /// An open document's unused bindings reach the check's diagnostics.
     #[test]

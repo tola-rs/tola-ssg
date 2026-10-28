@@ -2,11 +2,11 @@
 
 use std::io::Write;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use lsp_server::{ErrorCode, RequestId, Response};
 use lsp_types::ShowDocumentParams;
 use lsp_types::request::{self, Request as LspRequest};
-use tola_build::diagnostic::Diagnostic;
+use tola_diagnostic::Diagnostic;
 
 use crate::protocol::{self, PreviewReply, PreviewRequest, RouteParams};
 
@@ -18,6 +18,15 @@ const UNKNOWN_COMMAND: &str = "Tola runs no such command";
 
 /// The reply to a preview command whose arguments name no document, so there is no route to open.
 const PREVIEW_NEEDS_DOCUMENT: &str = "the preview command named no document";
+
+/// Why the preview command could not be answered.
+#[derive(Debug, thiserror::Error)]
+enum CommandError {
+    #[error("the page address is not a URI")]
+    PageAddress,
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
 
 impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
     /// Run one command the client asked for.
@@ -99,17 +108,18 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
     }
 
     /// Ask the client to open one address, which only a client that declared it can do.
-    fn show_document(&mut self, url: &str) -> Result<bool> {
+    fn show_document(&mut self, url: &str) -> std::result::Result<bool, CommandError> {
         let Phase::Ready(workspace) = &self.phase else {
             return Ok(false);
         };
         if !workspace.features.show_document {
             return Ok(false);
         }
+        let uri: lsp_types::Uri = url.parse().map_err(|_| CommandError::PageAddress)?;
         self.send_request(
             request::ShowDocument::METHOD,
             ShowDocumentParams {
-                uri: url.parse().context("the page address is not a URI")?,
+                uri,
                 external: Some(true),
                 take_focus: Some(true),
                 selection: None,
@@ -122,7 +132,6 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
 #[cfg(test)]
 mod tests {
     use crate::connection::tests::ready_at;
-    use std::sync::Arc;
 
     /// A running server is the only source that knows the port it fell back to, so the address it
     /// wrote names where the site is served.
@@ -144,21 +153,13 @@ mod tests {
     }
 
     #[test]
-    fn dev_server_address_follows_the_site_root() {
+    fn dev_address_follows_site_root() {
         let directory = tempfile::tempdir().unwrap();
         let site = directory.path().join("site");
         std::fs::create_dir_all(site.join("content")).unwrap();
-        let path = site.join("tola.toml");
-        std::fs::write(&path, "").unwrap();
-        let config = tola_build::config::loading::load_site_config(
-            Some(&path),
-            tola_typst::PackageLocations::default(),
-            &tola_build::config::loading::BuildOverrides::default(),
-        )
-        .unwrap()
-        .into_config();
+        let config = crate::compiler::tests::site_configuration(&site, "");
         let mut connection = ready_at(Vec::new(), directory.path().to_path_buf());
-        connection.configuration = Some(Arc::new(config));
+        connection.configuration = Some(config);
 
         let _written =
             tola_build::filesystem::DevServerAddress::write(&site, "http://localhost:4321")
@@ -173,17 +174,12 @@ mod tests {
     fn preview_mount_is_applied_once() {
         let directory = tempfile::tempdir().unwrap();
         std::fs::create_dir(directory.path().join("content")).unwrap();
-        let path = directory.path().join("tola.toml");
-        std::fs::write(&path, "[site]\nbase-path = \"/docs/\"\n").unwrap();
-        let config = tola_build::config::loading::load_site_config(
-            Some(&path),
-            tola_typst::PackageLocations::default(),
-            &tola_build::config::loading::BuildOverrides::default(),
-        )
-        .unwrap()
-        .into_config();
+        let config = crate::compiler::tests::site_configuration(
+            directory.path(),
+            "[site]\nbase-path = \"/docs/\"\n",
+        );
         let mut connection = ready_at(Vec::new(), directory.path().to_path_buf());
-        connection.configuration = Some(Arc::new(config));
+        connection.configuration = Some(config);
         connection.named_origin = Some("http://localhost:9000".to_owned());
         assert_eq!(
             connection.preview_url("/docs/post/").as_deref(),

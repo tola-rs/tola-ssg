@@ -10,7 +10,7 @@
 
 use std::path::Path;
 
-use tola_build::diagnostic::{Diagnostic, DiagnosticCause, Severity, SourcePosition, SourceRange};
+use tola_diagnostic::{Diagnostic, DiagnosticCause, Severity, SourcePosition, SourceRange};
 use tola_typst::TypstWorld;
 use tola_typst::typst::World;
 use tola_typst::typst::syntax::{LinkedNode, Source, ast};
@@ -36,12 +36,10 @@ pub(super) fn document_diagnostics(
 ) -> Vec<Diagnostic> {
     // A hint is spelled the way the compiler's own diagnostics for the document are, which only a
     // document inside the site, under a path an editor document can name, has.
-    if path
-        .strip_prefix(root)
-        .ok()
-        .and_then(Path::to_str)
-        .is_none()
-    {
+    let Ok(site_relative) = path.strip_prefix(root) else {
+        return Vec::new();
+    };
+    if site_relative.to_str().is_none() {
         return Vec::new();
     }
     let relative = tola_build::filesystem::display_path(path, root);
@@ -50,8 +48,7 @@ pub(super) fn document_diagnostics(
         .filter_map(|hint| {
             let diagnostic = diagnostic(hint, names.source(), &relative)?;
             let range = diagnostic.location.as_ref()?.range?;
-            let advised = covering(reported, &relative, &range)
-                .is_some_and(|report| !report.help.is_empty() || !report.notes.is_empty());
+            let advised = covering_advice(reported, &relative, &range);
             (!advised).then_some(diagnostic)
         })
         .collect()
@@ -97,7 +94,7 @@ pub(super) fn liveness_diagnostics(
 
 /// One hint, before it is projected into a diagnostic.
 struct Hint {
-    code: tola_build::diagnostic::DiagnosticCode,
+    code: tola_diagnostic::DiagnosticCode,
     message: String,
     note: Option<String>,
     help: Option<String>,
@@ -118,6 +115,16 @@ fn hints(names: &SourceNames, world: Option<&TypstWorld>) -> Vec<Hint> {
     }
     hints.sort_by_key(|hint| hint.span.start);
     hints
+}
+
+/// Every node of one syntax tree, each parent before its own children.
+fn nodes<'a>(root: LinkedNode<'a>) -> impl Iterator<Item = LinkedNode<'a>> {
+    let mut pending = vec![root];
+    std::iter::from_fn(move || {
+        let node = pending.pop()?;
+        pending.extend(node.children());
+        Some(node)
+    })
 }
 
 /// Walk the syntax tree in order, letting each pass report what a node justifies.
@@ -151,16 +158,7 @@ fn diagnostic(hint: Hint, source: &Source, path: &str) -> Option<Diagnostic> {
             range.start.line as usize + 1,
             range.start.character as usize + 1,
         )
-        .with_source_range(SourceRange {
-            start: SourcePosition {
-                line: range.start.line as usize,
-                character: range.start.character as usize,
-            },
-            end: SourcePosition {
-                line: range.end.line as usize,
-                character: range.end.character as usize,
-            },
-        });
+        .with_source_range(crate::diagnostic::compiler_source_range(range));
     if let Some(note) = hint.note {
         diagnostic = diagnostic.with_note(note);
     }
@@ -173,20 +171,16 @@ fn diagnostic(hint: Hint, source: &Source, path: &str) -> Option<Diagnostic> {
     Some(diagnostic)
 }
 
-/// The reported diagnostic covering this range in this file, when one does.
-fn covering<'a>(
-    reported: &'a [Diagnostic],
-    path: &str,
-    range: &SourceRange,
-) -> Option<&'a Diagnostic> {
-    reported.iter().find(|diagnostic| {
-        diagnostic.location.as_ref().is_some_and(|location| {
-            location.path == path
-                && location
-                    .range
-                    .as_ref()
-                    .is_some_and(|other| overlaps(other, range))
-        })
+fn covering_advice(reported: &[Diagnostic], path: &str, range: &SourceRange) -> bool {
+    reported.iter().any(|diagnostic| {
+        (!diagnostic.help.is_empty() || !diagnostic.notes.is_empty())
+            && diagnostic.location.as_ref().is_some_and(|location| {
+                location.path == path
+                    && location
+                        .range
+                        .as_ref()
+                        .is_some_and(|other| overlaps(other, range))
+            })
     })
 }
 
@@ -221,16 +215,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn covering_report_is_found() {
-        let names = SourceNames::new(Source::detached("#break\n".to_owned()));
-        let hint = hints(&names, None).remove(0);
-        let reported = diagnostic(hint, names.source(), "content/page.typ").unwrap();
-        let range = reported.location.as_ref().unwrap().range.unwrap();
-        assert!(covering(std::slice::from_ref(&reported), "content/page.typ", &range).is_some());
-        assert!(covering(&[reported], "content/other.typ", &range).is_none());
-    }
-
-    #[test]
     fn adjacent_report_is_not_covering() {
         let at = |line, character| SourcePosition { line, character };
         let hint = SourceRange {
@@ -243,30 +227,37 @@ pub(crate) mod tests {
             "content/page.typ",
             "another problem",
         )
+        .with_help("choose another font")
         .with_source_range(SourceRange {
             start: at(0, 0),
             end: at(0, 1),
         });
-        assert!(covering(&[before], "content/page.typ", &hint).is_none());
+        assert!(!covering_advice(&[before], "content/page.typ", &hint));
     }
 
     #[test]
-    fn plain_report_keeps_advice() {
+    fn reported_advice_suppresses_hint() {
         let names = SourceNames::new(Source::detached("#break\n".to_owned()));
         let hint = hints(&names, None).remove(0);
         let advised = diagnostic(hint, names.source(), "content/page.typ").unwrap();
         let mut plain = advised.clone();
         plain.help.clear();
         plain.notes.clear();
+        let mut elsewhere = advised.clone();
+        elsewhere.location.as_mut().unwrap().path = "content/other.typ".into();
         let root = Path::new("/site");
         let path = Path::new("/site/content/page.typ");
 
-        let kept = document_diagnostics(path, root, &names, None, &[plain]);
-        assert_eq!(kept.len(), 1, "{kept:?}");
-        assert!(
-            document_diagnostics(path, root, &names, None, &[advised]).is_empty(),
-            "a report that already advises leaves nothing to add"
-        );
+        for (reported, expected) in [
+            (vec![plain.clone()], 1),
+            (vec![elsewhere], 1),
+            (vec![advised.clone()], 0),
+            (vec![plain.clone(), advised.clone()], 0),
+            (vec![advised, plain], 0),
+        ] {
+            let kept = document_diagnostics(path, root, &names, None, &reported);
+            assert_eq!(kept.len(), expected, "{reported:?}");
+        }
     }
 
     #[test]

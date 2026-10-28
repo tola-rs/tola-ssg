@@ -2,7 +2,7 @@
 
 use std::io::{BufRead, Read, Write};
 
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
 use lsp_server::{ErrorCode, Message, RequestId, Response, ResponseError};
 use serde::Serialize;
 use serde_json::Value;
@@ -11,14 +11,22 @@ const MAX_HEADER_BYTES: usize = 8 * 1024;
 const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
 const JSON_RPC_VERSION: &str = "2.0";
 
-const UNREADABLE_MESSAGE: &str =
-    "Tola could not read the editor's message; restart the language server";
-const OVERSIZED_MESSAGE: &str =
-    "the editor's message is larger than Tola accepts; restart the language server";
-const TRUNCATED_MESSAGE: &str =
-    "the editor closed the connection partway through a message; restart the language server";
+/// Why one frame could not be read.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ReadError {
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error("Tola could not read the editor's message; restart the language server")]
+    Unreadable,
+    #[error("the editor's message is larger than Tola accepts; restart the language server")]
+    Oversized,
+    #[error(
+        "the editor closed the connection partway through a message; restart the language server"
+    )]
+    Truncated,
+}
 
-pub(super) fn read_frame(reader: &mut impl BufRead) -> Result<Option<Vec<u8>>> {
+pub(super) fn read_frame(reader: &mut impl BufRead) -> Result<Option<Vec<u8>>, ReadError> {
     let mut length = None;
     let mut header = String::new();
     let mut header_bytes = 0;
@@ -29,33 +37,38 @@ pub(super) fn read_frame(reader: &mut impl BufRead) -> Result<Option<Vec<u8>>> {
             .read_line(&mut header)?;
         header_bytes += read;
         if header_bytes > MAX_HEADER_BYTES {
-            bail!("{OVERSIZED_MESSAGE}");
+            return Err(ReadError::Oversized);
         }
         if read == 0 {
             if header_bytes == 0 {
                 return Ok(None);
             }
-            bail!("{TRUNCATED_MESSAGE}");
+            return Err(ReadError::Truncated);
         }
         if header == "\r\n" || header == "\n" {
             break;
         }
-        let (name, value) = header.split_once(':').context(UNREADABLE_MESSAGE)?;
+        let (name, value) = header.split_once(':').ok_or(ReadError::Unreadable)?;
         if name.eq_ignore_ascii_case("Content-Length") {
             if length.is_some() {
-                bail!("{UNREADABLE_MESSAGE}");
+                return Err(ReadError::Unreadable);
             }
-            length = Some(value.trim().parse::<usize>().context(UNREADABLE_MESSAGE)?);
+            length = Some(
+                value
+                    .trim()
+                    .parse::<usize>()
+                    .map_err(|_| ReadError::Unreadable)?,
+            );
         }
     }
-    let length = length.context(UNREADABLE_MESSAGE)?;
+    let length = length.ok_or(ReadError::Unreadable)?;
     if length > MAX_BODY_BYTES {
-        bail!("{OVERSIZED_MESSAGE}");
+        return Err(ReadError::Oversized);
     }
     let mut bytes = vec![0; length];
     reader
         .read_exact(&mut bytes)
-        .with_context(|| TRUNCATED_MESSAGE)?;
+        .map_err(|_| ReadError::Truncated)?;
     Ok(Some(bytes))
 }
 

@@ -18,6 +18,8 @@ use crate::server::ServedWorkspace;
 #[derive(Debug)]
 pub(crate) enum SourceFailure {
     Cancelled,
+    /// The job whose answer this would have been panicked; the request is still answered.
+    Panicked,
     Failed(anyhow::Error),
 }
 
@@ -41,8 +43,8 @@ impl SourceFailure {
         empty: impl FnOnce() -> T,
     ) -> Result<T, SourceFailure> {
         match Self::of(error) {
-            failure @ Self::Cancelled => Err(failure),
-            Self::Failed(_) => Ok(empty()),
+            Self::Cancelled => Err(Self::Cancelled),
+            _ => Ok(empty()),
         }
     }
 }
@@ -61,6 +63,8 @@ pub(crate) enum SourceCompilation {
     Answered {
         id: lsp_server::RequestId,
         serial: u64,
+        configuration: Option<Arc<tola_build::config::ResolvedSiteConfig>>,
+        read_paths: Vec<PathBuf>,
         response: Result<SourceReply, SourceFailure>,
     },
     Tokens {
@@ -83,6 +87,23 @@ pub(crate) enum SourceCompilation {
     Released,
 }
 
+impl SourceCompilation {
+    /// One reply to a client request, which reports no configuration or read paths of its own.
+    pub(super) fn answered(
+        id: lsp_server::RequestId,
+        serial: u64,
+        response: Result<SourceReply, SourceFailure>,
+    ) -> Self {
+        Self::Answered {
+            id,
+            serial,
+            configuration: None,
+            read_paths: Vec::new(),
+            response,
+        }
+    }
+}
+
 pub(crate) struct SourceCompiler<F> {
     pub(super) load: F,
     pub(super) resources: BuildResources,
@@ -92,9 +113,12 @@ pub(crate) struct SourceCompiler<F> {
     /// The site's own Typst files as this lane last read them, shared by every request it
     /// answers.
     pub(super) disk: crate::analysis::DiskSources,
+    /// The name graph this lane last built, reusable while its sources and import targets hold.
+    pub(super) graphs: crate::analysis::GraphCache,
     /// The site's bibliography files as this lane last parsed them, shared by every request it
     /// answers.
     pub(super) bibliographies: crate::query::BibliographyCache,
+    pub(super) entity_queries: super::entities::EntityQueries,
 }
 
 impl<F> SourceCompiler<F>
@@ -109,7 +133,9 @@ where
             session: None,
             compilations: RevisionCompilations::new(),
             disk: crate::analysis::DiskSources::default(),
+            graphs: crate::analysis::GraphCache::default(),
             bibliographies: crate::query::BibliographyCache::default(),
+            entity_queries: super::entities::EntityQueries::default(),
         }
     }
 
@@ -119,69 +145,81 @@ where
                 checked_revision: request.checked_revision,
                 checked: self.check(&request.sources, &request.view),
             },
-            SourceJob::Query(request) => SourceCompilation::Answered {
-                response: self.query_reply(&request),
-                id: request.id,
-                serial: request.serial,
-            },
-            SourceJob::Route(request) => SourceCompilation::Answered {
-                response: self.route(&request),
-                id: request.id,
-                serial: request.serial,
-            },
-            SourceJob::RouteIndex(request) => SourceCompilation::Answered {
-                response: self.route_index(&request),
-                id: request.id,
-                serial: request.serial,
-            },
-            SourceJob::Lenses(request) => SourceCompilation::Answered {
-                response: self.lenses(&request),
-                id: request.id,
-                serial: request.serial,
-            },
-            SourceJob::Symbols(request) => SourceCompilation::Answered {
-                response: self.workspace_symbols(&request),
-                id: request.id,
-                serial: request.serial,
-            },
-            SourceJob::Rename(request) => SourceCompilation::Answered {
-                response: self.rename(&request),
-                id: request.id,
-                serial: request.serial,
-            },
-            SourceJob::PackageSource(request) => SourceCompilation::Answered {
-                response: self.package_source(&request),
-                id: request.id,
-                serial: request.serial,
-            },
-            SourceJob::IncomingCalls(request) => SourceCompilation::Answered {
-                response: self.incoming_calls(&request),
-                id: request.id,
-                serial: request.serial,
-            },
-            SourceJob::Selection(request) => SourceCompilation::Selected {
-                revision: request.revision,
-                serial: request.serial,
-                root: request.root.clone(),
-                selected: crate::analysis::site_selected_interfaces(
+            SourceJob::Query(request) => {
+                let response = self.query_reply(&request);
+                let configuration = response.as_ref().ok().and_then(|_| {
+                    self.session
+                        .as_ref()
+                        .map(|(served, _)| Arc::clone(served.configuration()))
+                });
+                let read_paths = self.session.as_ref().map_or_else(Vec::new, |(served, _)| {
+                    self.entity_queries.observed_paths(
+                        served.configuration(),
+                        request.sources.source_revision,
+                        &request.sources.overrides,
+                    )
+                });
+                SourceCompilation::Answered {
+                    response,
+                    configuration,
+                    read_paths,
+                    id: request.id,
+                    serial: request.serial,
+                }
+            }
+            SourceJob::Route(request) => {
+                let response = self.route(&request);
+                SourceCompilation::answered(request.id, request.serial, response)
+            }
+            SourceJob::RouteIndex(request) => {
+                let response = self.route_index(&request);
+                SourceCompilation::answered(request.id, request.serial, response)
+            }
+            SourceJob::Lenses(request) => {
+                let response = self.lenses(&request);
+                SourceCompilation::answered(request.id, request.serial, response)
+            }
+            SourceJob::Symbols(request) => {
+                let response = self.workspace_symbols(&request);
+                SourceCompilation::answered(request.id, request.serial, response)
+            }
+            SourceJob::Rename(request) => {
+                let response = self.rename(&request);
+                SourceCompilation::answered(request.id, request.serial, response)
+            }
+            SourceJob::PackageSource(request) => {
+                let response = self.package_source(&request);
+                SourceCompilation::answered(request.id, request.serial, response)
+            }
+            SourceJob::IncomingCalls(request) => {
+                let response = self.incoming_calls(&request);
+                SourceCompilation::answered(request.id, request.serial, response)
+            }
+            SourceJob::Selection(request) => {
+                let selected = crate::analysis::site_selected_interfaces(
                     &request.root,
                     &request.view,
+                    &request.boundary,
                     &mut self.disk,
                     &request.cancellation,
-                )
-                .map_err(SourceFailure::of),
-            },
+                );
+                SourceCompilation::Selected {
+                    revision: request.revision,
+                    serial: request.serial,
+                    root: request.root,
+                    selected: selected.map_err(SourceFailure::of),
+                }
+            }
             SourceJob::ReleaseIdle => {
                 self.compilations.release();
+                self.entity_queries.release();
                 SourceCompilation::Released
             }
         }
     }
 
-    pub(super) fn prepare(
-        &mut self,
-        sources: &SourceInputs,
-    ) -> Result<(&ServedWorkspace, &mut SourceDiagnosticSession)> {
+    /// Resolve the workspace one job runs against, replacing the session when it changed.
+    pub(super) fn prepare(&mut self, sources: &SourceInputs) -> Result<()> {
         sources.cancellation.ensure_active()?;
         let served = (self.load)(&sources.root, &sources.overrides);
         sources.cancellation.ensure_active()?;
@@ -200,9 +238,10 @@ where
                 }
             };
             self.compilations.release();
+            self.entity_queries.release();
             self.session = Some((served, session));
         }
-        Ok(Self::prepared_session(&mut self.session))
+        Ok(())
     }
 
     /// The session of the configuration `prepare` resolved, without borrowing the whole compiler.
@@ -223,22 +262,15 @@ where
         &mut self,
         request: &QueryRequest,
     ) -> Result<SourceReply, SourceFailure> {
-        request
-            .sources
-            .cancellation
-            .ensure_active()
-            .map_err(SourceFailure::from)?;
         let response = (|| -> Result<SourceReply, SourceFailure> {
-            match self.prepare(&request.sources) {
-                Ok(_) => {}
-                Err(error) => {
-                    return SourceFailure::resolve_load_failure(error, || {
-                        crate::query::unavailable(&request.query)
-                    });
-                }
+            if let Err(error) = self.prepare(&request.sources) {
+                return SourceFailure::resolve_load_failure(error, || {
+                    crate::query::unavailable(&request.query)
+                });
             }
             let (served, session) = Self::prepared_session(&mut self.session);
             let configuration = served.configuration();
+            let client_root = crate::uri::ClientRoot::new(&request.sources.root);
             let published = self.published.published_packages(
                 &self.resources,
                 configuration.package_locations(),
@@ -251,27 +283,28 @@ where
                 session,
                 &mut self.compilations,
                 &mut self.disk,
+                &mut self.graphs,
                 &mut self.bibliographies,
+                &mut self.entity_queries,
                 configuration,
                 request.sources.source_revision,
                 &request.sources.overrides,
                 &request.view,
                 published,
-                request.package_sources.as_deref().map(PathBuf::as_path),
                 &request.query,
                 request.routes_as_hints,
                 request.check_progress,
                 &request.sources.cancellation,
-                &crate::uri::ClientRoot::new(&request.sources.root),
+                &client_root,
             )
             .map_err(SourceFailure::of)?;
             if let SourceReply::Definition(Some(definition)) = &mut response
-                && let Some(directory) = &request.package_sources
+                && let Some(directory) = request.view.package_sources()
             {
                 crate::query::package_source_definition(
                     definition,
                     directory,
-                    &crate::uri::ClientRoot::new(&request.sources.root),
+                    &client_root,
                     &request.sources.cancellation,
                 )
                 .map_err(SourceFailure::of)?;
@@ -295,7 +328,7 @@ mod tests {
     use crate::sources::SourceView;
     use tola_build::BuildResources;
     use tola_build::cancellation::BuildCancellation;
-    use tola_build::diagnostic::{Diagnostic, DiagnosticError, Severity};
+    use tola_diagnostic::{Diagnostic, DiagnosticError, Severity};
 
     fn package_hover(sources: SourceInputs) -> SourceJob {
         let uri = crate::uri::from_file_path(&sources.root.join("site.typ")).unwrap();
@@ -310,7 +343,6 @@ mod tests {
             serial: 11,
             sources,
             view: SourceView::default(),
-            package_sources: None,
             routes_as_hints: false,
             check_progress: crate::protocol::CheckProgress::NotChecked,
             query: crate::protocol::SourceQuery::Hover(lsp_types::TextDocumentPositionParams {
@@ -366,14 +398,14 @@ mod tests {
         let configuration = site_configuration(directory.path(), "");
         let diagnostics = vec![
             Diagnostic::at_path(
-                tola_build::codes::config::INVALID,
+                tola_diagnostic::codes::config::INVALID,
                 Severity::Error,
                 path.to_string_lossy(),
                 "invalid configuration",
             )
             .with_note("retained explanation"),
             Diagnostic::at_path(
-                tola_build::codes::config::WARNING,
+                tola_diagnostic::codes::config::WARNING,
                 Severity::Warning,
                 path.to_string_lossy(),
                 "configuration warning",

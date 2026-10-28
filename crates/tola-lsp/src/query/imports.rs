@@ -12,11 +12,7 @@ pub(super) struct ImportedMember<'n> {
     pub(super) path: Vec<String>,
 }
 
-/// The import item one callee names, when this file establishes one.
-///
-/// The identity is source-established: a named import of the item, with or without an alias, or a
-/// field read on the module imported whole. A wildcard import loads no interface here, so it names
-/// nothing this file can establish.
+/// The import item one callee names, when this file's own imports establish one.
 pub(super) fn imported_member<'n>(
     names: &'n tola_typst_syntax::names::SourceNames,
     callee: &LinkedNode<'_>,
@@ -59,11 +55,11 @@ pub(super) fn calls_package_member(
     let tola_typst_syntax::names::ImportSource::Path(source) = &imported.import.source else {
         return false;
     };
-    imported.path == [item] && is_package(source, package)
+    imported.path == [item] && is_tola_package_path(source, package)
 }
 
 /// Whether an import path names one package of the `@tola` namespace.
-fn is_package(source: &str, name: &str) -> bool {
+fn is_tola_package_path(source: &str, name: &str) -> bool {
     source
         .parse::<tola_typst::typst::syntax::package::PackageSpec>()
         .is_ok_and(|spec| {
@@ -77,7 +73,7 @@ mod tests {
     use lsp_types::GotoDefinitionResponse;
 
     #[test]
-    fn import_path_hover_names_the_file() {
+    fn path_hover_names_file() {
         let mut site = QuerySession::new();
         site.site.write("content/head.typ", "#let head = [Head]\n");
 
@@ -90,7 +86,7 @@ mod tests {
 
     /// An import item's name answers wherever the export lives, not only inside a Tola package.
     #[test]
-    fn imported_name_hover_names_its_file() {
+    fn imported_name_hover_names_file() {
         let mut site = QuerySession::new();
         site.site
             .write("content/library.typ", "#let helper() = 1\n");
@@ -103,7 +99,7 @@ mod tests {
     /// An import item's own name answers a cursor question whether or not the item renames it:
     /// the name is not a binding in this file, so nothing else can resolve it.
     #[test]
-    fn import_items_answer_at_their_own_name() {
+    fn import_items_answer_own_name() {
         let mut site = QuerySession::new();
         // The expected summary comes from the package's own documentation, so the test does not
         // pin a sentence the package source is free to rewrite.

@@ -7,7 +7,7 @@ use std::ops::Range;
 use anyhow::Result;
 use lsp_types::{CompletionItem, CompletionItemKind};
 use tola_build::cancellation::BuildCancellation;
-use tola_packages::{ExportDeclaration, ExportDocumentation, Signature};
+use tola_packages::{BuiltinPackage, ExportDeclaration, ExportDocumentation, Signature};
 use tola_typst::typst::foundations::Value;
 use tola_typst::typst::syntax::ast;
 use tola_typst::typst::syntax::{LinkedNode, Source, SyntaxKind, VirtualRoot};
@@ -17,7 +17,7 @@ use tola_typst_syntax::names::{Declaration, DeclarationKind, Initializer, Source
 use super::super::expression::ExpressionType;
 use super::super::semantic;
 use super::callable::{Callable, Receiver};
-use super::{labelled_type, markdown_documentation};
+use super::{labelled_type, markdown_documentation, unparenthesized};
 
 /// The kind a declaration promises: a closure is a function, an import of a whole module is a
 /// module, every other declaration names a value.
@@ -47,15 +47,33 @@ pub(super) fn attach_value(item: &mut CompletionItem, value: Value) -> Option<Ca
     callable
 }
 
-/// Whether a package this site ships exports one name: that package's own export documentation
-/// then owns the name, and no import or alias the file writes can change it.
-pub(super) fn package_exports(names: &SourceNames, name: &str) -> bool {
-    let file = names.source().id();
-    let VirtualRoot::Package(spec) = file.root() else {
-        return false;
+/// The package this site ships that publishes one name, whose own export documentation then
+/// owns it: no import or alias the file writes can change what that package publishes.
+pub(super) fn exporting_package(names: &SourceNames, name: &str) -> Option<BuiltinPackage> {
+    let id = names.source().id();
+    let VirtualRoot::Package(spec) = id.root() else {
+        return None;
     };
-    tola_packages::builtin_package(spec)
-        .is_some_and(|package| package.exports().any(|export| export == name))
+    let package = tola_packages::builtin_package(spec)?;
+    package
+        .exports()
+        .any(|export| export == name)
+        .then_some(package)
+}
+
+/// Every package export's documentation one completion has read, so a package this site ships is
+/// read once however many of its names complete.
+#[derive(Default)]
+pub(super) struct PackageExports(BTreeMap<String, Vec<ExportDocumentation>>);
+
+impl PackageExports {
+    /// The documentation a package publishes for its exports, read on first use.
+    fn documentation(&mut self, package: &BuiltinPackage) -> &[ExportDocumentation] {
+        self.0.entry(package.spec().to_string()).or_insert_with(|| {
+            let names = package.exports().map(str::to_owned).collect::<Vec<_>>();
+            package.export_documentation(&names).unwrap_or_default()
+        })
+    }
 }
 
 /// What one declaration in place says about its name's item: a package this site ships documents
@@ -64,7 +82,7 @@ pub(super) fn attach_declaration(
     item: &mut CompletionItem,
     names: &SourceNames,
     declaration: &Declaration,
-    packages: &mut BTreeMap<String, Vec<ExportDocumentation>>,
+    packages: &mut PackageExports,
     cancellation: &BuildCancellation,
 ) -> Result<Option<Callable>> {
     cancellation.ensure_active()?;
@@ -74,31 +92,21 @@ pub(super) fn attach_declaration(
     ) {
         return Ok(None);
     }
-    if package_exports(names, &declaration.name) {
-        return attach_package_export(item, names, declaration, packages, cancellation);
+    match exporting_package(names, &declaration.name) {
+        Some(package) => attach_package_export(item, declaration, package, packages, cancellation),
+        None => Ok(attach_own_text(item, names, declaration)),
     }
-    Ok(attach_own_text(item, names, declaration))
 }
 
 /// The export documentation a package this site ships writes for one exported name.
 fn attach_package_export(
     item: &mut CompletionItem,
-    names: &SourceNames,
     declaration: &Declaration,
-    packages: &mut BTreeMap<String, Vec<ExportDocumentation>>,
+    package: BuiltinPackage,
+    packages: &mut PackageExports,
     cancellation: &BuildCancellation,
 ) -> Result<Option<Callable>> {
-    let file = names.source().id();
-    let VirtualRoot::Package(spec) = file.root() else {
-        return Ok(None);
-    };
-    let Some(package) = tola_packages::builtin_package(spec) else {
-        return Ok(None);
-    };
-    let exports = packages.entry(spec.to_string()).or_insert_with(|| {
-        let names = package.exports().map(str::to_owned).collect::<Vec<_>>();
-        package.export_documentation(&names).unwrap_or_default()
-    });
+    let exports = packages.documentation(&package);
     cancellation.ensure_active()?;
     let Some(export) = exports
         .iter()
@@ -170,11 +178,7 @@ fn closure_signature(
     if binding.kind().bindings().len() != 1 {
         return None;
     }
-    let mut initializer = binding.init();
-    while let Some(ast::Expr::Parenthesized(group)) = initializer {
-        initializer = Some(group.expr());
-    }
-    let ast::Expr::Closure(closure) = initializer? else {
+    let ast::Expr::Closure(closure) = unparenthesized(binding.init())? else {
         return None;
     };
     Signature::from_source(

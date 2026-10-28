@@ -5,12 +5,10 @@ use std::io::Write;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use tola_build::diagnostic::Diagnostic;
+use tola_diagnostic::Diagnostic;
 
+use super::{Connection, IdleRelease};
 use crate::compiler::{AnalysisRequest, CheckRequest, SourceJob};
-use crate::protocol::CheckProgress;
-
-use super::{Connection, Phase};
 
 /// How long typing must pause before a whole-site check is worth its cost.
 ///
@@ -38,30 +36,30 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
         // A check past its bound is dispatched before the queued jobs, which keep their order and
         // are served once it finishes; a check a newer revision superseded is replaced, never run.
         let starved = self
-            .check_due
-            .is_some_and(|due| now >= due + CHECK_STARVATION_LIMIT);
+            .check
+            .as_ref()
+            .is_some_and(|check| now >= check.due + CHECK_STARVATION_LIMIT);
         if !starved {
             while let Some(job) = self.queries.pop_front() {
                 if !job.is_cancelled() {
-                    self.released = false;
+                    self.resume_after_release();
                     return Some(job);
                 }
             }
         }
-        if std::mem::take(&mut self.release) {
-            self.released = true;
+        if self.idle_release == IdleRelease::Requested {
+            self.idle_release = IdleRelease::Released;
             return Some(SourceJob::ReleaseIdle);
         }
-        if self.check_due.is_some_and(|due| now < due) {
+        if self.check.as_ref().is_some_and(|check| now < check.due) {
             return None;
         }
-        self.check_due = None;
         let pending = self
             .check
             .take()
             .filter(|check| !check.sources.cancellation.is_cancelled())?;
         self.running_check = Some(pending.checked_revision);
-        self.released = false;
+        self.resume_after_release();
         // A report is timed from the moment its check started running, so a check that answers
         // inside the window never shows one, and the first check shows one at once.
         self.begin_progress(now);
@@ -70,6 +68,14 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
             sources: pending.sources,
             view: self.open.view(),
         }))
+    }
+
+    /// Record that a job now holds the lane: a released site is about to be derived again, so
+    /// letting it go is worth asking another time.
+    fn resume_after_release(&mut self) {
+        if self.idle_release == IdleRelease::Released {
+            self.idle_release = IdleRelease::Available;
+        }
     }
 
     pub(crate) fn next_analysis(&mut self) -> Option<AnalysisRequest> {
@@ -95,7 +101,7 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
     /// again, so a connection with no open document lets it go at once, and one that has answered
     /// nothing for [`IDLE_RELEASE_DELAY`] lets it go as well. The next request derives it again.
     fn release_idle(&mut self, now: Instant) {
-        if self.release || self.released {
+        if self.idle_release != IdleRelease::Available {
             return;
         }
         let busy = self.check.is_some()
@@ -104,43 +110,13 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
             || !self.queries.is_empty()
             || !self.analyses.is_empty();
         if busy {
-            self.active = now;
+            self.last_work = now;
             return;
         }
-        let idle = now.duration_since(self.active) >= IDLE_RELEASE_DELAY;
-        if self.overrides.is_empty() || idle {
-            self.release = true;
+        let idle = now.duration_since(self.last_work) >= IDLE_RELEASE_DELAY;
+        if self.open.overrides().is_empty() || idle {
+            self.idle_release = IdleRelease::Requested;
         }
-    }
-
-    /// The check progress a query is answered in, which only this connection can tell apart.
-    pub(super) fn check_progress(&self) -> CheckProgress {
-        if self.check_due.is_some()
-            || self.check.is_some()
-            || self.running_check == Some(self.revision)
-        {
-            CheckProgress::Checking
-        } else if let Some((revision, compiled)) = self.checked
-            && revision == self.revision
-        {
-            if compiled {
-                CheckProgress::Checked
-            } else {
-                CheckProgress::Failed
-            }
-        } else {
-            CheckProgress::NotChecked
-        }
-    }
-
-    pub(super) fn report_source_check(&mut self, state: CheckProgress) -> Result<()> {
-        if !matches!(&self.phase, Phase::Ready(workspace) if workspace.source_check_status) {
-            return Ok(());
-        }
-        self.notify(
-            "tola/sourceCheckStatus",
-            serde_json::json!({ "revision": self.revision, "state": state }),
-        )
     }
 }
 
@@ -235,6 +211,39 @@ mod tests {
         assert!(matches!(
             connection.next_job(Instant::now()),
             Some(SourceJob::Check(_))
+        ));
+    }
+    /// A released site waits for a job that derives it again: asking on every idle turn would
+    /// release nothing.
+    #[test]
+    fn released_site_waits_for_new_work() {
+        let mut connection = ready(Vec::new());
+        let now = Instant::now();
+        connection.run_due_work(now).unwrap();
+        assert!(matches!(
+            connection.next_job(now),
+            Some(SourceJob::ReleaseIdle)
+        ));
+        assert!(connection.next_job(now).is_none());
+
+        let uri = crate::uri::from_file_path(
+            &std::env::current_dir()
+                .unwrap()
+                .join("content/document.typ"),
+        )
+        .unwrap();
+        open_document(&mut connection, &uri, 1, "Body\n");
+        let derived_at = Instant::now();
+        assert!(matches!(
+            connection.next_job(derived_at),
+            Some(SourceJob::Check(_))
+        ));
+        connection.running_check = None;
+        let idle_at = derived_at + IDLE_RELEASE_DELAY;
+        connection.run_due_work(idle_at).unwrap();
+        assert!(matches!(
+            connection.next_job(idle_at),
+            Some(SourceJob::ReleaseIdle)
         ));
     }
 }

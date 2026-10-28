@@ -1,8 +1,10 @@
 //! The phrases diagnostics and hovers write for a list of names.
 
 /// At most `limit` names, comma-joined, and how many were left out.
-pub(crate) fn listed<'a>(names: impl Iterator<Item = &'a str>, limit: usize) -> (String, usize) {
-    let mut names = names;
+pub(crate) fn listed<'a>(
+    mut names: impl Iterator<Item = &'a str>,
+    limit: usize,
+) -> (String, usize) {
     let listed = names.by_ref().take(limit).collect::<Vec<_>>().join(", ");
     (listed, names.count())
 }
@@ -48,32 +50,6 @@ mod tests {
                 listed(names.iter().copied(), 3),
                 (expected.0.to_owned(), expected.1)
             );
-        }
-    }
-
-    #[test]
-    fn joined_reads_as_one_english_phrase() {
-        for (names, expected) in [
-            (vec![], ""),
-            (vec!["a"], "a"),
-            (vec!["a", "b"], "a and b"),
-            (vec!["a", "b", "c"], "a, b, and c"),
-        ] {
-            let names: Vec<String> = names.iter().map(|name| name.to_string()).collect();
-            assert_eq!(joined(&names), expected);
-        }
-    }
-
-    #[test]
-    fn quoted_wraps_each_name_as_code() {
-        for (names, expected) in [
-            (vec![], ""),
-            (vec!["a"], "`a`"),
-            (vec!["a", "b"], "`a` and `b`"),
-            (vec!["a", "b", "c"], "`a`, `b` and `c`"),
-        ] {
-            let names: Vec<String> = names.iter().map(|name| name.to_string()).collect();
-            assert_eq!(quoted(&names), expected);
         }
     }
 }

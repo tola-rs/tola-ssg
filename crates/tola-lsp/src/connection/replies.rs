@@ -5,7 +5,7 @@ use std::io::Write;
 
 use anyhow::Result;
 use lsp_server::{ErrorCode, RequestId, Response};
-use tola_build::diagnostic::Diagnostic;
+use tola_diagnostic::Diagnostic;
 
 use crate::compiler::SourceFailure;
 use crate::protocol::{self, SourceReply};
@@ -23,7 +23,7 @@ const REQUEST_FAILED_ERROR: (ErrorCode, &str) = (
 );
 
 /// The reply pair for a request whose own work panicked.
-const PANICKED_ERROR: (ErrorCode, &str) = (
+pub(super) const PANICKED_ERROR: (ErrorCode, &str) = (
     ErrorCode::InternalError,
     "Tola could not answer this request",
 );
@@ -31,6 +31,12 @@ const PANICKED_ERROR: (ErrorCode, &str) = (
 /// The reply pair for a request superseded by a newer source revision.
 pub(super) const REVISION_CHANGED_ERROR: (ErrorCode, &str) =
     (ErrorCode::ContentModified, "source revision changed");
+
+/// The reply pair for a request refused because the connection is shutting down.
+pub(super) const SHUTDOWN_ERROR: (ErrorCode, &str) = (
+    ErrorCode::RequestCanceled,
+    "language server is shutting down",
+);
 
 pub(super) fn error_response(id: RequestId, (code, message): (ErrorCode, &str)) -> Response {
     Response::new_err(id, code as i32, message.into())
@@ -59,14 +65,7 @@ pub(super) fn failed_response(id: RequestId, error: anyhow::Error) -> Response {
     {
         return error_response(id, CANCELLED_ERROR);
     }
-    if error
-        .chain()
-        .any(|cause| cause.is::<crate::server::PanickedJob>())
-    {
-        tracing::error!(error = ?error, "a source request failed in a panicked job");
-        return error_response(id, PANICKED_ERROR);
-    }
-    if let Some(error) = error.downcast_ref::<crate::analysis::RenameError>() {
+    if let Some(error) = error.downcast_ref::<crate::analysis::NameQueryError>() {
         let mut response =
             Response::new_err(id, ErrorCode::InvalidParams as i32, error.to_string());
         if let Err(reply) = &mut response.response_result {
@@ -127,12 +126,15 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
     /// degrades it back to `changes` for every other client. An edit that touches no document the
     /// client holds keeps the plain shape: a version is the client's own record of a buffer.
     fn version_document_edits(&self, edit: &mut lsp_types::WorkspaceEdit) {
-        if edit.document_changes.is_some()
-            || !edit.changes.as_ref().is_some_and(|changes| {
-                changes
-                    .keys()
-                    .any(|uri| self.open.version(uri.as_str()).is_some())
-            })
+        if edit.document_changes.is_some() {
+            return;
+        }
+        let Some(changes) = edit.changes.as_ref() else {
+            return;
+        };
+        if !changes
+            .keys()
+            .any(|uri| self.open.version(uri.as_str()).is_some())
         {
             return;
         }
@@ -158,7 +160,7 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
     }
 
     pub(super) fn reject(&mut self, id: RequestId, code: ErrorCode, message: &str) -> Result<()> {
-        self.reply(Response::new_err(id, code as i32, message.into()))
+        self.reply(error_response(id, (code, message)))
     }
 }
 
@@ -167,6 +169,73 @@ mod tests {
     use super::*;
     use crate::connection::tests::{ready, response};
     use lsp_types::Uri;
+
+    #[test]
+    fn conflicting_buffers_explain_recovery() {
+        let response = failed_response(
+            7.into(),
+            crate::analysis::NameQueryError::ConflictingSourceText.into(),
+        );
+        let error = response.response_result.unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidParams as i32);
+        assert_eq!(error.data.unwrap()["kind"], "conflictingSourceText");
+        assert!(error.message.contains("save or close"));
+    }
+
+    #[test]
+    #[expect(
+        clippy::mutable_key_type,
+        reason = "the protocol defines a Uri-keyed map, and Uri carries its own parser state"
+    )]
+    fn entity_edits_keep_open_versions() {
+        use crate::connection::tests::{open_document, ready_at, ready_workspace};
+        let temporary = tempfile::tempdir().unwrap();
+        let mut connection = ready_at(Vec::new(), temporary.path().to_owned());
+        let capabilities = serde_json::from_value(serde_json::json!({
+            "workspace": {"workspaceEdit": {"documentChanges": true}}
+        }))
+        .unwrap();
+        ready_workspace(&mut connection).features =
+            crate::capabilities::ClientFeatures::new(&capabilities);
+        let definition =
+            crate::uri::from_file_path(&temporary.path().join("definitions.typ")).unwrap();
+        let reference = crate::uri::from_file_path(&temporary.path().join("author.typ")).unwrap();
+        open_document(&mut connection, &definition, 7, "#define(\"sku:α\")");
+        open_document(&mut connection, &reference, 3, "#link(\"sku:α\")");
+        let edits = [definition.clone(), reference.clone()]
+            .into_iter()
+            .map(|uri| {
+                (
+                    uri,
+                    vec![lsp_types::TextEdit {
+                        range: lsp_types::Range::default(),
+                        new_text: "\"sku:β\"".into(),
+                    }],
+                )
+            })
+            .collect();
+        connection
+            .source_reply(
+                19.into(),
+                SourceReply::Rename(Some(lsp_types::WorkspaceEdit {
+                    changes: Some(edits),
+                    ..Default::default()
+                })),
+            )
+            .unwrap();
+        let result = response(&mut connection).response_result.unwrap();
+        assert!(result.get("changes").is_none());
+        let changes = result["documentChanges"].as_array().unwrap();
+        assert_eq!(changes.len(), 2);
+        for (uri, version) in [(definition, 7), (reference, 3)] {
+            let change = changes
+                .iter()
+                .find(|change| change["textDocument"]["uri"] == uri.as_str())
+                .unwrap();
+            assert_eq!(change["textDocument"]["version"], version);
+            assert_eq!(change["edits"][0]["newText"], "\"sku:β\"");
+        }
+    }
 
     /// A preview lens names the route it opens, and the address this connection knows the page is
     /// served at: a client that runs no command of its own still reads the page it is about.

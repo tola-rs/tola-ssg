@@ -1,8 +1,6 @@
-//! The replies one checked revision produces for the read-back jobs (route, lenses, rename,
-//! symbols, package source, incoming calls).
+//! The replies one checked revision produces for the read-back jobs.
 
 use std::path::Path;
-use std::sync::Arc;
 
 use anyhow::Result;
 use lsp_types::{SymbolKind, WorkspaceSymbol, WorkspaceSymbolResponse};
@@ -24,12 +22,7 @@ where
         &mut self,
         request: &SymbolsRead,
     ) -> Result<SourceReply, SourceFailure> {
-        request
-            .sources
-            .cancellation
-            .ensure_active()
-            .map_err(SourceFailure::from)?;
-        if let Err(error) = self.prepare(&request.sources).map(|_| ()) {
+        if let Err(error) = self.prepare(&request.sources) {
             return SourceFailure::resolve_load_failure(error, || {
                 SourceReply::WorkspaceSymbols(WorkspaceSymbolResponse::Nested(Vec::new()))
             });
@@ -40,40 +33,28 @@ where
         let client_root = crate::uri::ClientRoot::new(&request.sources.root);
         let boundary = session.resources().source_boundary(configuration);
         let mut symbols = Vec::new();
-        self.disk.begin();
-        for id in crate::files::owned_file_ids(configuration) {
+        let sources = crate::analysis::site_sources(
+            &root,
+            &request.view,
+            &boundary,
+            &mut self.disk,
+            &request.sources.cancellation,
+        )
+        .map_err(SourceFailure::of)?;
+        for names in sources {
             request
                 .sources
                 .cancellation
                 .ensure_active()
                 .map_err(SourceFailure::from)?;
-            let path = root.join(id.vpath().get_without_slash());
-            if boundary.check(&path).is_err() {
-                continue;
-            }
-            // The author's unsaved text is what a search answers about; a file no editor holds is
-            // read through this lane's own parsed copy.
-            let names = match request
-                .sources
-                .overrides
-                .iter()
-                .find(|(known, _)| *known == path)
-            {
-                Some((_, text)) => Arc::new(tola_typst_syntax::names::SourceNames::new(
-                    tola_typst::typst::syntax::Source::new(id, text.to_string()),
-                )),
-                None => match self.disk.names(&path, id) {
-                    Some(names) => names,
-                    None => continue,
-                },
-            };
             let source = names.source();
+            let id = source.id();
             let container = id.vpath().get_without_slash().to_owned();
-            let Ok(uri) = client_root.address(&path) else {
+            let Some(uri) = crate::identity::client_uri(id, &root, &client_root).ok() else {
                 continue;
             };
-            for (name, kind, range) in crate::symbols::matching(source, &request.query) {
-                symbols.push(WorkspaceSymbol {
+            let symbol =
+                |name: String, kind: SymbolKind, range: lsp_types::Range| WorkspaceSymbol {
                     name,
                     kind,
                     tags: None,
@@ -83,38 +64,20 @@ where
                         range,
                     }),
                     data: None,
-                });
+                };
+            for (name, kind, range) in crate::symbols::matching(source, &request.query) {
+                symbols.push(symbol(name, kind, range));
             }
             // A search finds a label by the name the author gave it, whatever element has it.
             for (name, range) in crate::symbols::labels(source, &request.query) {
-                symbols.push(WorkspaceSymbol {
-                    name,
-                    kind: SymbolKind::CONSTANT,
-                    tags: None,
-                    container_name: Some(container.clone()),
-                    location: lsp_types::OneOf::Left(lsp_types::Location {
-                        uri: uri.clone(),
-                        range,
-                    }),
-                    data: None,
-                });
+                symbols.push(symbol(name, SymbolKind::CONSTANT, range));
             }
         }
-        // Closes the pass; a cancellation above left it open, and the next completed pass drops
-        // what this one did not see.
-        self.disk.retain_pass();
         // A search finds the site's pages and its declarations: a page answers to the route
         // an author knows it by, which no source declares.
         let revision = self
             .compilations
-            .inspect(
-                session,
-                configuration,
-                request.sources.source_revision,
-                request.sources.overrides.to_vec(),
-                &request.sources.cancellation,
-            )
-            .map_err(SourceFailure::from)?;
+            .inspect_job(session, configuration, &request.sources)?;
         if let Some(compilation) = revision.checked() {
             let realized =
                 crate::routes::pages(compilation, configuration, &request.sources.cancellation)
@@ -132,24 +95,19 @@ where
     }
 
     pub(super) fn rename(&mut self, request: &RenameRead) -> Result<SourceReply, SourceFailure> {
-        request
-            .sources
-            .cancellation
-            .ensure_active()
-            .map_err(SourceFailure::from)?;
-        let (served, session) = match self.prepare(&request.sources) {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                return SourceFailure::resolve_load_failure(error, || SourceReply::Rename(None));
-            }
-        };
+        if let Err(error) = self.prepare(&request.sources) {
+            return SourceFailure::resolve_load_failure(error, || SourceReply::Rename(None));
+        }
+        let (served, session) = Self::prepared_session(&mut self.session);
         let configuration = served.configuration();
         crate::renames::imports(
             configuration,
             &crate::uri::ClientRoot::new(&request.sources.root),
-            &request.sources.overrides,
+            &request.view,
             &request.files,
             &session.resources().source_boundary(configuration),
+            &mut self.disk,
+            &request.sources.cancellation,
         )
         .map(SourceReply::Rename)
         .map_err(SourceFailure::of)
@@ -181,12 +139,7 @@ where
         &mut self,
         request: &IncomingCallsRead,
     ) -> Result<SourceReply, SourceFailure> {
-        request
-            .sources
-            .cancellation
-            .ensure_active()
-            .map_err(SourceFailure::from)?;
-        if let Err(error) = self.prepare(&request.sources).map(|_| ()) {
+        if let Err(error) = self.prepare(&request.sources) {
             return SourceFailure::resolve_load_failure(error, || SourceReply::IncomingCalls(None));
         }
         let (served, session) = Self::prepared_session(&mut self.session);
@@ -195,14 +148,7 @@ where
         let locations = self.resources.package_locations(configuration);
         let revision = self
             .compilations
-            .inspect(
-                session,
-                configuration,
-                request.sources.source_revision,
-                request.sources.overrides.to_vec(),
-                &request.sources.cancellation,
-            )
-            .map_err(SourceFailure::from)?;
+            .inspect_job(session, configuration, &request.sources)?;
         let Some(compilation) = revision.checked() else {
             return Ok(SourceReply::IncomingCalls(None));
         };
@@ -227,12 +173,7 @@ where
     /// A source the site no longer holds — or a site that does not compile — answers with no
     /// routes rather than a failure: the author fixes the source first.
     pub(super) fn route(&mut self, request: &RouteRead) -> Result<SourceReply, SourceFailure> {
-        request
-            .sources
-            .cancellation
-            .ensure_active()
-            .map_err(SourceFailure::from)?;
-        if let Err(error) = self.prepare(&request.sources).map(|_| ()) {
+        if let Err(error) = self.prepare(&request.sources) {
             return SourceFailure::resolve_load_failure(error, || {
                 SourceReply::Routes(RouteReply::default())
             });
@@ -244,6 +185,8 @@ where
             configuration.get_root(),
             &request.sources.overrides,
             &session.resources().source_boundary(configuration),
+            None,
+            None,
         ) else {
             return Ok(SourceReply::Routes(RouteReply::default()));
         };
@@ -264,12 +207,7 @@ where
         &mut self,
         request: &RouteIndexRead,
     ) -> Result<SourceReply, SourceFailure> {
-        request
-            .sources
-            .cancellation
-            .ensure_active()
-            .map_err(SourceFailure::from)?;
-        if let Err(error) = self.prepare(&request.sources).map(|_| ()) {
+        if let Err(error) = self.prepare(&request.sources) {
             return SourceFailure::resolve_load_failure(error, || {
                 SourceReply::RouteIndex(RouteIndexReply::default())
             });
@@ -278,14 +216,7 @@ where
         let configuration = served.configuration();
         let revision = self
             .compilations
-            .inspect(
-                session,
-                configuration,
-                request.sources.source_revision,
-                request.sources.overrides.to_vec(),
-                &request.sources.cancellation,
-            )
-            .map_err(SourceFailure::from)?;
+            .inspect_job(session, configuration, &request.sources)?;
         let Some(compilation) = revision.checked() else {
             return Ok(SourceReply::RouteIndex(RouteIndexReply::default()));
         };
@@ -295,12 +226,7 @@ where
     }
 
     pub(super) fn lenses(&mut self, request: &LensesRead) -> Result<SourceReply, SourceFailure> {
-        request
-            .sources
-            .cancellation
-            .ensure_active()
-            .map_err(SourceFailure::from)?;
-        if let Err(error) = self.prepare(&request.sources).map(|_| ()) {
+        if let Err(error) = self.prepare(&request.sources) {
             return SourceFailure::resolve_load_failure(error, || SourceReply::CodeLenses(None));
         }
         let (served, session) = Self::prepared_session(&mut self.session);
@@ -310,6 +236,8 @@ where
             configuration.get_root(),
             &request.sources.overrides,
             &session.resources().source_boundary(configuration),
+            None,
+            None,
         ) else {
             return Ok(SourceReply::CodeLenses(None));
         };
@@ -335,7 +263,87 @@ mod tests {
     use crate::compiler::{IncomingCallsRead, SourceCompilation, SourceJob};
     use crate::sources::SourceView;
     use lsp_server::RequestId;
+    use std::sync::Arc;
     use tola_typst::typst::syntax::Source;
+
+    #[test]
+    fn workspace_symbols_search_source_closure() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.join("site.typ"),
+            "#import \".hidden.typ\": secret\n#document(\"index.html\")[Body]",
+        )
+        .unwrap();
+        std::fs::write(root.join(".hidden.typ"), "#let secret = 1").unwrap();
+        std::fs::write(root.join("ignored.typ"), "#let ignored = 1").unwrap();
+        std::fs::write(root.join(".ignore"), "ignored.typ\n").unwrap();
+        std::fs::write(root.join("saved.typ"), "#let stale = 1").unwrap();
+        let configuration = site_configuration(&root, "");
+        let mut compiler = compiler(&configuration);
+        let sources = inputs_at(
+            &root,
+            1,
+            Arc::from([
+                (root.join("saved.typ"), Arc::<str>::from("#let updated = 1")),
+                (
+                    root.join("unsaved.typ"),
+                    Arc::<str>::from("#let fresh = 1\nBody <new-label>"),
+                ),
+                (
+                    root.join("public/output.typ"),
+                    Arc::<str>::from("#let generated = 1"),
+                ),
+                (
+                    outside.path().join("outside.typ"),
+                    Arc::<str>::from("#let foreign = 1"),
+                ),
+            ]),
+        );
+        let mut open = crate::sources::OpenSources::new(&root);
+        for (path, text) in sources.overrides.iter() {
+            open.apply(lsp_server::Notification::new(
+                "textDocument/didOpen".into(),
+                lsp_types::DidOpenTextDocumentParams {
+                    text_document: lsp_types::TextDocumentItem {
+                        uri: crate::uri::from_file_path(path).unwrap(),
+                        language_id: "typst".into(),
+                        version: 1,
+                        text: text.to_string(),
+                    },
+                },
+            ))
+            .unwrap();
+        }
+        let SourceCompilation::Answered { response, .. } =
+            compiler.compile(SourceJob::Symbols(SymbolsRead {
+                id: 1.into(),
+                serial: 1,
+                sources,
+                view: open.view(),
+                query: String::new(),
+            }))
+        else {
+            panic!("expected a symbols answer");
+        };
+        let SourceReply::WorkspaceSymbols(WorkspaceSymbolResponse::Nested(symbols)) =
+            response.unwrap()
+        else {
+            panic!("expected workspace symbols");
+        };
+        let names: Vec<_> = symbols
+            .iter()
+            .filter(|symbol| symbol.kind != SymbolKind::FILE)
+            .map(|symbol| symbol.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            ["secret", "ignored", "updated", "fresh", "new-label"]
+        );
+        assert!(!root.join("unsaved.typ").exists());
+    }
+
     /// A failed revision's world still answers which sources reach a file.
     ///
     /// The pages a compilation realized are absent from a failed realization, but the sources
@@ -415,6 +423,7 @@ mod tests {
                 id: RequestId::from(3),
                 serial: 5,
                 sources: inputs_at(&alias, 0, crate::compiler::SourceOverrides::default()),
+                view: SourceView::default(),
                 query: String::new(),
             }))
         else {

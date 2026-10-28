@@ -1,90 +1,106 @@
 //! The two spellings a site path may be written in, and the conversion between them.
-//!
-//! A path names one file either from the site root or from the file that writes it. Both spellings
-//! name the same file, so a cursor on a path a source declares offers the spelling the author has
-//! not written.
 
-use lsp_types::TextEdit;
+use lsp_types::{Range, TextEdit};
 use tola_typst::typst::foundations::PathOrStr;
 use tola_typst::typst::syntax::{RootedPath, Source, VirtualPath, VirtualRoot, ast};
+use tola_typst_syntax::names::SourceNames;
 
+use crate::links::Link;
 use crate::position;
 
 /// The action that rewrites the path the source declares at `cursor` into the spelling the author
 /// has not written. A path with only one spelling offers no action.
+///
+/// `link` is the link `crate::links` found the cursor in, which owns where a path sits; the file
+/// behind the path comes from Typst's own resolution here.
 pub(crate) fn rewrites(
     source: &Source,
     cursor: usize,
-    written_range: Option<lsp_types::Range>,
+    link: Option<&Link>,
+    names: &SourceNames,
 ) -> Vec<(String, TextEdit)> {
     // `/` names the site root, so a document inside a package has no site spelling to convert to.
     if !matches!(source.id().root(), VirtualRoot::Project) {
         return Vec::new();
     }
-    // An asset argument names an output the site creates, from the site root, so its two spellings
-    // are what the author wrote and the same path with the root's slash. No file answers either, so
-    // this decides before the file-based path below does.
+    // An asset argument names an output from the root, so no file answers either spelling.
     if let Some(argument) = tola_typst_syntax::syntax::path_argument(source, cursor)
         && argument.base == tola_typst_syntax::syntax::PathBase::Site
     {
-        let written = source
-            .text()
-            .get(argument.range.clone())
-            .unwrap_or_default();
-        let spelling = match written.strip_prefix('/') {
-            Some(rest) => rest.to_owned(),
-            None => format!("/{written}"),
-        };
-        let Some(range) = position::utf16_range(source.lines(), argument.range) else {
-            return Vec::new();
-        };
-        // `/` names the site root, which is no output the site publishes: a path with one
-        // spelling offers no action.
-        if spelling.is_empty() || !no_escape_needed(&spelling) {
-            return Vec::new();
-        }
-        return vec![(
-            format!("replace `{written}` with `{spelling}`"),
-            TextEdit {
-                range,
-                new_text: spelling,
-            },
-        )];
+        return site_argument(source, &argument, names)
+            .into_iter()
+            .collect();
     }
-    // `crate::links` owns which strings are paths and where they sit, so the range it finds is the
-    // one this edits, while the file behind the path comes from Typst's own resolution below.
-    let Some(range) = written_range else {
+    let Some(link) = link else {
         return Vec::new();
     };
     let Some(written) = written(source, cursor) else {
         return Vec::new();
     };
-    let Some(target) = named_file(source, &written) else {
+    let Some(spelling) = other_spelling(source, &written) else {
         return Vec::new();
     };
+    rewrite_action(&written, spelling, link.range)
+        .into_iter()
+        .collect()
+}
+
+/// The action that rewrites an asset argument into the spelling of the same output, absent when the
+/// argument is the site root itself or a name the source declares.
+fn site_argument(
+    source: &Source,
+    argument: &tola_typst_syntax::syntax::PathArgument,
+    names: &SourceNames,
+) -> Option<(String, TextEdit)> {
+    let callee = argument
+        .callee
+        .as_ref()
+        .expect("an asset path belongs to a call");
+    if names.declared_at(callee.start).is_some() {
+        return None;
+    }
+    let written = source
+        .text()
+        .get(argument.range.clone())
+        .unwrap_or_default();
+    let spelling = match written.strip_prefix('/') {
+        Some(rest) => rest.to_owned(),
+        None => format!("/{written}"),
+    };
+    // `/` names the site root, which is no output the site publishes: a path with one spelling
+    // offers no action.
+    if spelling.is_empty() {
+        return None;
+    }
+    let range = position::utf16_range(source.lines(), argument.range.clone())?;
+    rewrite_action(written, spelling, range)
+}
+
+/// The spelling of the file `written` names that the author has not written, when both spellings
+/// reach that file.
+fn other_spelling(source: &Source, written: &str) -> Option<String> {
+    let target = named_file(source, written)?;
     let spelling = if written.starts_with('/') {
-        let Some(relative) = relative_spelling(target.vpath(), source.id().vpath()) else {
-            return Vec::new();
-        };
-        relative
+        relative_spelling(target.vpath(), source.id().vpath())?
     } else {
         target.vpath().get_with_slash().to_owned()
     };
-    // The edit replaces the author's own path, so the other spelling has to reach the file that path
-    // reaches, and it has to be writable between the quotation marks that enclose it.
-    let Some(other) = named_file(source, &spelling) else {
-        return Vec::new();
-    };
-    if other != target || !no_escape_needed(&spelling) {
-        return Vec::new();
-    }
-    vec![(
-        format!("replace `{written}` with `{spelling}`"),
-        TextEdit {
-            range,
-            new_text: spelling,
-        },
-    )]
+    // The edit replaces the author's own path, so the other spelling must reach the same file.
+    (named_file(source, &spelling)? == target).then_some(spelling)
+}
+
+/// The action that rewrites `written` into `spelling`, absent when the spelling cannot stand
+/// between the quotation marks that enclose the path.
+fn rewrite_action(written: &str, spelling: String, range: Range) -> Option<(String, TextEdit)> {
+    no_escape_needed(&spelling).then(|| {
+        (
+            format!("replace `{written}` with `{spelling}`"),
+            TextEdit {
+                range,
+                new_text: spelling,
+            },
+        )
+    })
 }
 
 /// The text one declared path is written as.
@@ -130,18 +146,15 @@ mod tests {
         .intern();
         let source = Source::new(id, text.to_owned());
         let cursor = source.text().find('"').expect("a path") + 2;
-        let actions = rewrites(&source, cursor, written_range(&source, cursor));
+        let names = SourceNames::new(source.clone());
+        let links = crate::links::declared(&source);
+        let actions = rewrites(
+            &source,
+            cursor,
+            crate::links::holding(&links, cursor),
+            &names,
+        );
         (source, actions)
-    }
-
-    /// The range the path at `cursor` occupies, as the links the reply collects report it.
-    fn written_range(source: &Source, cursor: usize) -> Option<lsp_types::Range> {
-        let at = position::utf16_range(source.lines(), cursor..cursor)?.start;
-        let root = std::env::current_dir().expect("the tests run in the crate's directory");
-        crate::links::paths(source, &root, &crate::uri::ClientRoot::new(&root))?
-            .into_iter()
-            .find(|link| link.range.start <= at && at <= link.range.end)
-            .map(|link| link.range)
     }
 
     /// The text of `source` one edit replaces.
@@ -211,6 +224,7 @@ mod tests {
             "#include \"/\"\n",
             "#import \"/content\": content\n",
             "#asset(\"/\", bytes)\n",
+            "#let asset(path, body) = path\n#asset(\"/downloads/file.pdf\", bytes)\n",
         ] {
             let (_, actions) = offered("content/post.typ", text);
             assert!(actions.is_empty(), "{text} offered {actions:?}");

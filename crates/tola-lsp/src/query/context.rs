@@ -1,7 +1,7 @@
 //! The request context — the source, the cursor, the construct the cursor stands in, and the
 //! revision the query copy realizes — and the source loading one request addresses.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -12,61 +12,68 @@ use tola_typst::typst::syntax::{FileId, Source, SyntaxMode, VirtualRoot};
 use tola_typst_syntax::names::SourceNames;
 
 use crate::compiler::RevisionCompilations;
+use crate::packages::PackageAccess;
 use crate::protocol::{CheckProgress, SourceQuery};
 
 use super::labels;
-use super::repair::{blank_query_name, blank_query_syntax, pin_source};
+use super::repair::{blank_query_name, blank_query_syntax, editable_source_path, pin_source};
 
-/// The source one request addresses, or `None` when the site holds no such file.
-///
-/// A file the editor has not opened and the site does not have answers nothing: an editor asks
-/// about any URI it is handed, and "no such source" is a result, not a failure of the request.
+/// The source overrides one query copy compiles with.
+type QueryOverrides = Vec<(PathBuf, Arc<str>)>;
+
+/// The source one request addresses; a file the site does not hold is a result, not a failure.
 pub(super) fn load_source(
     id: FileId,
     config: &ResolvedSiteConfig,
     overrides: &[(PathBuf, Arc<str>)],
-    boundary: &tola_typst::SourceBoundary,
+    package_access: &PackageAccess<'_>,
 ) -> Result<Option<Source>> {
     let text = match id.root() {
         VirtualRoot::Package(_) => match crate::identity::embedded_source(id) {
-            Some(text) => text.into(),
-            // A package this implementation does not embed — `@preview`, a local package, a
-            // vendored one — is read from the package location the compiler resolved, so its
-            // source answers exactly what a builtin package's source answers.
+            Some(text) => Some(text.into()),
+            // A package this implementation does not embed is read from its resolved location.
             None => {
-                let path = crate::identity::package_file_path(id, config.package_locations())
-                    .context("unknown package source")?;
-                boundary.check(&path)?;
-                match overrides.iter().find(|(open, _)| open == &path) {
-                    Some((_, text)) => text.to_string(),
-                    None => match std::fs::read_to_string(&path) {
-                        Ok(text) => text,
-                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                            return Ok(None);
-                        }
-                        Err(error) => return Err(error.into()),
-                    },
+                let path = crate::identity::package_file_path_with_packages(
+                    id,
+                    &package_access.locations,
+                    &package_access.boundary,
+                    &package_access.local_packages,
+                )
+                .context("unknown package source")?;
+                package_access.boundary.check(&path)?;
+                let physical = tola_build::filesystem::normalize_existing_prefix(&path);
+                match overrides.iter().find(|(open, _)| {
+                    tola_build::filesystem::normalize_existing_prefix(open) == physical
+                }) {
+                    Some((_, text)) => Some(text.to_string()),
+                    None => read_source_text(&path)?,
                 }
             }
         },
         VirtualRoot::Project => {
             let path = config.get_root().join(id.vpath().get_without_slash());
-            boundary.check(&path)?;
             match overrides
                 .iter()
                 .find(|(path, _)| crate::identity::path_id(path, config.get_root()) == Some(id))
             {
-                Some((_, text)) => text.to_string(),
-                None => match std::fs::read_to_string(path) {
-                    Ok(text) => text,
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-                    Err(error) => return Err(error.into()),
-                },
+                Some((_, text)) => Some(text.to_string()),
+                None => read_source_text(&path)?,
             }
         }
     };
-    Ok(Some(Source::new(id, text)))
+    Ok(text.map(|text| Source::new(id, text)))
 }
+
+/// The text of the file at `path`, or `None` when no file is there: a source the site no longer
+/// holds answers nothing rather than failing the request.
+fn read_source_text(path: &Path) -> Result<Option<String>> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ok(Some(text)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
 /// Selection and edits refer to the original source, not its repaired tree.
 pub(super) struct Selection<'a> {
     pub(super) source: &'a Source,
@@ -133,15 +140,7 @@ impl<'a> Selection<'a> {
             SourceQuery::InlayHints(_)
             | SourceQuery::CodeActions(_)
             | SourceQuery::DocumentColors(_)
-            | SourceQuery::ColorPresentations(_) => {
-                return Self {
-                    source,
-                    cursor,
-                    syntax: SelectedSyntax::Expression,
-                    check_progress,
-                    indexed_names,
-                };
-            }
+            | SourceQuery::ColorPresentations(_) => Some(SelectedSyntax::Expression),
             // A cursor question at an import item's own name reads the export it names: the name
             // is not a binding in this file, so nothing else resolves it.
             SourceQuery::Hover(_) | SourceQuery::Definition(_) => {
@@ -163,11 +162,7 @@ impl<'a> Selection<'a> {
         }
     }
 
-    /// The name index of one source, reusing the document's own index while it is that document.
-    ///
-    /// The connection builds the open document's index once per revision, so a query about that
-    /// document at the same bytes reads it instead of walking the tree again; another document, or
-    /// this one at other bytes, gets its own index.
+    /// The document's own index while the bytes match; any other document gets a fresh one.
     pub(super) fn names_of(&self, source: &Source) -> Arc<SourceNames> {
         if let Some(names) = &self.indexed_names
             && source.id() == self.source.id()
@@ -178,11 +173,7 @@ impl<'a> Selection<'a> {
         Arc::new(SourceNames::new(source.clone()))
     }
 
-    /// Whether the cursor stands at a member position in code, where only the receiver's own
-    /// members answer and the general names behind it belong to no member of an unresolved
-    /// receiver.
-    ///
-    /// A member position in math keeps Typst's own completions: a symbol's members answer there.
+    /// Whether the cursor stands at a code member position; math keeps Typst's own completions.
     pub(super) fn at_code_member(&self) -> bool {
         if !matches!(self.syntax, SelectedSyntax::Member(_)) {
             return false;
@@ -193,10 +184,7 @@ impl<'a> Selection<'a> {
             .any(|leaf| leaf.mode_after() == Some(SyntaxMode::Code))
     }
 
-    /// Whether `range` still holds the author's own bytes in the query copy.
-    ///
-    /// A range the repair rewrote is a stand-in: an answer about it would describe a fabricated
-    /// construct, so no lane answers about it.
+    /// Whether `range` still holds the author's bytes, not a repair's stand-in.
     pub(super) fn range_keeps_source_text(
         &self,
         prepared: &Source,
@@ -206,61 +194,107 @@ impl<'a> Selection<'a> {
     }
 
     /// Whether the construct at the cursor is the author's own text in the query copy.
-    ///
-    /// A search over the compiled copy — the reader's own — describes what it finds there, so a
-    /// construct the repair rewrote has no answer in the author's own text to fall back to.
     pub(super) fn cursor_keeps_source_text(&self, prepared: &Source) -> bool {
         tola_typst_syntax::syntax::expression(prepared, self.cursor)
             .is_none_or(|node| self.range_keeps_source_text(prepared, node.range()))
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "a query keeps its compiler revision and source admission separate"
+    )]
     pub(super) fn realize(
         &self,
         session: &mut SourceDiagnosticSession,
         compilations: &mut RevisionCompilations,
         config: &Arc<ResolvedSiteConfig>,
+        package_access: &PackageAccess<'_>,
         source_revision: u64,
         overrides: &[(PathBuf, Arc<str>)],
         cancellation: &BuildCancellation,
     ) -> Result<Arc<SourceRevision>> {
         let mut prepared = overrides.to_vec();
-        if self.source.id().root() == &VirtualRoot::Project {
+        let editable = editable_source_path(self.source, config, package_access).is_some();
+        if editable {
             pin_source(
                 self.source,
                 self.source.text().into(),
                 config,
+                package_access,
                 &mut prepared,
             )?;
         }
         let revision =
             compilations.inspect(session, config, source_revision, prepared, cancellation)?;
-        if revision.compiled() {
+        // Embedded and generated sources have no editable backing file. Local packages do: their
+        if revision.compiled() || !editable {
             return Ok(revision);
         }
-        // A document the site does not own — an embedded package, which no edit may reach — has only
-        // the world it was checked in: a repair writes a query copy of the site's sources, so the
-        // unrepaired revision is the answer instead of a failed request.
-        if self.source.id().root() != &VirtualRoot::Project {
+        let Some(blanked) = self.blanked_query_copy(config, package_access, overrides)? else {
             return Ok(revision);
+        };
+        let repaired =
+            compilations.inspect(session, config, source_revision, blanked, cancellation)?;
+        if repaired.compiled() {
+            return Ok(repaired);
         }
-        let mut repaired = overrides.to_vec();
+        // A repair can be too narrow: an argument the call rejects, or a call whose own name
+        match self.widened_query_copy(config, package_access, overrides)? {
+            Some(widened) => Ok(compilations.inspect(
+                session,
+                config,
+                source_revision,
+                widened,
+                cancellation,
+            )?),
+            None => Ok(repaired),
+        }
+    }
+
+    /// `overrides` with the construct at the cursor blanked, or `None` when this construct needs no
+    /// blanking to compile.
+    fn blanked_query_copy(
+        &self,
+        config: &ResolvedSiteConfig,
+        package_access: &PackageAccess<'_>,
+        overrides: &[(PathBuf, Arc<str>)],
+    ) -> Result<Option<QueryOverrides>> {
+        let mut blanked = overrides.to_vec();
         match &self.syntax {
             SelectedSyntax::Import(import) => match &import.repair {
-                Some(repair) => {
-                    blank_query_syntax(self.source, repair.clone(), config, &mut repaired)?
-                }
-                None => return Ok(revision),
+                Some(repair) => blank_query_syntax(
+                    self.source,
+                    repair.clone(),
+                    config,
+                    package_access,
+                    &mut blanked,
+                )?,
+                None => return Ok(None),
             },
-            SelectedSyntax::Member(member) => {
-                blank_query_syntax(self.source, member.suffix.clone(), config, &mut repaired)?
-            }
-            SelectedSyntax::Call(call) => {
-                blank_query_syntax(self.source, call.suffix.clone(), config, &mut repaired)?
-            }
+            SelectedSyntax::Member(member) => blank_query_syntax(
+                self.source,
+                member.suffix.clone(),
+                config,
+                package_access,
+                &mut blanked,
+            )?,
+            SelectedSyntax::Call(call) => blank_query_syntax(
+                self.source,
+                call.suffix.clone(),
+                config,
+                package_access,
+                &mut blanked,
+            )?,
             SelectedSyntax::Name(name) => {
                 // The author is still typing this name. Completion answers from the file's
                 // scopes, not from the name, so the query copy binds it and compiles.
-                blank_query_name(self.source, name.clone(), config, &mut repaired)?
+                blank_query_name(
+                    self.source,
+                    name.clone(),
+                    config,
+                    package_access,
+                    &mut blanked,
+                )?
             }
             SelectedSyntax::Reference(reference) => {
                 // A reference to a label the site does not declare yet is a compile error, so the
@@ -269,35 +303,41 @@ impl<'a> Selection<'a> {
                     self.source,
                     reference.written.clone(),
                     config,
-                    &mut repaired,
+                    package_access,
+                    &mut blanked,
                 )?
             }
-            SelectedSyntax::Expression | SelectedSyntax::ImportedName(_) => return Ok(revision),
-        };
-        let repaired =
-            compilations.inspect(session, config, source_revision, repaired, cancellation)?;
-        if repaired.compiled() {
-            return Ok(repaired);
+            SelectedSyntax::Expression | SelectedSyntax::ImportedName(_) => return Ok(None),
         }
-        // A repair can be too narrow: an argument the call rejects, or a call whose own name
-        // resolves nowhere. Dropping the call that has the cursor keeps the rest in place.
+        Ok(Some(blanked))
+    }
+
+    /// `overrides` with the whole call under the cursor dropped, or `None` when the cursor holds no
+    /// call to drop.
+    fn widened_query_copy(
+        &self,
+        config: &ResolvedSiteConfig,
+        package_access: &PackageAccess<'_>,
+        overrides: &[(PathBuf, Arc<str>)],
+    ) -> Result<Option<QueryOverrides>> {
         let Some(call) = tola_typst_syntax::syntax::call(self.source, self.cursor) else {
-            return Ok(repaired);
+            return Ok(None);
         };
         let Some(statement) = tola_typst_syntax::syntax::node_at_range(
             self.source,
             &(call.callee.start..call.suffix.end),
         ) else {
-            return Ok(repaired);
+            return Ok(None);
         };
         let mut widened = overrides.to_vec();
         blank_query_syntax(
             self.source,
             tola_typst_syntax::syntax::dropped(&statement),
             config,
+            package_access,
             &mut widened,
         )?;
-        Ok(compilations.inspect(session, config, source_revision, widened, cancellation)?)
+        Ok(Some(widened))
     }
 }
 
@@ -316,12 +356,12 @@ mod tests {
     use proptest::prelude::*;
     use serde_json::json;
     use tola_build::cancellation::BuildCancelled;
-    use tola_build::diagnostic::Severity;
+    use tola_diagnostic::Severity;
     use tola_typst::typst::syntax::LinkedNode;
     use tola_typst::typst::syntax::ast;
 
     #[test]
-    fn stale_revisions_never_reuse_values() {
+    fn uncompiled_document_answers_source_only() {
         let mut site = QuerySession::new();
         let items = site.completion(
             "#import \"@tola/document:0.0.0\": current-document\n#context current-document().|",
@@ -369,13 +409,14 @@ mod tests {
             &mut site.session,
             &mut site.compilations,
             &mut crate::analysis::DiskSources::default(),
+            &mut crate::analysis::GraphCache::default(),
             &mut site.bibliographies,
+            &mut crate::compiler::EntityQueries::default(),
             &site.config,
             0,
             &[],
             &SourceView::default(),
             &[],
-            None,
             &decode(
                 "textDocument/completion",
                 json!({
@@ -477,7 +518,7 @@ mod tests {
     /// The document's own index answers a query about that document, and a copy at other bytes —
     /// an unsaved edit, a package file — gets its own.
     #[test]
-    fn names_reuse_follows_the_document_text() {
+    fn index_reuse_follows_text() {
         let source = Source::detached("#let value = 1\n#value\n".to_owned());
         let indexed = Arc::new(SourceNames::new(source.clone()));
         let selection = Selection::new(

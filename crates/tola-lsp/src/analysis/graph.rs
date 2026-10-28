@@ -8,7 +8,7 @@ use anyhow::Result;
 use tola_build::cancellation::BuildCancellation;
 use tola_typst::typst::foundations::PathOrStr;
 use tola_typst::typst::syntax::package::{PackageManifest, PackageSpec};
-use tola_typst::typst::syntax::{FileId, RootedPath, Source, VirtualPath, VirtualRoot};
+use tola_typst::typst::syntax::{FileId, RootedPath, Source, SyntaxKind, VirtualPath, VirtualRoot};
 use tola_typst::{
     FileResolver, GLOBAL_LIBRARY, PackageFetchPolicy, PackageLocations, SourceBoundary,
 };
@@ -23,8 +23,8 @@ pub(crate) struct CachedGraph<'a> {
     pub(crate) cache: &'a mut GraphCache,
     pub(crate) revision: u64,
 }
-/// One source-only graph, reusable after every reached source and import target is revalidated.
-/// Directory scans alone omit hidden imports and package sources.
+/// One graph built with no host-established target, reusable after every reached source and
+/// import target is revalidated. Directory scans alone omit hidden imports and package sources.
 #[derive(Default)]
 pub(crate) struct GraphCache {
     revision: u64,
@@ -40,16 +40,23 @@ impl GraphCache {
         targets: &HashMap<FileId, BTreeMap<String, FileId>>,
     ) -> Option<Arc<NameGraph>> {
         let graph = self.graph.as_ref()?;
-        (self.revision == revision
-            && self.targets == *targets
-            && graph.sources().count() == sources.len()
-            && sources.iter().all(|(file, names)| {
-                graph.source(*file).is_some_and(|cached| {
-                    std::ptr::eq(cached, names.as_ref())
-                        || cached.source().text() == names.source().text()
-                })
-            }))
-        .then(|| Arc::clone(graph))
+        if self.revision != revision
+            || graph.sources().count() != sources.len()
+            || self.targets != *targets
+        {
+            return None;
+        }
+        // A pointer match and an equal text both mean the graph answers for this exact source.
+        let answers_for_sources = sources.iter().all(|(file, names)| {
+            graph.source(*file).is_some_and(|cached| {
+                std::ptr::eq(cached, names.as_ref())
+                    || cached.source().text() == names.source().text()
+            })
+        });
+        if !answers_for_sources {
+            return None;
+        }
+        Some(Arc::clone(graph))
     }
 
     fn store(
@@ -122,6 +129,8 @@ pub(crate) fn graph(
     // Every path this graph reads or compares is a filesystem path, and a client may name the
     // root through a symlink: the resolved spelling is what `VirtualPath::virtualize` accepts,
     // so the dependents walk reaches the site's files under the identity their readers hold.
+    let boundary = view.site_boundary(boundary);
+    let boundary = boundary.as_ref();
     let root: &Path = &tola_build::filesystem::normalize_existing_prefix(root);
     if view.is_unnamed(source.id()) {
         let names = view
@@ -139,6 +148,7 @@ pub(crate) fn graph(
     let mut sources = HashMap::new();
     let names = view
         .by_id(source.id())
+        .filter(|parsed| parsed.source.text() == source.text())
         .map(|parsed| parsed.names())
         .unwrap_or_else(|| Arc::new(SourceNames::new(source.clone())));
     sources.insert(source.id(), names);
@@ -146,24 +156,24 @@ pub(crate) fn graph(
     disk.begin();
     if include_dependents {
         for parsed in view.iter() {
-            if source_allowed(parsed.source.id(), root, boundary) {
-                sources.insert(parsed.source.id(), parsed.names());
+            if source_within_boundary(parsed.source.id(), root, boundary) {
+                sources
+                    .entry(parsed.source.id())
+                    .or_insert_with(|| parsed.names());
             }
         }
         // The walk reaches every `.typ` the site holds: the build reads whatever an import
         // reaches, so a file the author's own ignore file lists is still one a consumer's
         // reference must reach.
-        add_walked_sources(&mut sources, root, boundary, cancellation, |path, id| {
-            disk.names(path, id)
-        })?;
+        add_walked_sources(&mut sources, root, boundary, disk, cancellation)?;
     }
     let established: Vec<(PendingImport, FileId)> = resolved
         .iter()
         .copied()
-        .filter(|(_, target)| source_allowed(*target, root, boundary))
+        .filter(|(_, target)| source_within_boundary(*target, root, boundary))
         .collect();
     let mut targets = HashMap::new();
-    reach_imports(
+    reach_sources(
         &mut sources,
         &mut targets,
         view,
@@ -171,7 +181,7 @@ pub(crate) fn graph(
         boundary,
         resolver.as_ref(),
         &established,
-        true,
+        PackageSources::Joined,
         disk,
         cancellation,
     )?;
@@ -216,7 +226,7 @@ pub(crate) fn graph(
 /// import reaches it, so a file they list is still one the site's own imports and references
 /// reach. A dot-named entry is skipped, and Tola's generated state is refused by the boundary, so
 /// the walk descends into what a source can be written in; a dot-named file a site path names
-/// joins the source set through [`reach_imports`] once an import reaches it.
+/// joins the source set through [`reach_sources`] once an import or include reaches it.
 fn source_walk(root: &Path, boundary: &SourceBoundary) -> ignore::WalkBuilder {
     let boundary = boundary.clone();
     let mut walker = ignore::WalkBuilder::new(root);
@@ -228,12 +238,12 @@ fn source_walk(root: &Path, boundary: &SourceBoundary) -> ignore::WalkBuilder {
         .parents(false)
         .filter_entry(move |entry| {
             !entry.file_type().is_some_and(|kind| kind.is_dir())
-                || source_directory(entry, &boundary)
+                || walk_descends_into(entry, &boundary)
         });
     walker
 }
 
-/// Add every `.typ` file the site walk reaches to `sources`, parsed as `read_names` reads it.
+/// Add every `.typ` file the site walk reaches to `sources`, as the disk parses it.
 ///
 /// An id already present is left as it stands: an open document or an import target has the
 /// text its own reader holds, which takes precedence over the file the walk would read.
@@ -241,8 +251,8 @@ pub(super) fn add_walked_sources(
     sources: &mut HashMap<FileId, Arc<SourceNames>>,
     root: &Path,
     boundary: &SourceBoundary,
+    disk: &mut DiskSources,
     cancellation: &BuildCancellation,
-    mut read_names: impl FnMut(&Path, FileId) -> Option<Arc<SourceNames>>,
 ) -> Result<()> {
     for entry in source_walk(root, boundary).build().filter_map(Result::ok) {
         cancellation.ensure_active()?;
@@ -262,29 +272,35 @@ pub(super) fn add_walked_sources(
         if sources.contains_key(&id) {
             continue;
         }
-        if let Some(names) = read_names(entry.path(), id) {
+        if let Some(names) = disk.read_names(entry.path(), id) {
             sources.insert(id, names);
         }
     }
     Ok(())
 }
 
-/// Read every source the given sources' imports reach, to a fixed point.
+/// Which `@`-package paths the import closure follows into their own source.
+#[derive(Clone, Copy)]
+pub(super) enum PackageSources {
+    /// A package's sources are never sources of the site that spells it, so they stay out.
+    Skipped,
+    /// A `@`-package path's own source joins, so statements inside it resolve as the compiler does.
+    Joined,
+}
+
+/// Read every source the given sources import or include, to a fixed point.
 ///
-/// `targets` records the file each path statement resolves to, which is the resolver the name
+/// `targets` records the file each import resolves to, which is the resolver the name
 /// graph answers `ImportQuery::Path` with. A target the given set cannot see — a file inside a
 /// hidden directory, an embedded package source — is read from wherever the name layer reads it,
 /// and a target nothing answers for is left out: a file no reader produced has no identity.
 ///
-/// `package_targets` decides whether a `@`-package path's own source joins the set. The name
-/// graph resolves every import the site spells, while an index of what the site's own sources
-/// select from each other holds no package source: a package's sources are never sources of the
-/// site that spells it, and their own imports must not decide what a site statement selects.
+/// [`PackageSources`] decides whether a `@`-package path's own source joins the set.
 #[expect(
     clippy::too_many_arguments,
-    reason = "the closure reads sources, targets, view, root, boundary, resolver, proven targets, package scope, parsed sources, and cancellation"
+    reason = "the closure reads sources, targets, view, root, boundary, resolver, proven targets, package sources, parsed sources, and cancellation"
 )]
-pub(super) fn reach_imports(
+pub(super) fn reach_sources(
     sources: &mut HashMap<FileId, Arc<SourceNames>>,
     targets: &mut HashMap<FileId, BTreeMap<String, FileId>>,
     view: &SourceView,
@@ -292,7 +308,7 @@ pub(super) fn reach_imports(
     boundary: &SourceBoundary,
     resolver: Option<&FileResolver>,
     established: &[(PendingImport, FileId)],
-    package_targets: bool,
+    package_sources: PackageSources,
     disk: &mut DiskSources,
     cancellation: &BuildCancellation,
 ) -> Result<()> {
@@ -310,26 +326,21 @@ pub(super) fn reach_imports(
         for file in pending {
             cancellation.ensure_active()?;
             visited.insert(file);
-            let imports: Vec<String> = sources[&file]
-                .imports()
-                .iter()
-                .filter_map(|import| match &import.source {
-                    ImportSource::Path(path) if package_targets || !path.starts_with('@') => {
-                        Some(path.clone())
-                    }
-                    _ => None,
-                })
-                .collect();
+            let outward = outward_paths(&sources[&file], package_sources);
             let mut reached = Vec::new();
-            for path in imports {
+            for path in outward.imports {
                 cancellation.ensure_active()?;
-                let Some(target) = import_target(file, &path, root, resolver) else {
+                let Some(target) = reachable_target(file, &path, root, boundary, resolver) else {
                     continue;
                 };
-                if !source_allowed(target, root, boundary) {
-                    continue;
-                }
                 targets.entry(file).or_default().insert(path, target);
+                reached.push(target);
+            }
+            for path in outward.includes {
+                cancellation.ensure_active()?;
+                let Some(target) = reachable_target(file, &path, root, boundary, resolver) else {
+                    continue;
+                };
                 reached.push(target);
             }
             reached.extend(
@@ -340,36 +351,115 @@ pub(super) fn reach_imports(
             );
             for target in reached {
                 cancellation.ensure_active()?;
-                if sources.contains_key(&target) {
-                    continue;
-                }
-                if let Some(parsed) = view.by_id(target) {
-                    sources.insert(target, parsed.names());
-                    continue;
-                }
-                let text = crate::identity::embedded_source(target)
-                    .map(|text| text.into_owned())
-                    .or_else(|| {
-                        resolver.and_then(|resolver| {
-                            String::from_utf8(resolver.read(target, root).ok()?).ok()
-                        })
-                    })
-                    .or_else(|| {
-                        matches!(target.root(), VirtualRoot::Project)
-                            .then(|| {
-                                let path = root.join(target.vpath().get_without_slash());
-                                boundary.check(&path).ok()?;
-                                std::fs::read_to_string(path).ok()
-                            })
-                            .flatten()
-                    });
-                if let Some(text) = text {
-                    sources.insert(target, disk.names_from_text(target, text));
-                }
+                collect_reached_source(target, sources, view, root, boundary, resolver, disk);
             }
         }
     }
     Ok(())
+}
+
+/// Whether the import closure follows this path into its target.
+fn follows(path: &str, package_sources: PackageSources) -> bool {
+    matches!(package_sources, PackageSources::Joined) || !path.starts_with('@')
+}
+
+/// The paths one source's own statements name, split by what the closure does with them.
+///
+/// An import path's target answers the graph's `ImportQuery::Path`; an include only joins the
+/// source set. A dynamic import is in neither: tracing one compiles a whole document per site.
+struct OutwardPaths {
+    imports: Vec<String>,
+    includes: Vec<String>,
+}
+
+fn outward_paths(names: &SourceNames, package_sources: PackageSources) -> OutwardPaths {
+    let imports = names
+        .imports()
+        .iter()
+        .filter_map(|import| match &import.source {
+            ImportSource::Path(path) if follows(path, package_sources) => Some(path.clone()),
+            _ => None,
+        })
+        .collect();
+    let includes = tola_typst_syntax::syntax::module_paths(names.source())
+        .into_iter()
+        .filter(|path| path.kind == SyntaxKind::ModuleInclude)
+        .map(|path| path.text)
+        .filter(|path| follows(path, package_sources))
+        .collect();
+    OutwardPaths { imports, includes }
+}
+
+/// The source one traced path names, when the graph may read it.
+fn reachable_target(
+    file: FileId,
+    path: &str,
+    root: &Path,
+    boundary: &SourceBoundary,
+    resolver: Option<&FileResolver>,
+) -> Option<FileId> {
+    let target = import_target(file, path, root, resolver)?;
+    source_within_boundary(target, root, boundary).then_some(target)
+}
+
+/// Add one source the closure reached; a source already in the set keeps its own reader's text.
+fn collect_reached_source(
+    target: FileId,
+    sources: &mut HashMap<FileId, Arc<SourceNames>>,
+    view: &SourceView,
+    root: &Path,
+    boundary: &SourceBoundary,
+    resolver: Option<&FileResolver>,
+    disk: &mut DiskSources,
+) {
+    if sources.contains_key(&target) {
+        return;
+    }
+    if let Some(parsed) = view.by_id(target) {
+        sources.insert(target, parsed.names());
+        return;
+    }
+    // The bytes belong to the physical buffer; the ID keeps this module's import base.
+    let physical = matches!(target.root(), VirtualRoot::Project).then(|| {
+        tola_build::filesystem::normalize_existing_prefix(
+            &root.join(target.vpath().get_without_slash()),
+        )
+    });
+    let Some(text) = reached_text(target, root, boundary, physical.as_deref(), view, resolver)
+    else {
+        return;
+    };
+    sources.insert(target, disk.names_from_text(target, text));
+    if let Some(physical) = physical {
+        let logical = root.join(target.vpath().get_without_slash());
+        disk.set_alias(target, (physical != logical).then_some(physical));
+    }
+}
+
+/// The bytes of one source the closure reached, from the first reader that holds it.
+fn reached_text(
+    target: FileId,
+    root: &Path,
+    boundary: &SourceBoundary,
+    physical: Option<&Path>,
+    view: &SourceView,
+    resolver: Option<&FileResolver>,
+) -> Option<String> {
+    physical
+        .and_then(|path| view.named_source(path))
+        .map(|(_, text)| text.to_owned())
+        .or_else(|| crate::identity::embedded_source(target).map(|text| text.into_owned()))
+        .or_else(|| {
+            resolver.and_then(|resolver| String::from_utf8(resolver.read(target, root).ok()?).ok())
+        })
+        .or_else(|| {
+            if !matches!(target.root(), VirtualRoot::Project) {
+                return None;
+            }
+            let path = root.join(target.vpath().get_without_slash());
+            boundary.check(&path).ok()?;
+            std::fs::read_to_string(path).ok()
+        })
 }
 
 /// Whether the walk descends into this directory.
@@ -378,8 +468,8 @@ pub(super) fn reach_imports(
 /// published output, the vendor workspace — or when it is tool state a site root may hold:
 /// Cargo's `target` and npm's `node_modules` hold generated files the build never reads. The
 /// walk's own hidden filter already skips a dot-named directory, and a dot-named file a site
-/// path names joins the source set through [`reach_imports`] when an import reaches it.
-fn source_directory(entry: &ignore::DirEntry, boundary: &SourceBoundary) -> bool {
+/// path names joins the source set through [`reach_sources`] when an import or include reaches it.
+fn walk_descends_into(entry: &ignore::DirEntry, boundary: &SourceBoundary) -> bool {
     if entry.depth() == 0 {
         return true;
     }
@@ -389,7 +479,9 @@ fn source_directory(entry: &ignore::DirEntry, boundary: &SourceBoundary) -> bool
     boundary.check(entry.path()).is_ok()
 }
 
-fn source_allowed(id: FileId, root: &Path, boundary: &SourceBoundary) -> bool {
+/// Whether this source is one the graph may read. A package source is not a site file, so the
+/// boundary has nothing to refuse.
+pub(super) fn source_within_boundary(id: FileId, root: &Path, boundary: &SourceBoundary) -> bool {
     !matches!(id.root(), VirtualRoot::Project)
         || boundary
             .check(&root.join(id.vpath().get_without_slash()))
@@ -461,6 +553,286 @@ mod tests {
             ))
             .unwrap();
         uri
+    }
+
+    #[cfg(unix)]
+    fn alias_sources(root: &Path, text: &str) -> (OpenSources, lsp_types::Uri) {
+        std::fs::write(root.join("library.typ"), "#let stale = 0\n").unwrap();
+        std::os::unix::fs::symlink("library.typ", root.join("alias.typ")).unwrap();
+        let mut sources = OpenSources::new(root);
+        let uri = open(&mut sources, root, "alias.typ", text);
+        (sources, uri)
+    }
+
+    #[cfg(unix)]
+    fn source_reply(
+        root: &Path,
+        sources: &OpenSources,
+        uri: &lsp_types::Uri,
+        method: &str,
+        at: lsp_types::Position,
+        extra: serde_json::Value,
+    ) -> Result<crate::protocol::SourceReply> {
+        let view = sources.view();
+        let source = &view.get(uri).unwrap().source;
+        let cursor = crate::position::byte_offset(source.lines(), at)?;
+        let mut params = serde_json::json!({"textDocument":{"uri":uri},"position":at});
+        params
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let query = crate::protocol::SourceQuery::decode(lsp_server::Request::new(
+            1.into(),
+            method.into(),
+            params,
+        ))
+        .unwrap()
+        .1;
+        let boundary = tola_typst::SourceBoundary::new(root, true);
+        let mut disk = DiskSources::default();
+        let graph = source_only_graph(
+            root,
+            &view,
+            source,
+            None,
+            &boundary,
+            true,
+            &mut disk,
+            None,
+            &BuildCancellation::new(),
+        )?;
+        Ok(super::super::respond(
+            &graph,
+            source,
+            cursor,
+            &query,
+            &view,
+            &disk,
+            root,
+            &crate::uri::ClientRoot::new(root),
+            None,
+            &boundary,
+        )?
+        .unwrap())
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn conflicting_alias_buffers_refuse_queries() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let (mut sources, alias) = alias_sources(root, "#let value = 1\n");
+        open(&mut sources, root, "library.typ", "\n#let value = 2\n");
+        for (method, extra) in [
+            ("textDocument/definition", serde_json::json!({})),
+            (
+                "textDocument/references",
+                serde_json::json!({"context":{"includeDeclaration":false}}),
+            ),
+            (
+                "textDocument/rename",
+                serde_json::json!({"newName":"renamed"}),
+            ),
+        ] {
+            let error = source_reply(
+                root,
+                &sources,
+                &alias,
+                method,
+                lsp_types::Position::new(0, 6),
+                extra,
+            )
+            .expect_err("different buffers must not produce query results");
+            assert!(matches!(
+                error.downcast_ref::<super::super::NameQueryError>(),
+                Some(super::super::NameQueryError::ConflictingSourceText)
+            ));
+            assert!(error.to_string().contains("save or close"));
+        }
+    }
+
+    #[cfg(unix)]
+    fn shared_import_sources(root: &Path) -> OpenSources {
+        for name in ["real", "alias"] {
+            std::fs::create_dir(root.join(name)).unwrap();
+        }
+        for (path, text) in [
+            (
+                "real/library.typ",
+                "#import \"shared.typ\": value\n#value\n",
+            ),
+            ("real/shared.typ", "#let value = 1\n"),
+            ("alias/shared.typ", "#let value = 2\n"),
+            ("one.typ", "#import \"alias/library.typ\": value\n#value\n"),
+            ("two.typ", "#import \"real/library.typ\": value\n#value\n"),
+        ] {
+            std::fs::write(root.join(path), text).unwrap();
+        }
+        std::os::unix::fs::symlink("../real/library.typ", root.join("alias/library.typ")).unwrap();
+        OpenSources::new(root)
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn rename_refuses_divergent_import_contexts() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let mut sources = shared_import_sources(root);
+        let shared_uri = open(&mut sources, root, "alias/shared.typ", "#let value = 2\n");
+        let rename = source_reply(
+            root,
+            &sources,
+            &shared_uri,
+            "textDocument/rename",
+            lsp_types::Position::new(0, 6),
+            serde_json::json!({"newName":"renamed"}),
+        );
+        let error = rename.expect_err("one logical import must not break the shared consumer");
+        assert!(matches!(
+            error.downcast_ref::<super::super::NameQueryError>(),
+            Some(super::super::NameQueryError::ConflictingImportContexts(_))
+        ));
+        assert!(error.to_string().contains("explicit import target"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn closed_receive_one_edit_set() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let mut sources = shared_import_sources(root);
+        std::fs::remove_file(root.join("alias/shared.typ")).unwrap();
+        std::os::unix::fs::symlink("../real/shared.typ", root.join("alias/shared.typ")).unwrap();
+        let shared_uri = open(&mut sources, root, "real/shared.typ", "#let value = 1\n");
+        let crate::protocol::SourceReply::Rename(Some(edits)) = source_reply(
+            root,
+            &sources,
+            &shared_uri,
+            "textDocument/rename",
+            lsp_types::Position::new(0, 6),
+            serde_json::json!({"newName":"renamed-longer"}),
+        )
+        .unwrap() else {
+            panic!("both logical contexts share the target");
+        };
+        let real = crate::uri::from_file_path(&root.join("real/library.typ")).unwrap();
+        let alias = crate::uri::from_file_path(&root.join("alias/library.typ")).unwrap();
+        assert_eq!(
+            edits.changes.as_ref().unwrap().get(&real).map(Vec::len),
+            Some(2)
+        );
+        assert!(!edits.changes.as_ref().unwrap().contains_key(&alias));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn rename_edits_each_open_alias() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let (mut sources, alias) = alias_sources(root, "#let value = 1\n");
+        let real = open(&mut sources, root, "library.typ", "#let value = 1\n");
+        let crate::protocol::SourceReply::Rename(Some(edits)) = source_reply(
+            root,
+            &sources,
+            &alias,
+            "textDocument/rename",
+            lsp_types::Position::new(0, 6),
+            serde_json::json!({"newName":"renamed"}),
+        )
+        .unwrap() else {
+            panic!("the coherent aliases can be renamed");
+        };
+        assert_eq!(
+            edits.changes.as_ref().unwrap().get(&alias).map(Vec::len),
+            Some(1)
+        );
+        assert_eq!(
+            edits.changes.as_ref().unwrap().get(&real).map(Vec::len),
+            Some(1)
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn alias_buffers_own_navigation_ranges() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let (mut sources, library) = alias_sources(root, "🦊\n\n🦊 #let value = 1\n");
+        let importer = open(
+            &mut sources,
+            root,
+            "main.typ",
+            "#import \"alias.typ\": value\n#value\n",
+        );
+        open(
+            &mut sources,
+            root,
+            "consumer.typ",
+            "#import \"library.typ\": value\n#value\n",
+        );
+        let crate::protocol::SourceReply::Definition(Some(
+            lsp_types::GotoDefinitionResponse::Scalar(location),
+        )) = source_reply(
+            root,
+            &sources,
+            &importer,
+            "textDocument/definition",
+            lsp_types::Position::new(1, 2),
+            serde_json::json!({}),
+        )
+        .unwrap()
+        else {
+            panic!("the unsaved export has a definition");
+        };
+        assert_eq!(location.uri, library);
+        assert_eq!(location.range.start, lsp_types::Position::new(2, 8));
+        assert_eq!(location.range.end, lsp_types::Position::new(2, 13));
+        for (method, extra) in [
+            (
+                "textDocument/references",
+                serde_json::json!({"context":{"includeDeclaration":true}}),
+            ),
+            (
+                "textDocument/rename",
+                serde_json::json!({"newName":"renamed"}),
+            ),
+        ] {
+            match source_reply(
+                root,
+                &sources,
+                &library,
+                method,
+                lsp_types::Position::new(2, 9),
+                extra,
+            )
+            .unwrap()
+            {
+                crate::protocol::SourceReply::References(Some(locations)) => {
+                    assert_eq!(locations.len(), 5, "{locations:?}");
+                    assert_eq!(
+                        locations
+                            .iter()
+                            .filter(|location| location.uri == library)
+                            .count(),
+                        1
+                    );
+                }
+                crate::protocol::SourceReply::Rename(Some(edits)) => {
+                    assert_eq!(
+                        edits
+                            .changes
+                            .as_ref()
+                            .unwrap()
+                            .values()
+                            .map(Vec::len)
+                            .sum::<usize>(),
+                        5
+                    );
+                    assert_eq!(edits.changes.unwrap()[&library].len(), 1);
+                }
+                _ => panic!("a navigation reply"),
+            }
+        }
     }
 
     #[test]

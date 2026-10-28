@@ -8,25 +8,35 @@ use crate::codes;
 
 use super::Hint;
 
-/// The explicit `return` a block's remaining expressions are discarded by.
+/// What the explicit `return` ahead of a statement discards before it, and whether one such
+/// expression was already named.
 #[derive(Clone, Copy, Default, PartialEq)]
 struct Discard {
-    /// A `return` with a value follows on this path.
-    value: bool,
-    /// A `return` without a value follows on this path.
-    none: bool,
+    /// What the `return` this path reaches names; absent when the path leaves without one.
+    returned: Option<Returned>,
     /// The path already named the expression the `return` discards.
     warned: bool,
 }
 
+/// What the explicit `return` on one path does with the expressions before it.
+#[derive(Clone, Copy, PartialEq)]
+enum Returned {
+    /// It names a value, so every value before it is discarded.
+    WithValue,
+    /// It names none, so only the `set` and `show` rules before it are discarded.
+    WithoutValue,
+}
+
 impl Discard {
-    /// The state both branches agree on.
-    fn merge(self, other: Self) -> Self {
-        Self {
-            value: self.value && other.value,
-            none: self.none && other.none,
+    /// The state both branches agree on, absent when they reach a different kind of `return`.
+    ///
+    /// A value is discarded only when every path reaches the same kind, so a branch that leaves
+    /// without one withholds the finding.
+    fn agreed(self, other: Self) -> Option<Self> {
+        (self.returned == other.returned).then_some(Self {
+            returned: self.returned,
             warned: self.warned && other.warned,
-        }
+        })
     }
 }
 
@@ -147,9 +157,13 @@ fn walk(node: &LinkedNode<'_>, flow: &mut Flow, hints: &mut Vec<Hint>) {
             let Some(return_) = node.cast::<ast::FuncReturn>() else {
                 return;
             };
+            let returned = if return_.body().is_some() {
+                Returned::WithValue
+            } else {
+                Returned::WithoutValue
+            };
             flow.pending = Some(Discard {
-                value: return_.body().is_some(),
-                none: return_.body().is_none(),
+                returned: Some(returned),
                 warned: false,
             });
         }
@@ -261,8 +275,13 @@ fn value(node: &LinkedNode<'_>, flow: &mut Flow, hints: &mut Vec<Hint>) {
     if pending.warned {
         return;
     }
-    let discarded = (pending.value && discards_value(expr))
-        || (pending.none && matches!(expr, ast::Expr::SetRule(_) | ast::Expr::ShowRule(_)));
+    let discarded = match pending.returned {
+        Some(Returned::WithValue) => discards_value(expr),
+        Some(Returned::WithoutValue) => {
+            matches!(expr, ast::Expr::SetRule(_) | ast::Expr::ShowRule(_))
+        }
+        None => false,
+    };
     if discarded {
         pending.warned = true;
         hints.push(hint(node, expr));
@@ -317,12 +336,9 @@ fn hint(node: &LinkedNode<'_>, expr: ast::Expr<'_>) -> Hint {
 }
 
 /// Fold one branch's state into the state the other branches left.
-///
-/// A value is discarded only when every path reaches the same kind of `return`, so a branch that
-/// leaves no pending return withholds the finding.
 fn join(discard: &mut Option<Discard>, branch: Option<Discard>) {
     *discard = match (*discard, branch) {
-        (Some(current), Some(branch)) => Some(branch.merge(current)),
+        (Some(current), Some(branch)) => branch.agreed(current),
         _ => None,
     };
 }

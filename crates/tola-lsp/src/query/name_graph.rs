@@ -1,5 +1,4 @@
-//! The name graph's answers, with every import identity the query needs proven by the compiler,
-//! and the source-only replies that need no compilation.
+//! The name graph's answers, with every import identity proven by the compiler.
 
 use std::collections::{HashMap, hash_map};
 use std::path::{Path, PathBuf};
@@ -21,14 +20,10 @@ use tola_typst::typst::World;
 use super::colors;
 use super::semantic::Semantic;
 
-/// The name graph's answer, with every import identity the query needs proven by the compiler.
-///
-/// A statement the compiler cannot prove — an unreadable source, a value that names no file, a
-/// truncated trace, or two different files — stays unproven, and the graph answers only what it
-/// established rather than guessing a cross-file identity.
+/// The graph's answer; a statement the compiler cannot prove stays unproven.
 #[expect(
     clippy::too_many_arguments,
-    reason = "a graph reply reads session, package access, overrides, source, query, disk, and cancellation"
+    reason = "a graph reply reads session, packages, the source, the query, the lane's caches, and cancellation"
 )]
 pub(super) fn graph_reply(
     session: &mut SourceDiagnosticSession,
@@ -40,6 +35,8 @@ pub(super) fn graph_reply(
     cursor: usize,
     query: &SourceQuery,
     disk: &mut crate::analysis::DiskSources,
+    graphs: &mut crate::analysis::GraphCache,
+    revision: u64,
     cancellation: &BuildCancellation,
     client_root: &crate::uri::ClientRoot,
 ) -> Result<Option<SourceReply>> {
@@ -48,21 +45,27 @@ pub(super) fn graph_reply(
     let include_dependents = matches!(query, SourceQuery::References(_) | SourceQuery::Rename(_));
     let mut proven: Vec<(PendingImport, FileId)> = Vec::new();
     let mut visited: Vec<PendingImport> = Vec::new();
-    // One request proves many statements of the same file; the file compiles once for all of
-    // them, since nothing here outlives the request.
+    // One request proves many statements of a file, which compiles once for all of them.
     let mut compilations: HashMap<String, Option<SourceCompilation>> = HashMap::new();
-    let mut names = crate::analysis::graph(
-        root,
-        view,
-        source,
-        locations,
-        &package_access.boundary,
-        include_dependents,
-        &proven,
-        disk,
-        None,
-        cancellation,
-    )?;
+    // The proven statements are the only input that changes between builds.
+    let mut build_graph = |proven: &[(PendingImport, FileId)]| {
+        crate::analysis::graph(
+            root,
+            view,
+            source,
+            locations,
+            &package_access.boundary,
+            include_dependents,
+            proven,
+            disk,
+            proven.is_empty().then_some(crate::analysis::CachedGraph {
+                cache: graphs,
+                revision,
+            }),
+            cancellation,
+        )
+    };
+    let mut names = build_graph(&proven)?;
     loop {
         let fresh: Vec<_> = crate::analysis::unproven(&names, source, cursor, query)
             .into_iter()
@@ -91,36 +94,22 @@ pub(super) fn graph_reply(
         if !proven_any {
             break;
         }
-        names = crate::analysis::graph(
-            root,
-            view,
-            source,
-            locations,
-            &package_access.boundary,
-            include_dependents,
-            &proven,
-            disk,
-            None,
-            cancellation,
-        )?;
+        names = build_graph(&proven)?;
     }
     crate::analysis::respond(
         &names,
         source,
         cursor,
         query,
+        view,
+        disk,
         root,
         client_root,
         locations,
         &package_access.boundary,
     )
 }
-/// The file the official compiler proves one import statement's source expression names.
-///
-/// Every value the official trace observed at that expression must normalize to one file: a
-/// string resolves as the compiler resolves it, a module has its own file. Anything less is
-/// no identity: a missing or failed trace, a value that names nothing, a second file, or a
-/// statement whose evaluation this file does not own all leave the statement unproven.
+/// The one file the compiler proves an import statement names; anything less is no identity.
 fn proven_import(
     session: &mut SourceDiagnosticSession,
     compilations: &mut HashMap<String, Option<SourceCompilation>>,
@@ -146,9 +135,7 @@ fn proven_import(
     let Some(compilation) = compilation.as_ref() else {
         return Ok(None);
     };
-    // `typst::trace` swallows a failed compilation and its sink keeps only the first
-    // `Sink::MAX_VALUES` values, so a truncated or uncompleted evaluation observes less than the
-    // whole set of targets and proves nothing.
+    // A failed or truncated evaluation observes too little to prove a target.
     if compilation.introspector().is_none() {
         return Ok(None);
     }
@@ -198,11 +185,7 @@ fn traced_import_target(
         _ => None,
     }
 }
-pub(crate) fn source_reply(
-    source: &Source,
-    _cursor: usize,
-    query: &SourceQuery,
-) -> Result<Option<SourceReply>> {
+pub(crate) fn source_reply(source: &Source, query: &SourceQuery) -> Result<Option<SourceReply>> {
     Ok(Some(match query {
         SourceQuery::DocumentColors(_) => {
             SourceReply::DocumentColors(Some(colors::document(source)?))
@@ -221,8 +204,7 @@ pub(super) fn bare_name(source: &Source, cursor: usize) -> Option<&str> {
         .find_map(|side| root.leaf_at(cursor, side))
         .and_then(|leaf| match leaf.kind() {
             SyntaxKind::Ident => Some(&source.text()[leaf.range()]),
-            // The byte ends the space before a name, which is where a cursor in front of the
-            // name sits; the name the cursor opens is the one the author means.
+            // The byte ends the space before a name, which a cursor in front of the name means.
             SyntaxKind::Space => {
                 let next = leaf.next_leaf()?;
                 (next.kind() == SyntaxKind::Ident).then(|| &source.text()[next.range()])

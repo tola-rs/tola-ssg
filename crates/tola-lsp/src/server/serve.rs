@@ -4,20 +4,20 @@
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::thread;
+use std::thread::{self, JoinHandle, ScopedJoinHandle};
 use std::time::Instant;
 
-use anyhow::{Context, Result, bail};
-use crossbeam_channel::RecvTimeoutError;
+use anyhow::{Context, Result};
+use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
 use tola_build::BuildResources;
 use tola_build::cancellation::{BuildCancellation, BuildCanceller};
 use tola_build::config::ResolvedSiteConfig;
-use tola_build::diagnostic::Diagnostic;
+use tola_diagnostic::Diagnostic;
 
 use super::events::{Event, WAIT_INTERVAL};
 use super::lanes::{self, JobOwner};
 use super::reader::read_messages;
-use crate::compiler::SourceCompiler;
+use crate::compiler::{AnalysisRequest, SourceCompiler, SourceJob};
 use crate::connection::Connection;
 
 const STOPPED: &str = "the language server stopped; restart it from your editor";
@@ -100,22 +100,21 @@ where
     F: FnMut(&Path, &[(PathBuf, Arc<str>)]) -> Result<ServedWorkspace> + Send + 'static,
     D: Fn(&[Diagnostic]),
 {
-    let (events, incoming) = crossbeam_channel::bounded(0);
-    let (jobs, pending) = crossbeam_channel::bounded(1);
-    let (analyses, pending_analyses) = crossbeam_channel::bounded(1);
+    let (event_sender, events) = crossbeam_channel::bounded(0);
+    let (compiler_jobs, compiler_receiver) = crossbeam_channel::bounded(1);
+    let (analysis_jobs, analysis_receiver) = crossbeam_channel::bounded(1);
     let shutdown = BuildCanceller::new();
-    let reader_events = events.clone();
+    let reader_events = event_sender.clone();
     let reader_cancel = shutdown.token();
     let input = thread::Builder::new()
         .name("tola-lsp-reader".to_owned())
         .spawn(move || read_messages(reader, &reader_events, &reader_cancel))
         .context("the Tola language server could not start its input reader")?;
     thread::scope(|scope| {
-        let mut jobs = Some(jobs);
-        let mut analyses = Some(analyses);
-        let analysis_cancel = shutdown.token();
-        let analysis_events = events.clone();
+        // Both tokens are taken before the canceller moves into the connection that owns it.
         let compiler_cancel = shutdown.token();
+        let analysis_cancel = shutdown.token();
+        let analysis_events = event_sender.clone();
         let mut connection = Connection::new(
             writer,
             record_diagnostics,
@@ -127,22 +126,22 @@ where
             None,
             host_sections,
         );
-        let compiler = scope.spawn(move || {
+        let compiler_thread = scope.spawn(move || {
             let mut compiler = SourceCompiler::new(load_configuration, resources);
             lanes::run(
-                pending,
-                &events,
+                compiler_receiver,
+                &event_sender,
                 &compiler_cancel,
                 JobOwner::of,
                 |job| compiler.compile(job),
                 Event::Compiled,
             );
         });
-        let analyzer = scope.spawn(move || {
+        let analysis_thread = scope.spawn(move || {
             let mut disk = crate::analysis::DiskSources::default();
             let mut graphs = crate::analysis::GraphCache::default();
             lanes::run(
-                pending_analyses,
+                analysis_receiver,
                 &analysis_events,
                 &analysis_cancel,
                 JobOwner::of_analysis,
@@ -150,89 +149,152 @@ where
                 Event::Analyzed,
             );
         });
-        let outcome = (|| -> Result<()> {
-            let mut compiling = false;
-            let mut analyzing = false;
-            loop {
-                cancellation.ensure_active()?;
-                if connection.is_shutdown() {
-                    drop(jobs.take());
-                    drop(analyses.take());
-                } else {
-                    // A report that has run long enough to show, and a site nothing is using, are
-                    // owed between jobs: a job in flight is what both are waiting on.
-                    connection.run_due_work(Instant::now())?;
-                    if !compiling && let Some(job) = connection.next_job(Instant::now()) {
-                        // A lane receives another job only after its preceding reply arrives.
-                        jobs.as_ref()
-                            .expect("active connection owns compiler input")
-                            .send(job)
-                            .context("Tola compiler lane has stopped")?;
-                        compiling = true;
-                    }
-                    if !analyzing && let Some(request) = connection.next_analysis() {
-                        analyses
-                            .as_ref()
-                            .expect("active connection owns analysis input")
-                            .send(request)
-                            .context("Tola analysis lane has stopped")?;
-                        analyzing = true;
-                    }
-                }
-                let event = match incoming.recv_timeout(WAIT_INTERVAL) {
-                    Ok(event) => event,
-                    Err(RecvTimeoutError::Timeout) => {
-                        if input.is_finished() {
-                            bail!("{STOPPED}");
-                        }
-                        if (compiler.is_finished() || analyzer.is_finished())
-                            && !connection.is_shutdown()
-                        {
-                            bail!("{STOPPED}");
-                        }
-                        continue;
-                    }
-                    Err(RecvTimeoutError::Disconnected) => return Ok(()),
-                };
-                match event {
-                    Event::Message(message) => {
-                        if connection.receive(message)?.is_break() {
-                            return Ok(());
-                        }
-                    }
-                    Event::Compiled(completed) => {
-                        compiling = false;
-                        connection.completed(completed)?;
-                    }
-                    Event::Analyzed(completed) => {
-                        analyzing = false;
-                        connection.completed(completed)?;
-                    }
-                    Event::InputClosed => return Ok(()),
-                    Event::InputFailed(error) => return Err(error),
-                }
-            }
-        })();
-        connection.cancel();
-        drop(jobs.take());
-        drop(analyses.take());
-        let reader_joined = if input.is_finished() {
-            input.join().map_err(|_| anyhow::anyhow!(STOPPED))
-        } else {
-            Ok(())
+        let mut lanes = Lanes {
+            compiler_jobs: Some(compiler_jobs),
+            compiler_thread,
+            analysis_jobs: Some(analysis_jobs),
+            analysis_thread,
         };
-        let workers_joined = compiler
-            .join()
-            .map_err(|_| anyhow::anyhow!(STOPPED))
-            .and(analyzer.join().map_err(|_| anyhow::anyhow!(STOPPED)));
-        match outcome {
-            Err(error) if disconnected(&error) => reader_joined.and(workers_joined),
-            outcome => outcome.and(reader_joined).and(workers_joined),
-        }
+        let outcome = drive_connection(&mut connection, &events, &mut lanes, &input, &cancellation);
+        end_connection(connection, lanes, input, outcome)
     })
 }
 
-fn disconnected(error: &anyhow::Error) -> bool {
+/// The two worker lanes of one connection: each lane's queue, and the thread running its jobs.
+///
+/// A lane ends when its queue is dropped; `join` waits for the job each was running.
+struct Lanes<'scope> {
+    compiler_jobs: Option<Sender<SourceJob>>,
+    compiler_thread: ScopedJoinHandle<'scope, ()>,
+    analysis_jobs: Option<Sender<AnalysisRequest>>,
+    analysis_thread: ScopedJoinHandle<'scope, ()>,
+}
+
+impl Lanes<'_> {
+    fn dispatch_compilation(&mut self, job: SourceJob) -> Result<()> {
+        self.compiler_jobs
+            .as_ref()
+            .expect("a serving connection owns the compiler lane")
+            .send(job)
+            .context("Tola compiler lane has stopped")
+    }
+
+    fn dispatch_analysis(&mut self, request: AnalysisRequest) -> Result<()> {
+        self.analysis_jobs
+            .as_ref()
+            .expect("a serving connection owns the analysis lane")
+            .send(request)
+            .context("Tola analysis lane has stopped")
+    }
+
+    fn close(&mut self) {
+        self.compiler_jobs = None;
+        self.analysis_jobs = None;
+    }
+
+    fn any_finished(&self) -> bool {
+        self.compiler_thread.is_finished() || self.analysis_thread.is_finished()
+    }
+
+    fn join(self) -> Result<()> {
+        let compiler_joined = self.compiler_thread.join().map_err(|_| stopped_error());
+        let analysis_joined = self.analysis_thread.join().map_err(|_| stopped_error());
+        compiler_joined.and(analysis_joined)
+    }
+}
+
+/// Give each idle lane its next job, then act on the next event until the session ends.
+fn drive_connection<W, D>(
+    connection: &mut Connection<W, D>,
+    events: &Receiver<Event>,
+    lanes: &mut Lanes<'_>,
+    input: &JoinHandle<()>,
+    cancellation: &BuildCancellation,
+) -> Result<()>
+where
+    W: Write,
+    D: Fn(&[Diagnostic]),
+{
+    let mut compiling = false;
+    let mut analyzing = false;
+    loop {
+        cancellation.ensure_active()?;
+        if connection.is_shutdown() {
+            lanes.close();
+        } else {
+            // Owed between jobs: a job in flight is what the report and the idle release wait on.
+            connection.run_due_work(Instant::now())?;
+            // A lane receives another job only after its preceding reply arrives.
+            if !compiling && let Some(job) = connection.next_job(Instant::now()) {
+                lanes.dispatch_compilation(job)?;
+                compiling = true;
+            }
+            if !analyzing && let Some(request) = connection.next_analysis() {
+                lanes.dispatch_analysis(request)?;
+                analyzing = true;
+            }
+        }
+        let event = match events.recv_timeout(WAIT_INTERVAL) {
+            Ok(event) => event,
+            Err(RecvTimeoutError::Timeout) => {
+                // A lane closed by shutdown is expected; any other ending leaves nothing to answer.
+                if input.is_finished() || (lanes.any_finished() && !connection.is_shutdown()) {
+                    return Err(stopped_error());
+                }
+                continue;
+            }
+            Err(RecvTimeoutError::Disconnected) => return Ok(()),
+        };
+        match event {
+            Event::Message(message) => {
+                if connection.receive(message)?.is_break() {
+                    return Ok(());
+                }
+            }
+            Event::Compiled(completed) => {
+                compiling = false;
+                connection.completed(completed)?;
+            }
+            Event::Analyzed(completed) => {
+                analyzing = false;
+                connection.completed(completed)?;
+            }
+            Event::InputClosed => return Ok(()),
+            Event::InputFailed(error) => return Err(error.into()),
+        }
+    }
+}
+
+/// Cancel the connection's work, join the threads it ran, and report the outcome the session owes.
+fn end_connection<W, D>(
+    connection: Connection<W, D>,
+    mut lanes: Lanes<'_>,
+    input: JoinHandle<()>,
+    outcome: Result<()>,
+) -> Result<()> {
+    connection.cancel();
+    lanes.close();
+    // Joining a reader still blocked on the client would hold shutdown open.
+    let reader_joined = if input.is_finished() {
+        input.join().map_err(|_| stopped_error())
+    } else {
+        Ok(())
+    };
+    let lanes_joined = lanes.join();
+    match outcome {
+        Err(error) if client_disconnected(&error) => reader_joined.and(lanes_joined),
+        outcome => outcome.and(reader_joined).and(lanes_joined),
+    }
+}
+
+/// The failure a connection reports when a thread it started ended before the client did.
+fn stopped_error() -> anyhow::Error {
+    anyhow::anyhow!(STOPPED)
+}
+
+/// Whether the failure is the client's side of the connection going away, which ends the session
+/// without an error to report.
+fn client_disconnected(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| {
         cause.downcast_ref::<std::io::Error>().is_some_and(|error| {
             matches!(
@@ -297,7 +359,7 @@ mod tests {
         let mut client = EditorSession::start(&site);
 
         let marked = PROGRAM.replace("source.meta.draft", "source.meta.dr|aft");
-        let actions = client.code_actions_of_kind("site.typ", &marked, &["refactor"]);
+        let actions = client.code_actions("site.typ", &marked, &[], &["refactor"]);
         let titles = actions
             .iter()
             .filter_map(|action| action["title"].as_str())
@@ -341,10 +403,11 @@ mod tests {
             Some("absent-name")
         );
 
-        let actions = client.code_actions_for_diagnostics(
+        let actions = client.code_actions(
             "content/document.typ",
             &format!("{text}|"),
             std::slice::from_ref(diagnostic),
+            &["quickfix"],
         );
         assert_eq!(actions.len(), 1, "{actions:?}");
         let edits = action_edits(

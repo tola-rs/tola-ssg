@@ -1,6 +1,23 @@
-//! Completion insertion text at the Typst and LSP boundary.
+//! Completion text and ordering at the Typst and LSP boundary.
 
 use std::fmt::Write as _;
+
+use lsp_types::{CompletionItem, CompletionTextEdit};
+
+/// Clients compare sort text lexicographically, so every rank in one response has equal width.
+pub(super) fn preserve_order(completions: &mut [CompletionItem]) {
+    let width = completions.len().saturating_sub(1).to_string().len().max(3);
+    for (index, completion) in completions.iter_mut().enumerate() {
+        completion.sort_text = Some(format!("{index:0width$}"));
+    }
+}
+
+pub(super) fn set_edit_text(edit: &mut CompletionTextEdit, text: String) {
+    match edit {
+        CompletionTextEdit::Edit(edit) => edit.new_text = text,
+        CompletionTextEdit::InsertAndReplace(edit) => edit.new_text = text,
+    }
+}
 
 pub(super) fn typst_snippet(text: &str) -> String {
     let mut snippet = String::with_capacity(text.len());

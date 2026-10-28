@@ -28,10 +28,10 @@ pub(super) struct NamedPages<'a> {
 /// pages and one entry stands for the rest. Every client reads its pages from this selection, so a
 /// source's pages read the same wherever they appear.
 pub(super) fn named_pages(routes: &[Route]) -> NamedPages<'_> {
-    let named = routes.len().min(NAMED_PAGES);
+    let (named, remaining) = routes.split_at(routes.len().min(NAMED_PAGES));
     NamedPages {
-        named: &routes[..named],
-        remaining: routes.len() - named,
+        named,
+        remaining: remaining.len(),
     }
 }
 
@@ -50,7 +50,14 @@ pub(super) fn respond(
 ) -> Result<RouteReply> {
     cancellation.ensure_active()?;
     let mut prepared = overrides.to_vec();
-    crate::query::pin_source(source, Arc::from(source.text()), config, &mut prepared)?;
+    let packages = crate::packages::PackageAccess::prepared(config, session.resources(), &[])?;
+    crate::query::pin_source(
+        source,
+        Arc::from(source.text()),
+        config,
+        &packages,
+        &mut prepared,
+    )?;
     let revision = compilations
         .inspect(session, config, source_revision, prepared, cancellation)
         .context("the site could not be checked")?;
@@ -61,20 +68,22 @@ pub(super) fn respond(
     Ok(RouteReply { routes })
 }
 
-/// Every realized document whose body has `source`, in document order.
+/// The address of every realized document whose body has `source`, in document order.
 pub(super) fn site_routes(
     compilation: &SourceCompilation,
     config: &ResolvedSiteConfig,
     source: FileId,
     cancellation: &BuildCancellation,
 ) -> Result<Vec<Route>> {
-    let addresses = Addresses::new(config);
-    Ok(compilation
-        .realized_documents(cancellation)?
+    Ok(pages_carrying(compilation, config, source, cancellation)?
         .into_iter()
-        .filter(|document| document.sources.contains(&source))
-        .map(|document| addresses.of(&document))
+        .map(|page| page.route)
         .collect())
+}
+
+/// Whether a realized document's body has `source`: its own, or one it renders through an include.
+fn carries_source(document: &RealizedDocument, source: FileId) -> bool {
+    document.sources.contains(&source) || document.rendered_sources.contains(&source)
 }
 
 /// The addresses a site's realized documents answer at.
@@ -83,14 +92,14 @@ pub(super) fn site_routes(
 /// list of pages rather than once per page.
 struct Addresses<'a> {
     config: &'a ResolvedSiteConfig,
-    origin: bool,
+    has_origin: bool,
 }
 
 impl<'a> Addresses<'a> {
     fn new(config: &'a ResolvedSiteConfig) -> Self {
         Self {
             config,
-            origin: config.site_url().is_some(),
+            has_origin: config.site_url().is_some(),
         }
     }
 
@@ -99,7 +108,7 @@ impl<'a> Addresses<'a> {
         Route {
             route: self.config.url_mount().browser_path(&document.permalink),
             url: self
-                .origin
+                .has_origin
                 .then(|| self.config.canonical_url(&document.permalink)),
             output: document.output.as_str().to_owned(),
         }
@@ -180,7 +189,7 @@ fn realized_pages(
     Ok(compilation
         .realized_documents(cancellation)?
         .into_iter()
-        .filter(|document| carried.is_none_or(|source| document.sources.contains(&source)))
+        .filter(|document| carried.is_none_or(|source| carries_source(document, source)))
         .map(|document| Page {
             source: document
                 .sources
@@ -220,45 +229,11 @@ pub(super) fn index(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tola_build::config::loading::{BuildOverrides, load_site_config};
-    use tola_build::diagnostic::Severity;
+    use tola_diagnostic::Severity;
 
-    /// A site whose entry program realizes one page per content source.
-    ///
-    /// Every file is written below the root; only files below `content` are sources, so a file
-    /// elsewhere is readable without becoming a page of its own.
-    fn site(files: &[(&str, &str)]) -> (tempfile::TempDir, Arc<ResolvedSiteConfig>) {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path();
-        std::fs::write(
-            root.join("site.typ"),
-            r#"#import "@tola/source:0.0.0": all-sources
-#import "@tola/address:0.0.0": join-route, output-of
-#for source in all-sources() {
-  document(output-of(join-route(source.route-segments)))[#include source.file]
-}"#,
-        )
-        .unwrap();
-        for (name, text) in files {
-            let path = root.join(name);
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(path, text).unwrap();
-        }
-        let toml = root.join("tola.toml");
-        std::fs::write(&toml, "").unwrap();
-        let configuration = Arc::new(
-            load_site_config(
-                Some(&toml),
-                tola_typst::PackageLocations::default(),
-                &BuildOverrides::default(),
-            )
-            .unwrap()
-            .into_config(),
-        );
-        (directory, configuration)
-    }
+    use crate::server::tests::rendering_site;
 
-    /// The index of one `site`'s pages, asserted to come from a site that compiled.
+    /// The index of one site's pages, asserted to come from a site that compiled.
     fn indexed_routes(configuration: &Arc<ResolvedSiteConfig>) -> Vec<SiteRoute> {
         let cancellation = BuildCancellation::new();
         let mut session = SourceDiagnosticSession::new(Arc::clone(configuration));
@@ -294,8 +269,8 @@ mod tests {
     }
 
     #[test]
-    fn index_maps_each_page_to_its_source() {
-        let (_directory, configuration) = site(&[
+    fn index_maps_each_page_source() {
+        let (_directory, configuration) = rendering_site(&[
             (
                 "content/one.typ",
                 "#include \"../templates/note.typ\"\nOne.\n",
@@ -319,7 +294,7 @@ mod tests {
     #[test]
     fn index_orders_pages_by_route() {
         let (_directory, configuration) =
-            site(&[("content/two.typ", "Two.\n"), ("content/one.typ", "One.\n")]);
+            rendering_site(&[("content/two.typ", "Two.\n"), ("content/one.typ", "One.\n")]);
 
         assert_eq!(
             listed(&indexed_routes(&configuration)),
@@ -327,6 +302,36 @@ mod tests {
                 (Some("content/one.typ"), "/one/", "one/index.html"),
                 (Some("content/two.typ"), "/two/", "two/index.html"),
             ]
+        );
+    }
+
+    #[test]
+    fn deferred_contributes_each_realized_page() {
+        let (directory, configuration) = rendering_site(&[("content/shared.typ", "Shared text.")]);
+        std::fs::write(
+            directory.path().join("site.typ"),
+            r#"
+#document("one/index.html", format: "html")[#context { include "content/shared.typ" }]
+#document("two/index.html", format: "html")[#context { include "content/shared.typ" }]
+"#,
+        )
+        .unwrap();
+        let cancellation = BuildCancellation::new();
+        let mut session = SourceDiagnosticSession::new(Arc::clone(&configuration));
+        let revision = session.inspect(Vec::new(), &cancellation).unwrap();
+        let compiled = revision.checked().expect("the site compiles");
+        let source = tola_typst::file_id_from_path(
+            &directory.path().join("content/shared.typ"),
+            directory.path(),
+        )
+        .unwrap();
+        let routes = site_routes(compiled, &configuration, source, &cancellation).unwrap();
+        assert_eq!(
+            routes
+                .iter()
+                .map(|route| route.route.as_str())
+                .collect::<Vec<_>>(),
+            ["/one/", "/two/"]
         );
     }
 }

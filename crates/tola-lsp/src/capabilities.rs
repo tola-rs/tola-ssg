@@ -17,6 +17,7 @@ pub(super) struct ClientFeatures {
     /// Whether the client reads a completion's insert-and-replace edit, which has the range it
     /// replaces and the range it inserts at.
     insert_replace: bool,
+    completion_label_details: bool,
     completion_markup: Option<MarkupKind>,
     hover_markup: Option<MarkupKind>,
     signature_markup: Option<MarkupKind>,
@@ -56,19 +57,25 @@ impl ClientFeatures {
         let completion = document
             .and_then(|document| document.completion.as_ref())
             .and_then(|completion| completion.completion_item.as_ref());
-        let signature = document
+        let signature_information = document
             .and_then(|document| document.signature_help.as_ref())
             .and_then(|signature| signature.signature_information.as_ref());
         let action = document.and_then(|document| document.code_action.as_ref());
-        let diagnostic = document.and_then(|document| document.publish_diagnostics.as_ref());
+        let publish_diagnostics =
+            document.and_then(|document| document.publish_diagnostics.as_ref());
         let workspace = capabilities.workspace.as_ref();
         let edits = workspace.and_then(|workspace| workspace.workspace_edit.as_ref());
+        let watched = workspace.and_then(|workspace| workspace.did_change_watched_files.as_ref());
+        let window = capabilities.window.as_ref();
         Self {
             snippets: completion
                 .and_then(|completion| completion.snippet_support)
                 .unwrap_or(false),
             insert_replace: completion
                 .and_then(|completion| completion.insert_replace_support)
+                .unwrap_or(false),
+            completion_label_details: completion
+                .and_then(|completion| completion.label_details_support)
                 .unwrap_or(false),
             completion_markup: preferred_markup(
                 completion.and_then(|completion| completion.documentation_format.as_deref()),
@@ -79,9 +86,10 @@ impl ClientFeatures {
                     .and_then(|hover| hover.content_format.as_deref()),
             ),
             signature_markup: preferred_markup(
-                signature.and_then(|signature| signature.documentation_format.as_deref()),
+                signature_information
+                    .and_then(|signature| signature.documentation_format.as_deref()),
             ),
-            signature_active_parameter: signature
+            signature_active_parameter: signature_information
                 .and_then(|signature| signature.active_parameter_support)
                 .unwrap_or(false),
             hierarchical_symbols: document
@@ -104,28 +112,26 @@ impl ClientFeatures {
                 .unwrap_or(false),
             action_literals: action
                 .is_some_and(|action| action.code_action_literal_support.is_some()),
-            diagnostic_related: diagnostic
-                .and_then(|diagnostic| diagnostic.related_information)
+            diagnostic_related: publish_diagnostics
+                .and_then(|diagnostics| diagnostics.related_information)
                 .unwrap_or(false),
-            diagnostic_version: diagnostic
-                .and_then(|diagnostic| diagnostic.version_support)
+            diagnostic_version: publish_diagnostics
+                .and_then(|diagnostics| diagnostics.version_support)
                 .unwrap_or(false),
-            diagnostic_tags: diagnostic
-                .and_then(|diagnostic| diagnostic.tag_support.as_ref())
+            diagnostic_tags: publish_diagnostics
+                .and_then(|diagnostics| diagnostics.tag_support.as_ref())
                 .map(|tags| tags.value_set.clone())
                 .unwrap_or_default(),
-            diagnostic_data: diagnostic
-                .and_then(|diagnostic| diagnostic.data_support)
+            diagnostic_data: publish_diagnostics
+                .and_then(|diagnostics| diagnostics.data_support)
                 .unwrap_or(false),
             pull_diagnostics: document
                 .and_then(|document| document.diagnostic.as_ref())
                 .is_some(),
-            watched_files_dynamic: workspace
-                .and_then(|workspace| workspace.did_change_watched_files.as_ref())
+            watched_files_dynamic: watched
                 .and_then(|watched| watched.dynamic_registration)
                 .unwrap_or(false),
-            watched_files_relative: workspace
-                .and_then(|workspace| workspace.did_change_watched_files.as_ref())
+            watched_files_relative: watched
                 .and_then(|watched| watched.relative_pattern_support)
                 .unwrap_or(false),
             semantic_tokens_refresh: workspace
@@ -136,17 +142,13 @@ impl ClientFeatures {
                 .and_then(|workspace| workspace.diagnostic.as_ref())
                 .and_then(|diagnostics| diagnostics.refresh_support)
                 .unwrap_or(false),
-            work_done_progress: capabilities
-                .window
-                .as_ref()
+            work_done_progress: window
                 .and_then(|window| window.work_done_progress)
                 .unwrap_or(false),
             configuration: workspace
                 .and_then(|workspace| workspace.configuration)
                 .unwrap_or(false),
-            show_document: capabilities
-                .window
-                .as_ref()
+            show_document: window
                 .and_then(|window| window.show_document.as_ref())
                 .map(|document| document.support)
                 .unwrap_or(false),
@@ -199,10 +201,8 @@ impl ClientFeatures {
                     if !self.action_literals {
                         return false;
                     }
-                    if let Some(diagnostics) = &mut action.diagnostics {
-                        for diagnostic in diagnostics {
-                            self.diagnostic(diagnostic);
-                        }
+                    for diagnostic in action.diagnostics.iter_mut().flatten() {
+                        self.diagnostic(diagnostic);
                     }
                     action.edit.as_mut().is_none_or(|edit| {
                         self.workspace_edit(edit, self.annotations && self.action_annotations)
@@ -214,6 +214,14 @@ impl ClientFeatures {
     }
 
     fn completion(&self, completion: &mut CompletionItem) {
+        if !self.completion_label_details
+            && let Some(labels) = completion.label_details.take()
+        {
+            completion.detail = [completion.detail.take(), labels.detail, labels.description]
+                .into_iter()
+                .flatten()
+                .reduce(|detail, label| format!("{detail}\n{label}"));
+        }
         if !self.snippets && completion.insert_text_format == Some(InsertTextFormat::SNIPPET) {
             if let Some(text) = &mut completion.insert_text {
                 *text = crate::completion::plain_text(text);
@@ -298,9 +306,9 @@ impl ClientFeatures {
         }
     }
 
-    fn workspace_edit(&self, edit: &mut WorkspaceEdit, annotations: bool) -> bool {
-        let annotations = annotations && self.document_changes;
-        if !annotations
+    fn workspace_edit(&self, edit: &mut WorkspaceEdit, keep_annotations: bool) -> bool {
+        let keep_annotations = keep_annotations && self.document_changes;
+        if !keep_annotations
             && edit.change_annotations.as_ref().is_some_and(|annotations| {
                 annotations
                     .values()
@@ -323,7 +331,7 @@ impl ClientFeatures {
                 }
             }
         }
-        if !annotations {
+        if !keep_annotations {
             edit.change_annotations = None;
             match &mut edit.document_changes {
                 Some(DocumentChanges::Edits(edits)) => {
@@ -461,6 +469,42 @@ mod tests {
     fn features(capabilities: serde_json::Value) -> ClientFeatures {
         ClientFeatures::new(&serde_json::from_value(capabilities).unwrap())
     }
+    #[test]
+    fn completion_details_follow_client_support() {
+        for supported in [false, true] {
+            let client = features(json!({"textDocument":{"completion":{"completionItem":{
+                "labelDetailsSupport":supported
+            }}}}));
+            for detail in [None, Some("bibliography citation")] {
+                let mut completion: CompletionItem = serde_json::from_value(json!({
+                    "label":"draw", "detail":detail,
+                    "labelDetails":{"detail":"(value)","description":"draw(value: int)"}
+                }))
+                .unwrap();
+                let original = completion.clone();
+                let mut reply =
+                    SourceReply::Completion(CompletionResponse::Array(vec![completion]));
+                client.reply(&mut reply);
+                let SourceReply::Completion(CompletionResponse::Array(mut completions)) = reply
+                else {
+                    panic!("completion array");
+                };
+                completion = completions.remove(0);
+                if supported {
+                    assert_eq!(completion, original);
+                } else {
+                    assert!(completion.label_details.is_none());
+                    let expected = match detail {
+                        Some(detail) => format!("{detail}\n(value)\ndraw(value: int)"),
+                        None => "(value)\ndraw(value: int)".to_owned(),
+                    };
+                    assert_eq!(completion.detail, Some(expected));
+                    assert_eq!(completion.label, original.label);
+                }
+            }
+        }
+    }
+
     #[test]
     fn document_changes_fold_into_changes() {
         let mut edit: WorkspaceEdit = serde_json::from_value(json!({"documentChanges":[

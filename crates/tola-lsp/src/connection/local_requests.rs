@@ -11,16 +11,17 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use lsp_server::{ErrorCode, RequestId, Response};
 use lsp_types::{
-    CallHierarchyOutgoingCallsParams, CallHierarchyPrepareParams, CompletionResponse,
-    DiagnosticServerCancellationData, DocumentDiagnosticParams, DocumentFormattingParams,
-    DocumentLinkParams, DocumentRangeFormattingParams, DocumentSymbolParams, FoldingRangeParams,
-    SelectionRangeParams, SemanticTokensDeltaParams, SemanticTokensParams,
-    SemanticTokensRangeParams, Uri,
+    CallHierarchyOutgoingCallsParams, CallHierarchyPrepareParams, CodeActionKind,
+    CompletionResponse, DiagnosticServerCancellationData, DocumentDiagnosticParams,
+    DocumentFormattingParams, DocumentLinkParams, DocumentRangeFormattingParams,
+    DocumentSymbolParams, FoldingRangeParams, SelectionRangeParams, SemanticTokensDeltaParams,
+    SemanticTokensParams, SemanticTokensRangeParams, Uri,
 };
 use tola_build::config::ResolvedSiteConfig;
-use tola_build::diagnostic::Diagnostic;
+use tola_diagnostic::Diagnostic;
 use tola_typst::typst::syntax::Source;
 
+use crate::compiler::{AnalysisTask, TokensKind, TokensRead};
 use crate::diagnostic::Pulled;
 use crate::protocol::{self, EnterParams, EnterReply, SourceQuery, SourceReply};
 
@@ -31,17 +32,19 @@ pub(super) fn is_untitled(uri: &Uri) -> bool {
     uri.as_str().starts_with("untitled:")
 }
 impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
+    /// The root the client named, which a reply addresses its documents under.
+    pub(super) fn client_root(&self) -> crate::uri::ClientRoot {
+        crate::uri::ClientRoot::new(&self.workspace().root)
+    }
+
     pub(super) fn source_boundary(&self) -> tola_typst::SourceBoundary {
-        let root = self.source_root();
-        self.configuration.as_ref().map_or_else(
-            || {
-                crate::sources::base_source_boundary(
-                    &root,
-                    self.resources.input_scope() == tola_build::InputScope::Pure,
-                )
-            },
-            |config| self.resources.source_boundary(config),
-        )
+        match self.configuration.as_ref() {
+            Some(config) => self.resources.source_boundary(config),
+            None => crate::sources::base_source_boundary(
+                &self.source_root(),
+                self.resources.input_scope() == tola_build::InputScope::Pure,
+            ),
+        }
     }
 
     pub(super) fn package_locations(&self) -> Option<tola_typst::PackageLocations> {
@@ -51,15 +54,17 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
     }
 
     pub(super) fn source(&self, uri: &Uri) -> Option<Source> {
-        let root = self.source_root();
-        let boundary = self.source_boundary();
-        if let Ok(path) = crate::uri::to_site_path(uri.as_str()) {
-            boundary.check(&path).ok()?;
+        if is_untitled(uri) {
+            return self.open.source(uri).cloned();
         }
-        self.open
-            .source(uri)
-            .cloned()
-            .or_else(|| crate::sources::load(uri, &root, &self.overrides, &boundary))
+        crate::sources::load(
+            uri,
+            &self.source_root(),
+            self.open.overrides(),
+            &self.source_boundary(),
+            self.open.view().package_sources(),
+            self.open.source(uri),
+        )
     }
 
     fn text_request<T>(&self, uri: &Uri, answer: impl FnOnce(&Source) -> Option<T>) -> Option<T> {
@@ -155,7 +160,7 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
             ));
         }
         let root = self.source_root();
-        let client_root = crate::uri::ClientRoot::new(&self.workspace().root);
+        let client_root = self.client_root();
         let links = self
             .source(&parameters.text_document.uri)
             .and_then(|source| crate::links::paths(&source, &root, &client_root));
@@ -169,37 +174,29 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
         self.reply(Response::new_ok(id, EnterReply { edits }))
     }
 
-    fn enqueue_tokens(
-        &mut self,
-        id: RequestId,
-        uri: Uri,
-        kind: crate::compiler::TokensKind,
-    ) -> Result<()> {
+    fn enqueue_tokens(&mut self, id: RequestId, uri: Uri, kind: TokensKind) -> Result<()> {
         let Some(source) = self.source(&uri) else {
             return self.reply(Response::new_ok(
                 id,
                 Option::<lsp_types::SemanticTokens>::None,
             ));
         };
-        self.enqueue_analysis(
-            id,
-            source,
-            crate::compiler::AnalysisTask::Tokens(crate::compiler::TokensRead { uri, kind }),
-        )
+        self.enqueue_analysis(id, source, AnalysisTask::Tokens(TokensRead { uri, kind }))
     }
 
     pub(super) fn commit_tokens(
         &mut self,
         id: RequestId,
-        read: crate::compiler::TokensRead,
+        read: TokensRead,
         mut tokens: lsp_types::SemanticTokens,
     ) -> Result<()> {
-        use crate::compiler::TokensKind;
-        if matches!(read.kind, TokensKind::Range(_)) {
-            self.tokens.entry(read.uri).or_insert(None);
-            return self.reply(Response::new_ok(id, tokens));
-        }
-        let delta = match &read.kind {
+        // A range read answers for a slice and holds no full-document baseline to delta against.
+        let delta = match read.kind {
+            TokensKind::Range(_) => {
+                self.tokens.entry(read.uri).or_default();
+                return self.reply(Response::new_ok(id, tokens));
+            }
+            TokensKind::Full => None,
             TokensKind::Delta(previous_result_id) => self
                 .tokens
                 .get(&read.uri)
@@ -208,23 +205,17 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
                     previous.result_id.as_deref() == Some(previous_result_id.as_str())
                 })
                 .map(|previous| crate::tokens::delta(previous, &tokens)),
-            _ => None,
         };
         self.tokens_serial += 1;
         tokens.result_id = Some(self.tokens_serial.to_string());
-        self.tokens.insert(read.uri.clone(), Some(tokens));
-        let current = self
-            .tokens
-            .get(&read.uri)
-            .and_then(Option::as_ref)
-            .expect("current tokens were retained");
         let reply = match delta {
             Some(mut delta) => {
-                delta.result_id.clone_from(&current.result_id);
+                delta.result_id.clone_from(&tokens.result_id);
                 Response::new_ok(id, delta)
             }
-            None => Response::new_ok(id, current),
+            None => Response::new_ok(id, &tokens),
         };
+        self.tokens.insert(read.uri, Some(tokens));
         self.reply(reply)
     }
 
@@ -236,16 +227,12 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
         self.enqueue_tokens(
             id,
             parameters.text_document.uri,
-            crate::compiler::TokensKind::Delta(parameters.previous_result_id),
+            TokensKind::Delta(parameters.previous_result_id),
         )
     }
 
     pub(super) fn tokens(&mut self, id: RequestId, parameters: SemanticTokensParams) -> Result<()> {
-        self.enqueue_tokens(
-            id,
-            parameters.text_document.uri,
-            crate::compiler::TokensKind::Full,
-        )
+        self.enqueue_tokens(id, parameters.text_document.uri, TokensKind::Full)
     }
 
     pub(super) fn tokens_range(
@@ -256,7 +243,7 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
         self.enqueue_tokens(
             id,
             parameters.text_document.uri,
-            crate::compiler::TokensKind::Range(parameters.range),
+            TokensKind::Range(parameters.range),
         )
     }
 
@@ -266,13 +253,16 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
     /// workspace root until one has: an author may name the configuration with `--config` or reach
     /// it through a symlink, so only the resolved path identifies it.
     pub(super) fn configuration_path(&self, root: &Path) -> PathBuf {
-        let config = self
+        let path = self
             .configuration
-            .as_ref()
-            .map(|config| config.config_path().to_path_buf())
-            .or_else(|| self.named_configuration.clone())
-            .unwrap_or_else(|| root.join(tola_build::config::loading::CONFIG_FILE_NAME));
-        tola_build::filesystem::normalize_existing_prefix(&config)
+            .as_deref()
+            .map(ResolvedSiteConfig::config_path)
+            .or(self.named_configuration.as_deref())
+            .map_or_else(
+                || root.join(tola_build::config::loading::CONFIG_FILE_NAME),
+                Path::to_path_buf,
+            );
+        tola_build::filesystem::normalize_existing_prefix(&path)
     }
 
     /// The text the editor holds for one document: the buffer it opened, or the file on disk.
@@ -285,10 +275,12 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
             return None;
         }
         let normalized = tola_build::filesystem::normalize_existing_prefix(path);
-        let opened = self.overrides.iter().find(|(open, _)| {
-            **open == *path || tola_build::filesystem::normalize_existing_prefix(open) == normalized
-        });
-        match opened {
+        match self
+            .open
+            .overrides()
+            .iter()
+            .find(|(open, _)| **open == normalized)
+        {
             Some((_, text)) => Some(Cow::Borrowed(text.as_ref())),
             None => std::fs::read_to_string(path).ok().map(Cow::Owned),
         }
@@ -306,11 +298,11 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
     ) -> Option<SourceReply> {
         let (uri, position) = query.document();
         let requested = crate::uri::to_site_path(uri.as_str()).ok()?;
-        let config = self.configuration_path(root);
-        if requested != config {
+        let configuration = self.configuration_path(root);
+        if requested != configuration {
             return None;
         }
-        let text = self.document_text(&config)?;
+        let text = self.document_text(&configuration)?;
         match query {
             SourceQuery::Completion(_) => Some(SourceReply::Completion(CompletionResponse::Array(
                 crate::query::config::document(text.as_ref(), position, self.host_sections),
@@ -320,13 +312,10 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
             )),
             SourceQuery::CodeActions(params) => {
                 let only = params.context.only.as_deref();
-                if !crate::code_actions::admits(only, &lsp_types::CodeActionKind::QUICKFIX) {
+                if !crate::code_actions::admits(only, &CodeActionKind::QUICKFIX) {
                     // A fix-all request reads the document's own diagnostics, which this lane does
                     // not answer, so the request continues to the handler that computes them.
-                    if crate::code_actions::only_names(
-                        only,
-                        &lsp_types::CodeActionKind::SOURCE_FIX_ALL,
-                    ) {
+                    if crate::code_actions::only_names(only, &CodeActionKind::SOURCE_FIX_ALL) {
                         return None;
                     }
                     return Some(SourceReply::CodeActions(None));
@@ -373,7 +362,7 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
             &boundary,
             &source,
             cursor,
-            &crate::uri::ClientRoot::new(&self.workspace().root),
+            &self.client_root(),
         );
         self.source_reply(
             id,
@@ -388,15 +377,14 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
         parameters: CallHierarchyOutgoingCallsParams,
     ) -> Result<()> {
         let root = self.source_root();
-        let source = self.source(&parameters.item.uri).filter(|source| {
+        let Some(source) = self.source(&parameters.item.uri).filter(|source| {
             parameters
                 .item
                 .data
                 .as_ref()
                 .and_then(|data| crate::call_hierarchy::item_file(data, &root))
                 .is_some_and(|node| node == source.id())
-        });
-        let Some(source) = source else {
+        }) else {
             return self.source_reply(id, SourceReply::OutgoingCalls(None));
         };
         let boundary = self.source_boundary();
@@ -405,7 +393,7 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
             self.package_locations().as_ref(),
             &boundary,
             &source,
-            &crate::uri::ClientRoot::new(&self.workspace().root),
+            &self.client_root(),
         );
         self.source_reply(
             id,
@@ -420,11 +408,11 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
         parameters: DocumentDiagnosticParams,
     ) -> Result<()> {
         let workspace = self.workspace();
-        let uri = parameters.text_document.uri.clone();
+        let uri = &parameters.text_document.uri;
         let synced = self.open.version(uri.as_str());
         match workspace
             .diagnostics
-            .pull(&uri, parameters.previous_result_id.as_deref(), synced)
+            .pull(uri, parameters.previous_result_id.as_deref(), synced)
         {
             Pulled::Report(report) => self.reply(Response::new_ok(id, report)),
             // A report that predates the text the client has synced is refused in the protocol's
@@ -440,9 +428,11 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
                     "the diagnostics Tola holds are for an older version of this document"
                         .to_owned(),
                 );
-                if let Err(error) = &mut response.response_result {
-                    error.data = Some(data);
-                }
+                response
+                    .response_result
+                    .as_mut()
+                    .expect_err("a rejection carries its error")
+                    .data = Some(data);
                 self.reply(response)
             }
         }
@@ -456,7 +446,8 @@ mod tests {
     use crate::compiler::SourceCompilation;
     use crate::compiler::SourceJob;
     use crate::connection::tests::{
-        messages, open_draft, ready, ready_at, ready_workspace, response,
+        finish_analysis, messages, open_document, open_draft, ready, ready_at, ready_workspace,
+        response,
     };
     use crate::server::tests::load_configuration;
     use lsp_server::{Message, Notification, Request};
@@ -468,17 +459,6 @@ mod tests {
     use std::sync::Arc;
     use std::time::Instant;
     use tola_typst::typst::syntax::Source;
-
-    fn finish_analysis(connection: &mut Connection<Vec<u8>, impl Fn(&[Diagnostic])>) {
-        let request = connection.next_analysis().expect("queued source analysis");
-        connection
-            .completed(crate::compiler::analyze(
-                &mut crate::analysis::DiskSources::default(),
-                &mut crate::analysis::GraphCache::default(),
-                request,
-            ))
-            .unwrap();
-    }
 
     fn full_tokens(
         connection: &mut Connection<Vec<u8>, impl Fn(&[Diagnostic])>,
@@ -510,6 +490,49 @@ mod tests {
             })
             .unwrap_or_else(|| panic!("no reply for {id:?}"))
     }
+
+    #[test]
+    fn package_mirrors_stay_outside_site_sources() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        std::fs::write(root.join("site.typ"), "#document(\"index.html\")[Body]").unwrap();
+        let configuration = crate::compiler::tests::site_configuration(&root, "");
+        let mut compiler = crate::compiler::tests::compiler(&configuration);
+        let mirrors = root.join("package-sources");
+        let package: Uri = "tola-package:/tola/address/0.0.0/lib.typ".parse().unwrap();
+        let id = crate::identity::file_id(&package, &root).unwrap();
+        let text = crate::identity::embedded_source(id).unwrap();
+        let path = mirrors.join("tola/address/0.0.0/lib.typ");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, text.as_bytes()).unwrap();
+        let uri = crate::uri::from_file_path(&path).unwrap();
+        let mut connection = ready_at(Vec::new(), root.clone());
+        connection.open =
+            crate::sources::OpenSources::new(&root).with_package_sources(Some(Arc::new(mirrors)));
+        open_document(&mut connection, &uri, 1, &text);
+        assert!(connection.open.overrides().is_empty());
+        assert_eq!(connection.source(&uri).unwrap().id(), id);
+        connection
+            .request(Request::new(
+                27.into(),
+                request::WorkspaceSymbolRequest::METHOD.into(),
+                json!({"query": ""}),
+            ))
+            .unwrap();
+        let job = connection.next_job(Instant::now()).unwrap();
+        assert!(matches!(job, SourceJob::Symbols(_)));
+        connection.completed(compiler.compile(job)).unwrap();
+        let symbols: Vec<lsp_types::WorkspaceSymbol> =
+            serde_json::from_value(reply_for(&mut connection, &27.into())).unwrap();
+        assert!(
+            symbols.iter().all(|symbol| match &symbol.location {
+                lsp_types::OneOf::Left(location) => location.uri != uri,
+                lsp_types::OneOf::Right(location) => location.uri != uri,
+            }),
+            "package mirror leaked into workspace symbols: {symbols:?}"
+        );
+    }
+
     #[test]
     fn missing_delta_base_returns_full_tokens() {
         let mut connection = ready(Vec::new());

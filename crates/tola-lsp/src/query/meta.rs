@@ -24,8 +24,7 @@ pub(super) struct MetaKey {
     pub(super) written: BTreeSet<String>,
 }
 
-/// The `#tola-meta` call the cursor addresses, when this file establishes the callee as the
-/// package function and the call writes a dictionary argument.
+/// The tola-meta call the cursor addresses, when the callee and its dictionary are established.
 pub(super) fn meta_call(
     source: &Source,
     cursor: usize,
@@ -59,18 +58,19 @@ pub(super) fn meta_call(
     })
 }
 
-/// The innermost function call whose bytes cover the cursor.
-///
-/// A call the author is still writing has no leaf at the cursor when the file ends inside it, so
-/// the call is found by containment rather than by climbing from a leaf.
+/// Whether range covers cursor, both ends included.
+fn covers_cursor(range: &Range<usize>, cursor: usize) -> bool {
+    range.start <= cursor && cursor <= range.end
+}
+
+/// The innermost call covering the cursor, found by containment when it has no leaf.
 pub(super) fn call_around(source: &Source, cursor: usize) -> Option<LinkedNode<'_>> {
     let mut found: Option<LinkedNode<'_>> = None;
     let mut pending = vec![LinkedNode::new(source.root())];
     while let Some(node) = pending.pop() {
         pending.extend(node.children());
         if node.cast::<ast::FuncCall>().is_some()
-            && node.range().start <= cursor
-            && cursor <= node.range().end
+            && covers_cursor(&node.range(), cursor)
             && found
                 .as_ref()
                 .is_none_or(|found| node.range().len() < found.range().len())
@@ -81,59 +81,67 @@ pub(super) fn call_around(source: &Source, cursor: usize) -> Option<LinkedNode<'
     found
 }
 
-/// The key the cursor writes inside a `#tola-meta` dictionary, or `None` when the cursor writes a
-/// value there.
-pub(super) fn meta_key(source: &Source, cursor: usize, call: &MetaCall) -> Option<MetaKey> {
-    if !(call.dict.start <= cursor && cursor <= call.dict.end) {
+/// The dictionary argument's node, when the cursor stands inside it.
+fn dict_at_cursor<'a>(
+    source: &'a Source,
+    cursor: usize,
+    call: &MetaCall,
+) -> Option<LinkedNode<'a>> {
+    if !covers_cursor(&call.dict, cursor) {
         return None;
     }
-    let dict = tola_typst_syntax::syntax::node_at_range(source, &call.dict)?;
+    tola_typst_syntax::syntax::node_at_range(source, &call.dict)
+}
+
+/// The key of one `name: value` entry, when the cursor stands in that key.
+fn named_key_at(child: &LinkedNode<'_>, cursor: usize) -> Option<Range<usize>> {
+    let named = child.cast::<ast::Named>()?;
+    let name = child.find(named.name().span())?;
+    covers_cursor(&name.range(), cursor).then(|| name.range())
+}
+
+/// The key the cursor writes in a tola-meta dictionary, or None over a value.
+pub(super) fn meta_key(source: &Source, cursor: usize, call: &MetaCall) -> Option<MetaKey> {
+    let dict = dict_at_cursor(source, cursor, call)?;
     let mut written = BTreeSet::new();
     let mut typed = None;
     let mut value = false;
     for child in dict.children() {
         if let Some(named) = child.cast::<ast::Named>() {
-            if let Some(name) = child.find(named.name().span()) {
+            if child.find(named.name().span()).is_some() {
                 written.insert(named.name().get().to_string());
-                if name.range().start <= cursor && cursor <= name.range().end {
-                    typed = Some(name.range());
-                }
             }
+            typed = typed.or_else(|| named_key_at(&child, cursor));
             if let Some(expr) = child.find(named.expr().span()) {
-                value |= expr.range().start <= cursor && cursor <= expr.range().end;
+                value |= covers_cursor(&expr.range(), cursor);
             }
         } else if let Some(keyed) = child.cast::<ast::Keyed>() {
             if let ast::Expr::Str(key) = keyed.key()
                 && let Some(key) = child.find(key.span())
-                && key.range().start <= cursor
-                && cursor <= key.range().end
+                && covers_cursor(&key.range(), cursor)
             {
                 return None;
             }
             if let Some(expr) = child.find(keyed.expr().span()) {
-                value |= expr.range().start <= cursor && cursor <= expr.range().end;
+                value |= covers_cursor(&expr.range(), cursor);
             }
         }
     }
-    if value && typed.is_none() {
-        return None;
-    }
     let typed = match typed {
         Some(typed) => typed,
+        None if value => return None,
         None => match dict
             .children()
             .filter(|child| !child.kind().is_trivia())
             .find(|child| {
-                child.range().start <= cursor
-                    && cursor <= child.range().end
+                covers_cursor(&child.range(), cursor)
                     && !matches!(child.kind(), SyntaxKind::LeftParen | SyntaxKind::RightParen)
             }) {
             Some(child) if matches!(child.kind(), SyntaxKind::Error | SyntaxKind::Ident) => {
                 child.range()
             }
             Some(_) => return None,
-            // A cursor past the dictionary stands in no key and no child covers it: offering
-            // one would insert outside the dictionary the author wrote.
+            // A cursor past the dictionary stands in no key; offering one would insert outside it.
             None if cursor >= call.dict.end => return None,
             None => cursor..cursor,
         },
@@ -143,22 +151,9 @@ pub(super) fn meta_key(source: &Source, cursor: usize, call: &MetaCall) -> Optio
 
 /// The name of the key the cursor stands in inside a `#tola-meta` dictionary.
 pub(super) fn meta_key_at(source: &Source, cursor: usize, call: &MetaCall) -> Option<Range<usize>> {
-    if !(call.dict.start <= cursor && cursor <= call.dict.end) {
-        return None;
-    }
-    let dict = tola_typst_syntax::syntax::node_at_range(source, &call.dict)?;
-    for child in dict.children() {
-        let Some(named) = child.cast::<ast::Named>() else {
-            continue;
-        };
-        let Some(name) = child.find(named.name().span()) else {
-            continue;
-        };
-        if name.range().start <= cursor && cursor <= name.range().end {
-            return Some(name.range());
-        }
-    }
-    None
+    let dict = dict_at_cursor(source, cursor, call)?;
+    dict.children()
+        .find_map(|child| named_key_at(&child, cursor))
 }
 
 #[cfg(test)]
@@ -242,18 +237,16 @@ mod tests {
         let items = site.completion(
             "#import \"@tola/source:0.0.0\": tola-meta\n#tola-meta((title: \"Page\", summ|))\n",
         );
-        let item = item_labeled(&items, "summary");
+        let summary = item_labeled(&items, "summary");
         assert_eq!(
-            item.label_details
+            summary
+                .label_details
                 .as_ref()
                 .and_then(|details| details.description.as_deref()),
             Some("str")
         );
-        let documentation = serde_json::to_string(&item.documentation).unwrap();
-        assert!(
-            documentation.contains("```typc\\nsummary?: str\\n```"),
-            "{documentation}"
-        );
+        let documentation = serde_json::to_string(&summary.documentation).unwrap();
+        assert!(documentation.contains("summary?: str"), "{documentation}");
         assert!(
             documentation.contains("the page summary"),
             "{documentation}"

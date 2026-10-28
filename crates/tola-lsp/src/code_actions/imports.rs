@@ -2,11 +2,11 @@
 //! action an editor's Organize Imports gesture runs.
 
 use lsp_types::{CodeActionKind, CodeActionOrCommand, TextEdit, Uri};
-use tola_build::diagnostic::UnreadRemoval;
+use tola_diagnostic::UnreadRemoval;
 use tola_typst::typst::syntax::Source;
 use tola_typst_syntax::names::{ImportRemoval, SourceNames};
 
-use super::edits::{echoed_range, edit_action, merged_removals, protocol_line};
+use super::edits::{echoed_range, edit_action, merged_removals, protocol_line, removal};
 
 /// The removal one unread-import report justifies, when the file's own index still reports the
 /// same import on the same line — or the same spans.
@@ -28,8 +28,7 @@ pub(super) fn unread_import_removal(
                         source.lines(),
                         unread.statement.start..unread.statement.start,
                     )
-                    .map(|at| at.start.line as usize + 1)
-                        == Some(*line)
+                    .is_some_and(|at| at.start.line as usize + 1 == *line)
                 }
                 (ImportRemoval::Spans(spans), UnreadRemoval::Spans { ranges }) => {
                     spans.len() == ranges.len()
@@ -51,15 +50,7 @@ pub(super) fn unread_import_removal(
             .filter_map(|span| crate::position::utf16_range(source.lines(), span))
             .collect(),
     };
-    let edits = merged_removals(
-        ranges
-            .into_iter()
-            .map(|range| TextEdit {
-                range,
-                new_text: String::new(),
-            })
-            .collect(),
-    );
+    let edits = merged_removals(ranges.into_iter().map(removal).collect());
     if edits.is_empty() {
         return None;
     }
@@ -155,7 +146,6 @@ mod tests {
             vec![CodeActionKind::SOURCE_ORGANIZE_IMPORTS],
         );
 
-        // The dead statement leaves whole; the import the page reads keeps its own line.
         assert_eq!(
             edits_of(&actions, "organize imports"),
             [(
@@ -164,56 +154,38 @@ mod tests {
             )]
         );
     }
-    /// A statement sharing its line with other text keeps that text when it is removed.
-    ///
-    /// The removal the echo names is the statement's own line, so a line holding anything
-    /// besides it cannot go whole: only the statement, with the `#` that introduces it, is
-    /// removed, and what the author wrote beside it stays.
+
+    /// A statement sharing its line with other text keeps that text; one alone goes whole.
     #[test]
     fn import_removal_spares_line_mates() {
-        let text = "#import \"@tola/web:0.0.0\": sitemap; Hello there\n";
-        let actions = actions_for(
-            text,
-            vec![serde_json::json!({
-                "kind": "unread-import",
-                "names": ["sitemap"],
-                "removal": {"kind": "statement", "line": 1},
-            })],
-            vec![CodeActionKind::QUICKFIX],
-        );
-
-        assert_eq!(
-            edits_of(&actions, "remove the unused import of `sitemap`"),
-            [(
+        for (text, expected) in [
+            (
+                "#import \"@tola/web:0.0.0\": sitemap; Hello there\n",
                 Range::new(Position::new(0, 0), Position::new(0, 35)),
-                String::new()
-            )]
-        );
-        // The same statement alone on its line goes whole, its break included.
-        let alone = "#import \"@tola/web:0.0.0\": sitemap\nHello there\n";
-        let actions = actions_for(
-            alone,
-            vec![serde_json::json!({
-                "kind": "unread-import",
-                "names": ["sitemap"],
-                "removal": {"kind": "statement", "line": 1},
-            })],
-            vec![CodeActionKind::QUICKFIX],
-        );
-        assert_eq!(
-            edits_of(&actions, "remove the unused import of `sitemap`"),
-            [(
+            ),
+            (
+                "#import \"@tola/web:0.0.0\": sitemap\nHello there\n",
                 Range::new(Position::new(0, 0), Position::new(1, 0)),
-                String::new()
-            )]
-        );
+            ),
+        ] {
+            let actions = actions_for(
+                text,
+                vec![serde_json::json!({
+                    "kind": "unread-import",
+                    "names": ["sitemap"],
+                    "removal": {"kind": "statement", "line": 1},
+                })],
+                vec![CodeActionKind::QUICKFIX],
+            );
+            assert_eq!(
+                edits_of(&actions, "remove the unused import of `sitemap`"),
+                [(expected, String::new())],
+                "{text:?}"
+            );
+        }
     }
 
     /// An unused import's `;` goes with it, whatever whitespace the author wrote before it.
-    ///
-    /// A `;` left behind stops ending the code expression and prints itself as the page's own
-    /// text, so the removal takes the terminator — and only it: what the author wrote beside the
-    /// statement stays.
     #[test]
     fn unused_import_removal_takes_its_terminator() {
         for (text, expected) in [
@@ -221,8 +193,6 @@ mod tests {
             ("#import \"helpers.typ\": orphan ;\n", ""),
             ("#import \"helpers.typ\": orphan;\nHello\n", "Hello\n"),
             ("#import \"helpers.typ\": orphan; Hello\n", " Hello\n"),
-            // The author's own horizontal whitespace separates the terminator equally well; the
-            // `;` goes with it. A break is not crossed: the line below keeps its own text.
             ("#import \"helpers.typ\": orphan\u{00A0};Hello\n", "Hello\n"),
             ("#import \"helpers.typ\": orphan\u{3000};Hello\n", "Hello\n"),
             ("#import \"helpers.typ\": orphan\u{2009};Hello\n", "Hello\n"),
@@ -264,22 +234,14 @@ mod tests {
         );
         let directory = tempfile::tempdir().unwrap();
         std::fs::create_dir(directory.path().join("content")).unwrap();
-        std::fs::write(directory.path().join("tola.toml"), "").unwrap();
         std::fs::write(directory.path().join("site.typ"), &rewritten).unwrap();
         std::fs::write(
             directory.path().join("helpers.typ"),
             "#let a = 1\n#let b = 2\n#let c = 3\n",
         )
         .unwrap();
-        let config = tola_build::config::loading::load_site_config(
-            Some(&directory.path().join("tola.toml")),
-            tola_typst::PackageLocations::default(),
-            &tola_build::config::loading::BuildOverrides::default(),
-        )
-        .unwrap()
-        .into_config();
-        let mut session =
-            tola_build::check::SourceDiagnosticSession::new(std::sync::Arc::new(config));
+        let config = crate::compiler::tests::site_configuration(directory.path(), "");
+        let mut session = tola_build::check::SourceDiagnosticSession::new(config);
         let revision = session
             .inspect(
                 Vec::new(),

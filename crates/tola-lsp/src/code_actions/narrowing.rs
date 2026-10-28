@@ -5,10 +5,11 @@
 
 use lsp_types::{CodeActionOrCommand, Uri};
 use tola_typst::typst::foundations::Repr;
-use tola_typst::typst::syntax::ast::AstNode;
-use tola_typst::typst::syntax::{LinkedNode, Source, SyntaxKind, ast};
+use tola_typst::typst::syntax::ast::{self, AstNode};
+use tola_typst::typst::syntax::{LinkedNode, Source, SyntaxKind};
 use tola_typst_syntax::names::SourceNames;
 
+use super::ancestors::selection_ancestor;
 use super::edits::rewrite_action;
 
 /// The collection closure a metadata chain narrows.
@@ -36,16 +37,7 @@ pub(crate) struct NarrowingSource {
 /// The cursor must read a field chain inside a `filter` closure over the record's own name: the
 /// action adds a condition that keeps one source, which only a predicate over the records means.
 pub(crate) fn narrowing_closure(source: &Source, cursor: usize) -> Option<Narrowing> {
-    let closure = tola_typst_syntax::syntax::cursor_leaves(source, cursor)
-        .into_iter()
-        .flatten()
-        .find_map(|leaf| {
-            let mut node = leaf;
-            while !node.is::<ast::Closure>() {
-                node = node.parent()?.clone();
-            }
-            Some(node)
-        })?;
+    let closure = selection_ancestor(source, &(cursor..cursor), |node| node.is::<ast::Closure>())?;
     let receiver = filter_receiver(&closure)?;
     let expression = tola_typst_syntax::syntax::expression(source, cursor)?;
     let (root, _fields) = crate::query::field_chain(&expression)?;
@@ -84,15 +76,20 @@ fn filter_receiver(closure: &LinkedNode<'_>) -> Option<std::ops::Range<usize>> {
         .filter(|args| args.kind() == SyntaxKind::Args)
         .and_then(|args| args.parent())?;
     let call = call_node.cast::<ast::FuncCall>()?;
-    let arguments = call.args().items().collect::<Vec<_>>();
-    if !matches!(arguments.as_slice(), [ast::Arg::Pos(argument)] if argument.span() == closure.span())
+    let mut arguments = call.args().items();
+    if !matches!(
+        arguments.next(),
+        Some(ast::Arg::Pos(argument)) if argument.span() == closure.span()
+    ) || arguments.next().is_some()
     {
         return None;
     }
     let callee = call_node.find(call.callee().span())?;
     let access = callee.cast::<ast::FieldAccess>()?;
-    (access.field().get() == "filter")
-        .then(|| callee.find(access.target().span()).map(|node| node.range()))?
+    if access.field().get() != "filter" {
+        return None;
+    }
+    callee.find(access.target().span()).map(|node| node.range())
 }
 
 /// One narrowing action per source the chain's records were observed on.

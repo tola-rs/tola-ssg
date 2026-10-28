@@ -9,7 +9,6 @@ mod lanes;
 mod reader;
 mod serve;
 
-pub(crate) use lanes::PanickedJob;
 pub use serve::{HostSections, ServedWorkspace, serve};
 
 #[cfg(test)]
@@ -35,12 +34,12 @@ pub(crate) mod tests {
     };
     use tola_build::BuildResources;
     use tola_build::cancellation::BuildCanceller;
-    use tola_build::diagnostic::Diagnostic;
+    use tola_diagnostic::Diagnostic;
 
     use crate::server::ServedWorkspace;
     use crate::uri;
 
-    pub(crate) use fixtures::{SiteDirectory, announcing_client, marked_cursor};
+    pub(crate) use fixtures::{SiteDirectory, announcing_client, marked_cursor, rendering_site};
 
     pub(super) const REPLY_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -174,6 +173,40 @@ pub(crate) mod tests {
                 .start;
             (text, cursor)
         }
+
+        pub(crate) fn rendering_site(
+            files: &[(&str, &str)],
+        ) -> (tempfile::TempDir, Arc<ResolvedSiteConfig>) {
+            let directory = tempfile::tempdir().expect("a temporary site directory");
+            let root = directory.path();
+            std::fs::write(
+                root.join("site.typ"),
+                r#"#import "@tola/source:0.0.0": all-sources
+#import "@tola/address:0.0.0": join-route, output-of
+#for source in all-sources() {
+  document(output-of(join-route(source.route-segments)))[#include source.file]
+}"#,
+            )
+            .expect("an entry program");
+            for &(name, text) in files {
+                let path = root.join(name);
+                let parent = path.parent().expect("a site parent");
+                std::fs::create_dir_all(parent).expect("a site directory");
+                std::fs::write(path, text).expect("a site file");
+            }
+            let configuration = root.join("tola.toml");
+            std::fs::write(&configuration, "").expect("a configuration");
+            let configuration = Arc::new(
+                load_site_config(
+                    Some(&configuration),
+                    tola_typst::PackageLocations::default(),
+                    &BuildOverrides::default(),
+                )
+                .expect("the site configuration loads")
+                .into_config(),
+            );
+            (directory, configuration)
+        }
     }
 
     pub(super) struct EditorSession {
@@ -190,20 +223,10 @@ pub(crate) mod tests {
 
     impl EditorSession {
         pub(super) fn start(site: &SiteDirectory) -> Self {
-            Self::start_configured(site, |root, _| load_configuration(root), None)
-        }
-        pub(super) fn start_with_loader<F>(site: &SiteDirectory, load: F) -> Self
-        where
-            F: FnMut(&Path, &[(PathBuf, Arc<str>)]) -> Result<ServedWorkspace> + Send + 'static,
-        {
-            Self::start_configured(site, load, None)
+            Self::start_with_loader(site, |root, _| load_configuration(root))
         }
 
-        fn start_configured<F>(
-            site: &SiteDirectory,
-            load: F,
-            named_configuration: Option<PathBuf>,
-        ) -> Self
+        pub(super) fn start_with_loader<F>(site: &SiteDirectory, load: F) -> Self
         where
             F: FnMut(&Path, &[(PathBuf, Arc<str>)]) -> Result<ServedWorkspace> + Send + 'static,
         {
@@ -231,7 +254,7 @@ pub(crate) mod tests {
                         server_cancellation,
                         load,
                         |_: &[Diagnostic]| {},
-                        named_configuration,
+                        None,
                         &[],
                     );
                     let _ = exit.send(outcome);
@@ -385,24 +408,6 @@ pub(crate) mod tests {
             reply.as_array().cloned().unwrap_or_default()
         }
 
-        pub(super) fn code_actions_of_kind(
-            &mut self,
-            relative: &str,
-            marked: &str,
-            only: &[&str],
-        ) -> Vec<serde_json::Value> {
-            self.code_actions(relative, marked, &[], only)
-        }
-
-        /// The actions a document answers when the client echoes the diagnostics it shows.
-        pub(super) fn code_actions_for_diagnostics(
-            &mut self,
-            relative: &str,
-            marked: &str,
-            diagnostics: &[lsp_types::Diagnostic],
-        ) -> Vec<serde_json::Value> {
-            self.code_actions(relative, marked, diagnostics, &["quickfix"])
-        }
         pub(super) fn changed_on_disk(&mut self, relative: &str) {
             let uri = uri_string(&self.root, relative);
             self.send(Message::Notification(Notification::new(

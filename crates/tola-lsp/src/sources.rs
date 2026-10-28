@@ -1,5 +1,6 @@
 //! Immutable parsed editor sources and atomic UTF-16 document changes.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -23,48 +24,32 @@ pub(super) fn load(
     root: &Path,
     unsaved: &SourceOverrides,
     boundary: &SourceBoundary,
+    package_sources: Option<&Path>,
+    parsed: Option<&Source>,
 ) -> Option<Source> {
-    // The client's root keeps its own spelling; every site path a request compares is
-    // normalized, so the identity a source is given comes from the normalized root.
     let root = tola_build::filesystem::normalize_existing_prefix(root);
-    // A package document is addressed by `tola-package:`, which names no site path: the identity and
-    // the source are read before any path is required.
-    if let Ok(id) = crate::identity::file_id(uri, &root)
-        && matches!(id.root(), VirtualRoot::Package(_))
-    {
-        let text = crate::identity::embedded_source(id)?;
+    let id = crate::identity::source_id(uri, &root, package_sources, boundary).ok()??;
+    if let Some(text) = crate::identity::embedded_source(id) {
         return Some(Source::new(id, text.into_owned()));
     }
     let path = crate::uri::to_site_path(uri.as_str()).ok()?;
-    let site_id = crate::identity::file_id(uri, &root).ok();
-    // A file inside the site's own package view answers as the package document it mirrors: the
-    // view is published for file-only clients, which are sent to exactly these files.
-    if let Some(mirrored) = crate::identity::mirrored_package_id(&path, &root) {
-        return Some(Source::new(
-            mirrored,
-            crate::identity::embedded_source(mirrored)?.into_owned(),
-        ));
-    }
-    boundary.check(&path).ok()?;
-    if path.extension().and_then(OsStr::to_str) != Some("typ") {
+    if !is_typst_source(&path) {
         return None;
+    }
+    if let Some(source) = parsed.filter(|source| source.id() == id) {
+        return Some(source.clone());
     }
     let text = match unsaved.iter().find(|(open, _)| open == &path) {
         Some((_, text)) => text.to_string(),
         None => std::fs::read_to_string(&path).ok()?,
-    };
-    // A package outside the site — the host cache, another package root — has no site path, and a
-    // definition sends the editor to exactly those files: they answer as the package document the
-    // compiler resolved, never as a path this site holds.
-    let id = match site_id {
-        Some(id) => id,
-        None => crate::identity::package_directory_id(&path)?,
     };
     Some(Source::new(id, text))
 }
 
 #[derive(Clone)]
 pub(super) struct ParsedSource {
+    /// The revision at which this document's text or identity last changed. A reply in flight is
+    /// stale only when its own document's revision moves, so an unrelated file change leaves it.
     pub(super) revision: u64,
     pub(super) source: Source,
     names: Arc<OnceLock<Arc<tola_typst_syntax::names::SourceNames>>>,
@@ -134,7 +119,7 @@ impl OpenSource {
         let Ok(path) = crate::uri::to_site_path(uri) else {
             return;
         };
-        let id = (path.extension() == Some(OsStr::new("typ")))
+        let id = is_typst_source(&path)
             .then(|| crate::identity::path_id(&path, root))
             .flatten();
         if self.path.as_ref() == Some(&path)
@@ -153,11 +138,27 @@ impl OpenSource {
 
 #[derive(Clone, Default)]
 pub(super) struct SourceView {
+    package_sources: Option<Arc<PathBuf>>,
     sources: Arc<BTreeMap<String, OpenSource>>,
     overrides: SourceOverrides,
 }
 
 impl SourceView {
+    pub(crate) fn package_sources(&self) -> Option<&Path> {
+        self.package_sources.as_deref().map(PathBuf::as_path)
+    }
+
+    /// Package mirrors are readable as embedded sources, never as editable site sources.
+    pub(crate) fn site_boundary<'a>(
+        &self,
+        boundary: &'a SourceBoundary,
+    ) -> Cow<'a, SourceBoundary> {
+        match self.package_sources() {
+            Some(directory) => Cow::Owned(boundary.clone().excluding(directory.to_path_buf())),
+            None => Cow::Borrowed(boundary),
+        }
+    }
+
     pub(super) fn get(&self, uri: &Uri) -> Option<&ParsedSource> {
         self.sources.get(uri.as_str())?.parsed.as_ref()
     }
@@ -169,6 +170,27 @@ impl SourceView {
         })
     }
 
+    pub(crate) fn named_source(&self, path: &Path) -> Option<(&str, &str)> {
+        self.sources.iter().find_map(|(uri, open)| {
+            (open.path.as_deref() == Some(path)).then_some((uri.as_str(), open.text.as_ref()))
+        })
+    }
+
+    pub(crate) fn overrides(&self) -> &SourceOverrides {
+        &self.overrides
+    }
+
+    pub(crate) fn versions_for_path<'a>(
+        &'a self,
+        path: &'a Path,
+    ) -> impl Iterator<Item = (&'a str, i32)> {
+        self.sources
+            .iter()
+            .filter(move |(_, source)| source.path.as_deref() == Some(path))
+            .map(|(uri, source)| (uri.as_str(), source.version))
+    }
+
+    /// Parsed site documents; unnamed buffers and package documents are excluded.
     pub(super) fn iter(&self) -> impl Iterator<Item = &ParsedSource> {
         self.sources
             .values()
@@ -210,6 +232,12 @@ impl OpenSources {
         }
     }
 
+    pub(super) fn with_package_sources(mut self, directory: Option<Arc<PathBuf>>) -> Self {
+        self.view.package_sources = directory;
+        self.generated = self.view.site_boundary(&self.generated).into_owned();
+        self
+    }
+
     /// Add the generated state one resolved configuration refuses, which a file change must not
     /// turn into a revision either.
     ///
@@ -226,7 +254,10 @@ impl OpenSources {
         if self.root == root {
             return;
         }
-        self.generated = generated_state_boundary(&root);
+        self.generated = self
+            .view
+            .site_boundary(&generated_state_boundary(&root))
+            .into_owned();
         self.root = root;
         self.refresh_paths(self.revision);
         self.view.overrides = self.open_source_texts().into();
@@ -259,8 +290,8 @@ impl OpenSources {
         self.view.clone()
     }
 
-    pub(super) fn overrides(&self) -> SourceOverrides {
-        Arc::clone(&self.view.overrides)
+    pub(super) fn overrides(&self) -> &SourceOverrides {
+        &self.view.overrides
     }
 
     pub(super) fn source(&self, uri: &Uri) -> Option<&Source> {
@@ -271,11 +302,7 @@ impl OpenSources {
         &'a self,
         path: &'a Path,
     ) -> impl Iterator<Item = (&'a str, i32)> {
-        self.view
-            .sources
-            .iter()
-            .filter(move |(_, source)| source.path.as_deref() == Some(path))
-            .map(|(uri, source)| (uri.as_str(), source.version))
+        self.view.versions_for_path(path)
     }
 
     pub(super) fn version(&self, uri: &str) -> Option<i32> {
@@ -291,10 +318,7 @@ impl OpenSources {
     }
 
     pub(super) fn apply(&mut self, message: Notification) -> Result<bool> {
-        let revision = self
-            .revision
-            .checked_add(1)
-            .context("source revision counter exhausted")?;
+        let revision = self.revision + 1;
         let document = message
             .params
             .get("textDocument")
@@ -306,103 +330,31 @@ impl OpenSources {
         if document.is_some_and(|uri| self.is_generated_state(uri)) {
             return Ok(false);
         }
-        match message.method.as_str() {
-            notification::DidOpenTextDocument::METHOD => {
-                let params = extract::<notification::DidOpenTextDocument>(message)?;
-                let document = params.text_document;
-                let Some(path) = document_path(document.uri.as_str()) else {
-                    return Ok(false);
-                };
-                let parsed = if path.is_none() {
-                    let id = FileId::unique(RootedPath::new(
-                        VirtualRoot::Project,
-                        VirtualPath::new("untitled.typ").expect("valid virtual path"),
-                    ));
-                    Some(Source::new(id, document.text.clone()))
-                } else if path.as_ref().and_then(|path| path.extension()) == Some(OsStr::new("typ"))
-                {
-                    crate::identity::file_id(&document.uri, &self.root)
-                        .ok()
-                        .map(|id| Source::new(id, document.text.clone()))
-                } else {
-                    None
-                }
-                .map(|source| ParsedSource {
-                    revision,
-                    source,
-                    names: Arc::default(),
-                });
-                Arc::make_mut(&mut self.view.sources).insert(
-                    document.uri.as_str().to_owned(),
-                    OpenSource {
-                        path,
-                        version: document.version,
-                        text: document.text.into(),
-                        parsed,
-                    },
-                );
-            }
+        let changed = match message.method.as_str() {
+            notification::DidOpenTextDocument::METHOD => self.open_document(message, revision)?,
             notification::DidChangeTextDocument::METHOD => {
-                let params = extract::<notification::DidChangeTextDocument>(message)?;
-                let document = params.text_document;
-                if document_path(document.uri.as_str()).is_none() {
-                    return Ok(false);
-                }
-                let source = self
-                    .view
-                    .sources
-                    .get(document.uri.as_str())
-                    .with_context(|| {
-                        format!(
-                            "received changes for unopened document `{}`",
-                            document.uri.as_str()
-                        )
-                    })?;
-                let Some(text) = source.changed_text(document.version, params.content_changes)?
-                else {
-                    return Ok(false);
-                };
-                Arc::make_mut(&mut self.view.sources)
-                    .get_mut(document.uri.as_str())
-                    .expect("the validated open document remains tracked")
-                    .replace_text(document.version, text, revision);
+                self.change_document(message, revision)?
             }
-            notification::DidCloseTextDocument::METHOD => {
-                let params = extract::<notification::DidCloseTextDocument>(message)?;
-                if Arc::make_mut(&mut self.view.sources)
-                    .remove(params.text_document.uri.as_str())
-                    .is_none()
-                {
-                    return Ok(false);
-                }
-            }
+            notification::DidCloseTextDocument::METHOD => self.close_document(message)?,
             notification::DidSaveTextDocument::METHOD => {
-                let params = extract::<notification::DidSaveTextDocument>(message)?;
                 if unnamed {
                     return Ok(false);
                 }
-                let uri = params.text_document.uri;
-                if let Some(open) = Arc::make_mut(&mut self.view.sources).get_mut(uri.as_str()) {
-                    open.refresh_path(uri.as_str(), &self.root, revision);
-                }
+                self.save_document(message, revision)?
             }
             notification::DidChangeWatchedFiles::METHOD => {
                 let params = extract::<notification::DidChangeWatchedFiles>(message)?;
-                if !self.refresh_unless_generated(
+                self.refresh_unless_generated(
                     params.changes.iter().map(|change| change.uri.as_str()),
                     revision,
-                ) {
-                    return Ok(false);
-                }
+                )
             }
             notification::DidCreateFiles::METHOD => {
                 let params = extract::<notification::DidCreateFiles>(message)?;
-                if !self.refresh_unless_generated(
+                self.refresh_unless_generated(
                     params.files.iter().map(|file| file.uri.as_str()),
                     revision,
-                ) {
-                    return Ok(false);
-                }
+                )
             }
             notification::DidRenameFiles::METHOD => {
                 let params = extract::<notification::DidRenameFiles>(message)?;
@@ -410,25 +362,106 @@ impl OpenSources {
                     .files
                     .iter()
                     .flat_map(|file| [file.old_uri.as_str(), file.new_uri.as_str()]);
-                if !self.refresh_unless_generated(moved, revision) {
-                    return Ok(false);
-                }
+                self.refresh_unless_generated(moved, revision)
             }
             notification::DidDeleteFiles::METHOD => {
                 let params = extract::<notification::DidDeleteFiles>(message)?;
-                if !self.refresh_unless_generated(
+                self.refresh_unless_generated(
                     params.files.iter().map(|file| file.uri.as_str()),
                     revision,
-                ) {
-                    return Ok(false);
-                }
+                )
             }
             _ => return Ok(false),
+        };
+        if !changed {
+            return Ok(false);
         }
         self.revision = revision;
         if !unnamed {
             self.view.overrides = self.open_source_texts().into();
         }
+        Ok(true)
+    }
+
+    fn open_document(&mut self, message: Notification, revision: u64) -> Result<bool> {
+        let params = extract::<notification::DidOpenTextDocument>(message)?;
+        let document = params.text_document;
+        let Some(path) = document_path(document.uri.as_str()) else {
+            return Ok(false);
+        };
+        let parsed = match &path {
+            DocumentPath::Untitled => Some(Source::new(
+                FileId::unique(RootedPath::new(
+                    VirtualRoot::Project,
+                    VirtualPath::new("untitled.typ").expect("valid virtual path"),
+                )),
+                document.text.clone(),
+            )),
+            DocumentPath::Site(site) if is_typst_source(site) => {
+                crate::identity::file_id(&document.uri, &self.root)
+                    .ok()
+                    .map(|id| Source::new(id, document.text.clone()))
+            }
+            DocumentPath::Site(_) => None,
+        }
+        .map(|source| ParsedSource {
+            revision,
+            source,
+            names: Arc::default(),
+        });
+        Arc::make_mut(&mut self.view.sources).insert(
+            document.uri.as_str().to_owned(),
+            OpenSource {
+                path: path.site_path(),
+                version: document.version,
+                text: document.text.into(),
+                parsed,
+            },
+        );
+        Ok(true)
+    }
+
+    fn change_document(&mut self, message: Notification, revision: u64) -> Result<bool> {
+        let params = extract::<notification::DidChangeTextDocument>(message)?;
+        let document = params.text_document;
+        if document_path(document.uri.as_str()).is_none() {
+            return Ok(false);
+        }
+        let open = self
+            .view
+            .sources
+            .get(document.uri.as_str())
+            .with_context(|| {
+                format!(
+                    "received changes for unopened document `{}`",
+                    document.uri.as_str()
+                )
+            })?;
+        let Some(text) = open.changed_text(document.version, params.content_changes)? else {
+            return Ok(false);
+        };
+        Arc::make_mut(&mut self.view.sources)
+            .get_mut(document.uri.as_str())
+            .expect("the validated open document remains tracked")
+            .replace_text(document.version, text, revision);
+        Ok(true)
+    }
+
+    fn close_document(&mut self, message: Notification) -> Result<bool> {
+        let params = extract::<notification::DidCloseTextDocument>(message)?;
+        Ok(Arc::make_mut(&mut self.view.sources)
+            .remove(params.text_document.uri.as_str())
+            .is_some())
+    }
+
+    fn save_document(&mut self, message: Notification, revision: u64) -> Result<bool> {
+        let params = extract::<notification::DidSaveTextDocument>(message)?;
+        let uri = params.text_document.uri;
+        if let Some(open) = Arc::make_mut(&mut self.view.sources).get_mut(uri.as_str()) {
+            open.refresh_path(uri.as_str(), &self.root, revision);
+        }
+        // A save costs a revision even when the editor no longer tracks the document: the client
+        // wrote those bytes to disk.
         Ok(true)
     }
 
@@ -474,7 +507,7 @@ pub(super) fn base_source_boundary(root: &Path, contained: bool) -> SourceBounda
     SourceBoundary::new(root, contained)
         .excluding_except(
             root.join(tola_build::filesystem::INTERNAL_DIR),
-            root.join(tola_build::filesystem::PACKAGE_MIRROR_DIRECTORY),
+            tola_build::filesystem::layout::builtin_packages(root),
         )
         .excluding(root.join(tola_build::filesystem::SITE_BUILD_LOCK_FILE))
 }
@@ -494,12 +527,32 @@ fn extract<N: LspNotification>(message: Notification) -> Result<N::Params> {
     message.extract(N::METHOD).map_err(Into::into)
 }
 
-/// The site path a document answers for: its own, or none when the editor has not named it.
-fn document_path(uri: &str) -> Option<Option<PathBuf>> {
-    if uri.starts_with("untitled:") {
-        return Some(None);
+/// Whether a path names a Typst source, the only file kind this connection parses.
+fn is_typst_source(path: &Path) -> bool {
+    path.extension() == Some(OsStr::new("typ"))
+}
+
+/// Where the editor's document URI resolves: a site path, or a buffer the editor has not named.
+enum DocumentPath {
+    Untitled,
+    Site(PathBuf),
+}
+
+impl DocumentPath {
+    /// The site path the document answers for, or none for an untitled buffer.
+    fn site_path(self) -> Option<PathBuf> {
+        match self {
+            Self::Untitled => None,
+            Self::Site(path) => Some(path),
+        }
     }
-    Some(Some(crate::uri::to_site_path(uri).ok()?))
+}
+
+fn document_path(uri: &str) -> Option<DocumentPath> {
+    if uri.starts_with("untitled:") {
+        return Some(DocumentPath::Untitled);
+    }
+    Some(DocumentPath::Site(crate::uri::to_site_path(uri).ok()?))
 }
 
 #[cfg(test)]
@@ -546,10 +599,10 @@ mod tests {
         position::utf16_range(&Lines::new(text), start..start + marker.len()).unwrap()
     }
 
-    /// A package's own file answers as the package document the compiler resolved, whether the
-    /// editor reads it from the host cache or from the site's package view.
+    /// A package's own file answers as the package document the compiler resolved, wherever the
+    /// editor reads it from.
     #[test]
-    fn package_files_load_as_their_package_document() {
+    fn package_files_load_package_document() {
         let site = tempfile::tempdir().unwrap();
         let cache = tempfile::tempdir().unwrap();
         let package = cache.path().join("preview/demo/1.0.0");
@@ -565,8 +618,21 @@ mod tests {
             site.path(),
             &SourceOverrides::default(),
             &base_source_boundary(site.path(), false),
+            None,
+            None,
         )
         .expect("the package source loads");
+        assert!(
+            load(
+                &crate::uri::from_file_path(&package.join("lib.typ")).unwrap(),
+                site.path(),
+                &SourceOverrides::default(),
+                &base_source_boundary(site.path(), true),
+                None,
+                None,
+            )
+            .is_none()
+        );
         assert_eq!(cached.text(), "#let shout(body) = upper(body)\n");
         let id = cached.id();
         let VirtualRoot::Package(spec) = id.root() else {
@@ -578,23 +644,51 @@ mod tests {
         );
         assert_eq!(id.vpath().get_without_slash(), "lib.typ");
 
-        // A file inside the site's own package view loads as the package document it mirrors.
+        // A file below the site's package view, or below the client's own, loads as the package
+        // document it mirrors.
         let root = site.path();
         let package_uri: Uri = "tola-package:/tola/source/0.0.0/lib.typ".parse().unwrap();
         let id = crate::identity::file_id(&package_uri, root).expect("a builtin package");
         let source = crate::identity::embedded_source(id).expect("a builtin source");
-        let mirror = root.join(".tola/builtin-packages/tola/source/0.0.0/lib.typ");
-        std::fs::create_dir_all(mirror.parent().unwrap()).unwrap();
-        std::fs::write(&mirror, source.as_bytes()).unwrap();
-        let mirrored = load(
-            &crate::uri::from_file_path(&mirror).unwrap(),
-            root,
-            &SourceOverrides::default(),
-            &base_source_boundary(root, true),
-        )
-        .expect("the mirror loads");
-        assert_eq!(mirrored.id(), id);
-        assert_eq!(mirrored.text(), source);
+        let boundary = base_source_boundary(root, true);
+        let configured = tempfile::tempdir().unwrap();
+        let mirror = tola_build::filesystem::layout::builtin_packages(root)
+            .join("tola/source/0.0.0/lib.typ");
+        for (path, package_sources) in [
+            (mirror.clone(), None),
+            (
+                configured.path().join("tola/source/0.0.0/lib.typ"),
+                Some(configured.path()),
+            ),
+        ] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, source.as_bytes()).unwrap();
+            let loaded = load(
+                &crate::uri::from_file_path(&path).unwrap(),
+                root,
+                &SourceOverrides::default(),
+                &boundary,
+                package_sources,
+                None,
+            )
+            .expect("the package view loads");
+            assert_eq!(loaded.id(), id, "{path:?}");
+            assert_eq!(loaded.text(), source);
+        }
+
+        // Bytes another Tola wrote are not this implementation's package source.
+        std::fs::write(&mirror, "stale\n").unwrap();
+        assert!(
+            load(
+                &crate::uri::from_file_path(&mirror).unwrap(),
+                root,
+                &SourceOverrides::default(),
+                &boundary,
+                None,
+                None,
+            )
+            .is_none()
+        );
     }
     #[test]
     fn utf16_edits_preserve_prior_sources() {

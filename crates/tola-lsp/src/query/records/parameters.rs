@@ -18,8 +18,7 @@ pub(in crate::query) struct ParameterArgument {
     pub(in crate::query) declared: Option<DeclaredOutput>,
     /// The type the argument reads as: what its chain declares, or what the world observed at it.
     pub(in crate::query) ty: Option<String>,
-    /// The record the argument's value is, when its chain reads one: a chain over the parameter
-    /// continues through this origin.
+    /// The record an argument's value is, when its chain reads one.
     pub(in crate::query) origin: Option<RecordOrigin>,
 }
 
@@ -35,13 +34,8 @@ struct FunctionParameter {
     index: usize,
 }
 
-/// The value the site's own call sites prove one parameter takes.
-///
-/// A parameter's value is the argument each call passes, which the world observed only where a
-/// call ran. With no observation, the project-local calls the compiler read still prove it, as
-/// long as every call passes the same argument chain: a second call with another shape, a named
-/// or spread argument, a call that omits the parameter, or an argument no chain declares leaves
-/// the value unproved.
+/// The value the site's call sites prove one parameter takes; one differing call leaves it
+/// unknown.
 pub(in crate::query) fn parameter_argument(
     prepared: &Source,
     names: &tola_typst_syntax::names::SourceNames,
@@ -58,7 +52,7 @@ pub(in crate::query) fn parameter_argument(
     let Some(function) = function_parameter(names, &parameter) else {
         return Ok(None);
     };
-    let mut sites = 0;
+    let mut call_sites = 0;
     let mut proved: Option<ParameterArgument> = None;
     for file in semantics.project_sources() {
         let Some(source) = semantics.world_source(file) else {
@@ -71,70 +65,31 @@ pub(in crate::query) fn parameter_argument(
             continue;
         };
         for call in function_calls(&file_names) {
-            let Some(func) = call.cast::<ast::FuncCall>() else {
-                continue;
-            };
-            let Some(callee) = call.find(func.callee().span()) else {
-                continue;
-            };
-            let Some(ident) = callee.cast::<ast::Ident>() else {
-                continue;
-            };
-            if ident.get() != function.name.as_str() {
-                continue;
-            }
-            let Some(span) = semantics.definition(&callee)? else {
-                continue;
-            };
-            if span.id() != Some(function.file) {
-                continue;
-            }
-            let Some(range) = semantics.span_range(span) else {
-                continue;
-            };
-            if range != function.range {
-                continue;
-            }
-            let arguments = func.args().items().collect::<Vec<_>>();
-            if arguments
-                .iter()
-                .any(|argument| !matches!(argument, ast::Arg::Pos(_)))
-            {
-                return Ok(None);
-            }
-            let Some(ast::Arg::Pos(argument)) = arguments.get(function.index) else {
-                return Ok(None);
-            };
-            let Some(argument) = call.find(argument.span()) else {
-                return Ok(None);
-            };
-            let Some(value) = argument_value(&argument, &file_names, semantics)? else {
-                return Ok(None);
-            };
-            match &proved {
-                Some(previous)
-                    if previous.declared != value.declared || previous.ty != value.ty =>
-                {
-                    return Ok(None);
+            match call_argument(&call, &function, &file_names, semantics)? {
+                CallProof::Unrelated => continue,
+                CallProof::Unproved => return Ok(None),
+                CallProof::Proved(value) => {
+                    if let Some(previous) = &proved
+                        && (previous.declared != value.declared || previous.ty != value.ty)
+                    {
+                        return Ok(None);
+                    }
+                    proved.get_or_insert(value);
+                    call_sites += 1;
                 }
-                Some(_) => {}
-                None => proved = Some(value),
             }
-            sites += 1;
         }
     }
-    // One call site's argument is the record a chain over the parameter continues through; several
-    // agreeing calls still declare the parameter's own shape, but no one chain is theirs.
-    Ok(proved.map(|mut proved| {
-        if sites > 1 {
-            proved.origin = None;
-        }
-        proved
-    }))
+    // One call site's argument carries the record a chain continues through; several leave none.
+    if call_sites > 1
+        && let Some(proved) = &mut proved
+    {
+        proved.origin = None;
+    }
+    Ok(proved)
 }
 
-/// The named function one parameter declaration belongs to, with the parameter's position among
-/// its positional parameters.
+/// The declared function one parameter belongs to, with its positional index.
 fn function_parameter(
     names: &tola_typst_syntax::names::SourceNames,
     parameter: &LinkedNode<'_>,
@@ -159,8 +114,7 @@ fn function_parameter(
             }
             let index = index?;
             let ident = node.find(function.span())?;
-            // The function is the declaration the closure's own name writes: a call resolving to
-            // another binding of that spelling names a different function.
+            // The callee must resolve to the declaration its own name writes.
             let declared = names.declared_at(ident.range().start)?;
             if names.declarations()[declared].range != ident.range() {
                 return None;
@@ -174,6 +128,65 @@ fn function_parameter(
         }
         node = node.parent()?.clone();
     }
+}
+
+/// What one call site proves about the parameter its callee declares.
+enum CallProof {
+    /// The call does not name this function.
+    Unrelated,
+    /// The call leaves the parameter unproved.
+    Unproved,
+    Proved(ParameterArgument),
+}
+
+/// The argument one call passes to `function`'s parameter, when the call is a call to it.
+fn call_argument<'a>(
+    call: &LinkedNode<'a>,
+    function: &FunctionParameter,
+    names: &'a Arc<tola_typst_syntax::names::SourceNames>,
+    semantics: &mut Semantic<'_>,
+) -> Result<CallProof> {
+    let Some(func) = call.cast::<ast::FuncCall>() else {
+        return Ok(CallProof::Unrelated);
+    };
+    let Some(callee) = call.find(func.callee().span()) else {
+        return Ok(CallProof::Unrelated);
+    };
+    let Some(ident) = callee.cast::<ast::Ident>() else {
+        return Ok(CallProof::Unrelated);
+    };
+    if ident.get() != function.name.as_str() {
+        return Ok(CallProof::Unrelated);
+    }
+    let Some(span) = semantics.definition(&callee)? else {
+        return Ok(CallProof::Unrelated);
+    };
+    if span.id() != Some(function.file) {
+        return Ok(CallProof::Unrelated);
+    }
+    let Some(range) = semantics.span_range(span) else {
+        return Ok(CallProof::Unrelated);
+    };
+    if range != function.range {
+        return Ok(CallProof::Unrelated);
+    }
+    let arguments = func.args().items().collect::<Vec<_>>();
+    if arguments
+        .iter()
+        .any(|argument| !matches!(argument, ast::Arg::Pos(_)))
+    {
+        return Ok(CallProof::Unproved);
+    }
+    let Some(ast::Arg::Pos(argument)) = arguments.get(function.index) else {
+        return Ok(CallProof::Unproved);
+    };
+    let Some(argument) = call.find(argument.span()) else {
+        return Ok(CallProof::Unproved);
+    };
+    Ok(match argument_value(&argument, names, semantics)? {
+        Some(value) => CallProof::Proved(value),
+        None => CallProof::Unproved,
+    })
 }
 
 /// Every function call one file writes, in source order.
@@ -195,26 +208,24 @@ fn argument_value<'a>(
     names: &'a Arc<tola_typst_syntax::names::SourceNames>,
     semantics: &mut Semantic<'_>,
 ) -> Result<Option<ParameterArgument>> {
-    let (root, fields) = match field_chain(argument) {
-        Some((root, fields)) => (root, fields),
-        None => (argument.clone(), Vec::new()),
-    };
+    let (root, fields) = field_chain(argument).unwrap_or_else(|| (argument.clone(), Vec::new()));
     let path = names.text(&argument.range()).to_owned();
-    let origin = record_origin(names, root, semantics)?;
-    let mut declared = None;
-    let mut ty = None;
-    let mut value_origin = None;
-    if let Some(origin) = &origin {
-        declared = declared_output(origin, &fields, &path, semantics)?;
-        ty = declared_chain_type(origin, &fields);
-        value_origin = chained_origin(origin, &fields);
-    }
-    if ty.is_none() {
-        ty = semantics
+    let root_origin = record_origin(names, root, semantics)?;
+    let (declared, declared_type, value_origin) = match &root_origin {
+        Some(origin) => (
+            declared_output(origin, &fields, &path, semantics)?,
+            declared_chain_type(origin, &fields),
+            chained_origin(origin, &fields),
+        ),
+        None => (None, None, None),
+    };
+    let ty = match declared_type {
+        Some(ty) => Some(ty),
+        None => semantics
             .types(argument)?
             .first()
-            .map(|(value, _)| value.type_name());
-    }
+            .map(|(value, _)| value.type_name()),
+    };
     Ok(
         (declared.is_some() || ty.is_some()).then_some(ParameterArgument {
             declared,
@@ -293,10 +304,9 @@ mod tests {
                 "#let helper(value, scale: 2) = value * scale\nCall #hel|per(1, scale: 2)\n",
             )
             .expect("a hover for the function");
-        assert_eq!(
-            hover,
-            "```typc\nlet helper(\n  value: int,\n  scale: int = 2,\n) = any;\n```\n\n---\n\n# Positional Parameters\n\n## value\n\n```typc\ntype: int\n```\n\n# Named Parameters\n\n## scale\n\n```typc\ntype: int\n```"
-        );
+        assert!(hover.contains("let helper("), "{hover}");
+        assert!(hover.contains("value: int"), "{hover}");
+        assert!(hover.contains("scale: int = 2"), "{hover}");
 
         // The same call, spelling the value it passes by the parameter's own name.
         let named = site

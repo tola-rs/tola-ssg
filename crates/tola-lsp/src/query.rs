@@ -8,6 +8,8 @@ pub(super) mod config;
 mod context;
 mod definition;
 mod editing;
+mod entities;
+mod entity_reply;
 mod expression;
 mod hints;
 mod hover;
@@ -38,38 +40,109 @@ pub(super) use package::package_source_definition;
 pub(super) use records::origin::field_chain;
 pub(super) use repair::pin_source;
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use lsp_types::{
-    CompletionItem, CompletionResponse, DocumentHighlight, GotoDefinitionResponse,
-    PrepareRenameResponse,
+    CodeActionParams, ColorPresentationParams, CompletionItem, CompletionResponse,
+    DocumentHighlight, GotoDefinitionResponse, InlayHintParams, PrepareRenameResponse,
+    ReferenceParams, RenameParams,
 };
 use tola_build::AssetUrls;
 use tola_build::cancellation::BuildCancellation;
 use tola_build::check::{SourceCompilation, SourceDiagnosticSession};
 use tola_build::config::ResolvedSiteConfig;
 use tola_typst::typst::World;
-use tola_typst::typst::syntax::VirtualRoot;
+use tola_typst::typst::syntax::{Source, VirtualRoot};
+use tola_typst_syntax::names::SourceNames;
 
-use crate::compiler::RevisionCompilations;
+use crate::compiler::{EntityQueries, RevisionCompilations};
 use crate::packages::PackageAccess;
 use crate::position;
 use crate::protocol::{CheckProgress, PackageSourceText, SourceQuery, SourceReply, markdown_hover};
 use crate::published::PublishedPackage;
 use crate::sources::SourceView;
 
-use completion::documentation_template;
 use context::{SelectedSyntax, Selection, load_source};
 use hover::says_something;
 use name_graph::graph_reply;
 use semantic::Semantic;
 
-/// Answer a semantic request without writing sources, running hooks or exporting
-/// output. Cancellation remains an error, distinct from an unavailable result.
-/// The caller owns serialization, discards responses for superseded revisions, and holds the
-/// compilations this revision already produced.
+/// The site one source query answers against: its resolved configuration, the packages the
+/// editor may reach, the cancellation that ends the answer, and the client's spelling of the root.
+struct QuerySite<'a> {
+    configuration: &'a Arc<ResolvedSiteConfig>,
+    packages: &'a PackageAccess<'a>,
+    cancellation: &'a BuildCancellation,
+    client_root: &'a crate::uri::ClientRoot,
+}
+
+/// One compiled selection's inputs: the compilation that proves it, its site, and the caches and
+/// client view the answer reuses.
+struct CompiledAnswer<'a> {
+    site: &'a QuerySite<'a>,
+    compilation: &'a SourceCompilation,
+    bibliographies: &'a mut BibliographyCache,
+    query: &'a SourceQuery,
+    /// Whether the client renders a page's route as an inlay hint.
+    routes_as_hints: bool,
+    /// The editor's unsaved text, by path.
+    overrides: &'a [(PathBuf, Arc<str>)],
+}
+
+/// The source one query addresses, the cursor in it, and the name index the connection built for
+/// that source while its text was the one the index read.
+struct AddressedSource {
+    source: Source,
+    cursor: usize,
+    indexed_names: Option<Arc<SourceNames>>,
+}
+
+/// The source `query` addresses and the cursor in it; `None` when the site holds no such file or
+/// the URI names nothing this service serves.
+fn addressed_source(
+    query: &SourceQuery,
+    view: &SourceView,
+    config: &ResolvedSiteConfig,
+    overrides: &[(PathBuf, Arc<str>)],
+    package_access: &PackageAccess<'_>,
+) -> Result<Option<AddressedSource>> {
+    let (uri, position) = query.document();
+    // An unaddressable URI answers nothing; a read the boundary itself could not perform fails.
+    let Some(id) = crate::identity::source_id_with_packages(
+        uri,
+        config.get_root(),
+        view.package_sources(),
+        &package_access.boundary,
+        &package_access.local_packages,
+        Some((
+            &package_access.project_content,
+            &package_access.project_files,
+        )),
+    )?
+    else {
+        return Ok(None);
+    };
+    let (source, indexed_names) = match view.by_id(id) {
+        Some(parsed) => (parsed.source.clone(), Some(parsed.names())),
+        None => match load_source(id, config, overrides, package_access)? {
+            Some(source) => (source, None),
+            None => return Ok(None),
+        },
+    };
+    // A position outside the source names nothing, and an editor may ask about any position in a
+    let Ok(cursor) = position::byte_offset(source.lines(), position) else {
+        return Ok(None);
+    };
+    Ok(Some(AddressedSource {
+        source,
+        cursor,
+        indexed_names,
+    }))
+}
+
+/// Answer a semantic request read-only; cancellation stays distinct from an unavailable result.
 #[expect(
     clippy::too_many_arguments,
     reason = "an answer reads session state, revision inputs, the query, packages, and cancellation"
@@ -78,13 +151,14 @@ pub(super) fn respond(
     session: &mut SourceDiagnosticSession,
     compilations: &mut RevisionCompilations,
     disk: &mut crate::analysis::DiskSources,
+    graphs: &mut crate::analysis::GraphCache,
     bibliographies: &mut BibliographyCache,
+    entity_queries: &mut EntityQueries,
     config: &Arc<ResolvedSiteConfig>,
     source_revision: u64,
     overrides: &[(PathBuf, Arc<str>)],
     view: &SourceView,
     published: &[PublishedPackage],
-    package_sources: Option<&Path>,
     query: &SourceQuery,
     routes_as_hints: bool,
     check_progress: CheckProgress,
@@ -92,67 +166,55 @@ pub(super) fn respond(
     client_root: &crate::uri::ClientRoot,
 ) -> Result<SourceReply> {
     cancellation.ensure_active()?;
-    let (uri, position) = query.document();
-    // A URI this service cannot address names no source this site holds: one outside the site, one
-    // naming generated state, or a package URI with an editor's own qualifier. An editor asks
-    // about every document it shows, so the answer is that there is nothing to say, never that the
-    // request failed. A read the boundary itself could not perform stays a failure.
-    let Ok(mut id) = crate::identity::file_id(uri, config.get_root()) else {
+    let package_access = PackageAccess::prepared(config, session.resources(), published)?;
+    let site = QuerySite {
+        configuration: config,
+        packages: &package_access,
+        cancellation,
+        client_root,
+    };
+    let Some(addressed) = addressed_source(query, view, config, overrides, &package_access)? else {
         return Ok(unavailable(query));
     };
-    let package_access = PackageAccess::new(config, session.resources(), published);
-    if matches!(id.root(), VirtualRoot::Project) {
-        let path = config.get_root().join(id.vpath().get_without_slash());
-        if package_access.boundary.refusal(&path)?.is_some() {
-            // The mirrors `tola editor setup` publishes are how a file-only client reads this
-            // site's packages, and a definition into one names the mirror rather than a
-            // `tola-package:` document. A mirror of a builtin source answers as that source, which
-            // is immutable and already verified against the file; anything else refused by the
-            // boundary names nothing this site holds.
-            let mirrored = package_sources
-                .and_then(|directory| crate::identity::package_view_id(&path, directory))
-                .or_else(|| crate::identity::mirrored_package_id(&path, config.get_root()));
-            let Some(mirrored) = mirrored else {
-                return Ok(unavailable(query));
-            };
-            id = mirrored;
-        }
-    }
-    let (source, indexed_names) = match view.by_id(id) {
-        Some(parsed) => (Some(parsed.source.clone()), Some(parsed.names())),
-        None => (
-            load_source(id, config, overrides, &package_access.boundary)?,
-            None,
-        ),
-    };
-    let Some(source) = source else {
-        return Ok(unavailable(query));
-    };
-    // A position outside the source names nothing, and an editor may ask about any position in a
-    // document it has since shortened: that answers nothing rather than failing the request.
-    let Ok(cursor) = position::byte_offset(source.lines(), position) else {
-        return Ok(unavailable(query));
-    };
-    if matches!(query, SourceQuery::Completion(_))
-        && let Some(reply) = documentation_template(&source, cursor)
+    let source = addressed.source;
+    let cursor = addressed.cursor;
+    let indexed_names = addressed.indexed_names;
+    // A comment, a raw block, and a `///` template answer before the world is read.
+    if let SourceQuery::Completion(_) = query
+        && let Some(reply) = completion::source_completion_reply(&source, cursor)
     {
         return Ok(reply);
     }
-    // A comment has no names to offer; the documentation template above is its one completion.
-    if matches!(query, SourceQuery::Completion(_)) && completion::comment_at(&source, cursor) {
-        return Ok(completion_reply(Vec::new()));
-    }
-    if matches!(query, SourceQuery::Completion(_)) && completion::raw_at(&source, cursor) {
-        return Ok(completion_reply(Vec::new()));
-    }
-    if let Some(reply) = source_reply(&source, cursor, query)? {
+    if let Some(reply) = source_reply(&source, query)? {
         return Ok(reply);
     }
     // An import path is neither a name nor a label, so the package lane answers it before the
     // name graph builds over the source set.
-    if let Some(reply) =
-        package::respond(config, &package_access, &source, cursor, query, client_root)?
-    {
+    if let Some(reply) = package::respond(
+        config,
+        &package_access,
+        &source,
+        cursor,
+        query,
+        client_root,
+        cancellation,
+        overrides,
+        indexed_names.as_deref(),
+    )? {
+        return Ok(reply);
+    }
+    if let Some(reply) = entity_reply::respond(entity_reply::EntityQuery {
+        site: &site,
+        source: &source,
+        cursor,
+        query,
+        cache: entity_queries,
+        resources: session.resources(),
+        revision: source_revision,
+        overlays: overrides,
+        view,
+        disk: &mut *disk,
+    })? {
         return Ok(reply);
     }
     if query.answered_from_name_graph()
@@ -169,6 +231,8 @@ pub(super) fn respond(
                 cursor,
                 query,
                 disk,
+                graphs,
+                source_revision,
                 cancellation,
                 client_root,
             )?
@@ -176,67 +240,47 @@ pub(super) fn respond(
     {
         return Ok(reply);
     }
-    let result = {
-        let selection = Selection::new(&source, cursor, query, check_progress, indexed_names);
-        let revision = selection.realize(
-            session,
-            compilations,
-            config,
-            source_revision,
+    let selection = Selection::new(&source, cursor, query, check_progress, indexed_names);
+    let revision = selection.realize(
+        session,
+        compilations,
+        config,
+        &package_access,
+        source_revision,
+        overrides,
+        cancellation,
+    )?;
+    // A site that does not compile still answers from the file alone, in the same world.
+    let alone = match revision.checked() {
+        Some(checked) if checked.bundle().is_some() => None,
+        // Preserve the package identity when a mutable library is checked alone. Embedded sources
+        // retain the world of the site check.
+        _ if repair::editable_source_path(&source, config, &package_access).is_some() => session
+            .inspect_source_file(source.id(), overrides.to_vec(), cancellation)?
+            .into_checked(),
+        _ => None,
+    };
+    let checked = alone.as_ref().or_else(|| revision.checked());
+    if checked.is_some_and(|compiled| {
+        compiled.world().local_packages().as_ref() != package_access.local_packages.as_ref()
+    }) {
+        return Err(tola_build::cancellation::BuildCancelled.into());
+    }
+    let reply = match checked {
+        Some(checked) => selection.compiled_reply(&mut CompiledAnswer {
+            site: &site,
+            compilation: checked,
+            bibliographies: &mut *bibliographies,
+            query,
+            routes_as_hints,
             overrides,
-            cancellation,
-        )?;
-        // A site that does not compile still answers about the file the author is editing: that
-        // source compiles on its own in the same world, and the answer says what the file alone
-        // establishes. The site's diagnostics name what stopped the site itself.
-        let alone = match revision.checked() {
-            Some(checked) if checked.bundle().is_some() => None,
-            _ => {
-                // A package document is compiled where its package lives, not below the site root:
-                // the alone path must load the file the compiler resolved. An embedded package
-                // has no path on disk, so it keeps the no-world answer instead of failing.
-                let document = match source.id().root() {
-                    VirtualRoot::Package(_) => {
-                        crate::identity::package_file_path(source.id(), config.package_locations())
-                    }
-                    VirtualRoot::Project => Some(
-                        config
-                            .get_root()
-                            .join(source.id().vpath().get_without_slash()),
-                    ),
-                };
-                match document {
-                    Some(document) => session
-                        .inspect_source(
-                            document.to_string_lossy().as_ref(),
-                            overrides.to_vec(),
-                            cancellation,
-                        )?
-                        .into_checked(),
-                    None => None,
-                }
-            }
-        };
-        let checked = alone.as_ref().or_else(|| revision.checked());
-        match checked {
-            Some(checked) => selection.compiled_reply(
-                checked,
-                config,
-                &package_access,
-                bibliographies,
-                query,
-                routes_as_hints,
-                cancellation,
-                client_root,
-            )?,
-            None => match selection.source_only_reply(config, query)? {
-                Some(reply) => reply,
-                None => unavailable(query),
-            },
-        }
+        })?,
+        None => selection
+            .source_only_reply(config, query)?
+            .unwrap_or_else(|| unavailable(query)),
     };
     cancellation.ensure_active()?;
-    Ok(result)
+    Ok(reply)
 }
 
 pub(super) fn package_source(uri: &lsp_types::Uri) -> Result<PackageSourceText> {
@@ -265,334 +309,408 @@ pub(super) fn unavailable(query: &SourceQuery) -> SourceReply {
     }
 }
 
-/// The completion items as one reply, each stamped with the order its lane answered in.
-///
-/// A client that ranks equal matches by label alone would otherwise lose the order the lanes
-/// chose — the wraps, the names, and the reader's own items — so every item has its place.
 fn completion_reply(mut items: Vec<CompletionItem>) -> SourceReply {
-    for (index, item) in items.iter_mut().enumerate() {
-        item.sort_text = Some(format!("{index:03}"));
-    }
+    crate::completion::preserve_order(&mut items);
     SourceReply::Completion(CompletionResponse::Array(items))
 }
 
 impl<'a> Selection<'a> {
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "an answer reads its compilation, config, package access, bibliographies, query, and cancellation"
-    )]
-    fn compiled_reply(
-        &self,
-        compilation: &SourceCompilation,
-        config: &ResolvedSiteConfig,
-        package_access: &PackageAccess<'_>,
-        bibliographies: &mut BibliographyCache,
-        query: &SourceQuery,
-        routes_as_hints: bool,
-        cancellation: &BuildCancellation,
-        client_root: &crate::uri::ClientRoot,
-    ) -> Result<SourceReply> {
-        let prepared = compilation
+    /// The name the selected reference writes, when the cursor stands on one.
+    fn referenced_name(&self) -> Option<&str> {
+        let SelectedSyntax::Reference(reference) = &self.syntax else {
+            return None;
+        };
+        Some(&self.source.text()[reference.name.clone()])
+    }
+
+    /// The one answer this selection's compiled world gives, one query category at a time.
+    fn compiled_reply(&self, answer: &mut CompiledAnswer<'_>) -> Result<SourceReply> {
+        let prepared = answer
+            .compilation
             .world()
             .source(self.source.id())
             .context("prepared source is unavailable")?;
-        let mut semantics = Semantic::new(compilation, cancellation);
-        Ok(match query {
+        let compilation = answer.compilation;
+        let mut semantics = Semantic::new(compilation, answer.site.cancellation);
+        Ok(match answer.query {
             SourceQuery::Completion(_) => {
-                // A `#tola-meta` dictionary completes the keys the site's schemas declare there.
-                if let Some(items) = self.meta_completion(compilation, config, &mut semantics)? {
-                    return Ok(completion_reply(items));
-                }
-                // An argument the site's own declarations constrain to published asset URLs
-                // completes with those URLs alone: a name this file holds names no URL.
-                if let Some((typed, bytes)) = self.asset_url_argument(&mut semantics)? {
-                    let urls = AssetUrls::for_check(config, cancellation)?;
-                    return Ok(SourceReply::Completion(crate::assets::url_completions(
-                        &urls,
-                        config.get_root(),
-                        self.source,
-                        &typed,
-                        bytes,
-                        self.cursor,
-                    )));
-                }
-                // A plain string or raw block has no names; only the lanes above (paths, asset
-                // URLs, metadata keys) answer there.
-                if completion::opaque_at(self.source, self.cursor) {
-                    return Ok(completion_reply(Vec::new()));
-                }
-                // A value's own wraps answer before the fields it already has, so a name both
-                // spellings could complete reaches the wrap first.
-                let mut items = postfix::completions(self.source, self.cursor);
-                let mut seen: std::collections::BTreeSet<String> =
-                    items.iter().map(|item| item.label.clone()).collect();
-                let mut add_unseen = |candidates: Vec<CompletionItem>| {
-                    items.extend(
-                        candidates
-                            .into_iter()
-                            .filter(|item| seen.insert(item.label.clone())),
-                    );
-                };
-                add_unseen(self.completion(&prepared, &mut semantics)?);
-                if let Some(referenced) = labels::completion(compilation, self.source, self.cursor)
-                {
-                    add_unseen(referenced);
-                    add_unseen(citations::completions(
-                        compilation,
-                        config,
-                        self.source,
-                        self.cursor,
-                        bibliographies,
-                        cancellation,
-                    )?);
-                }
-                // A member position answers the receiver's own records — its members and wraps —
-                // never the general names the reader falls back to for an unresolved receiver.
-                // An import item list answers the module's own exports; the reader's general
-                // completion would add names the statement cannot accept, with a range the client
-                // cannot filter. Every other position reads the author's own text, whether or not
-                // the query copy could compile it.
-                if !self.at_code_member()
-                    && !matches!(self.syntax, SelectedSyntax::Import(_))
-                    && let Some((_, ordinary)) = editing::completion(
-                        compilation.world(),
-                        config,
-                        package_access,
-                        self.source,
-                        self.cursor,
-                    )
-                {
-                    // A value's own representation is the editor's line to draw, and a page list
-                    // would draw a screenful of it.
-                    add_unseen(
-                        ordinary
-                            .into_iter()
-                            .map(|mut item| {
-                                item.detail = item.detail.as_deref().map(semantic::abbreviated);
-                                item
-                            })
-                            .collect(),
-                    );
-                }
-                completion_reply(items)
+                self.compiled_completion(answer, &prepared, &mut semantics)?
             }
-            SourceQuery::Hover(_) => {
-                // The first answer that knows the cursor wins: Tola's own names, then the entry a
-                // citation reaches, then the site's labels, an asset argument, a reader path, and
-                // finally what Typst itself reads at the cursor.
-                let hover = self
-                    .hover(compilation, config, cancellation, &prepared, &mut semantics)?
-                    .or(self.citation(compilation, config, bibliographies, cancellation)?)
-                    .or(labels::hover(
-                        compilation,
-                        config,
-                        self.source,
-                        self.cursor,
-                        cancellation,
-                    )?)
-                    .or(crate::assets::hover(config, self.source, self.cursor))
-                    .or(self.asset_url_hover(config, &mut semantics, cancellation)?)
-                    .or(crate::links::hover(
-                        compilation,
-                        config,
-                        self.source,
-                        self.cursor,
-                        cancellation,
-                    )?)
-                    .or_else(|| {
-                        // The reader's own answer reads the compiled copy: a construct the repair
-                        // rewrote has no answer in the author's own text, and the lanes above had their say.
-                        self.cursor_keeps_source_text(&prepared)
-                            .then(|| {
-                                self.builtin_hover(compilation.world(), &prepared, self.cursor)
-                            })
-                            .flatten()
-                    });
-                // A box an editor opens to show nothing is worse than no answer: a hover that says
-                // nothing at all is no hover.
-                SourceReply::Hover(hover.filter(says_something))
-            }
+            SourceQuery::Hover(_) => self.compiled_hover(answer, &prepared, &mut semantics)?,
             SourceQuery::Definition(_) => {
-                // A written asset URL resolves to the file its declaration names, before the
-                // ordinary definition search reads the name under the cursor.
-                if let Some((_, bytes)) = self.asset_url_argument(&mut semantics)? {
-                    let urls = AssetUrls::for_check(config, cancellation)?;
-                    if let Some(definition) =
-                        crate::assets::written_definition(&urls, client_root, self.source, bytes)
-                    {
-                        return Ok(SourceReply::Definition(Some(definition)));
-                    }
-                }
-                let referenced = match &self.syntax {
-                    SelectedSyntax::Reference(reference) => {
-                        let name = &self.source.text()[reference.name.clone()];
-                        match labels::definition(compilation, name)
-                            .and_then(|span| semantics.location(span, client_root))
-                        {
-                            Some(location) => Some(GotoDefinitionResponse::Scalar(location)),
-                            // A name the site does not label is the entry a bibliography
-                            // declares; a label the site cannot place answers nothing here.
-                            None if !labels::declares(compilation, name) => citations::definition(
-                                compilation,
-                                config,
-                                self.source.id(),
-                                name,
-                                bibliographies,
-                                cancellation,
-                                client_root,
-                            )?
-                            .map(GotoDefinitionResponse::Scalar),
-                            None => None,
-                        }
-                    }
-                    _ => None,
-                };
-                let name_definition = self.definition(&prepared, &mut semantics, client_root)?;
-                let definition = match referenced.or(name_definition) {
-                    Some(definition) => Some(definition),
-                    // The reader's own search reads the compiled copy: a construct the repair
-                    // rewrote has no definition in the author's own text.
-                    None if self.cursor_keeps_source_text(&prepared) => {
-                        editing::definition(compilation.world(), &prepared, self.cursor)
-                            .and_then(|target| semantics.target_location(target, client_root))
-                            .map(GotoDefinitionResponse::Scalar)
-                    }
-                    None => None,
-                };
-                SourceReply::Definition(definition)
+                self.compiled_definition(answer, &prepared, &mut semantics)?
             }
             SourceQuery::SignatureHelp(_) => {
-                SourceReply::SignatureHelp(self.signature_help(&prepared, &mut semantics)?)
+                self.compiled_signature_help(&prepared, &mut semantics)?
             }
-            SourceQuery::PrepareRename(_) => {
-                let prepared = labels::prepared(compilation, self.source, self.cursor);
-                SourceReply::PrepareRename(prepared.map(|(range, placeholder)| {
-                    PrepareRenameResponse::RangeWithPlaceholder { range, placeholder }
-                }))
+            SourceQuery::PrepareRename(_) => self.compiled_prepare_rename(compilation),
+            SourceQuery::Rename(params) => self.compiled_rename(answer, params)?,
+            SourceQuery::References(params) => self.compiled_references(answer, params)?,
+            SourceQuery::DocumentHighlights(_) => self.compiled_highlights(),
+            SourceQuery::CodeActions(params) => {
+                self.compiled_code_actions(params, &prepared, &mut semantics)?
             }
-            SourceQuery::DocumentHighlights(_) => {
-                let highlights = match &self.syntax {
-                    SelectedSyntax::Reference(reference) => {
-                        let name = &self.source.text()[reference.name.clone()];
-                        Some(labels::highlights(self.source, name))
-                    }
-                    // A cursor on a loop's control flow answers the loop it belongs to: its own
-                    // keyword and every `break` or `continue` inside, which no compilation is
-                    // needed for.
-                    _ => {
-                        let keywords = tola_typst_syntax::loops::keywords(self.source, self.cursor);
-                        (!keywords.is_empty()).then(|| {
-                            keywords
-                                .into_iter()
-                                .filter_map(|range| {
-                                    Some(DocumentHighlight {
-                                        range: position::utf16_range(self.source.lines(), range)?,
-                                        kind: None,
-                                    })
-                                })
-                                .collect()
-                        })
-                    }
-                };
-                SourceReply::DocumentHighlights(highlights)
-            }
-            SourceQuery::CodeActions(params) => SourceReply::CodeActions(self.narrowing(
-                &params.text_document.uri,
-                &prepared,
-                &mut semantics,
-            )?),
-            SourceQuery::DocumentColors(_) => {
-                SourceReply::DocumentColors(Some(colors::document(self.source)?))
-            }
-            SourceQuery::ColorPresentations(params) => SourceReply::ColorPresentations(Some(
-                colors::presentations(self.source, params.color, params.range),
-            )),
-            SourceQuery::InlayHints(params) => {
-                let mut hints = hints::hints(
-                    compilation,
-                    package_access.published,
-                    self.source,
-                    params.range,
-                    cancellation,
-                )?;
-                if routes_as_hints {
-                    hints.extend(hints::route_hints(
-                        compilation,
-                        config,
-                        self.source,
-                        params.range,
-                        cancellation,
-                    )?);
-                }
-                SourceReply::InlayHints(hints)
-            }
-            SourceQuery::References(params) => {
-                let references = match &self.syntax {
-                    SelectedSyntax::Reference(reference) => {
-                        let name = &self.source.text()[reference.name.clone()];
-                        // A label's spellings are the ones its own documents hold; a citation
-                        // key's are the ones any source the site holds spells, since a
-                        // bibliography can be cited from any page.
-                        let found = if labels::declares(compilation, name) {
-                            labels::locations(
-                                compilation,
-                                name,
-                                params.context.include_declaration,
-                                cancellation,
-                                client_root,
-                            )?
-                        } else {
-                            citations::references(
-                                compilation,
-                                config,
-                                &citations::CitationRequest {
-                                    open: self.source.id(),
-                                    key: name,
-                                    include_declaration: params.context.include_declaration,
-                                },
-                                bibliographies,
-                                cancellation,
-                                client_root,
-                            )?
-                        };
-                        (!found.is_empty()).then_some(found)
-                    }
-                    _ => None,
-                };
-                SourceReply::References(references)
-            }
-            SourceQuery::Rename(params) => {
-                let rename = match &self.syntax {
-                    SelectedSyntax::Reference(reference) => {
-                        let name = &self.source.text()[reference.name.clone()];
-                        labels::rename(
-                            compilation,
-                            name,
-                            &params.new_name,
-                            cancellation,
-                            client_root,
-                        )?
-                    }
-                    _ => None,
-                };
-                SourceReply::Rename(rename)
-            }
+            SourceQuery::DocumentColors(_) => self.compiled_document_colors()?,
+            SourceQuery::ColorPresentations(params) => self.compiled_color_presentations(params),
+            SourceQuery::InlayHints(params) => self.compiled_inlay_hints(answer, params)?,
         })
     }
 
-    /// The answers a source decides on its own, which a site that does not compile still has.
-    ///
-    /// Completion answers only its wraps: every name it could offer comes from the compilation.
+    fn compiled_definition(
+        &self,
+        answer: &mut CompiledAnswer<'_>,
+        prepared: &Source,
+        semantics: &mut Semantic<'_>,
+    ) -> Result<SourceReply> {
+        let compilation = answer.compilation;
+        let configuration = answer.site.configuration;
+        let cancellation = answer.site.cancellation;
+        let client_root = answer.site.client_root;
+        // A written asset URL resolves to the file its declaration names, before the ordinary
+        if let Some((_, bytes)) = self.asset_url_argument(semantics)? {
+            let urls = AssetUrls::for_check(configuration, cancellation)?;
+            if let Some(definition) =
+                crate::assets::written_definition(&urls, client_root, self.source, bytes)
+            {
+                return Ok(SourceReply::Definition(Some(definition)));
+            }
+        }
+        let referenced = match self.referenced_name() {
+            Some(name) => match labels::definition(compilation, name)
+                .and_then(|span| semantics.location(span, client_root))
+            {
+                Some(location) => Some(GotoDefinitionResponse::Scalar(location)),
+                // A name the site does not label is the entry a bibliography declares.
+                None if !labels::declares(compilation, name) => citations::definition(
+                    compilation,
+                    configuration,
+                    self.source.id(),
+                    name,
+                    answer.bibliographies,
+                    cancellation,
+                    client_root,
+                )?
+                .map(GotoDefinitionResponse::Scalar),
+                None => None,
+            },
+            None => None,
+        };
+        let name_definition = self.definition(prepared, semantics, client_root)?;
+        let definition = match referenced.or(name_definition) {
+            Some(definition) => Some(definition),
+            // The reader's own search reads the compiled copy: a construct the repair rewrote has
+            None if self.cursor_keeps_source_text(prepared) => {
+                editing::definition(compilation.world(), prepared, self.cursor)
+                    .and_then(|target| semantics.target_location(target, client_root))
+                    .map(GotoDefinitionResponse::Scalar)
+            }
+            None => None,
+        };
+        Ok(SourceReply::Definition(definition))
+    }
+
+    fn compiled_signature_help(
+        &self,
+        prepared: &Source,
+        semantics: &mut Semantic<'_>,
+    ) -> Result<SourceReply> {
+        Ok(SourceReply::SignatureHelp(
+            self.signature_help(prepared, semantics)?,
+        ))
+    }
+
+    fn compiled_prepare_rename(&self, compilation: &SourceCompilation) -> SourceReply {
+        let range_with_placeholder = labels::prepared(compilation, self.source, self.cursor);
+        SourceReply::PrepareRename(range_with_placeholder.map(|(range, placeholder)| {
+            PrepareRenameResponse::RangeWithPlaceholder { range, placeholder }
+        }))
+    }
+
+    fn compiled_references(
+        &self,
+        answer: &mut CompiledAnswer<'_>,
+        params: &ReferenceParams,
+    ) -> Result<SourceReply> {
+        let compilation = answer.compilation;
+        let configuration = answer.site.configuration;
+        let cancellation = answer.site.cancellation;
+        let client_root = answer.site.client_root;
+        let references = match self.referenced_name() {
+            // A label's spellings stay in its own documents; a citation key's span sources.
+            Some(name) => {
+                let found = if labels::declares(compilation, name) {
+                    labels::locations(
+                        compilation,
+                        name,
+                        params.context.include_declaration,
+                        cancellation,
+                        client_root,
+                    )?
+                } else {
+                    citations::references(
+                        compilation,
+                        configuration,
+                        &citations::CitationRequest {
+                            open: self.source.id(),
+                            key: name,
+                            include_declaration: params.context.include_declaration,
+                        },
+                        answer.bibliographies,
+                        cancellation,
+                        client_root,
+                    )?
+                };
+                (!found.is_empty()).then_some(found)
+            }
+            None => None,
+        };
+        Ok(SourceReply::References(references))
+    }
+
+    fn compiled_highlights(&self) -> SourceReply {
+        let highlights = match self.referenced_name() {
+            Some(name) => Some(labels::highlights(self.source, name)),
+            // A cursor on a loop's control flow answers its own keywords, without a world.
+            None => {
+                let keywords = tola_typst_syntax::loops::keywords(self.source, self.cursor);
+                (!keywords.is_empty()).then(|| {
+                    keywords
+                        .into_iter()
+                        .filter_map(|range| {
+                            Some(DocumentHighlight {
+                                range: position::utf16_range(self.source.lines(), range)?,
+                                kind: None,
+                            })
+                        })
+                        .collect()
+                })
+            }
+        };
+        SourceReply::DocumentHighlights(highlights)
+    }
+
+    fn compiled_code_actions(
+        &self,
+        params: &CodeActionParams,
+        prepared: &Source,
+        semantics: &mut Semantic<'_>,
+    ) -> Result<SourceReply> {
+        Ok(SourceReply::CodeActions(self.narrowing(
+            &params.text_document.uri,
+            prepared,
+            semantics,
+        )?))
+    }
+
+    fn compiled_document_colors(&self) -> Result<SourceReply> {
+        Ok(SourceReply::DocumentColors(Some(colors::document(
+            self.source,
+        )?)))
+    }
+
+    fn compiled_color_presentations(&self, params: &ColorPresentationParams) -> SourceReply {
+        SourceReply::ColorPresentations(Some(colors::presentations(
+            self.source,
+            params.color,
+            params.range,
+        )))
+    }
+
+    fn compiled_inlay_hints(
+        &self,
+        answer: &CompiledAnswer<'_>,
+        params: &InlayHintParams,
+    ) -> Result<SourceReply> {
+        let compilation = answer.compilation;
+        let cancellation = answer.site.cancellation;
+        let mut hints = hints::hints(
+            compilation,
+            answer.site.packages.published,
+            self.source,
+            params.range,
+            cancellation,
+        )?;
+        if answer.routes_as_hints {
+            hints.extend(hints::route_hints(
+                compilation,
+                answer.site.configuration,
+                self.source,
+                params.range,
+                cancellation,
+            )?);
+        }
+        Ok(SourceReply::InlayHints(hints))
+    }
+
+    fn compiled_rename(
+        &self,
+        answer: &CompiledAnswer<'_>,
+        params: &RenameParams,
+    ) -> Result<SourceReply> {
+        let rename = match self.referenced_name() {
+            Some(name) => labels::rename(
+                answer.compilation,
+                name,
+                &params.new_name,
+                answer.site.cancellation,
+                answer.site.client_root,
+            )?,
+            None => None,
+        };
+        Ok(SourceReply::Rename(rename))
+    }
+
+    /// The first lane that knows the cursor wins; Typst's own read comes last.
+    fn compiled_hover(
+        &self,
+        answer: &mut CompiledAnswer<'_>,
+        prepared: &Source,
+        semantics: &mut Semantic<'_>,
+    ) -> Result<SourceReply> {
+        let compilation = answer.compilation;
+        let configuration = answer.site.configuration;
+        let cancellation = answer.site.cancellation;
+        let mut hover = self.hover(
+            compilation,
+            configuration,
+            cancellation,
+            prepared,
+            semantics,
+        )?;
+        if hover.is_none() {
+            hover = self.citation(
+                compilation,
+                configuration,
+                answer.bibliographies,
+                cancellation,
+            )?;
+        }
+        if hover.is_none() {
+            hover = labels::hover(
+                compilation,
+                configuration,
+                self.source,
+                self.cursor,
+                cancellation,
+            )?;
+        }
+        if hover.is_none() {
+            hover = crate::assets::hover(configuration, self.source, self.cursor);
+        }
+        if hover.is_none() {
+            hover = self.asset_url_hover(configuration, semantics, cancellation)?;
+        }
+        if hover.is_none() {
+            hover = crate::links::hover(
+                compilation,
+                configuration,
+                self.source,
+                self.cursor,
+                cancellation,
+            )?;
+        }
+        // The reader's own answer reads the compiled copy: a repair-rewritten construct has none.
+        let hover = hover.or_else(|| {
+            self.cursor_keeps_source_text(prepared)
+                .then(|| self.builtin_hover(compilation.world(), prepared, self.cursor))
+                .flatten()
+        });
+        Ok(SourceReply::Hover(hover.filter(says_something)))
+    }
+
+    /// The completion one compiled selection answers: the site's own keys and asset URLs first,
+    /// then the names and wraps the authored text can hold.
+    fn compiled_completion(
+        &self,
+        answer: &mut CompiledAnswer<'_>,
+        prepared: &Source,
+        semantics: &mut Semantic<'_>,
+    ) -> Result<SourceReply> {
+        let compilation = answer.compilation;
+        let configuration = answer.site.configuration;
+        let cancellation = answer.site.cancellation;
+        // A `#tola-meta` dictionary completes the keys the site's schemas declare there.
+        if let Some(items) = self.meta_completion(compilation, configuration, semantics)? {
+            return Ok(completion_reply(items));
+        }
+        // An argument the site's own declarations constrain to published asset URLs
+        // completes with those URLs alone: a name this file holds names no URL.
+        if let Some((typed, bytes)) = self.asset_url_argument(semantics)? {
+            let urls = AssetUrls::for_check(configuration, cancellation)?;
+            return Ok(SourceReply::Completion(crate::assets::url_completions(
+                &urls,
+                configuration.get_root(),
+                self.source,
+                &typed,
+                bytes,
+                self.cursor,
+            )));
+        }
+        // A plain string or raw block has no names; only the lanes above (paths, asset
+        // URLs, metadata keys) answer there.
+        if completion::opaque_at(self.source, self.cursor) {
+            return Ok(completion_reply(Vec::new()));
+        }
+        // A value's own wraps answer before the fields it already has, so a name both
+        // spellings could complete reaches the wrap first.
+        let mut items = postfix::completions(self.source, self.cursor);
+        let mut seen: std::collections::BTreeSet<String> =
+            items.iter().map(|item| item.label.clone()).collect();
+        let mut add_unseen = |candidates: Vec<CompletionItem>| {
+            items.extend(
+                candidates
+                    .into_iter()
+                    .filter(|item| seen.insert(item.label.clone())),
+            );
+        };
+        add_unseen(self.completion(prepared, semantics)?);
+        if let Some(referenced) = labels::completion(compilation, self.source, self.cursor) {
+            add_unseen(referenced);
+            add_unseen(citations::completions(
+                compilation,
+                configuration,
+                self.source,
+                self.cursor,
+                answer.bibliographies,
+                cancellation,
+            )?);
+        }
+        // A member position answers only the receiver's records, an import list only its exports.
+        if !self.at_code_member()
+            && !matches!(self.syntax, SelectedSyntax::Import(_))
+            && let Some((_, ordinary)) = editing::completion(
+                compilation.world(),
+                configuration,
+                answer.site.packages,
+                self.source,
+                self.cursor,
+                cancellation,
+                answer.overrides,
+            )?
+        {
+            // A value's own representation is the editor's line to draw, and a page list
+            // would draw a screenful of it.
+            add_unseen(
+                ordinary
+                    .into_iter()
+                    .map(|mut item| {
+                        item.detail = item.detail.as_deref().map(semantic::abbreviated);
+                        item
+                    })
+                    .collect(),
+            );
+        }
+        Ok(completion_reply(items))
+    }
+
+    /// The answers a source decides alone: completion offers only wraps here.
     fn source_only_reply(
         &self,
         config: &ResolvedSiteConfig,
         query: &SourceQuery,
     ) -> Result<Option<SourceReply>> {
         Ok(Some(match query {
-            // An asset argument names an output the site creates, so the answer needs the
-            // configuration and the source, not a compilation. Only this site's own file can say
-            // why the site has none: a package document belongs to its package, and blaming the
-            // site for it would be false.
+            // An asset argument needs configuration, not a compilation; only a site file blames.
             SourceQuery::Hover(_) => SourceReply::Hover(
                 crate::assets::hover(config, self.source, self.cursor).or_else(|| {
                     matches!(self.source.id().root(), VirtualRoot::Project)
@@ -616,11 +734,28 @@ impl<'a> Selection<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn large_completions_keep_rank() {
+        let candidates = (0..=1000)
+            .map(|index| CompletionItem {
+                label: format!("candidate-{}", 1000 - index),
+                ..CompletionItem::default()
+            })
+            .collect();
+        let SourceReply::Completion(CompletionResponse::Array(mut candidates)) =
+            completion_reply(candidates)
+        else {
+            panic!("completion list");
+        };
+        candidates.sort_by(|left, right| left.sort_text.cmp(&right.sort_text));
+        assert_eq!(candidates.last().unwrap().label, "candidate-0");
+    }
     use lsp_types::request::Request as LspRequest;
+    use lsp_types::{CompletionTextEdit, Hover, InlayHintLabel, Position, SignatureHelp};
     use lsp_types::{
         DocumentHighlight, InlayHint, Location, WorkspaceEdit, request as lsp_request,
     };
-    use lsp_types::{Hover, InlayHintLabel, Position, SignatureHelp};
     /// A site whose evaluation stops before it includes the page being edited.
     pub(crate) const FAILED_PROGRAM: &str = r#"#panic("early")
 #document("index.html", format: "html")[#include "content/document.typ"]
@@ -638,6 +773,18 @@ mod tests {
         SiteDirectory, announcing_client, marked_cursor, site_configuration as load_configuration,
     };
 
+    /// The text a completion inserts, whichever edit shape it carries.
+    pub(crate) fn insertion_text(completion: &CompletionItem) -> &str {
+        match completion
+            .text_edit
+            .as_ref()
+            .expect("a completion carries its edit")
+        {
+            CompletionTextEdit::Edit(edit) => &edit.new_text,
+            CompletionTextEdit::InsertAndReplace(edit) => &edit.new_text,
+        }
+    }
+
     /// A site root in the spelling the compiler resolves it to.
     ///
     /// The world locates a site's files through the filesystem, so a lane that turns a path into a
@@ -654,12 +801,11 @@ mod tests {
         pub(crate) compilations: RevisionCompilations,
         /// The site's parsed bibliography files, as one lane reuses them.
         pub(crate) bibliographies: BibliographyCache,
+        pub(crate) entity_queries: EntityQueries,
         /// The source revision this session's requests belong to, which a test advances when the
         /// site's files change on disk.
         pub(crate) revision: u64,
         pub(crate) capabilities: lsp_types::ClientCapabilities,
-        /// The directory a file-only client reads this site's packages from, when one does.
-        pub(crate) package_sources: Option<PathBuf>,
     }
 
     impl QuerySession {
@@ -683,10 +829,26 @@ mod tests {
                 session,
                 compilations: RevisionCompilations::new(),
                 bibliographies: BibliographyCache::default(),
+                entity_queries: EntityQueries::default(),
                 revision: 0,
                 capabilities: announcing_client(),
-                package_sources: None,
             }
+        }
+
+        pub(crate) fn reload_with(&mut self, resources: tola_build::BuildResources) {
+            self.config = load_configuration(self.site.root()).expect("site configuration");
+            self.session = tola_build::check::SourceDiagnosticSession::with_resources(
+                Arc::clone(&self.config),
+                resources,
+            );
+        }
+
+        pub(crate) fn reload(&mut self) {
+            self.reload_with(
+                tola_build::BuildResources::new()
+                    .with_network_access(tola_build::NetworkAccess::Denied)
+                    .without_system_fonts(),
+            );
         }
 
         /// A session whose site declares a published asset URL, so a `asset-url` argument has one
@@ -702,13 +864,7 @@ mod tests {
                     "{configuration}\n[assets]\ntrees = [{{ source = \"brand\", url-prefix = \"/brand\" }}]\n"
                 ),
             );
-            session.config = load_configuration(session.site.root()).expect("site configuration");
-            session.session = tola_build::check::SourceDiagnosticSession::with_resources(
-                Arc::clone(&session.config),
-                tola_build::BuildResources::new()
-                    .with_network_access(tola_build::NetworkAccess::Denied)
-                    .without_system_fonts(),
-            );
+            session.reload();
             session
         }
 
@@ -820,7 +976,7 @@ mod tests {
                 .rename_error(marked, new_name)
                 .expect("the rename is refused");
             let error = error
-                .downcast_ref::<crate::analysis::RenameError>()
+                .downcast_ref::<crate::analysis::NameQueryError>()
                 .expect("a rename refusal has its kind");
             error.kind().to_owned()
         }
@@ -899,13 +1055,14 @@ mod tests {
                 &mut self.session,
                 &mut self.compilations,
                 &mut crate::analysis::DiskSources::default(),
+                &mut crate::analysis::GraphCache::default(),
                 &mut self.bibliographies,
+                &mut self.entity_queries,
                 &self.config,
                 self.revision,
                 &overrides,
-                &SourceView::default(),
+                &crate::sources::OpenSources::new(self.config.get_root()).view(),
                 &[],
-                self.package_sources.as_deref(),
                 &query,
                 crate::connection::routes_as_hints(&self.capabilities),
                 CheckProgress::Failed,
@@ -947,6 +1104,16 @@ mod tests {
             .collect()
     }
 
+    pub(crate) fn published(name: &str, version: &str) -> PublishedPackage {
+        PublishedPackage {
+            name: name.to_owned(),
+            version: version.to_owned(),
+            description: None,
+            homepage: None,
+            repository: None,
+        }
+    }
+
     pub(crate) fn item_labeled<'a>(items: &'a [CompletionItem], label: &str) -> &'a CompletionItem {
         items
             .iter()
@@ -973,7 +1140,7 @@ mod tests {
         let mut site = QuerySession::new();
         let sibling = site.site.root().parent().unwrap().join("outside.typ");
         site.site.write(
-            ".tola/builtin-packages/tola/site/0.0.0/lib.typ",
+            ".tola/mirrors/builtin-packages/tola/site/0.0.0/lib.typ",
             "#let value = 1\n",
         );
         let uris = [
@@ -1098,5 +1265,262 @@ mod tests {
             }),
         );
         reply.as_array().cloned().unwrap_or_default()
+    }
+
+    mod local_packages {
+        use std::{fs, path::Path};
+
+        use lsp_types::{GotoDefinitionResponse, Position, Range, Uri};
+        use serde_json::{Value, json};
+        use tola_build::cancellation::BuildCancellation;
+        use tola_typst::typst::syntax::VirtualRoot;
+
+        use super::{QuerySession, decode, marked_cursor};
+        use crate::protocol::CheckProgress;
+        use crate::sources::OpenSources;
+
+        fn open(sources: &mut OpenSources, uri: &Uri, text: &str) {
+            sources
+                .apply(lsp_server::Notification::new(
+                    "textDocument/didOpen".into(),
+                    json!({
+                        "textDocument": {"uri": uri, "languageId": "typst", "version": 1, "text": text},
+                    }),
+                ))
+                .unwrap();
+        }
+
+        fn change(sources: &mut OpenSources, uri: &Uri, version: i32, text: &str) {
+            sources
+                .apply(lsp_server::Notification::new(
+                    "textDocument/didChange".into(),
+                    json!({
+                        "textDocument": {"uri": uri, "version": version},
+                        "contentChanges": [{"text": text}],
+                    }),
+                ))
+                .unwrap();
+        }
+
+        fn ask(
+            site: &mut QuerySession,
+            sources: &OpenSources,
+            uri: &Uri,
+            position: Position,
+            method: &str,
+        ) -> Value {
+            let query = decode(
+                method,
+                json!({"textDocument": {"uri": uri}, "position": position}),
+            );
+            let reply = crate::query::respond(
+                &mut site.session,
+                &mut site.compilations,
+                &mut crate::analysis::DiskSources::default(),
+                &mut crate::analysis::GraphCache::default(),
+                &mut site.bibliographies,
+                &mut crate::compiler::EntityQueries::default(),
+                &site.config,
+                sources.revision(),
+                sources.overrides(),
+                &sources.view(),
+                &[],
+                &query,
+                false,
+                CheckProgress::Failed,
+                &BuildCancellation::default(),
+                &crate::uri::ClientRoot::new(site.config.get_root()),
+            )
+            .unwrap();
+            serde_json::to_value(reply).unwrap()
+        }
+
+        fn definition(value: Value) -> (Uri, Range) {
+            let response: Option<GotoDefinitionResponse> = serde_json::from_value(value).unwrap();
+            match response.expect("the definition is available") {
+                GotoDefinitionResponse::Scalar(location) => (location.uri, location.range),
+                GotoDefinitionResponse::Array(locations) => {
+                    let location = locations.into_iter().next().unwrap();
+                    (location.uri, location.range)
+                }
+                GotoDefinitionResponse::Link(locations) => {
+                    let location = locations.into_iter().next().unwrap();
+                    (location.target_uri, location.target_selection_range)
+                }
+            }
+        }
+
+        fn configured(module: &Path) -> QuerySession {
+            install(QuerySession::new(), module)
+        }
+
+        fn install(mut site: QuerySession, module: &Path) -> QuerySession {
+            fs::write(
+                module.join("tola-module.toml"),
+                "schema-version=1\nname='notes'\nversion='1.0.0'\n[typst]\nentry='lib.typ'\n",
+            )
+            .unwrap();
+            let old = fs::read_to_string(site.site.root().join("tola.toml")).unwrap();
+            let path = serde_json::to_string(&module.to_string_lossy()).unwrap();
+            site.site.write(
+                "tola.toml",
+                &format!("{old}\n[modules.notes]\npath={path}\n"),
+            );
+            site.reload_with(
+                tola_build::BuildResources::new().with_input_scope(tola_build::InputScope::Offline),
+            );
+            site
+        }
+
+        #[test]
+        fn module_library_keeps_root() {
+            let site = QuerySession::new();
+            let module = site.site.root().join("theme");
+            fs::create_dir(&module).unwrap();
+            let (library, _) = marked_cursor(
+                "#import \"@tola/module:0.0.0\": get-module\n#let context-name = get-module().name\n#assert.eq(context-name, \"notes\")\n#let greet() = context-name\n#context-na|me",
+            );
+            fs::write(module.join("lib.typ"), &library).unwrap();
+            let mut site = install(site, &module);
+            let project = "#import \"@tola/source:0.0.0\": current-source\n#assert.eq(current-source().path, \"document.typ\")\n#import \"@tola-modules/notes:0.0.0\": greet\n#gre|et()";
+            let (project, project_cursor) = marked_cursor(project);
+            site.site.write("content/document.typ", &project);
+            let library_uri = crate::uri::from_file_path(&module.join("lib.typ")).unwrap();
+            let project_uri =
+                crate::uri::from_file_path(&site.config.build().content_dir.join("document.typ"))
+                    .unwrap();
+            let access = crate::packages::PackageAccess::prepared(
+                &site.config,
+                site.session.resources(),
+                &[],
+            )
+            .unwrap();
+            let id = |uri| {
+                crate::identity::source_id_with_packages(
+                    uri,
+                    site.config.get_root(),
+                    None,
+                    &access.boundary,
+                    &access.local_packages,
+                    Some((&access.project_content, &access.project_files)),
+                )
+                .unwrap()
+                .unwrap()
+            };
+            let library_id = id(&library_uri);
+            assert!(matches!(library_id.root(), VirtualRoot::Package(_)));
+            assert_eq!(id(&project_uri).root(), &VirtualRoot::Project);
+            let mut sources = OpenSources::new(site.config.get_root());
+            open(&mut sources, &library_uri, &library);
+            open(&mut sources, &project_uri, &project);
+            let cancellation = BuildCancellation::default();
+            let checked = site
+                .session
+                .inspect(sources.overrides().to_vec(), &cancellation)
+                .unwrap();
+            assert!(checked.compiled(), "{:?}", checked.diagnostics());
+            assert!(
+                checked.diagnostics().is_empty(),
+                "{:?}",
+                checked.diagnostics()
+            );
+            let alone = site
+                .session
+                .inspect_source_file(library_id, sources.overrides().to_vec(), &cancellation)
+                .unwrap();
+            assert!(alone.compiled(), "{:?}", alone.diagnostics());
+            assert!(alone.diagnostics().is_empty(), "{:?}", alone.diagnostics());
+            let (target, _) = definition(ask(
+                &mut site,
+                &sources,
+                &project_uri,
+                project_cursor,
+                "textDocument/definition",
+            ));
+            assert_eq!(
+                crate::uri::to_site_path(target.as_str()).unwrap(),
+                module.canonicalize().unwrap().join("lib.typ")
+            );
+        }
+
+        #[test]
+        fn module_queries_follow_unsaved_buffers() {
+            let module = tempfile::tempdir().unwrap();
+            let disk = "#let greeting = \"saved\"\n#let greet() = greeting\n";
+            fs::write(module.path().join("lib.typ"), disk).unwrap();
+            let mut site = configured(module.path());
+            let (project_text, project_cursor) =
+                marked_cursor("#import \"@tola-modules/notes:0.0.0\": greet\n#gr|eet()");
+            site.site.write("content/document.typ", &project_text);
+            let project_uri =
+                crate::uri::from_file_path(&site.config.build().content_dir.join("document.typ"))
+                    .unwrap();
+            let mut sources = OpenSources::new(site.config.get_root());
+            open(&mut sources, &project_uri, &project_text);
+            let (library_uri, saved_range) = definition(ask(
+                &mut site,
+                &sources,
+                &project_uri,
+                project_cursor,
+                "textDocument/definition",
+            ));
+            assert_eq!(
+                crate::uri::to_site_path(library_uri.as_str()).unwrap(),
+                module.path().canonicalize().unwrap().join("lib.typ")
+            );
+            assert_eq!(saved_range.start.line, 1);
+            open(&mut sources, &library_uri, disk);
+
+            let unsaved = "// editor buffer\n#let greeting = \"unsaved\"\n#let greet() = greeting\n#let buffer-only = 42\n";
+            change(&mut sources, &library_uri, 2, unsaved);
+            let (target, updated_range) = definition(ask(
+                &mut site,
+                &sources,
+                &project_uri,
+                project_cursor,
+                "textDocument/definition",
+            ));
+            assert_eq!(target, library_uri);
+            assert_eq!(
+                updated_range.start.line, 2,
+                "navigation must use the editor's source lines"
+            );
+
+            let (editing, cursor) = marked_cursor(&format!("{unsaved}#buff|"));
+            change(&mut sources, &library_uri, 3, &editing);
+            let completed = ask(
+                &mut site,
+                &sources,
+                &library_uri,
+                cursor,
+                "textDocument/completion",
+            );
+            let completion: Option<lsp_types::CompletionResponse> =
+                serde_json::from_value(completed).unwrap();
+            let items = match completion.unwrap() {
+                lsp_types::CompletionResponse::Array(items) => items,
+                lsp_types::CompletionResponse::List(list) => list.items,
+            };
+            assert!(
+                items.iter().any(|item| item.label == "buffer-only"),
+                "{items:?}"
+            );
+
+            let (editing, cursor) = marked_cursor(&format!("{unsaved}#gr|eet()"));
+            change(&mut sources, &library_uri, 4, &editing);
+            let (target, range) = definition(ask(
+                &mut site,
+                &sources,
+                &library_uri,
+                cursor,
+                "textDocument/definition",
+            ));
+            assert_eq!(target, library_uri);
+            assert_eq!(range.start.line, 2);
+            assert_eq!(
+                fs::read_to_string(module.path().join("lib.typ")).unwrap(),
+                disk
+            );
+        }
     }
 }

@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use lsp_types::{CodeLens, Command, Position, Range, Uri};
 use tola_build::cancellation::BuildCancellation;
 use tola_build::check::SourceDiagnosticSession;
@@ -73,7 +73,7 @@ fn document_uri(
     client_root: &crate::uri::ClientRoot,
 ) -> Result<Uri> {
     let root = tola_build::filesystem::normalize_existing_prefix(config.get_root());
-    client_root.address(&root.join(id.vpath().get_without_slash()))
+    crate::identity::client_uri(id, &root, client_root).context("a lens names one file's address")
 }
 
 /// The lens that opens one page, or asks which page when it names none.
@@ -108,15 +108,8 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().canonicalize().unwrap();
         let spelled = directory.path().join("client");
-        std::fs::write(root.join("tola.toml"), "").unwrap();
         std::fs::create_dir_all(root.join("content")).unwrap();
-        let config = tola_build::config::loading::load_site_config(
-            Some(&root.join("tola.toml")),
-            tola_typst::PackageLocations::default(),
-            &tola_build::config::loading::BuildOverrides::default(),
-        )
-        .unwrap()
-        .into_config();
+        let config = crate::compiler::tests::site_configuration(&root, "");
         let id = crate::identity::file_id(
             &crate::uri::from_file_path(&root.join("content/document.typ")).unwrap(),
             config.get_root(),

@@ -5,7 +5,7 @@ use std::io::Write;
 use anyhow::Result;
 use lsp_server::{RequestId, Response};
 use lsp_types::request::{Request as _, SemanticTokensRefresh};
-use tola_build::diagnostic::Diagnostic;
+use tola_diagnostic::Diagnostic;
 
 use super::{Connection, Phase};
 
@@ -23,7 +23,7 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
             || self.shutdown.token().is_cancelled()
             || !self
                 .checked
-                .is_some_and(|(revision, _)| revision == checked_revision)
+                .is_some_and(|check| check.revision == checked_revision)
             || self.tokens.is_empty()
             || self.semantic_refresh.in_flight.is_some()
             || self.semantic_refresh.sent_revision == Some(checked_revision)
@@ -43,9 +43,9 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
         }
         self.semantic_refresh.in_flight = None;
         if response.response_result.is_ok()
-            && let Some((revision, _)) = self.checked
+            && let Some(check) = self.checked
         {
-            self.refresh_semantic_tokens(revision)?;
+            self.refresh_semantic_tokens(check.revision)?;
         }
         Ok(true)
     }
@@ -70,7 +70,10 @@ mod tests {
             .tokens
             .insert("untitled:Tokens".parse().unwrap(), Some(Default::default()));
         connection.revision = 1;
-        connection.checked = Some((1, true));
+        connection.checked = Some(crate::connection::CompletedCheck {
+            revision: 1,
+            usable_world: true,
+        });
         connection
     }
     /// A refresh is asked of a client that declared `refreshSupport` and holds a baseline to

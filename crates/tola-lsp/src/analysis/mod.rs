@@ -4,8 +4,10 @@ mod disk;
 mod graph;
 mod selection;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::ops::Range;
 use std::path::Path;
+use std::sync::Arc;
 
 use anyhow::Result;
 use lsp_types::{
@@ -14,38 +16,145 @@ use lsp_types::{
 };
 use tola_typst::typst::syntax::{FileId, Source, VirtualRoot};
 use tola_typst::{PackageFetchPolicy, PackageStore};
-use tola_typst_syntax::imports::{NameGraph, PendingImport};
+use tola_typst_syntax::imports::{BindingId, NameEdit, NameGraph, PendingImport};
+
+/// Orders source identities by the site path the compiler addresses them under.
+fn by_source_path(left: &FileId, right: &FileId) -> std::cmp::Ordering {
+    left.vpath()
+        .get_without_slash()
+        .cmp(right.vpath().get_without_slash())
+}
 
 pub(crate) use disk::DiskSources;
 pub(crate) use graph::{
     CachedGraph, GraphCache, file_resolver, graph, import_target, source_only_graph,
 };
-pub(crate) use selection::site_selected_interfaces;
+pub(crate) use selection::{site_selected_interfaces, site_sources};
 
 use crate::protocol::{SourceQuery, SourceReply};
 
-#[derive(Debug)]
-pub(crate) struct RenameError(tola_typst_syntax::imports::RenameError);
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum NameQueryError {
+    #[error("{0}")]
+    Rename(tola_typst_syntax::imports::RenameError),
+    #[error("{0}")]
+    EntityRename(String),
+    #[error(
+        "this source has different text through multiple paths; save or close duplicate editor documents and try again"
+    )]
+    ConflictingSourceText,
+    #[error(
+        "cannot rename through `{0}` because its import targets depend on the path; use one explicit import target or separate the shared sources before renaming"
+    )]
+    ConflictingImportContexts(String),
+}
 
-impl RenameError {
+impl NameQueryError {
     pub(crate) fn kind(&self) -> &'static str {
-        match self.0 {
-            tola_typst_syntax::imports::RenameError::InvalidIdentifier(_)
-            | tola_typst_syntax::imports::RenameError::InvalidMathIdentifier(_) => {
-                "invalidIdentifier"
-            }
-            tola_typst_syntax::imports::RenameError::Conflict(_) => "renameConflict",
-            tola_typst_syntax::imports::RenameError::UnknownImport(_) => "unknownImport",
-            tola_typst_syntax::imports::RenameError::ReadOnly => "readOnly",
+        match self {
+            Self::EntityRename(_) => "entityRenameRefused",
+            Self::ConflictingSourceText => "conflictingSourceText",
+            Self::ConflictingImportContexts(_) => "conflictingImportContexts",
+            Self::Rename(error) => match error {
+                tola_typst_syntax::imports::RenameError::InvalidIdentifier(_)
+                | tola_typst_syntax::imports::RenameError::InvalidMathIdentifier(_) => {
+                    "invalidIdentifier"
+                }
+                tola_typst_syntax::imports::RenameError::Conflict(_) => "renameConflict",
+                tola_typst_syntax::imports::RenameError::UnknownImport(_) => "unknownImport",
+                tola_typst_syntax::imports::RenameError::ReadOnly => "readOnly",
+            },
         }
     }
 }
-impl std::fmt::Display for RenameError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.0.fmt(formatter)
+/// One graph location as the editor receives it.
+struct EditorLocation {
+    location: Location,
+    /// The first address is the one this location names; the rest hold the same source.
+    addresses: Arc<[lsp_types::Uri]>,
+}
+
+/// Where this query's graph locations answer in the editor.
+struct EditorLocations<'a> {
+    graph: &'a NameGraph,
+    source: &'a Source,
+    query: &'a SourceQuery,
+    view: &'a crate::sources::SourceView,
+    source_root: &'a Path,
+    client_root: &'a crate::uri::ClientRoot,
+    packages: Option<PackageStore>,
+    addresses_by_file: HashMap<FileId, Arc<[lsp_types::Uri]>>,
+}
+
+impl<'a> EditorLocations<'a> {
+    /// The editor's addresses for one graph file, resolved once per query.
+    fn addresses(&mut self, file: FileId, text: &str) -> Result<Option<Arc<[lsp_types::Uri]>>> {
+        if let Some(addresses) = self.addresses_by_file.get(&file) {
+            return Ok(Some(Arc::clone(addresses)));
+        }
+        let uri = if file == self.source.id() {
+            self.query.document().0.clone()
+        } else {
+            let Some(uri) = package_directory_uri(
+                file,
+                self.source_root,
+                self.client_root,
+                self.packages.as_ref(),
+            ) else {
+                return Ok(None);
+            };
+            match crate::uri::to_site_path(uri.as_str())
+                .ok()
+                .and_then(|path| self.view.named_source(&path))
+            {
+                Some((opened, _)) => opened.parse().expect("tracked source URIs are valid"),
+                None => uri,
+            }
+        };
+        let mut addresses = Vec::new();
+        if let Ok(path) = crate::uri::to_site_path(uri.as_str()) {
+            require_source_text(self.view, &path, text)?;
+            if matches!(self.query, SourceQuery::Rename(_)) {
+                addresses.extend(
+                    self.view
+                        .versions_for_path(&path)
+                        .map(|(opened, _)| opened.parse().expect("tracked source URIs are valid")),
+                );
+                if addresses.is_empty() {
+                    addresses.push(self.client_root.address(&path)?);
+                }
+            }
+        }
+        if addresses.is_empty() {
+            addresses.push(uri);
+        }
+        let addresses: Arc<[lsp_types::Uri]> = addresses.into();
+        self.addresses_by_file.insert(file, Arc::clone(&addresses));
+        Ok(Some(addresses))
+    }
+
+    /// One graph location in the editor's spelling, when the editor addresses its file at all.
+    fn locate(&mut self, file: FileId, bytes: Range<usize>) -> Result<Option<EditorLocation>> {
+        let graph = self.graph;
+        let target = graph
+            .source(file)
+            .expect("a graph location belongs to a source")
+            .source();
+        let Some(addresses) = self.addresses(file, target.text())? else {
+            return Ok(None);
+        };
+        let Some(range) = crate::position::utf16_range(target.lines(), bytes) else {
+            return Ok(None);
+        };
+        Ok(Some(EditorLocation {
+            location: Location {
+                uri: addresses[0].clone(),
+                range,
+            },
+            addresses,
+        }))
     }
 }
-impl std::error::Error for RenameError {}
 
 #[expect(
     clippy::too_many_arguments,
@@ -56,6 +165,8 @@ pub(crate) fn respond(
     source: &Source,
     cursor: usize,
     query: &SourceQuery,
+    view: &crate::sources::SourceView,
+    disk: &DiskSources,
     source_root: &Path,
     client_root: &crate::uri::ClientRoot,
     locations: Option<&tola_typst::PackageLocations>,
@@ -75,106 +186,305 @@ pub(crate) fn respond(
         PackageStore::new(locations.clone(), PackageFetchPolicy::LocalOnly)
             .with_source_boundary(boundary.clone())
     });
-    let mut uris: HashMap<FileId, lsp_types::Uri> = HashMap::new();
-    let mut location = |file, range| -> Option<Location> {
-        let uri = if let Some(uri) = uris.get(&file) {
-            uri.clone()
-        } else {
-            // A package document answers under its own identity, whichever spelling the client
-            // used to reach it: a mirror file and the `tola-package:` document it mirrors are one
-            // document, so their answers never disagree.
-            let uri = if file == source.id() && !matches!(file.root(), VirtualRoot::Package(_)) {
-                query.document().0.clone()
-            } else {
-                package_directory_uri(file, source_root, client_root, packages.as_ref())?
-            };
-            uris.insert(file, uri.clone());
-            uri
-        };
-        Some(Location {
-            uri,
-            range: crate::position::utf16_range(graph.source(file)?.source().lines(), range)?,
-        })
+    let mut located = EditorLocations {
+        graph,
+        source,
+        query,
+        view,
+        source_root,
+        client_root,
+        packages,
+        addresses_by_file: HashMap::new(),
     };
-    Ok(Some(match query {
-        SourceQuery::Definition(_) => {
-            let Some((file, range)) = graph.definition(binding) else {
-                // The name graph has no definition; the compiler can still establish one, as it
-                // does for an import expression whose interface the graph never resolved.
-                return Ok(None);
-            };
-            SourceReply::Definition(location(file, range).map(GotoDefinitionResponse::Scalar))
-        }
-        SourceQuery::PrepareRename(_) => {
-            let writable = matches!(graph.binding(binding).file.root(), VirtualRoot::Project);
-            SourceReply::PrepareRename(
-                writable
-                    .then(|| {
-                        Some(PrepareRenameResponse::RangeWithPlaceholder {
-                            range: crate::position::utf16_range(
-                                source.lines(),
-                                selected.range.clone(),
-                            )?,
-                            placeholder: graph.binding(binding).name.clone(),
-                        })
-                    })
-                    .flatten(),
-            )
-        }
-        SourceQuery::References(params) => SourceReply::References(Some(
-            graph
-                .references(binding, params.context.include_declaration)
-                .into_iter()
-                .filter_map(|(file, occurrence)| location(file, occurrence.range.clone()))
-                .collect(),
+    Ok(match query {
+        SourceQuery::Definition(_) => definition_reply(&mut located, binding)?,
+        SourceQuery::PrepareRename(_) => Some(prepare_rename_reply(
+            graph,
+            source,
+            selected.range.clone(),
+            binding,
         )),
-        SourceQuery::DocumentHighlights(_) => SourceReply::DocumentHighlights(Some(
-            graph
-                .occurrences(source.id())
-                .iter()
-                .filter(|occurrence| occurrence.binding == Some(binding))
-                .filter_map(|occurrence| {
-                    Some(DocumentHighlight {
-                        range: crate::position::utf16_range(
-                            source.lines(),
-                            occurrence.range.clone(),
-                        )?,
-                        kind: Some(if occurrence.declaration {
-                            DocumentHighlightKind::WRITE
-                        } else {
-                            DocumentHighlightKind::READ
-                        }),
-                    })
-                })
-                .collect(),
-        )),
+        SourceQuery::References(params) => {
+            Some(references_reply(&mut located, disk, binding, params)?)
+        }
+        SourceQuery::DocumentHighlights(_) => Some(highlights_reply(graph, source, binding)),
         SourceQuery::Rename(params) => {
-            let edits = graph
-                .rename(binding, &params.new_name)
-                .map_err(RenameError)?;
-            #[expect(
-                clippy::mutable_key_type,
-                reason = "the protocol keys workspace edits by URI"
-            )]
-            let mut changes = HashMap::new();
-            for edit in edits {
-                if let Some(location) = location(edit.file, edit.range) {
-                    changes
-                        .entry(location.uri)
-                        .or_insert_with(Vec::new)
-                        .push(TextEdit {
-                            range: location.range,
-                            new_text: edit.replacement,
-                        });
-                }
-            }
-            SourceReply::Rename(Some(WorkspaceEdit {
-                changes: Some(changes),
-                ..WorkspaceEdit::default()
-            }))
+            Some(rename_reply(&mut located, disk, binding, &params.new_name)?)
         }
-        _ => unreachable!(),
-    }))
+        _ => unreachable!("the name graph answers only the queries handled above"),
+    })
+}
+
+/// The definition one binding resolves to, or no reply when the graph establishes none.
+fn definition_reply(
+    located: &mut EditorLocations<'_>,
+    binding: BindingId,
+) -> Result<Option<SourceReply>> {
+    let Some((file, bytes)) = located.graph.definition(binding) else {
+        // The compiler can still establish a definition for an import this graph never resolved.
+        return Ok(None);
+    };
+    let definition = located
+        .locate(file, bytes)?
+        .map(|EditorLocation { location, .. }| GotoDefinitionResponse::Scalar(location));
+    Ok(Some(SourceReply::Definition(definition)))
+}
+
+/// The range and placeholder a rename would edit, when the editor may write the declaration.
+fn prepare_rename_reply(
+    graph: &NameGraph,
+    source: &Source,
+    spelling: Range<usize>,
+    binding: BindingId,
+) -> SourceReply {
+    let declared = graph.binding(binding);
+    let range = matches!(declared.file.root(), VirtualRoot::Project)
+        .then(|| crate::position::utf16_range(source.lines(), spelling))
+        .flatten();
+    SourceReply::PrepareRename(
+        range.map(|range| PrepareRenameResponse::RangeWithPlaceholder {
+            range,
+            placeholder: declared.name.clone(),
+        }),
+    )
+}
+
+/// Every location one spelling's bindings answer, in protocol order.
+fn references_reply(
+    located: &mut EditorLocations<'_>,
+    disk: &DiskSources,
+    binding: BindingId,
+    params: &lsp_types::ReferenceParams,
+) -> Result<SourceReply> {
+    let graph = located.graph;
+    let root = tola_build::filesystem::normalize_existing_prefix(located.source_root);
+    let declaration = graph.definition(binding);
+    let mut references = Vec::new();
+    for binding in declaration_bindings(located, disk, &root, binding, declaration)? {
+        for (file, occurrence) in graph.references(binding, params.context.include_declaration) {
+            if let Some(EditorLocation { location, .. }) =
+                located.locate(file, occurrence.range.clone())?
+            {
+                references.push(location);
+            }
+        }
+    }
+    references.sort_by(|left, right| {
+        (left.uri.as_str(), left.range.start, left.range.end).cmp(&(
+            right.uri.as_str(),
+            right.range.start,
+            right.range.end,
+        ))
+    });
+    references.dedup();
+    Ok(SourceReply::References(Some(references)))
+}
+
+/// Every occurrence of one binding in the queried document.
+fn highlights_reply(graph: &NameGraph, source: &Source, binding: BindingId) -> SourceReply {
+    let highlights = graph
+        .occurrences(source.id())
+        .iter()
+        .filter(|occurrence| occurrence.binding == Some(binding))
+        .filter_map(|occurrence| {
+            Some(DocumentHighlight {
+                range: crate::position::utf16_range(source.lines(), occurrence.range.clone())?,
+                kind: Some(if occurrence.declaration {
+                    DocumentHighlightKind::WRITE
+                } else {
+                    DocumentHighlightKind::READ
+                }),
+            })
+        })
+        .collect();
+    SourceReply::DocumentHighlights(Some(highlights))
+}
+
+/// The workspace edit that renames one spelling through every binding it covers.
+fn rename_reply(
+    located: &mut EditorLocations<'_>,
+    disk: &DiskSources,
+    binding: BindingId,
+    new_name: &str,
+) -> Result<SourceReply> {
+    let graph = located.graph;
+    let root = tola_build::filesystem::normalize_existing_prefix(located.source_root);
+    let declared = graph.binding(binding);
+    let declaration = declared.declaration.map(|declaration| {
+        let source = graph
+            .source(declared.file)
+            .expect("a binding belongs to a graph source");
+        (
+            declared.file,
+            source.declarations()[declaration].range.clone(),
+        )
+    });
+    let mut edits = Vec::new();
+    for binding in declaration_bindings(located, disk, &root, binding, declaration)? {
+        edits.extend(
+            graph
+                .rename(binding, new_name)
+                .map_err(NameQueryError::Rename)?,
+        );
+    }
+    validate_aliased_edits(graph, disk, &root, &edits)?;
+    Ok(SourceReply::Rename(Some(WorkspaceEdit {
+        changes: Some(rename_changes(located, edits)?),
+        ..WorkspaceEdit::default()
+    })))
+}
+
+/// The rename edits keyed by the URI each lands in; each URI's list is in protocol order.
+fn rename_changes(
+    located: &mut EditorLocations<'_>,
+    edits: Vec<NameEdit>,
+) -> Result<HashMap<lsp_types::Uri, Vec<TextEdit>>> {
+    #[expect(
+        clippy::mutable_key_type,
+        reason = "the protocol keys workspace edits by URI"
+    )]
+    let mut changes = HashMap::new();
+    for edit in edits {
+        let EditorLocation {
+            location,
+            addresses,
+        } = located
+            .locate(edit.file, edit.range)?
+            .expect("writable graph sources have document URIs");
+        let edit = TextEdit {
+            range: location.range,
+            new_text: edit.replacement,
+        };
+        for uri in addresses.iter().skip(1) {
+            changes
+                .entry(uri.clone())
+                .or_insert_with(Vec::new)
+                .push(edit.clone());
+        }
+        changes
+            .entry(location.uri)
+            .or_insert_with(Vec::new)
+            .push(edit);
+    }
+    for edits in changes.values_mut() {
+        edits.sort_by(|left, right| {
+            (left.range.start, left.range.end, &left.new_text).cmp(&(
+                right.range.start,
+                right.range.end,
+                &right.new_text,
+            ))
+        });
+        edits.dedup();
+    }
+    Ok(changes)
+}
+
+/// The bindings a reference or rename covers: the spelling's own, plus every logical instance.
+fn declaration_bindings(
+    located: &mut EditorLocations<'_>,
+    disk: &DiskSources,
+    root: &Path,
+    binding: BindingId,
+    declaration: Option<(FileId, Range<usize>)>,
+) -> Result<Vec<BindingId>> {
+    let graph = located.graph;
+    let mut bindings = vec![binding];
+    if let Some((file, bytes)) = declaration {
+        // Reading the declaration is what checks its text against the editor's buffer.
+        located.locate(file, bytes.clone())?;
+        bindings.extend(source_bindings(graph, disk, file, bytes.start, root)?);
+    }
+    bindings.sort_unstable();
+    bindings.dedup();
+    Ok(bindings)
+}
+
+/// Every logical instance of a physical consumer must license the same text changes.
+fn validate_aliased_edits(
+    graph: &NameGraph,
+    disk: &DiskSources,
+    root: &Path,
+    edits: &[NameEdit],
+) -> Result<(), NameQueryError> {
+    let mut rewrites: HashMap<_, HashSet<_>> = HashMap::new();
+    for edit in edits {
+        rewrites.entry(edit.file).or_default().insert((
+            edit.range.start,
+            edit.range.end,
+            edit.replacement.as_str(),
+        ));
+    }
+    let mut files: Vec<_> = rewrites.keys().copied().collect();
+    files.sort_by(by_source_path);
+    for file in files {
+        for alias in disk.source_aliases(file, root) {
+            if alias == file {
+                continue;
+            }
+            let Some(counterpart) = graph.source(alias) else {
+                continue;
+            };
+            if counterpart.source().text()
+                != graph
+                    .source(file)
+                    .expect("a rename edits a graph source")
+                    .source()
+                    .text()
+            {
+                return Err(NameQueryError::ConflictingSourceText);
+            }
+            if rewrites.get(&alias) != rewrites.get(&file) {
+                return Err(NameQueryError::ConflictingImportContexts(
+                    file.vpath().get_without_slash().to_owned(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn require_source_text(
+    view: &crate::sources::SourceView,
+    path: &Path,
+    text: &str,
+) -> Result<(), NameQueryError> {
+    if view
+        .overrides()
+        .iter()
+        .any(|(opened, current)| opened == path && current.as_ref() != text)
+    {
+        return Err(NameQueryError::ConflictingSourceText);
+    }
+    Ok(())
+}
+
+/// Bindings of one physical declaration, with each module's logical import base kept intact.
+fn source_bindings(
+    graph: &NameGraph,
+    disk: &DiskSources,
+    file: FileId,
+    at: usize,
+    root: &Path,
+) -> Result<Vec<BindingId>, NameQueryError> {
+    if !matches!(file.root(), VirtualRoot::Project) {
+        return Ok(Vec::new());
+    }
+    let source = graph
+        .source(file)
+        .expect("a definition belongs to a graph source");
+    let mut bindings = Vec::new();
+    for id in disk.source_aliases(file, root) {
+        let Some(names) = graph.source(id) else {
+            continue;
+        };
+        if names.source().text() != source.source().text() {
+            return Err(NameQueryError::ConflictingSourceText);
+        }
+        if let Some(binding) = graph.selected(id, at).and_then(|selected| selected.binding) {
+            bindings.push(binding);
+        }
+    }
+    Ok(bindings)
 }
 
 /// The statements whose official target this query still needs before its answer is complete.
@@ -229,5 +539,5 @@ fn package_directory_uri(
         )
         .ok();
     }
-    crate::identity::client_uri(file, source_root, client_root)
+    crate::identity::client_uri(file, source_root, client_root).ok()
 }

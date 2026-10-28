@@ -1,6 +1,6 @@
 //! Math spellings no scope, import, or the checked library defines.
 
-use tola_build::diagnostic::DiagnosticCause;
+use tola_diagnostic::DiagnosticCause;
 use tola_typst::typst::Library;
 use tola_typst::typst::syntax::LinkedNode;
 use tola_typst::typst::syntax::SyntaxKind;
@@ -17,13 +17,9 @@ use super::imports::could_supply_unknown;
 /// selection. A spelling a lexical declaration, an import, or the math scope binds, or one an
 /// import this source cannot enumerate may supply, is not reported.
 pub(super) fn warn_undefined_names(names: &SourceNames, library: &Library, hints: &mut Vec<Hint>) {
-    let mut stack = vec![LinkedNode::new(names.source().root())];
-    while let Some(node) = stack.pop() {
+    for node in super::nodes(LinkedNode::new(names.source().root())) {
         if node.kind() == SyntaxKind::MathIdent && !field_name(&node) {
             warn_undefined_name(names, &node, library, hints);
-        }
-        for child in node.children() {
-            stack.push(child);
         }
     }
 }

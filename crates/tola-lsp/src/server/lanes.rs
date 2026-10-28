@@ -9,50 +9,40 @@ use tola_build::cancellation::BuildCancellation;
 use super::events::{Event, send_event};
 use crate::compiler::{AnalysisRequest, SourceCompilation, SourceFailure, SourceJob};
 
-/// The failure of one lane job whose own work panicked.
-///
-/// A panic is not a refusal of the job's request: the client is answered with an internal failure,
-/// and the lane keeps taking jobs.
-#[derive(Debug)]
-pub(crate) struct PanickedJob;
-
-impl std::fmt::Display for PanickedJob {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("a lane job panicked")
-    }
-}
-
-impl std::error::Error for PanickedJob {}
-
-/// The failure one panicked lane job answers with, with the panic's own message for the log.
-fn panicked_job(payload: &(dyn std::any::Any + Send)) -> anyhow::Error {
-    let detail = payload
+/// The panic's own message, for the log.
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
+    payload
         .downcast_ref::<&str>()
         .copied()
         .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
-        .unwrap_or("no message");
-    anyhow::Error::new(PanickedJob).context(format!("a lane job panicked: {detail}"))
+        .unwrap_or("no message")
 }
 
 /// What one lane job owes an answer, read before the job runs so a job that panicked can still be
 /// answered.
 pub(super) enum JobOwner {
     /// A source check, answered with its own revision's outcome.
-    Check(u64),
+    Check { checked_revision: u64 },
     /// One selection index a revision's corrections wait for, answered with the revision and site
     /// it was asked about.
-    Selection(u64, u64, PathBuf),
+    Selection {
+        revision: u64,
+        serial: u64,
+        root: PathBuf,
+    },
     /// A client request, answered under the id and serial it was admitted with.
     Request(RequestId, u64),
-    /// A job nothing waits on.
-    None,
+    /// A job nothing claims.
+    Unclaimed,
 }
 
 impl JobOwner {
     /// The owner of one compiler-lane job.
     pub(super) fn of(job: &SourceJob) -> Self {
         match job {
-            SourceJob::Check(request) => Self::Check(request.checked_revision),
+            SourceJob::Check(request) => Self::Check {
+                checked_revision: request.checked_revision,
+            },
             SourceJob::Query(request) => Self::Request(request.id.clone(), request.serial),
             SourceJob::Route(request) => Self::Request(request.id.clone(), request.serial),
             SourceJob::Lenses(request) => Self::Request(request.id.clone(), request.serial),
@@ -61,10 +51,12 @@ impl JobOwner {
             SourceJob::PackageSource(request) => Self::Request(request.id.clone(), request.serial),
             SourceJob::IncomingCalls(request) => Self::Request(request.id.clone(), request.serial),
             SourceJob::RouteIndex(request) => Self::Request(request.id.clone(), request.serial),
-            SourceJob::Selection(request) => {
-                Self::Selection(request.revision, request.serial, request.root.clone())
-            }
-            SourceJob::ReleaseIdle => Self::None,
+            SourceJob::Selection(request) => Self::Selection {
+                revision: request.revision,
+                serial: request.serial,
+                root: request.root.clone(),
+            },
+            SourceJob::ReleaseIdle => Self::Unclaimed,
         }
     }
 
@@ -74,24 +66,30 @@ impl JobOwner {
     }
 
     /// The completion one job answers with when its work panicked.
-    fn panicked(self, error: anyhow::Error) -> SourceCompilation {
+    fn panicked(self) -> SourceCompilation {
         match self {
-            Self::Check(checked_revision) => SourceCompilation::Checked {
+            Self::Check { checked_revision } => SourceCompilation::Checked {
                 checked_revision,
-                checked: Err(SourceFailure::Failed(error)),
+                checked: Err(SourceFailure::Panicked),
             },
             Self::Request(id, serial) => SourceCompilation::Answered {
+                configuration: None,
+                read_paths: Vec::new(),
                 id,
                 serial,
-                response: Err(SourceFailure::Failed(error)),
+                response: Err(SourceFailure::Panicked),
             },
-            Self::Selection(revision, serial, root) => SourceCompilation::Selected {
+            Self::Selection {
                 revision,
                 serial,
                 root,
-                selected: Err(SourceFailure::Failed(error)),
+            } => SourceCompilation::Selected {
+                revision,
+                serial,
+                root,
+                selected: Err(SourceFailure::Panicked),
             },
-            Self::None => SourceCompilation::Released,
+            Self::Unclaimed => SourceCompilation::Released,
         }
     }
 }
@@ -109,9 +107,8 @@ fn contain_panic<J>(
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || work(job))) {
         Ok(completed) => completed,
         Err(payload) => {
-            let error = panicked_job(&*payload);
-            tracing::error!(error = ?error, "a lane job panicked");
-            owner.panicked(error)
+            tracing::error!(detail = panic_message(&*payload), "a lane job panicked");
+            owner.panicked()
         }
     }
 }

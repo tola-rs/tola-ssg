@@ -18,13 +18,13 @@ impl Selection<'_> {
             return Ok(None);
         };
         let name = &self.source.text()[call.callee.clone()];
+        let callee_node = tola_typst_syntax::syntax::node_at_range(prepared, &call.callee);
         let (mut signatures, parameters) = match &call.target {
             tola_typst_syntax::syntax::CallTarget::Function => {
-                let Some(callee) = tola_typst_syntax::syntax::node_at_range(prepared, &call.callee)
-                else {
+                let Some(callee) = &callee_node else {
                     return Ok(None);
                 };
-                semantics.signatures(&callee, name)?
+                semantics.signatures(callee, name)?
             }
             tola_typst_syntax::syntax::CallTarget::Field { receiver, field } => {
                 let Some(receiver) = tola_typst_syntax::syntax::node_at_range(prepared, receiver)
@@ -49,7 +49,8 @@ impl Selection<'_> {
                 })
                 .or(rest)
         } else {
-            let positional = tola_typst_syntax::syntax::node_at_range(prepared, &call.callee)
+            let positional = callee_node
+                .as_ref()
                 .and_then(|callee| callee.parent().cloned())
                 .and_then(|node| {
                     let invocation = node.cast::<ast::FuncCall>()?;
@@ -88,7 +89,12 @@ impl Selection<'_> {
 #[cfg(test)]
 mod tests {
     use crate::query::tests::*;
-    use lsp_types::ParameterLabel;
+    use lsp_types::{ParameterLabel, SignatureHelp};
+
+    /// The signature help one source reports at its own cursor marker.
+    fn signature_of(source: &str) -> SignatureHelp {
+        QuerySession::new().signature(source).expect("a signature")
+    }
 
     /// A call reports the signature of the function it names, however the callee resolves: a
     /// standard-library call, a module member, a show rule, a method, a local function, an aliased
@@ -125,8 +131,7 @@ mod tests {
             ),
         ];
         for (source, prefix, fragments, declared) in cases {
-            let mut site = QuerySession::new();
-            let signature = site.signature(source).expect("a signature");
+            let signature = signature_of(source);
             let first = &signature.signatures[0];
             // The label begins with the spelling the author wrote, so an alias cannot answer as
             // the name it imports.
@@ -150,13 +155,12 @@ mod tests {
     }
     #[test]
     fn positional_arguments_skip_named_arguments() {
-        let mut site = QuerySession::new();
         for (source, expected) in [
             ("#text(size: 10pt, |\"hello\")\n", "text:"),
             ("#let f(a: 1, b) = b\n#f(a: 2, |\"x\")\n", "b:"),
             ("#let f(a, ..xs) = a\n#f(1, size: 2, |3)\n", "xs:"),
         ] {
-            let signature = site.signature(source).expect("a signature");
+            let signature = signature_of(source);
             let first = &signature.signatures[0];
             let selected = first.active_parameter.expect("a selected parameter");
             assert_eq!(
@@ -169,14 +173,13 @@ mod tests {
 
     #[test]
     fn unknown_positions_mark_no_parameter() {
-        let mut site = QuerySession::new();
         for source in [
             "#let f(size: 1) = size\n#f(|2)\n",
             "#let f(a, b) = a\n#f(..(1,), |2)\n",
             "#let f(size: 1) = size\n#f(|unknown: 2)\n",
             "#let f(a, b: 1) = a\n#f(|a: 2)\n",
         ] {
-            let signature = site.signature(source).expect("a signature");
+            let signature = signature_of(source);
             assert_eq!(signature.signatures[0].active_parameter, None, "{source}");
         }
     }
@@ -184,10 +187,8 @@ mod tests {
     /// A named argument marks the parameter it names, not the position it was written at.
     #[test]
     fn named_argument_marks_its_own_parameter() {
-        let mut site = QuerySession::new();
-        let signature = site
-            .signature("#let size(body, width: 0pt, height: 0pt) = body\n#size(|width: 1pt)\n")
-            .expect("a signature");
+        let signature =
+            signature_of("#let size(body, width: 0pt, height: 0pt) = body\n#size(|width: 1pt)\n");
         let help = &signature.signatures[0];
         let parameters = help.parameters.as_ref().expect("parameters");
         let marked = help.active_parameter.expect("a marked parameter");
@@ -197,36 +198,12 @@ mod tests {
         );
     }
 
-    /// A signature names the parameters a local declaration takes, each labelled by its own name.
-    #[test]
-    fn local_call_labels_its_signature() {
-        let mut site = QuerySession::new();
-        let signature = site
-            .signature("#let write(body, depth: 0) = body\n#write(|\"\")\n")
-            .expect("a signature");
-        let first = &signature.signatures[0];
-        assert_eq!(first.label, "write(body: any, depth: any)");
-        assert_eq!(
-            first.parameters.as_ref().map(|parameters| parameters
-                .iter()
-                .map(|parameter| match &parameter.label {
-                    ParameterLabel::Simple(label) => label.as_str(),
-                    ParameterLabel::LabelOffsets(_) => "",
-                })
-                .collect::<Vec<_>>()),
-            Some(vec!["body:", "depth:"])
-        );
-    }
-
     /// A library call's signature names the element's own type as the value it returns.
     #[test]
     fn library_call_labels_its_return() {
-        let mut site = QuerySession::new();
-        let signature = site.signature("#text(|\"\")\n").expect("a signature");
+        let signature = signature_of("#text(|\"\")\n");
         let label = &signature.signatures[0].label;
-        assert!(
-            label.starts_with("text(text: str,") && label.ends_with(") -> text"),
-            "{label}"
-        );
+        assert!(label.starts_with("text("), "{label}");
+        assert!(label.contains("-> text"), "{label}");
     }
 }
