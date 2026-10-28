@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 
-use super::jobs::{AnalysisContinuation, AnalysisRequest};
+use super::jobs::{AnalysisContinuation, AnalysisRequest, AnalysisTask, TokensKind, TokensRead};
 use super::worker::{SourceCompilation, SourceFailure};
 use crate::protocol::SourceReply;
 
@@ -11,7 +11,7 @@ pub(crate) fn analyze(
     graphs: &mut crate::analysis::GraphCache,
     request: AnalysisRequest,
 ) -> SourceCompilation {
-    let super::jobs::AnalysisTask::Query { query, cursor } = &request.task else {
+    let AnalysisTask::Query { query, cursor } = &request.task else {
         return analyze_tokens(disk, graphs, request);
     };
     let cursor = *cursor;
@@ -26,19 +26,22 @@ pub(crate) fn analyze(
                     | crate::protocol::SourceQuery::Rename(_)
             );
             let names = source_graph(disk, graphs, &request, include_dependents)?;
-            if !crate::analysis::unproven(&names, &request.source, cursor, query).is_empty() {
-                None
-            } else {
+            if crate::analysis::unproven(&names, &request.source, cursor, query).is_empty() {
                 crate::analysis::respond(
                     &names,
                     &request.source,
                     cursor,
                     query,
+                    &request.view,
+                    &*disk,
                     &request.source_root,
                     &crate::uri::ClientRoot::new(&request.sources.root),
                     request.package_locations.as_ref(),
                     &request.boundary,
                 )?
+            } else {
+                // A statement the graph never resolved may still be answered by the checked world.
+                None
             }
         };
         request.sources.cancellation.ensure_active()?;
@@ -49,7 +52,7 @@ pub(crate) fn analyze(
                 .then(|| crate::query::unavailable(query))
         });
         if let (Some(SourceReply::Definition(Some(definition))), Some(directory)) =
-            (&mut response, &request.package_sources)
+            (&mut response, request.view.package_sources())
         {
             crate::query::package_source_definition(
                 definition,
@@ -63,14 +66,10 @@ pub(crate) fn analyze(
     })()
     .map_err(SourceFailure::of);
     match response {
-        Ok(Some(response)) => SourceCompilation::Answered {
-            id: request.id,
-            serial: request.serial,
-            response: Ok(response),
-        },
+        Ok(Some(response)) => SourceCompilation::answered(request.id, request.serial, Ok(response)),
         Ok(None) => {
-            let super::jobs::AnalysisTask::Query { query, .. } = request.task else {
-                unreachable!()
+            let AnalysisTask::Query { query, .. } = request.task else {
+                unreachable!("only a query continues to the compiler lane")
             };
             SourceCompilation::Continued(AnalysisContinuation {
                 id: request.id,
@@ -80,11 +79,7 @@ pub(crate) fn analyze(
                 query,
             })
         }
-        Err(failure) => SourceCompilation::Answered {
-            id: request.id,
-            serial: request.serial,
-            response: Err(failure),
-        },
+        Err(failure) => SourceCompilation::answered(request.id, request.serial, Err(failure)),
     }
 }
 
@@ -115,27 +110,29 @@ fn analyze_tokens(
     graphs: &mut crate::analysis::GraphCache,
     request: AnalysisRequest,
 ) -> SourceCompilation {
+    // Only a range read answers for a slice; every other kind asks for the whole document.
+    let range = match &request.task {
+        AnalysisTask::Tokens(TokensRead {
+            kind: TokensKind::Range(range),
+            ..
+        }) => Some(*range),
+        _ => None,
+    };
     let response = (|| -> Result<lsp_types::SemanticTokens> {
         request.sources.cancellation.ensure_active()?;
         let graph = source_graph(disk, graphs, &request, false)?;
-        let super::jobs::AnalysisTask::Tokens(read) = &request.task else {
-            unreachable!()
-        };
         let tokens = crate::tokens::tokens(
             &request.source,
             &graph,
-            match read.kind {
-                super::jobs::TokensKind::Range(range) => Some(range),
-                _ => None,
-            },
+            range,
             &request.sources.cancellation,
         )?;
         request.sources.cancellation.ensure_active()?;
         Ok(tokens)
     })()
     .map_err(SourceFailure::of);
-    let super::jobs::AnalysisTask::Tokens(read) = request.task else {
-        unreachable!()
+    let AnalysisTask::Tokens(read) = request.task else {
+        unreachable!("the analysis lane tokenizes only a tokens request")
     };
     SourceCompilation::Tokens {
         id: request.id,
@@ -189,7 +186,7 @@ fn source_completion(
     } else {
         None
     };
-    let mut items = if import {
+    let mut candidates = if import {
         crate::query::source_import_completion(
             graph.as_deref().expect("an import reads its graph"),
             &names,
@@ -200,8 +197,8 @@ fn source_completion(
     } else {
         None
     };
-    if items.is_none() && name {
-        items = crate::query::source_name_completion(
+    if candidates.is_none() && name {
+        candidates = crate::query::source_name_completion(
             graph.as_deref(),
             &names,
             source,
@@ -209,8 +206,8 @@ fn source_completion(
             cancellation,
         )?;
     }
-    if items.is_none() {
-        items = crate::query::source_member_completion(
+    if candidates.is_none() {
+        candidates = crate::query::source_member_completion(
             graph.as_deref(),
             &names,
             source,
@@ -219,7 +216,9 @@ fn source_completion(
         )?;
     }
     cancellation.ensure_active()?;
-    Ok(items.map(|items| SourceReply::Completion(lsp_types::CompletionResponse::Array(items))))
+    Ok(candidates.map(|candidates| {
+        SourceReply::Completion(lsp_types::CompletionResponse::Array(candidates))
+    }))
 }
 
 #[cfg(test)]
@@ -255,7 +254,6 @@ mod tests {
             view: SourceView::default(),
             source,
             package_locations: None,
-            package_sources: None,
             task: super::super::jobs::AnalysisTask::Query {
                 cursor,
                 query: crate::protocol::SourceQuery::References(lsp_types::ReferenceParams {

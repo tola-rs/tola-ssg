@@ -5,38 +5,27 @@
 //! writes it.
 
 use lsp_types::{Position, Range, TextEdit};
-use tola_build::diagnostic::{SourcePosition, SourceRange, UnknownField};
+use tola_diagnostic::{SourcePosition, SourceRange, UnknownField};
 use tola_typst::typst::syntax::Source;
-use tola_typst_syntax::names::SourceNames;
+use tola_typst_syntax::names::{OccurrenceKind, SourceNames};
 
 use crate::server::HostSections;
 
-use super::edits::{byte_range, protocol_line};
+use super::Fix;
+use super::edits::{protocol_line, removal};
+use crate::position::byte_range;
 
-/// The fixes one unknown-configuration-field report justifies: the declared key that replaces the
-/// misspelling, and the removal of the line that writes the unknown key.
+/// One group per unknown field: its correction first, then removal of the line that writes it.
 pub(super) fn configuration_fixes(
     source: &Source,
     host: HostSections,
     fields: &[UnknownField],
-) -> Vec<(String, Vec<TextEdit>)> {
+) -> Vec<Vec<Fix>> {
     let text = source.text();
     let mut fixes = Vec::new();
     for field in fields {
-        // The configuration reader counts lines by `\n` alone, so its positions are
-        // read through that model rather than the protocol's own.
-        let offset = field
-            .written
-            .and_then(|range| config_byte_offset(text, range.start))
-            .or_else(|| {
-                let start = config_line_start(text, field.line?)?;
-                text[start..]
-                    .char_indices()
-                    .find(|(_, character)| !character.is_whitespace() && *character != '[')
-                    .map(|(column, _)| start + column)
-            });
-        let Some((bytes, path)) =
-            offset.and_then(|offset| crate::query::config::key_path(source.lines(), offset))
+        let Some((bytes, path)) = field_key_offset(text, field)
+            .and_then(|offset| crate::query::config::key_path(source.lines(), offset))
         else {
             continue;
         };
@@ -56,11 +45,12 @@ pub(super) fn configuration_fixes(
         {
             continue;
         }
+        let mut alternatives = Vec::new();
         if let Some(written) = &written
             && let Some(range) = crate::position::utf16_range(source.lines(), written.clone())
             && let Some(suggestion) = crate::query::config::corrected(host, &field.name)
         {
-            fixes.push((
+            alternatives.push((
                 format!("change `{}` to `{suggestion}`", field.name),
                 vec![TextEdit {
                     range,
@@ -73,14 +63,9 @@ pub(super) fn configuration_fixes(
             && !writes_a_table_header(&text[line.clone()])
             && let Some(range) = crate::position::utf16_range(source.lines(), line)
         {
-            fixes.push((
-                format!("remove `{}`", field.name),
-                vec![TextEdit {
-                    range,
-                    new_text: String::new(),
-                }],
-            ));
+            alternatives.push((format!("remove `{}`", field.name), vec![removal(range)]));
         }
+        fixes.push(alternatives);
     }
     fixes
 }
@@ -95,8 +80,8 @@ pub(super) fn unknown_variable_fixes(
     parsed_names: &mut Option<SourceNames>,
     reported: Range,
     name: &str,
-) -> Vec<(String, Vec<TextEdit>)> {
-    let Some(bytes) = byte_range(source, reported) else {
+) -> Vec<Fix> {
+    let Some(bytes) = byte_range(source.lines(), reported) else {
         return Vec::new();
     };
     if !tola_typst_syntax::typst_syntax::is_ident(name)
@@ -104,17 +89,13 @@ pub(super) fn unknown_variable_fixes(
     {
         return Vec::new();
     }
-    let names = match source_names {
-        Some(names) => names,
-        None => parsed_names.get_or_insert_with(|| SourceNames::new(source.clone())),
+    let names = super::names_index(source, source_names, parsed_names);
+    let Some(occurrence) = names.occurrence(bytes.start) else {
+        return Vec::new();
     };
-    if names.occurrence(bytes.start).is_none_or(|occurrence| {
-        occurrence.range != bytes
-            || !matches!(
-                occurrence.kind,
-                tola_typst_syntax::names::OccurrenceKind::Name
-            )
-    }) || names.declared_at(bytes.start).is_some()
+    if occurrence.range != bytes
+        || !matches!(occurrence.kind, OccurrenceKind::Name)
+        || names.declared_at(bytes.start).is_some()
     {
         return Vec::new();
     }
@@ -143,6 +124,20 @@ pub(super) fn unknown_variable_fixes(
     fixes
 }
 
+/// The byte offset the reported field's key starts at.
+fn field_key_offset(text: &str, field: &UnknownField) -> Option<usize> {
+    field
+        .written
+        .and_then(|range| config_byte_offset(text, range.start))
+        .or_else(|| {
+            let start = config_line_start(text, field.line?.checked_sub(1)?)?;
+            text[start..]
+                .char_indices()
+                .find(|(_, character)| !character.is_whitespace() && *character != '[')
+                .map(|(column, _)| start + column)
+        })
+}
+
 /// The byte range one configuration span addresses, in the model the configuration reader uses:
 /// lines break on `\n` alone, and a column counts UTF-16 units from that line's start.
 fn config_bytes(text: &str, range: SourceRange) -> Option<std::ops::Range<usize>> {
@@ -153,11 +148,7 @@ fn config_bytes(text: &str, range: SourceRange) -> Option<std::ops::Range<usize>
 
 /// The byte offset one configuration position addresses.
 fn config_byte_offset(text: &str, at: SourcePosition) -> Option<usize> {
-    let mut start = 0;
-    for _ in 0..at.line {
-        let newline = text[start..].find('\n')?;
-        start += newline + 1;
-    }
+    let start = config_line_start(text, at.line)?;
     let end = text[start..]
         .find('\n')
         .map_or(text.len(), |newline| start + newline);
@@ -183,17 +174,15 @@ fn config_line(text: &str, byte: usize) -> usize {
         + 1
 }
 
-/// The byte offset one one-based line of the configuration reader's model starts at.
-fn config_line_start(text: &str, line: usize) -> Option<usize> {
-    if line == 0 {
-        return None;
-    }
+/// The byte offset the configuration reader's line model gives the start of zero-based line
+/// `index`.
+fn config_line_start(text: &str, index: usize) -> Option<usize> {
     let mut start = 0;
-    for _ in 1..line {
+    for _ in 0..index {
         let newline = text[start..].find('\n')?;
         start += newline + 1;
     }
-    (start <= text.len()).then_some(start)
+    Some(start)
 }
 
 /// Whether the line a key was reported on writes a table header, whose removal would leave every
@@ -207,11 +196,10 @@ mod tests {
     use super::*;
     use crate::code_actions::tests::{actions, actions_at, edits, field};
     use lsp_types::Position;
-    /// A correction is offered only where the echoed cause still describes the text: a header
-    /// line, an out-of-range line, a stale echo, and a name the language cannot declare all offer
-    /// nothing, so a client never applies an edit to a document it no longer holds.
+
+    /// A correction is offered only while the echoed cause still describes the text.
     #[test]
-    fn stale_or_unaddressable_causes_offer_no_fix() {
+    fn stale_unaddressable_causes_no_fix() {
         // Rows: (document, echoed cause, requested position, why no fix applies).
         let cases: [(&str, serde_json::Value, Option<Range>, &str); 6] = [
             (

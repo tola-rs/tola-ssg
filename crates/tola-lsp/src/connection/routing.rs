@@ -3,22 +3,31 @@
 use std::io::Write;
 use std::ops::ControlFlow;
 
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
 use lsp_server::{ErrorCode, Notification, Request, RequestId, Response};
 use lsp_types::notification::{self, Notification as LspNotification};
 use lsp_types::{LogMessageParams, MessageType, NumberOrString, Uri};
 use tola_build::cancellation::{BuildCancellation, BuildCanceller};
-use tola_build::diagnostic::Diagnostic;
+use tola_diagnostic::Diagnostic;
 
 use crate::protocol::{CheckProgress, ClientRequest};
 
 use super::local_requests::is_untitled;
-use super::replies::{CANCELLED_ERROR, error_response};
+use super::replies::{CANCELLED_ERROR, REVISION_CHANGED_ERROR, SHUTDOWN_ERROR, error_response};
 use super::{Connection, PendingRequest, Phase};
 
 const MAX_SOURCE_REQUESTS: usize = 64;
 
 const SERVER_BUSY_ERROR_CODE: i32 = -32000;
+
+/// Why the connection had to stop.
+#[derive(Debug, thiserror::Error)]
+pub(super) enum ConnectionError {
+    #[error("LSP exit received before shutdown")]
+    ExitBeforeShutdown,
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
 
 /// One notification the connection could not read, named in the editor's log.
 pub(super) enum InvalidNotification {
@@ -45,6 +54,13 @@ impl InvalidNotification {
     }
 }
 
+/// One source request this connection admitted: the serial its reply must carry, and the token
+/// that cancels the job answering it.
+pub(super) struct SourceAdmission {
+    pub(super) serial: u64,
+    pub(super) cancellation: BuildCancellation,
+}
+
 impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
     pub(super) fn request(&mut self, request: Request) -> Result<()> {
         if let Some((code, message)) = self.phase.request_error(&request.method) {
@@ -66,17 +82,8 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
         match request {
             ClientRequest::Initialize(parameters) => self.initialize(id, *parameters),
             ClientRequest::Shutdown => {
-                self.checking.cancel();
-                self.cancel_selection();
-                self.cancel_requests(
-                    ErrorCode::RequestCanceled,
-                    "language server is shutting down",
-                )?;
-                self.queries.clear();
-                self.analyses.clear();
-                self.check = None;
+                self.cancel_pending_work(SHUTDOWN_ERROR)?;
                 self.running_check = None;
-                self.end_progress()?;
                 self.unwatch_sources()?;
                 self.phase = Phase::Shutdown;
                 self.reply(Response::new_ok(id, ()))
@@ -109,7 +116,7 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
     }
 
     /// Register one source request, or reply with its rejection and return `None`.
-    pub(super) fn admit(&mut self, id: &RequestId) -> Result<Option<(u64, BuildCancellation)>> {
+    pub(super) fn admit(&mut self, id: &RequestId) -> Result<Option<SourceAdmission>> {
         if self.requests.len() >= MAX_SOURCE_REQUESTS {
             self.reply(Response::new_err(
                 id.clone(),
@@ -118,10 +125,7 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
             ))?;
             return Ok(None);
         }
-        self.serial = self
-            .serial
-            .checked_add(1)
-            .context("source request counter exhausted")?;
+        self.serial += 1;
         let canceller = BuildCanceller::new();
         let cancellation = canceller.token();
         self.requests.insert(
@@ -134,13 +138,19 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
                 waiting: None,
             },
         );
-        Ok(Some((self.serial, cancellation)))
+        Ok(Some(SourceAdmission {
+            serial: self.serial,
+            cancellation,
+        }))
     }
 
-    pub(super) fn notification(&mut self, message: Notification) -> Result<ControlFlow<()>> {
+    pub(super) fn notification(
+        &mut self,
+        message: Notification,
+    ) -> std::result::Result<ControlFlow<()>, ConnectionError> {
         if message.method == notification::Exit::METHOD {
             if !self.is_shutdown() {
-                bail!("LSP exit received before shutdown");
+                return Err(ConnectionError::ExitBeforeShutdown);
             }
             return Ok(ControlFlow::Break(()));
         }
@@ -159,7 +169,6 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
             }) {
                 self.checking.cancel();
                 self.check = None;
-                self.check_due = None;
                 self.running_check = None;
                 self.end_progress()?;
                 self.report_source_check(CheckProgress::NotChecked)?;
@@ -191,6 +200,15 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
         {
             return Ok(ControlFlow::Continue(()));
         }
+        self.apply_document_notification(message)?;
+        Ok(ControlFlow::Continue(()))
+    }
+
+    /// Apply one document notification: the buffer it changes, and what that change costs.
+    ///
+    /// A change to a document no check reads answers from that buffer alone, so its own requests
+    /// are refused and the revision every other answer was computed in stands.
+    fn apply_document_notification(&mut self, message: Notification) -> Result<()> {
         let uri = message
             .params
             .get("textDocument")
@@ -222,7 +240,7 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
             }
             Err(_) => self.log_invalid_notification(InvalidNotification::FileChange)?,
         }
-        Ok(ControlFlow::Continue(()))
+        Ok(())
     }
 
     fn cancel_request(&mut self, message: Notification) -> Result<()> {
@@ -248,15 +266,15 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
         Ok(())
     }
 
-    pub(super) fn cancel_requests(&mut self, code: ErrorCode, message: &str) -> Result<()> {
+    pub(super) fn cancel_requests(&mut self, refusal: (ErrorCode, &str)) -> Result<()> {
         // Cancel every job before writing: a disconnected client must not leave
         // a compiler running after response delivery fails partway through.
         for request in self.requests.values() {
             request.canceller.cancel();
         }
         self.discard_cancelled_jobs();
-        for (id, _) in std::mem::take(&mut self.requests) {
-            self.reject(id, code, message)?;
+        for id in std::mem::take(&mut self.requests).into_keys() {
+            self.reply(error_response(id, refusal))?;
         }
         Ok(())
     }
@@ -282,10 +300,7 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
         }
         self.discard_cancelled_jobs();
         for id in ids {
-            self.reply(super::replies::error_response(
-                id,
-                super::replies::REVISION_CHANGED_ERROR,
-            ))?;
+            self.reply(error_response(id, REVISION_CHANGED_ERROR))?;
         }
         Ok(())
     }

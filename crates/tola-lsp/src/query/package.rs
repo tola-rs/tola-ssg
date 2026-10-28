@@ -2,18 +2,23 @@
 //! without requiring a successful Bundle.
 
 use std::path::Path;
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use lsp_types::{
     CompletionItem, CompletionItemKind, CompletionResponse, CompletionTextEdit,
     GotoDefinitionResponse, Location, TextEdit, Uri,
 };
+use tola_build::cancellation::BuildCancellation;
 use tola_build::config::ResolvedSiteConfig;
 use tola_packages::{BuiltinPackage, TOLA_NAMESPACE, builtin_package, builtin_packages};
+use tola_typst::typst::foundations::Repr;
 use tola_typst::typst::syntax::package::{PackageManifest, PackageSpec, PackageVersion};
 use tola_typst::typst::syntax::{
     FileId, LinkedNode, RootedPath, Side, Source, SyntaxKind, VirtualPath, VirtualRoot, ast,
 };
+use tola_typst_syntax::names::SourceNames;
 
 use crate::packages::{PackageAccess, importable_packages, installed_versions};
 use crate::position;
@@ -28,6 +33,16 @@ struct ImportPath<'a> {
     unterminated: bool,
 }
 
+/// One path argument as far as the cursor has written it, in the bytes a completion edits.
+struct WrittenPath {
+    /// The content bytes a completion replaces.
+    range: std::ops::Range<usize>,
+    /// Whether the string is still open, so the edit writes its closing quote.
+    unterminated: bool,
+    /// The file format the call's parameter accepts, when it narrows suggestions.
+    extension: Option<&'static str>,
+}
+
 fn import_path(source: &Source, cursor: usize) -> Option<ImportPath<'_>> {
     let node = LinkedNode::new(source.root()).leaf_at(cursor, Side::Before)?;
     let unclosed = node.kind() == SyntaxKind::Error
@@ -40,13 +55,7 @@ fn import_path(source: &Source, cursor: usize) -> Option<ImportPath<'_>> {
         return None;
     }
     let start = node.range().start + 1;
-    // A string may legally span lines, but an import path is written on one. A token that
-    // reaches past this line leaves the path unfinished here: the edit closes it without
-    // replacing the source below, which the token may have swallowed.
-    let text = source.text();
-    let line_end = text[start..node.range().end]
-        .find(['\r', '\n'])
-        .map_or(node.range().end, |offset| start + offset);
+    let line_end = string_line_end(source.text(), start, node.range().end);
     let unterminated = unclosed || line_end < node.range().end;
     let end = if unterminated {
         line_end
@@ -60,6 +69,26 @@ fn import_path(source: &Source, cursor: usize) -> Option<ImportPath<'_>> {
     })
 }
 
+/// A path is written on one line, so an unfinished string's edit stops at its own line break.
+fn string_line_end(text: &str, start: usize, token_end: usize) -> usize {
+    text[start..token_end]
+        .find(['\r', '\n'])
+        .map_or(token_end, |offset| start + offset)
+}
+
+/// The edit text one import completion writes: a string the author has not closed takes the
+/// closing quote.
+fn with_closing_quote(mut content: String, unterminated: bool) -> String {
+    if unterminated {
+        content.push('"');
+    }
+    content
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "package queries retain source, client projection, and open files"
+)]
 pub(super) fn respond(
     config: &ResolvedSiteConfig,
     package_access: &PackageAccess<'_>,
@@ -67,137 +96,207 @@ pub(super) fn respond(
     cursor: usize,
     query: &SourceQuery,
     client_root: &crate::uri::ClientRoot,
+    cancellation: &BuildCancellation,
+    overrides: &[(PathBuf, Arc<str>)],
+    indexed_names: Option<&SourceNames>,
 ) -> Result<Option<SourceReply>> {
-    let Some(ImportPath {
-        node,
-        path,
-        unterminated,
-    }) = import_path(source, cursor)
-    else {
-        if matches!(query, SourceQuery::Completion(_))
-            && let Some((path, unterminated)) = reader_path(source, cursor)
-            && let Some(items) = site_path_completion(
+    let completing = matches!(query, SourceQuery::Completion(_));
+    let import = import_path(source, cursor);
+    // A completion answers the spelling being written, before a definition or a hover answers it.
+    if completing {
+        let offered = match &import {
+            Some(import) => import_completions(
+                config,
+                package_access,
+                source,
+                cursor,
+                import,
+                cancellation,
+                overrides,
+            )?,
+            None => reader_path_completions(
                 config,
                 source,
                 cursor,
-                path.start,
-                path.end,
-                unterminated,
-                None,
-            )?
-        {
-            return Ok(Some(SourceReply::Completion(CompletionResponse::Array(
-                items,
-            ))));
+                indexed_names,
+                cancellation,
+                overrides,
+                &package_access.boundary,
+            )?,
+        };
+        if let Some(items) = offered {
+            let reply = SourceReply::Completion(CompletionResponse::Array(items));
+            return Ok(Some(reply));
         }
+    }
+    let Some(import) = import else {
         return Ok(None);
     };
-    let literal = node.cast::<ast::Str>();
-    let (content_start, content_end) = (path.start, path.end);
-    let prefix = &source.text()[content_start..cursor];
-    if matches!(query, SourceQuery::Completion(_)) && prefix.contains(':') {
-        let version_start = content_start + prefix.rfind(':').expect("a version separator") + 1;
-        return Ok(Some(SourceReply::Completion(CompletionResponse::Array(
-            version_completions(
-                package_access,
-                source,
-                prefix,
-                version_start,
-                content_end,
-                unterminated,
-            ),
-        ))));
+    if let Some(reply) = local_module_answer(
+        config,
+        package_access,
+        source,
+        &import,
+        query,
+        client_root,
+        overrides,
+    )? {
+        return Ok(Some(reply));
     }
-    // A bare quote names a file the site has, so the completion that answers it leads: the
-    // package catalogue joins only once the author writes the `@` a package spec starts with.
-    if matches!(query, SourceQuery::Completion(_)) && prefix.starts_with('@') {
-        let range = position::utf16_range(source.lines(), content_start..content_end)
-            .context("invalid package completion range")?;
-        let mut items = Vec::new();
-        for (spec, package_description) in importable_packages(package_access) {
-            let name = spec.to_string();
-            if !name.starts_with(prefix) {
-                continue;
-            }
-            let (description, documentation) = match builtin_package(&spec) {
-                Some(package) => {
-                    let manifest = manifest(&package)?;
-                    let description = description(&package, &manifest)?;
-                    let documentation = package_docs(&package, &name, description.as_deref());
-                    (
-                        description,
-                        Some(super::markdown_documentation(documentation)),
-                    )
-                }
-                None => {
-                    let description = package_description.map(|text| text.to_string());
-                    let documentation = description.as_deref().map(super::markdown_documentation);
-                    (description, documentation)
-                }
-            };
-            let new_text = if unterminated {
-                format!("{name}\"")
-            } else {
-                name.clone()
-            };
-            items.push(CompletionItem {
-                kind: Some(CompletionItemKind::MODULE),
-                detail: description,
-                documentation,
-                text_edit: Some(CompletionTextEdit::Edit(TextEdit { range, new_text })),
-                label: name,
-                ..CompletionItem::default()
-            });
-        }
-        items.sort_unstable_by(|left, right| left.label.cmp(&right.label));
-        return Ok(Some(SourceReply::Completion(CompletionResponse::Array(
-            items,
-        ))));
-    }
-    // A bare quote that names no package names a site file. The spelling the author typed
-    // decides the labels, and the edit replaces only the string's content between its quotes.
-    if matches!(query, SourceQuery::Completion(_))
-        && let Some(items) = site_path_completion(
-            config,
+    builtin_answer(config, package_access, source, &import, query, client_root)
+}
+
+/// The completions a path argument the site's own calls read offers, when the cursor writes one.
+fn reader_path_completions(
+    config: &ResolvedSiteConfig,
+    source: &Source,
+    cursor: usize,
+    indexed_names: Option<&SourceNames>,
+    cancellation: &BuildCancellation,
+    overrides: &[(PathBuf, Arc<str>)],
+    boundary: &tola_typst::SourceBoundary,
+) -> Result<Option<Vec<CompletionItem>>> {
+    let Some(written) = reader_path(source, cursor, indexed_names) else {
+        return Ok(None);
+    };
+    site_path_completion(
+        config,
+        source,
+        cursor,
+        &written,
+        cancellation,
+        overrides,
+        boundary,
+    )
+}
+
+/// The completions one import path offers; `None` when the path names a package source.
+fn import_completions(
+    config: &ResolvedSiteConfig,
+    package_access: &PackageAccess<'_>,
+    source: &Source,
+    cursor: usize,
+    import: &ImportPath<'_>,
+    cancellation: &BuildCancellation,
+    overrides: &[(PathBuf, Arc<str>)],
+) -> Result<Option<Vec<CompletionItem>>> {
+    let prefix = &source.text()[import.path.start..cursor];
+    if prefix.starts_with('@') && prefix.contains(':') {
+        let version_start = import.path.start + prefix.rfind(':').expect("a version separator") + 1;
+        return Ok(Some(version_completions(
+            package_access,
             source,
-            cursor,
-            content_start,
-            content_end,
-            unterminated,
-            Some("typ"),
-        )?
-    {
-        return Ok(Some(SourceReply::Completion(CompletionResponse::Array(
-            items,
-        ))));
+            prefix,
+            version_start,
+            import.path.end,
+            import.unterminated,
+        )));
     }
-    let Some(literal) = literal else {
+    if prefix.starts_with('@') {
+        return Ok(Some(spec_completions(
+            package_access,
+            source,
+            import.path.clone(),
+            prefix,
+            import.unterminated,
+        )?));
+    }
+    // A bare quote names a site file: the typed spelling decides the labels and the edit.
+    let written = WrittenPath {
+        range: import.path.clone(),
+        unterminated: import.unterminated,
+        extension: Some("typ"),
+    };
+    site_path_completion(
+        config,
+        source,
+        cursor,
+        &written,
+        cancellation,
+        overrides,
+        &package_access.boundary,
+    )
+}
+
+/// The answer a path naming a locally declared module source gets, when it names one.
+fn local_module_answer(
+    config: &ResolvedSiteConfig,
+    package_access: &PackageAccess<'_>,
+    source: &Source,
+    import: &ImportPath<'_>,
+    query: &SourceQuery,
+    client_root: &crate::uri::ClientRoot,
+    overrides: &[(PathBuf, Arc<str>)],
+) -> Result<Option<SourceReply>> {
+    let Some(literal) = import.node.cast::<ast::Str>() else {
         return Ok(None);
     };
-    let Some((package, id, description)) = imported_source(source.id(), &literal.get())? else {
+    let written = literal.get();
+    let Some(id) = local_imported_source(source.id(), &written, package_access) else {
+        return Ok(None);
+    };
+    match query {
+        SourceQuery::Definition(_) => {
+            if super::context::load_source(id, config, overrides, package_access)?.is_none() {
+                return Ok(Some(super::unavailable(query)));
+            }
+            let Some(path) = crate::identity::package_file_path_with_packages(
+                id,
+                &package_access.locations,
+                &package_access.boundary,
+                &package_access.local_packages,
+            ) else {
+                return Ok(Some(super::unavailable(query)));
+            };
+            Ok(Some(definition_reply(
+                client_root.address(&path)?,
+                lsp_types::Range::default(),
+            )))
+        }
+        SourceQuery::Hover(_) => Ok(Some(import_path_hover(
+            source,
+            &import.node,
+            format!("Declared local module source `{written}`."),
+        ))),
+        _ => Ok(Some(super::unavailable(query))),
+    }
+}
+
+/// The answer a path naming a builtin package source gets; `None` when it names none.
+fn builtin_answer(
+    config: &ResolvedSiteConfig,
+    package_access: &PackageAccess<'_>,
+    source: &Source,
+    import: &ImportPath<'_>,
+    query: &SourceQuery,
+    client_root: &crate::uri::ClientRoot,
+) -> Result<Option<SourceReply>> {
+    let Some(literal) = import.node.cast::<ast::Str>() else {
+        return Ok(None);
+    };
+    let written = literal.get();
+    let Some((package, id, description)) = imported_source(source.id(), &written)? else {
         if matches!(query, SourceQuery::Hover(_))
-            && let Ok(spec) = literal
-                .get()
-                .parse::<tola_typst::typst::syntax::package::PackageSpec>()
+            && let Ok(spec) = written.parse::<PackageSpec>()
         {
-            return Ok(Some(SourceReply::Hover(Some(
-                crate::protocol::markdown_hover(
-                    spec_hover(package_access, &spec),
-                    position::utf16_range(source.lines(), node.range()),
-                ),
-            ))));
+            return Ok(Some(import_path_hover(
+                source,
+                &import.node,
+                spec_hover(package_access, &spec),
+            )));
         }
         // Immutable package navigation must never fall through to disk/package
         // lookup for a path absent from the builtin registry.
-        return Ok((source.id().root() != &VirtualRoot::Project).then(|| super::unavailable(query)));
+        return Ok(crate::identity::embedded_source(source.id())
+            .is_some()
+            .then(|| super::unavailable(query)));
     };
     match query {
-        SourceQuery::Hover(_) => Ok(Some(SourceReply::Hover(Some(
-            crate::protocol::markdown_hover(
-                package_docs(&package, &literal.get(), description.as_deref()),
-                position::utf16_range(source.lines(), node.range()),
-            ),
-        )))),
+        SourceQuery::Hover(_) => Ok(Some(import_path_hover(
+            source,
+            &import.node,
+            package_docs(&package, &written, description.as_deref()),
+        ))),
         SourceQuery::Definition(_) => {
             let target = Source::new(
                 id,
@@ -207,39 +306,121 @@ pub(super) fn respond(
             );
             let range = position::utf16_range(target.lines(), 0..target.text().len())
                 .context("invalid embedded source range")?;
-            Ok(Some(SourceReply::Definition(Some(
-                GotoDefinitionResponse::Scalar(Location {
-                    uri: definition_uri(id, target.text(), config.get_root(), client_root)?,
-                    range,
-                }),
-            ))))
+            Ok(Some(definition_reply(
+                definition_uri(id, config.get_root(), client_root)?,
+                range,
+            )))
         }
         _ => Ok(Some(super::unavailable(query))),
     }
 }
 
-/// The editor's address for one definition target.
-///
-/// A package document has no site path, so a file-only client reaches it through the mirror this
-/// site publishes: the definition names that file, addressed in the spelling the client named its
-/// root by. A site whose mirror is absent or differs from the source this Tola ships keeps the
-/// package URI, which is what a client that knows the scheme opens. A site file is a path, and is
-/// addressed in the client's spelling for the same reason.
+/// The import-spec completions one site offers for the `@` prefix the author writes.
+fn spec_completions(
+    package_access: &PackageAccess<'_>,
+    source: &Source,
+    path: std::ops::Range<usize>,
+    prefix: &str,
+    unterminated: bool,
+) -> Result<Vec<CompletionItem>> {
+    let range =
+        position::utf16_range(source.lines(), path).context("invalid package completion range")?;
+    let mut items = Vec::new();
+    for (spec, package_description) in importable_packages(package_access) {
+        let name = spec.to_string();
+        if !name.starts_with(prefix) {
+            continue;
+        }
+        let (description, documentation) = match builtin_package(&spec) {
+            Some(package) => {
+                let manifest = manifest(&package)?;
+                let description = description(&package, &manifest)?;
+                let documentation = package_docs(&package, &name, description.as_deref());
+                (
+                    description,
+                    Some(super::markdown_documentation(documentation)),
+                )
+            }
+            None => {
+                let description = package_description.map(|text| text.to_string());
+                let documentation = description.as_deref().map(super::markdown_documentation);
+                (description, documentation)
+            }
+        };
+        let new_text = with_closing_quote(name.clone(), unterminated);
+        items.push(CompletionItem {
+            kind: Some(CompletionItemKind::MODULE),
+            detail: description,
+            documentation,
+            text_edit: Some(CompletionTextEdit::Edit(TextEdit { range, new_text })),
+            label: name,
+            ..CompletionItem::default()
+        });
+    }
+    items.sort_unstable_by(|left, right| left.label.cmp(&right.label));
+    Ok(items)
+}
+
+/// One definition reply: the file the import names and the range the client selects in it.
+fn definition_reply(uri: Uri, range: lsp_types::Range) -> SourceReply {
+    SourceReply::Definition(Some(GotoDefinitionResponse::Scalar(Location {
+        uri,
+        range,
+    })))
+}
+
+fn import_path_hover(source: &Source, node: &LinkedNode<'_>, text: String) -> SourceReply {
+    SourceReply::Hover(Some(crate::protocol::markdown_hover(
+        text,
+        position::utf16_range(source.lines(), node.range()),
+    )))
+}
+
+fn local_imported_source(
+    from: FileId,
+    written: &str,
+    access: &PackageAccess<'_>,
+) -> Option<FileId> {
+    if written.starts_with('@') {
+        let spec = written.parse::<PackageSpec>().ok()?;
+        return access
+            .local_packages
+            .package(&spec)
+            .map(tola_typst::LocalPackage::entry_id);
+    }
+    let VirtualRoot::Package(spec) = from.root() else {
+        return None;
+    };
+    access.local_packages.package(spec)?;
+    tola_typst::typst::foundations::PathOrStr::Str(written.into())
+        .resolve(from)
+        .ok()
+        .map(|path| path.intern())
+}
+
+/// The mirror file an editor reads one builtin package source at, when it holds that source.
+fn verified_package_view(id: FileId, directory: &Path) -> Option<PathBuf> {
+    let source = crate::identity::embedded_source(id)?;
+    let path = crate::identity::package_view_path(id, directory)?;
+    crate::identity::verify_package_view(&path, &source)
+        .ok()
+        .map(|()| path)
+}
+
+/// The client's address for one definition target; a package with no verified mirror keeps its URI.
 fn definition_uri(
     id: FileId,
-    source: &str,
-    source_root: &Path,
+    site_root: &Path,
     client_root: &crate::uri::ClientRoot,
 ) -> Result<Uri> {
-    let resolved = source_root;
-    if !matches!(id.root(), VirtualRoot::Package(_)) {
-        return client_root.address(&resolved.join(id.vpath().get_without_slash()));
-    }
-    let view = resolved.join(tola_build::filesystem::PACKAGE_MIRROR_DIRECTORY);
-    let mirror = crate::identity::package_view_path(id, &view)?;
-    match crate::identity::verify_package_view(&mirror, source) {
-        Ok(()) => client_root.address(&mirror),
-        Err(_) => crate::identity::source_uri(id, resolved),
+    let VirtualRoot::Package(_) = id.root() else {
+        return crate::identity::client_uri(id, site_root, client_root)
+            .context("a site file has a client address");
+    };
+    let view = tola_build::filesystem::layout::builtin_packages(site_root);
+    match verified_package_view(id, &view) {
+        Some(mirror) => Ok(client_root.address(&mirror)?),
+        None => Ok(crate::identity::source_uri(id, site_root)?),
     }
 }
 
@@ -248,20 +429,19 @@ fn version_completions(
     source: &Source,
     prefix: &str,
     version_start: usize,
-    content_end: usize,
+    path_end: usize,
     unterminated: bool,
 ) -> Vec<CompletionItem> {
-    let Some((namespace, name)) = namespace_and_name(prefix) else {
+    let Some((written, typed)) = prefix.split_once(':') else {
+        return Vec::new();
+    };
+    let typed = typed.trim_start();
+    let Some((namespace, name)) = namespace_and_name(written) else {
         return Vec::new();
     };
     let mut versions: Vec<PackageVersion> = installed_versions(package_access, namespace, name);
-    if namespace == "preview" {
-        versions.extend(
-            published_versions(package_access.published, namespace, name)
-                .into_iter()
-                .flatten(),
-        );
-    }
+    versions
+        .extend(published_versions(package_access.published, namespace, name).unwrap_or_default());
     if namespace == TOLA_NAMESPACE {
         versions.extend(
             builtin_packages()
@@ -272,14 +452,9 @@ fn version_completions(
                 .map(|package| package.spec().version),
         );
     }
-    // Versions order by their numbers, not by their spelling: `0.9.0` precedes `0.10.0`.
     versions.sort();
     versions.dedup();
-    let typed = prefix
-        .split_once(':')
-        .map_or("", |(_, version)| version)
-        .trim_start();
-    let Some(range) = position::utf16_range(source.lines(), version_start..content_end) else {
+    let Some(range) = position::utf16_range(source.lines(), version_start..path_end) else {
         return Vec::new();
     };
     versions
@@ -287,11 +462,7 @@ fn version_completions(
         .filter(|version| version.to_string().starts_with(typed))
         .map(|version| {
             let version = version.to_string();
-            let new_text = if unterminated {
-                format!("{version}\"")
-            } else {
-                version.clone()
-            };
+            let new_text = with_closing_quote(version.clone(), unterminated);
             CompletionItem {
                 kind: Some(CompletionItemKind::VALUE),
                 detail: Some(format!("@{namespace}/{name}")),
@@ -303,10 +474,8 @@ fn version_completions(
         .collect()
 }
 
-fn namespace_and_name(prefix: &str) -> Option<(&str, &str)> {
-    let (written, _) = prefix.split_once(':')?;
-    let remainder = written.strip_prefix('@')?;
-    let (namespace, name) = remainder.split_once('/')?;
+fn namespace_and_name(written: &str) -> Option<(&str, &str)> {
+    let (namespace, name) = written.strip_prefix('@')?.split_once('/')?;
     (!namespace.is_empty() && !name.is_empty()).then_some((namespace, name))
 }
 
@@ -314,9 +483,7 @@ fn namespace_and_name(prefix: &str) -> Option<(&str, &str)> {
 /// Tola does not publish, and a path that already resolves needs no fix.
 pub(crate) fn replacement(source: &Source, cursor: usize) -> Option<TextEdit> {
     let ImportPath { path, .. } = import_path(source, cursor)?;
-    let spec = source.text()[path.clone()]
-        .parse::<tola_typst::typst::syntax::package::PackageSpec>()
-        .ok()?;
+    let spec = source.text()[path.clone()].parse::<PackageSpec>().ok()?;
     if spec.namespace.as_str() != TOLA_NAMESPACE || builtin_package(&spec).is_some() {
         return None;
     }
@@ -332,16 +499,15 @@ pub(crate) fn replacement(source: &Source, cursor: usize) -> Option<TextEdit> {
 }
 
 fn nearest_builtin(name: &str) -> Option<BuiltinPackage> {
-    let packages: Vec<(String, BuiltinPackage)> = builtin_packages()
-        .map(|package| (package.spec().name.to_string(), package))
+    let packages: Vec<BuiltinPackage> = builtin_packages().collect();
+    let names: Vec<String> = packages
+        .iter()
+        .map(|package| package.spec().name.to_string())
         .collect();
-    let closest =
-        tola_typst::spelling::closest(name, packages.iter().map(|(name, _)| name.as_str()))?
-            .to_owned();
+    let closest = tola_typst::spelling::closest(name, names.iter().map(String::as_str))?.to_owned();
     packages
         .into_iter()
-        .find(|(candidate, _)| *candidate == closest)
-        .map(|(_, package)| package)
+        .find(|package| package.spec().name.as_str() == closest)
 }
 
 fn spec_hover(package_access: &PackageAccess<'_>, spec: &PackageSpec) -> String {
@@ -366,7 +532,9 @@ fn spec_hover(package_access: &PackageAccess<'_>, spec: &PackageSpec) -> String 
         Some(versions) => {
             let versions: Vec<String> = versions.iter().map(ToString::to_string).collect();
             text.push_str(&format!("; published: {}.", versions.join(", ")));
-            if let Some(entry) = published_entry(package_access.published, spec) {
+            if let Some(entry) =
+                newest_published_entry(package_access.published, spec.name.as_str())
+            {
                 if let Some(description) = &entry.description {
                     text.push_str(&format!("\n\n{description}"));
                 }
@@ -390,17 +558,14 @@ fn spec_hover(package_access: &PackageAccess<'_>, spec: &PackageSpec) -> String 
     text
 }
 
-/// The published entry a package specification names, or the newest one the index has.
-fn published_entry<'a>(
+/// The newest entry one `@preview` package name has in the published index.
+fn newest_published_entry<'a>(
     published: &'a [PublishedPackage],
-    spec: &PackageSpec,
+    name: &str,
 ) -> Option<&'a PublishedPackage> {
-    if spec.namespace != "preview" {
-        return None;
-    }
     published
         .iter()
-        .filter(|package| package.name == spec.name)
+        .filter(|package| package.name == name)
         .filter_map(|package| {
             let version = package.version.parse::<PackageVersion>().ok()?;
             Some((version, package))
@@ -410,9 +575,6 @@ fn published_entry<'a>(
 }
 
 /// The published versions of one `@preview` package, oldest first.
-///
-/// A version a package specification cannot name is left out: an import resolves by parsing the
-/// specification, so a version the index spells otherwise names no package.
 pub(super) fn published_versions(
     published: &[PublishedPackage],
     namespace: &str,
@@ -494,95 +656,65 @@ fn package_docs(package: &BuiltinPackage, name: &str, description: Option<&str>)
     text
 }
 
-/// The reader path argument the cursor writes, closed or not.
-///
-/// A closed string is the parser's `Str`; an unfinished one is an error token that can swallow
-/// the rest of the program, so the edit is bounded to the line the path is written on. Only the
-/// call's path argument answers: the first positional argument, or a named `path`/`style`.
-fn reader_path(source: &Source, cursor: usize) -> Option<(std::ops::Range<usize>, bool)> {
+/// The reader path argument the cursor writes; an unfinished string's edit ends on its line.
+fn reader_path(
+    source: &Source,
+    cursor: usize,
+    indexed_names: Option<&SourceNames>,
+) -> Option<WrittenPath> {
     let text = source.text();
-    if let Some(argument) = tola_typst_syntax::syntax::path_argument(source, cursor)
-        && argument.base == tola_typst_syntax::syntax::PathBase::File
-    {
-        let line_end = text[argument.range.start..argument.range.end]
-            .find(['\r', '\n'])
-            .map_or(argument.range.end, |offset| argument.range.start + offset);
-        if cursor > line_end {
+    let argument = tola_typst_syntax::syntax::path_argument(source, cursor)?;
+    if argument.base != tola_typst_syntax::syntax::PathBase::File {
+        return None;
+    }
+    if let Some(callee) = &argument.callee {
+        let local_names;
+        let names = match indexed_names {
+            Some(names) => names,
+            None => {
+                local_names = SourceNames::new(source.clone());
+                &local_names
+            }
+        };
+        if names.declared_at(callee.start).is_some() {
             return None;
         }
-        return Some((
-            argument.range.start..line_end,
-            line_end < argument.range.end,
-        ));
     }
-    let node = LinkedNode::new(source.root()).leaf_at(cursor, Side::Before)?;
-    if node.kind() != SyntaxKind::Error || !node.leaf_text().starts_with('"') {
-        return None;
-    }
-    let mut call = node.parent()?.clone();
-    while !call.is::<ast::FuncCall>() {
-        call = call.parent()?.clone();
-    }
-    let call_node = call.clone();
-    let call = call.cast::<ast::FuncCall>()?;
-    let base = tola_typst_syntax::syntax::path_base(call_name(call)?.as_str())?;
-    if base != tola_typst_syntax::syntax::PathBase::File {
-        return None;
-    }
-    let start = node.range().start + 1;
-    let line_end = text[start..node.range().end]
-        .find(['\r', '\n'])
-        .map_or(node.range().end, |offset| start + offset);
-    if cursor < start || cursor > line_end {
-        return None;
-    }
-    let call_start = call_node.range().start;
-    let open = text[call_start..node.range().start].find('(')?;
-    let before = &text[call_start + open + 1..node.range().start];
-    let argument = before.rsplit(',').next().unwrap_or(before).trim_start();
-    if before.contains(',') && !(argument.starts_with("path:") || argument.starts_with("style:")) {
-        return None;
-    }
-    Some((start..line_end, true))
+    let line_end = string_line_end(text, argument.range.start, argument.range.end);
+    (cursor <= line_end).then_some(WrittenPath {
+        range: argument.range.start..line_end,
+        unterminated: text.as_bytes().get(line_end) != Some(&b'"'),
+        extension: argument.extension,
+    })
 }
 
-fn call_name(call: ast::FuncCall<'_>) -> Option<String> {
-    match call.callee() {
-        ast::Expr::Ident(ident) => Some(ident.get().to_string()),
-        ast::Expr::FieldAccess(access) => Some(access.field().get().to_string()),
-        _ => None,
-    }
-}
-
-/// The site files and directories one path argument can name.
-///
-/// A path that starts with `/` is labeled from the site root and every other path from the
-/// writing file's directory, so the label is the spelling Typst's own resolution would use.
-/// `extension` limits an import or include to the files Typst can read there; a reader lists
-/// every site file. The edit replaces only the content between the quotes, which keeps the
-/// client's filter text equal to the path the author typed.
+/// The site files and directories one path argument names, labelled from the root or the writer.
 fn site_path_completion(
     config: &ResolvedSiteConfig,
     source: &Source,
     cursor: usize,
-    start: usize,
-    end: usize,
-    unterminated: bool,
-    extension: Option<&str>,
+    written: &WrittenPath,
+    cancellation: &BuildCancellation,
+    overrides: &[(PathBuf, Arc<str>)],
+    boundary: &tola_typst::SourceBoundary,
 ) -> Result<Option<Vec<CompletionItem>>> {
     if source.id().root() != &VirtualRoot::Project {
         return Ok(None);
     }
-    let prefix = &source.text()[start..cursor];
+    let raw_prefix = &source.text()[written.range.start..cursor];
+    let prefix = tola_typst_syntax::syntax::string_prefix(raw_prefix);
     let rooted = prefix.starts_with('/');
     let Some(directory) = source.id().vpath().parent() else {
         return Ok(Some(Vec::new()));
     };
     let mut directories = std::collections::BTreeSet::new();
     let mut files = Vec::new();
-    for id in crate::files::owned_file_ids(config) {
+    for id in crate::files::completable_file_ids(config, overrides, boundary, cancellation)? {
+        cancellation.ensure_active()?;
         if id == source.id()
-            || extension.is_some_and(|extension| id.vpath().extension() != Some(extension))
+            || written
+                .extension
+                .is_some_and(|extension| id.vpath().extension() != Some(extension))
         {
             continue;
         }
@@ -591,21 +723,25 @@ fn site_path_completion(
         } else {
             id.vpath().relative_from(&directory).to_string()
         };
-        if label.contains(['"', '\\']) {
-            continue;
-        }
         for (index, _) in label.match_indices('/') {
             let directory = &label[..=index];
-            if directory != "/" && directory != prefix {
+            if directory != "/" && directory != prefix.as_str() {
                 directories.insert(directory.to_owned());
             }
         }
         files.push(label);
     }
     files.sort();
-    files.dedup();
-    let range =
-        position::utf16_range(source.lines(), start..end).context("invalid import path range")?;
+    let mut replacement =
+        super::completion::completion_edit(source, cursor, written.range.clone(), String::new())?;
+    if written.unterminated
+        && let CompletionTextEdit::InsertAndReplace(edit) = &replacement
+    {
+        replacement = CompletionTextEdit::Edit(TextEdit {
+            range: edit.replace,
+            new_text: String::new(),
+        });
+    }
     let mut items = Vec::new();
     let labels = directories
         .into_iter()
@@ -616,21 +752,32 @@ fn site_path_completion(
                 .map(|label| (label, CompletionItemKind::FILE)),
         );
     for (label, kind) in labels {
-        let new_text = if unterminated {
-            format!("{label}\"")
+        let quoted = label.as_str().repr();
+        let content = &quoted[1..quoted.len() - 1];
+        let new_text = if written.unterminated {
+            quoted[1..].to_owned()
         } else {
-            label.clone()
+            content.to_owned()
         };
+        let filter = match label.strip_prefix(prefix.as_str()) {
+            Some(suffix) => {
+                let suffix = suffix.repr();
+                format!("{raw_prefix}{}", &suffix[1..suffix.len() - 1])
+            }
+            None => content.to_owned(),
+        };
+        let filter_text = (filter != label).then_some(filter);
+        let mut edit = replacement.clone();
+        crate::completion::set_edit_text(&mut edit, new_text);
         items.push(CompletionItem {
             label,
             kind: Some(kind),
-            text_edit: Some(CompletionTextEdit::Edit(TextEdit { range, new_text })),
+            filter_text,
+            text_edit: Some(edit),
             ..CompletionItem::default()
         });
     }
-    for (index, item) in items.iter_mut().enumerate() {
-        item.sort_text = Some(format!("{index:03}"));
-    }
+    crate::completion::preserve_order(&mut items);
     Ok(Some(items))
 }
 fn imported_source(
@@ -638,7 +785,7 @@ fn imported_source(
     from: &str,
 ) -> Result<Option<(BuiltinPackage, FileId, Option<String>)>> {
     if from.starts_with('@') {
-        let Ok(spec) = from.parse::<tola_typst::typst::syntax::package::PackageSpec>() else {
+        let Ok(spec) = from.parse::<PackageSpec>() else {
             return Ok(None);
         };
         let Some(package) = builtin_package(&spec) else {
@@ -662,8 +809,7 @@ fn imported_source(
     }
 }
 
-/// File-only clients use host-prepared mirrors. Missing or modified mirrors are
-/// errors; this projection never writes them.
+/// Rewrite each package URI to the verified mirror file; a missing mirror keeps the URI.
 pub(crate) fn package_source_definition(
     response: &mut GotoDefinitionResponse,
     directory: &Path,
@@ -707,19 +853,14 @@ fn package_source_uri(
         return Ok(());
     }
     cancellation.ensure_active()?;
-    // The mirror is read where identity resolves it and answered where the client spelled it: the
-    // site's packages live below the resolved root, and the editor named a different spelling of
-    // that same root.
     let id = crate::identity::file_id(uri, client_root.resolved())?;
     if !matches!(id.root(), VirtualRoot::Package(_)) {
         return Ok(());
     }
-    let expected =
-        crate::identity::embedded_source(id).context("unknown embedded package source")?;
-    let path = crate::identity::package_view_path(id, directory)?;
+    let mirror = verified_package_view(id, directory);
     cancellation.ensure_active()?;
     // A missing or stale mirror keeps the package URI; `tola editor doctor` reports it.
-    if crate::identity::verify_package_view(&path, &expected).is_ok() {
+    if let Some(path) = mirror {
         *uri = client_root.address(&path)?;
     }
     Ok(())
@@ -796,15 +937,10 @@ mod tests {
     use tola_build::cancellation::BuildCancellation;
     use tola_build::config::ResolvedSiteConfig;
 
-    fn site_config(root: &Path) -> ResolvedSiteConfig {
+    /// The configuration of a site whose `tola.toml` is empty.
+    fn site_config(root: &Path) -> Arc<ResolvedSiteConfig> {
         std::fs::write(root.join("tola.toml"), "").unwrap();
-        tola_build::config::loading::load_site_config(
-            Some(&root.join("tola.toml")),
-            tola_typst::PackageLocations::from_absolute_roots(None, None).unwrap(),
-            &tola_build::config::loading::BuildOverrides::default(),
-        )
-        .unwrap()
-        .into_config()
+        load_configuration(root).expect("site configuration")
     }
 
     fn site_source(text: &str) -> Source {
@@ -844,6 +980,9 @@ mod tests {
             cursor,
             &query,
             &crate::uri::ClientRoot::new(config.get_root()),
+            &BuildCancellation::new(),
+            &[],
+            None,
         )
         .expect("a reply")
         {
@@ -866,78 +1005,8 @@ mod tests {
         (site_source(&marked.replacen('|', "", 1)), cursor)
     }
 
-    /// A definition into a package is answered as a file in the spelling the client named its root
-    /// by: both the mirror path the compiler wrote and the package URI a scheme-aware client opens
-    /// reach it, and a mirror that is not there keeps the package URI rather than an invented path
-    /// or a failed request.
     #[test]
-    fn package_source_rewrite_keeps_the_client_spelling() {
-        let directory = tempfile::tempdir().unwrap();
-        let resolved = directory.path().canonicalize().unwrap();
-        let spelled = directory.path().join("aliased");
-        let spec: PackageSpec = "@tola/site:0.0.0".parse().unwrap();
-        let package = builtin_package(&spec).expect("a builtin package");
-        let id = entrypoint(&package, &manifest(&package).expect("a manifest")).expect("an entry");
-        let source = crate::identity::embedded_source(id).expect("a builtin package source");
-        let view = resolved.join(tola_build::filesystem::PACKAGE_MIRROR_DIRECTORY);
-        let mirror = crate::identity::package_view_path(id, &view).unwrap();
-        std::fs::create_dir_all(mirror.parent().unwrap()).unwrap();
-        std::fs::write(&mirror, source.as_bytes()).unwrap();
-        let client_root = crate::uri::ClientRoot::with_resolved(&spelled, &resolved);
-        let expected =
-            crate::uri::from_file_path(&spelled.join(mirror.strip_prefix(&resolved).unwrap()))
-                .unwrap();
-        for uri in [
-            crate::uri::from_file_path(&mirror).unwrap(),
-            crate::identity::source_uri(id, &resolved).unwrap(),
-        ] {
-            let mut response = GotoDefinitionResponse::Scalar(Location {
-                uri,
-                range: Range::default(),
-            });
-            package_source_definition(
-                &mut response,
-                &view,
-                &client_root,
-                &BuildCancellation::new(),
-            )
-            .unwrap();
-            let GotoDefinitionResponse::Scalar(location) = &response else {
-                panic!("one location: {response:?}");
-            };
-            assert_eq!(location.uri, expected);
-            assert_ne!(
-                location.uri,
-                crate::uri::from_file_path(&mirror).unwrap(),
-                "the answer must not be the resolved spelling"
-            );
-        }
-        // A site whose mirror is not there keeps the package URI rather than inventing a path.
-        std::fs::remove_file(&mirror).unwrap();
-        let mut definition = GotoDefinitionResponse::Scalar(Location {
-            uri: crate::identity::source_uri(id, &resolved).unwrap(),
-            range: Range::default(),
-        });
-        let before = definition.clone();
-        package_source_definition(
-            &mut definition,
-            &view,
-            &client_root,
-            &BuildCancellation::new(),
-        )
-        .unwrap();
-        assert_eq!(
-            serde_json::to_value(&definition).unwrap(),
-            serde_json::to_value(before).unwrap(),
-            "a missing mirror keeps the package URI"
-        );
-    }
-
-    /// A definition into a package is a client URI: the mirror the site publishes, in the spelling
-    /// the client named its root by, never the resolved form and never a URI only a scheme-aware
-    /// client can open.
-    #[test]
-    fn package_definition_answers_the_client_spelling() {
+    fn definition_answers_client_spelling() {
         let directory = tempfile::tempdir().unwrap();
         let resolved = directory.path().canonicalize().unwrap();
         let spelled = directory.path().join("aliased");
@@ -945,11 +1014,16 @@ mod tests {
         let spec: PackageSpec = "@tola/site:0.0.0".parse().unwrap();
         let package = builtin_package(&spec).expect("a builtin package");
         let id = entrypoint(&package, &manifest(&package).expect("a manifest")).expect("an entry");
-        let source = crate::identity::embedded_source(id).expect("a builtin package source");
-        let view = resolved.join(tola_build::filesystem::PACKAGE_MIRROR_DIRECTORY);
+        let embedded = crate::identity::embedded_source(id).expect("a builtin package source");
+        let view = tola_build::filesystem::layout::builtin_packages(&resolved);
         let mirror = crate::identity::package_view_path(id, &view).unwrap();
         std::fs::create_dir_all(mirror.parent().unwrap()).unwrap();
-        std::fs::write(&mirror, source.as_bytes()).unwrap();
+        std::fs::write(&mirror, embedded.as_bytes()).unwrap();
+        let client_root = crate::uri::ClientRoot::with_resolved(&spelled, &resolved);
+        let expected =
+            crate::uri::from_file_path(&spelled.join(mirror.strip_prefix(&resolved).unwrap()))
+                .unwrap();
+
         let (source, cursor) = marked_source("#import \"@tola/site:0.0.0|\"\n");
         let position = position::utf16_range(source.lines(), cursor..cursor)
             .unwrap()
@@ -972,17 +1046,144 @@ mod tests {
             &source,
             cursor,
             &query,
-            &crate::uri::ClientRoot::with_resolved(&spelled, &resolved),
+            &client_root,
+            &BuildCancellation::new(),
+            &[],
+            None,
         )
         .expect("a reply");
         let Some(SourceReply::Definition(Some(GotoDefinitionResponse::Scalar(location)))) = reply
         else {
             panic!("a definition: {reply:?}");
         };
-        let expected =
-            crate::uri::from_file_path(&spelled.join(mirror.strip_prefix(&resolved).unwrap()))
-                .unwrap();
         assert_eq!(location.uri, expected);
+
+        // A mirror file the client already reads as a file keeps the client's spelling too.
+        let mut mirrored = GotoDefinitionResponse::Scalar(Location {
+            uri: crate::uri::from_file_path(&mirror).unwrap(),
+            range: Range::default(),
+        });
+        package_source_definition(
+            &mut mirrored,
+            &view,
+            &client_root,
+            &BuildCancellation::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            mirrored,
+            GotoDefinitionResponse::Scalar(Location {
+                uri: expected,
+                range: Range::default(),
+            })
+        );
+    }
+
+    #[test]
+    fn unsaved_paths_complete_once() {
+        let mut site = QuerySession::new();
+        let root = site.config.get_root().to_path_buf();
+        let document = root.join("content/document.typ");
+        let draft = root.join("content/draft.typ");
+        site.site.write("content/existing.typ", "Existing\n");
+        let (text, position) = marked_cursor("#include \"dr|\"\n");
+        let query = SourceQuery::decode(lsp_server::Request {
+            id: 1.into(),
+            method: lsp_request::Completion::METHOD.into(),
+            params: json!({
+                "textDocument": { "uri": crate::uri::from_file_path(&document).unwrap() },
+                "position": position,
+            }),
+        })
+        .unwrap()
+        .1;
+        let overrides = [
+            (document, Arc::from(text)),
+            (draft.clone(), Arc::from("Draft\n")),
+            (root.join("content/existing.typ"), Arc::from("Unsaved\n")),
+            (root.join("public/hidden.typ"), Arc::from("Generated\n")),
+        ];
+        let reply = crate::query::respond(
+            &mut site.session,
+            &mut site.compilations,
+            &mut crate::analysis::DiskSources::default(),
+            &mut crate::analysis::GraphCache::default(),
+            &mut site.bibliographies,
+            &mut crate::compiler::EntityQueries::default(),
+            &site.config,
+            site.revision,
+            &overrides,
+            &crate::sources::SourceView::default(),
+            &[],
+            &query,
+            false,
+            crate::protocol::CheckProgress::Failed,
+            &BuildCancellation::new(),
+            &crate::uri::ClientRoot::new(&root),
+        )
+        .unwrap();
+        let SourceReply::Completion(CompletionResponse::Array(items)) = reply else {
+            panic!("a path completion reply");
+        };
+        let labels = completion_labels(&items);
+        assert!(labels.contains(&"draft.typ"), "{labels:?}");
+        assert_eq!(
+            labels
+                .iter()
+                .filter(|label| **label == "existing.typ")
+                .count(),
+            1
+        );
+        assert!(!labels.iter().any(|label| label.ends_with("hidden.typ")));
+        assert!(!draft.exists());
+    }
+
+    #[test]
+    fn local_imports_land_at_start() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let config = site_config(&root);
+        let package_root = root.join("module");
+        std::fs::create_dir(&package_root).unwrap();
+        let entry = package_root.join("lib.typ");
+        std::fs::write(&entry, "#let value = 1\n#value\n").unwrap();
+        let spec = "@local/demo:0.1.0".parse().unwrap();
+        let package = tola_typst::LocalPackage::new(
+            spec,
+            &package_root,
+            VirtualPath::new("lib.typ").unwrap(),
+        )
+        .unwrap();
+        let mut access = PackageAccess::new(&config, &tola_build::BuildResources::new(), &[]);
+        access.local_packages =
+            Arc::new(tola_typst::LocalPackages::new([package], ["local"]).unwrap());
+        let (source, cursor) = marked_source("#import \"@local/de|mo:0.1.0\"\n");
+        let query = SourceQuery::decode(lsp_server::Request::new(
+            1.into(),
+            lsp_request::GotoDefinition::METHOD.into(),
+            json!({
+                "textDocument": {"uri": crate::uri::from_file_path(&root.join("content/document.typ")).unwrap()},
+                "position": position::utf16_range(source.lines(), cursor..cursor).unwrap().start,
+            }),
+        )).unwrap().1;
+        let reply = respond(
+            &config,
+            &access,
+            &source,
+            cursor,
+            &query,
+            &crate::uri::ClientRoot::new(&root),
+            &BuildCancellation::new(),
+            &[],
+            None,
+        )
+        .unwrap();
+        let Some(SourceReply::Definition(Some(GotoDefinitionResponse::Scalar(location)))) = reply
+        else {
+            panic!("a local import names its source file");
+        };
+        assert_eq!(location.uri, crate::uri::from_file_path(&entry).unwrap());
+        assert_eq!(location.range, Range::default());
     }
 
     #[test]
@@ -995,15 +1196,9 @@ mod tests {
 
     #[test]
     fn published_versions_stay_query_local() {
-        let published = [PublishedPackage {
-            name: "query-local".into(),
-            version: "0.2.0".into(),
-            description: None,
-            homepage: None,
-            repository: None,
-        }];
+        let index = [published("query-local", "0.2.0")];
         let marked = "#import \"@preview/query-local:|\"\n";
-        assert_eq!(import_completions(&published, marked), ["0.2.0"]);
+        assert_eq!(import_completions(&index, marked), ["0.2.0"]);
         assert!(import_completions(&[], marked).is_empty());
     }
 
@@ -1030,70 +1225,31 @@ mod tests {
     }
 
     #[test]
-    fn published_names_complete_once_per_package() {
-        let published = [
-            PublishedPackage {
-                name: "cetz".into(),
-                version: "0.3.3".into(),
-                description: None,
-                homepage: None,
-                repository: None,
-            },
-            PublishedPackage {
-                name: "cetz".into(),
-                version: "0.3.4".into(),
-                description: None,
-                homepage: None,
-                repository: None,
-            },
-            PublishedPackage {
-                name: "cetz-other".into(),
-                version: "1.0.0".into(),
-                description: None,
-                homepage: None,
-                repository: None,
-            },
+    fn published_names_complete_once() {
+        let index = [
+            published("cetz", "0.3.3"),
+            published("cetz", "0.3.4"),
+            published("cetz-other", "1.0.0"),
         ];
         assert_eq!(
-            import_completions(&published, "#import \"@preview/ce|\"\n"),
+            import_completions(&index, "#import \"@preview/ce|\"\n"),
             ["@preview/cetz-other:1.0.0", "@preview/cetz:0.3.4"],
             "a name position offers one entry per package, at its newest version"
         );
         assert_eq!(
-            import_completions(&published, "#import \"@preview/cetz:|\"\n"),
+            import_completions(&index, "#import \"@preview/cetz:|\"\n"),
             ["0.3.3", "0.3.4"],
             "a version position still offers every version"
         );
     }
 
-    /// A version position lists versions by their numbers, not by their spelling.
     #[test]
     fn version_completions_order_by_number() {
-        let published = [
-            PublishedPackage {
-                name: "cetz".into(),
-                version: "0.10.0".into(),
-                description: None,
-                homepage: None,
-                repository: None,
-            },
-            PublishedPackage {
-                name: "cetz".into(),
-                version: "0.9.0".into(),
-                description: None,
-                homepage: None,
-                repository: None,
-            },
-        ];
+        let index = [published("cetz", "0.10.0"), published("cetz", "0.9.0")];
         assert_eq!(
-            import_completions(&published, "#import \"@preview/cetz:|\"\n"),
+            import_completions(&index, "#import \"@preview/cetz:|\"\n"),
             ["0.9.0", "0.10.0"]
         );
-    }
-
-    #[test]
-    fn unnamed_package_completes_no_version() {
-        assert!(import_completions(&[], "#import \":|\"\n").is_empty());
     }
 
     #[test]
@@ -1132,7 +1288,7 @@ mod tests {
     }
 
     #[test]
-    fn file_only_clients_read_package_sources() {
+    fn file_clients_read_package_sources() {
         let directory = tempfile::tempdir().unwrap();
         let sources = directory.path().join("package-sources");
         let client_root = crate::uri::ClientRoot::new(directory.path());
@@ -1149,112 +1305,39 @@ mod tests {
             lsp_types::Position::new(1, 2),
             lsp_types::Position::new(3, 4),
         );
-        let location = Location {
-            uri: uri.clone(),
-            range,
-        };
-        let definitions = [
-            GotoDefinitionResponse::Scalar(location.clone()),
-            GotoDefinitionResponse::Array(vec![location]),
-        ];
-        let file_uri: Uri = url::Url::from_file_path(&path)
-            .unwrap()
-            .as_str()
-            .parse()
-            .unwrap();
-        for definition in &definitions {
-            let mut projected = definition.clone();
+        let original = Location { uri, range };
+        for mut definition in [
+            GotoDefinitionResponse::Scalar(original.clone()),
+            GotoDefinitionResponse::Array(vec![original.clone()]),
+        ] {
             package_source_definition(
-                &mut projected,
+                &mut definition,
                 &sources,
                 &client_root,
                 &BuildCancellation::new(),
             )
             .unwrap();
-            match (projected, definition) {
-                (
-                    GotoDefinitionResponse::Scalar(projected),
-                    GotoDefinitionResponse::Scalar(original),
-                ) => {
-                    assert_eq!(projected.uri, file_uri);
-                    assert_eq!(projected.range, original.range);
-                }
-                (
-                    GotoDefinitionResponse::Array(projected),
-                    GotoDefinitionResponse::Array(original),
-                ) => {
-                    assert_eq!(projected[0].uri, file_uri);
-                    assert_eq!(projected[0].range, original[0].range);
-                }
-                _ => panic!("definition shape changed"),
-            }
+            let location = match &definition {
+                GotoDefinitionResponse::Scalar(location) => location,
+                GotoDefinitionResponse::Array(locations) => &locations[0],
+                _ => unreachable!(),
+            };
+            assert_eq!(location.uri, crate::uri::from_file_path(&path).unwrap());
+            assert_eq!(location.range, range);
         }
-        for prepare in [
-            (|path: &std::path::Path| std::fs::write(path, "modified source").unwrap())
-                as fn(&Path),
-            |path: &Path| std::fs::remove_file(path).unwrap(),
-        ] {
-            prepare(&path);
-            for definition in &definitions {
-                let mut projected = definition.clone();
-                package_source_definition(
-                    &mut projected,
-                    &sources,
-                    &client_root,
-                    &BuildCancellation::new(),
-                )
-                .unwrap();
-                assert_eq!(
-                    serde_json::to_value(&projected).unwrap(),
-                    serde_json::to_value(definition).unwrap(),
-                    "an unavailable mirror leaves the definition as the client named it"
-                );
-            }
-        }
+
+        std::fs::write(&path, "modified source").unwrap();
+        let mut projected = GotoDefinitionResponse::Scalar(original.clone());
+        package_source_definition(
+            &mut projected,
+            &sources,
+            &client_root,
+            &BuildCancellation::new(),
+        )
+        .unwrap();
+        assert_eq!(projected, GotoDefinitionResponse::Scalar(original));
     }
 
-    /// A file-only client reads a site's packages as the mirrors editor setup publishes, so the
-    /// server itself hands the editor a mirror path where it otherwise hands out a package
-    /// document. The mirror answers as the immutable package source it has, whether the client
-    /// named the view or the site's own published directory is read, and a path no builtin package
-    /// file mirrors — an unknown package, or a copy this Tola did not write — answers nothing.
-    #[test]
-    fn package_mirror_answers_as_its_package_source() {
-        let mut site = QuerySession::new();
-        let directory = site.site.path(".tola/builtin-packages");
-        let package = "tola-package:/tola/site/0.0.0/lib.typ".parse().unwrap();
-        let id = crate::identity::file_id(&package, site.site.root()).expect("a builtin package");
-        let source = crate::identity::embedded_source(id).expect("a builtin source");
-        let needle = "@tola/host";
-        let at = source
-            .find(needle)
-            .expect("the package imports the host site value")
-            + needle.len();
-        let position = position::utf16_range(Source::detached(source.to_string()).lines(), at..at)
-            .expect("a position inside the source")
-            .start;
-        site.site
-            .write(".tola/builtin-packages/tola/site/0.0.0/lib.typ", &source);
-        site.site
-            .write(".tola/builtin-packages/tola/web/0.0.0/lib.typ", "stale\n");
-        let mirror =
-            crate::uri::from_file_path(&directory.join("tola/site/0.0.0/lib.typ")).unwrap();
-        for named in [Some(directory.clone()), None] {
-            site.package_sources = named;
-            let answer = site
-                .hover_at(mirror.as_str(), position)
-                .expect("an answerable request");
-            assert!(answer.is_some(), "{answer:?}");
-            assert_eq!(answer, site.hover_at(package.as_str(), position).unwrap());
-            for unmirrored in [
-                directory.join("tola/no-such-package/0.0.0/lib.typ"),
-                directory.join("tola/web/0.0.0/lib.typ"),
-            ] {
-                let uri = crate::uri::from_file_path(&unmirrored).unwrap();
-                assert!(site.hover_at(uri.as_str(), position).unwrap().is_none());
-            }
-        }
-    }
     /// An embedded package document answers a completion as an ordinary result, never as an
     /// internal error.
     ///

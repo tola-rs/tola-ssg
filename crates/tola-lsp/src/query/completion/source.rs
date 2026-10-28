@@ -6,7 +6,6 @@ use anyhow::Result;
 use tola_build::cancellation::BuildCancellation;
 
 use lsp_types::{CompletionItem, CompletionItemKind, CompletionResponse};
-use tola_packages::ExportDocumentation;
 use tola_typst::GLOBAL_LIBRARY;
 use tola_typst::typst::foundations::Value;
 use tola_typst::typst::syntax::ast;
@@ -18,9 +17,10 @@ use super::super::expression::{ExpressionType, MemberCall, members, single_value
 use super::super::inference::{ExpressionResolver, SourceResolver};
 use super::super::semantic;
 use super::callable::{self, Callable};
-use super::definition;
+use super::definition::{self, PackageExports};
 use super::{
-    comment_at, completion_edit, documentation_template, is_path_position, opaque_at, raw_at,
+    NamePosition, already_imported, comment_at, documentation_template, is_path_position,
+    opaque_at, raw_at, wildcard_import_item,
 };
 use crate::protocol::SourceReply;
 
@@ -47,7 +47,7 @@ pub(crate) fn source_completion_reply(source: &Source, cursor: usize) -> Option<
 
 /// Whether the cursor reads a name the source-only scope can answer.
 pub(crate) fn source_name_position(names: &SourceNames, source: &Source, cursor: usize) -> bool {
-    if opaque_at(source, cursor) || comment_at(source, cursor) || raw_at(source, cursor) {
+    if opaque_at(source, cursor) {
         return false;
     }
     if name_range(source, cursor).is_none() {
@@ -73,73 +73,11 @@ pub(crate) fn source_name_completion(
     if !source_name_position(names, source, cursor) {
         return Ok(None);
     }
-    let Some(range) = name_range(source, cursor) else {
+    let Some(position) = typed_name(source, cursor) else {
         return Ok(None);
     };
-    let replacement = if &source.text()[range.clone()] == "#" {
-        cursor..cursor
-    } else {
-        range
-    };
-    let prefix = &source.text()[replacement.start..cursor];
-    let mut items = Vec::new();
-    let mut seen = BTreeSet::new();
-    let mut packages = BTreeMap::new();
-    let mut push = |name: String,
-                    kind: Option<CompletionItemKind>,
-                    definition: Option<NameDefinition>,
-                    declaration: Option<&Declaration>,
-                    items: &mut Vec<CompletionItem>|
-     -> Result<()> {
-        cancellation.ensure_active()?;
-        if !super::name_matches(&name, prefix) || !seen.insert(name.clone()) {
-            return Ok(());
-        }
-        let Ok(edit) = completion_edit(source, cursor, replacement.clone(), name.clone()) else {
-            return Ok(());
-        };
-        let mut item = CompletionItem::new_simple(name, String::new());
-        item.kind = kind;
-        item.text_edit = Some(edit);
-        let mut followed = Vec::new();
-        let callable = if let Some(definition) = definition {
-            attach_definition(
-                &mut item,
-                definition,
-                graph,
-                &mut packages,
-                &mut followed,
-                cancellation,
-            )?
-        } else if let Some(declaration) = declaration {
-            attach_source_declaration(
-                &mut item,
-                names,
-                declaration,
-                graph,
-                &mut packages,
-                &mut followed,
-                cancellation,
-            )?
-        } else {
-            None
-        };
-        match callable {
-            Some(callable) => items.extend(callable::callable_items(
-                item,
-                source,
-                cursor,
-                &replacement,
-                callable,
-            )),
-            None => items.push(item),
-        }
-        Ok(())
-    };
-    enum ScopeName<'a> {
-        Declaration(&'a Declaration),
-        Import(ModuleExport),
-    }
+    let prefix = position.prefix;
+    let mut offered = OfferedNames::new(position, names, graph, cancellation);
     let mut scope = Some(names.scope_at(cursor));
     while let Some(id) = scope {
         let mut candidates = Vec::new();
@@ -153,82 +91,190 @@ pub(crate) fn source_name_completion(
                         .as_ref()
                         .is_some_and(|body| body.contains(&cursor)))
             {
-                candidates.push((
-                    declaration.visible_from,
-                    ScopeName::Declaration(declaration),
-                ));
+                candidates.push(ScopeName::Declaration(declaration));
             }
         }
         for (statement, import) in names.imports().iter().enumerate() {
             cancellation.ensure_active()?;
-            if import.wildcard && import.scope == id && import.range.end <= cursor {
-                let Some(graph) = graph else {
-                    return Ok(None);
-                };
-                if !graph.interface_established(source.id(), statement) {
-                    return Ok(None);
-                }
-                for export in
-                    graph.module_exports_matching(source.id(), statement, &[], prefix, || {
-                        cancellation.ensure_active()
-                    })?
-                {
-                    candidates.push((import.range.end, ScopeName::Import(export)));
-                }
+            if !wildcard_import_visible(import, id, cursor) {
+                continue;
+            }
+            let Some(graph) = graph else {
+                return Ok(None);
+            };
+            if !graph.interface_established(source.id(), statement) {
+                return Ok(None);
+            }
+            for export in
+                graph.module_exports_matching(source.id(), statement, &[], prefix, || {
+                    cancellation.ensure_active()
+                })?
+            {
+                candidates.push(ScopeName::Import {
+                    export,
+                    visible_from: import.range.end,
+                });
             }
         }
         cancellation.ensure_active()?;
-        candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.0));
-        for (_, candidate) in candidates {
+        candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.visible_from()));
+        for candidate in candidates {
             cancellation.ensure_active()?;
             match candidate {
-                ScopeName::Declaration(declaration) => push(
-                    declaration.name.clone(),
-                    Some(definition::declaration_kind(&declaration.initializer)),
-                    None,
-                    Some(declaration),
-                    &mut items,
-                ),
-                ScopeName::Import(export) => push(
-                    export.name,
-                    Some(class_kind(export.class)),
-                    export.definition,
-                    None,
-                    &mut items,
-                ),
-            }?;
+                ScopeName::Declaration(declaration) => offered.declaration(declaration)?,
+                ScopeName::Import { export, .. } => offered.export(export)?,
+            }
         }
         scope = names.scopes()[id].parent;
     }
-    let math = names
-        .occurrence(cursor)
-        .is_some_and(|occurrence| occurrence.math);
-    let scope = if math {
-        GLOBAL_LIBRARY.math.scope()
-    } else {
-        GLOBAL_LIBRARY.global.scope()
-    };
-    for (name, binding) in scope
-        .iter()
-        .filter(|(name, _)| super::name_matches(name, prefix))
-    {
-        push(
-            name.to_string(),
-            None,
-            Some(NameDefinition::Builtin(binding.read().clone())),
-            None,
-            &mut items,
-        )?;
-    }
-    push(
-        "std".to_owned(),
-        None,
-        Some(NameDefinition::Builtin(GLOBAL_LIBRARY.std.read().clone())),
-        None,
-        &mut items,
-    )?;
+    offered.standard_library()?;
     cancellation.ensure_active()?;
-    Ok(Some(items))
+    Ok(Some(offered.into_items()))
+}
+
+/// One name a scope offers: a declaration the scope holds, or an export a wildcard import brings
+/// in. Both become visible at a byte offset, which orders a later binding first.
+enum ScopeName<'a> {
+    Declaration(&'a Declaration),
+    Import {
+        export: ModuleExport,
+        visible_from: usize,
+    },
+}
+
+impl ScopeName<'_> {
+    /// The byte offset the name becomes visible at.
+    fn visible_from(&self) -> usize {
+        match self {
+            Self::Declaration(declaration) => declaration.visible_from,
+            Self::Import { visible_from, .. } => *visible_from,
+        }
+    }
+}
+
+/// The items one source-only name position offers, as the scopes around the cursor are walked
+/// outward: a name is offered once, and a package's export documentation once per completion.
+struct OfferedNames<'a> {
+    position: NamePosition<'a>,
+    names: &'a SourceNames,
+    graph: Option<&'a NameGraph>,
+    cancellation: &'a BuildCancellation,
+    packages: PackageExports,
+    offered: BTreeSet<String>,
+    items: Vec<CompletionItem>,
+}
+
+impl<'a> OfferedNames<'a> {
+    fn new(
+        position: NamePosition<'a>,
+        names: &'a SourceNames,
+        graph: Option<&'a NameGraph>,
+        cancellation: &'a BuildCancellation,
+    ) -> Self {
+        Self {
+            position,
+            names,
+            graph,
+            cancellation,
+            packages: PackageExports::default(),
+            offered: BTreeSet::new(),
+            items: Vec::new(),
+        }
+    }
+
+    /// Offers one declaration of the scope being walked, with the kind it promises.
+    fn declaration(&mut self, declaration: &Declaration) -> Result<()> {
+        self.offer(
+            declaration.name.clone(),
+            Some(definition::declaration_kind(&declaration.initializer)),
+            None,
+            Some(declaration),
+        )
+    }
+
+    /// Offers one export a wildcard import brings into the scope.
+    fn export(&mut self, export: ModuleExport) -> Result<()> {
+        self.offer(
+            export.name,
+            Some(class_kind(export.class)),
+            export.definition,
+            None,
+        )
+    }
+
+    /// Offers the standard library names the cursor's mode holds, and `std` itself.
+    fn standard_library(&mut self) -> Result<()> {
+        let math = self
+            .names
+            .occurrence(self.position.cursor)
+            .is_some_and(|occurrence| occurrence.math);
+        let library = if math {
+            &GLOBAL_LIBRARY.math
+        } else {
+            &GLOBAL_LIBRARY.global
+        };
+        for (name, binding) in library.scope().iter() {
+            if super::name_matches(name, self.position.prefix) {
+                self.builtin(name.to_string(), binding.read().clone())?;
+            }
+        }
+        self.builtin("std".to_owned(), GLOBAL_LIBRARY.std.read().clone())
+    }
+
+    fn builtin(&mut self, name: String, value: Value) -> Result<()> {
+        self.offer(name, None, Some(NameDefinition::Builtin(value)), None)
+    }
+
+    /// One candidate's items, or none when it does not match the typed name, was already offered,
+    /// or names no range this completion can edit.
+    fn offer(
+        &mut self,
+        name: String,
+        kind: Option<CompletionItemKind>,
+        definition: Option<NameDefinition>,
+        declaration: Option<&Declaration>,
+    ) -> Result<()> {
+        self.cancellation.ensure_active()?;
+        if !super::name_matches(&name, self.position.prefix) || !self.offered.insert(name.clone()) {
+            return Ok(());
+        }
+        let Ok(edit) = self.position.edit(name.clone()) else {
+            return Ok(());
+        };
+        let mut item = CompletionItem::new_simple(name, String::new());
+        item.kind = kind;
+        item.text_edit = Some(edit);
+        let mut followed = Vec::new();
+        let callable = if let Some(definition) = definition {
+            attach_definition(
+                &mut item,
+                definition,
+                self.graph,
+                &mut self.packages,
+                &mut followed,
+                self.cancellation,
+            )?
+        } else if let Some(declaration) = declaration {
+            attach_source_declaration(
+                &mut item,
+                self.names,
+                declaration,
+                self.graph,
+                &mut self.packages,
+                &mut followed,
+                self.cancellation,
+            )?
+        } else {
+            None
+        };
+        self.items
+            .extend(callable::name_items(item, callable, &self.position));
+        Ok(())
+    }
+
+    fn into_items(self) -> Vec<CompletionItem> {
+        self.items
+    }
 }
 
 fn name_range(source: &Source, cursor: usize) -> Option<std::ops::Range<usize>> {
@@ -236,6 +282,27 @@ fn name_range(source: &Source, cursor: usize) -> Option<std::ops::Range<usize>> 
         let leaf = LinkedNode::new(source.root()).leaf_at(cursor, Side::Before)?;
         (leaf.kind() == SyntaxKind::MathIdent).then(|| leaf.range())
     })
+}
+
+/// The name position the cursor stands in. A `#` on its own inserts the name after it rather
+/// than replacing it.
+fn typed_name(source: &Source, cursor: usize) -> Option<NamePosition<'_>> {
+    let range = name_range(source, cursor)?;
+    let replacement = if &source.text()[range.clone()] == "#" {
+        cursor..cursor
+    } else {
+        range
+    };
+    Some(NamePosition::at(source, cursor, replacement))
+}
+
+/// Whether `import` brings its module's exports into `scope`, visible at the cursor.
+fn wildcard_import_visible(
+    import: &tola_typst_syntax::names::Import,
+    scope: usize,
+    cursor: usize,
+) -> bool {
+    import.wildcard && import.scope == scope && import.range.end <= cursor
 }
 
 /// Whether an import visible at the cursor can contribute completion names or documentation.
@@ -246,26 +313,21 @@ pub(crate) fn source_name_graph_needed(
 ) -> Result<bool> {
     cancellation.ensure_active()?;
     let source = names.source();
-    let Some(range) = name_range(source, cursor) else {
+    let Some(position) = typed_name(source, cursor) else {
         return Ok(false);
-    };
-    let prefix = if &source.text()[range.clone()] == "#" {
-        ""
-    } else {
-        &source.text()[range.start..cursor]
     };
     let mut scope = Some(names.scope_at(cursor));
     while let Some(id) = scope {
         for import in names.imports() {
             cancellation.ensure_active()?;
-            if import.wildcard && import.scope == id && import.range.end <= cursor {
+            if wildcard_import_visible(import, id, cursor) {
                 return Ok(true);
             }
         }
         for &declaration in &names.scopes()[id].declarations {
             cancellation.ensure_active()?;
             let declared = &names.declarations()[declaration];
-            if super::name_matches(&declared.name, prefix)
+            if super::name_matches(&declared.name, position.prefix)
                 && declared.visible_from <= cursor
                 && imported_declaration(names, declaration, &mut BTreeSet::new(), cancellation)?
             {
@@ -342,7 +404,7 @@ fn attach_definition(
     item: &mut CompletionItem,
     definition: NameDefinition,
     graph: Option<&NameGraph>,
-    packages: &mut BTreeMap<String, Vec<ExportDocumentation>>,
+    packages: &mut PackageExports,
     followed: &mut Vec<(FileId, usize)>,
     cancellation: &BuildCancellation,
 ) -> Result<Option<Callable>> {
@@ -375,7 +437,7 @@ fn attach_source_declaration(
     names: &SourceNames,
     declaration: &Declaration,
     graph: Option<&NameGraph>,
-    packages: &mut BTreeMap<String, Vec<ExportDocumentation>>,
+    packages: &mut PackageExports,
     followed: &mut Vec<(FileId, usize)>,
     cancellation: &BuildCancellation,
 ) -> Result<Option<Callable>> {
@@ -385,7 +447,7 @@ fn attach_source_declaration(
         return Ok(None);
     }
     followed.push(identity);
-    if definition::package_exports(names, &declaration.name) {
+    if definition::exporting_package(names, &declaration.name).is_some() {
         return definition::attach_declaration(item, names, declaration, packages, cancellation);
     }
     let mut shape = None;
@@ -415,7 +477,7 @@ fn attach_alias(
     names: &SourceNames,
     path: &NamePath,
     graph: Option<&NameGraph>,
-    packages: &mut BTreeMap<String, Vec<ExportDocumentation>>,
+    packages: &mut PackageExports,
     followed: &mut Vec<(FileId, usize)>,
     cancellation: &BuildCancellation,
 ) -> Result<Option<Callable>> {
@@ -489,6 +551,31 @@ fn class_kind(class: NameClass) -> CompletionItemKind {
     }
 }
 
+fn export_item(
+    position: &NamePosition<'_>,
+    export: ModuleExport,
+    graph: Option<&NameGraph>,
+    packages: &mut PackageExports,
+    cancellation: &BuildCancellation,
+) -> Result<(CompletionItem, Option<Callable>)> {
+    let edit = position.edit(export.name.clone())?;
+    let mut item = CompletionItem::new_simple(export.name, String::new());
+    item.kind = Some(class_kind(export.class));
+    item.text_edit = Some(edit);
+    let callable = match export.definition {
+        Some(definition) => attach_definition(
+            &mut item,
+            definition,
+            graph,
+            packages,
+            &mut Vec::new(),
+            cancellation,
+        )?,
+        None => None,
+    };
+    Ok((item, callable))
+}
+
 /// The members a source expression establishes without evaluating the site.
 pub(crate) fn source_member_completion(
     graph: Option<&NameGraph>,
@@ -504,47 +591,20 @@ pub(crate) fn source_member_completion(
     let Some(target) = tola_typst_syntax::syntax::node_at_range(source, &member.target) else {
         return Ok(None);
     };
-    let prefix = &source.text()[member.replacement.start..cursor];
+    let position = NamePosition::at(source, cursor, member.replacement.clone());
     let mut resolver = SourceResolver::new(names, graph, cancellation);
     let values = resolver.types(&target)?;
-    let mut packages = BTreeMap::new();
+    let mut packages = PackageExports::default();
     if values.is_empty() {
-        let Some(exports) = resolver.module_members(&target, prefix)? else {
+        let Some(exports) = resolver.module_members(&target, position.prefix)? else {
             return Ok(None);
         };
         let mut items = Vec::new();
         for export in exports {
             cancellation.ensure_active()?;
-            let edit = completion_edit(
-                source,
-                cursor,
-                member.replacement.clone(),
-                export.name.clone(),
-            )?;
-            let mut item = CompletionItem::new_simple(export.name, String::new());
-            item.kind = Some(class_kind(export.class));
-            item.text_edit = Some(edit);
-            let callable = match export.definition {
-                Some(definition) => attach_definition(
-                    &mut item,
-                    definition,
-                    graph,
-                    &mut packages,
-                    &mut Vec::new(),
-                    cancellation,
-                )?,
-                None => None,
-            };
-            match callable {
-                Some(callable) => items.extend(callable::callable_items(
-                    item,
-                    source,
-                    cursor,
-                    &member.replacement,
-                    callable,
-                )),
-                None => items.push(item),
-            }
+            let (item, callable) =
+                export_item(&position, export, graph, &mut packages, cancellation)?;
+            items.extend(callable::name_items(item, callable, &position));
         }
         cancellation.ensure_active()?;
         return Ok(Some(items));
@@ -557,7 +617,7 @@ pub(crate) fn source_member_completion(
             Ok(())
         })? {
             cancellation.ensure_active()?;
-            if super::name_matches(&name, prefix) {
+            if super::name_matches(&name, position.prefix) {
                 let alternatives = fields.entry(name).or_default();
                 if !alternatives.iter().any(|(ty, _)| *ty == member.ty) {
                     alternatives.push((member.ty, member.call));
@@ -568,33 +628,18 @@ pub(crate) fn source_member_completion(
     let mut items = Vec::new();
     for (name, alternatives) in fields {
         cancellation.ensure_active()?;
-        let edit = completion_edit(source, cursor, member.replacement.clone(), name.clone())?;
         let types = alternatives
             .iter()
             .map(|(ty, _)| ty.clone())
             .collect::<Vec<_>>();
-        let item = semantic::completion(&name, &types, edit);
-        let binds = callable::receiver_binds(
+        let item = semantic::completion(&name, &types, position.edit(name.clone())?);
+        let receiver = callable::receiver_binds(
             alternatives
                 .iter()
                 .map(|(_, call)| *call == Some(MemberCall::Receiver)),
         );
-        let callable = binds.and_then(|bound| {
-            alternatives.iter().find_map(|(ty, _)| {
-                ty.value()
-                    .and_then(|value| Callable::of_value(value, bound))
-            })
-        });
-        match callable {
-            Some(callable) => items.extend(callable::callable_items(
-                item,
-                source,
-                cursor,
-                &member.replacement,
-                callable,
-            )),
-            None => items.push(item),
-        }
+        let callable = receiver.and_then(|receiver| Callable::of_types(&types, receiver));
+        items.extend(callable::name_items(item, callable, &position));
     }
     cancellation.ensure_active()?;
     Ok(Some(items))
@@ -633,54 +678,25 @@ pub(crate) fn source_import_completion(
     let Some(statement) = statement else {
         return Ok(None);
     };
-    let prefix = &source.text()[replacement.start..cursor];
-    let exports =
-        graph.module_exports_matching(source.id(), statement, &import.path, prefix, || {
-            cancellation.ensure_active()
-        })?;
-    let mut packages = BTreeMap::new();
+    let position = NamePosition::at(source, cursor, replacement);
+    let exports = graph.module_exports_matching(
+        source.id(),
+        statement,
+        &import.path,
+        position.prefix,
+        || cancellation.ensure_active(),
+    )?;
+    let mut packages = PackageExports::default();
     let mut items = Vec::new();
-    if import.imported.is_empty() && "*".starts_with(prefix) {
-        let mut item = CompletionItem::new_simple("*".to_owned(), "Import everything.".to_owned());
-        item.kind = Some(CompletionItemKind::SNIPPET);
-        item.text_edit = Some(completion_edit(
-            source,
-            cursor,
-            replacement.clone(),
-            "*".to_owned(),
-        )?);
-        items.push(item);
+    if import.imported.is_empty() && "*".starts_with(position.prefix) {
+        items.push(wildcard_import_item(position.edit("*".to_owned())?));
     }
     for export in exports {
         cancellation.ensure_active()?;
-        let name = export.name;
-        let mut imported = false;
-        for path in &import.imported {
-            cancellation.ensure_active()?;
-            if path.len() == import.path.len() + 1
-                && path[..import.path.len()] == import.path
-                && path.last() == Some(&name)
-            {
-                imported = true;
-                break;
-            }
-        }
-        if imported {
+        if already_imported(&import, &export.name) {
             continue;
         }
-        let mut item = CompletionItem::new_simple(name.clone(), String::new());
-        item.kind = Some(class_kind(export.class));
-        item.text_edit = Some(completion_edit(source, cursor, replacement.clone(), name)?);
-        if let Some(definition) = export.definition {
-            let _ = attach_definition(
-                &mut item,
-                definition,
-                Some(graph),
-                &mut packages,
-                &mut Vec::new(),
-                cancellation,
-            )?;
-        }
+        let (item, _) = export_item(&position, export, Some(graph), &mut packages, cancellation)?;
         items.push(item);
     }
     cancellation.ensure_active()?;
@@ -694,6 +710,8 @@ mod tests {
     use tola_typst::typst::foundations::PathOrStr;
     use tola_typst::typst::syntax::{FileId, RootedPath, VirtualPath, VirtualRoot};
     use tola_typst_syntax::imports::ImportQuery;
+
+    use crate::query::tests::insertion_text;
 
     fn file(path: &str) -> FileId {
         RootedPath::new(VirtualRoot::Project, VirtualPath::new(path).unwrap()).intern()
@@ -731,13 +749,6 @@ mod tests {
         items.iter().find(|item| item.label == name).unwrap()
     }
 
-    fn inserted_text(item: &CompletionItem) -> &str {
-        match item.text_edit.as_ref().unwrap() {
-            lsp_types::CompletionTextEdit::Edit(edit) => &edit.new_text,
-            lsp_types::CompletionTextEdit::InsertAndReplace(edit) => &edit.new_text,
-        }
-    }
-
     fn description(item: &CompletionItem) -> &str {
         item.label_details
             .as_ref()
@@ -767,10 +778,71 @@ mod tests {
         .unwrap()
     }
 
+    /// The members the lane that reads the source alone answers with, or `None` when it cannot
+    /// tell the receiver's value.
+    fn cold_member_items(marked: &str) -> Option<Vec<CompletionItem>> {
+        let cursor = marked.find('|').unwrap();
+        let source = Source::detached(marked.replace('|', ""));
+        let names = SourceNames::new(source.clone());
+        source_member_completion(None, &names, &source, cursor, &BuildCancellation::new()).unwrap()
+    }
+
+    /// The members the source-alone lane answers for one marked file importing `library`.
+    fn cold_imported_member_items(marked: &str, library: &Source) -> Vec<CompletionItem> {
+        let cursor = marked.find('|').unwrap();
+        let source = Source::new(file("main.typ"), marked.replace('|', ""));
+        let names = SourceNames::new(source.clone());
+        source_member_completion(
+            Some(&graph(&source, std::slice::from_ref(library))),
+            &names,
+            &source,
+            cursor,
+            &BuildCancellation::new(),
+        )
+        .unwrap()
+        .unwrap_or_else(|| panic!("{marked}"))
+    }
+
+    /// The source written at `text` as `main.typ`, its names, and the graph over `libraries`.
+    fn main_source(text: &str, libraries: &[Source]) -> (Source, SourceNames, NameGraph) {
+        let source = Source::new(file("main.typ"), text.to_owned());
+        let names = SourceNames::new(source.clone());
+        let graph = graph(&source, libraries);
+        (source, names, graph)
+    }
+
+    /// The names the lane that reads the source alone answers at the end of `text`.
+    fn cold_names(text: &str, libraries: &[Source]) -> Vec<CompletionItem> {
+        let (source, names, graph) = main_source(text, libraries);
+        source_name_completion(
+            Some(&graph),
+            &names,
+            &source,
+            source.text().len(),
+            &BuildCancellation::new(),
+        )
+        .unwrap()
+        .unwrap()
+    }
+
+    /// The import items the lane that reads the source alone answers at the end of `text`.
+    fn cold_import_items(text: &str, libraries: &[Source]) -> Vec<CompletionItem> {
+        let (source, names, graph) = main_source(text, libraries);
+        source_import_completion(
+            &graph,
+            &names,
+            &source,
+            source.text().len(),
+            &BuildCancellation::new(),
+        )
+        .unwrap()
+        .unwrap()
+    }
+
     /// A callable completes as a call snippet only where the position calls it; anywhere else the
     /// completion inserts the bare name.
     #[test]
-    fn call_snippets_follow_the_typed_position() {
+    fn call_snippets_follow_position() {
         for (marked, label, expected) in [
             ("𝄞 #rep|\n", "repr", "repr(${1})"),
             ("#ran|", "range", "range(${1})"),
@@ -782,32 +854,52 @@ mod tests {
             ("#let result = 1 + rep|", "repr", "repr(${1})"),
             ("#let f(x) = x\n#f(rep|)", "repr", "repr"),
             ("#show raw: rep|", "repr", "repr"),
+            (
+                "#show heading: pagebr|",
+                "pagebreak.with",
+                "pagebreak.with(${1})",
+            ),
             ("#show stron|: it => it", "strong", "strong"),
             ("#import math: ab|", "abs", "abs"),
         ] {
             let items = cold_items(marked);
             let item = named(&items, label);
-            let text = inserted_text(item);
-            assert_eq!(text, expected, "{marked}");
-            if expected.contains("${") {
-                assert_eq!(
-                    item.insert_text_format,
-                    Some(lsp_types::InsertTextFormat::SNIPPET),
-                    "{marked}"
-                );
-                assert_eq!(crate::completion::plain_text(text), format!("{label}()"));
-            } else {
-                assert_ne!(
-                    item.insert_text_format,
-                    Some(lsp_types::InsertTextFormat::SNIPPET),
-                    "{marked}"
-                );
-            }
+            assert_eq!(insertion_text(item), expected, "{marked}");
+            assert_eq!(
+                item.insert_text_format == Some(lsp_types::InsertTextFormat::SNIPPET),
+                expected.contains("${"),
+                "{marked}"
+            );
         }
     }
 
     /// The lane that reads the source alone and the lane that reads the checked site insert the
     /// same call.
+    #[test]
+    fn mixed_members_insert_names() {
+        let marked =
+            "#let value = if false { (choice: rect) } else { (choice: 2) }\n#value.cho|ice\n";
+        let cursor = marked.find('|').unwrap();
+        let source = Source::new(file("main.typ"), marked.replace('|', ""));
+        let names = SourceNames::new(source.clone());
+        let cold =
+            source_member_completion(None, &names, &source, cursor, &BuildCancellation::new())
+                .unwrap()
+                .unwrap();
+        let mut site = crate::query::tests::QuerySession::new();
+        let warm = site.completion(marked);
+        for items in [cold, warm] {
+            let item = named(&items, "choice");
+            assert_eq!(insertion_text(item), "choice");
+            assert_eq!(item.kind, Some(lsp_types::CompletionItemKind::VARIABLE));
+            assert!(item.documentation.is_none());
+            assert_ne!(
+                item.insert_text_format,
+                Some(lsp_types::InsertTextFormat::SNIPPET)
+            );
+        }
+    }
+
     #[test]
     fn cold_and_warm_lanes_agree() {
         for (marked, label) in [
@@ -820,7 +912,7 @@ mod tests {
             let mut site = crate::query::tests::QuerySession::new();
             let warm = site.completion(marked);
             let (cold, warm) = (named(&cold, label), named(&warm, label));
-            assert_eq!(inserted_text(cold), inserted_text(warm), "{marked}");
+            assert_eq!(insertion_text(cold), insertion_text(warm), "{marked}");
             assert_eq!(cold.insert_text_format, warm.insert_text_format, "{marked}");
         }
     }
@@ -856,28 +948,16 @@ mod tests {
             ),
             ("#let stamp() = 1\n#sta|", "stamp", "stamp()${1}", "stamp()"),
         ] {
-            let cursor = marked.find('|').unwrap();
-            let source = Source::new(file("main.typ"), marked.replace('|', ""));
-            let names = SourceNames::new(source.clone());
-            let graph = graph(&source, std::slice::from_ref(&library));
-            let cold = source_name_completion(
-                Some(&graph),
-                &names,
-                &source,
-                cursor,
-                &BuildCancellation::new(),
-            )
-            .unwrap()
-            .unwrap();
+            let text = marked.replace('|', "");
+            let cold = cold_names(&text, std::slice::from_ref(&library));
             let mut site = crate::query::tests::QuerySession::new();
             site.site.write("content/lib.typ", library.text());
-            site.site
-                .write("content/document.typ", &marked.replace('|', ""));
+            site.site.write("content/document.typ", &text);
             let warm = site.completion(marked);
             for item in [named(&cold, label), named(&warm, label)] {
                 assert_eq!(item.kind, Some(CompletionItemKind::FUNCTION), "{marked}");
                 assert_eq!(description(item), signature, "{marked}");
-                assert_eq!(inserted_text(item), inserted, "{marked}");
+                assert_eq!(insertion_text(item), inserted, "{marked}");
                 assert_eq!(
                     item.insert_text_format,
                     Some(lsp_types::InsertTextFormat::SNIPPET),
@@ -901,26 +981,14 @@ mod tests {
             ("#str.le|", "len", "len(${1})"),
             ("#let text = \"x\"\n#text.le|", "len", "len()${1}"),
         ] {
-            let cursor = marked.find('|').unwrap();
-            let source = Source::new(file("main.typ"), marked.replace('|', ""));
-            let names = SourceNames::new(source.clone());
-            let graph = graph(&source, std::slice::from_ref(&library));
-            let cold = source_member_completion(
-                Some(&graph),
-                &names,
-                &source,
-                cursor,
-                &BuildCancellation::new(),
-            )
-            .unwrap()
-            .unwrap();
+            let cold = cold_imported_member_items(marked, &library);
             let mut site = crate::query::tests::QuerySession::new();
             site.site.write("content/lib.typ", library.text());
             site.site
                 .write("content/document.typ", &marked.replace('|', ""));
             let warm = site.completion(marked);
             for item in [named(&cold, label), named(&warm, label)] {
-                assert_eq!(inserted_text(item), inserted, "{marked}");
+                assert_eq!(insertion_text(item), inserted, "{marked}");
             }
         }
     }
@@ -1000,29 +1068,11 @@ mod tests {
                 true,
             ),
         ] {
-            let source = Source::new(file("main.typ"), text.to_owned());
-            let names = SourceNames::new(source.clone());
-            let graph = graph(&source, &[library.clone(), reexport.clone()]);
+            let libraries = [library.clone(), reexport.clone()];
             let items = if import {
-                source_import_completion(
-                    &graph,
-                    &names,
-                    &source,
-                    source.text().len(),
-                    &BuildCancellation::new(),
-                )
-                .unwrap()
-                .unwrap()
+                cold_import_items(text, &libraries)
             } else {
-                source_name_completion(
-                    Some(&graph),
-                    &names,
-                    &source,
-                    source.text().len(),
-                    &BuildCancellation::new(),
-                )
-                .unwrap()
-                .unwrap()
+                cold_names(text, &libraries)
             };
             let completed = named(&items, label);
             assert!(
@@ -1057,39 +1107,22 @@ mod tests {
             .export_documentation(&["current-document".to_owned()])
             .unwrap()
             .remove(0);
-        for (text, label) in [
+        for (text, label, import) in [
             (
                 "#import \"@tola/document:0.0.0\": current-doc",
                 "current-document",
+                true,
             ),
             (
                 "#import \"@tola/document:0.0.0\": current-document as identity\n#iden",
                 "identity",
+                false,
             ),
         ] {
-            let source = Source::new(file("main.typ"), text.to_owned());
-            let names = SourceNames::new(source.clone());
-            let graph = graph(&source, &libraries);
-            let items = if label == "identity" {
-                source_name_completion(
-                    Some(&graph),
-                    &names,
-                    &source,
-                    source.text().len(),
-                    &BuildCancellation::new(),
-                )
-                .unwrap()
-                .unwrap()
+            let items = if import {
+                cold_import_items(text, &libraries)
             } else {
-                source_import_completion(
-                    &graph,
-                    &names,
-                    &source,
-                    source.text().len(),
-                    &BuildCancellation::new(),
-                )
-                .unwrap()
-                .unwrap()
+                cold_names(text, &libraries)
             };
             let completed = named(&items, label);
             assert!(
@@ -1103,13 +1136,7 @@ mod tests {
     #[test]
     fn library_names_follow_math_namespace() {
         for (marked, expected) in [("$sq|$", "sqrt"), ("$st|$", "std"), ("#st|", "std")] {
-            let cursor = marked.find('|').unwrap();
-            let source = Source::detached(marked.replace('|', ""));
-            let names = SourceNames::new(source.clone());
-            let items =
-                source_name_completion(None, &names, &source, cursor, &BuildCancellation::new())
-                    .unwrap()
-                    .unwrap();
+            let items = cold_items(marked);
             assert!(
                 items.iter().any(|item| item.label == expected),
                 "{marked}: {items:?}"
@@ -1120,13 +1147,7 @@ mod tests {
             ("#std.str.le|", "len"),
             ("$sqrt.wh|$", "where"),
         ] {
-            let cursor = marked.find('|').unwrap();
-            let source = Source::detached(marked.replace('|', ""));
-            let names = SourceNames::new(source.clone());
-            let items =
-                source_member_completion(None, &names, &source, cursor, &BuildCancellation::new())
-                    .unwrap()
-                    .unwrap();
+            let items = cold_member_items(marked).unwrap();
             assert!(
                 items.iter().any(|item| item.label == expected),
                 "{marked}: {items:?}"
@@ -1137,13 +1158,7 @@ mod tests {
     #[test]
     fn completion_edits_follow_utf16_cursor() {
         let marked = "#let café(value) = value\n😀 #ca|fé";
-        let cursor = marked.find('|').unwrap();
-        let source = Source::detached(marked.replace('|', ""));
-        let names = SourceNames::new(source.clone());
-        let items =
-            source_name_completion(None, &names, &source, cursor, &BuildCancellation::new())
-                .unwrap()
-                .unwrap();
+        let items = cold_items(marked);
         let completed = named(&items, "café");
         let Some(lsp_types::CompletionTextEdit::InsertAndReplace(edit)) = &completed.text_edit
         else {
@@ -1184,13 +1199,7 @@ mod tests {
             ("#let convert = str\n#convert(1).|", "split"),
             ("#let value = \"a,b\".split(\",\")\n#value.|", "map"),
         ] {
-            let cursor = marked.find('|').unwrap();
-            let source = Source::detached(marked.replace('|', ""));
-            let names = SourceNames::new(source.clone());
-            let items =
-                source_member_completion(None, &names, &source, cursor, &BuildCancellation::new())
-                    .unwrap()
-                    .unwrap_or_else(|| panic!("{marked}"));
+            let items = cold_member_items(marked).unwrap_or_else(|| panic!("{marked}"));
             assert!(
                 items.iter().any(|item| item.label == expected),
                 "{marked}: {items:?}"
@@ -1219,19 +1228,7 @@ mod tests {
                 "custom",
             ),
         ] {
-            let cursor = marked.find('|').unwrap();
-            let source = Source::new(file("main.typ"), marked.replace('|', ""));
-            let names = SourceNames::new(source.clone());
-            let graph = graph(&source, std::slice::from_ref(&library));
-            let items = source_member_completion(
-                Some(&graph),
-                &names,
-                &source,
-                cursor,
-                &BuildCancellation::new(),
-            )
-            .unwrap()
-            .unwrap_or_else(|| panic!("{marked}"));
+            let items = cold_imported_member_items(marked, &library);
             assert!(
                 items.iter().any(|item| item.label == expected),
                 "{marked}: {items:?}"
@@ -1259,12 +1256,7 @@ mod tests {
                 Some("old"),
             ),
         ] {
-            let cursor = marked.find('|').unwrap();
-            let source = Source::detached(marked.replace('|', ""));
-            let names = SourceNames::new(source.clone());
-            let cold =
-                source_member_completion(None, &names, &source, cursor, &BuildCancellation::new())
-                    .unwrap();
+            let cold = cold_member_items(marked);
             if let Some(expected) = expected {
                 assert!(
                     cold.unwrap().iter().any(|item| item.label == expected),
@@ -1310,13 +1302,7 @@ mod tests {
                 "signum",
             ),
         ] {
-            let cursor = marked.find('|').unwrap();
-            let source = Source::detached(marked.replace('|', ""));
-            let names = SourceNames::new(source.clone());
-            let cold =
-                source_member_completion(None, &names, &source, cursor, &BuildCancellation::new())
-                    .unwrap()
-                    .expect(marked);
+            let cold = cold_member_items(marked).expect(marked);
             let mut site = crate::query::tests::QuerySession::with_program(
                 crate::query::tests::FAILED_PROGRAM,
             );
@@ -1365,12 +1351,7 @@ mod tests {
                 Some("right"),
             ),
         ] {
-            let cursor = marked.find('|').unwrap();
-            let source = Source::detached(marked.replace('|', ""));
-            let names = SourceNames::new(source.clone());
-            let items =
-                source_member_completion(None, &names, &source, cursor, &BuildCancellation::new())
-                    .unwrap();
+            let items = cold_member_items(marked);
             let labels = items.as_ref().map(|items| {
                 items
                     .iter()

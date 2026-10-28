@@ -39,7 +39,6 @@ pub(crate) struct QueryRequest {
     pub(crate) serial: u64,
     pub(crate) sources: SourceInputs,
     pub(crate) view: crate::sources::SourceView,
-    pub(crate) package_sources: Option<Arc<PathBuf>>,
     pub(crate) routes_as_hints: bool,
     pub(crate) check_progress: CheckProgress,
     pub(crate) query: SourceQuery,
@@ -71,7 +70,6 @@ pub(crate) struct AnalysisRequest {
     pub(crate) package_locations: Option<tola_typst::PackageLocations>,
     pub(crate) boundary: tola_typst::SourceBoundary,
     pub(crate) task: AnalysisTask,
-    pub(crate) package_sources: Option<Arc<PathBuf>>,
 }
 
 /// The request one source-only analysis hands to the compiler lane.
@@ -147,6 +145,7 @@ pub(crate) struct SelectionRead {
     pub(crate) serial: u64,
     pub(crate) root: PathBuf,
     pub(crate) view: crate::sources::SourceView,
+    pub(crate) boundary: tola_typst::SourceBoundary,
     pub(crate) cancellation: BuildCancellation,
 }
 
@@ -161,6 +160,7 @@ pub(crate) struct RenameRead {
     pub(crate) id: RequestId,
     pub(crate) serial: u64,
     pub(crate) sources: SourceInputs,
+    pub(crate) view: crate::sources::SourceView,
     /// The files the editor renames: where each was, and where it goes.
     pub(crate) files: Vec<(PathBuf, PathBuf)>,
 }
@@ -169,6 +169,7 @@ pub(crate) struct SymbolsRead {
     pub(crate) id: RequestId,
     pub(crate) serial: u64,
     pub(crate) sources: SourceInputs,
+    pub(crate) view: crate::sources::SourceView,
     pub(crate) query: String,
 }
 

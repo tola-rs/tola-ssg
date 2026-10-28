@@ -7,13 +7,34 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::LazyLock;
 
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
 use lsp_types::Uri;
 use tola_packages::{BuiltinPackage, TolaPackage, builtin_package, resolvable_packages};
 use tola_typst::typst::syntax::{FileId, RootedPath, VirtualPath, VirtualRoot};
 use url::Url;
+
+/// The editor URI that names no source this server serves.
+///
+/// The message is what a request failure carries; the URI itself stays with the caller, which is
+/// the only layer that knows which document the address came from.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum SourceUriError {
+    /// A scheme or shape this server publishes no documents under.
+    #[error("unsupported source URI")]
+    Unsupported,
+    /// A `tola-package:` address outside the registry this implementation ships.
+    #[error("unknown embedded package source")]
+    UnknownEmbedded,
+    /// A site path outside the source root.
+    #[error("source is outside the site root")]
+    OutsideSite,
+    /// A site address this server could not spell as a protocol URI.
+    #[error("source URL is not a valid protocol URI")]
+    Protocol(#[source] crate::uri::UriError),
+}
 
 pub(crate) fn path_id(path: &Path, root: &Path) -> Option<FileId> {
     let logical = tola_build::filesystem::lexical_path_identity(path);
@@ -23,29 +44,93 @@ pub(crate) fn path_id(path: &Path, root: &Path) -> Option<FileId> {
 
 pub(crate) fn file_id(uri: &Uri, root: &Path) -> Result<FileId> {
     let url = Url::parse(uri.as_str())?;
-    if url.scheme() == "file" {
-        let path = crate::uri::to_site_path(uri.as_str())?;
-        return path_id(&path, root).context("source is outside the site root");
+    if url.scheme() != "file" {
+        return Ok(package_url_id(&url)?);
     }
-    package_url_id(&url)
+    let path = crate::uri::site_path_of(&url)?;
+    let Some(id) = path_id(&path, root) else {
+        return Err(SourceUriError::OutsideSite.into());
+    };
+    Ok(id)
+}
+
+/// A verified mirror keeps its embedded package identity wherever the client stores it.
+pub(crate) fn source_id(
+    uri: &Uri,
+    root: &Path,
+    package_sources: Option<&Path>,
+    boundary: &tola_typst::SourceBoundary,
+) -> Result<Option<FileId>> {
+    source_id_with_packages(uri, root, package_sources, boundary, &Arc::default(), None)
+}
+
+/// Address a selected local module before treating a file as a project or global package source.
+/// Several aliases of one physical file need an explicit context; none is guessed here.
+pub(crate) fn source_id_with_packages(
+    uri: &Uri,
+    root: &Path,
+    package_sources: Option<&Path>,
+    boundary: &tola_typst::SourceBoundary,
+    local_packages: &Arc<tola_typst::LocalPackages>,
+    project_sources: Option<(&Path, &[PathBuf])>,
+) -> Result<Option<FileId>> {
+    let Ok(url) = Url::parse(uri.as_str()) else {
+        return Ok(None);
+    };
+    if url.scheme() != "file" {
+        return Ok(package_url_id(&url).ok());
+    }
+    let Ok(path) = crate::uri::site_path_of(&url) else {
+        return Ok(None);
+    };
+    let mirror = tola_build::filesystem::layout::builtin_packages(root);
+    for directory in package_sources.into_iter().chain([mirror.as_path()]) {
+        let directory = tola_build::filesystem::normalize_existing_prefix(directory);
+        if path.starts_with(&directory) {
+            return Ok(package_view_id(&path, &directory));
+        }
+    }
+    if boundary.refusal(&path)?.is_some() {
+        return Ok(None);
+    }
+    if project_sources
+        .is_some_and(|(content, files)| path.starts_with(content) || files.contains(&path))
+    {
+        return Ok(tola_typst::file_id_from_path(&path, root));
+    }
+    let resolver = tola_typst::FileResolver::new()
+        .with_source_boundary(boundary.clone())
+        .with_local_packages(Arc::clone(local_packages));
+    let spelled = crate::uri::file_path_of(&url)?;
+    match resolver.local_package_ids(&spelled)?.as_slice() {
+        [id] => return Ok(Some(*id)),
+        [] => {}
+        _ => return Ok(None),
+    }
+    let id = tola_typst::file_id_from_path(&path, root)
+        .or_else(|| tola_build::filesystem::package_document_id(&path, None));
+    Ok(id.filter(|id| {
+        !matches!(id.root(), VirtualRoot::Package(package)
+        if local_packages.owns_namespace(&package.namespace))
+    }))
 }
 
 pub(crate) fn package_file_id(uri: &Uri) -> Result<FileId> {
-    package_url_id(&Url::parse(uri.as_str())?)
+    Ok(package_url_id(&Url::parse(uri.as_str())?)?)
 }
 
-fn package_url_id(url: &Url) -> Result<FileId> {
+fn package_url_id(url: &Url) -> Result<FileId, SourceUriError> {
     if url.scheme() != "tola-package"
         || url.host_str().is_some()
         || url.query().is_some()
         || url.fragment().is_some()
     {
-        bail!("unsupported source URI");
+        return Err(SourceUriError::Unsupported);
     }
-    let Some(id) = PACKAGE_FILE_ADDRESSES.get(url.as_str()) else {
-        bail!("unknown embedded package source");
-    };
-    Ok(*id)
+    PACKAGE_FILE_ADDRESSES
+        .get(url.as_str())
+        .copied()
+        .ok_or(SourceUriError::UnknownEmbedded)
 }
 
 /// The identity this implementation reads one builtin package file at, when `path` spells one.
@@ -74,20 +159,21 @@ static PACKAGE_FILE_ADDRESSES: LazyLock<HashMap<String, FileId>> = LazyLock::new
     addresses
 });
 
-pub(crate) fn source_uri(id: FileId, root: &Path) -> Result<Uri> {
+pub(crate) fn source_uri(id: FileId, root: &Path) -> Result<Uri, SourceUriError> {
     let path = id.vpath().get_without_slash();
     if let VirtualRoot::Package(package) = id.root() {
-        let mut uri = Url::parse("tola-package:/")?;
+        let mut uri = Url::parse("tola-package:/")
+            .map_err(|error| SourceUriError::Protocol(crate::uri::UriError::Invalid(error)))?;
         uri.path_segments_mut()
-            .map_err(|_| anyhow::anyhow!("invalid package URI base"))?
+            .expect("a package URI has path segments")
             .pop_if_empty()
             .push(&package.namespace)
             .push(&package.name)
             .push(&package.version.to_string())
             .extend(path.split('/'));
-        crate::uri::from_url(uri)
+        crate::uri::from_url(uri).map_err(SourceUriError::Protocol)
     } else {
-        crate::uri::from_file_path(&root.join(path))
+        crate::uri::from_file_path(&root.join(path)).map_err(SourceUriError::Protocol)
     }
 }
 
@@ -98,13 +184,13 @@ pub(crate) fn client_uri(
     id: FileId,
     source_root: &Path,
     client_root: &crate::uri::ClientRoot,
-) -> Option<Uri> {
+) -> Result<Uri, SourceUriError> {
     if matches!(id.root(), VirtualRoot::Project) {
         return client_root
             .address(&source_root.join(id.vpath().get_without_slash()))
-            .ok();
+            .map_err(SourceUriError::Protocol);
     }
-    source_uri(id, source_root).ok()
+    source_uri(id, source_root)
 }
 
 pub(crate) fn embedded_source(id: FileId) -> Option<Cow<'static, str>> {
@@ -122,73 +208,59 @@ pub(crate) fn embedded_source(id: FileId) -> Option<Cow<'static, str>> {
 /// A file-only client cannot open a `tola-package:` document, so it reads a site's packages as the
 /// mirrors `tola editor setup` publishes beside it, and a definition into a package names one of
 /// them.
-pub(crate) fn package_view_path(id: FileId, directory: &Path) -> Result<PathBuf> {
+pub(crate) fn package_view_path(id: FileId, directory: &Path) -> Option<PathBuf> {
     let VirtualRoot::Package(spec) = id.root() else {
-        bail!("source is not a package file");
+        return None;
     };
-    Ok(directory
-        .join(spec.namespace.as_str())
-        .join(spec.name.as_str())
-        .join(spec.version.to_string())
-        .join(id.vpath().get_without_slash()))
+    Some(
+        directory
+            .join(spec.namespace.as_str())
+            .join(spec.name.as_str())
+            .join(spec.version.to_string())
+            .join(id.vpath().get_without_slash()),
+    )
 }
 
 /// Whether the file an editor reads has exactly the package source it mirrors.
 ///
 /// A mirror some other Tola wrote holds positions the builtin source does not, so the bytes decide
 /// whether the file is this implementation's package source at all.
-pub(crate) fn verify_package_view(path: &Path, source: &str) -> Result<()> {
-    let file = std::fs::File::open(path).with_context(|| {
-        "Tola could not open an editor package source; run `tola editor setup`".to_owned()
-    })?;
+pub(crate) fn verify_package_view(path: &Path, source: &str) -> Result<(), PackageViewError> {
+    let file = std::fs::File::open(path).map_err(PackageViewError::Unreadable)?;
     let mut contents = Vec::with_capacity(source.len());
     file.take(source.len() as u64 + 1)
-        .read_to_end(&mut contents)?;
-    anyhow::ensure!(
-        contents == source.as_bytes(),
-        "an editor package source differs from this Tola implementation; run `tola editor setup`"
-    );
+        .read_to_end(&mut contents)
+        .map_err(PackageViewError::Unreadable)?;
+    if contents != source.as_bytes() {
+        return Err(PackageViewError::Differs);
+    }
     Ok(())
 }
 
-/// The builtin package source a file of the editor's package view mirrors, when it is one.
-///
-/// The mirror is not a source of its own: every answer about it is the immutable package source's,
-/// taken from this implementation rather than from the copy the editor holds. A path no builtin
-/// package file mirrors — an unknown package, a file that package does not hold, or a copy that
-/// differs from the one this Tola ships — mirrors nothing.
-pub(crate) fn package_view_id(path: &Path, directory: &Path) -> Option<FileId> {
-    // The view is a spelling of the published files, not a place: an editor may reach the same
-    // source through a link, and the site root may itself be spelled differently.
-    let path = tola_build::filesystem::normalize_existing_prefix(path);
-    let directory = tola_build::filesystem::normalize_existing_prefix(directory);
-    // Every published file sits below the view directory, so a path outside it mirrors nothing:
-    // this is the common answer, and it skips deriving every candidate address.
-    if !path.starts_with(&directory) {
-        return None;
-    }
+/// Why a mirror file is not the builtin package source it mirrors.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum PackageViewError {
+    #[error("Tola could not open an editor package source; run `tola editor setup`")]
+    Unreadable(#[source] std::io::Error),
+    #[error(
+        "an editor package source differs from this Tola implementation; run `tola editor setup`"
+    )]
+    Differs,
+}
+
+fn package_view_id(path: &Path, directory: &Path) -> Option<FileId> {
     for package in resolvable_packages() {
         for (file, source) in package.files() {
             let Some(id) = builtin_file_id(package, file) else {
                 continue;
             };
-            if package_view_path(id, &directory).ok().as_deref() != Some(path.as_path()) {
+            if package_view_path(id, directory).as_deref() != Some(path) {
                 continue;
             }
-            return verify_package_view(&path, &source).is_ok().then_some(id);
+            return verify_package_view(path, &source).is_ok().then_some(id);
         }
     }
     None
-}
-
-/// The builtin package source a file of the site's own package view mirrors, when it is one.
-///
-/// `tola editor setup` publishes a site's packages beside its configuration, and a file-only client
-/// reads and is sent into those files. The site's own view needs no client configuration: a mirror
-/// answers as the package document it mirrors, whether or not the client named the view.
-pub(crate) fn mirrored_package_id(path: &Path, root: &Path) -> Option<FileId> {
-    let view = root.join(tola_build::filesystem::PACKAGE_MIRROR_DIRECTORY);
-    package_view_id(path, &view)
 }
 
 /// Where one package document's bytes are read from, among the locations the compiler resolved.
@@ -198,36 +270,43 @@ pub(crate) fn mirrored_package_id(path: &Path, root: &Path) -> Option<FileId> {
 pub(crate) fn package_file_path(
     id: FileId,
     locations: &tola_typst::PackageLocations,
+    boundary: &tola_typst::SourceBoundary,
 ) -> Option<PathBuf> {
     let VirtualRoot::Package(spec) = id.root() else {
         return None;
     };
-    let vpath = id.vpath().get_without_slash();
-    locations
-        .declared()
-        .iter()
-        .chain(locations.data())
-        .chain(locations.cache())
-        .map(|location| {
-            location
-                .root()
-                .join(spec.namespace.as_str())
-                .join(spec.name.as_str())
-                .join(spec.version.to_string())
-                .join(vpath)
-        })
-        .find(|path| path.is_file())
+    let package =
+        tola_typst::PackageStore::new(locations.clone(), tola_typst::PackageFetchPolicy::LocalOnly)
+            .with_source_boundary(boundary.clone())
+            .prepare(spec)
+            .ok()?;
+    Some(package.directory().join(id.vpath().get_without_slash()))
 }
 
-/// The package document a file below a package directory names, when the directory is one.
-///
-/// The rule lives in `tola-build`, beside the package locations it serves; the language server adds
-/// no location requirement of its own, because the source boundary already governs reads.
-pub(crate) fn package_directory_id(path: &Path) -> Option<FileId> {
-    tola_build::filesystem::package_document_id(path, None)
+/// Prefer the request's selected local package over global package directories.
+/// This maps unsaved buffers as well as disk bytes, and never exposes virtual manifests.
+pub(crate) fn package_file_path_with_packages(
+    id: FileId,
+    locations: &tola_typst::PackageLocations,
+    boundary: &tola_typst::SourceBoundary,
+    local_packages: &Arc<tola_typst::LocalPackages>,
+) -> Option<PathBuf> {
+    let VirtualRoot::Package(spec) = id.root() else {
+        return None;
+    };
+    if local_packages.package(spec).is_some() || local_packages.owns_namespace(&spec.namespace) {
+        return tola_typst::FileResolver::new()
+            .with_source_boundary(boundary.clone())
+            .with_local_packages(Arc::clone(local_packages))
+            .local_package_path(id)
+            .ok()
+            .flatten();
+    }
+    package_file_path(id, locations, boundary)
 }
 
-/// Resolve with Typst's path semantics, then require an actual builtin file.
+/// The builtin package file a path inside one builtin package names, when this implementation
+/// ships it.
 pub(crate) fn embedded_relative(id: FileId, path: &str) -> Option<FileId> {
     embedded_source(id)?;
     let target = tola_typst::typst::foundations::PathOrStr::Str(path.into())
@@ -237,10 +316,46 @@ pub(crate) fn embedded_relative(id: FileId, path: &str) -> Option<FileId> {
     embedded_source(target).map(|_| target)
 }
 
-fn is_tola_package(id: FileId) -> bool {
-    matches!(id.root(), VirtualRoot::Package(spec) if TolaPackage::from_spec(spec).is_some())
+pub(crate) fn is_tola_span(span: tola_typst::typst::syntax::Span) -> bool {
+    span.id().is_some_and(|id| {
+        matches!(id.root(), VirtualRoot::Package(spec) if TolaPackage::from_spec(spec).is_some())
+    })
 }
 
-pub(crate) fn is_tola_span(span: tola_typst::typst::syntax::Span) -> bool {
-    span.id().is_some_and(is_tola_package)
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn package_files_share_selected_root() {
+        let directory = tempfile::tempdir().unwrap();
+        let declared = directory.path().join("declared");
+        let cache = directory.path().join("cache");
+        let package = "local/example/1.0.0";
+        for root in [&declared, &cache] {
+            std::fs::create_dir_all(root.join(package)).unwrap();
+        }
+        std::fs::write(cache.join(package).join("extra.typ"), "#let extra = 1").unwrap();
+        let locations = tola_typst::PackageLocations::from_absolute_roots(None, Some(cache))
+            .unwrap()
+            .with_declared_root(declared.clone())
+            .unwrap();
+        let id = RootedPath::new(
+            VirtualRoot::Package("@local/example:1.0.0".parse().unwrap()),
+            VirtualPath::new("extra.typ").unwrap(),
+        )
+        .intern();
+        let path =
+            package_file_path(id, &locations, &tola_typst::SourceBoundary::default()).unwrap();
+
+        assert_eq!(
+            path,
+            declared
+                .canonicalize()
+                .unwrap()
+                .join(package)
+                .join("extra.typ")
+        );
+        assert!(!path.exists());
+    }
 }

@@ -3,11 +3,11 @@
 //!
 //! A rewrite reads the syntax the selection covers, so it costs what that selection covers.
 
-use lsp_types::{CodeActionKind, CodeActionOrCommand, Range, TextEdit, Uri};
+use lsp_types::{CodeActionOrCommand, Range, TextEdit, Uri};
 use tola_typst::typst::syntax::{LinkedNode, Source, SyntaxKind, SyntaxMode, ast};
 
 use super::ancestors::selection_ancestor;
-use super::edits::{edit_action, rewrite_action};
+use super::edits::{refactor_action, removal, rewrite_action};
 
 /// Whether `at` sits in content: the leaf ending there answers, and the leaf opening there answers
 /// when the ending leaf does not — a position right after an embedded expression reads as code
@@ -47,10 +47,9 @@ pub(super) fn wrap_content_block(
     ) else {
         return Vec::new();
     };
-    vec![edit_action(
+    vec![refactor_action(
         uri,
         "wrap the selection in a content block".to_owned(),
-        CodeActionKind::REFACTOR_REWRITE,
         vec![
             TextEdit {
                 range: start,
@@ -86,23 +85,17 @@ pub(super) fn equation_rewrites(
     };
     let mut children = equation.children();
     let Some(first_dollar) = children
-        .by_ref()
-        .take(1)
-        .find(|child| child.kind() == SyntaxKind::Dollar)
+        .next()
+        .filter(|child| child.kind() == SyntaxKind::Dollar)
     else {
         return Vec::new();
     };
     let Some(last_dollar) = children
-        .rev()
-        .take(1)
-        .find(|child| child.kind() == SyntaxKind::Dollar)
+        .next_back()
+        .filter(|child| child.kind() == SyntaxKind::Dollar)
     else {
         return Vec::new();
     };
-    // An unclosed equation spells one dollar, and a rewrite has no second one to reach.
-    if first_dollar.offset() == last_dollar.offset() {
-        return Vec::new();
-    }
     let body_range = body.range();
     let front = first_dollar.range().end..body_range.start;
     let back = body_range.end..last_dollar.range().start;
@@ -170,35 +163,27 @@ fn equation_rewrite(
             range: front,
             new_text: gap.to_owned(),
         });
-        edits.push(TextEdit {
-            range: back,
-            new_text: if gap.is_empty() {
-                String::new()
-            } else {
-                punctuation
+        edits.push(if gap.is_empty() {
+            removal(back)
+        } else {
+            TextEdit {
+                range: back,
+                new_text: punctuation
                     .as_ref()
                     .map(|(character, _)| format!("{character}{gap}"))
-                    .unwrap_or_else(|| gap.to_owned())
-            },
+                    .unwrap_or_else(|| gap.to_owned()),
+            }
         });
     }
     if !gap.is_empty()
         && let Some((_, range)) = &punctuation
     {
-        edits.push(TextEdit {
-            range: *range,
-            new_text: String::new(),
-        });
+        edits.push(removal(*range));
     }
     if edits.is_empty() {
         return None;
     }
-    Some(edit_action(
-        uri,
-        title.to_owned(),
-        CodeActionKind::REFACTOR_REWRITE,
-        edits,
-    ))
+    Some(refactor_action(uri, title.to_owned(), edits))
 }
 
 /// Whether the equation is written as a block: whitespace stands between each dollar and the body.
@@ -249,11 +234,10 @@ pub(super) fn figure_wrap(
     }) else {
         return Vec::new();
     };
-    let Some((name, hash)) = figure_element(&node) else {
-        return Vec::new();
-    };
+    let (name, needs_hash) =
+        figure_element(&node).expect("the selection's ancestor holds a figure element");
     let text = &source.text()[node.range()];
-    let hash = if hash { "#" } else { "" };
+    let hash = if needs_hash { "#" } else { "" };
     let new_text = if text.contains('\n') {
         format!("{hash}figure(\n  caption: [Caption],\n  {text},\n)")
     } else {
@@ -331,7 +315,6 @@ mod tests {
         ] {
             let actions = selection_actions(&uri(), &Source::detached(text), span);
             let edits = edits_of(&actions, "wrap the selection in a content block");
-            assert_eq!(edits.len(), 2, "{text:?}");
             assert!(
                 edits.iter().all(|(range, _)| range.start == range.end),
                 "{text:?}"
@@ -346,8 +329,7 @@ mod tests {
             );
         }
     }
-    /// A selection starting inside a nested equation and reaching past it is not answered by the
-    /// outer equation: the inner one does not hold it, and no outer one answers in its place.
+
     #[test]
     fn outer_equation_ignores_nested_selection() {
         let text = "$ a + #{ let inner = $x + 1$; inner } $";

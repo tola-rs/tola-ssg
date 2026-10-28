@@ -8,16 +8,7 @@ use std::collections::BTreeSet;
 use lsp_types::{
     CodeAction, CodeActionKind, CodeActionOrCommand, Position, Range, TextEdit, Uri, WorkspaceEdit,
 };
-use tola_build::diagnostic::SourceRange;
-use tola_typst::typst::syntax::Source;
-
-/// The byte range one echoed protocol range addresses, absent when a position is past the
-/// document or the range is reversed.
-pub(super) fn byte_range(source: &Source, range: Range) -> Option<std::ops::Range<usize>> {
-    let start = crate::position::byte_offset(source.lines(), range.start).ok()?;
-    let end = crate::position::byte_offset(source.lines(), range.end).ok()?;
-    (start <= end).then_some(start..end)
-}
+use tola_diagnostic::SourceRange;
 
 /// The protocol range one echoed diagnostic has, whose positions are the protocol's own.
 pub(super) fn echoed_range(range: SourceRange) -> Range {
@@ -54,6 +45,19 @@ pub(super) fn protocol_line(text: &str, byte: usize) -> Option<std::ops::Range<u
     Some(start..end)
 }
 
+/// The edit removing the text in `range`.
+pub(super) fn removal(range: Range) -> TextEdit {
+    TextEdit {
+        range,
+        new_text: String::new(),
+    }
+}
+
+/// The identity one edit claims: the span it replaces and the text it writes.
+pub(super) fn edit_key(edit: &TextEdit) -> (Position, Position, String) {
+    (edit.range.start, edit.range.end, edit.new_text.clone())
+}
+
 /// `edits` with every claim merged: two removals overlapping or touching become one.
 pub(super) fn merged_removals(mut edits: Vec<TextEdit>) -> Vec<TextEdit> {
     edits.sort_by_key(|edit| (edit.range.start, edit.range.end));
@@ -79,7 +83,7 @@ pub(super) fn disjoint_edits(edits: Vec<TextEdit>) -> Vec<TextEdit> {
     let mut seen = BTreeSet::new();
     let mut disjoint: Vec<TextEdit> = Vec::new();
     for edit in edits {
-        if !seen.insert((edit.range.start, edit.range.end, edit.new_text.clone())) {
+        if !seen.insert(edit_key(&edit)) {
             continue;
         }
         if disjoint
@@ -111,6 +115,15 @@ pub(super) fn edit_action(
     })
 }
 
+/// The refactor code action applying `edits` in `uri`.
+pub(super) fn refactor_action(
+    uri: &Uri,
+    title: String,
+    edits: Vec<TextEdit>,
+) -> CodeActionOrCommand {
+    edit_action(uri, title, CodeActionKind::REFACTOR_REWRITE, edits)
+}
+
 /// The code action rewriting `range` in `uri` with `new_text`.
 pub(super) fn rewrite_action(
     uri: &Uri,
@@ -118,10 +131,5 @@ pub(super) fn rewrite_action(
     range: Range,
     new_text: String,
 ) -> CodeActionOrCommand {
-    edit_action(
-        uri,
-        title,
-        CodeActionKind::REFACTOR_REWRITE,
-        vec![TextEdit { range, new_text }],
-    )
+    refactor_action(uri, title, vec![TextEdit { range, new_text }])
 }

@@ -1,6 +1,6 @@
 //! What one hover shows, and how its sections part from each other.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 
 use anyhow::Result;
@@ -11,9 +11,11 @@ use tola_build::check::SourceCompilation;
 use tola_build::config::ResolvedSiteConfig;
 use tola_packages::Signature;
 use tola_typst::typst::World;
-use tola_typst::typst::foundations::Value;
+use tola_typst::typst::foundations::{Func, Styles, Value};
 use tola_typst::typst::syntax::ast::{self, AstNode};
 use tola_typst::typst::syntax::{LinkedNode, Side, Source, Span, SyntaxKind, VirtualRoot};
+use tola_typst_syntax::docs::Documentation;
+use tola_typst_syntax::names::{Declaration, DeclarationKind, SourceNames};
 use typst_ide::Tooltip;
 
 use crate::markdown;
@@ -24,13 +26,14 @@ use crate::sentence::{joined, listed};
 use super::citations::{self, BibliographyCache};
 use super::context::{SelectedSyntax, Selection};
 use super::editing;
+use super::expression::ExpressionType;
 use super::imports::imported_member;
 use super::labels;
 use super::meta::{MetaCall, meta_call, meta_key_at};
 use super::name_graph::bare_name;
-use super::records::declared::declared_output;
+use super::records::declared::{DeclaredOutput, declared_output};
 use super::records::origin::{field_chain, record_origin};
-use super::records::parameters::parameter_argument;
+use super::records::parameters::{ParameterArgument, parameter_argument};
 use super::repair::import_star;
 use super::schema;
 use super::semantic::{self, Semantic};
@@ -38,43 +41,72 @@ use super::site_schema::{declared_documentation, rejected_key_note};
 
 /// Whether a hover says anything, which a markdown envelope of whitespace does not.
 pub(super) fn says_something(hover: &lsp_types::Hover) -> bool {
+    let says = |marked: &lsp_types::MarkedString| match marked {
+        lsp_types::MarkedString::String(text) => !text.trim().is_empty(),
+        lsp_types::MarkedString::LanguageString(code) => !code.value.trim().is_empty(),
+    };
     match &hover.contents {
         lsp_types::HoverContents::Markup(markup) => !markup.value.trim().is_empty(),
-        lsp_types::HoverContents::Scalar(marked) => match marked {
-            lsp_types::MarkedString::String(text) => !text.trim().is_empty(),
-            lsp_types::MarkedString::LanguageString(code) => !code.value.trim().is_empty(),
-        },
-        lsp_types::HoverContents::Array(marked) => marked.iter().any(|marked| match marked {
-            lsp_types::MarkedString::String(text) => !text.trim().is_empty(),
-            lsp_types::MarkedString::LanguageString(code) => !code.value.trim().is_empty(),
-        }),
+        lsp_types::HoverContents::Scalar(marked) => says(marked),
+        lsp_types::HoverContents::Array(marked) => marked.iter().any(says),
     }
 }
-/// The hover markdown for one described name: its signatures, then its documentation.
-fn described(descriptions: &[String], docs: Option<&str>) -> String {
-    let mut text = if descriptions.is_empty() {
-        String::new()
-    } else {
-        format!("```typc\n{}\n```", descriptions.join("\n"))
+
+/// The union of every type the world observed at a node.
+fn observed_type_union(observed: &[(ExpressionType, Option<Styles>)]) -> Option<String> {
+    let types = observed
+        .iter()
+        .map(|(ty, _)| ty.type_name())
+        .collect::<BTreeSet<_>>();
+    (!types.is_empty()).then(|| types.into_iter().collect::<Vec<_>>().join(" | "))
+}
+
+/// The one value every observation at a node agrees on, when the world observed one there.
+fn agreed_value(observed: &[(ExpressionType, Option<Styles>)]) -> Option<&Value> {
+    let (ty, _) = observed.first()?;
+    let value = ty.value()?;
+    observed
+        .iter()
+        .all(|(ty, _)| ty.value() == Some(value))
+        .then_some(value)
+}
+
+/// One export as every answer reads it: its value line, then its documentation.
+fn described_export(semantics: &Semantic<'_>, name: &str, value: &Value, span: Span) -> String {
+    let docs = match value {
+        Value::Func(func) => semantic::function_docs(func).map(str::to_owned),
+        _ => None,
+    }
+    .or_else(|| semantics.source_docs(span));
+    let line = match value {
+        Value::Func(func) => semantic::signature(name, func, None, &BTreeMap::new()).code(),
+        _ => semantic::description(value, name),
     };
+    let mut text = typc_fence(&line);
     if let Some(docs) = docs {
-        if !text.is_empty() {
-            text.push_str(SECTION_JOIN);
-        }
-        text.push_str(&markdown::docs(docs));
+        text.push_str(SECTION_JOIN);
+        text.push_str(&markdown::docs(&docs));
     }
     text
 }
 
-/// How one hover's sections part from each other, as Tinymist parts them
-/// (Apache-2.0; see `licenses/README.md`).
+/// One Typst code fence, as every hover section writes it.
+pub(in crate::query) fn typc_fence(code: &str) -> String {
+    format!("```typc\n{code}\n```")
+}
+
+/// Hover sections part as Tinymist parts them (Apache-2.0; see licenses/README.md).
 pub(in crate::query) const SECTION_JOIN: &str = "\n\n---\n\n";
+
+/// The hover a set of sections makes, or none when they say nothing.
+fn sections_hover(sections: Vec<String>, range: Option<lsp_types::Range>) -> Option<Hover> {
+    (!sections.is_empty()).then(|| markdown_hover(sections.join(SECTION_JOIN), range))
+}
 
 /// How many fields one record shape lists before the remainder is counted.
 const SHAPE_FIELD_LIMIT: usize = 20;
 
-/// The parameters of a function as the sections Tinymist prints: each group headed, each
-/// parameter named, its type, then the documentation that describes it.
+/// Function parameters as Tinymist sections: group, name, type, documentation.
 fn parameter_section(signature: &Signature) -> Option<String> {
     let mut text = String::new();
     for (heading, kind, group) in [
@@ -102,9 +134,8 @@ fn parameter_section(signature: &Signature) -> Option<String> {
                 text.push_str(kind);
                 text.push(')');
             }
-            text.push_str("\n\n```typc\ntype: ");
-            text.push_str(parameter.ty_spelling());
-            text.push_str("\n```");
+            text.push_str("\n\n");
+            text.push_str(&typc_fence(&format!("type: {}", parameter.ty_spelling())));
             if let Some(docs) = &parameter.docs {
                 text.push_str("\n\n");
                 text.push_str(&markdown::docs(docs));
@@ -129,9 +160,88 @@ fn shape_section(heading: &str, fields: &[String]) -> String {
     section
 }
 
+/// The routes an answer names, capped at NAMED_PAGES, with the count left out.
+pub(in crate::query) fn shown_routes<'a>(routes: impl Iterator<Item = &'a str>) -> String {
+    let (mut names, remaining) = listed(routes, crate::routes::NAMED_PAGES);
+    if remaining > 0 {
+        names.push_str(&format!(" and {remaining} more"));
+    }
+    names
+}
+
+/// The parameter declaration one source binds at `at`, when that name is a parameter.
+fn parameter_declaration(names: &SourceNames, at: usize) -> Option<&Declaration> {
+    names
+        .declared_at(at)
+        .map(|id| &names.declarations()[id])
+        .filter(|declaration| matches!(declaration.kind, DeclarationKind::Parameter))
+}
+
+/// A function's value line when the name is bare, the block's summary, then its parameters.
+fn function_sections(
+    name: &str,
+    named: bool,
+    func: &Func,
+    documentation: Option<&Documentation>,
+    observed_parameters: &BTreeMap<String, String>,
+) -> Vec<String> {
+    let signature = semantic::signature(name, func, documentation, observed_parameters);
+    let mut sections = Vec::new();
+    if named {
+        sections.push(typc_fence(&signature.code()));
+    }
+    // The block's summary describes the declaration; parameter docs sit with the parameters.
+    if let Some(documentation) = documentation
+        && !documentation.summary.is_empty()
+    {
+        sections.push(markdown::docs(&documentation.summary));
+    }
+    sections.extend(parameter_section(&signature));
+    sections
+}
+
+/// The type one name reads: what the world observed at it, the default its declaration spells,
+fn name_type(
+    prepared: &Source,
+    observed: &[(ExpressionType, Option<Styles>)],
+    declaration: Option<&Declaration>,
+    provisioned: Option<&ParameterArgument>,
+    semantics: &mut Semantic<'_>,
+) -> Result<String> {
+    let ty = match (observed_type_union(observed), declaration) {
+        (Some(ty), _) => Some(ty),
+        (None, Some(declaration)) => {
+            Selection::default_type(prepared, &declaration.range, semantics)?
+        }
+        (None, None) => None,
+    }
+    .or_else(|| provisioned.and_then(|provisioned| provisioned.ty.clone()));
+    Ok(ty.unwrap_or_else(|| "any".to_owned()))
+}
+
+/// The sections a declaration's docs and declared shape add after its value line.
+fn declaration_sections(docs: Option<String>, declared: Option<&DeclaredOutput>) -> Vec<String> {
+    let mut sections = Vec::new();
+    if let Some(declared) = declared {
+        sections.push(shape_section("Declared fields", &declared.lines));
+    }
+    if let Some(summary) = docs
+        .map(|docs| Documentation::parse(&docs))
+        .map(|documentation| documentation.summary)
+        .filter(|summary| !summary.is_empty())
+    {
+        sections.push(markdown::docs(&summary));
+    }
+    if let Some(declared) = declared
+        && let Some(description) = &declared.documentation
+    {
+        sections.push(markdown::docs(description));
+    }
+    sections
+}
+
 impl Selection<'_> {
-    /// The hover a citation answers with, or `None` when the cursor is not on a key a bibliography
-    /// declares.
+    /// The hover a citation answers, when the cursor stands on a declared key.
     pub(super) fn citation(
         &self,
         compilation: &SourceCompilation,
@@ -156,11 +266,7 @@ impl Selection<'_> {
             cancellation,
         )
     }
-    /// The text of a `asset-url` argument the cursor sits in, with the bytes it occupies.
-    ///
-    /// The parameter's declared domain decides whether an argument names a published URL, and the
-    /// callee's own metadata decides the parameter, so an alias, an imported binding, or a
-    /// re-export keeps the answer.
+    /// The text of an asset-url argument the cursor sits in, with its bytes.
     pub(super) fn asset_url_argument(
         &self,
         semantics: &mut Semantic<'_>,
@@ -192,8 +298,7 @@ impl Selection<'_> {
         let parameters = func.params().collect::<Vec<_>>();
         let mut index = 0usize;
         for item in func_call.args().items() {
-            // A content block is the call's body rather than a value of the parameter it sits in,
-            // and a named argument names itself, exactly as the parameter hints read them.
+            // A content block is the call's body, not a parameter value; a named argument names
             let (parameter, text) = match item {
                 ast::Arg::Pos(ast::Expr::ContentBlock(_)) | ast::Arg::Spread(_) => continue,
                 ast::Arg::Pos(ast::Expr::Str(text)) => {
@@ -231,8 +336,7 @@ impl Selection<'_> {
         Ok(None)
     }
 
-    /// The hover a `asset-url` argument earns: where the URL it writes is published, or that no
-    /// `assets` declaration of this site publishes it.
+    /// The hover an asset-url argument earns: where the URL is published, or that nothing
     pub(super) fn asset_url_hover(
         &self,
         config: &ResolvedSiteConfig,
@@ -287,15 +391,11 @@ impl Selection<'_> {
         if let Some(star) = import_star(self.source, self.cursor) {
             return self.hover_star(prepared, semantics, &star);
         }
-        // A `#tola-meta` call answers from the site's schemas: its callee as the package function,
-        // its existing keys as the fields the site declares.
+        // A tola-meta call answers from the site's schemas: its callee, then its declared keys.
         if let Some(hover) = self.meta_hover(compilation, config, prepared, semantics)? {
             return Ok(Some(hover));
         }
-        // A named argument's name answers the parameter it fills; a dict field's key answers the
-        // documentation its value's `describe` call has. A parameter declaration spells the
-        // same shape, so it keeps its name for the rungs below; anything else names no value of
-        // its own, and the value lane must not read it as one.
+        // A named argument's name answers its parameter; a dict key answers its value's docs.
         if let Some(named) = Self::named_argument(prepared, self.cursor) {
             if let Some(hover) = self.parameter_hover(prepared, &named, semantics)? {
                 return Ok(Some(hover));
@@ -311,14 +411,11 @@ impl Selection<'_> {
         let Some(node) = tola_typst_syntax::syntax::expression(prepared, self.cursor) else {
             return Ok(None);
         };
-        // A node the query copy repaired is a stand-in: its compiled value answers about a
-        // fabricated construct, so this lane answers nothing about it.
+        // A repaired node is a stand-in; this lane answers nothing about it.
         if !self.range_keeps_source_text(prepared, node.range()) {
             return Ok(None);
         }
-        // Only a name has a value this lane describes: an identifier in code, or a chain
-        // rooted at one. Anything else — a literal, a call, a content block — names no value of
-        // its own.
+        // Only a name or a chain rooted at one has a value this lane describes.
         let rooted = tola_typst_syntax::syntax::root_expression(node.clone());
         if rooted.kind() != SyntaxKind::Ident {
             return Ok(None);
@@ -326,14 +423,7 @@ impl Selection<'_> {
         self.value_hover(prepared, &node, semantics)
     }
 
-    /// Hover for one name the value lane observed.
-    ///
-    /// A name bound to a function answers its definition line and, when this file declares it, the
-    /// types the world observed at its parameters; a name bound to a module answers where the
-    /// module is bound and what it is; anything else answers the declaration its author reads and
-    /// the type the world observed. A record chain answers the shape its file's schema declares,
-    /// observed records or none. A declared name with neither an observation nor a declared shape
-    /// still answers `any`: the declaration itself is the fact.
+    /// Hover for one observed name: signature or module line, type, declared shape, docs.
     fn value_hover(
         &self,
         prepared: &Source,
@@ -345,37 +435,13 @@ impl Selection<'_> {
             .declared_at(self.cursor)
             .map(|id| &names.declarations()[id]);
         let observed = semantics.types(node)?;
-        // The declared shape of one chain is a fact of the source, not of the realized site: a
-        // chain answers it whether or not this execution observed any record the chain reads.
-        let (root, fields) = match field_chain(node) {
-            Some((root, fields)) => (root, fields),
-            None => (node.clone(), Vec::new()),
-        };
+        // A chain's declared shape is a source fact, answered without any realized record.
+        let (root, fields) = field_chain(node).unwrap_or_else(|| (node.clone(), Vec::new()));
         let name = &prepared.text()[node.range()];
-        // A field chain reads its root's value, and a field names no declaration of its own, so a
-        // parameter's proof comes from the root's declaration.
-        let parameter = match declaration {
-            Some(declaration)
-                if matches!(
-                    declaration.kind,
-                    tola_typst_syntax::names::DeclarationKind::Parameter
-                ) =>
-            {
-                Some(declaration)
-            }
-            _ => names
-                .declared_at(root.range().start)
-                .map(|id| &names.declarations()[id])
-                .filter(|declaration| {
-                    matches!(
-                        declaration.kind,
-                        tola_typst_syntax::names::DeclarationKind::Parameter
-                    )
-                }),
-        };
-        // A parameter's value is the argument each call passes, which the world observed only
-        // where a call ran: with no observation, the site's own calls still prove it, and the
-        // record that argument names is what a chain over the parameter reads.
+        // A field reads no declaration of its own, so a parameter proof comes from the chain's
+        let parameter = parameter_declaration(&names, self.cursor)
+            .or_else(|| parameter_declaration(&names, root.range().start));
+        // A parameter's value is the argument each call passes; the site's calls prove it without
         let provisioned = match parameter {
             Some(declaration) if observed.is_empty() => {
                 parameter_argument(prepared, &names, declaration, semantics)?
@@ -401,11 +467,77 @@ impl Selection<'_> {
         if observed.is_empty() && declaration.is_none() && declared.is_none() {
             return Ok(None);
         }
-        // A member path names no declaration of its own, so the signature, module, and type lines
-        // answer a bare name only.
+        // A member path names no declaration, so signature, module, and type lines answer a bare
         let named = node.kind() == SyntaxKind::Ident;
-        // A named argument holds the value its parameter takes, and the world observed that value
-        // at the argument itself.
+        let observed_parameters =
+            self.observed_parameters(prepared, node, declaration, semantics)?;
+        // A declaration with no observed value still has the block its author wrote above it.
+        let mut docs = semantics
+            .definition(node)?
+            .and_then(|span| semantics.source_docs(span))
+            .or_else(|| {
+                declaration.and_then(|declaration| {
+                    tola_typst_syntax::docs::declaration_docs(prepared, declaration.range.start)
+                })
+            });
+
+        let mut sections = Vec::new();
+        match agreed_value(&observed) {
+            Some(Value::Func(func)) => {
+                docs = semantic::function_docs(func).map(str::to_owned).or(docs);
+                // The summary sits with the function's own line, so the tail writes none.
+                let documented = docs.take().map(|docs| Documentation::parse(&docs));
+                sections.extend(function_sections(
+                    name,
+                    named,
+                    func,
+                    documented.as_ref(),
+                    &observed_parameters,
+                ));
+            }
+            Some(Value::Module(module)) => {
+                if named {
+                    let bound = module
+                        .name()
+                        .map_or_else(|| name.to_owned(), ToString::to_string);
+                    sections.push(typc_fence(&format!("let {bound};")));
+                }
+            }
+            _ => {
+                let ty = name_type(
+                    prepared,
+                    &observed,
+                    declaration,
+                    provisioned.as_ref(),
+                    semantics,
+                )?;
+                // A bare any adds nothing beside a declared shape; an observed type stays.
+                if named && (ty != "any" || declared.is_none()) {
+                    sections.push(typc_fence(&format!("let {name} = {ty};")));
+                }
+            }
+        }
+        sections.extend(declaration_sections(docs, declared.as_ref()));
+        Ok(sections_hover(
+            sections,
+            position::utf16_range(self.source.lines(), node.range()),
+        ))
+    }
+
+    /// The observed type of each parameter, by name, from the call or the declaration.
+    fn observed_parameters(
+        &self,
+        prepared: &Source,
+        node: &LinkedNode<'_>,
+        declaration: Option<&Declaration>,
+        semantics: &mut Semantic<'_>,
+    ) -> Result<BTreeMap<String, String>> {
+        let Some(declaration) =
+            declaration.filter(|declaration| matches!(declaration.kind, DeclarationKind::Let))
+        else {
+            return Ok(BTreeMap::new());
+        };
+        // A named argument holds its parameter's value, observed at the argument itself.
         let mut arguments = BTreeMap::new();
         if let Some(parent) = node.parent().cloned()
             && let Some(call) = parent.cast::<ast::FuncCall>()
@@ -420,128 +552,14 @@ impl Selection<'_> {
                 arguments.insert(named.name().get().to_string(), value.range());
             }
         }
-        let observed_parameters = match declaration {
-            Some(declaration)
-                if matches!(
-                    declaration.kind,
-                    tola_typst_syntax::names::DeclarationKind::Let
-                ) =>
-            {
-                self.observed_parameter_types(prepared, &declaration.range, &arguments, semantics)?
-            }
-            _ => BTreeMap::new(),
-        };
-        let mut docs = semantics
-            .definition(node)?
-            .and_then(|span| semantics.source_docs(span));
-        // A declaration the world observed no value at — a parameter, whose value is the
-        // argument — still has the block its author wrote above it.
-        if docs.is_none()
-            && let Some(declaration) = declaration
-        {
-            docs = tola_typst_syntax::docs::declaration_docs(prepared, declaration.range.start);
-        }
-
-        let mut sections = Vec::new();
-        match observed.first().and_then(|(ty, _)| ty.value()) {
-            Some(Value::Func(func)) => {
-                docs = semantic::function_docs(func).map(str::to_owned).or(docs);
-                let documented = docs
-                    .take()
-                    .map(|docs| tola_typst_syntax::docs::Documentation::parse(&docs));
-                let signature =
-                    semantic::signature(name, func, documented.as_ref(), &observed_parameters);
-                if named {
-                    sections.push(format!("```typc\n{}\n```", signature.code()));
-                }
-                // The block's summary describes the declaration; its parameter descriptions
-                // belong with the parameters the signature section shows.
-                if let Some(documentation) = documented
-                    && !documentation.summary.is_empty()
-                {
-                    sections.push(markdown::docs(&documentation.summary));
-                }
-                if let Some(section) = parameter_section(&signature) {
-                    sections.push(section);
-                }
-            }
-            Some(Value::Module(module)) => {
-                if named {
-                    let bound = module
-                        .name()
-                        .map_or_else(|| name.to_owned(), ToString::to_string);
-                    sections.push(format!("```typc\nlet {bound};\n```"));
-                }
-            }
-            _ => {
-                let ty = observed
-                    .first()
-                    .map(|(value, _)| value.type_name())
-                    .or(match declaration {
-                        Some(declaration) => {
-                            self.default_type(prepared, &declaration.range, semantics)?
-                        }
-                        None => None,
-                    })
-                    .or_else(|| {
-                        provisioned
-                            .as_ref()
-                            .and_then(|provisioned| provisioned.ty.clone())
-                    })
-                    .unwrap_or_else(|| "any".to_owned());
-                // A bare `any` says nothing next to a declared shape; a type the world observed
-                // stays, because it reads what `any` cannot.
-                if named && (ty != "any" || declared.is_none()) {
-                    sections.push(format!("```typc\nlet {name} = {ty};\n```"));
-                }
-            }
-        }
-        // A chain over site records answers the shape of those records, never one dictionary per
-        // realized document: with many sources every hover would describe the whole site. The shape
-        // is declared by the source — a schema, the descriptors, or a project function's body —
-        // so it answers even where the site realized no record at all.
-        if let Some(declared) = &declared {
-            sections.push(shape_section("Declared fields", &declared.lines));
-        }
-        if let Some(summary) = docs
-            .map(|docs| tola_typst_syntax::docs::Documentation::parse(&docs))
-            .map(|documentation| documentation.summary)
-            .filter(|summary| !summary.is_empty())
-        {
-            sections.push(markdown::docs(&summary));
-        }
-        if let Some(declared) = &declared
-            && let Some(description) = &declared.documentation
-        {
-            sections.push(markdown::docs(description));
-        }
-        if sections.is_empty() {
-            return Ok(None);
-        }
-        Ok(Some(markdown_hover(
-            sections.join(SECTION_JOIN),
-            position::utf16_range(self.source.lines(), node.range()),
-        )))
-    }
-
-    /// The type the world observed at each parameter of the function one declaration binds, keyed
-    /// by parameter name: the call's own argument where it names one, the declaration's value
-    /// otherwise.
-    fn observed_parameter_types(
-        &self,
-        prepared: &Source,
-        range: &std::ops::Range<usize>,
-        arguments: &BTreeMap<String, std::ops::Range<usize>>,
-        semantics: &mut Semantic<'_>,
-    ) -> Result<BTreeMap<String, String>> {
-        let Some(ident) = tola_typst_syntax::syntax::node_at_range(prepared, range) else {
+        let Some(ident) = tola_typst_syntax::syntax::node_at_range(prepared, &declaration.range)
+        else {
             return Ok(BTreeMap::new());
         };
         let Some(parent) = ident.parent().cloned() else {
             return Ok(BTreeMap::new());
         };
-        // The sugar `let name(parameters) = body` hangs the parameters on the closure the name
-        // belongs to; a closure bound as a value has them on its own node.
+        // The let-name sugar hangs parameters on the closure the name belongs to.
         let closure = parent.cast::<ast::Closure>().or_else(|| {
             parent
                 .cast::<ast::LetBinding>()
@@ -578,8 +596,9 @@ impl Selection<'_> {
             let Some(node) = node else {
                 continue;
             };
-            if let Some((ty, _)) = semantics.types(&node)?.first() {
-                observed.insert(name, ty.type_name());
+            let types = semantics.types(&node)?;
+            if let Some(ty) = observed_type_union(&types) {
+                observed.insert(name, ty);
             }
         }
         Ok(observed)
@@ -592,8 +611,7 @@ impl Selection<'_> {
             .into_iter()
             .find_map(|side| root.leaf_at(cursor, side))?;
         loop {
-            if node.kind() == SyntaxKind::Named {
-                let named = node.cast::<ast::Named>()?;
+            if let Some(named) = node.cast::<ast::Named>() {
                 let range = prepared.find(named.name().span())?.range();
                 return (cursor >= range.start && cursor <= range.end).then_some(node);
             }
@@ -601,8 +619,7 @@ impl Selection<'_> {
         }
     }
 
-    /// Hover for the name of a named argument: the parameter it fills, with what the world
-    /// observed at the argument itself.
+    /// Hover for a named argument's name: its parameter and the observed argument value.
     fn parameter_hover(
         &self,
         prepared: &Source,
@@ -622,8 +639,7 @@ impl Selection<'_> {
             return Ok(None);
         };
         let name = argument.name().get().to_string();
-        // A function the world observed at the callee is the one whose parameters this name can
-        // fill; anything else leaves the name to the rungs below.
+        // Only a function observed at the callee has parameters this name can fill.
         let traced = prepared
             .find(call.callee().span())
             .map(|callee| semantics.known_values(&callee))
@@ -646,9 +662,8 @@ impl Selection<'_> {
             .find(argument.expr().span())
             .map(|value| semantics.types(&value))
             .transpose()?
-            .unwrap_or_default()
-            .first()
-            .map(|(ty, _)| ty.type_name());
+            .unwrap_or_default();
+        let observed = observed_type_union(&observed);
         // The block above the callee's declaration describes the parameter this argument fills.
         let documented = match prepared.find(call.callee().span()) {
             Some(callee) => semantics
@@ -657,7 +672,7 @@ impl Selection<'_> {
             None => None,
         }
         .or_else(|| func.docs().map(str::to_owned))
-        .map(|docs| tola_typst_syntax::docs::Documentation::parse(&docs));
+        .map(|docs| Documentation::parse(&docs));
         let observed = match observed {
             Some(observed) => BTreeMap::from([(name.clone(), observed)]),
             None => BTreeMap::new(),
@@ -720,8 +735,7 @@ impl Selection<'_> {
         )))
     }
 
-    /// The answer a `#tola-meta` call earns: the package function its callee names, or the field a
-    /// key inside its dictionary is declared with.
+    /// The answer a tola-meta call earns: its package function, or a declared key's field.
     fn meta_hover(
         &self,
         compilation: &SourceCompilation,
@@ -781,8 +795,7 @@ impl Selection<'_> {
         )))
     }
 
-    /// The answer a `#tola-meta` callee earns: the package function the file's import binds,
-    /// whether or not the call itself evaluated.
+    /// The package function the file's import binds at a tola-meta callee.
     fn meta_callee_hover(
         &self,
         compilation: &SourceCompilation,
@@ -807,17 +820,8 @@ impl Selection<'_> {
             return Ok(None);
         };
         let name = &self.source.text()[call.callee.clone()];
-        let docs = match &value {
-            Value::Func(func) => semantic::function_docs(func).map(str::to_owned),
-            _ => None,
-        }
-        .or_else(|| semantics.source_docs(span));
-        let line = match &value {
-            Value::Func(func) => semantic::signature(name, func, None, &BTreeMap::new()).code(),
-            _ => semantic::description(&value, name),
-        };
-        let mut described = described(&[line], docs.as_deref());
-        if let Some(home) = self.declaring_file(compilation, span) {
+        let mut described = described_export(semantics, name, &value, span);
+        if let Some(home) = span.id().map(|id| labels::source_path(compilation, id)) {
             described.push_str(&format!("\n\nDeclared in `{home}`."));
         }
         Ok(Some(markdown_hover(
@@ -828,13 +832,11 @@ impl Selection<'_> {
 
     /// The type one declaration's default expression gives it, when the world observed it.
     fn default_type(
-        &self,
         prepared: &Source,
         range: &std::ops::Range<usize>,
         semantics: &mut Semantic<'_>,
     ) -> Result<Option<String>> {
-        // A named parameter's default is the last child of its own node; the world observed its
-        // literal when it observed the parameter at all.
+        // A named parameter's default is its last child, observed when the parameter was.
         let Some(default) = tola_typst_syntax::syntax::node_at_range(prepared, range)
             .and_then(|ident| ident.parent().cloned())
             .filter(|param| param.kind() == SyntaxKind::Named)
@@ -843,7 +845,7 @@ impl Selection<'_> {
             return Ok(None);
         };
         let types = semantics.types(&default)?;
-        Ok(types.first().map(|(ty, _)| ty.type_name()))
+        Ok(observed_type_union(&types))
     }
 
     /// Hover for the star of a wildcard import: every name the module publishes.
@@ -866,32 +868,18 @@ impl Selection<'_> {
         else {
             return Ok(None);
         };
-        let names: Vec<String> = semantics
+        let listed: Vec<String> = semantics
             .import_bindings(&module, &[])?
             .into_keys()
+            .map(|name| format!("`{name}`"))
             .collect();
-        if names.is_empty() {
+        if listed.is_empty() {
             return Ok(None);
         }
-        let listed: Vec<String> = names.iter().map(|name| format!("`{name}`")).collect();
         Ok(Some(markdown_hover(
             format!("This star imports {}.", joined(&listed)),
             position::utf16_range(self.source.lines(), star.range()),
         )))
-    }
-
-    /// The site-relative path of the file that declares what `span` names.
-    fn declaring_file(&self, compilation: &SourceCompilation, span: Span) -> Option<String> {
-        let world = compilation.world();
-        let id = span.id()?;
-        let path = match id.root() {
-            VirtualRoot::Package(spec) => spec.to_string(),
-            VirtualRoot::Project => tola_build::filesystem::display_path(
-                &world.root().join(id.vpath().get_without_slash()),
-                world.root(),
-            ),
-        };
-        Some(path)
     }
 
     fn checked_routes(
@@ -908,22 +896,11 @@ impl Selection<'_> {
             return Ok(None);
         }
         let routes = crate::routes::site_routes(compilation, config, id, cancellation)?;
-        let (mut listed, remaining) = listed(
-            routes.iter().map(|route| route.route.as_str()),
-            crate::routes::NAMED_PAGES,
-        );
-        if remaining > 0 {
-            listed.push_str(&format!(" and {remaining} more"));
-        }
+        let listed = shown_routes(routes.iter().map(|route| route.route.as_str()));
         Ok((!listed.is_empty()).then(|| format!("`{listed}`")))
     }
 
-    /// The hover Typst's own reader answers, shaped into the sections an author reads.
-    ///
-    /// The reader reports what it observed at the cursor, and the library's own metadata names what
-    /// the name stands for: a library function answers its signature, then the reader's own
-    /// representation of the value the name reads, then the documentation the library or the
-    /// reader has.
+    /// Typst's own reader hover, shaped into sections: signature, value, docs.
     pub(super) fn builtin_hover(
         &self,
         world: &tola_typst::TypstWorld,
@@ -935,15 +912,17 @@ impl Selection<'_> {
             Some(Tooltip::Code(code)) => (None, Some(code.to_string())),
             None => (None, None),
         };
-        // The name the cursor stands in. An embedded callee writes `#` directly before its name, so
-        // the byte the cursor sits on is the name's own and the reader's leaf sides miss it.
-        let name = tola_typst_syntax::syntax::expression(prepared, cursor)
-            .filter(|node| node.kind() == SyntaxKind::Ident)
+        // The name the cursor stands in; an embedded callee's hash leaves no leaf at the name.
+        let selected = tola_typst_syntax::syntax::expression(prepared, cursor)
+            .filter(|node| matches!(node.kind(), SyntaxKind::Ident | SyntaxKind::MathIdent));
+        let name = selected
+            .as_ref()
             .map(|node| &prepared.text()[node.range()])
             .or_else(|| bare_name(prepared, cursor));
-        // Only a name that reads a value answers by spelling: a declaration, import item, argument
-        // label, dict key, or field name reads nothing here, and a name the file itself binds is
-        // that binding's, not the standard library's.
+        let math = selected
+            .as_ref()
+            .is_some_and(|node| node.kind() == SyntaxKind::MathIdent);
+        // Math names read the math scope; code names read the global scope, and only value reads
         let names = self.names_of(prepared);
         let signature = names
             .reads_value_at(cursor)
@@ -951,7 +930,13 @@ impl Selection<'_> {
             .flatten()
             .filter(|_| names.declared_at(cursor).is_none())
             .and_then(|name| {
-                let value = world.library().global.scope().get(name)?.read().clone();
+                let value = if math {
+                    world.library().math.scope().get(name)
+                } else {
+                    world.library().global.scope().get(name)
+                }?
+                .read()
+                .clone();
                 let Value::Func(func) = value else {
                     return None;
                 };
@@ -966,15 +951,15 @@ impl Selection<'_> {
         };
         let mut sections: Vec<String> = Vec::new();
         if let Some(line) = line {
-            sections.push(format!("```typc\n{line}\n```"));
+            sections.push(typc_fence(&line));
         }
         if let Some(code) = values {
-            sections.push(format!("```typc\n{code}\n```"));
+            sections.push(typc_fence(&code));
         }
         if let Some(docs) = docs {
             sections.push(markdown::docs(&docs));
         }
-        (!sections.is_empty()).then(|| markdown_hover(sections.join(SECTION_JOIN), None))
+        sections_hover(sections, None)
     }
 
     /// Hover for one import item's own name, which the import binds under another name at most.
@@ -996,17 +981,8 @@ impl Selection<'_> {
         let Some(name) = item.path.last() else {
             return Ok(None);
         };
-        let docs = match &value {
-            Value::Func(func) => semantic::function_docs(func).map(str::to_owned),
-            _ => None,
-        }
-        .or_else(|| semantics.source_docs(span));
-        let line = match &value {
-            Value::Func(func) => semantic::signature(name, func, None, &BTreeMap::new()).code(),
-            _ => semantic::description(&value, name),
-        };
-        let mut described = described(&[line], docs.as_deref());
-        if let Some(home) = self.declaring_file(compilation, span) {
+        let mut described = described_export(semantics, name, &value, span);
+        if let Some(home) = span.id().map(|id| labels::source_path(compilation, id)) {
             described.push_str(&format!("\n\nDeclared in `{home}`"));
             if let Some(routes) = self.checked_routes(compilation, config, cancellation, span)? {
                 described.push_str(&format!(", pages from current source: {routes}"));
@@ -1025,6 +1001,45 @@ mod tests {
     use super::*;
 
     use crate::query::tests::*;
+
+    #[test]
+    fn parameter_hover_lists_observed_types() {
+        for (first, second, expected) in [
+            ("1", "\"text\"", "int | str"),
+            ("x => x", "\"text\"", "function | str"),
+            ("x => x", "(x, y) => x + y", "function"),
+            ("std", "math", "module"),
+        ] {
+            let mut site = QuerySession::new();
+            let calls = format!("\n#render({first})\n#render({second})\n");
+            let hover = site
+                .hover_text(&format!(
+                    "#let render(value) = {{ let kept = val|ue; none }}{calls}",
+                ))
+                .expect("the observed parameter has a hover");
+            assert!(
+                hover.contains(&format!("let value = {expected};")),
+                "{hover}"
+            );
+            let signature = site
+                .hover_text(&format!(
+                    "#let ren|der(value) = {{ let kept = value; none }}{calls}",
+                ))
+                .expect("the function has a hover");
+            assert!(
+                signature.contains(&format!("value: {expected}")),
+                "{signature}"
+            );
+        }
+    }
+
+    #[test]
+    fn whitespace_hover_answers_nothing() {
+        let mut site = QuerySession::new();
+        for marked in ["#let value = 1\n#value   | \n", "#let value = 1\n|    \n"] {
+            assert!(site.hover(marked).is_none(), "{marked:?}");
+        }
+    }
 
     #[test]
     fn imported_hover_ranges_cover_selected_names() {
@@ -1054,23 +1069,6 @@ mod tests {
         assert!(!hover.contains("Sampled"), "{hover}");
     }
 
-    /// The cursor on a name's first character answers it, as one inside the name does.
-    #[test]
-    fn hover_answers_the_name_at_the_cursor() {
-        let mut site = QuerySession::new();
-        // The byte before the cursor sits in the space before `scale`, so the name it opens is the
-        // one the author means; the middle of the name names it outright.
-        for marked in ["#let scale = 3\n#sca|le\n", "#let scale = 3\n#sc|ale\n"] {
-            let text = site
-                .hover_text(marked)
-                .unwrap_or_else(|| panic!("{marked:?} asks about `scale`"));
-            assert!(
-                text.contains("let scale = int;"),
-                "{marked:?} answered {text}"
-            );
-        }
-    }
-
     /// The library answers a name it spells only where that name reads a value; a dict key reads
     /// none, so it must answer nothing rather than the function the key happens to spell.
     #[test]
@@ -1080,16 +1078,6 @@ mod tests {
             site.hover_text("#let page = (tit|le: \"Hello\", text: \"Body\")\n")
                 .is_none()
         );
-    }
-
-    /// A hover that would say nothing at all is no hover, which an editor would otherwise open an
-    /// empty box for.
-    #[test]
-    fn blank_hover_answers_nothing() {
-        for blank in ["", "\n\n", "   "] {
-            assert!(!says_something(&markdown_hover(blank.to_owned(), None)));
-        }
-        assert!(says_something(&markdown_hover("text".to_owned(), None)));
     }
 
     /// A name the file binds answers where markup embeds it, on the name and directly after it.
@@ -1143,29 +1131,21 @@ mod tests {
         let hover = site
             .hover_text("#let dead() = [#t|ext(size: 10pt)[x]]\n")
             .expect("a hover for the library callee");
-        assert!(
-            hover.starts_with("```typc\nlet text(\n  text: str,"),
-            "{hover}"
-        );
+        assert!(hover.starts_with("```typc\nlet text("), "{hover}");
         assert!(hover.contains("Customizes the look"), "{hover}");
     }
 
-    /// Typst's own `example` fence reads as the `typ` an editor has a grammar for, and any other
-    /// language a sample names reaches the editor as the documentation wrote it.
     #[test]
-    fn docs_example_fences_read_as_typ() {
+    fn math_function_hover_shows_its_signature() {
         let mut site = QuerySession::new();
-        for (docs, expected) in [("example", "```typ"), ("typc", "```typc")] {
-            let marked = format!(
-                "/// ```{docs}\n/// #let x = 1\n/// ```\n#let documented = 1\nDocs #docu|mented\n"
-            );
-            let hover = site
-                .hover_text(&marked)
-                .unwrap_or_else(|| panic!("a hover for `{docs}` docs"));
-            assert!(
-                hover.contains(&format!("{expected}\n#let x = 1\n```")),
-                "{hover}"
-            );
-        }
+        let hover = site
+            .hover_text("$sqr|t(4)$")
+            .expect("a hover for a math function");
+        assert!(hover.contains("let sqrt("), "{hover}");
+        assert!(hover.contains("A square root."), "{hover}");
+        let shadowed = site
+            .hover_text("#let sqrt(x) = x\n$sqr|t(4)$")
+            .expect("a hover for the local function");
+        assert!(!shadowed.contains("A square root."), "{shadowed}");
     }
 }

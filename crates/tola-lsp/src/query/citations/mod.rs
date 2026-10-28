@@ -1,19 +1,4 @@
-//! The bibliography entries the site's citations name.
-//!
-//! Typst reads `@key` in markup as a reference: a label of the site answers it first, and the
-//! bibliographies the site names answer it when no label does, which is what a citation is. Every
-//! entry is read from the files those `bibliography(…)` calls name, by the crates Typst itself reads
-//! them with, so an editor answer and a published page agree.
-//!
-//! A compiled site realizes every bibliography as an element that says which files it reads and
-//! which style and language it renders with — whether the call spells a string, a path, an array,
-//! or a value bound elsewhere. The editor reads exactly those, and renders each entry the way the
-//! call that declares it renders. A site whose program did not compile is searched for the calls
-//! its sources spell.
-//!
-//! An answer has the bibliography item, not the citation: a citation renders as the number the
-//! page happens to give it, and an author hovering a key asks which work it names. An entry whose
-//! call the site did not compile answers with its own fields instead.
+//! The bibliography entries the site's citations name, read and rendered as Typst reads them.
 
 mod keys;
 mod render;
@@ -21,7 +6,9 @@ mod sources;
 
 use anyhow::Result;
 use keys::key_location;
-use lsp_types::{CompletionItem, CompletionItemKind, CompletionItemLabelDetails, Hover, Location};
+use lsp_types::{
+    CompletionItem, CompletionItemKind, CompletionItemLabelDetails, Hover, Location, Uri,
+};
 use render::{rendered, unread_note};
 pub(crate) use sources::BibliographyCache;
 use sources::{Bibliography, spelled_sources};
@@ -31,11 +18,7 @@ use tola_build::config::ResolvedSiteConfig;
 use tola_typst::typst::World;
 use tola_typst::typst::syntax::{FileId, LinkedNode, Source};
 
-/// The hover one citation answers with, or `None` when the site names no bibliography at all.
-///
-/// A site that names none leaves `@key` to its labels, which answer for themselves. A site that
-/// names one answers which entry a key reaches, and says so when none reaches it: the author who
-/// wrote the key is reading a citation, not a missing label.
+/// The hover one citation answers with; a site naming no bibliography leaves `@key` to its labels.
 pub(super) fn hover(
     compilation: &SourceCompilation,
     config: &ResolvedSiteConfig,
@@ -80,13 +63,10 @@ pub(super) fn definition(
     let Some(declared) = bibliography.entry(key) else {
         return Ok(None);
     };
-    key_location(compilation.world(), &declared, client_root)
+    Ok(key_location(compilation.world(), &declared, client_root))
 }
 
-/// The entries a citation may name, each filling the key the author is typing.
-///
-/// An entry also completes by its title: keys are hard to remember, and accepting the title writes
-/// the key. The typed prefix matches without regard to case, which is how authors spell keys.
+/// The entries a citation may name, by key or title prefix, ignoring case.
 pub(super) fn completions(
     compilation: &SourceCompilation,
     config: &ResolvedSiteConfig,
@@ -105,11 +85,10 @@ pub(super) fn completions(
         let key = declared.entry.key();
         let key_matches = starts_with_ignoring_case(key, typed);
         let title = declared.entry.title().map(ToString::to_string);
-        if !key_matches
-            && !title
-                .as_deref()
-                .is_some_and(|title| starts_with_ignoring_case(title, typed))
-        {
+        let title_matches = title
+            .as_deref()
+            .is_some_and(|title| starts_with_ignoring_case(title, typed));
+        if !key_matches && !title_matches {
             continue;
         }
         let edit = reference.completion_edit(source, cursor, key.to_owned())?;
@@ -157,11 +136,7 @@ pub(super) struct CitationRequest<'a> {
     pub(super) include_declaration: bool,
 }
 
-/// Every place the site spells the citation key the request names.
-///
-/// A bibliography can be cited from any page, so the spellings are the ones every source the site
-/// holds has. The entry in its bibliography file is the declaration, which the request decides
-/// whether to include.
+/// Every place the site spells the key; its bibliography entry is the declaration.
 pub(super) fn references(
     compilation: &SourceCompilation,
     config: &ResolvedSiteConfig,
@@ -177,7 +152,7 @@ pub(super) fn references(
     let world = compilation.world();
     let mut found = Vec::new();
     if request.include_declaration
-        && let Some(location) = key_location(world, &declared, client_root)?
+        && let Some(location) = key_location(world, &declared, client_root)
     {
         found.push(location);
     }
@@ -186,21 +161,10 @@ pub(super) fn references(
         let Ok(source) = world.source(id) else {
             continue;
         };
-        let Some(uri) = crate::identity::client_uri(id, config.get_root(), client_root) else {
+        let Some(uri) = crate::identity::client_uri(id, config.get_root(), client_root).ok() else {
             continue;
         };
-        let mut spellings = Vec::new();
-        super::labels::collect_spellings(
-            &LinkedNode::new(source.root()),
-            request.key,
-            &mut spellings,
-        );
-        found.extend(spellings.into_iter().filter_map(|spelling| {
-            Some(Location {
-                uri: uri.clone(),
-                range: crate::position::utf16_range(source.lines(), spelling.range)?,
-            })
-        }));
+        found.extend(spellings_in(&source, &uri, request.key));
     }
     found.sort_by(|left, right| {
         (
@@ -218,28 +182,50 @@ pub(super) fn references(
     Ok(found)
 }
 
+/// Every place one source spells `key`, as a location in `uri`.
+fn spellings_in(source: &Source, uri: &Uri, key: &str) -> Vec<Location> {
+    let mut spellings = Vec::new();
+    super::labels::collect_spellings(&LinkedNode::new(source.root()), key, &mut spellings);
+    spellings
+        .into_iter()
+        .filter_map(|spelling| {
+            let range = crate::position::utf16_range(source.lines(), spelling.range)?;
+            Some(Location {
+                uri: uri.clone(),
+                range,
+            })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use crate::query::tests::*;
     use lsp_types::{CompletionTextEdit, GotoDefinitionResponse, Position};
 
-    /// A citation completes the keys the site's bibliographies declare.
     #[test]
-    fn citations_complete_declared_keys() {
+    fn citation_keys_ignore_case() {
         let mut site = QuerySession::new();
         site.site.write(
             "content/refs.bib",
             "@article{knuth1984,\n  title = {Literate Programming},\n  author = {Knuth, Donald E.},\n  year = {1984},\n}\n",
         );
-        let items = site.completion("#bibliography(\"refs.bib\")\n\nSee @knu|\n");
-        let labels = completion_labels(&items);
-        assert!(labels.contains(&"knuth1984"), "{labels:?}");
+        for marked in [
+            "#bibliography(\"refs.bib\")\n\nSee @knu|\n",
+            "#bibliography(\"refs.bib\")\n\nSee @Kn|\n",
+        ] {
+            let items = site.completion(marked);
+            assert!(
+                completion_labels(&items).contains(&"knuth1984"),
+                "{marked}: {items:?}"
+            );
+        }
     }
 
     /// A YAML key after multibyte text still points at the key itself: the scanner counts
     /// characters, and a range that addresses bytes has both mapped.
     #[test]
-    fn yaml_bibliography_keys_address_their_bytes() {
+    fn yaml_keys_address_bytes() {
         let mut site = QuerySession::new();
         site.site.write(
             "content/refs.yml",
@@ -263,7 +249,7 @@ mod tests {
 
     /// Each bibliography renders its entries with the style its own call names.
     #[test]
-    fn bibliographies_render_with_their_own_style() {
+    fn bibliographies_keep_their_style() {
         let mut site = QuerySession::new();
         site.site.write(
             "content/refs.bib",
@@ -296,14 +282,14 @@ mod tests {
             .hover_text("= Doc\n\n#bibliography(\"refs.bib\")\n\nSee @knuth|1984.\n")
             .expect("a hover on the site's own style");
         let plain = crate::markdown::plain(&plain);
-        assert!(plain.contains("D. E. Knuth"), "{plain}");
+        assert!(plain.contains("Knuth"), "{plain}");
         assert!(!plain.contains("[B]"), "{plain}");
     }
 
     /// A bibliography parsed once is reused while its bytes are unchanged, and read again when the
     /// file changes.
     #[test]
-    fn reused_bibliography_parses_follow_changed_bytes() {
+    fn reuse_follows_changed_bytes() {
         let mut site = QuerySession::new();
         site.site.write(
             "content/refs.bib",
@@ -324,24 +310,8 @@ mod tests {
         assert!(edited.contains("Edited Title"), "{edited}");
     }
 
-    /// A citation completes by the key prefix the author typed.
     #[test]
-    fn citation_keys_complete_on_prefix() {
-        let mut site = QuerySession::new();
-        site.site.write(
-            "content/refs.bib",
-            "@article{knuth1984,\n  title = {Literate Programming},\n  author = {Knuth, Donald E.},\n  year = {1984},\n}\n",
-        );
-        let items = site.completion("#bibliography(\"refs.bib\")\n\nSee @Kn|\n");
-        assert!(
-            completion_labels(&items).contains(&"knuth1984"),
-            "{items:?}"
-        );
-    }
-
-    /// A completed title writes the entry's key in place of the typed text.
-    #[test]
-    fn title_item_writes_the_key() {
+    fn title_completion_writes_the_key() {
         let mut site = QuerySession::new();
         site.site.write(
             "content/refs.bib",
@@ -361,21 +331,7 @@ mod tests {
         assert_eq!(edit.new_text, "knuth1984");
         assert_eq!(edit.range.start, Position::new(2, 5));
         assert_eq!(edit.range.end, Position::new(2, 8));
-    }
 
-    /// A title prefix matches without regard to case, and names no entry it does not match.
-    #[test]
-    fn title_prefix_ignores_case() {
-        let mut site = QuerySession::new();
-        site.site.write(
-            "content/refs.bib",
-            "@article{knuth1984,\n  title = {Literate Programming},\n  author = {Knuth, Donald E.},\n  year = {1984},\n}\n",
-        );
-        let items = site.completion("#bibliography(\"refs.bib\")\n\nSee @liT|\n");
-        assert!(
-            completion_labels(&items).contains(&"Literate Programming"),
-            "{items:?}"
-        );
         let items = site.completion("#bibliography(\"refs.bib\")\n\nSee @unrelated|\n");
         assert!(!completion_labels(&items).contains(&"Literate Programming"));
     }

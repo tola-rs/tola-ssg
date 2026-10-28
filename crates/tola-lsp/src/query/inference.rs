@@ -28,6 +28,18 @@ pub(in crate::query) struct ExpressionBinding {
     pub initializer: Option<Span>,
 }
 
+impl ExpressionBinding {
+    /// A binding the file alone does not establish.
+    pub(super) fn unknown(span: Span) -> Self {
+        Self {
+            span,
+            value: None,
+            parameter: false,
+            initializer: None,
+        }
+    }
+}
+
 /// Owned by one request, so arguments and recursive initializers never escape their source parse.
 #[derive(Default)]
 pub(in crate::query) struct Inference {
@@ -42,8 +54,7 @@ impl Inference {
     }
 }
 
-/// A completed assignment or an unproven method call can invalidate the initializer. Callers
-/// with a separate proof for a method may retain it; spelling alone is not a purity guarantee.
+/// An assignment or unproven method call invalidates the initializer unless the caller proves
 pub(in crate::query) fn binding_is_written(
     names: &SourceNames,
     declaration: usize,
@@ -134,6 +145,11 @@ impl<'a> SourceResolver<'a> {
         }
     }
 
+    fn file_names(&self, node: &LinkedNode<'_>) -> Option<(FileId, &SourceNames)> {
+        let file = node.span().id()?;
+        Some((file, self.names(file)?))
+    }
+
     fn selected(&self, node: &LinkedNode<'_>) -> Option<BindingId> {
         let range = match node.cast::<ast::Expr>()? {
             ast::Expr::Ident(_) | ast::Expr::MathIdent(_) => node.range(),
@@ -151,10 +167,7 @@ impl<'a> SourceResolver<'a> {
         node: &LinkedNode<'_>,
         binding: Option<BindingId>,
     ) -> Result<bool> {
-        let Some(file) = node.span().id() else {
-            return Ok(false);
-        };
-        let Some(names) = self.names(file) else {
+        let Some((file, names)) = self.file_names(node) else {
             return Ok(false);
         };
         let candidate = binding
@@ -215,20 +228,18 @@ impl<'a> SourceResolver<'a> {
         let Some(names) = self.names(file) else {
             return Ok(None);
         };
-        let declaration_id = declaration;
-        let declaration = &names.declarations()[declaration];
-        let Some(node) =
-            tola_typst_syntax::syntax::node_at_range(names.source(), &declaration.range)
+        let declared = &names.declarations()[declaration];
+        let Some(node) = tola_typst_syntax::syntax::node_at_range(names.source(), &declared.range)
         else {
             return Ok(None);
         };
         let mut binding = ExpressionBinding {
             span: node.span(),
             value: None,
-            parameter: matches!(declaration.kind, DeclarationKind::Parameter),
+            parameter: matches!(declared.kind, DeclarationKind::Parameter),
             initializer: None,
         };
-        if !followed.insert((file, declaration_id)) {
+        if !followed.insert((file, declaration)) {
             return Ok(Some(binding));
         }
         let before = if usage.0 == file {
@@ -236,11 +247,11 @@ impl<'a> SourceResolver<'a> {
         } else {
             names.source().text().len()
         };
-        let root_checked = usage.0 == file && names.declared_at(usage.1) == Some(declaration_id);
+        let root_checked = usage.0 == file && names.declared_at(usage.1) == Some(declaration);
         if !root_checked
             && binding_is_written(
                 names,
-                declaration_id,
+                declaration,
                 before,
                 |_| false,
                 || self.ensure_active(),
@@ -249,7 +260,7 @@ impl<'a> SourceResolver<'a> {
             binding.parameter = false;
             return Ok(Some(binding));
         }
-        if let Initializer::Import { import, path } = &declaration.initializer {
+        if let Initializer::Import { import, path } = &declared.initializer {
             if !path.is_empty()
                 && let Some(definition) = self
                     .graph
@@ -259,16 +270,9 @@ impl<'a> SourceResolver<'a> {
             }
             return Ok(Some(binding));
         }
-        if matches!(declaration.kind, DeclarationKind::Let) {
-            let mut current = Some(node);
-            while let Some(node) = current {
-                self.ensure_active()?;
-                if let Some(declared) = node.cast::<ast::LetBinding>() {
-                    binding.initializer = declared.init().map(|init| init.span());
-                    break;
-                }
-                current = node.parent().cloned();
-            }
+        if matches!(declared.kind, DeclarationKind::Let) {
+            binding.initializer = enclosing_let_binding(node, &|| self.ensure_active())?
+                .and_then(|binding| binding.init().map(|init| init.span()));
         }
         Ok(Some(binding))
     }
@@ -294,10 +298,7 @@ impl<'a> SourceResolver<'a> {
 
     fn root_is_written(&self, node: &LinkedNode<'_>) -> Result<bool> {
         self.ensure_active()?;
-        let Some(file) = node.span().id() else {
-            return Ok(false);
-        };
-        let Some(names) = self.names(file) else {
+        let Some((_, names)) = self.file_names(node) else {
             return Ok(false);
         };
         let root = tola_typst_syntax::syntax::root_expression(node.clone());
@@ -319,15 +320,15 @@ impl<'a> SourceResolver<'a> {
         prefix: &str,
     ) -> Result<Option<Vec<ModuleExport>>> {
         self.ensure_active()?;
+        let Some(graph) = self.graph else {
+            return Ok(None);
+        };
         let Some(binding) = self.selected(node) else {
             return Ok(None);
         };
         if self.root_is_written(node)? || self.ambiguous_wildcard(node, Some(binding))? {
             return Ok(None);
         }
-        let Some(graph) = self.graph else {
-            return Ok(None);
-        };
         graph.binding_exports(binding, prefix, || self.ensure_active())
     }
 }
@@ -347,36 +348,27 @@ impl ExpressionResolver for SourceResolver<'_> {
         ) {
             return Ok(None);
         }
+        let Some(file) = node.span().id() else {
+            return Ok(None);
+        };
         let selected = self.selected(node);
         if self.root_is_written(node)? || self.ambiguous_wildcard(node, selected)? {
-            return Ok(Some(ExpressionBinding {
-                span: node.span(),
-                value: None,
-                parameter: false,
-                initializer: None,
-            }));
+            return Ok(Some(ExpressionBinding::unknown(node.span())));
         }
         if let Some(binding) = selected
             && let Some(definition) = self
                 .graph
                 .and_then(|graph| graph.binding_definition(binding))
         {
-            return self.defined(
-                definition,
-                &mut HashSet::new(),
-                (node.span().id().unwrap(), node.range().start),
-            );
+            return self.defined(definition, &mut HashSet::new(), (file, node.range().start));
         }
-        let Some(file) = node.span().id() else {
+        if !matches!(node.kind(), SyntaxKind::Ident | SyntaxKind::MathIdent) {
             return Ok(None);
-        };
-        let declared = matches!(node.kind(), SyntaxKind::Ident | SyntaxKind::MathIdent)
-            .then(|| {
-                self.names(file)
-                    .and_then(|names| names.declared_at(node.range().start))
-            })
-            .flatten();
-        let Some(declaration) = declared else {
+        }
+        let Some(declaration) = self
+            .names(file)
+            .and_then(|names| names.declared_at(node.range().start))
+        else {
             return Ok(None);
         };
         self.declared(
@@ -410,14 +402,15 @@ pub(in crate::query) trait ExpressionResolver: Sized {
     fn inference(&mut self) -> &mut Inference;
     fn ensure_active(&self) -> Result<()>;
 
+    /// The compiled source a span addresses, when this resolver reads it.
+    fn owning_source(&mut self, span: Span) -> Option<Source> {
+        self.source(span.id()?)
+    }
+
     fn types(&mut self, node: &LinkedNode<'_>) -> Result<Vec<(ExpressionType, Option<Styles>)>> {
         self.ensure_active()?;
         if self.inference().depth >= EXPRESSION_DEPTH {
-            return Ok(self
-                .observed(node.span())?
-                .into_iter()
-                .map(|(value, styles)| (ExpressionType::Known(value), styles))
-                .collect());
+            return Ok(observed_types(self.observed(node.span())?));
         }
         self.inference().depth += 1;
         let values = self.expression_types(node);
@@ -458,18 +451,9 @@ pub(in crate::query) trait ExpressionResolver: Sized {
         }
         let values = self.observed(node.span())?;
         if !values.is_empty() {
-            return Ok(values
-                .into_iter()
-                .map(|(value, styles)| (ExpressionType::Known(value), styles))
-                .collect());
+            return Ok(observed_types(values));
         }
-        if (expression_name(node).is_some()
-            || matches!(
-                node.kind(),
-                SyntaxKind::FieldAccess | SyntaxKind::MathFieldAccess
-            ))
-            && let Some(binding) = self.binding(node)?
-        {
+        if let Some(binding) = self.binding(node)? {
             if let Some(value) = binding.value {
                 return Ok(vec![(ExpressionType::Known(value), None)]);
             }
@@ -480,22 +464,15 @@ pub(in crate::query) trait ExpressionResolver: Sized {
             }
             let traced = self.observed(binding.span)?;
             if !traced.is_empty() {
-                return Ok(traced
-                    .into_iter()
-                    .map(|(value, styles)| (ExpressionType::Known(value), styles))
-                    .collect());
+                return Ok(observed_types(traced));
             }
             if let Some(initializer) = binding.initializer {
-                if let Some(value) = self.constant_span(initializer, 0)? {
-                    return Ok(self
-                        .project_binding_types(binding.span, vec![ExpressionType::Known(value)])?
-                        .into_iter()
-                        .map(|value| (value, None))
-                        .collect());
-                }
-                let inferred = self.inferred_span(initializer)?;
+                let initializer_types = match self.constant_span(initializer, 0)? {
+                    Some(value) => vec![ExpressionType::Known(value)],
+                    None => self.inferred_span(initializer)?,
+                };
                 return Ok(self
-                    .project_binding_types(binding.span, inferred)?
+                    .project_binding_types(binding.span, initializer_types)?
                     .into_iter()
                     .map(|value| (value, None))
                     .collect());
@@ -538,31 +515,21 @@ pub(in crate::query) trait ExpressionResolver: Sized {
 
     /// The initializer a declaration span names, for a function that lives in another source.
     fn declaration_initializer(&mut self, span: Span) -> Result<Option<Span>> {
-        let Some(source) = span.id().and_then(|id| self.source(id)) else {
+        let Some(source) = self.owning_source(span) else {
             return Ok(None);
         };
-        let root = LinkedNode::new(source.root());
-        let Some(node) = root.find(span) else {
+        let Some(node) = node_at_span(&source, span) else {
             return Ok(None);
         };
         if matches!(node.cast::<ast::Expr>(), Some(ast::Expr::Closure(_))) {
             return Ok(Some(span));
         }
-        let mut current = Some(node);
-        while let Some(node) = current {
-            self.ensure_active()?;
-            if let Some(binding) = node.cast::<ast::LetBinding>() {
-                return Ok(binding.init().map(|init| init.span()));
-            }
-            current = node.parent().cloned();
-        }
-        Ok(None)
+        Ok(enclosing_let_binding(node, &|| self.ensure_active())?
+            .and_then(|binding| binding.init().map(|init| init.span())))
     }
 
-    /// The value a library name holds in the mode the expression reads it in.
-    ///
-    /// A site that failed before reaching this expression traces no value, and a library name is
-    /// no declaration the file holds; the standard library still answers, as Typst's own IDE does.
+    /// The value a library name holds in the mode it is read; the library answers even when the
+    /// site did not compile.
     fn library_value(&self, node: &LinkedNode<'_>) -> Option<Value> {
         let (name, mode) = match node.cast::<ast::Expr>()? {
             ast::Expr::Ident(ident) => (ident.get(), SyntaxMode::Code),
@@ -577,14 +544,10 @@ pub(in crate::query) trait ExpressionResolver: Sized {
     }
 
     fn inferred_span(&mut self, span: Span) -> Result<Vec<ExpressionType>> {
-        let Some(id) = span.id() else {
+        let Some(source) = self.owning_source(span) else {
             return Ok(Vec::new());
         };
-        let Some(source) = self.source(id) else {
-            return Ok(Vec::new());
-        };
-        let root = LinkedNode::new(source.root());
-        let Some(node) = root.find(span) else {
+        let Some(node) = node_at_span(&source, span) else {
             return Ok(Vec::new());
         };
         self.inferred(&node)
@@ -595,59 +558,47 @@ pub(in crate::query) trait ExpressionResolver: Sized {
         span: Span,
         values: Vec<ExpressionType>,
     ) -> Result<Vec<ExpressionType>> {
-        let Some(source) = span.id().and_then(|file| self.source(file)) else {
+        let Some(source) = self.owning_source(span) else {
             return Ok(Vec::new());
         };
-        let root = LinkedNode::new(source.root());
-        let mut current = root.find(span);
-        while let Some(node) = current {
-            self.ensure_active()?;
-            if let Some(binding) = node.cast::<ast::LetBinding>() {
-                let ast::LetBindingKind::Normal(pattern) = binding.kind() else {
-                    return Ok(values);
-                };
-                if !pattern.bindings().iter().any(|ident| ident.span() == span) {
-                    return Ok(values);
-                }
-                let mut projected = Vec::new();
-                for value in values {
-                    self.ensure_active()?;
-                    let mut bindings = HashMap::new();
-                    if !bind_pattern(pattern, value, &mut bindings, &|| self.ensure_active())? {
-                        return Ok(Vec::new());
-                    }
-                    let Some(value) = bindings.remove(&span) else {
-                        return Ok(Vec::new());
-                    };
-                    projected.push(value);
-                }
-                return Ok(projected);
-            }
-            current = node.parent().cloned();
+        let Some(node) = node_at_span(&source, span) else {
+            return Ok(values);
+        };
+        let Some(binding) = enclosing_let_binding(node, &|| self.ensure_active())? else {
+            return Ok(values);
+        };
+        let ast::LetBindingKind::Normal(pattern) = binding.kind() else {
+            return Ok(values);
+        };
+        if !pattern.bindings().iter().any(|ident| ident.span() == span) {
+            return Ok(values);
         }
-        Ok(values)
+        let mut projected = Vec::new();
+        for value in values {
+            self.ensure_active()?;
+            let mut bindings = HashMap::new();
+            if !bind_pattern(pattern, value, &mut bindings, &|| self.ensure_active())? {
+                return Ok(Vec::new());
+            }
+            let Some(value) = bindings.remove(&span) else {
+                return Ok(Vec::new());
+            };
+            projected.push(value);
+        }
+        Ok(projected)
     }
 
     fn constant_span(&mut self, span: Span, depth: usize) -> Result<Option<Value>> {
-        let Some(id) = span.id() else {
+        let Some(source) = self.owning_source(span) else {
             return Ok(None);
         };
-        let Some(source) = self.source(id) else {
-            return Ok(None);
-        };
-        let root = LinkedNode::new(source.root());
-        let Some(node) = root.find(span) else {
+        let Some(node) = node_at_span(&source, span) else {
             return Ok(None);
         };
         self.constant(&node, depth)
     }
 
-    /// The value an expression spells without the site's evaluation.
-    ///
-    /// Completion answers while the site is mid-edit, so a literal, array, dictionary, or a field
-    /// selected from one still names its members, and a name resolves through the file's bindings
-    /// or the library. Anything the evaluator owns — calls, operators, control flow — has no value
-    /// here.
+    /// The value an expression spells without the site evaluating it: literals, containers
     fn constant(&mut self, node: &LinkedNode<'_>, depth: usize) -> Result<Option<Value>> {
         self.ensure_active()?;
         if depth > INITIALIZER_DEPTH {
@@ -703,31 +654,31 @@ pub(in crate::query) trait ExpressionResolver: Sized {
                 if !is_name_reference(node) {
                     return Ok(None);
                 }
-                if let Some(binding) = self.binding(node)? {
-                    if let Some(value) = binding.value {
-                        return Ok(Some(value));
-                    }
-                    if binding.parameter
-                        && let Some(value) = self
-                            .parameter_type(binding.span)
-                            .and_then(ExpressionType::into_value)
-                    {
-                        return Ok(Some(value));
-                    }
-                    if let Some(initializer) = binding.initializer {
-                        let values = self
-                            .constant_span(initializer, depth + 1)?
-                            .into_iter()
-                            .map(ExpressionType::Known)
-                            .collect();
-                        return Ok(
-                            single_value(self.project_binding_types(binding.span, values)?)
-                                .and_then(ExpressionType::into_value),
-                        );
-                    }
-                    return Ok(None);
+                let Some(binding) = self.binding(node)? else {
+                    return Ok(self.library_value(node));
+                };
+                if let Some(value) = binding.value {
+                    return Ok(Some(value));
                 }
-                return Ok(self.library_value(node));
+                if binding.parameter
+                    && let Some(value) = self
+                        .parameter_type(binding.span)
+                        .and_then(ExpressionType::into_value)
+                {
+                    return Ok(Some(value));
+                }
+                if let Some(initializer) = binding.initializer {
+                    let values = self
+                        .constant_span(initializer, depth + 1)?
+                        .into_iter()
+                        .map(ExpressionType::Known)
+                        .collect();
+                    return Ok(
+                        single_value(self.project_binding_types(binding.span, values)?)
+                            .and_then(ExpressionType::into_value),
+                    );
+                }
+                return Ok(None);
             }
             ast::Expr::Dict(dict) => {
                 let mut values = Dict::new();
@@ -783,10 +734,7 @@ pub(in crate::query) trait ExpressionResolver: Sized {
         Ok(functions)
     }
 
-    /// The values an expression can have, inferred from its syntax.
-    ///
-    /// This runs only after the compiler's trace, the file's bindings, and literal evaluation
-    /// found nothing; a successful evaluation always wins.
+    /// The values an expression can have, inferred once the trace and bindings found none.
     fn inferred(&mut self, node: &LinkedNode<'_>) -> Result<Vec<ExpressionType>> {
         self.ensure_active()?;
         let Some(expr) = node.cast::<ast::Expr>() else {
@@ -795,45 +743,17 @@ pub(in crate::query) trait ExpressionResolver: Sized {
         match expr {
             ast::Expr::Parenthesized(paren) => self.infer_child(node, paren.expr().span()),
             ast::Expr::Binary(binary) => {
-                let Some(lhs) = node.find(binary.lhs().span()) else {
-                    return Ok(Vec::new());
-                };
-                let Some(rhs) = node.find(binary.rhs().span()) else {
-                    return Ok(Vec::new());
-                };
-                let lhs = single_value(plain(self.types(&lhs)?));
-                let rhs = single_value(plain(self.types(&rhs)?));
+                let lhs = self.operand_type(node, binary.lhs())?;
+                let rhs = self.operand_type(node, binary.rhs())?;
                 Ok(binary_type(binary.op(), lhs.as_ref(), rhs.as_ref())
                     .into_iter()
                     .collect())
             }
             ast::Expr::Unary(unary) => {
-                let Some(inner) = node.find(unary.expr().span()) else {
-                    return Ok(Vec::new());
-                };
-                let value = single_value(plain(self.types(&inner)?));
+                let value = self.operand_type(node, unary.expr())?;
                 Ok(unary_type(unary.op(), value.as_ref()).into_iter().collect())
             }
-            ast::Expr::Conditional(conditional) => {
-                let mut values = Vec::new();
-                for body in [Some(conditional.if_body()), conditional.else_body()] {
-                    self.ensure_active()?;
-                    let branch = match body {
-                        Some(body) => {
-                            let Some(body) = node.find(body.span()) else {
-                                return Ok(Vec::new());
-                            };
-                            plain(self.types(&body)?)
-                        }
-                        None => vec![ExpressionType::Known(Value::None)],
-                    };
-                    if branch.is_empty() {
-                        return Ok(Vec::new());
-                    }
-                    values.extend(branch);
-                }
-                Ok(values)
-            }
+            ast::Expr::Conditional(conditional) => self.infer_conditional(node, conditional),
             ast::Expr::FieldAccess(access) => {
                 let Some(target) = node.find(access.target().span()) else {
                     return Ok(Vec::new());
@@ -854,36 +774,7 @@ pub(in crate::query) trait ExpressionResolver: Sized {
                 Some(body) => Ok(plain(self.types(&body)?)),
                 None => Ok(Vec::new()),
             },
-            ast::Expr::CodeBlock(block) => {
-                if has_control_flow(node, &|| self.ensure_active())? {
-                    return Ok(Vec::new());
-                }
-                let mut expressions = block.body().exprs().peekable();
-                while let Some(expression) = expressions.next() {
-                    self.ensure_active()?;
-                    if expressions.peek().is_none() {
-                        return self.infer_child(node, expression.span());
-                    }
-                    if matches!(
-                        expression,
-                        ast::Expr::LetBinding(_) | ast::Expr::ModuleImport(_)
-                    ) {
-                        continue;
-                    }
-                    // Typst joins every expression: only a prefix producing `none` preserves
-                    // the tail's type, and an unknown prefix proves nothing about that join.
-                    let preceding = self.infer_child(node, expression.span())?;
-                    if preceding.is_empty()
-                        || preceding.iter().any(|value| {
-                            value.ty()
-                                != Some(Type::of::<tola_typst::typst::foundations::NoneValue>())
-                        })
-                    {
-                        return Ok(Vec::new());
-                    }
-                }
-                Ok(vec![ExpressionType::Known(Value::None)])
-            }
+            ast::Expr::CodeBlock(block) => self.infer_code_block(node, block),
             ast::Expr::Dict(dict) => {
                 if has_control_flow(node, &|| self.ensure_active())? {
                     return Ok(Vec::new());
@@ -904,11 +795,7 @@ pub(in crate::query) trait ExpressionResolver: Sized {
                         }
                         ast::DictItem::Spread(_) => return Ok(Vec::new()),
                     };
-                    let ty = match node.find(expr.span()) {
-                        Some(child) => single_value(plain(self.types(&child)?))
-                            .unwrap_or(ExpressionType::Unknown),
-                        None => ExpressionType::Unknown,
-                    };
+                    let ty = self.child_type(node, expr.span())?;
                     fields.insert(key, ty);
                 }
                 Ok(vec![ExpressionType::Dictionary(fields)])
@@ -923,12 +810,7 @@ pub(in crate::query) trait ExpressionResolver: Sized {
                     let ast::ArrayItem::Pos(expr) = item else {
                         return Ok(Vec::new());
                     };
-                    let ty = match node.find(expr.span()) {
-                        Some(child) => single_value(plain(self.types(&child)?))
-                            .unwrap_or(ExpressionType::Unknown),
-                        None => ExpressionType::Unknown,
-                    };
-                    items.push(ty);
+                    items.push(self.child_type(node, expr.span())?);
                 }
                 Ok(vec![ExpressionType::tuple(items, || self.ensure_active())?])
             }
@@ -937,11 +819,91 @@ pub(in crate::query) trait ExpressionResolver: Sized {
         }
     }
 
+    /// The type a code block's last expression gives it, when every earlier one produces none.
+    fn infer_code_block(
+        &mut self,
+        node: &LinkedNode<'_>,
+        block: ast::CodeBlock<'_>,
+    ) -> Result<Vec<ExpressionType>> {
+        if has_control_flow(node, &|| self.ensure_active())? {
+            return Ok(Vec::new());
+        }
+        let mut expressions = block.body().exprs().peekable();
+        while let Some(expression) = expressions.next() {
+            self.ensure_active()?;
+            if expressions.peek().is_none() {
+                return self.infer_child(node, expression.span());
+            }
+            if matches!(
+                expression,
+                ast::Expr::LetBinding(_) | ast::Expr::ModuleImport(_)
+            ) {
+                continue;
+            }
+            // Only a prefix producing none preserves the tail's type.
+            let preceding = self.infer_child(node, expression.span())?;
+            if preceding.is_empty()
+                || preceding.iter().any(|value| {
+                    value.ty() != Some(Type::of::<tola_typst::typst::foundations::NoneValue>())
+                })
+            {
+                return Ok(Vec::new());
+            }
+        }
+        Ok(vec![ExpressionType::Known(Value::None)])
+    }
+
+    /// The union of a conditional's branches, with a missing else reading as none.
+    fn infer_conditional(
+        &mut self,
+        node: &LinkedNode<'_>,
+        conditional: ast::Conditional<'_>,
+    ) -> Result<Vec<ExpressionType>> {
+        let mut values = Vec::new();
+        for body in [Some(conditional.if_body()), conditional.else_body()] {
+            self.ensure_active()?;
+            let branch = match body {
+                Some(body) => {
+                    let Some(body) = node.find(body.span()) else {
+                        return Ok(Vec::new());
+                    };
+                    plain(self.types(&body)?)
+                }
+                None => vec![ExpressionType::Known(Value::None)],
+            };
+            if branch.is_empty() {
+                return Ok(Vec::new());
+            }
+            values.extend(branch);
+        }
+        Ok(values)
+    }
+
     fn infer_child(&mut self, root: &LinkedNode<'_>, span: Span) -> Result<Vec<ExpressionType>> {
         let Some(child) = root.find(span) else {
             return Ok(Vec::new());
         };
         Ok(plain(self.types(&child)?))
+    }
+
+    /// The single type one child expression proves, or Unknown when absent or ambiguous.
+    fn child_type(&mut self, node: &LinkedNode<'_>, span: Span) -> Result<ExpressionType> {
+        let Some(child) = node.find(span) else {
+            return Ok(ExpressionType::Unknown);
+        };
+        Ok(single_value(plain(self.types(&child)?)).unwrap_or(ExpressionType::Unknown))
+    }
+
+    /// The single type one operand proves, when it proves exactly one.
+    fn operand_type(
+        &mut self,
+        node: &LinkedNode<'_>,
+        operand: ast::Expr<'_>,
+    ) -> Result<Option<ExpressionType>> {
+        let Some(operand) = node.find(operand.span()) else {
+            return Ok(None);
+        };
+        Ok(single_value(plain(self.types(&operand)?)))
     }
 
     /// Source calls bind the current argument frame; native calls expose only official return metadata.
@@ -963,12 +925,7 @@ pub(in crate::query) trait ExpressionResolver: Sized {
                 }
             };
             if let Some(initializer) = initializer {
-                if !self.inference().inferring.insert(initializer) {
-                    return Ok(Vec::new());
-                }
-                let inferred = self.infer_function(initializer, Some((node, call)));
-                self.inference().inferring.remove(&initializer);
-                return inferred;
+                return self.infer_once(initializer, node, call);
             }
             return Ok(binding
                 .value
@@ -998,19 +955,31 @@ pub(in crate::query) trait ExpressionResolver: Sized {
         Ok(callable.as_ref().map(native_returns).unwrap_or_default())
     }
 
+    /// The return of one initializer's function, refusing a recursion that revisits it.
+    fn infer_once(
+        &mut self,
+        initializer: Span,
+        call_node: &LinkedNode<'_>,
+        call: ast::FuncCall<'_>,
+    ) -> Result<Vec<ExpressionType>> {
+        if !self.inference().inferring.insert(initializer) {
+            return Ok(Vec::new());
+        }
+        let inferred = self.infer_function(initializer, call_node, call);
+        self.inference().inferring.remove(&initializer);
+        inferred
+    }
+
     fn infer_function(
         &mut self,
         span: Span,
-        call: Option<(&LinkedNode<'_>, ast::FuncCall<'_>)>,
+        call_node: &LinkedNode<'_>,
+        call: ast::FuncCall<'_>,
     ) -> Result<Vec<ExpressionType>> {
-        let Some(id) = span.id() else {
+        let Some(source) = self.owning_source(span) else {
             return Ok(Vec::new());
         };
-        let Some(source) = self.source(id) else {
-            return Ok(Vec::new());
-        };
-        let root = LinkedNode::new(source.root());
-        let Some(mut node) = root.find(span) else {
+        let Some(mut node) = node_at_span(&source, span) else {
             return Ok(Vec::new());
         };
         while let Some(ast::Expr::Parenthesized(group)) = node.cast::<ast::Expr>() {
@@ -1035,26 +1004,28 @@ pub(in crate::query) trait ExpressionResolver: Sized {
                     .map(native_returns)
                     .unwrap_or_default());
             };
-            if !self.inference().inferring.insert(initializer) {
-                return Ok(Vec::new());
-            }
-            let values = self.infer_function(initializer, call);
-            self.inference().inferring.remove(&initializer);
-            return values;
+            return self.infer_once(initializer, call_node, call);
         };
-        let scope = match call {
-            Some((call_node, call)) => self.call_arguments(&node, closure, call_node, call)?,
-            None => HashMap::new(),
-        };
+        let scope = self.call_arguments(&node, closure, call_node, call)?;
         self.inference().parameters.push(scope);
         let inferred = self.infer_child(&node, closure.body().span());
         self.inference().parameters.pop();
         inferred
     }
 
-    /// Argument values are read before pushing parameters; declaration spans distinguish
-    /// parameters with the same spelling in nested calls. An unresolved spread leaves both
-    /// positional and named arguments unknown.
+    /// One argument's single proved type, with its node's span.
+    fn argument_type(
+        &mut self,
+        call_node: &LinkedNode<'_>,
+        expr: ast::Expr<'_>,
+    ) -> Result<Option<(ExpressionType, Span)>> {
+        let Some(argument) = call_node.find(expr.span()) else {
+            return Ok(None);
+        };
+        Ok(single_value(plain(self.types(&argument)?)).map(|ty| (ty, argument.span())))
+    }
+
+    /// Arguments are read before parameters are pushed; an unresolved spread leaves both kinds
     fn call_arguments(
         &mut self,
         closure_node: &LinkedNode<'_>,
@@ -1089,10 +1060,7 @@ pub(in crate::query) trait ExpressionResolver: Sized {
                     let Some(expr) = positional.next() else {
                         continue;
                     };
-                    let Some(argument) = call_node.find(expr.span()) else {
-                        continue;
-                    };
-                    let Some(value) = single_value(plain(self.types(&argument)?)) else {
+                    let Some((value, _)) = self.argument_type(call_node, expr)? else {
                         continue;
                     };
                     let mut bindings = HashMap::new();
@@ -1109,18 +1077,12 @@ pub(in crate::query) trait ExpressionResolver: Sized {
                         _ => None,
                     });
                     let value = match explicit {
-                        Some(expr) => {
-                            let Some(argument) = call_node.find(expr.span()) else {
-                                continue;
-                            };
-                            single_value(plain(self.types(&argument)?))
-                        }
+                        Some(expr) => self.argument_type(call_node, expr)?.map(|(ty, _)| ty),
                         None => {
                             let Some(default) = closure_node.find(named.expr().span()) else {
                                 continue;
                             };
-                            // A default reads the scope the closure is written in; Typst keeps the
-                            // closure's own parameters out of it.
+                            // A default reads the closure's written scope, not its parameters.
                             single_value(plain(self.types(&default)?))
                         }
                     };
@@ -1133,61 +1095,71 @@ pub(in crate::query) trait ExpressionResolver: Sized {
                     let Some(sink) = spread.sink_ident() else {
                         continue;
                     };
-                    let mut values = Array::new();
-                    let mut known = true;
-                    for expr in positional.by_ref() {
-                        self.ensure_active()?;
-                        let Some(argument) = call_node.find(expr.span()) else {
-                            continue;
-                        };
-                        let Some(value) = single_value(plain(self.types(&argument)?)) else {
-                            known = false;
-                            continue;
-                        };
-                        if let Some(value) = value.into_value() {
-                            values.push(value);
-                        } else {
-                            known = false;
-                        }
-                    }
-                    let mut captured = Args::new(call.span(), values);
-                    for argument in &args {
-                        self.ensure_active()?;
-                        let ast::Arg::Named(named) = argument else {
-                            continue;
-                        };
-                        if named_parameters.contains(named.name().get().as_str()) {
-                            continue;
-                        }
-                        let Some(argument) = call_node.find(named.expr().span()) else {
-                            continue;
-                        };
-                        let Some(value) = single_value(plain(self.types(&argument)?)) else {
-                            known = false;
-                            continue;
-                        };
-                        if let Some(value) = value.into_value() {
-                            captured.items.push(Arg {
-                                span: argument.span(),
-                                name: Some(named.name().get().clone().into()),
-                                value: Spanned::new(value, argument.span()),
-                            });
-                        } else {
-                            known = false;
-                        }
-                    }
-                    scope.insert(
-                        sink.span(),
-                        if known {
-                            ExpressionType::Known(Value::Args(captured))
-                        } else {
-                            ExpressionType::Unknown
-                        },
-                    );
+                    let value = self.rest_value(
+                        call_node,
+                        call.span(),
+                        &args,
+                        &named_parameters,
+                        &mut positional,
+                    )?;
+                    scope.insert(sink.span(), value);
                 }
             }
         }
         Ok(scope)
+    }
+
+    /// The value a rest parameter holds: every remaining positional argument and every named
+    fn rest_value<'ast>(
+        &mut self,
+        call_node: &LinkedNode<'_>,
+        call_span: Span,
+        args: &[ast::Arg<'ast>],
+        named_parameters: &HashSet<String>,
+        positional: &mut impl Iterator<Item = ast::Expr<'ast>>,
+    ) -> Result<ExpressionType> {
+        let mut values = Array::new();
+        let mut known = true;
+        for expr in positional {
+            self.ensure_active()?;
+            let Some((value, _)) = self.argument_type(call_node, expr)? else {
+                known = false;
+                continue;
+            };
+            if let Some(value) = value.into_value() {
+                values.push(value);
+            } else {
+                known = false;
+            }
+        }
+        let mut captured = Args::new(call_span, values);
+        for argument in args {
+            self.ensure_active()?;
+            let ast::Arg::Named(named) = argument else {
+                continue;
+            };
+            if named_parameters.contains(named.name().get().as_str()) {
+                continue;
+            }
+            let Some((value, span)) = self.argument_type(call_node, named.expr())? else {
+                known = false;
+                continue;
+            };
+            if let Some(value) = value.into_value() {
+                captured.items.push(Arg {
+                    span,
+                    name: Some(named.name().get().clone().into()),
+                    value: Spanned::new(value, span),
+                });
+            } else {
+                known = false;
+            }
+        }
+        Ok(if known {
+            ExpressionType::Known(Value::Args(captured))
+        } else {
+            ExpressionType::Unknown
+        })
     }
 }
 
@@ -1222,6 +1194,27 @@ pub(in crate::query) fn is_name_reference(node: &LinkedNode<'_>) -> bool {
         }
         _ => true,
     }
+}
+
+/// The node one span addresses in the source that owns it.
+fn node_at_span(source: &Source, span: Span) -> Option<LinkedNode<'_>> {
+    LinkedNode::new(source.root()).find(span)
+}
+
+/// The let binding a node sits in, its own node included.
+fn enclosing_let_binding<'a>(
+    node: LinkedNode<'a>,
+    ensure_active: &impl Fn() -> Result<()>,
+) -> Result<Option<ast::LetBinding<'a>>> {
+    let mut current = Some(node);
+    while let Some(node) = current {
+        ensure_active()?;
+        if let Some(binding) = node.get().cast::<ast::LetBinding<'a>>() {
+            return Ok(Some(binding));
+        }
+        current = node.parent().cloned();
+    }
+    Ok(None)
 }
 
 fn has_control_flow(
@@ -1287,130 +1280,170 @@ fn bind_destructuring(
         items.push(item);
     }
     match &value {
-        ExpressionType::Known(Value::Dict(_)) | ExpressionType::Dictionary(_) => {
-            let mut used = HashSet::new();
-            let mut sink = None;
-            for item in items {
-                ensure_active()?;
-                let (name, pattern) = match item {
-                    ast::DestructuringItem::Pattern(
-                        pattern @ ast::Pattern::Normal(ast::Expr::Ident(ident)),
-                    ) => (ident.get(), pattern),
-                    ast::DestructuringItem::Named(named) => (named.name().get(), named.pattern()),
-                    ast::DestructuringItem::Spread(spread) => {
-                        if sink.is_some() {
-                            return Ok(false);
-                        }
-                        sink = spread.sink_expr();
-                        continue;
+        ExpressionType::Known(Value::Dict(dict)) => bind_fields(
+            items,
+            &value,
+            |used| {
+                let mut remaining = Dict::new();
+                for (name, value) in dict.iter() {
+                    ensure_active()?;
+                    if !used.contains(name.as_str()) {
+                        remaining.insert(name.clone(), value.clone());
                     }
-                    _ => return Ok(false),
-                };
-                let Some(field) = value.field(name.as_str(), ensure_active)? else {
-                    return Ok(false);
-                };
-                if !bind_pattern(pattern, field, scope, ensure_active)? {
+                }
+                Ok(ExpressionType::Known(Value::Dict(remaining)))
+            },
+            scope,
+            ensure_active,
+        ),
+        ExpressionType::Dictionary(fields) => bind_fields(
+            items,
+            &value,
+            |used| {
+                let mut remaining = BTreeMap::new();
+                for (name, ty) in fields {
+                    ensure_active()?;
+                    if !used.contains(name.as_str()) {
+                        remaining.insert(name.clone(), ty.clone());
+                    }
+                }
+                Ok(ExpressionType::Dictionary(remaining))
+            },
+            scope,
+            ensure_active,
+        ),
+        ExpressionType::Known(Value::Array(array)) => bind_sequence(
+            items,
+            &array
+                .iter()
+                .cloned()
+                .map(ExpressionType::Known)
+                .collect::<Vec<_>>(),
+            scope,
+            ensure_active,
+        ),
+        ExpressionType::Tuple(fields) => bind_sequence(items, fields, scope, ensure_active),
+        _ => Ok(false),
+    }
+}
+
+/// Binds one dictionary pattern, its spread sink holding what the named fields leave.
+fn bind_fields(
+    items: Vec<ast::DestructuringItem<'_>>,
+    value: &ExpressionType,
+    remainder: impl FnOnce(&HashSet<&str>) -> Result<ExpressionType>,
+    scope: &mut HashMap<Span, ExpressionType>,
+    ensure_active: &impl Fn() -> Result<()>,
+) -> Result<bool> {
+    let mut used = HashSet::new();
+    let mut sink = None;
+    for item in items {
+        ensure_active()?;
+        let (name, pattern) = match item {
+            ast::DestructuringItem::Pattern(
+                pattern @ ast::Pattern::Normal(ast::Expr::Ident(ident)),
+            ) => (ident.get(), pattern),
+            ast::DestructuringItem::Named(named) => (named.name().get(), named.pattern()),
+            ast::DestructuringItem::Spread(spread) => {
+                if sink.is_some() {
                     return Ok(false);
                 }
-                used.insert(name.as_str());
+                sink = spread.sink_expr();
+                continue;
             }
-            if let Some(sink) = sink {
-                let ast::Expr::Ident(ident) = sink else {
+            _ => return Ok(false),
+        };
+        let Some(field) = value.field(name.as_str(), ensure_active)? else {
+            return Ok(false);
+        };
+        if !bind_pattern(pattern, field, scope, ensure_active)? {
+            return Ok(false);
+        }
+        used.insert(name.as_str());
+    }
+    let Some(sink) = sink else {
+        return Ok(true);
+    };
+    let ast::Expr::Ident(ident) = sink else {
+        return Ok(false);
+    };
+    scope.insert(ident.span(), remainder(&used)?);
+    Ok(true)
+}
+
+/// One item of a positional pattern, narrowed to the shapes a tuple destructuring admits.
+enum Slot<'a> {
+    Pattern(ast::Pattern<'a>),
+    Spread(Option<ast::Expr<'a>>),
+}
+
+/// Binds one positional pattern, its spread sink holding what its neighbours leave.
+fn bind_sequence(
+    items: Vec<ast::DestructuringItem<'_>>,
+    values: &[ExpressionType],
+    scope: &mut HashMap<Span, ExpressionType>,
+    ensure_active: &impl Fn() -> Result<()>,
+) -> Result<bool> {
+    let mut slots = Vec::with_capacity(items.len());
+    let mut spreads = 0;
+    for item in items {
+        ensure_active()?;
+        match item {
+            ast::DestructuringItem::Pattern(pattern) => slots.push(Slot::Pattern(pattern)),
+            ast::DestructuringItem::Spread(spread) => {
+                spreads += 1;
+                slots.push(Slot::Spread(spread.sink_expr()));
+            }
+            ast::DestructuringItem::Named(_) => return Ok(false),
+        }
+    }
+    let Some(sink_size) = values.len().checked_sub(slots.len() - spreads) else {
+        return Ok(false);
+    };
+    if spreads > 1 || (spreads == 0 && sink_size != 0) {
+        return Ok(false);
+    }
+    let mut offset = 0;
+    for slot in slots {
+        ensure_active()?;
+        match slot {
+            Slot::Pattern(pattern) => {
+                if !bind_pattern(pattern, values[offset].clone(), scope, ensure_active)? {
                     return Ok(false);
-                };
-                let remaining = match &value {
-                    ExpressionType::Known(Value::Dict(dict)) => {
-                        let mut remaining = Dict::new();
-                        for (name, value) in dict.iter() {
-                            ensure_active()?;
-                            if !used.contains(name.as_str()) {
-                                remaining.insert(name.clone(), value.clone());
-                            }
-                        }
-                        ExpressionType::Known(Value::Dict(remaining))
+                }
+                offset += 1;
+            }
+            Slot::Spread(sink) => {
+                if let Some(sink) = sink {
+                    let ast::Expr::Ident(ident) = sink else {
+                        return Ok(false);
+                    };
+                    let mut captured = Vec::new();
+                    for value in &values[offset..offset + sink_size] {
+                        ensure_active()?;
+                        captured.push(value.clone());
                     }
-                    ExpressionType::Dictionary(fields) => {
-                        let mut remaining = BTreeMap::new();
-                        for (name, ty) in fields {
-                            ensure_active()?;
-                            if !used.contains(name.as_str()) {
-                                remaining.insert(name.clone(), ty.clone());
-                            }
-                        }
-                        ExpressionType::Dictionary(remaining)
-                    }
-                    _ => unreachable!(),
-                };
-                scope.insert(ident.span(), remaining);
+                    scope.insert(
+                        ident.span(),
+                        ExpressionType::tuple(captured, ensure_active)?,
+                    );
+                }
+                offset += sink_size;
             }
         }
-        ExpressionType::Known(Value::Array(_)) | ExpressionType::Tuple(_) => {
-            let len = match &value {
-                ExpressionType::Known(Value::Array(array)) => array.len(),
-                ExpressionType::Tuple(items) => items.len(),
-                _ => unreachable!(),
-            };
-            let item_at = |index: usize| match &value {
-                ExpressionType::Known(Value::Array(array)) => {
-                    ExpressionType::Known(array.as_slice()[index].clone())
-                }
-                ExpressionType::Tuple(items) => items[index].clone(),
-                _ => unreachable!(),
-            };
-            let mut spreads = 0;
-            for item in &items {
-                ensure_active()?;
-                match item {
-                    ast::DestructuringItem::Named(_) => return Ok(false),
-                    ast::DestructuringItem::Spread(_) => spreads += 1,
-                    ast::DestructuringItem::Pattern(_) => {}
-                }
-            }
-            let required = items.len() - spreads;
-            let Some(sink_size) = len.checked_sub(required) else {
-                return Ok(false);
-            };
-            if spreads > 1 || (spreads == 0 && sink_size != 0) {
-                return Ok(false);
-            }
-            let mut offset = 0;
-            for item in items {
-                ensure_active()?;
-                match item {
-                    ast::DestructuringItem::Pattern(pattern) => {
-                        if !bind_pattern(pattern, item_at(offset), scope, ensure_active)? {
-                            return Ok(false);
-                        }
-                        offset += 1;
-                    }
-                    ast::DestructuringItem::Spread(spread) => {
-                        if let Some(sink) = spread.sink_expr() {
-                            let ast::Expr::Ident(ident) = sink else {
-                                return Ok(false);
-                            };
-                            let mut captured = Vec::new();
-                            for index in offset..offset + sink_size {
-                                ensure_active()?;
-                                captured.push(item_at(index));
-                            }
-                            scope.insert(
-                                ident.span(),
-                                ExpressionType::tuple(captured, ensure_active)?,
-                            );
-                        }
-                        offset += sink_size;
-                    }
-                    ast::DestructuringItem::Named(_) => unreachable!(),
-                }
-            }
-        }
-        _ => return Ok(false),
     }
     Ok(true)
 }
 
 fn plain(values: Vec<(ExpressionType, Option<Styles>)>) -> Vec<ExpressionType> {
     values.into_iter().map(|(value, _)| value).collect()
+}
+
+fn observed_types(values: Vec<(Value, Option<Styles>)>) -> Vec<(ExpressionType, Option<Styles>)> {
+    values
+        .into_iter()
+        .map(|(value, styles)| (ExpressionType::Known(value), styles))
+        .collect()
 }
 
 fn binary_type(

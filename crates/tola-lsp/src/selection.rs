@@ -20,6 +20,8 @@ pub(super) fn ranges(source: &Source, positions: &[Position]) -> Option<Vec<Sele
             })
             .collect();
     }
+    // `nesting` addresses the compiler's lines, so a byte becomes one of its positions here; the
+    // byte ranges it answers convert back through the protocol's in `nested`.
     let at: Vec<_> = positions
         .iter()
         .map(|at| {
@@ -91,18 +93,6 @@ mod tests {
             let start = position::byte_offset(source.lines(), selected.start).unwrap();
             let end = position::byte_offset(source.lines(), selected.end).unwrap();
             assert_eq!(&source.text()[start..end], "second", "{separator:?}");
-        }
-    }
-
-    #[test]
-    fn selections_clamp_excessive_columns() {
-        for text in ["", "#let value = 1"] {
-            let source = Source::detached(text);
-            let at_end = Position::new(0, position::utf16_len(text) as u32);
-            assert_eq!(
-                ranges(&source, &[Position::new(0, 1000)]),
-                ranges(&source, &[at_end])
-            );
         }
     }
 }

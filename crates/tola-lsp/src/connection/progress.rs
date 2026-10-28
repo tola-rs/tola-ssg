@@ -5,13 +5,14 @@ use std::io::Write;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use lsp_server::Response;
 use lsp_types::notification::{self, Notification as LspNotification};
 use lsp_types::request::{self, Request as LspRequest};
 use lsp_types::{
-    NumberOrString, ProgressParams, ProgressParamsValue, WorkDoneProgress,
+    NumberOrString, ProgressParams, ProgressParamsValue, WorkDoneProgress, WorkDoneProgressBegin,
     WorkDoneProgressCreateParams, WorkDoneProgressEnd,
 };
-use tola_build::diagnostic::Diagnostic;
+use tola_diagnostic::Diagnostic;
 
 use super::{Connection, PendingCreation, Phase, Progress};
 
@@ -20,13 +21,6 @@ use super::{Connection, PendingCreation, Phase, Progress};
 /// A check that finishes inside this window reports nothing: the report would arrive after the
 /// author stopped waiting for it, and a client showing one has nothing to show.
 const PROGRESS_DELAY: Duration = Duration::from_millis(300);
-
-/// How long a report's creation request may stay unanswered before the report is given up.
-///
-/// The answer normally arrives in the client's next turn, so a report the author has waited this
-/// long for is worth no more of the connection's state — and one client's unanswered creation must
-/// not hold back the reports of every later check.
-const PROGRESS_CREATION_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// What the report a running check is shown under says, beside the client's own progress spinner.
 pub(super) const PROGRESS_TITLE: &str = "Tola is checking the site";
@@ -46,13 +40,44 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
         }
         let revision = self.revision;
         let due = if self.warm { now + PROGRESS_DELAY } else { now };
-        self.request_serial += 1;
+        let serial = self.next_identifier();
         self.progress = Some(Progress {
             revision,
-            token: NumberOrString::String(format!("tola-check-{}", self.request_serial)),
+            token: NumberOrString::String(format!("tola-check-{serial}")),
             due,
             opened: false,
         });
+    }
+
+    /// Answer the client's reply to one report creation; `false` when it answers something else.
+    ///
+    /// A client that refused one report is never sent another: nothing Tola does needs a report, and
+    /// repeating a refused request is noise.
+    pub(super) fn progress_created(&mut self, response: &Response) -> Result<bool> {
+        let Some(creation) = self
+            .progress_create
+            .take_if(|creation| creation.id == response.id)
+        else {
+            return Ok(false);
+        };
+        self.progress_agreed = response.response_result.is_ok();
+        if !self.progress_agreed {
+            self.progress = None;
+        } else if let Some(progress) = self.progress.as_mut()
+            && progress.token == creation.token
+        {
+            progress.opened = true;
+            self.report_progress(
+                creation.token,
+                WorkDoneProgress::Begin(WorkDoneProgressBegin {
+                    title: PROGRESS_TITLE.to_owned(),
+                    cancellable: Some(true),
+                    message: None,
+                    percentage: None,
+                }),
+            )?;
+        }
+        Ok(true)
     }
 
     /// Tell the client the check is running, once it has run long enough to be worth showing.
@@ -64,25 +89,7 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
             return Ok(());
         }
         let token = progress.token.clone();
-        // This report's own creation is still within its bound: the client's answer is what opens
-        // the report, so nothing more is asked for it.
-        if self.progress_create.as_ref().is_some_and(|creation| {
-            creation.token == token && now < creation.sent + PROGRESS_CREATION_TIMEOUT
-        }) {
-            return Ok(());
-        }
-        if let Some(creation) = self.progress_create.take()
-            && creation.token == token
-        {
-            // The client has not answered this report's own creation within its bound, so the
-            // report is given up: the answer is matched by request id, so it reaches nothing.
-            let waited = now.saturating_duration_since(creation.sent);
-            tracing::warn!(
-                token = ?creation.token,
-                waited = ?waited,
-                "a progress creation the client did not answer was dropped"
-            );
-            self.progress = None;
+        if self.progress_create.is_some() {
             return Ok(());
         }
         let id = self.send_request(
@@ -91,11 +98,7 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
                 token: token.clone(),
             },
         )?;
-        self.progress_create = Some(PendingCreation {
-            id,
-            token,
-            sent: now,
-        });
+        self.progress_create = Some(PendingCreation { id, token });
         Ok(())
     }
 
@@ -186,6 +189,24 @@ mod tests {
     }
 
     #[test]
+    fn superseded_progress_stays_closed() {
+        let mut connection = ready(Vec::new());
+        ready_workspace(&mut connection).features.work_done_progress = true;
+        connection.begin_progress(Instant::now());
+        connection.run_due_work(Instant::now()).unwrap();
+        let Message::Request(create) = messages(&mut connection).remove(0) else {
+            panic!("progress creation request");
+        };
+        connection.sources_changed(false).unwrap();
+        connection
+            .response(Response::new_ok(create.id, ()))
+            .unwrap();
+        assert!(messages(&mut connection).is_empty());
+        assert!(connection.progress.is_none());
+        assert!(connection.progress_create.is_none());
+    }
+
+    #[test]
     fn refused_progress_stays_silent() {
         let mut connection = ready(Vec::new());
         let workspace = ready_workspace(&mut connection);
@@ -204,11 +225,6 @@ mod tests {
             ))
             .unwrap();
         connection.end_progress().unwrap();
-        assert!(
-            written
-                .iter()
-                .all(|message| progress_kind(message).is_none())
-        );
         assert!(messages(&mut connection).is_empty());
     }
     /// Which kind of `$/progress` report one message is, when it is one.

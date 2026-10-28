@@ -3,6 +3,7 @@
 mod analyze;
 mod check;
 mod compilations;
+mod entities;
 mod jobs;
 mod readback;
 mod worker;
@@ -10,6 +11,7 @@ mod worker;
 pub(crate) use analyze::analyze;
 pub(crate) use check::{CheckedSources, checked_root};
 pub(crate) use compilations::RevisionCompilations;
+pub(crate) use entities::EntityQueries;
 pub(crate) use jobs::{
     AnalysisRequest, AnalysisTask, CheckRequest, IncomingCallsRead, LensesRead, PackageSourceRead,
     QueryRequest, RenameRead, RouteIndexRead, RouteRead, SelectionRead, SourceInputs, SourceJob,

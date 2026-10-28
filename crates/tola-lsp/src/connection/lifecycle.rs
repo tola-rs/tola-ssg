@@ -5,22 +5,18 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use lsp_server::{ErrorCode, Notification, RequestId, Response};
 use lsp_types::notification::{self, Notification as LspNotification};
 use lsp_types::request::{self, Request as LspRequest};
-use lsp_types::{
-    ConfigurationItem, ConfigurationParams, InitializeParams, WorkDoneProgress,
-    WorkDoneProgressBegin,
-};
-use tola_build::diagnostic::Diagnostic;
+use lsp_types::{ConfigurationItem, ConfigurationParams, InitializeParams};
+use tola_diagnostic::Diagnostic;
 
 use crate::capabilities::ClientFeatures;
 use crate::diagnostic::ClientDiagnostics;
 use crate::protocol::{self, InitializationOptions, Settings};
 use crate::sources::OpenSources;
 
-use super::progress::PROGRESS_TITLE;
 use super::routing::InvalidNotification;
 use super::{Connection, Phase, Workspace};
 
@@ -31,11 +27,11 @@ const SETTINGS_SECTION: &str = "tola";
 impl Phase {
     pub(super) fn request_error(&self, method: &str) -> Option<(ErrorCode, &'static str)> {
         use ErrorCode::{InvalidRequest, ServerNotInitialized};
+        if method == request::Initialize::METHOD {
+            return (!matches!(self, Self::Uninitialized))
+                .then_some((InvalidRequest, "language server is already initialized"));
+        }
         match self {
-            Self::Uninitialized if method == request::Initialize::METHOD => None,
-            _ if method == request::Initialize::METHOD => {
-                Some((InvalidRequest, "language server is already initialized"))
-            }
             Self::Uninitialized => {
                 Some((ServerNotInitialized, "language server is not initialized"))
             }
@@ -44,13 +40,30 @@ impl Phase {
                 ServerNotInitialized,
                 "language server is awaiting initialized",
             )),
-            _ => None,
+            Self::Initializing(_) | Self::Ready(_) => None,
         }
     }
 }
 
+/// Why the workspace this client named cannot be served.
+#[derive(Debug, thiserror::Error)]
+enum WorkspaceError {
+    #[error("Tola serves one workspace folder at a time; open this site in a window of its own")]
+    SeveralFolders,
+    #[error("the workspace root must be a local file URI")]
+    RootNotLocal(#[source] crate::uri::UriError),
+    #[error("resolve workspace root")]
+    UnresolvableRoot(#[source] std::io::Error),
+    #[error("resolve workspace directory")]
+    UnresolvableDirectory(#[source] std::io::Error),
+    #[error("{0}")]
+    Options(#[from] serde_json::Error),
+}
+
 impl Workspace {
-    fn initialize(parameters: InitializeParams) -> Result<Self> {
+    fn initialize(
+        parameters: InitializeParams,
+    ) -> Result<(Self, Option<Arc<PathBuf>>), WorkspaceError> {
         let root = initialization_root(&parameters)?;
         let features = ClientFeatures::new(&parameters.capabilities);
         let options: InitializationOptions = parameters
@@ -75,17 +88,19 @@ impl Workspace {
                 root.join(directory)
             })
         });
-        Ok(Self {
-            diagnostics: ClientDiagnostics::new(root.clone()),
-            root,
+        Ok((
+            Self {
+                diagnostics: ClientDiagnostics::new(root.clone()),
+                root,
+                check_mode,
+                source_check_status: options.source_check_status,
+                preview_origin,
+                line_folding_only,
+                routes_as_hints,
+                features,
+            },
             package_sources,
-            check_mode,
-            source_check_status: options.source_check_status,
-            preview_origin,
-            line_folding_only,
-            routes_as_hints,
-            features,
-        })
+        ))
     }
 }
 
@@ -93,12 +108,11 @@ impl Workspace {
     deprecated,
     reason = "LSP clients may still select a workspace through rootUri or rootPath"
 )]
-fn initialization_root(parameters: &InitializeParams) -> Result<PathBuf> {
+fn initialization_root(parameters: &InitializeParams) -> Result<PathBuf, WorkspaceError> {
     let folders = parameters.workspace_folders.as_deref().unwrap_or_default();
-    anyhow::ensure!(
-        folders.len() <= 1,
-        "Tola serves one workspace folder at a time; open this site in a window of its own"
-    );
+    if folders.len() > 1 {
+        return Err(WorkspaceError::SeveralFolders);
+    }
     if let Some(uri) = parameters
         .root_uri
         .as_ref()
@@ -106,13 +120,12 @@ fn initialization_root(parameters: &InitializeParams) -> Result<PathBuf> {
     {
         // The client's own spelling of the root is kept: diagnostics are published back under the
         // identity the editor opened, while paths are normalized wherever Tola compares them.
-        return crate::uri::to_file_path(uri.as_str())
-            .context("the workspace root must be a local file URI");
+        return crate::uri::to_file_path(uri.as_str()).map_err(WorkspaceError::RootNotLocal);
     }
     if let Some(root) = &parameters.root_path {
-        return std::path::absolute(root).context("resolve workspace root");
+        return std::path::absolute(root).map_err(WorkspaceError::UnresolvableRoot);
     }
-    std::env::current_dir().context("resolve workspace directory")
+    std::env::current_dir().map_err(WorkspaceError::UnresolvableDirectory)
 }
 
 impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
@@ -122,11 +135,12 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
         // The launch configuration names where the site is served, and it stands in for the site's
         // own generated state until a settings change names an origin of its own.
         match Workspace::initialize(parameters) {
-            Ok(workspace) => {
+            Ok((workspace, package_sources)) => {
                 self.default_origin = workspace.preview_origin.clone();
                 let reply = protocol::initialize_result(&workspace.features);
                 self.phase = Phase::Initializing(workspace);
-                self.open = OpenSources::new(&self.source_root());
+                self.open =
+                    OpenSources::new(&self.source_root()).with_package_sources(package_sources);
                 self.reply(Response::new_ok(id, reply))
             }
             Err(error) => self.reject(id, ErrorCode::InvalidParams, &error.to_string()),
@@ -167,7 +181,11 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
             Ok(parameters) => parameters,
             Err(_) => return self.log_invalid_notification(InvalidNotification::Configuration),
         };
-        let settings = Settings::read(&parameters.settings);
+        let section = parameters
+            .settings
+            .get(SETTINGS_SECTION)
+            .unwrap_or(&parameters.settings);
+        let settings = Settings::read(section);
         if !settings.is_empty() {
             self.settings_pull = None;
             self.apply_settings(settings);
@@ -183,7 +201,7 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
             request::WorkspaceConfiguration::METHOD,
             ConfigurationParams {
                 items: vec![ConfigurationItem {
-                    scope_uri: None,
+                    scope_uri: Some(crate::uri::from_file_path(&workspace.root)?),
                     section: Some(SETTINGS_SECTION.to_owned()),
                 }],
             },
@@ -206,38 +224,11 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
     }
 
     /// Apply what the client answered to a request this connection sent.
-    pub(super) fn response(&mut self, response: lsp_server::Response) -> Result<()> {
+    pub(super) fn response(&mut self, response: Response) -> Result<()> {
         if self.semantic_tokens_refreshed(&response)? {
             return Ok(());
         }
-        if self
-            .progress_create
-            .as_ref()
-            .is_some_and(|creation| creation.id == response.id)
-        {
-            let creation = self
-                .progress_create
-                .take()
-                .expect("matching progress creation");
-            // A client that refused one report is never sent another: nothing Tola does needs a
-            // report, and repeating a refused request is noise.
-            self.progress_agreed = response.response_result.is_ok();
-            if !self.progress_agreed {
-                self.progress = None;
-            } else if let Some(progress) = self.progress.as_mut()
-                && progress.token == creation.token
-            {
-                progress.opened = true;
-                self.report_progress(
-                    creation.token,
-                    WorkDoneProgress::Begin(WorkDoneProgressBegin {
-                        title: PROGRESS_TITLE.to_owned(),
-                        cancellable: Some(true),
-                        message: None,
-                        percentage: None,
-                    }),
-                )?;
-            }
+        if self.progress_created(&response)? {
             return Ok(());
         }
         if self.settings_pull.as_ref() == Some(&response.id) {
@@ -245,8 +236,7 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
             if let Ok(sections) = response.response_result
                 && let Some(section) = sections.as_array().and_then(|sections| sections.first())
             {
-                let settings = Settings::read(section);
-                self.apply_settings(settings);
+                self.apply_settings(Settings::read(section));
             }
         }
         Ok(())
@@ -266,8 +256,9 @@ mod tests {
     use serde_json::json;
     use std::time::Instant;
 
+    /// A root that is not this machine's, and two roots at once, are both refused.
     #[test]
-    fn initialization_refuses_bad_roots() {
+    fn initialization_refuses_roots_it_cannot_serve() {
         let parameters = |value| serde_json::from_value::<InitializeParams>(value).unwrap();
         assert!(
             initialization_root(&parameters(
@@ -275,7 +266,17 @@ mod tests {
             ))
             .is_err()
         );
-        assert!(initialization_root(&parameters(json!({"capabilities":{},"rootUri":"file:///site", "workspaceFolders":[{"uri":"file:///site","name":"site"},{"uri":"file:///other","name":"other"}]}))).is_err());
+        assert!(
+            initialization_root(&parameters(json!({
+                "capabilities":{},
+                "rootUri":"file:///site",
+                "workspaceFolders":[
+                    {"uri":"file:///site","name":"site"},
+                    {"uri":"file:///other","name":"other"},
+                ],
+            })))
+            .is_err()
+        );
     }
     /// A document notification that arrives between the `initialize` reply and `initialized` must
     /// not crash the connection or leave a buffer the handshake never accepted.
@@ -305,10 +306,45 @@ mod tests {
     /// for is not read.
     #[test]
     fn inline_settings_supersede_pulls() {
+        for settings in [
+            json!({"checkMode":"onSave"}),
+            json!({"tola":{"checkMode":"onSave"}}),
+        ] {
+            let mut connection = ready(Vec::new());
+            ready_workspace(&mut connection).features.configuration = true;
+            let _ = connection
+                .notification(Notification::new(
+                    notification::DidChangeConfiguration::METHOD.into(),
+                    json!({"settings": null}),
+                ))
+                .unwrap();
+            let Message::Request(pulled) = messages(&mut connection).remove(0) else {
+                panic!("settings request");
+            };
+            let _ = connection
+                .notification(Notification::new(
+                    notification::DidChangeConfiguration::METHOD.into(),
+                    json!({"settings": settings}),
+                ))
+                .unwrap();
+            connection
+                .response(Response::new_ok(
+                    pulled.id,
+                    json!([{
+                        "checkMode": "onType"
+                    }]),
+                ))
+                .unwrap();
+            assert_eq!(connection.workspace().check_mode, CheckMode::OnSave);
+        }
+    }
+
+    #[test]
+    fn settings_pulls_name_workspace_scope() {
         let mut connection = ready(Vec::new());
         ready_workspace(&mut connection).features.configuration = true;
-        let _ = connection
-            .notification(Notification::new(
+        connection
+            .configured(Notification::new(
                 notification::DidChangeConfiguration::METHOD.into(),
                 json!({"settings": null}),
             ))
@@ -316,20 +352,7 @@ mod tests {
         let Message::Request(pulled) = messages(&mut connection).remove(0) else {
             panic!("settings request");
         };
-        let _ = connection
-            .notification(Notification::new(
-                notification::DidChangeConfiguration::METHOD.into(),
-                json!({"settings": {"checkMode": "onSave"}}),
-            ))
-            .unwrap();
-        connection
-            .response(Response::new_ok(
-                pulled.id,
-                json!([{
-                    "checkMode": "onType"
-                }]),
-            ))
-            .unwrap();
-        assert_eq!(connection.workspace().check_mode, CheckMode::OnSave);
+        let root = crate::uri::from_file_path(&connection.workspace().root).unwrap();
+        assert_eq!(pulled.params["items"][0]["scopeUri"], root.as_str());
     }
 }

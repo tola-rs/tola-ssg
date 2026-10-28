@@ -24,7 +24,6 @@ pub(super) fn pages(
     query: &str,
 ) -> Vec<WorkspaceSymbol> {
     let query = query.to_lowercase();
-    let root = source_root;
     realized
         .iter()
         .filter(|page| {
@@ -32,18 +31,18 @@ pub(super) fn pages(
             route.contains(&query)
                 || percent_decode_str(&route)
                     .decode_utf8_lossy()
+                    .to_lowercase()
                     .contains(&query)
         })
         .filter_map(|page| {
             let source = page.source?;
-            let path = root.join(source.vpath().get_without_slash());
             Some(WorkspaceSymbol {
                 name: page.route.route.clone(),
                 kind: SymbolKind::FILE,
                 tags: None,
                 container_name: Some(source.vpath().get_without_slash().to_owned()),
                 location: OneOf::Left(Location::new(
-                    client_root.address(&path).ok()?,
+                    crate::identity::client_uri(source, source_root, client_root).ok()?,
                     Range::new(Position::new(0, 0), Position::new(0, 0)),
                 )),
                 data: None,
@@ -243,7 +242,7 @@ mod tests {
     fn page_search_matches_decoded_route() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().canonicalize().unwrap();
-        let served = page(&root, "content/café.typ", "/caf%C3%A9/");
+        let served = page(&root, "content/café.typ", "/CAF%C3%89/");
 
         let found = pages(
             &[served],

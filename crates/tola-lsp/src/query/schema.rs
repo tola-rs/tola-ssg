@@ -32,19 +32,22 @@ impl OutputDescription {
         values.iter().cloned().filter_map(Self::read).collect()
     }
 
-    fn child(&self, key: &str) -> Option<Self> {
-        Self::read(self.0.get(key).ok()?.clone())
+    fn branches(&self) -> Vec<Self> {
+        self.children(if self.kind() == "union" {
+            "members"
+        } else {
+            "branches"
+        })
     }
 
     pub(super) fn documentation(&self) -> Option<String> {
         if let Some(description) = string(&self.0, "description") {
             return (!description.is_empty()).then(|| description.to_owned());
         }
-        let branches = match self.kind() {
-            "union" => self.children("members"),
-            "variant" => self.children("branches"),
-            _ => return None,
-        };
+        if !matches!(self.kind(), "union" | "variant") {
+            return None;
+        }
+        let branches = self.branches();
         let descriptions = branches
             .iter()
             .filter_map(Self::documentation)
@@ -70,7 +73,6 @@ impl OutputDescription {
                 _ => None,
             },
             "any" => Some("any".into()),
-            "unknown" => None,
             "literal" => self.0.get("value").ok().map(super::semantic::sampled_value),
             "enum" => {
                 let Value::Array(values) = self.0.get("values").ok()? else {
@@ -86,11 +88,9 @@ impl OutputDescription {
                         .join(" | "),
                 )
             }
-            "object" | "variant" => Some("dictionary".into()),
-            // A tuple value's type is `array`: Typst spells neither an array nor a tuple with
-            // its member types.
+            "object" | "variant" | "dictionary" => Some("dictionary".into()),
+            // A tuple reads as array: Typst never spells an array or tuple by its member types.
             "array" | "tuple" => Some("array".into()),
-            "dictionary" => Some("dictionary".into()),
             "union" => {
                 let mut types = Vec::new();
                 for member in self.children("members") {
@@ -116,14 +116,14 @@ impl OutputDescription {
                 };
                 match fields.get(key) {
                     Ok(value) => Self::read(value.clone())?.at_path(rest),
-                    Err(_) if string(&self.0, "unknown") == Some("keep") => {
+                    Err(_) if self.accepts_unknown() => {
                         Some(Self::unconstrained("any", "optional"))
                     }
                     Err(_) => None,
                 }
             }
             "dictionary" => {
-                let mut field = self.child("element")?.at_path(rest)?;
+                let mut field = Self::read(self.0.get("element").ok()?.clone())?.at_path(rest)?;
                 field
                     .0
                     .insert("presence".into(), Value::Str("optional".into()));
@@ -132,11 +132,7 @@ impl OutputDescription {
             "any" => Some(Self::unconstrained("any", "optional")),
             "unknown" => Some(Self::unconstrained("unknown", "unknown")),
             "union" | "variant" => {
-                let branches = self.children(if self.kind() == "union" {
-                    "members"
-                } else {
-                    "branches"
-                });
+                let branches = self.branches();
                 let selected = branches
                     .iter()
                     .filter_map(|branch| branch.at_path(path))
@@ -158,11 +154,8 @@ impl OutputDescription {
                 } else {
                     "required"
                 };
-                let mut joined = Dict::new();
-                joined.insert("kind".into(), Value::Str("union".into()));
-                joined.insert("presence".into(), Value::Str(presence.into()));
-                joined.insert("description".into(), Value::None);
-                joined.insert(
+                let mut joined = Self::unconstrained("union", presence);
+                joined.0.insert(
                     "members".into(),
                     Value::Array(
                         selected
@@ -171,7 +164,7 @@ impl OutputDescription {
                             .collect::<Array>(),
                     ),
                 );
-                Some(Self(joined))
+                Some(joined)
             }
             _ => None,
         }
@@ -213,26 +206,24 @@ impl OutputDescription {
             },
             "union" | "variant" => {
                 let mut names = BTreeSet::new();
-                for branch in self.children(if self.kind() == "union" {
-                    "members"
-                } else {
-                    "branches"
-                }) {
+                for branch in self.branches() {
                     names.extend(branch.fields().into_iter().map(|(name, _)| name));
                 }
                 names
                     .into_iter()
-                    .filter_map(|name| Some((name.clone(), self.at_path(&[name])?)))
+                    .filter_map(|name| {
+                        let description = self.at_path(std::slice::from_ref(&name))?;
+                        Some((name, description))
+                    })
                     .collect()
             }
             _ => Vec::new(),
         }
     }
 
-    /// The declared field one name addresses: its declaration, and the facts the schema states
-    /// beyond it.
+    /// The declared field one name addresses, with the schema's presence fact.
     pub(super) fn field(&self, name: &str) -> DeclaredField {
-        let optional = string(&self.0, "presence") != Some("required");
+        let optional = !self.is_required();
         let mut declaration = format!("{name}{}", if optional { "?" } else { "" });
         if let Some(ty) = self.ty() {
             declaration.push_str(&format!(": {ty}"));
@@ -262,8 +253,7 @@ pub(super) struct DeclaredField {
 }
 
 impl DeclaredField {
-    /// The field as one item of a declared-shape list: its declaration in code ticks, then the
-    /// presence fact and documentation on continuation lines.
+    /// One declared field as a list item: declaration, presence, then documentation.
     pub(super) fn list_item(&self) -> String {
         let mut item = format!("`{}`", self.declaration);
         if self.presence_unknown {
@@ -275,8 +265,7 @@ impl DeclaredField {
         item
     }
 
-    /// The field as its own answer: the declaration in a code fence, then the presence fact and
-    /// documentation, each its own section.
+    /// One declared field as an answer: declaration fence, presence, documentation.
     pub(super) fn section(&self) -> String {
         let mut section = format!("```typc\n{}\n```", self.declaration);
         if self.presence_unknown {

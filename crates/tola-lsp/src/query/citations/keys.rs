@@ -2,7 +2,6 @@
 
 use std::ops::Range;
 
-use anyhow::Result;
 use lsp_types::Location;
 use tola_typst::TypstWorld;
 use tola_typst::typst::World;
@@ -15,27 +14,16 @@ pub(super) fn key_location(
     world: &TypstWorld,
     declared: &Declared<'_>,
     client_root: &crate::uri::ClientRoot,
-) -> Result<Option<Location>> {
-    let Ok(bytes) = world.file(declared.file) else {
-        return Ok(None);
-    };
-    let Ok(text) = std::str::from_utf8(bytes.as_slice()) else {
-        return Ok(None);
-    };
+) -> Option<Location> {
+    let bytes = world.file(declared.file).ok()?;
+    let text = std::str::from_utf8(bytes.as_slice()).ok()?;
     let source = Source::new(declared.file, text.to_owned());
-    let Some(range) = crate::position::utf16_range(source.lines(), declared.range.clone()) else {
-        return Ok(None);
-    };
-    let Some(uri) = crate::identity::client_uri(declared.file, world.root(), client_root) else {
-        return Ok(None);
-    };
-    Ok(Some(Location { uri, range }))
+    let range = crate::position::utf16_range(source.lines(), declared.range.clone())?;
+    let uri = crate::identity::client_uri(declared.file, world.root(), client_root).ok()?;
+    Some(Location { uri, range })
 }
 
-/// Where the keys of a YAML bibliography sit in its text.
-///
-/// A bibliography's keys are the scalars of its outermost mapping, so the scanner reports one from
-/// each depth-one scalar. Nothing else is read: the entries themselves come from Hayagriva.
+/// Where the keys of a YAML bibliography sit: each depth-one scalar of its outermost mapping.
 pub(super) fn yaml_keys(text: &str) -> Vec<(String, Range<usize>)> {
     let mut keys = Keys::default();
     let mut parser = yaml_rust::parser::Parser::new(text.chars());
@@ -73,10 +61,7 @@ fn yaml_key_range(text: &str, range: Range<usize>) -> Option<Range<usize>> {
     None
 }
 
-/// The byte ranges of the keys one YAML scanner reported.
-///
-/// The scanner counts characters, while every range this module stores addresses bytes; one sweep
-/// over the text maps the starts and ends both.
+/// The byte ranges of the keys a YAML scanner reported in characters.
 fn byte_ranges(text: &str, written: Vec<(String, Range<usize>)>) -> Vec<(String, Range<usize>)> {
     let mut offsets: Vec<usize> = written
         .iter()

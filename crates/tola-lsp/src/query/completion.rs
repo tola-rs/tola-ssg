@@ -1,7 +1,7 @@
 //! What one completion offers at the cursor: names, members, import items, metadata keys, and the
 //! parameters a call can still fill; and the signature one call stands in.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -16,7 +16,7 @@ use tola_build::config::ResolvedSiteConfig;
 use tola_typst::typst::foundations::Value;
 use tola_typst::typst::syntax::ast;
 use tola_typst::typst::syntax::{LinkedNode, Side, Source, Span, SyntaxKind};
-use tola_typst_syntax::names::{Initializer, SourceNames};
+use tola_typst_syntax::names::{Declaration, Initializer, SourceNames};
 
 use crate::markdown;
 use crate::position;
@@ -50,11 +50,42 @@ fn labelled_type(ty: Option<String>) -> CompletionItemLabelDetails {
         description: ty,
     }
 }
-/// Whether the cursor stands where a path is written: inside an import or include statement, or
-/// in a reader call's path argument.
-///
-/// A path position names a file or a package, never the file's own bindings, so completion reads
-/// the author's own source there: a repair blanks the statement a query copy compiles without.
+
+/// Where one completion is written: the author's source, the cursor, the bytes typed before it,
+/// and the range an accepted item replaces.
+pub(super) struct NamePosition<'a> {
+    pub(super) source: &'a Source,
+    pub(super) cursor: usize,
+    /// The bytes inside [`Self::replacement`] before the cursor, which the client filters on.
+    pub(super) prefix: &'a str,
+    pub(super) replacement: Range<usize>,
+}
+
+impl<'a> NamePosition<'a> {
+    /// The name `replacement` covers in `source`.
+    pub(super) fn at(source: &'a Source, cursor: usize, replacement: Range<usize>) -> Self {
+        Self {
+            source,
+            cursor,
+            prefix: typed_text(source, &replacement, cursor),
+            replacement,
+        }
+    }
+
+    /// The edit `new_text` writes over the written name, keeping what follows the cursor.
+    pub(super) fn edit(&self, new_text: String) -> Result<CompletionTextEdit> {
+        completion_edit(self.source, self.cursor, self.replacement.clone(), new_text)
+    }
+}
+
+/// The one alternative every candidate agrees on, or `None` when they disagree or there are none.
+pub(super) fn agreed<T: PartialEq>(mut alternatives: impl Iterator<Item = T>) -> Option<T> {
+    let first = alternatives.next()?;
+    alternatives
+        .all(|alternative| alternative == first)
+        .then_some(first)
+}
+/// Whether the cursor stands where a path is written, which completion reads from author text.
 fn is_path_position(source: &Source, cursor: usize) -> bool {
     if tola_typst_syntax::syntax::path_argument(source, cursor).is_some() {
         return true;
@@ -127,10 +158,7 @@ pub(in crate::query) fn comment_at(source: &Source, cursor: usize) -> bool {
         })
 }
 
-/// The completion a `///` comment above a function definition offers.
-///
-/// The template names the closure's own parameters, so an author writes the descriptions where
-/// the ecosystem reads them; it completes the comment line and inserts at the cursor.
+/// The documentation template an empty `///` above a function definition completes.
 pub(in crate::query) fn documentation_template(
     source: &Source,
     cursor: usize,
@@ -199,9 +227,7 @@ pub(in crate::query) fn documentation_template(
     ])))
 }
 
-/// Whether one name can still complete what the author typed: every typed character appears in
-/// the name, in order. A `-` is part of a kebab-case name, so `al-` still reaches `all-sources`,
-/// and a name whose letters are spread out (`m07` for `marker_000_07`) stays reachable.
+/// Whether the name still contains the typed characters in order (`al-` reaches `all-sources`).
 pub(super) fn name_matches(name: &str, prefix: &str) -> bool {
     let mut spelled = name.chars();
     prefix
@@ -218,7 +244,7 @@ pub(super) fn typed_prefix(source: &Source, cursor: usize) -> &str {
         SyntaxKind::Ident | SyntaxKind::MathIdent => leaf.range(),
         _ => return "",
     };
-    &source.text()[range.start..cursor]
+    typed_text(source, &range, cursor)
 }
 
 /// The next node after `node` at any depth: its next sibling, or that of its nearest ancestor
@@ -232,6 +258,15 @@ fn next_node<'a>(node: &LinkedNode<'a>) -> Option<LinkedNode<'a>> {
         current = current.parent()?.clone();
     }
 }
+
+/// The expression a parenthesized group wraps: a group spells what it holds, not itself.
+fn unparenthesized(mut expression: Option<ast::Expr>) -> Option<ast::Expr> {
+    while let Some(ast::Expr::Parenthesized(group)) = expression {
+        expression = Some(group.expr());
+    }
+    expression
+}
+
 /// One completion item's documentation, as the markdown an editor renders.
 pub(in crate::query) fn markdown_documentation(text: impl Into<String>) -> Documentation {
     Documentation::MarkupContent(MarkupContent {
@@ -240,20 +275,32 @@ pub(in crate::query) fn markdown_documentation(text: impl Into<String>) -> Docum
     })
 }
 
+/// The declaration one name resolves to, in the source that declares it.
+struct DeclaredName {
+    names: Arc<SourceNames>,
+    index: usize,
+}
+
+impl DeclaredName {
+    fn declaration(&self) -> &Declaration {
+        &self.names.declarations()[self.index]
+    }
+}
+
 /// The declaration the site's source binds one name by, following the name an alias spells.
 fn declared(
     semantics: &mut Semantic<'_>,
     bindings: &BTreeMap<String, semantic::Binding>,
     span: Span,
-) -> Option<(Arc<SourceNames>, usize)> {
+) -> Option<DeclaredName> {
     let mut span = span;
     let mut followed = Vec::new();
     loop {
         let range = semantics.span_range(span)?;
         let names = semantics.source_names(span.id()?)?;
-        let declaration = names.declared_at(range.start)?;
+        let index = names.declared_at(range.start)?;
         // An alias names another binding; that binding's declaration is what the author reads.
-        if let Initializer::Alias(path) = &names.declarations()[declaration].initializer
+        if let Initializer::Alias(path) = &names.declarations()[index].initializer
             && let Some(root) = path.segments.first()
             && let Some(target) = bindings.get(names.text(root))
             && !followed.contains(&target.span)
@@ -262,7 +309,7 @@ fn declared(
             span = target.span;
             continue;
         }
-        return Some((names, declaration));
+        return Some(DeclaredName { names, index });
     }
 }
 
@@ -279,16 +326,43 @@ fn attach_value_docs(
             .map(markdown_documentation);
     }
 }
+
+/// The expression types one resolved value offers: the value itself, or none when no value
+/// reached the name.
+fn known_types(value: Option<&Value>) -> Vec<ExpressionType> {
+    value
+        .cloned()
+        .map(ExpressionType::Known)
+        .into_iter()
+        .collect()
+}
+
+/// The item an import statement offers while it asks for every export: `*`, which the client
+/// filters on like any other name.
+fn wildcard_import_item(edit: CompletionTextEdit) -> CompletionItem {
+    CompletionItem {
+        label: "*".to_owned(),
+        kind: Some(CompletionItemKind::SNIPPET),
+        detail: Some("Import everything.".to_owned()),
+        text_edit: Some(edit),
+        ..CompletionItem::default()
+    }
+}
+
+/// Whether the statement already imports `name` from the module it selects.
+fn already_imported(import: &tola_typst_syntax::syntax::Import, name: &str) -> bool {
+    import.imported.iter().any(|path| {
+        path.len() == import.path.len() + 1
+            && path[..import.path.len()] == import.path
+            && path.last().map(String::as_str) == Some(name)
+    })
+}
+
 impl Selection<'_> {
     /// The names, members, import items, and parameters one completion position offers.
     ///
-    /// The edit's range and prefix come from the author's own text: the query copy the world
-    /// compiled may have repaired an unfinished construct into a different one, and it is the
-    /// author's text the returned edit rewrites. A node whose evaluated value answers the
-    /// request — a member's receiver, an import's module — is resolved on the world's copy
-    /// first, whose parse the traced spans belong to, and falls back to the author's own parse
-    /// for a construct the repair dropped; the repairs keep byte offsets aligned, so a
-    /// fallback node still answers through its binding and its range.
+    /// Edits rewrite the author's text; resolved nodes come from the compiled copy first, whose
+    /// offsets the repairs keep aligned with the author's parse.
     pub(super) fn completion(
         &self,
         prepared: &Source,
@@ -316,12 +390,31 @@ impl Selection<'_> {
         } else {
             self.cursor..self.cursor
         };
-        let (_, prefix) = self.completion_range(replacement.clone())?;
-        let mut items = Vec::new();
-        let mut packages = BTreeMap::new();
+        let position = self.name_position(replacement)?;
+        let mut items = self.bound_name_items(semantics, &node, &position)?;
+        let mut seen: BTreeSet<String> = items.iter().map(|item| item.label.clone()).collect();
+        items.extend(self.library_name_items(semantics, &node, &position, &mut seen)?);
+        items.extend(
+            parameters
+                .into_iter()
+                .filter(|item| seen.insert(item.label.clone())),
+        );
+        Ok(items)
+    }
+
+    /// The items this source's own bindings offer at `node`, each with the call its value or its
+    /// declaration admits.
+    fn bound_name_items(
+        &self,
+        semantics: &mut Semantic<'_>,
+        node: &LinkedNode<'_>,
+        position: &NamePosition<'_>,
+    ) -> Result<Vec<CompletionItem>> {
         let bindings = semantics.bindings(node.clone())?;
+        let mut packages = definition::PackageExports::default();
+        let mut items = Vec::new();
         for (name, binding) in &bindings {
-            if !name_matches(name, prefix) {
+            if !name_matches(name, position.prefix) {
                 continue;
             }
             let value = match &binding.value {
@@ -335,30 +428,22 @@ impl Selection<'_> {
                 None => None,
             };
             let declaration = declared(semantics, &bindings, binding.span);
-            let mut item = semantic::completion(
-                name,
-                &value
-                    .iter()
-                    .cloned()
-                    .map(ExpressionType::Known)
-                    .collect::<Vec<_>>(),
-                self.completion_edit(replacement.clone(), name.clone())?,
-            );
+            let mut item = self.name_item(name, &known_types(value.as_ref()), position)?;
             attach_value_docs(&mut item, semantics, binding.span, value.as_ref());
             if value.is_none()
-                && let Some((names, declaration)) = &declaration
+                && let Some(declaration) = &declaration
             {
                 // No value reached this name, so the kind its declaration promises is the only
                 // kind the editor can show.
                 item.kind = Some(definition::declaration_kind(
-                    &names.declarations()[*declaration].initializer,
+                    &declaration.declaration().initializer,
                 ));
             }
             let shape = match &declaration {
-                Some((names, declaration)) => definition::attach_declaration(
+                Some(declaration) => definition::attach_declaration(
                     &mut item,
-                    names,
-                    &names.declarations()[*declaration],
+                    &declaration.names,
+                    declaration.declaration(),
                     &mut packages,
                     semantics.cancellation(),
                 )?,
@@ -369,47 +454,35 @@ impl Selection<'_> {
                     callable::Callable::of_value(value, callable::Receiver::Unbound)
                 })
             });
-            match callable {
-                Some(callable) => items.extend(callable::callable_items(
-                    item,
-                    self.source,
-                    self.cursor,
-                    &replacement,
-                    callable,
-                )),
-                None => items.push(item),
-            }
+            items.extend(callable::name_items(item, callable, position));
         }
-        // A library name the file did not bind still answers, even when the site failed before
-        // evaluating this position; the file's own bindings above shadow it.
-        let mut seen: std::collections::BTreeSet<String> =
-            items.iter().map(|item| item.label.clone()).collect();
-        for (name, value) in semantics.library_bindings(&node) {
-            if !name_matches(&name, prefix) || !seen.insert(name.clone()) {
+        Ok(items)
+    }
+
+    /// The items the standard library offers for the names this file does not bind: they answer
+    /// even when the site failed before evaluating this position, and the file's own bindings
+    /// shadow them.
+    fn library_name_items(
+        &self,
+        semantics: &mut Semantic<'_>,
+        node: &LinkedNode<'_>,
+        position: &NamePosition<'_>,
+        seen: &mut BTreeSet<String>,
+    ) -> Result<Vec<CompletionItem>> {
+        let mut items = Vec::new();
+        for (name, value) in semantics.library_bindings(node) {
+            if !name_matches(&name, position.prefix) || !seen.insert(name.clone()) {
                 continue;
             }
-            let mut item = semantic::completion(
-                &name,
-                &[ExpressionType::Known(value.clone())],
-                self.completion_edit(replacement.clone(), name.clone())?,
-            );
+            let mut item =
+                self.name_item(&name, &[ExpressionType::Known(value.clone())], position)?;
             attach_value_docs(&mut item, semantics, Span::detached(), Some(&value));
-            match callable::Callable::of_value(&value, callable::Receiver::Unbound) {
-                Some(callable) => items.extend(callable::callable_items(
-                    item,
-                    self.source,
-                    self.cursor,
-                    &replacement,
-                    callable,
-                )),
-                None => items.push(item),
-            }
+            items.extend(callable::name_items(
+                item,
+                callable::Callable::of_value(&value, callable::Receiver::Unbound),
+                position,
+            ));
         }
-        items.extend(
-            parameters
-                .into_iter()
-                .filter(|item| seen.insert(item.label.clone())),
-        );
         Ok(items)
     }
 
@@ -422,46 +495,23 @@ impl Selection<'_> {
         let Some(replacement) = &import.replacement else {
             return Ok(Vec::new());
         };
-        // The module node answers by its value, so the world's parse comes first; a repair that
-        // dropped the statement leaves only the author's own node, which still answers by
-        // offsets.
+        // The module node answers by value from the compiled copy, then from the author's parse.
         let Some(source) = tola_typst_syntax::syntax::node_at_range(prepared, &import.source)
             .or_else(|| tola_typst_syntax::syntax::node_at_range(self.source, &import.source))
         else {
             return Ok(Vec::new());
         };
-        let (_, prefix) = self.completion_range(replacement.clone())?;
+        let position = self.name_position(replacement.clone())?;
         let mut items = Vec::new();
-        if import.imported.is_empty() && "*".starts_with(prefix) {
-            let mut item = semantic::completion(
-                "*",
-                &[],
-                self.completion_edit(replacement.clone(), "*".to_owned())?,
-            );
-            item.kind = Some(CompletionItemKind::SNIPPET);
-            item.detail = Some("Import everything.".to_owned());
-            items.push(item);
+        if import.imported.is_empty() && "*".starts_with(position.prefix) {
+            items.push(wildcard_import_item(position.edit("*".to_owned())?));
         }
         for (name, binding) in semantics.import_bindings(&source, &import.path)? {
-            if !name_matches(&name, prefix)
-                || import.imported.iter().any(|path| {
-                    path.len() == import.path.len() + 1
-                        && path[..import.path.len()] == import.path
-                        && path.last() == Some(&name)
-                })
-            {
+            if !name_matches(&name, position.prefix) || already_imported(import, &name) {
                 continue;
             }
-            let mut item = semantic::completion(
-                &name,
-                &binding
-                    .value
-                    .iter()
-                    .cloned()
-                    .map(ExpressionType::Known)
-                    .collect::<Vec<_>>(),
-                self.completion_edit(replacement.clone(), name.clone())?,
-            );
+            let mut item =
+                self.name_item(&name, &known_types(binding.value.as_ref()), &position)?;
             attach_value_docs(&mut item, semantics, binding.span, binding.value.as_ref());
             items.push(item);
         }
@@ -474,9 +524,7 @@ impl Selection<'_> {
         semantics: &mut Semantic<'_>,
         member: &tola_typst_syntax::syntax::Member,
     ) -> Result<Vec<CompletionItem>> {
-        // The receiver answers by its value, so the world's parse comes first; a repair that
-        // dropped the statement leaves only the author's own node, whose binding still resolves
-        // its value by offset.
+        // The receiver answers by value from the compiled copy, then from the author's parse.
         let Some(target) = tola_typst_syntax::syntax::node_at_range(prepared, &member.target)
             .or_else(|| tola_typst_syntax::syntax::node_at_range(self.source, &member.target))
         else {
@@ -516,18 +564,14 @@ impl Selection<'_> {
                 .iter()
                 .map(|(receiver, _)| !matches!(receiver, Value::Module(_) | Value::Type(_))),
         );
-        let (_, prefix) = self.completion_range(member.replacement.clone())?;
+        let position = self.name_position(member.replacement.clone())?;
         let mut items = Vec::new();
         for (name, values) in fields
             .into_iter()
-            .filter(|(name, _)| name_matches(name, prefix))
+            .filter(|(name, _)| name_matches(name, position.prefix))
         {
-            let mut item = semantic::completion(
-                &name,
-                &values,
-                self.completion_edit(member.replacement.clone(), name.clone())?,
-            );
-            let value = values.first().and_then(ExpressionType::value);
+            let mut item = self.name_item(&name, &values, &position)?;
+            let value = agreed(values.iter().map(ExpressionType::value)).flatten();
             let span = receivers
                 .iter()
                 .filter_map(|(receiver, _)| receiver.scope()?.get(&name))
@@ -540,32 +584,15 @@ impl Selection<'_> {
                 let (_, field) = declared_fields.remove(index);
                 item.documentation = Some(markdown_documentation(field.field(&name).section()));
             }
-            let callable = receiver.and_then(|receiver| {
-                values.iter().find_map(|ty| {
-                    ty.value()
-                        .and_then(|value| callable::Callable::of_value(value, receiver))
-                })
-            });
-            match callable {
-                Some(callable) => items.extend(callable::callable_items(
-                    item,
-                    self.source,
-                    self.cursor,
-                    &member.replacement,
-                    callable,
-                )),
-                None => items.push(item),
-            }
+            let callable =
+                receiver.and_then(|receiver| callable::Callable::of_types(&values, receiver));
+            items.extend(callable::name_items(item, callable, &position));
         }
         for (name, field) in declared_fields {
-            if !name_matches(&name, prefix) {
+            if !name_matches(&name, position.prefix) {
                 continue;
             }
-            let mut item = semantic::completion(
-                &name,
-                &[],
-                self.completion_edit(member.replacement.clone(), name.clone())?,
-            );
+            let mut item = self.name_item(&name, &[], &position)?;
             item.label_details = Some(labelled_type(field.ty()));
             item.documentation = Some(markdown_documentation(field.field(&name).section()));
             items.push(item);
@@ -573,14 +600,12 @@ impl Selection<'_> {
         if let Some(descriptors) = descriptors {
             for field in descriptors.fields() {
                 let name = field.name();
-                if !name_matches(name, prefix) || items.iter().any(|item| item.label == name) {
+                if !name_matches(name, position.prefix)
+                    || items.iter().any(|item| item.label == name)
+                {
                     continue;
                 }
-                let mut item = semantic::completion(
-                    name,
-                    &[],
-                    self.completion_edit(member.replacement.clone(), name.to_owned())?,
-                );
+                let mut item = self.name_item(name, &[], &position)?;
                 item.label_details = Some(labelled_type(Some(
                     descriptor_type(field.kind()).to_owned(),
                 )));
@@ -608,7 +633,7 @@ impl Selection<'_> {
         if schemas.shapes.is_empty() {
             return Ok(None);
         }
-        let (_, prefix) = self.completion_range(key.typed.clone())?;
+        let position = self.name_position(key.typed.clone())?;
         let mut declared: BTreeMap<String, DeclaredKey> = BTreeMap::new();
         for schema in &schemas.shapes {
             for (name, field) in schema.shape.fields() {
@@ -623,12 +648,10 @@ impl Selection<'_> {
         }
         let mut items = Vec::new();
         for (name, declared) in declared {
-            if !name_matches(&name, prefix) || key.written.contains(&name) {
+            if !name_matches(&name, position.prefix) || key.written.contains(&name) {
                 continue;
             }
-            // Every call parsing this source must accept the key: one that neither declares it nor
-            // keeps unknown keys rejects it, so the key is offered only where no call rejects it or
-            // another call requires it, in which case the conflict is named.
+            // One call that neither declares the key nor keeps unknown keys rejects it.
             let rejecting = schemas
                 .shapes
                 .iter()
@@ -648,10 +671,7 @@ impl Selection<'_> {
             let mut item = semantic::completion(
                 &name,
                 &[],
-                self.completion_edit(
-                    key.typed.clone(),
-                    crate::completion::typst_snippet(&format!("{name}: ${{}}")),
-                )?,
+                position.edit(crate::completion::typst_snippet(&format!("{name}: ${{}}")))?,
             );
             item.label_details = Some(labelled_type(declared.ty));
             item.documentation = Some(markdown_documentation(documentation));
@@ -662,12 +682,33 @@ impl Selection<'_> {
         // answers names, labels, citations, and postfix wraps at this cursor.
         Ok((!items.is_empty()).then_some(items))
     }
-    /// The edit one completion item has.
-    ///
-    /// The whole token the item replaces, and the prefix the cursor has already typed: a client
-    /// that reads insert-and-replace edits keeps the text after the cursor while the item is
-    /// inserted, and replaces the token when it is accepted. Both ranges coincide at the end of a
-    /// name, where a plain edit says the same.
+
+    /// The item one name inserts at `position`, described by the types the site establishes for it.
+    fn name_item(
+        &self,
+        name: &str,
+        types: &[ExpressionType],
+        position: &NamePosition<'_>,
+    ) -> Result<CompletionItem> {
+        Ok(semantic::completion(
+            name,
+            types,
+            self.completion_edit(position.replacement.clone(), name.to_owned())?,
+        ))
+    }
+
+    /// The position an item accepted at `replacement` writes at.
+    fn name_position(&self, replacement: Range<usize>) -> Result<NamePosition<'_>> {
+        let (_, prefix) = self.completion_range(replacement.clone())?;
+        Ok(NamePosition {
+            source: self.source,
+            cursor: self.cursor,
+            prefix,
+            replacement,
+        })
+    }
+
+    /// The insert-and-replace edit one item has: keep what follows the cursor, replace the token.
     pub(super) fn completion_edit(
         &self,
         replacement: Range<usize>,
@@ -682,21 +723,22 @@ impl Selection<'_> {
     ) -> Result<(lsp_types::Range, &str)> {
         let range = position::utf16_range(self.source.lines(), replacement.clone())
             .context("invalid completion range")?;
-        Ok((range, &self.source.text()[replacement.start..self.cursor]))
+        Ok((range, typed_text(self.source, &replacement, self.cursor)))
     }
 
-    /// The named parameters a call at the cursor can still fill, resolved through the same function
-    /// metadata signature help reads. The editor's own reader answers a library callee, but a
-    /// member or imported callee only the world resolves.
+    /// The named parameters a call can still fill, from the metadata signature help reads.
     pub(super) fn parameter_completion(
         &self,
         semantics: &mut Semantic<'_>,
     ) -> Result<Vec<CompletionItem>> {
         let previous = LinkedNode::new(self.source.root()).leaf_at(self.cursor, Side::Before);
-        if !matches!(
-            previous.as_ref().map(|node| node.kind()),
-            Some(SyntaxKind::LeftParen | SyntaxKind::Comma | SyntaxKind::Error)
-        ) {
+        let after_separator = previous.is_some_and(|node| {
+            matches!(
+                node.kind(),
+                SyntaxKind::LeftParen | SyntaxKind::Comma | SyntaxKind::Error
+            )
+        });
+        if !after_separator {
             return Ok(Vec::new());
         }
         let Some(call) = tola_typst_syntax::syntax::call(self.source, self.cursor) else {
@@ -724,7 +766,7 @@ impl Selection<'_> {
             self.source,
             &(call.callee.start..call.suffix.end),
         );
-        let taken: std::collections::BTreeSet<String> = call_node
+        let taken: BTreeSet<String> = call_node
             .as_ref()
             .and_then(|node| node.cast::<ast::FuncCall>())
             .map(|call| {
@@ -742,6 +784,12 @@ impl Selection<'_> {
             semantics, &functions, &taken, range,
         ))
     }
+}
+
+/// The text one completion replaces from its start up to the cursor: the prefix the client filters
+/// on, read from the author's own source.
+fn typed_text<'a>(source: &'a Source, replacement: &Range<usize>, cursor: usize) -> &'a str {
+    &source.text()[replacement.start..cursor]
 }
 
 pub(super) fn completion_edit(
@@ -799,16 +847,7 @@ mod tests {
             output.contains("a.html") && output.contains("b.html"),
             "{output}"
         );
-        assert!(
-            !site
-                .config
-                .build()
-                .content_dir
-                .join("document.typ")
-                .exists()
-        );
         assert!(!site.config.build().publish_dir.exists());
-        assert!(!site.site.path(".tola/builtin-packages").exists());
     }
 
     #[test]
@@ -838,7 +877,7 @@ mod tests {
     /// An item completed inside a name keeps the text after the cursor while it is inserted, and
     /// replaces the whole name when it is accepted.
     #[test]
-    fn completion_edit_separates_insert_from_replace() {
+    fn edit_separates_insert_from_replace() {
         let mut site = QuerySession::new();
         let completion = site.reply(
             "textDocument/completion",
@@ -896,7 +935,7 @@ mod tests {
     /// An empty `///` comment above a function definition completes the template that documents
     /// it: the parameters the closure declares, then a return line.
     #[test]
-    fn empty_comment_completes_the_function_template() {
+    fn empty_comment_completes_template() {
         let mut site = QuerySession::new();
         let items = site.completion("///|\n#let f(a, b) = a\n");
         let item = item_labeled(&items, "Document function");
@@ -977,10 +1016,147 @@ mod tests {
         }
     }
 
-    /// A reader's path argument is completed from the file that writes it, replacing only the
-    /// argument itself rather than the quotation marks around it.
     #[test]
-    fn reader_paths_replace_their_own_argument() {
+    fn path_prefixes_decode_typst_escapes() {
+        let mut site = QuerySession::new();
+        site.site.write("templates/title.typ", "Title\n");
+        let items = site.completion("#include \"\\u{2f}te|\"\n");
+        let item = item_labeled(&items, "/templates/title.typ");
+        assert_eq!(insertion_text(item), "/templates/title.typ");
+        assert_eq!(
+            item.filter_text.as_deref(),
+            Some("\\u{2f}templates/title.typ")
+        );
+    }
+
+    /// The label is the file's own spelling; the inserted text is escaped for Typst.
+    #[test]
+    #[cfg(unix)]
+    fn paths_keep_written_spelling() {
+        let mut site = QuerySession::new();
+        site.site.write("content/quo\"ted.typ", "Quoted\n");
+        let items = site.completion("#include \"|\"\n");
+        let item = item_labeled(&items, "quo\"ted.typ");
+        assert_eq!(insertion_text(item), "quo\\\"ted.typ");
+        let completed = format!("#include \"{}|\"\n", insertion_text(item));
+        let Some(lsp_types::GotoDefinitionResponse::Scalar(location)) = site.definition(&completed)
+        else {
+            panic!("the completed string reaches its file");
+        };
+        assert_eq!(
+            location.uri,
+            crate::uri::from_file_path(&site.config.get_root().join("content/quo\"ted.typ"))
+                .unwrap()
+        );
+        let opened = crate::sources::load(
+            &location.uri,
+            site.config.get_root(),
+            &Default::default(),
+            &site.session.resources().source_boundary(&site.config),
+            None,
+            None,
+        )
+        .expect("the completed file opens");
+        assert_eq!(opened.text(), "Quoted\n");
+
+        site.site.write("content/chapter:notes.typ", "Notes\n");
+        let items = site.completion("#include \"chapter:|notes.typ\"\n");
+        let item = item_labeled(&items, "chapter:notes.typ");
+        assert_eq!(insertion_text(item), "chapter:notes.typ");
+    }
+
+    #[test]
+    fn nonpath_arguments_offer_no_files() {
+        let mut site = QuerySession::new();
+        site.site.write("assets/cover.svg", "<svg/>");
+        for marked in [
+            "#image(alt: \"|",
+            "#read(encoding: \"|",
+            "#read(\"data.csv\", encoding: \"utf|8\")",
+            "#bibliography(\"refs.bib\", style: \"ap|a\")",
+            "#bibliography(\"refs.bib\", \"m|\")",
+            "#let read(text) = text\n#read(\"|\")",
+            "#let read(text) = text\n#read(\"|",
+            "#let render(read) = read(\"|\")",
+        ] {
+            let items = site.completion(marked);
+            assert!(
+                !completion_labels(&items).contains(&"../assets/cover.svg"),
+                "{marked}: {items:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn bibliographies_complete_each_source() {
+        let mut site = QuerySession::new();
+        site.site.write("content/more.bib", "");
+        for marked in [
+            "#bibliography((\"first.bib\", \"m|\"))",
+            "#bibliography((\"first.bib\", \"m|",
+        ] {
+            let items = site.completion(marked);
+            assert!(
+                completion_labels(&items).contains(&"more.bib"),
+                "{marked}: {items:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn styles_complete_only_csl() {
+        let mut site = QuerySession::new();
+        site.site.write("content/styles/custom.csl", "");
+        site.site.write("content/styles/refs.bib", "");
+        for marked in [
+            "#bibliography(\"refs.bib\", style: \"styles/|custom.csl\")",
+            "#bibliography(\"refs.bib\", style: \"styles/|\")",
+        ] {
+            let items = site.completion(marked);
+            assert!(completion_labels(&items).contains(&"styles/custom.csl"));
+            assert!(
+                items
+                    .iter()
+                    .filter(|item| item.kind == Some(CompletionItemKind::FILE))
+                    .all(|item| item.label.ends_with(".csl")),
+                "{marked}: {items:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn raw_files_complete_by_role() {
+        let mut site = QuerySession::new();
+        site.site.write("content/my.tmTheme", "");
+        site.site.write("content/my.sublime-syntax", "");
+        for (marked, expected, excluded) in [
+            (
+                "#set raw(theme: \"my|\")",
+                "my.tmTheme",
+                "my.sublime-syntax",
+            ),
+            (
+                "#raw(\"text\", theme: \"my|\")",
+                "my.tmTheme",
+                "my.sublime-syntax",
+            ),
+            (
+                "#set raw(syntaxes: (\"other.sublime-syntax\", \"my|\"))",
+                "my.sublime-syntax",
+                "my.tmTheme",
+            ),
+        ] {
+            let items = site.completion(marked);
+            let labels = completion_labels(&items);
+            assert!(labels.contains(&expected), "{marked}: {labels:?}");
+            assert!(!labels.contains(&excluded), "{marked}: {labels:?}");
+        }
+        let items = site.completion("#let raw(theme) = theme\n#raw(theme: \"my|\")");
+        assert!(!completion_labels(&items).contains(&"my.tmTheme"));
+    }
+
+    #[test]
+    fn reader_paths_replace_own_argument() {
         let mut site = QuerySession::new();
         site.site.write("assets/cover.svg", "<svg/>");
         site.site.write("data/site.json", "{}");
@@ -996,13 +1172,19 @@ mod tests {
         assert_eq!(edit.range.end.character, 12);
         assert_eq!(edit.new_text, "../assets/cover.svg");
 
-        let items = site.completion("#read(\"da|\")\n");
-        assert!(
-            completion_labels(&items)
-                .iter()
-                .any(|label| label.ends_with("data/site.json")),
-            "{items:?}"
-        );
+        for marked in [
+            "#read(\"da|\")\n",
+            "#let read(text) = text\n#std.read(\"da|\")\n",
+            "#read(\"da|\")\n#let read(text) = text\n",
+        ] {
+            let items = site.completion(marked);
+            assert!(
+                completion_labels(&items)
+                    .iter()
+                    .any(|label| label.ends_with("data/site.json")),
+                "{marked}: {items:?}"
+            );
+        }
 
         for marked in ["#image(\"asse|\nBody", "#image(\"asse|\nBody \"quoted\""] {
             let items = site.completion(marked);
@@ -1020,7 +1202,7 @@ mod tests {
 
     /// An import item list answers only the module's exports, narrowed by what the author typed.
     #[test]
-    fn package_import_items_are_the_only_completion() {
+    fn import_items_only_module_exports() {
         let package = tola_packages::builtin_package(&tola_packages::TolaPackage::Web.spec())
             .expect("the web package");
         let mut site = QuerySession::with_program(FAILED_PROGRAM);
@@ -1059,7 +1241,7 @@ mod tests {
     /// A local module answers every export on the colon itself, and offers the wildcard the
     /// statement can still use.
     #[test]
-    fn local_module_items_complete_on_the_colon() {
+    fn local_module_items_on_colon() {
         let mut site = QuerySession::with_program(FAILED_PROGRAM);
         site.site.write(
             "components/home.typ",

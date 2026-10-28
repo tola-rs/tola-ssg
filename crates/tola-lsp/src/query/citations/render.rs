@@ -11,12 +11,7 @@ use super::sources::{Declared, StyleLocale};
 /// The CSL locale files a style reads its terms from, loaded once.
 static LOCALES: LazyLock<Vec<Locale>> = LazyLock::new(hayagriva::archive::locales);
 
-/// What one entry answers with.
-///
-/// The page prints a citation in the style its own `bibliography(…)` call names, in the language
-/// that call is written in, so the entry renders here the way the call that declares it renders
-/// it. An entry whose call the site did not compile has no rendering to read, and the entry's own
-/// fields answer instead.
+/// What one entry answers with: its call's rendering, or its own fields when none was read.
 pub(super) fn rendered(declared: &Declared<'_>) -> String {
     declared
         .rendering
@@ -42,10 +37,7 @@ pub(super) fn unread_note(files: &[FileId]) -> String {
     format!("Tola could not read {listed}")
 }
 
-/// One entry as the style renders the reference to it, in markdown.
-///
-/// The bibliography item, not the citation: a citation renders as the number the page happens to
-/// give it, and an author hovering a key asks which work it names.
+/// The bibliography item one entry renders to, in markdown, not the citation number.
 fn cited(rendering: &StyleLocale, entry: &hayagriva::Entry) -> Option<String> {
     let item = rendered_item(rendering, entry)?;
     let mut rendered = String::new();
@@ -70,13 +62,7 @@ fn rendered_item(rendering: &StyleLocale, entry: &hayagriva::Entry) -> Option<El
     Some(rendered.bibliography?.items.first()?.content.clone())
 }
 
-/// The item as CommonMark: emphasis, strong, and links, with every character markdown would read
-/// escaped.
-///
-/// A hover is markdown, and CommonMark is the one markup every client that asks for markdown
-/// renders: the styles a site names emphasize titles and journal names and link DOIs, and both
-/// survive here. Underline, small caps, and sub/superscript have no CommonMark form, so their text
-/// stays as the author wrote it.
+/// The item as CommonMark: emphasis and links survive, every markdown character escaped.
 fn write_markdown(children: &ElemChildren, out: &mut String) {
     for child in &children.0 {
         match child {
@@ -88,22 +74,25 @@ fn write_markdown(children: &ElemChildren, out: &mut String) {
                 write_markdown(&elem.children, out);
             }
             ElemChild::Markup(markup) => write_escaped(markup, out),
-            ElemChild::Link { text, url } => {
-                out.push('[');
-                write_run(text, out);
-                // A destination with whitespace or parentheses only parses inside `<…>`.
-                if url.contains([' ', '(', ')']) {
-                    out.push_str("](<");
-                    write_escaped(url, out);
-                    out.push_str(">)");
-                } else {
-                    out.push_str("](");
-                    out.push_str(url);
-                    out.push(')');
-                }
-            }
+            ElemChild::Link { text, url } => write_link(text, url, out),
             ElemChild::Transparent { .. } => {}
         }
+    }
+}
+
+/// One link as markdown, its destination wrapped when it cannot be written bare.
+fn write_link(text: &Formatted, url: &str, out: &mut String) {
+    out.push('[');
+    write_run(text, out);
+    // A destination with whitespace or parentheses only parses inside `<…>`.
+    if url.contains([' ', '(', ')']) {
+        out.push_str("](<");
+        write_escaped(url, out);
+        out.push_str(">)");
+    } else {
+        out.push_str("](");
+        out.push_str(url);
+        out.push(')');
     }
 }
 

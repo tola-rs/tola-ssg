@@ -8,11 +8,11 @@ use lsp_server::RequestId;
 use lsp_types::{
     CallHierarchyIncomingCallsParams, CodeLensParams, RenameFilesParams, Uri, WorkspaceSymbolParams,
 };
-use tola_build::diagnostic::Diagnostic;
+use tola_diagnostic::Diagnostic;
 
 use crate::compiler::{
     AnalysisRequest, AnalysisTask, IncomingCallsRead, LensesRead, PackageSourceRead, QueryRequest,
-    RenameRead, RouteIndexRead, RouteRead, SourceJob, SymbolsRead,
+    RenameRead, RouteIndexRead, RouteRead, SourceInputs, SourceJob, SymbolsRead,
 };
 use crate::protocol::{self, PackageSourceParams, RouteParams, SourceQuery, SourceReply};
 
@@ -21,39 +21,47 @@ use super::replies::failed_response;
 use super::{Connection, Phase};
 
 impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
+    /// Admit one source request and queue the job that answers it.
+    ///
+    /// The job carries the identity and source inputs the admission assigned, so a job no admitted
+    /// request owns cannot be queued; a refused request queues nothing.
+    fn queue(
+        &mut self,
+        id: RequestId,
+        job: impl FnOnce(RequestId, u64, SourceInputs) -> SourceJob,
+    ) -> Result<()> {
+        let Some(admission) = self.admit(&id)? else {
+            return Ok(());
+        };
+        let sources = self.source_inputs(self.workspace().root.clone(), admission.cancellation);
+        self.queries.push_back(job(id, admission.serial, sources));
+        Ok(())
+    }
+
     /// Routes realized from the current source check, not proof of dev-server publication.
     pub(super) fn route(&mut self, id: RequestId, parameters: RouteParams) -> Result<()> {
         if is_untitled(&parameters.uri) {
             return self.source_reply(id, SourceReply::Routes(protocol::RouteReply::default()));
         }
-        let workspace = self.workspace();
-        let root = workspace.root.clone();
-        let Some((serial, cancellation)) = self.admit(&id)? else {
-            return Ok(());
-        };
-        self.queries.push_back(SourceJob::Route(RouteRead {
-            id,
-            serial,
-            sources: self.source_inputs(root, cancellation),
-            uri: parameters.uri,
-        }));
-        Ok(())
+        self.queue(id, |id, serial, sources| {
+            SourceJob::Route(RouteRead {
+                id,
+                serial,
+                sources,
+                uri: parameters.uri,
+            })
+        })
     }
 
     /// Every page the checked sources realize, which no request of one document names.
     pub(super) fn route_index(&mut self, id: RequestId) -> Result<()> {
-        let workspace = self.workspace();
-        let root = workspace.root.clone();
-        let Some((serial, cancellation)) = self.admit(&id)? else {
-            return Ok(());
-        };
-        self.queries
-            .push_back(SourceJob::RouteIndex(RouteIndexRead {
+        self.queue(id, |id, serial, sources| {
+            SourceJob::RouteIndex(RouteIndexRead {
                 id,
                 serial,
-                sources: self.source_inputs(root, cancellation),
-            }));
-        Ok(())
+                sources,
+            })
+        })
     }
 
     /// The commands every page of the requested source has.
@@ -61,18 +69,14 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
         if is_untitled(&parameters.text_document.uri) {
             return self.source_reply(id, SourceReply::CodeLenses(None));
         }
-        let workspace = self.workspace();
-        let root = workspace.root.clone();
-        let Some((serial, cancellation)) = self.admit(&id)? else {
-            return Ok(());
-        };
-        self.queries.push_back(SourceJob::Lenses(LensesRead {
-            id,
-            serial,
-            sources: self.source_inputs(root, cancellation),
-            uri: parameters.text_document.uri,
-        }));
-        Ok(())
+        self.queue(id, |id, serial, sources| {
+            SourceJob::Lenses(LensesRead {
+                id,
+                serial,
+                sources,
+                uri: parameters.text_document.uri,
+            })
+        })
     }
 
     /// The symbols of every source the site holds whose name answers the search.
@@ -81,24 +85,20 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
         id: RequestId,
         parameters: WorkspaceSymbolParams,
     ) -> Result<()> {
-        let workspace = self.workspace();
-        let root = workspace.root.clone();
-        let Some((serial, cancellation)) = self.admit(&id)? else {
-            return Ok(());
-        };
-        self.queries.push_back(SourceJob::Symbols(SymbolsRead {
-            id,
-            serial,
-            sources: self.source_inputs(root, cancellation),
-            query: parameters.query,
-        }));
-        Ok(())
+        let view = self.open.view();
+        self.queue(id, |id, serial, sources| {
+            SourceJob::Symbols(SymbolsRead {
+                id,
+                serial,
+                sources,
+                view,
+                query: parameters.query,
+            })
+        })
     }
 
     /// The edit that keeps every import pointing at a file the editor is renaming.
     pub(super) fn rename(&mut self, id: RequestId, parameters: RenameFilesParams) -> Result<()> {
-        let workspace = self.workspace();
-        let root = workspace.root.clone();
         let files: Vec<(PathBuf, PathBuf)> = parameters
             .files
             .into_iter()
@@ -109,16 +109,16 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
                 ))
             })
             .collect();
-        let Some((serial, cancellation)) = self.admit(&id)? else {
-            return Ok(());
-        };
-        self.queries.push_back(SourceJob::Rename(RenameRead {
-            id,
-            serial,
-            sources: self.source_inputs(root, cancellation),
-            files,
-        }));
-        Ok(())
+        let view = self.open.view();
+        self.queue(id, |id, serial, sources| {
+            SourceJob::Rename(RenameRead {
+                id,
+                serial,
+                sources,
+                view,
+                files,
+            })
+        })
     }
 
     pub(super) fn enqueue_analysis(
@@ -134,10 +134,9 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
         let view = self.open.view();
         let document_revision = view.get(uri).map(|parsed| (uri.clone(), parsed.revision));
         let root = self.workspace().root.clone();
-        let package_sources = self.workspace().package_sources.clone();
         let package_locations = self.package_locations();
         let boundary = self.source_boundary();
-        let Some((serial, cancellation)) = self.admit(&id)? else {
+        let Some(admission) = self.admit(&id)? else {
             return Ok(());
         };
         self.requests
@@ -146,15 +145,14 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
             .document_revision = document_revision;
         self.analyses.push_back(AnalysisRequest {
             id,
-            serial,
-            sources: self.source_inputs(root, cancellation),
+            serial: admission.serial,
+            sources: self.source_inputs(root, admission.cancellation),
             source_root: self.source_root(),
             view,
             source,
             package_locations,
             boundary,
             task,
-            package_sources,
         });
         Ok(())
     }
@@ -162,7 +160,6 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
     pub(super) fn query(&mut self, id: RequestId, query: SourceQuery) -> Result<()> {
         let workspace = self.workspace();
         let root = workspace.root.clone();
-        let package_sources = workspace.package_sources.clone();
         let routes_as_hints = workspace.routes_as_hints;
         if let Some(reply) = self.configuration_query(&query, &root) {
             return self.source_reply(id, reply);
@@ -182,7 +179,7 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
             {
                 return self.source_reply(id, reply);
             }
-            let source_analysis = matches!(
+            let answered_from_names = matches!(
                 query,
                 SourceQuery::Definition(_)
                     | SourceQuery::PrepareRename(_)
@@ -190,16 +187,16 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
                     | SourceQuery::References(_)
                     | SourceQuery::Rename(_)
             );
-            if source_analysis
+            if answered_from_names
                 || (matches!(query, SourceQuery::Completion(_))
                     && (is_untitled(uri)
                         || !self
                             .checked
-                            .is_some_and(|(revision, _)| revision == self.revision)))
+                            .is_some_and(|check| check.revision == self.revision)))
             {
                 return self.enqueue_analysis(id, source, AnalysisTask::Query { query, cursor });
             }
-            let source_reply = crate::query::source_reply(&source, cursor, &query);
+            let source_reply = crate::query::source_reply(&source, &query);
             match source_reply {
                 Ok(Some(reply)) => return self.source_reply(id, reply),
                 Err(error) => return self.reply(failed_response(id, error)),
@@ -209,20 +206,19 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
         if is_untitled(uri) {
             return self.source_reply(id, crate::query::unavailable(&query));
         }
-        let Some((serial, cancellation)) = self.admit(&id)? else {
-            return Ok(());
-        };
-        self.queries.push_back(SourceJob::Query(QueryRequest {
-            id,
-            serial,
-            sources: self.source_inputs(root, cancellation),
-            view: self.open.view(),
-            package_sources,
-            routes_as_hints,
-            check_progress: self.check_progress(),
-            query,
-        }));
-        Ok(())
+        let view = self.open.view();
+        let check_progress = self.check_progress();
+        self.queue(id, |id, serial, sources| {
+            SourceJob::Query(QueryRequest {
+                id,
+                serial,
+                sources,
+                view,
+                routes_as_hints,
+                check_progress,
+                query,
+            })
+        })
     }
 
     /// The causes the last completed check reported for one document, when they are still the
@@ -244,15 +240,15 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
         id: RequestId,
         parameters: PackageSourceParams,
     ) -> Result<()> {
-        let Some((serial, cancellation)) = self.admit(&id)? else {
+        let Some(admission) = self.admit(&id)? else {
             return Ok(());
         };
         self.queries
             .push_back(SourceJob::PackageSource(PackageSourceRead {
                 id,
-                serial,
+                serial: admission.serial,
                 uri: parameters.uri,
-                cancellation,
+                cancellation: admission.cancellation,
             }));
         Ok(())
     }
@@ -263,8 +259,6 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
         id: RequestId,
         parameters: CallHierarchyIncomingCallsParams,
     ) -> Result<()> {
-        let workspace = self.workspace();
-        let root = workspace.root.clone();
         let node = parameters
             .item
             .data
@@ -277,18 +271,16 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
         let Some(source) = source else {
             return self.source_reply(id, SourceReply::IncomingCalls(None));
         };
-        let Some((serial, cancellation)) = self.admit(&id)? else {
-            return Ok(());
-        };
-        self.queries
-            .push_back(SourceJob::IncomingCalls(IncomingCallsRead {
+        let view = self.open.view();
+        self.queue(id, |id, serial, sources| {
+            SourceJob::IncomingCalls(IncomingCallsRead {
                 id,
                 serial,
-                sources: self.source_inputs(root, cancellation),
-                view: self.open.view(),
+                sources,
+                view,
                 source,
-            }));
-        Ok(())
+            })
+        })
     }
 }
 
@@ -296,8 +288,8 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
 mod tests {
     use super::*;
     use crate::connection::tests::{
-        dynamic_import_position, open_document, open_draft, ready, ready_at, references_request,
-        response,
+        dynamic_import_position, finish_analysis, last_position, open_document, open_draft, ready,
+        ready_at, references_request, response,
     };
     use lsp_server::Request;
     use lsp_types::request::{self, Request as LspRequest};
@@ -305,26 +297,13 @@ mod tests {
     use std::time::Instant;
     use tola_typst::typst::syntax::Source;
 
-    fn finish_analysis(connection: &mut Connection<Vec<u8>, impl Fn(&[Diagnostic])>) {
-        let request = connection.next_analysis().expect("queued analysis");
-        connection
-            .completed(crate::compiler::analyze(
-                &mut crate::analysis::DiskSources::default(),
-                &mut crate::analysis::GraphCache::default(),
-                request,
-            ))
-            .unwrap();
-    }
     #[test]
     fn unnamed_highlights_need_no_compilation() {
         let mut connection = ready(Vec::new());
         let text = "#let count = 1\n#count";
         let uri = open_draft(&mut connection, text);
         let source = Source::detached(text);
-        let byte = text.rfind("count").unwrap();
-        let position = crate::position::utf16_range(source.lines(), byte..byte)
-            .unwrap()
-            .start;
+        let position = last_position(text, "count");
         connection
             .request(Request::new(
                 1.into(),
@@ -436,7 +415,7 @@ mod tests {
 
     /// A name the source-only graph binds answers highlights without the compiler lane.
     #[test]
-    fn static_highlights_answer_in_the_names_lane() {
+    fn static_highlights_answer_names_lane() {
         let directory = tempfile::tempdir().unwrap();
         let mut connection = ready_at(Vec::new(), directory.path().to_path_buf());
         let uri = crate::uri::from_file_path(&directory.path().join("page.typ")).unwrap();
@@ -446,11 +425,7 @@ mod tests {
             connection.next_job(Instant::now()),
             Some(SourceJob::Check(_))
         ));
-        let source = Source::detached(text);
-        let byte = text.rfind("count").unwrap();
-        let position = crate::position::utf16_range(source.lines(), byte..byte)
-            .unwrap()
-            .start;
+        let position = last_position(text, "count");
         connection
             .request(Request::new(
                 8.into(),

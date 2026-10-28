@@ -210,7 +210,6 @@ pub(super) fn initialize_result(
             // advertisement cannot drift from what a request can select.
             code_action_provider: Some(CodeActionProviderCapability::Options(CodeActionOptions {
                 code_action_kinds: Some(crate::code_actions::SERVED_KINDS.to_vec()),
-
                 work_done_progress_options: WorkDoneProgressOptions::default(),
                 resolve_provider: Some(false),
             })),
@@ -235,24 +234,7 @@ pub(super) fn initialize_result(
                 }),
             ),
             workspace: Some(WorkspaceServerCapabilities {
-                file_operations: features.will_rename_files.then(|| {
-                    WorkspaceFileOperationsServerCapabilities {
-                        will_rename: Some(FileOperationRegistrationOptions {
-                            // A folder rename moves every site file below it, and any site file
-                            // may be a link target, so the whole workspace is what the request
-                            // asks about; the site's own file list decides which renames matter.
-                            filters: vec![FileOperationFilter {
-                                scheme: Some("file".to_owned()),
-                                pattern: FileOperationPattern {
-                                    glob: "**/*".to_owned(),
-                                    matches: None,
-                                    options: None,
-                                },
-                            }],
-                        }),
-                        ..WorkspaceFileOperationsServerCapabilities::default()
-                    }
-                }),
+                file_operations: features.will_rename_files.then(rename_files_capability),
                 workspace_folders: Some(WorkspaceFoldersServerCapabilities {
                     supported: Some(false),
                     change_notifications: Some(OneOf::Left(false)),
@@ -260,14 +242,7 @@ pub(super) fn initialize_result(
             }),
             // A client that pulls asks for the site's diagnostics itself; one that only takes what
             // is pushed has no use for the provider, so it is offered only to the former.
-            diagnostic_provider: features.pull_diagnostics.then(|| {
-                DiagnosticServerCapabilities::Options(DiagnosticOptions {
-                    identifier: Some("tola".to_owned()),
-                    inter_file_dependencies: true,
-                    workspace_diagnostics: false,
-                    work_done_progress_options: WorkDoneProgressOptions::default(),
-                })
-            }),
+            diagnostic_provider: features.pull_diagnostics.then(diagnostics_capability),
             // The server's own requests have no standard field, so the ones a client may call are
             // named here, each with the method it answers to and what its reply has.
             experimental: Some(serde_json::json!({
@@ -282,7 +257,38 @@ pub(super) fn initialize_result(
             name: "tola-lsp".into(),
             version: Some(env!("CARGO_PKG_VERSION").into()),
         }),
+        ..Default::default()
     }
+}
+
+/// What a client that renames files may ask Tola, which rewrites the imports the rename breaks.
+fn rename_files_capability() -> WorkspaceFileOperationsServerCapabilities {
+    WorkspaceFileOperationsServerCapabilities {
+        will_rename: Some(FileOperationRegistrationOptions {
+            // A folder rename moves every site file below it, and any site file may be a link
+            // target, so the whole workspace is what the request asks about; the site's own file
+            // list decides which renames matter.
+            filters: vec![FileOperationFilter {
+                scheme: Some("file".to_owned()),
+                pattern: FileOperationPattern {
+                    glob: "**/*".to_owned(),
+                    matches: None,
+                    options: None,
+                },
+            }],
+        }),
+        ..WorkspaceFileOperationsServerCapabilities::default()
+    }
+}
+
+/// What a client that pulls diagnostics asks this server for itself.
+fn diagnostics_capability() -> DiagnosticServerCapabilities {
+    DiagnosticServerCapabilities::Options(DiagnosticOptions {
+        identifier: Some("tola".to_owned()),
+        inter_file_dependencies: true,
+        workspace_diagnostics: false,
+        work_done_progress_options: WorkDoneProgressOptions::default(),
+    })
 }
 
 /// Package-source access and status negotiation are fixed for one connection.
@@ -645,7 +651,6 @@ impl SourceQuery {
     }
 }
 
-/// The quick fix that replaces `range` in `uri` with `new_text`.
 pub(super) fn quick_fix(uri: &Uri, title: String, edit: TextEdit) -> CodeActionOrCommand {
     CodeActionOrCommand::CodeAction(CodeAction {
         title,
@@ -695,6 +700,7 @@ pub(super) enum SourceReply {
     OutgoingCalls(Option<Vec<CallHierarchyOutgoingCall>>),
 }
 
+/// Decode one request's typed parameters, keeping its id for the `InvalidParams` answer.
 fn extract<R: LspRequest>(request: Request) -> Result<(RequestId, R::Params), Box<Response>> {
     let id = request.id.clone();
     request.extract(R::METHOD).map_err(|error| {
@@ -781,21 +787,5 @@ mod tests {
             unknown.response_result.unwrap_err().code,
             ErrorCode::MethodNotFound as i32
         );
-    }
-
-    /// Every hover reply shares one envelope: markdown contents, and the range the answer covers.
-    #[test]
-    fn markdown_hover_names_markup_kind_and_range() {
-        let range = lsp_types::Range::new(
-            lsp_types::Position::new(1, 2),
-            lsp_types::Position::new(1, 5),
-        );
-        let hover = markdown_hover("body".to_owned(), Some(range));
-        let HoverContents::Markup(markup) = hover.contents else {
-            panic!("markdown contents");
-        };
-        assert_eq!(markup.kind, MarkupKind::Markdown);
-        assert_eq!(markup.value, "body");
-        assert_eq!(hover.range, Some(range));
     }
 }

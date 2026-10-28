@@ -1,10 +1,13 @@
 //! `typst-ide` queries over the same checked world used for site compilation.
 
-use std::sync::OnceLock;
+use std::path::PathBuf;
+use std::sync::{Arc, OnceLock};
 
+use anyhow::Result;
 use lsp_types::{
     CompletionItem, CompletionItemKind, CompletionTextEdit, InsertTextFormat, Range, TextEdit,
 };
+use tola_build::cancellation::BuildCancellation;
 use tola_build::config::ResolvedSiteConfig;
 use tola_typst::TypstWorld;
 use tola_typst::typst::World;
@@ -21,21 +24,32 @@ use crate::files;
 use crate::packages::{PackageAccess, importable_packages};
 use crate::position;
 
-/// The checked world `typst-ide` answers over, plus the site inventories a
-/// completion position may read.
-///
-/// `typst-ide` asks for site files and importable packages only in path and
-/// package positions, so both are produced on first ask for one query: a
-/// completion for a name, member, or argument performs no walk at all, and the
-/// file list one request may ask for twice is walked once. Nothing here survives
-/// the query, and both are held in the view because `IdeWorld` answers them by
-/// value or by reference.
+/// The checked world `typst-ide` answers over, plus the site inventories a completion reads lazily.
 struct IdeView<'w, 'p> {
     world: &'w TypstWorld,
-    config: Option<&'w ResolvedSiteConfig>,
-    package_access: Option<&'p PackageAccess<'p>>,
-    files: OnceLock<Vec<FileId>>,
+    inventories: Option<IdeInventories<'w, 'p>>,
+    overrides: &'w [(PathBuf, Arc<str>)],
+    files: OnceLock<Result<Vec<FileId>>>,
     packages: OnceLock<Vec<(PackageSpec, Option<EcoString>)>>,
+}
+
+struct IdeInventories<'w, 'p> {
+    config: &'w ResolvedSiteConfig,
+    boundary: &'w tola_typst::SourceBoundary,
+    cancellation: &'w BuildCancellation,
+    package_access: &'p PackageAccess<'p>,
+}
+
+impl<'w> IdeView<'w, 'static> {
+    fn without_inventories(world: &'w TypstWorld) -> Self {
+        Self {
+            world,
+            inventories: None,
+            overrides: &[],
+            files: OnceLock::new(),
+            packages: OnceLock::new(),
+        }
+    }
 }
 
 impl World for IdeView<'_, '_> {
@@ -74,21 +88,28 @@ impl IdeWorld for IdeView<'_, '_> {
     }
 
     fn files(&self) -> Vec<FileId> {
-        match self.config {
-            Some(config) => self
-                .files
-                .get_or_init(|| files::owned_file_ids(config))
-                .clone(),
-            None => Vec::new(),
+        let Some(inventories) = &self.inventories else {
+            return Vec::new();
+        };
+        match self.files.get_or_init(|| {
+            files::completable_file_ids(
+                inventories.config,
+                self.overrides,
+                inventories.boundary,
+                inventories.cancellation,
+            )
+        }) {
+            Ok(files) => files.clone(),
+            Err(_) => Vec::new(),
         }
     }
 
     fn packages(&self) -> &[(PackageSpec, Option<EcoString>)] {
-        let Some(package_access) = self.package_access else {
+        let Some(inventories) = &self.inventories else {
             return &[];
         };
         self.packages
-            .get_or_init(|| importable_packages(package_access))
+            .get_or_init(|| importable_packages(inventories.package_access))
     }
 }
 
@@ -98,26 +119,43 @@ pub(super) fn completion(
     package_access: &PackageAccess<'_>,
     source: &Source,
     cursor: usize,
-) -> Option<(Range, Vec<CompletionItem>)> {
+    cancellation: &BuildCancellation,
+    overrides: &[(PathBuf, Arc<str>)],
+) -> Result<Option<(Range, Vec<CompletionItem>)>> {
+    cancellation.ensure_active()?;
     let view = IdeView {
         world,
-        config: Some(config),
-        package_access: Some(package_access),
+        inventories: Some(IdeInventories {
+            config,
+            boundary: &package_access.boundary,
+            cancellation,
+            package_access,
+        }),
+        overrides,
         files: OnceLock::new(),
         packages: OnceLock::new(),
     };
-    let (from, completions) =
-        typst_ide::autocomplete(&view, None::<&dyn Output>, source, cursor, false)?;
-    let range = position::utf16_range(source.lines(), from..cursor)?;
+    let completions = typst_ide::autocomplete(&view, None::<&dyn Output>, source, cursor, false);
+    // `IdeWorld::files` cannot return failures; the request carries the scan's failure instead.
+    if let Some(Err(error)) = view.files.into_inner() {
+        return Err(error);
+    }
+    cancellation.ensure_active()?;
+    let Some((from, completions)) = completions else {
+        return Ok(None);
+    };
+    let Some(range) = position::utf16_range(source.lines(), from..cursor) else {
+        return Ok(None);
+    };
     let prefix = super::completion::typed_prefix(source, cursor);
-    Some((
+    Ok(Some((
         range,
         completions
             .into_iter()
             .filter(|completion| matches_prefix(completion, prefix))
             .map(|completion| protocol_completion(completion, &range))
             .collect(),
-    ))
+    )))
 }
 
 /// Whether the reader's completion can still match what the author typed. A name has to start with
@@ -136,13 +174,7 @@ fn matches_prefix(completion: &Completion, prefix: &str) -> bool {
 /// The tooltip Typst's own reader answers at one cursor, with its own section shapes left to the
 /// caller.
 pub(super) fn tooltip(world: &TypstWorld, source: &Source, cursor: usize) -> Option<Tooltip> {
-    let view = IdeView {
-        world,
-        config: None,
-        package_access: None,
-        files: OnceLock::new(),
-        packages: OnceLock::new(),
-    };
+    let view = IdeView::without_inventories(world);
     typst_ide::tooltip(&view, None::<&dyn Output>, source, cursor, Side::After)
 }
 
@@ -152,13 +184,7 @@ pub(super) enum Definition {
 }
 
 pub(super) fn definition(world: &TypstWorld, source: &Source, cursor: usize) -> Option<Definition> {
-    let view = IdeView {
-        world,
-        config: None,
-        package_access: None,
-        files: OnceLock::new(),
-        packages: OnceLock::new(),
-    };
+    let view = IdeView::without_inventories(world);
     match typst_ide::definition(&view, None::<&dyn Output>, source, cursor, Side::After)? {
         UpstreamDefinition::Span(span) => Some(Definition::Span(span)),
         UpstreamDefinition::File(id) => Some(Definition::File(id)),
@@ -174,14 +200,20 @@ fn protocol_completion(completion: Completion, range: &Range) -> CompletionItem 
         apply,
         detail,
     } = completion;
+    let text = apply.map_or_else(|| label.to_string(), |apply| apply.to_string());
     // A path label is the quoted string an author would type, while the completion itself has
     // the quotes the position needs.
     let label = match kind {
         CompletionKind::Path => label.trim_matches('"').to_owned(),
         _ => label.to_string(),
     };
-    let text = apply.map_or_else(|| label.clone(), |apply| apply.to_string());
-    let snippet = text.contains("${");
+    let snippet = matches!(
+        kind,
+        CompletionKind::Syntax
+            | CompletionKind::Func
+            | CompletionKind::Type
+            | CompletionKind::Param
+    ) && text.contains("${");
     let text = if snippet {
         crate::completion::typst_snippet(&text)
     } else {

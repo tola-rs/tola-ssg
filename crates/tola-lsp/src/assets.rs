@@ -28,15 +28,15 @@ pub(super) fn hover(config: &ResolvedSiteConfig, source: &Source, at: usize) -> 
         return None;
     }
     let range = argument.range;
-    let written = source.text().get(range.clone())?;
+    let written_path = source.text().get(range.clone())?;
     // An output is a logical path below the output root, so a path the Bundle cannot publish names
     // no output at all: the answer says so rather than staying silent, and the rule the path breaks
     // goes to the debug log.
-    let described = match published_path(config, written) {
+    let described = match published_path(config, written_path) {
         Ok(published) => format!("Published at `{published}`."),
         Err(rule) => {
             tracing::debug!(%rule, "asset argument names no path the site publishes");
-            format!("`{written}` is not a path this site publishes")
+            format!("`{written_path}` is not a path this site publishes")
         }
     };
     Some(crate::protocol::markdown_hover(
@@ -76,9 +76,9 @@ pub(super) enum Written<'a> {
 /// lookup decodes it: `/caf%C3%A9.svg` and `/café.svg` name the one declaration. Everything else
 /// names nothing this site publishes, whether the spelling is wrong or no declaration covers it.
 pub(super) fn written<'a>(urls: &'a AssetUrls, text: &str) -> Written<'a> {
-    let decoded = decoded(text);
+    let declared = decoded_spelling(text);
     urls.published()
-        .find(|asset| asset.declared == decoded)
+        .find(|asset| asset.declared == declared)
         .map_or(Written::Unpublished, Written::Published)
 }
 
@@ -86,8 +86,8 @@ pub(super) fn written<'a>(urls: &'a AssetUrls, text: &str) -> Written<'a> {
 ///
 /// Completion answers with these, so the order is the inventory's own rather than a preference
 /// this function invents.
-fn candidates<'a>(urls: &'a AssetUrls, typed: &str) -> Vec<&'a str> {
-    let typed = decoded(typed);
+fn matching_declared_urls<'a>(urls: &'a AssetUrls, typed: &str) -> Vec<&'a str> {
+    let typed = decoded_spelling(typed);
     urls.published()
         .map(|asset| asset.declared)
         .filter(|declared| declared.starts_with(typed.as_str()))
@@ -128,7 +128,7 @@ pub(super) fn url_completions(
     let Some(insert) = position::utf16_range(source.lines(), written.start..cursor) else {
         return lsp_types::CompletionResponse::Array(Vec::new());
     };
-    let items = candidates(urls, typed)
+    let items = matching_declared_urls(urls, typed)
         .into_iter()
         .map(|declared| {
             let detail = urls
@@ -200,7 +200,7 @@ pub(super) fn declaration_note(origin: &AssetOrigin, site_root: &Path) -> String
 ///
 /// A URL that does not decode is returned as written: completion runs while the author is still
 /// typing, and a half-written escape is not yet a URL.
-fn decoded(text: &str) -> String {
+fn decoded_spelling(text: &str) -> String {
     AssetUrl::parse(text)
         .map(|url| url.as_str().to_owned())
         .unwrap_or_else(|_| text.to_owned())
@@ -208,21 +208,13 @@ fn decoded(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use tola_build::config::loading::{BuildOverrides, load_site_config};
+    use std::sync::Arc;
 
     use super::*;
 
     fn asset_output(written: &str) -> Result<String, AssetUrlError> {
         let directory = tempfile::tempdir().expect("a site directory");
-        let configuration = directory.path().join("tola.toml");
-        std::fs::write(&configuration, "").expect("a configuration");
-        let config = load_site_config(
-            Some(&configuration),
-            tola_typst::PackageLocations::default(),
-            &BuildOverrides::default(),
-        )
-        .expect("the site configuration loads")
-        .into_config();
+        let config = crate::compiler::tests::site_configuration(directory.path(), "");
         published_path(&config, written)
     }
 
@@ -246,16 +238,15 @@ mod tests {
     }
 
     /// A site that declares one exact file and one tree, mounted below `/docs/`.
-    fn site_with_declared_assets() -> (tempfile::TempDir, ResolvedSiteConfig) {
+    fn site_with_declared_assets() -> (tempfile::TempDir, Arc<ResolvedSiteConfig>) {
         let directory = tempfile::tempdir().expect("a site directory");
         let root = directory.path();
         std::fs::create_dir_all(root.join("brand")).expect("a tree directory");
         std::fs::write(root.join("brand/logo.svg"), b"<svg></svg>").expect("a tree member");
         std::fs::write(root.join("app.js"), "export {}").expect("a declared file");
         std::fs::write(root.join("图.svg"), b"<svg></svg>").expect("a declared file");
-        let configuration = root.join("tola.toml");
-        std::fs::write(
-            &configuration,
+        let config = crate::compiler::tests::site_configuration(
+            root,
             concat!(
                 "[site]\nbase-path = \"/docs/\"\n\n",
                 "[assets]\n",
@@ -263,15 +254,7 @@ mod tests {
                 "{ source = \"图.svg\", url = \"/%E5%9B%BE.svg\" }]\n",
                 "trees = [{ source = \"brand\", url-prefix = \"/brand\" }]\n",
             ),
-        )
-        .expect("a configuration");
-        let config = load_site_config(
-            Some(&configuration),
-            tola_typst::PackageLocations::default(),
-            &BuildOverrides::default(),
-        )
-        .expect("the site configuration loads")
-        .into_config();
+        );
         (directory, config)
     }
 
@@ -324,13 +307,16 @@ mod tests {
         let (_directory, config) = site_with_declared_assets();
         let urls = published_urls(&config);
 
-        assert_eq!(candidates(&urls, "/brand/"), ["/brand/logo.svg"]);
         assert_eq!(
-            candidates(&urls, "/"),
+            matching_declared_urls(&urls, "/brand/"),
+            ["/brand/logo.svg"]
+        );
+        assert_eq!(
+            matching_declared_urls(&urls, "/"),
             ["/app.js", "/brand/logo.svg", "/图.svg"],
             "declared order, not the order the author typed"
         );
-        assert!(candidates(&urls, "/nothing/").is_empty());
+        assert!(matching_declared_urls(&urls, "/nothing/").is_empty());
     }
 
     #[test]

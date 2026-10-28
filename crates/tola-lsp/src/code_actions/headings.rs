@@ -12,9 +12,9 @@ use super::edits::rewrite_action;
 pub(super) fn heading_depth(
     uri: &Uri,
     source: &Source,
-    span: std::ops::Range<usize>,
+    span: &std::ops::Range<usize>,
 ) -> Vec<CodeActionOrCommand> {
-    let Some(heading) = selection_ancestor(source, &span, |node| node.is::<ast::Heading>()) else {
+    let Some(heading) = selection_ancestor(source, span, |node| node.is::<ast::Heading>()) else {
         return Vec::new();
     };
     let depth = heading
@@ -55,7 +55,7 @@ mod tests {
     use super::*;
     use crate::code_actions::selection_actions;
     use crate::code_actions::tests::{edits_of, uri};
-    use lsp_types::{CodeActionOrCommand, Position, Range};
+    use lsp_types::{Position, Range};
 
     #[test]
     fn heading_depth_rewrites_the_marker_alone() {
@@ -65,7 +65,6 @@ mod tests {
             Range::new(Position::new(0, 3), Position::new(0, 8)),
         );
 
-        // The heading's own text stays as the author wrote it: only the marker changes.
         assert_eq!(
             edits_of(&actions, "decrease the heading's depth"),
             [(
@@ -98,10 +97,7 @@ mod tests {
             )]
         );
         assert!(
-            actions.iter().all(
-                |action| !matches!(action, CodeActionOrCommand::CodeAction(action)
-                    if action.title == "decrease the heading's depth")
-            ),
+            edits_of(&actions, "decrease the heading's depth").is_empty(),
             "{actions:?}"
         );
     }

@@ -207,9 +207,12 @@ pub(super) struct Bibliography {
 impl Bibliography {
     /// One entry by the key a citation writes.
     pub(super) fn entry(&self, key: &str) -> Option<Declared<'_>> {
-        self.files
-            .iter()
-            .find_map(|file| Some(file.declared(file.parsed.entries.get(key)?)))
+        self.files.iter().find_map(|file| {
+            file.parsed
+                .entries
+                .get(key)
+                .map(|entry| file.declared(entry))
+        })
     }
 
     /// Every entry the site's bibliographies declare, in the order their files declare them.
@@ -292,9 +295,9 @@ impl Bibliography {
             let Ok(source) = world.source(id) else {
                 continue;
             };
-            let (named, paths) = bibliography_paths(&source);
-            self.named |= named;
-            for path in paths {
+            let calls = bibliography_calls(&source);
+            self.named |= calls.named;
+            for path in calls.paths {
                 cancellation.ensure_active()?;
                 let Some(file) = resolve(id, &path) else {
                     continue;
@@ -323,7 +326,7 @@ pub(super) fn spelled_sources(
             .into_iter()
             .flat_map(|document| document.sources)
             .collect(),
-        None => crate::files::owned_file_ids(config),
+        None => crate::files::owned_file_ids(config, cancellation)?,
     };
     sources.push(open);
     // Only a source is read as Typst, and a citation is spelled in a source.
@@ -405,61 +408,70 @@ enum Format {
     Yaml,
 }
 
-/// The paths one source passes to `bibliography(…)`, and whether it makes such a call at all.
-fn bibliography_paths(source: &Source) -> (bool, Vec<PathOrStr>) {
-    let mut named = false;
-    let mut paths = Vec::new();
-    collect_paths(&LinkedNode::new(source.root()), &mut named, &mut paths);
-    (named, paths)
+/// The `bibliography(…)` calls one source writes: whether it writes one, and the paths it passes.
+#[derive(Default)]
+struct BibliographyCalls {
+    /// Whether the source writes a `bibliography(…)` call at all.
+    named: bool,
+    /// The paths its calls pass, in the order they are written.
+    paths: Vec<PathOrStr>,
 }
 
-fn collect_paths(node: &LinkedNode<'_>, named: &mut bool, paths: &mut Vec<PathOrStr>) {
-    if node.kind() == SyntaxKind::FuncCall
-        && let Some(call) = node.cast::<ast::FuncCall>()
-        && let ast::Expr::Ident(name) = call.callee()
-        && name.get().as_str() == "bibliography"
-    {
-        *named = true;
-        for item in call.args().items() {
-            match item {
-                ast::Arg::Pos(expression) => collect_argument(&expression, paths),
-                ast::Arg::Named(named) if named.name().get().as_str() == "path" => {
-                    collect_argument(&named.expr(), paths);
+impl BibliographyCalls {
+    /// The paths one `bibliography(…)` argument spells: a string, a `path(…)` call, or an array.
+    fn push_argument(&mut self, expression: &ast::Expr) {
+        match expression {
+            ast::Expr::Str(text) => self.paths.push(PathOrStr::Str(Str::from(text.get()))),
+            ast::Expr::Array(array) => {
+                for item in array.items() {
+                    if let ast::ArrayItem::Pos(item) = item {
+                        self.push_argument(&item);
+                    }
                 }
-                _ => {}
             }
+            ast::Expr::FuncCall(call) => {
+                let ast::Expr::Ident(name) = call.callee() else {
+                    return;
+                };
+                if name.get().as_str() != "path" {
+                    return;
+                }
+                if let Some(ast::Arg::Pos(ast::Expr::Str(text))) = call.args().items().next() {
+                    self.paths.push(PathOrStr::Str(Str::from(text.get())));
+                }
+            }
+            _ => {}
         }
-    }
-    for child in node.children() {
-        collect_paths(&child, named, paths);
     }
 }
 
-/// The paths one `bibliography(…)` argument spells: a string, a `path(…)` call around one, or an
-/// array of arguments. Anything else is computed too far away to read here.
-fn collect_argument(expression: &ast::Expr, paths: &mut Vec<PathOrStr>) {
-    match expression {
-        ast::Expr::Str(text) => paths.push(PathOrStr::Str(Str::from(text.get()))),
-        ast::Expr::Array(array) => {
-            for item in array.items() {
-                if let ast::ArrayItem::Pos(item) = item {
-                    collect_argument(&item, paths);
+/// The `bibliography(…)` calls one source writes.
+fn bibliography_calls(source: &Source) -> BibliographyCalls {
+    fn walk(node: &LinkedNode<'_>, calls: &mut BibliographyCalls) {
+        if node.kind() == SyntaxKind::FuncCall
+            && let Some(call) = node.cast::<ast::FuncCall>()
+            && let ast::Expr::Ident(name) = call.callee()
+            && name.get().as_str() == "bibliography"
+        {
+            calls.named = true;
+            for item in call.args().items() {
+                match item {
+                    ast::Arg::Pos(expression) => calls.push_argument(&expression),
+                    ast::Arg::Named(named) if named.name().get().as_str() == "path" => {
+                        calls.push_argument(&named.expr());
+                    }
+                    _ => {}
                 }
             }
         }
-        ast::Expr::FuncCall(call) => {
-            let ast::Expr::Ident(name) = call.callee() else {
-                return;
-            };
-            if name.get().as_str() != "path" {
-                return;
-            }
-            if let Some(ast::Arg::Pos(ast::Expr::Str(text))) = call.args().items().next() {
-                paths.push(PathOrStr::Str(Str::from(text.get())));
-            }
+        for child in node.children() {
+            walk(&child, calls);
         }
-        _ => {}
     }
+
+    let mut calls = BibliographyCalls::default();
+    walk(&LinkedNode::new(source.root()), &mut calls);
+    calls
 }
 
 /// What one entry's own fields say: who wrote it, when, and what it is called.
@@ -494,16 +506,17 @@ mod tests {
 
     /// A `path:` argument names the file it reads exactly as a positional one does.
     #[test]
-    fn named_path_argument_names_its_file() {
+    fn named_path_argument_names_file() {
         let file = tola_typst::typst::syntax::RootedPath::new(
             tola_typst::typst::syntax::VirtualRoot::Project,
             tola_typst::typst::syntax::VirtualPath::new("/content/post.typ").unwrap(),
         )
         .intern();
         let source = Source::new(file, "#bibliography(path: \"refs.bib\")\n".to_owned());
-        let (named, paths) = bibliography_paths(&source);
-        assert!(named);
-        let resolved: Vec<String> = paths
+        let calls = bibliography_calls(&source);
+        assert!(calls.named);
+        let resolved: Vec<String> = calls
+            .paths
             .iter()
             .map(|path| {
                 path.resolve(source.id())

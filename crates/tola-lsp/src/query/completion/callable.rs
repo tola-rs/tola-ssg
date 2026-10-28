@@ -1,13 +1,14 @@
 //! What one callable's completion spells: the arguments the author still passes, the calls the
 //! position admits, and the rule spellings a show position adds.
 
-use std::ops::Range;
-
-use lsp_types::{CompletionItem, CompletionTextEdit, InsertTextFormat};
+use lsp_types::{CompletionItem, InsertTextFormat};
 use tola_packages::{ParameterKind, Signature};
 use tola_typst::typst::foundations::{CastInfo, Content, Func, Scope, Type, Value};
 use tola_typst::typst::syntax::ast;
 use tola_typst::typst::syntax::{LinkedNode, Side, Source, SyntaxKind, SyntaxMode};
+
+use super::super::expression::ExpressionType;
+use super::{NamePosition, unparenthesized};
 
 /// Whether the call's receiver is already written where the call stands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -40,6 +41,10 @@ pub(super) struct Callable {
 }
 
 impl Callable {
+    pub(super) fn of_types(types: &[ExpressionType], receiver: Receiver) -> Option<Self> {
+        super::agreed(types.iter().map(|ty| Self::of_value(ty.value()?, receiver))).flatten()
+    }
+
     /// What one known value offers, called with the receiver `receiver` states.
     pub(super) fn of_value(value: &Value, receiver: Receiver) -> Option<Self> {
         match value {
@@ -100,6 +105,8 @@ impl Callable {
                         .is_some_and(|native| is_content(&native.input));
                 }
                 callable.positional += 1;
+            } else if param.named() {
+                callable.named += 1;
             }
         }
         callable
@@ -136,14 +143,7 @@ fn scope_has_static_member(scope: &Scope) -> bool {
 /// Whether the receivers of one member call agree that they supply `self`. A disagreement or an
 /// empty set answers `None`, so the completion keeps the name alone rather than guess a call.
 pub(super) fn receiver_binds(binds: impl Iterator<Item = bool>) -> Option<Receiver> {
-    let mut agreed = None;
-    for bound in binds {
-        match agreed {
-            Some(seen) if seen != bound => return None,
-            _ => agreed = Some(bound),
-        }
-    }
-    agreed.map(|bound| {
+    super::agreed(binds).map(|bound| {
         if bound {
             Receiver::Bound
         } else {
@@ -166,19 +166,18 @@ enum Surrounding {
     Selector,
 }
 
-/// The completions one callable's name offers here: the name as a scope, the call, the block form
-/// of a call whose next argument is content, and the rule spellings a show position adds.
-pub(super) fn callable_items(
+pub(super) fn name_items(
     item: CompletionItem,
-    source: &Source,
-    cursor: usize,
-    replaced: &Range<usize>,
-    callable: Callable,
+    callable: Option<Callable>,
+    position: &NamePosition<'_>,
 ) -> Vec<CompletionItem> {
-    if source.text()[replaced.end..].starts_with(['(', '[']) {
+    let Some(callable) = callable else {
+        return vec![item];
+    };
+    if position.source.text()[position.replacement.end..].starts_with(['(', '[']) {
         return vec![item];
     }
-    let rule = match surrounding(source, cursor) {
+    let rule = match surrounding(position.source, position.cursor) {
         Surrounding::Name => return vec![item],
         Surrounding::Transform if callable.positional + callable.named > 0 => Some(".with"),
         Surrounding::Selector if callable.element => Some(".where"),
@@ -232,12 +231,10 @@ fn surrounding(source: &Source, cursor: usize) -> Surrounding {
                 };
             }
             SyntaxKind::LetBinding => {
-                let mut initializer = node
-                    .cast::<ast::LetBinding>()
-                    .and_then(|binding| binding.init());
-                while let Some(ast::Expr::Parenthesized(group)) = initializer {
-                    initializer = Some(group.expr());
-                }
+                let initializer = unparenthesized(
+                    node.cast::<ast::LetBinding>()
+                        .and_then(|binding| binding.init()),
+                );
                 return if matches!(
                     initializer,
                     Some(ast::Expr::Ident(_) | ast::Expr::FieldAccess(_))
@@ -297,10 +294,7 @@ fn with_text(item: &CompletionItem, text: &str) -> CompletionItem {
     let mut completed = item.clone();
     let text = crate::completion::typst_snippet(text);
     if let Some(edit) = completed.text_edit.as_mut() {
-        match edit {
-            CompletionTextEdit::Edit(edit) => edit.new_text = text,
-            CompletionTextEdit::InsertAndReplace(edit) => edit.new_text = text,
-        }
+        crate::completion::set_edit_text(edit, text);
     }
     completed.insert_text_format = Some(InsertTextFormat::SNIPPET);
     completed

@@ -38,9 +38,9 @@ use serde::{Deserialize, Serialize};
 use tola_build::cancellation::BuildCancellation;
 use tola_build::check::SourceCompilation;
 use tola_build::config::ResolvedSiteConfig;
-use tola_typst::typst::syntax::ast::{self, AstNode};
-use tola_typst::typst::syntax::{FileId, LinkedNode, Source, SyntaxKind, VirtualRoot};
+use tola_typst::typst::syntax::{FileId, Source, VirtualRoot};
 use tola_typst::{PackageLocations, SourceBoundary};
+use tola_typst_syntax::syntax::module_paths;
 
 /// What one call-hierarchy item names.
 ///
@@ -85,7 +85,7 @@ pub(super) fn prepare(
     client_root: &crate::uri::ClientRoot,
 ) -> Option<CallHierarchyItem> {
     let resolver = crate::analysis::file_resolver(locations, boundary);
-    let named = written_paths(source)
+    let named = module_paths(source)
         .into_iter()
         .find(|path| path.range.start <= cursor && cursor <= path.range.end)
         .and_then(|path| {
@@ -152,7 +152,7 @@ pub(super) fn incoming(
         if writer == source.id() || !matches!(writer.root(), VirtualRoot::Project) {
             continue;
         }
-        let mut ranges: Vec<Range<usize>> = written_paths(names.source())
+        let mut ranges: Vec<Range<usize>> = module_paths(names.source())
             .into_iter()
             .filter(|path| {
                 crate::analysis::import_target(writer, &path.text, &resolved, resolver.as_ref())
@@ -208,7 +208,7 @@ pub(super) fn outgoing(
     let resolver = crate::analysis::file_resolver(locations, boundary);
     let resolved = tola_build::filesystem::normalize_existing_prefix(root);
     let mut reached: BTreeMap<String, Target> = BTreeMap::new();
-    for written in written_paths(source) {
+    for written in module_paths(source) {
         let Some(target) = crate::analysis::import_target(
             source.id(),
             &written.text,
@@ -255,61 +255,6 @@ struct Target {
     ranges: Vec<ProtocolRange>,
 }
 
-/// One `#include` or `#import` path a source writes.
-struct WrittenPath {
-    /// The path the statement decodes to, which is what the compiler resolves.
-    text: String,
-    /// The statement's bytes, quotes included.
-    range: Range<usize>,
-}
-
-/// The paths one source writes: every `#include` and every `#import` with a literal path.
-///
-/// A statement whose path is an expression names no file until evaluation, so it writes no path
-/// this graph can resolve.
-fn written_paths(source: &Source) -> Vec<WrittenPath> {
-    let mut paths = Vec::new();
-    let mut stack = vec![LinkedNode::new(source.root())];
-    while let Some(node) = stack.pop() {
-        // The statement's own untied node has the tree's lifetime, so the path it names
-        // outlives this walk; a name cast from an owned child borrows the child.
-        let literal = match node.kind() {
-            SyntaxKind::ModuleInclude => node
-                .get()
-                .children()
-                .find(|child| child.kind() == SyntaxKind::Str)
-                .and_then(|child| child.cast::<ast::Str>()),
-            SyntaxKind::ModuleImport => {
-                node.get()
-                    .cast::<ast::ModuleImport>()
-                    .and_then(|import| match import.source() {
-                        ast::Expr::Str(text) => Some(text),
-                        _ => None,
-                    })
-            }
-            _ => {
-                stack.extend(node.children());
-                continue;
-            }
-        };
-        if let Some(text) = literal
-            && let Some(written) = node.find(text.span())
-        {
-            let range = written.range();
-            // A string the author has not closed yet is one quotation mark, and reading its value
-            // would cut both ends off a single byte.
-            if range.end >= range.start + 2 {
-                paths.push(WrittenPath {
-                    text: text.get().to_string(),
-                    range,
-                });
-            }
-        }
-    }
-    paths.sort_by_key(|path| path.range.start);
-    paths
-}
-
 /// The item naming one source, with the pages it is served at as its detail.
 fn source_item(
     root: &Path,
@@ -322,7 +267,7 @@ fn source_item(
         kind: SymbolKind::FILE,
         tags: None,
         detail,
-        uri: crate::identity::client_uri(source, root, client_root)?,
+        uri: crate::identity::client_uri(source, root, client_root).ok()?,
         range: file_range(),
         selection_range: file_range(),
         data: Some(serde_json::to_value(ItemNode::of(source)).expect("item identity is JSON")),
@@ -361,45 +306,10 @@ mod tests {
 
     use serde_json::json;
     use tola_build::check::{SourceDiagnosticSession, SourceRevision};
-    use tola_build::config::loading::{BuildOverrides, load_site_config};
-    use tola_build::diagnostic::Severity;
+    use tola_diagnostic::Severity;
 
     use super::*;
-
-    /// A site whose entry program realizes one page per content source.
-    ///
-    /// Every file is written below the root; only files below `content` are sources, so a
-    /// template elsewhere is readable without becoming a page of its own.
-    fn site(files: &[(&str, &str)]) -> (tempfile::TempDir, Arc<ResolvedSiteConfig>) {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path();
-        std::fs::write(
-            root.join("site.typ"),
-            r#"#import "@tola/source:0.0.0": all-sources
-#import "@tola/address:0.0.0": join-route, output-of
-#for source in all-sources() {
-  document(output-of(join-route(source.route-segments)))[#include source.file]
-}"#,
-        )
-        .unwrap();
-        for (name, text) in files {
-            let path = root.join(name);
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(path, text).unwrap();
-        }
-        let toml = root.join("tola.toml");
-        std::fs::write(&toml, "").unwrap();
-        let configuration = Arc::new(
-            load_site_config(
-                Some(&toml),
-                tola_typst::PackageLocations::default(),
-                &BuildOverrides::default(),
-            )
-            .unwrap()
-            .into_config(),
-        );
-        (directory, configuration)
-    }
+    use crate::server::tests::rendering_site;
 
     /// A site that compiled, with the revision every question is asked against.
     fn compiled_site(
@@ -410,7 +320,7 @@ mod tests {
         BuildCancellation,
         SourceRevision,
     ) {
-        let (directory, configuration) = site(files);
+        let (directory, configuration) = rendering_site(files);
         let cancellation = BuildCancellation::new();
         let mut session = SourceDiagnosticSession::new(Arc::clone(&configuration));
         let revision = session.inspect(Vec::new(), &cancellation).unwrap();
@@ -547,7 +457,7 @@ mod tests {
     }
     #[test]
     fn outgoing_names_reached_files() {
-        let (_directory, configuration) = site(&[
+        let (_directory, configuration) = rendering_site(&[
             (
                 "content/document.typ",
                 "#include \"note.typ\"\n#import \"lib.typ\": greet\n",
@@ -591,7 +501,7 @@ mod tests {
     }
     #[test]
     fn prepare_names_the_written_source() {
-        let (_directory, configuration) = site(&[(
+        let (_directory, configuration) = rendering_site(&[(
             "content/one.typ",
             "#include \"../templates/note.typ\"\nOne.\n",
         )]);

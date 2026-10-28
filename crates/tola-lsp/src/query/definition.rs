@@ -33,8 +33,7 @@ impl Selection<'_> {
         if !self.range_keeps_source_text(prepared, node.range()) {
             return Ok(None);
         }
-        // A chain reading site sources jumps to the files the site observed its records in: every
-        // candidate the chain was realized with, each at the binding that file declares.
+        // A chain jumps to the files the site observed its records in, each at its binding.
         if matches!(
             node.kind(),
             SyntaxKind::FieldAccess | SyntaxKind::MathFieldAccess
@@ -62,6 +61,64 @@ mod tests {
     use crate::query::package_source;
     use crate::query::tests::*;
     use serde_json::json;
+
+    #[test]
+    #[cfg(unix)]
+    fn symlink_modules_keep_relative_import_context() {
+        let mut site = QuerySession::new();
+        site.site.write(
+            "content/real/library.typ",
+            "#import \"helper.typ\": value\n",
+        );
+        site.site
+            .write("content/real/helper.typ", "#let value = 1\n");
+        site.site
+            .write("content/alias/helper.typ", "#let value = 2\n");
+        std::os::unix::fs::symlink(
+            "../real/library.typ",
+            site.site.root().join("content/alias/library.typ"),
+        )
+        .unwrap();
+        let Some(GotoDefinitionResponse::Scalar(location)) =
+            site.definition("#import \"alias/library.typ\": value\n#val|ue\n")
+        else {
+            panic!("the re-export has a definition");
+        };
+        assert!(
+            location.uri.as_str().ends_with("content/alias/helper.typ"),
+            "{location:?}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn symlink_imports_share_source_references() {
+        let mut site = QuerySession::new();
+        site.site.write("content/library.typ", "#let value = 1\n");
+        std::os::unix::fs::symlink("library.typ", site.site.root().join("content/alias.typ"))
+            .unwrap();
+        site.site.write(
+            "content/document.typ",
+            "#import \"alias.typ\": value\n#value\n",
+        );
+        site.site.write(
+            "content/consumer.typ",
+            "#import \"library.typ\": value\n#value\n",
+        );
+        let uri =
+            crate::uri::from_file_path(&site.site.root().join("content/library.typ")).unwrap();
+        let reply = site
+            .try_reply_at(
+                "textDocument/references",
+                uri.as_str(),
+                lsp_types::Position::new(0, 6),
+                None,
+                json!({"context":{"includeDeclaration":false}}),
+            )
+            .unwrap();
+        let references: Vec<lsp_types::Location> = serde_json::from_value(reply).unwrap();
+        assert_eq!(references.len(), 2, "{references:?}");
+    }
 
     /// A reference the query copy repaired is a stand-in: no definition answers about the
     /// enclosing construct it left behind.
@@ -138,7 +195,7 @@ mod tests {
 
     /// A metadata chain jumps to the file its records came from, at the binding that file declares.
     #[test]
-    fn metadata_chain_jumps_to_its_source_file() {
+    fn metadata_chain_jumps_source_file() {
         let program = parsed_program(PAGE_SCHEMA);
         let mut site = QuerySession::with_program(&program);
         site.site.write("content/page.typ", SCHEMA_PAGE);

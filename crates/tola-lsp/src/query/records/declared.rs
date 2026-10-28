@@ -6,30 +6,40 @@ use super::super::semantic::Semantic;
 use super::super::site_schema::{declared_schema, descriptor_line, descriptor_type};
 use super::origin::{
     ProjectedField, ProjectedRecords, ProjectedValue, RecordOrigin, SourceDescriptors,
+    SourceExpression,
 };
 
-/// The descriptor field lines one chain rooted at the site's own descriptors addresses.
-///
-/// The whole shape answers for the root itself; one field answers for a chain reading it. A chain
-/// through `meta` reads the schema declaration instead.
+/// The descriptor lines one chain addresses; meta reads the schema declaration instead.
 pub(in crate::query) fn descriptor_fields(
-    descriptors: SourceDescriptors,
+    origin: &RecordOrigin,
     fields: &[String],
 ) -> Option<Vec<String>> {
-    let carried = descriptors.fields();
+    let descriptors = origin.descriptors()?;
     match fields {
         [] => Some(
-            carried
-                .iter()
-                .map(|field| descriptor_line(*field))
+            descriptors
+                .fields()
+                .into_iter()
+                .map(descriptor_line)
                 .collect(),
         ),
-        [field] if field != tola_build::SourceDescriptorField::Metadata.name() => carried
-            .iter()
-            .find(|candidate| candidate.name() == field)
-            .map(|field| vec![descriptor_line(*field)]),
+        [field] => Some(vec![descriptor_line(descriptor_field(descriptors, field)?)]),
         _ => None,
     }
+}
+
+/// The descriptor field one name addresses, unless it is meta.
+fn descriptor_field(
+    descriptors: SourceDescriptors,
+    field: &str,
+) -> Option<tola_build::SourceDescriptorField> {
+    if field == tola_build::SourceDescriptorField::Metadata.name() {
+        return None;
+    }
+    descriptors
+        .fields()
+        .into_iter()
+        .find(|candidate| candidate.name() == field)
 }
 
 /// The declared output one record chain answers.
@@ -41,71 +51,57 @@ pub(in crate::query) struct DeclaredOutput {
     pub(in crate::query) documentation: Option<String>,
 }
 
-/// The declared output one chain reading `fields` beyond one record origin answers.
-///
-/// `path` is the chain's own text, which a single declared metadata field names itself by: the
-/// field's declaration has the whole read, because the read is what declares the field. The
-/// whole shape answers for the root itself, one field answers for a chain reading it, and a
-/// record's `meta` read answers the schema the file parsing it declares.
+/// The declared output one chain reads; path names the read a metadata field declares.
 pub(in crate::query) fn declared_output(
     origin: &RecordOrigin,
     fields: &[String],
     path: &str,
     semantics: &mut Semantic<'_>,
 ) -> Result<Option<DeclaredOutput>> {
+    let reads_metadata = fields
+        .first()
+        .is_some_and(|field| field == tola_build::SourceDescriptorField::Metadata.name());
     match origin {
-        RecordOrigin::Descriptors(descriptors) => {
-            Ok(descriptor_fields(*descriptors, fields).map(DeclaredOutput::lines))
-        }
-        RecordOrigin::Parsed {
-            schema,
-            descriptors,
-        } => {
-            if fields
-                .first()
-                .is_some_and(|field| field == tola_build::SourceDescriptorField::Metadata.name())
-            {
-                let Some(declared) = declared_schema(schema, semantics)? else {
-                    return Ok(None);
-                };
-                let Some(declared) = declared.at_path(fields.get(1..).unwrap_or_default()) else {
-                    return Ok(None);
-                };
-                let declared_fields = declared.fields();
-                if declared_fields.is_empty() {
-                    return Ok(Some(DeclaredOutput {
-                        lines: vec![declared.field(path).list_item()],
-                        documentation: None,
-                    }));
-                }
-                Ok(Some(DeclaredOutput {
-                    lines: declared_fields
-                        .iter()
-                        .map(|(field, description)| description.field(field).list_item())
-                        .collect(),
-                    documentation: declared.documentation(),
-                }))
-            } else {
-                // `parse-sources` admits only complete `all-sources()` records, so a call whose
-                // input records were not traced still has every descriptor.
-                Ok(
-                    descriptor_fields(descriptors.unwrap_or(SourceDescriptors::All), fields)
-                        .map(DeclaredOutput::lines),
-                )
-            }
-        }
         RecordOrigin::Projected(records) => records.declared_output(fields, path, semantics),
+        RecordOrigin::Parsed { schema, .. } if reads_metadata => {
+            declared_metadata_output(schema, fields, path, semantics)
+        }
+        _ => Ok(
+            descriptor_fields(origin, fields).map(|lines| DeclaredOutput {
+                lines,
+                documentation: None,
+            }),
+        ),
     }
 }
 
-impl DeclaredOutput {
-    /// One shape's lines as an answer, without a declaration's own description.
-    fn lines(lines: Vec<String>) -> Self {
-        Self {
-            lines,
+/// The schema declaration one metadata read answers, declared by the file parsing these records.
+fn declared_metadata_output(
+    schema: &SourceExpression,
+    fields: &[String],
+    path: &str,
+    semantics: &mut Semantic<'_>,
+) -> Result<Option<DeclaredOutput>> {
+    let Some(declared) = declared_schema(schema, semantics)? else {
+        return Ok(None);
+    };
+    let Some(declared) = declared.at_path(&fields[1..]) else {
+        return Ok(None);
+    };
+    let declared_fields = declared.fields();
+    if declared_fields.is_empty() {
+        return Ok(Some(DeclaredOutput {
+            lines: vec![declared.field(path).list_item()],
             documentation: None,
-        }
+        }));
     }
+    Ok(Some(DeclaredOutput {
+        lines: declared_fields
+            .iter()
+            .map(|(field, description)| description.field(field).list_item())
+            .collect(),
+        documentation: declared.documentation(),
+    }))
 }
 
 impl ProjectedRecords {
@@ -130,11 +126,7 @@ impl ProjectedRecords {
                 documentation: None,
             }));
         };
-        let Some(projected) = self
-            .fields
-            .iter()
-            .find(|candidate| &candidate.name == field)
-        else {
+        let Some(projected) = self.field(field) else {
             return Ok(None);
         };
         match &projected.known {
@@ -149,12 +141,10 @@ impl ProjectedRecords {
 }
 
 impl ProjectedField {
-    /// The type this field reads as: what the body proves, or what the world observed at the
-    /// field's own value expression.
+    /// The type a field reads as: what the body proves, else what the world observed.
     fn ty(&self, semantics: &mut Semantic<'_>) -> Result<String> {
         match &self.known {
-            Some(ProjectedValue::Record(_)) => Ok("dictionary".to_owned()),
-            Some(ProjectedValue::Declared(ty)) => Ok(ty.clone()),
+            Some(known) => Ok(known.type_name()),
             None => Ok(self
                 .observed_type(semantics)?
                 .unwrap_or_else(|| "any".to_owned())),
@@ -173,34 +163,19 @@ impl ProjectedField {
     }
 }
 
-/// The type one chain over a record origin declares, when a project function's body proves it.
-///
-/// Only the reads a body alone can declare answer here: the record a field has, the type the
-/// field's callee returns, or one descriptor field. Every other read is left to the values the
-/// world observed at its own expression.
+/// The type a chain declares from a project body: a field record, a call return, or one descriptor.
 pub(in crate::query) fn declared_chain_type(
     origin: &RecordOrigin,
     fields: &[String],
 ) -> Option<String> {
     match (origin, fields) {
         (RecordOrigin::Projected(_), []) => Some("dictionary".to_owned()),
-        (RecordOrigin::Projected(records), [field]) => {
-            let projected = records
-                .fields
-                .iter()
-                .find(|candidate| &candidate.name == field)?;
-            match &projected.known {
-                Some(ProjectedValue::Record(_)) => Some("dictionary".to_owned()),
-                Some(ProjectedValue::Declared(ty)) => Some(ty.clone()),
-                None => None,
-            }
-        }
-        (RecordOrigin::Descriptors(descriptors), [field]) => {
-            descriptor_field_type(*descriptors, field)
-        }
-        (RecordOrigin::Parsed { descriptors, .. }, [field]) => {
-            descriptor_field_type(descriptors.unwrap_or(SourceDescriptors::All), field)
-        }
+        (RecordOrigin::Projected(records), [field]) => records
+            .field(field)?
+            .known
+            .as_ref()
+            .map(ProjectedValue::type_name),
+        (_, [field]) => descriptor_field_type(origin.descriptors()?, field),
         _ => None,
     }
 }
@@ -210,14 +185,7 @@ pub(in crate::query) fn descriptor_field_type(
     descriptors: SourceDescriptors,
     field: &str,
 ) -> Option<String> {
-    if field == tola_build::SourceDescriptorField::Metadata.name() {
-        return None;
-    }
-    descriptors
-        .fields()
-        .iter()
-        .find(|candidate| candidate.name() == field)
-        .map(|field| descriptor_type(field.kind()).to_owned())
+    Some(descriptor_type(descriptor_field(descriptors, field)?.kind()).to_owned())
 }
 
 #[cfg(test)]

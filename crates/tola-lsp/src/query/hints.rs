@@ -1,10 +1,4 @@
-//! Positional parameter hints and the current source's checked routes.
-//!
-//! Tola's own functions are positional — `output-of(route)`, `join-route(segments)` — and a
-//! site author cannot look their parameters up anywhere else, so a hint has each name to the
-//! call site. A call into Typst's own library keeps its signature to itself: `align(center)`,
-//! `document(path)`, and `asset(path)` are documented where the author can read them, and naming a
-//! single argument would only echo the call.
+//! Positional parameter hints for Tola's own functions, and the current source's checked routes.
 
 use std::ops::Range as ByteRange;
 
@@ -45,21 +39,22 @@ pub(super) fn route_hints(
     let mut hints: Vec<InlayHint> = pages
         .named
         .iter()
-        .map(|route| annotation(route.route.clone(), route.url.clone(), at))
+        .map(|route| page_hint(route.route.clone(), route.url.clone(), at))
         .collect();
     if pages.remaining > 0 {
-        hints.push(annotation(format!("+{} pages", pages.remaining), None, at));
+        hints.push(page_hint(format!("+{} pages", pages.remaining), None, at));
     }
     Ok(hints)
 }
 
 /// Where the line that opens a source ends, which is where its pages are annotated.
 fn opening_line_end(source: &Source) -> Option<Position> {
-    let line = source.text().split(['\n', '\r']).next()?;
-    position::checked_position(0, position::utf16_len(line))
+    let text = source.text();
+    let opening = text.find(['\n', '\r']).map_or(text, |end| &text[..end]);
+    position::checked_position(0, position::utf16_len(opening))
 }
 
-fn annotation(label: String, url: Option<String>, at: Position) -> InlayHint {
+fn page_hint(label: String, url: Option<String>, at: Position) -> InlayHint {
     InlayHint {
         position: at,
         label: InlayHintLabel::String(label),
@@ -94,7 +89,7 @@ pub(super) fn hints(
     walk(
         &LinkedNode::new(source.root()),
         source,
-        start..end,
+        &(start..end),
         &mut semantics,
         &mut hints,
     )?;
@@ -105,17 +100,22 @@ pub(super) fn hints(
 fn walk(
     node: &LinkedNode<'_>,
     source: &Source,
-    range: ByteRange<usize>,
+    range: &ByteRange<usize>,
     semantics: &mut Semantic<'_>,
     hints: &mut Vec<InlayHint>,
 ) -> Result<()> {
-    if node.range().start <= range.end && range.start <= node.range().end {
+    if overlaps(node, range) {
         hints.extend(call_hints(node, source, semantics)?);
     }
     for child in node.children() {
-        walk(&child, source, range.clone(), semantics, hints)?;
+        walk(&child, source, range, semantics, hints)?;
     }
     Ok(())
+}
+
+/// Whether one node's source range touches the viewport.
+fn overlaps(node: &LinkedNode<'_>, range: &ByteRange<usize>) -> bool {
+    node.range().start <= range.end && range.start <= node.range().end
 }
 
 /// The hints one call names: each positional argument takes the parameter at its own index.
@@ -150,9 +150,7 @@ fn call_hints(
         })
         .filter(|value| !matches!(value, ast::Expr::ContentBlock(_)))
         .collect();
-    // A single argument under a standard-library call needs no name: that function documents
-    // itself, and the name would only echo the call. Tola's own functions name their arguments
-    // nowhere else, so those keep theirs.
+    // A standard-library call documents itself; only Tola's own functions keep their hints.
     if values.len() == 1 && !semantics.tola_origin(&callee)? {
         return Ok(Vec::new());
     }
@@ -205,9 +203,6 @@ fn hint(
 }
 
 /// The version status of every published package a string inside `range` imports.
-///
-/// Only the index's own entries speak: a namespace it does not describe, or an index that never
-/// loaded, states nothing rather than a guess.
 fn package_version_hints(
     source: &Source,
     range: ByteRange<usize>,
@@ -219,8 +214,7 @@ fn package_version_hints(
     }
     let mut stack = vec![LinkedNode::new(source.root())];
     while let Some(node) = stack.pop() {
-        let overlaps = node.range().start <= range.end && range.start <= node.range().end;
-        if overlaps
+        if overlaps(&node, &range)
             && node.kind() == SyntaxKind::Str
             && matches!(
                 node.parent_kind(),
@@ -228,7 +222,7 @@ fn package_version_hints(
             )
             && let Some(literal) = node.cast::<ast::Str>()
             && let Ok(spec) = literal.get().parse::<PackageSpec>()
-            && let Some(label) = version_status(published, &spec)
+            && let Some(label) = version_label(published, &spec)
             && let Some(end) =
                 position::utf16_range(source.lines(), node.range().end..node.range().end)
         {
@@ -250,7 +244,7 @@ fn package_version_hints(
 }
 
 /// What the published index says about one package specification: the label its import states.
-fn version_status(published: &[PublishedPackage], spec: &PackageSpec) -> Option<String> {
+fn version_label(published: &[PublishedPackage], spec: &PackageSpec) -> Option<String> {
     // Only `@preview` is published; another namespace names no index entry to speak about.
     if spec.namespace != "preview" {
         return None;
@@ -272,20 +266,10 @@ mod tests {
     use super::*;
     use crate::query::tests::*;
 
-    fn published(name: &str, version: &str) -> PublishedPackage {
-        PublishedPackage {
-            name: name.to_owned(),
-            version: version.to_owned(),
-            description: None,
-            homepage: None,
-            repository: None,
-        }
-    }
-
     /// A package import states its version against the index; a namespace the index does not
     /// describe, or a string that imports nothing, states nothing.
     #[test]
-    fn package_imports_state_their_version_status() {
+    fn imports_state_version_status() {
         let index = [
             published("cetz", "0.3.1"),
             published("cetz", "0.3.2"),
@@ -296,27 +280,15 @@ mod tests {
         );
         let mut hints = Vec::new();
         package_version_hints(&source, 0..source.text().len(), &index, &mut hints);
-        let mut found: Vec<(u32, String)> = hints
-            .iter()
-            .map(|hint| {
-                let label = match &hint.label {
-                    InlayHintLabel::String(label) => label.clone(),
-                    InlayHintLabel::LabelParts(_) => String::new(),
-                };
-                (hint.position.line, label)
-            })
-            .collect();
+        let mut found = hint_labels(&hints);
         found.sort();
         assert_eq!(
-            found
-                .iter()
-                .map(|(_, label)| label.as_str())
-                .collect::<Vec<_>>(),
+            found,
             [
+                "version not found",
+                "version not found",
                 "→ 0.3.2 available",
                 "√ latest",
-                "version not found",
-                "version not found"
             ],
             "{hints:?}"
         );
@@ -336,7 +308,7 @@ mod tests {
     }
 
     #[test]
-    fn page_hints_stand_in_for_code_lenses() {
+    fn hints_stand_in_for_lenses() {
         let mut site = QuerySession::two_documents();
         site.capabilities = lsp_types::ClientCapabilities {
             text_document: Some(lsp_types::TextDocumentClientCapabilities {
@@ -357,7 +329,6 @@ mod tests {
             "a client that shows lenses reads the pages there"
         );
     }
-    /// A call has the parameter name each positional argument fills.
     #[test]
     fn ambiguous_callees_omit_parameter_hints() {
         for (expression, expected) in [

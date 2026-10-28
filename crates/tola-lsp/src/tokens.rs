@@ -53,14 +53,14 @@ pub(crate) fn tokens(
     names: &NameGraph,
     range: Option<lsp_types::Range>,
     cancellation: &tola_build::cancellation::BuildCancellation,
-) -> anyhow::Result<SemanticTokens> {
+) -> Result<SemanticTokens, tola_build::cancellation::BuildCancelled> {
     let bytes = range.map(|range| {
         let start = crate::position::byte_offset(source.lines(), range.start).unwrap_or(0);
         let end =
             crate::position::byte_offset(source.lines(), range.end).unwrap_or(source.text().len());
         start..end
     });
-    Ok(encoded_with_check(
+    encoded_with_check(
         source,
         names,
         |token| {
@@ -69,7 +69,7 @@ pub(crate) fn tokens(
                 .is_none_or(|range| token.range.end > range.start && token.range.start < range.end)
         },
         || cancellation.ensure_active(),
-    )?)
+    )
 }
 
 fn encoded_with_check<E>(

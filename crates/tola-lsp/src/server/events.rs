@@ -17,9 +17,11 @@ pub(super) enum Event {
     Compiled(SourceCompilation),
     Analyzed(SourceCompilation),
     InputClosed,
-    InputFailed(anyhow::Error),
+    InputFailed(crate::transport::ReadError),
 }
 
+/// Whether the serving loop took this event; `false` means it is gone or cancelled, so the
+/// caller stops.
 pub(super) fn send_event(
     events: &Sender<Event>,
     mut event: Event,

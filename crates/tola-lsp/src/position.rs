@@ -16,27 +16,37 @@ use tola_typst_syntax::position::{
 };
 use tola_typst_syntax::typst_syntax::Lines;
 
+/// The byte range one protocol range addresses, absent when a position is past the document or
+/// the range is reversed.
+pub(crate) fn byte_range<T: AsRef<str>>(
+    lines: &Lines<T>,
+    range: Range,
+) -> Option<std::ops::Range<usize>> {
+    let start = byte_offset(lines, range.start).ok()?;
+    let end = byte_offset(lines, range.end).ok()?;
+    (start <= end).then_some(start..end)
+}
+
 /// The byte offset one position addresses; columns beyond a line clamp to its end.
 pub(crate) fn byte_offset<T: AsRef<str>>(lines: &Lines<T>, at: Position) -> Result<usize> {
     let text = lines.text();
+    let line = lines.line_to_range(at.line as usize);
     // A break after the compiler's own line for this position cannot move it, and one inside that
     // line is reached by the same prefix.
-    let reach = lines
-        .line_to_range(at.line as usize)
-        .map_or(text.len(), |range| range.end);
-    if protocol_breaks_differ(first_break(text), reach) {
+    let reach = line.as_ref().map_or(text.len(), |range| range.end);
+    if first_break(&text[..reach]).is_some() {
         return protocol_byte_offset(text, at.line, at.character);
     }
-    match source_byte_offset(lines, utf16(at)) {
+    match source_byte_offset(lines, utf16(at)).map_err(anyhow::Error::from) {
         Ok(byte) => Ok(byte),
         Err(error) => {
-            let Some(line) = lines.line_to_range(at.line as usize) else {
+            let Some(line) = line else {
                 return Err(error);
             };
-            let text =
+            let content =
                 text[line.clone()].trim_end_matches(tola_typst_syntax::typst_syntax::is_newline);
-            if at.character as usize > utf16_len(text) {
-                Ok(line.start + text.len())
+            if at.character as usize > utf16_len(content) {
+                Ok(line.start + content.len())
             } else {
                 Err(error)
             }
@@ -121,14 +131,12 @@ fn protocol_breaks_differ(first_break: Option<usize>, reach: usize) -> bool {
 fn protocol_byte_offset(text: &str, line: u32, character: u32) -> Result<usize> {
     let mut start = 0usize;
     for _ in 0..line {
-        let Some(at) = text[start..].find(['\n', '\r']) else {
+        let Some((_, after)) = next_break(text, start) else {
             bail!("source position line exceeds the document");
         };
-        start = break_end(text, start + at);
+        start = after;
     }
-    let end = text[start..]
-        .find(['\n', '\r'])
-        .map_or(text.len(), |at| start + at);
+    let end = next_break(text, start).map_or(text.len(), |(at, _)| at);
     let mut units = 0u32;
     for (at, ch) in text[start..end].char_indices() {
         if units == character {
@@ -150,16 +158,14 @@ fn protocol_position_of(text: &str, byte: usize) -> Option<Utf16Position> {
     let mut line = 0usize;
     let mut start = 0usize;
     while start < byte {
-        let Some(at) = text[start..].find(['\n', '\r']) else {
+        let Some((at, after)) = next_break(text, start) else {
             break;
         };
-        let at = start + at;
-        let end = break_end(text, at);
-        if at >= byte || end > byte {
+        if at >= byte || after > byte {
             break;
         }
         line += 1;
-        start = end;
+        start = after;
     }
     Some(Utf16Position::new(
         u32::try_from(line).ok()?,
@@ -167,13 +173,16 @@ fn protocol_position_of(text: &str, byte: usize) -> Option<Utf16Position> {
     ))
 }
 
-/// The byte after the line break that starts at `break_start`.
-fn break_end(text: &str, break_start: usize) -> usize {
-    let mut end = break_start + 1;
-    if text.as_bytes()[break_start] == b'\r' && text.as_bytes().get(end) == Some(&b'\n') {
-        end += 1;
-    }
-    end
+/// The first protocol line break at or after `start`: where it begins, and the byte after it.
+fn next_break(text: &str, start: usize) -> Option<(usize, usize)> {
+    let at = start + text[start..].find(['\n', '\r'])?;
+    let bytes = text.as_bytes();
+    let after = if bytes[at] == b'\r' && bytes.get(at + 1) == Some(&b'\n') {
+        at + 2
+    } else {
+        at + 1
+    };
+    Some((at, after))
 }
 
 #[cfg(test)]
@@ -208,7 +217,7 @@ mod tests {
 
     /// A lone `\r` breaks a protocol line, as it does for the client.
     #[test]
-    fn lone_carriage_return_breaks_the_protocol_line() {
+    fn lone_return_breaks_protocol_line() {
         let lines = Lines::new("a\u{0B}b\rc".to_owned());
         assert_eq!(byte_offset(&lines, Position::new(1, 1)).unwrap(), 5);
         assert_eq!(
@@ -237,7 +246,7 @@ mod tests {
     /// A break that ends the compiler's line is probed with that line, so a position past the
     /// compiler line's own length is answered when the break ending it is not the protocol's.
     #[test]
-    fn position_past_the_compiler_line_is_answered() {
+    fn position_past_compiler_line_answered() {
         let lines = Lines::new("x\ny\u{0B}z\nw".to_owned());
         assert_eq!(byte_offset(&lines, Position::new(1, 2)).unwrap(), 4);
         assert_eq!(

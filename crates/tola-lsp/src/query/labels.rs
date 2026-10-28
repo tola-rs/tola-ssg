@@ -1,12 +1,9 @@
-//! The labels the site declares, and the references that point at them.
-//!
-//! A reference crosses documents, so it answers from the whole compiled Bundle rather than from
-//! the file that has it.
+//! Labels the site declares and the references that point at them, answered from the compiled
 
+use std::collections::HashMap;
 use std::ops::Range;
 
 use anyhow::Result;
-use std::collections::HashMap;
 
 use lsp_types::{
     CompletionItem, CompletionItemKind, CompletionTextEdit, DocumentHighlight,
@@ -26,11 +23,10 @@ use tola_typst::typst::utils::PicoStr;
 use crate::position;
 use crate::protocol::markdown_hover;
 use crate::routes;
-use crate::sentence::listed;
 
-/// A reference to a label of the site, as the author wrote it.
-///
-/// Both spellings name a label: `@name` in markup and `<name>` in code.
+use super::hover::{shown_routes, typc_fence};
+
+/// A reference to a site label, written in markup or in code.
 #[derive(Debug)]
 pub(super) struct Reference {
     /// The whole reference, including its own punctuation: what a query copy drops to compile.
@@ -58,8 +54,7 @@ impl Reference {
 }
 
 pub(super) fn referenced(source: &Source, cursor: usize) -> Option<Reference> {
-    // A cursor sits between two leaves: an author who clicks the `@` of `@name` means the leaf that
-    // starts there, and one whose cursor rests after `@nam` means the leaf that ends there.
+    // A cursor sits between two leaves; a click on the marker means the leaf that starts there.
     let root = LinkedNode::new(source.root());
     [Side::Before, Side::After]
         .into_iter()
@@ -70,45 +65,30 @@ pub(super) fn referenced(source: &Source, cursor: usize) -> Option<Reference> {
 fn reference(mut node: LinkedNode<'_>) -> Option<Reference> {
     loop {
         let range = node.range();
-        match node.kind() {
-            SyntaxKind::RefMarker => {
-                return Some(Reference {
-                    written: range.clone(),
-                    name: range.start + 1..range.end,
-                });
+        let name = match node.kind() {
+            SyntaxKind::RefMarker => range.start + 1..range.end,
+            SyntaxKind::Label => range.start + 1..range.end - 1,
+            // An unclosed label is a syntax error; another unclosed token is no reference.
+            SyntaxKind::Error if node.leaf_text().starts_with('<') => range.start + 1..range.end,
+            _ => {
+                node = node.parent()?.clone();
+                continue;
             }
-            SyntaxKind::Label => {
-                return Some(Reference {
-                    written: range.clone(),
-                    name: range.start + 1..range.end - 1,
-                });
-            }
-            // A label the author has not closed yet is a syntax error: `<name` with no `>`.
-            // Another unclosed token — a string — is no label reference, so it walks on.
-            SyntaxKind::Error if node.leaf_text().starts_with('<') => {
-                return Some(Reference {
-                    written: range.clone(),
-                    name: range.start + 1..range.end,
-                });
-            }
-            _ => node = node.parent()?.clone(),
-        }
+        };
+        return Some(Reference {
+            written: range,
+            name,
+        });
     }
 }
 
-/// The part of a reference's name the author has typed, which is what a completion filters by.
-///
-/// A cursor that rests on the marker itself — the leaf `referenced` answers with when it ends
-/// there — has typed none of the name.
+/// The part of a reference's name the author typed, which a completion filters by.
 pub(super) fn typed_name<'a>(source: &'a Source, reference: &Reference, cursor: usize) -> &'a str {
     let typed = cursor.clamp(reference.name.start, reference.name.end);
     &source.text()[reference.name.start..typed]
 }
 
-/// Every spelling of one label in this source, the declaration first.
-///
-/// A label is declared by `<name>` and referred to by `@name`; both spellings name the one label,
-/// and neither needs the site to compile.
+/// Every spelling of one label here, declaration first, without the site compiling.
 pub(super) fn highlights(source: &Source, name: &str) -> Vec<DocumentHighlight> {
     let mut found = Vec::new();
     collect_spellings(&LinkedNode::new(source.root()), name, &mut found);
@@ -186,10 +166,7 @@ fn declared_element(compilation: &SourceCompilation, name: &str) -> Option<Conte
         .query_first(&Selector::Label(label))
 }
 
-/// The label declaration this source has for `name`, if any.
-///
-/// A compilation without the site's own documents cannot say what the site labels, so the
-/// declaration the author is looking at answers from the text in front of them.
+/// The label declaration this source has, when no site documents declare the labels.
 fn declared_label<'a>(source: &'a Source, name: &str) -> Option<LinkedNode<'a>> {
     fn walk<'a>(node: LinkedNode<'a>, text: &str, name: &str) -> Option<LinkedNode<'a>> {
         let range = node.range();
@@ -201,10 +178,7 @@ fn declared_label<'a>(source: &'a Source, name: &str) -> Option<LinkedNode<'a>> 
     walk(LinkedNode::new(source.root()), source.text(), name)
 }
 
-/// The element a label declaration names: the call it sits inside in code, or follows in markup.
-///
-/// `#figure([Body]) <fig>` labels the figure; a declaration naming no call answers without an
-/// element.
+/// The element a label names: the call it sits inside, or follows in markup.
 fn labelled_element(label: &LinkedNode<'_>) -> Option<String> {
     let mut node = label.clone();
     loop {
@@ -222,8 +196,7 @@ fn labelled_element(label: &LinkedNode<'_>) -> Option<String> {
     }
 }
 
-/// The call a label follows in markup, with the space the author typed, and any comment, between
-/// them.
+/// The call a label follows in markup, across space or a comment.
 fn call_before<'b>(node: &LinkedNode<'b>) -> Option<LinkedNode<'b>> {
     let mut previous = node.prev_sibling()?;
     loop {
@@ -251,12 +224,14 @@ fn called_name(call: &LinkedNode<'_>) -> Option<String> {
     }
 }
 
-/// Every place the site's own files spell `name`, as a file and a range inside it.
-///
-/// Both spellings count: `@name` where a source references the label, and `<name>` where one
-/// declares it. A label belongs to the document that has it, so the sources compiled into the
-/// same documents are the ones that spell it — a partial compiled into many pages answers from all
-/// of them, and a page nothing includes answers from itself.
+/// The order every answer names files in: their site path.
+fn compare_paths(left: &FileId, right: &FileId) -> std::cmp::Ordering {
+    left.vpath()
+        .get_without_slash()
+        .cmp(right.vpath().get_without_slash())
+}
+
+/// Every site file spelling one label, narrowed to documents compiled with its holder.
 fn spellings(
     compilation: &SourceCompilation,
     name: &str,
@@ -285,21 +260,15 @@ fn spellings(
                 }),
         );
     }
-    found.sort_by_key(|(id, range)| {
-        (
-            id.vpath().get_without_slash().to_owned(),
-            range.start.line,
-            range.start.character,
-        )
+    found.sort_by(|(left, left_range), (right, right_range)| {
+        compare_paths(left, right)
+            .then_with(|| left_range.start.line.cmp(&right_range.start.line))
+            .then_with(|| left_range.start.character.cmp(&right_range.start.character))
     });
     Ok(found)
 }
 
-/// The sources compiled into the documents that hold `id`, in a deterministic order.
-///
-/// A label belongs to the document that has it, so the spellings that can name it are the
-/// ones in the sources compiled beside it. A source the site publishes no document for still
-/// declares its own labels.
+/// The sources compiled with the document holding the id, in a deterministic order.
 fn compiled_with(
     compilation: &SourceCompilation,
     id: FileId,
@@ -313,7 +282,7 @@ fn compiled_with(
         .filter(|id| id.vpath().extension() == Some("typ"))
         .collect();
     sources.push(id);
-    sources.sort_by_key(|id| id.vpath().get_without_slash().to_owned());
+    sources.sort_by(compare_paths);
     sources.dedup();
     Ok(sources)
 }
@@ -378,10 +347,7 @@ pub(super) fn definition(compilation: &SourceCompilation, name: &str) -> Option<
     Some(declared_element(compilation, name)?.span())
 }
 
-/// Every document that names the label `name`, wherever in the site it is written.
-///
-/// A file is addressed in the spelling the client named the site root by, never the resolved form
-/// the compiler reads it through.
+/// Every document naming the label, addressed in the client's root spelling.
 pub(super) fn locations(
     compilation: &SourceCompilation,
     name: &str,
@@ -391,8 +357,7 @@ pub(super) fn locations(
 ) -> Result<Vec<Location>> {
     let mut found = Vec::new();
     for (id, range) in spellings(compilation, name, include_declaration, cancellation)? {
-        if let Some(uri) = crate::identity::client_uri(id, compilation.world().root(), client_root)
-        {
+        if let Ok(uri) = crate::identity::client_uri(id, compilation.world().root(), client_root) {
             found.push(Location { uri, range });
         }
     }
@@ -413,13 +378,9 @@ pub(super) fn rename(
     // The protocol's own edit map is keyed by URI, which clippy reads as interior-mutable.
     #[expect(clippy::mutable_key_type, reason = "the protocol keys edits by URI")]
     let mut changes: HashMap<Uri, Vec<TextEdit>> = HashMap::new();
-    for (id, range) in spellings(compilation, name, true, cancellation)? {
-        let Some(uri) = crate::identity::client_uri(id, compilation.world().root(), client_root)
-        else {
-            continue;
-        };
-        changes.entry(uri).or_default().push(TextEdit {
-            range,
+    for spelled in locations(compilation, name, true, cancellation, client_root)? {
+        changes.entry(spelled.uri).or_default().push(TextEdit {
+            range: spelled.range,
             new_text: new_name.to_owned(),
         });
     }
@@ -441,8 +402,7 @@ fn literal_name(name: &str) -> bool {
         })
 }
 
-/// What the site says about the label the reference at `cursor` names: the element that has
-/// it, the file that declares it, and the pages the site serves it on.
+/// What the site says about the label a reference names: element, file, and served pages.
 pub(super) fn hover(
     compilation: &SourceCompilation,
     config: &ResolvedSiteConfig,
@@ -458,49 +418,53 @@ pub(super) fn hover(
     // The hover shows the spelling the author wrote, brackets and all.
     let written = &source.text()[reference.written.clone()];
     let Some(element) = declared_element(compilation, name) else {
-        // The compiled label set is unknown without the site's own documents, so a declaration
-        // this file has answers from the file instead of as a missing label.
-        if compilation.bundle().is_none()
-            && let Some(label) = declared_label(source, name)
-        {
-            let described = match labelled_element(&label) {
-                Some(element) => format!("Labels a `{element}` element declared in this file."),
-                None => format!("`{written}` is declared in this file."),
-            };
-            return Ok(Some(markdown_hover(
-                format!("```typc\n{written}\n```\n\n{described}"),
-                range,
-            )));
-        }
-        return Ok(Some(markdown_hover(
-            format!("no source declares the label `{name}`"),
+        return Ok(Some(undeclared_hover(
+            compilation,
+            source,
+            name,
+            written,
             range,
         )));
     };
     let mut described = format!("Labels a `{}` element", element.func().name());
     if let Some(id) = element.span().id() {
-        described.push_str(&format!(" declared in `{}`", declared_in(compilation, id)));
+        described.push_str(&format!(" declared in `{}`", source_path(compilation, id)));
         let served = routes::site_routes(compilation, config, id, cancellation)?;
-        let (listed, remaining) = listed(
-            served.iter().map(|route| route.route.as_str()),
-            crate::routes::NAMED_PAGES,
-        );
+        let listed = shown_routes(served.iter().map(|route| route.route.as_str()));
         if !listed.is_empty() {
             described.push_str(&format!(", served at {listed}"));
-            if remaining > 0 {
-                described.push_str(&format!(" and {remaining} more"));
-            }
         }
     }
     described.push('.');
     Ok(Some(markdown_hover(
-        format!("```typc\n{written}\n```\n\n{described}"),
+        format!("{}\n\n{described}", typc_fence(written)),
         range,
     )))
 }
 
-/// The site-relative path that declares a label, or the package that has it.
-fn declared_in(compilation: &SourceCompilation, id: FileId) -> String {
+/// The answer for an undeclared label: this file's declaration, or that none declares it.
+fn undeclared_hover(
+    compilation: &SourceCompilation,
+    source: &Source,
+    name: &str,
+    written: &str,
+    range: Option<ProtocolRange>,
+) -> Hover {
+    // Without site documents the compiled label set is unknown, so a local declaration answers.
+    if compilation.bundle().is_none()
+        && let Some(label) = declared_label(source, name)
+    {
+        let described = match labelled_element(&label) {
+            Some(element) => format!("Labels a `{element}` element declared in this file."),
+            None => format!("`{written}` is declared in this file."),
+        };
+        return markdown_hover(format!("{}\n\n{described}", typc_fence(written)), range);
+    }
+    markdown_hover(format!("no source declares the label `{name}`"), range)
+}
+
+/// The path an answer names one source by: its site-relative path, or the package that has it.
+pub(super) fn source_path(compilation: &SourceCompilation, id: FileId) -> String {
     let world = compilation.world();
     match id.root() {
         VirtualRoot::Package(spec) => spec.to_string(),
@@ -574,12 +538,10 @@ mod tests {
         }
     }
 
-    use std::path::Path;
     use std::sync::Arc;
 
     use tola_build::BuildResources;
     use tola_build::check::SourceDiagnosticSession;
-    use tola_build::config::loading::{BuildOverrides, load_site_config};
 
     /// A site program that compiles: every content file becomes one page.
     const SITE_PROGRAM: &str =
@@ -592,18 +554,6 @@ mod tests {
         site
     }
 
-    fn configuration(root: &Path) -> Arc<ResolvedSiteConfig> {
-        Arc::new(
-            load_site_config(
-                Some(&root.join("tola.toml")),
-                tola_typst::PackageLocations::from_absolute_roots(None, None).unwrap(),
-                &BuildOverrides::default(),
-            )
-            .unwrap()
-            .into_config(),
-        )
-    }
-
     /// The label hover over `marked` in `relative`, from the compilation the query ladder answers
     /// with: the site's own when it compiled, and the file's alone when it did not.
     fn label_hover(site: &SiteDirectory, relative: &str, marked: &str) -> String {
@@ -612,7 +562,7 @@ mod tests {
         let text = marked.replace('|', "");
         let cursor = marked.find('|').expect("a cursor marker");
         site.write(relative, &text);
-        let config = configuration(&root);
+        let config = load_configuration(&root).expect("site configuration");
         let cancellation = BuildCancellation::new();
         let overrides = vec![(path.clone(), Arc::<str>::from(text.as_str()))];
         let mut session = SourceDiagnosticSession::with_resources(
@@ -648,7 +598,7 @@ mod tests {
     }
 
     #[test]
-    fn file_labels_answer_while_the_check_fails() {
+    fn file_labels_answer_check_fails() {
         // The site's own program does not compile, and neither does the page on its own, so the
         // compiled label set is unknown while the page still has the label the author reads.
         let site = site_with_program("#let broken = )\n");
@@ -690,7 +640,7 @@ mod tests {
             "content/page.typ",
             "#figure([Body]) <intro>\n\nSee @intro\n",
         );
-        let config = configuration(&resolved_root(&site));
+        let config = load_configuration(&resolved_root(&site)).expect("site configuration");
         let cancellation = BuildCancellation::new();
         let mut session = SourceDiagnosticSession::with_resources(
             Arc::clone(&config),
@@ -709,10 +659,10 @@ mod tests {
         (site, compilation, client_root, expected)
     }
 
-    /// A label's locations name the file the client spelled, never the resolved root the compiler
+    /// A label's answers name the file the client spelled, never the resolved root the compiler
     /// reads through.
     #[test]
-    fn label_locations_keep_the_client_spelling() {
+    fn label_answers_keep_the_client_spelling() {
         let (_site, compilation, client_root, expected) = spelled_site();
         let cancellation = BuildCancellation::new();
 
@@ -723,14 +673,6 @@ mod tests {
             found.iter().all(|location| location.uri == expected),
             "{found:?}"
         );
-    }
-
-    /// A label's rename edits name the file the client spelled, never the resolved root the
-    /// compiler reads through.
-    #[test]
-    fn label_rename_keeps_the_client_spelling() {
-        let (_site, compilation, client_root, expected) = spelled_site();
-        let cancellation = BuildCancellation::new();
 
         let rename = rename(&compilation, "intro", "outro", &cancellation, &client_root)
             .expect("a rename")
@@ -740,30 +682,13 @@ mod tests {
         let changes = rename.changes.expect("edits by URI");
         assert_eq!(changes.keys().collect::<Vec<_>>(), [&expected]);
     }
-    /// A label hover names the page the labelled element is served at.
-    #[test]
-    fn label_hover_names_the_serving_page() {
-        let site = site_with_program(
-            r#"#for source in ("content/page.typ",) {
-  document("page.html")[#include source]
-}
-"#,
-        );
-        let answer = label_hover(
-            &site,
-            "content/page.typ",
-            "#figure([Body]) <introduction>\n\nSee @intro|duction\n",
-        );
-        assert!(answer.contains("@introduction"), "{answer}");
-        assert!(answer.contains("/page.html"), "{answer}");
-    }
 
     use crate::query::tests::*;
     use lsp_types::{GotoDefinitionResponse, PrepareRenameResponse};
     /// A cursor resting on a reference's own marker — where a click or a motion lands — means that
     /// reference, not the text beside it.
     #[test]
-    fn cursor_on_the_marker_names_the_reference() {
+    fn cursor_marker_names_reference() {
         let mut site = QuerySession::new();
         let hover = site
             .hover_text("= Title <intro>\n\nSee |@intro.\n")
@@ -811,6 +736,55 @@ mod tests {
         assert!(hover.contains("/document/"), "{hover}");
     }
 
+    #[test]
+    fn label_queries_follow_the_owning_document() {
+        let mut site = QuerySession::with_program(
+            "#document(\"a.html\")[#include \"content/a.typ\"]\n#document(\"b.html\")[#include \"content/document.typ\"]\n",
+        );
+        site.site
+            .write("content/a.typ", "#figure([First]) <intro>\nSee @intro\n");
+        let marked = "#figure([Second]) <intro>\nSee @int|ro\n";
+        let Some(GotoDefinitionResponse::Scalar(location)) = site.definition(marked) else {
+            panic!("the label has a definition");
+        };
+        assert!(
+            location.uri.as_str().ends_with("content/document.typ"),
+            "{location:?}"
+        );
+        let references = site
+            .references(marked, true)
+            .expect("the label has references");
+        assert_eq!(references.len(), 2, "{references:?}");
+        assert!(
+            references
+                .iter()
+                .all(|location| location.uri.as_str().ends_with("content/document.typ")),
+            "{references:?}"
+        );
+    }
+
+    #[test]
+    fn included_label_answers_site_document() {
+        let mut site = QuerySession::new();
+        site.site.write(
+            "content/labels.typ",
+            "#figure([Parameters]) <tbl:appendix-parameters>\n",
+        );
+        let source = "#include \"labels.typ\"\nSee @tbl:appendix-parameters\n";
+        let completion = site.completion(&source.replace("parameters", "para|"));
+        assert!(
+            completion
+                .iter()
+                .any(|item| item.label == "tbl:appendix-parameters")
+        );
+        let Some(GotoDefinitionResponse::Scalar(location)) =
+            site.definition(&source.replace("parameters", "para|meters"))
+        else {
+            panic!("the included label has a definition");
+        };
+        assert!(location.uri.as_str().ends_with("content/labels.typ"));
+    }
+
     /// A label answers every place the site spells it, and the declaration only when the client
     /// asks for it.
     #[test]
@@ -832,7 +806,7 @@ mod tests {
     }
 
     #[test]
-    fn rename_refuses_names_that_are_not_labels() {
+    fn rename_refuses_names_not_labels() {
         let mut site = QuerySession::new();
         let source = "#figure([Body]) <intro>\nSee @int|ro\n";
         for name in [
@@ -1024,17 +998,5 @@ mod tests {
             hover.contains("no source declares the label `introduction`"),
             "{hover}"
         );
-    }
-
-    /// A reference points at the element its label sits on, wherever in the site that is.
-    #[test]
-    fn reference_definition_names_its_element() {
-        let mut site = QuerySession::new();
-        let Some(GotoDefinitionResponse::Scalar(location)) =
-            site.definition("#metadata((kind: \"note\")) <introduction>\nSee @intro|duction")
-        else {
-            panic!("expected the labelled element");
-        };
-        assert_eq!(location.range.start.line, 0);
     }
 }

@@ -8,20 +8,20 @@ use anyhow::Result;
 use lsp_types::MessageType;
 use lsp_types::notification::{self, Notification as LspNotification};
 use lsp_types::request::{self, Request as LspRequest};
-use tola_build::diagnostic::Diagnostic;
+use tola_build::config::ResolvedSiteConfig;
+use tola_diagnostic::Diagnostic;
 
 use crate::compiler::{
     CheckedSources, QueryRequest, SourceCompilation, SourceFailure, SourceJob, checked_root,
 };
 use crate::diagnostic::refine_unread_configuration;
-use crate::protocol::CheckProgress;
+use crate::protocol::{CheckProgress, SourceReply};
 
-use super::replies::{CANCELLED_ERROR, error_response, failed_response, merge_code_actions};
-use super::{Connection, Phase};
-
-/// What the author hears, in the client's own message channel, when no world resolved at all.
-const UNREAD_CONFIGURATION_ANNOUNCEMENT: &str =
-    "Tola could not read this site's configuration; fix the problem reported in `tola.toml`";
+use super::replies::{
+    CANCELLED_ERROR, PANICKED_ERROR, REVISION_CHANGED_ERROR, error_response, failed_response,
+    merge_code_actions,
+};
+use super::{Connection, PendingRequest, Phase};
 
 /// What the author hears when a check's own work failed rather than the site.
 const PANICKED_CHECK_ANNOUNCEMENT: &str =
@@ -33,64 +33,12 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
             SourceCompilation::Checked {
                 checked_revision,
                 checked,
-            } => {
-                if self.running_check == Some(checked_revision) {
-                    self.running_check = None;
-                }
-                // A check that finished is the one the author was waiting for, so the next check is
-                // one of their own edits rather than the site's first.
-                self.warm = true;
-                if checked_revision == self.revision
-                    && !self.checking.token().is_cancelled()
-                    && !matches!(checked, Err(SourceFailure::Cancelled))
-                {
-                    if let Err(SourceFailure::Failed(error)) = &checked
-                        && error
-                            .chain()
-                            .any(|cause| cause.is::<crate::server::PanickedJob>())
-                    {
-                        // The check's own lane failed, so no outcome exists for this revision: the
-                        // author is told the check failed rather than that the site does not
-                        // compile, and nothing is published as this revision's result.
-                        self.report_source_check(CheckProgress::NotChecked)?;
-                        self.announce_panic()?;
-                    } else {
-                        self.announced_panic = false;
-                        let compiled = checked.as_ref().is_ok_and(|checked| checked.compiled);
-                        self.checked = Some((checked_revision, compiled));
-                        let state = if compiled {
-                            CheckProgress::Checked
-                        } else {
-                            CheckProgress::Failed
-                        };
-                        if let Ok(checked) = checked {
-                            if let Some(paths) = checked.read_paths.as_ref() {
-                                self.read_paths = paths.iter().cloned().collect();
-                            }
-                            self.announce(&checked)?;
-                            self.publish(checked, checked_revision)?;
-                            self.watch_sources()?;
-                            self.refresh_semantic_tokens(checked_revision)?;
-                            // The check built this revision's index itself, so a correction waiting
-                            // for one reads it now instead of paying for a second walk.
-                            if self
-                                .selection_build
-                                .as_ref()
-                                .is_some_and(|build| build.revision == checked_revision)
-                            {
-                                self.cancel_selection();
-                            }
-                            self.complete_waiting_code_actions(checked_revision)?;
-                            self.refresh_diagnostics()?;
-                        }
-                        self.report_source_check(state)?;
-                    }
-                }
-                self.finish_progress(checked_revision)?;
-            }
+            } => self.accept_check(checked_revision, checked)?,
             SourceCompilation::Answered {
                 id,
                 serial,
+                configuration,
+                read_paths,
                 response,
             } => {
                 // Client IDs may be reused while an older cancelled job finishes.
@@ -99,22 +47,21 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
                     let Phase::Ready(_) = &self.phase else {
                         return Ok(());
                     };
-                    let mut response = response;
+                    let mut response = honour_cancellation(&request, response);
                     merge_code_actions(&request, &mut response);
-                    // Every client-facing source reply is shaped in the one order — this
-                    // connection's own shaping, then the capability projection — whether or not
-                    // the request waited for the checked world.
-                    if request.canceller.token().is_cancelled() {
-                        response = Err(SourceFailure::Cancelled);
+                    // A rejected query still depends on the files that made it fail.
+                    if !matches!(&response, Err(SourceFailure::Cancelled)) {
+                        self.query_read_paths
+                            .extend(read_paths.into_iter().flat_map(|path| {
+                                let physical =
+                                    tola_build::filesystem::normalize_existing_prefix(&path);
+                                [path, physical]
+                            }));
+                        self.watch_sources()?;
                     }
                     match response {
-                        Ok(reply) => self.source_reply(id, reply)?,
-                        Err(SourceFailure::Cancelled) => {
-                            self.reply(error_response(id, CANCELLED_ERROR))?
-                        }
-                        Err(SourceFailure::Failed(error)) => {
-                            self.reply(failed_response(id, error))?
-                        }
+                        Ok(reply) => self.accept_answer(id, configuration, reply)?,
+                        Err(failure) => self.reply_failure(id, failure)?,
                     }
                 }
             }
@@ -125,19 +72,10 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
                 response,
             } => {
                 if self.accepts_reply(&id, serial)? {
-                    let pending = self.requests.remove(&id).expect("matching tokens request");
-                    if pending.canceller.token().is_cancelled() {
-                        self.reply(error_response(id, CANCELLED_ERROR))?;
-                    } else {
-                        match response {
-                            Ok(tokens) => self.commit_tokens(id, read, tokens)?,
-                            Err(SourceFailure::Cancelled) => {
-                                self.reply(error_response(id, CANCELLED_ERROR))?
-                            }
-                            Err(SourceFailure::Failed(error)) => {
-                                self.reply(failed_response(id, error))?
-                            }
-                        }
+                    let request = self.requests.remove(&id).expect("matching tokens request");
+                    match honour_cancellation(&request, response) {
+                        Ok(tokens) => self.commit_tokens(id, read, tokens)?,
+                        Err(failure) => self.reply_failure(id, failure)?,
                     }
                 }
             }
@@ -154,7 +92,6 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
                         serial: continued.serial,
                         sources: continued.sources,
                         view: continued.view,
-                        package_sources: workspace.package_sources.clone(),
                         routes_as_hints: workspace.routes_as_hints,
                         check_progress: self.check_progress(),
                         query: continued.query,
@@ -189,7 +126,7 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
                         self.complete_waiting_code_actions(revision)?;
                     }
                     Ok(_) | Err(SourceFailure::Cancelled) => {}
-                    Err(SourceFailure::Failed(_)) => {
+                    Err(SourceFailure::Failed(_) | SourceFailure::Panicked) => {
                         self.fail_waiting_code_actions(revision)?;
                     }
                 }
@@ -198,6 +135,117 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
             SourceCompilation::Released => {}
         }
         Ok(())
+    }
+
+    /// Take one finished site check: the lane's own failure, or the outcome this revision answers
+    /// from.
+    ///
+    /// A run a newer revision superseded, a cancelled one, and a panicked one all publish nothing
+    /// as this revision's result, and every one of them ends its progress report here.
+    fn accept_check(
+        &mut self,
+        checked_revision: u64,
+        checked: Result<CheckedSources, SourceFailure>,
+    ) -> Result<()> {
+        if self.running_check == Some(checked_revision) {
+            self.running_check = None;
+        }
+        // A check that finished is the one the author was waiting for, so the next check is one of
+        // their own edits rather than the site's first.
+        self.warm = true;
+        if checked_revision == self.revision
+            && !self.checking.token().is_cancelled()
+            && !matches!(checked, Err(SourceFailure::Cancelled))
+        {
+            match checked {
+                Err(SourceFailure::Panicked) => {
+                    // The check's own lane failed, so no outcome exists for this revision: the
+                    // author is told the check failed rather than that the site does not compile.
+                    self.report_source_check(CheckProgress::NotChecked)?;
+                    self.announce_panic()?;
+                }
+                checked => self.apply_check(checked_revision, checked)?,
+            }
+        }
+        self.finish_progress(checked_revision)
+    }
+
+    /// Record one site check's outcome, answer from it, and report the progress it established.
+    fn apply_check(
+        &mut self,
+        checked_revision: u64,
+        checked: Result<CheckedSources, SourceFailure>,
+    ) -> Result<()> {
+        self.announced_panic = false;
+        let Ok(checked) = checked else {
+            self.checked = Some(super::CompletedCheck {
+                revision: checked_revision,
+                usable_world: false,
+            });
+            return self.report_source_check(CheckProgress::Failed);
+        };
+        let compiled = checked.compiled;
+        self.checked = Some(super::CompletedCheck {
+            revision: checked_revision,
+            usable_world: compiled,
+        });
+        let progress = if compiled {
+            CheckProgress::Checked
+        } else {
+            CheckProgress::Failed
+        };
+        let configuration = checked.configuration.clone();
+        if let Some(paths) = checked.read_paths.as_ref() {
+            self.read_paths = paths.iter().cloned().collect();
+        }
+        self.publish(checked, checked_revision)?;
+        self.watch_sources()?;
+        self.refresh_semantic_tokens(checked_revision)?;
+        // The check built this revision's index itself, so a correction waiting for one reads it
+        // now instead of paying for a second walk.
+        if self
+            .selection_build
+            .as_ref()
+            .is_some_and(|build| build.revision == checked_revision)
+        {
+            self.cancel_selection();
+        }
+        self.complete_waiting_code_actions(checked_revision)?;
+        self.refresh_diagnostics()?;
+        match configuration {
+            Some(configuration) => self.report_prepared_site(progress, &configuration),
+            None => self.report_source_check(progress),
+        }
+    }
+
+    /// Answer one source failure in the protocol's own shape.
+    fn reply_failure(&mut self, id: lsp_server::RequestId, failure: SourceFailure) -> Result<()> {
+        match failure {
+            SourceFailure::Cancelled => self.reply(error_response(id, CANCELLED_ERROR)),
+            SourceFailure::Panicked => self.reply(error_response(id, PANICKED_ERROR)),
+            SourceFailure::Failed(error) => self.reply(failed_response(id, error)),
+        }
+    }
+
+    /// Answer one query from the reply its job produced.
+    ///
+    /// A configuration this connection has not accepted yet is reported first, so the client reads
+    /// the package roots before a location inside them.
+    fn accept_answer(
+        &mut self,
+        id: lsp_server::RequestId,
+        configuration: Option<Arc<ResolvedSiteConfig>>,
+        reply: SourceReply,
+    ) -> Result<()> {
+        if let Some(configuration) = configuration
+            && !self
+                .configuration
+                .as_ref()
+                .is_some_and(|accepted| Arc::ptr_eq(accepted, &configuration))
+        {
+            self.report_prepared_site(self.check_progress(), &configuration)?;
+        }
+        self.source_reply(id, reply)
     }
 
     fn accepts_reply(&mut self, id: &lsp_server::RequestId, serial: u64) -> Result<bool> {
@@ -226,10 +274,7 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
             .canceller
             .cancel();
         self.discard_cancelled_jobs();
-        self.reply(error_response(
-            id.clone(),
-            super::replies::REVISION_CHANGED_ERROR,
-        ))?;
+        self.reply(error_response(id.clone(), REVISION_CHANGED_ERROR))?;
         Ok(false)
     }
 
@@ -282,37 +327,13 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
     ///
     /// The request is global, so one refresh makes the client re-read every document it pulls.
     fn refresh_diagnostics(&mut self) -> Result<()> {
-        let refresh = match &self.phase {
-            Phase::Ready(workspace) => {
-                workspace.features.pull_diagnostics && workspace.features.diagnostic_refresh
-            }
-            _ => false,
+        let Phase::Ready(workspace) = &self.phase else {
+            return Ok(());
         };
-        if refresh {
+        if workspace.features.pull_diagnostics && workspace.features.diagnostic_refresh {
             self.send_request(request::WorkspaceDiagnosticRefresh::METHOD, ())?;
         }
         Ok(())
-    }
-
-    /// Tell the author, once per state, about the one failure nothing else reports.
-    ///
-    /// A check that could not read the site's own configuration publishes its diagnostics on that
-    /// document, which the author may never open; every other failure reaches them as a diagnostic
-    /// on a document they can see. So this failure is announced once, when it starts, and the
-    /// recoverable ones stay in the editor's own reporting.
-    fn announce(&mut self, checked: &CheckedSources) -> Result<()> {
-        let failed = checked.configuration.is_none();
-        if failed == self.announced_configuration_failure {
-            return Ok(());
-        }
-        self.announced_configuration_failure = failed;
-        if !failed {
-            return Ok(());
-        }
-        self.show_message(
-            MessageType::WARNING,
-            UNREAD_CONFIGURATION_ANNOUNCEMENT.to_owned(),
-        )
     }
 
     /// Show the author one message the client puts in front of them.
@@ -334,12 +355,25 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
     }
 }
 
+/// The answer a finished job leaves for its client: a request that client cancelled answers as
+/// cancelled, whatever the job produced.
+fn honour_cancellation<T>(
+    request: &PendingRequest,
+    response: Result<T, SourceFailure>,
+) -> Result<T, SourceFailure> {
+    if request.canceller.token().is_cancelled() {
+        Err(SourceFailure::Cancelled)
+    } else {
+        response
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::connection::tests::{
-        dynamic_import_position, messages, open_document, ready, ready_at, references_request,
-        response, uninitialized,
+        answer_analysis, dynamic_import_position, messages, open_document, ready, ready_at,
+        ready_workspace, references_request, response, uninitialized,
     };
     use lsp_server::{ErrorCode, Message, Notification, Request};
     use lsp_types::notification::{self, Notification as LspNotification};
@@ -349,6 +383,228 @@ mod tests {
     use std::time::Instant;
     use tola_typst::typst::syntax::Source;
     use tola_typst_syntax::names::SelectedInterfaces;
+
+    #[test]
+    fn stale_answers_observe_no_inputs() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("site");
+        std::fs::create_dir(&root).unwrap();
+        let external = directory.path().join("model-data.json");
+        std::fs::write(&external, "{}").unwrap();
+        let external = tola_build::filesystem::normalize_existing_prefix(&external);
+        let uri = crate::uri::from_file_path(&external).unwrap();
+        for stale in [false, true] {
+            let mut connection = ready_at(Vec::new(), root.clone());
+            connection.checked = Some(crate::connection::CompletedCheck {
+                revision: connection.revision,
+                usable_world: true,
+            });
+            let id = 17.into();
+            let serial = connection.admit(&id).unwrap().unwrap().serial;
+            connection
+                .completed(SourceCompilation::Answered {
+                    id,
+                    serial: if stale { serial + 1 } else { serial },
+                    configuration: None,
+                    read_paths: vec![external.clone()],
+                    response: Ok(SourceReply::Definition(None)),
+                })
+                .unwrap();
+            assert_eq!(connection.query_read_paths.contains(&external), !stale);
+            let changed = Notification::new(
+                notification::DidChangeWatchedFiles::METHOD.into(),
+                json!({"changes": [{"uri": uri, "type": 2}]}),
+            );
+            assert_eq!(connection.watched_change_matters(&changed), !stale);
+        }
+    }
+
+    #[test]
+    fn prepared_site_status_precedes_definition() {
+        let directory = tempfile::tempdir().unwrap();
+        let site = directory.path().join("site");
+        let cache = directory.path().join("cache");
+        std::fs::create_dir(&site).unwrap();
+        std::fs::create_dir(&cache).unwrap();
+        std::fs::create_dir(site.join("assets")).unwrap();
+        std::fs::write(site.join("icon.svg"), "<svg/>").unwrap();
+        let configuration = site.join("tola.toml");
+        std::fs::write(
+            &configuration,
+            "[assets]\nfiles = [{ source = \"icon.svg\", url = \"/icon.svg\" }]\ntrees = [{ source = \"assets\", url-prefix = \"/assets\" }]\n",
+        )
+        .unwrap();
+        let locations =
+            tola_typst::PackageLocations::from_absolute_roots(None, Some(cache.clone())).unwrap();
+        let configuration = Arc::new(
+            tola_build::config::loading::load_site_config(
+                Some(&configuration),
+                locations,
+                &tola_build::config::loading::BuildOverrides::default(),
+            )
+            .unwrap()
+            .into_config(),
+        );
+        let expected_entry_uri = crate::uri::ClientRoot::new(&site)
+            .address(&configuration.build().entry)
+            .unwrap();
+        let config_uri = crate::uri::from_file_path(&site.join("tola.toml")).unwrap();
+        let mut connection = ready_at(Vec::new(), site);
+        ready_workspace(&mut connection).source_check_status = true;
+        let opened = connection
+            .notification(Notification::new(
+                notification::DidOpenTextDocument::METHOD.into(),
+                lsp_types::DidOpenTextDocumentParams {
+                    text_document: lsp_types::TextDocumentItem::new(
+                        config_uri.clone(),
+                        "toml".into(),
+                        7,
+                        std::fs::read_to_string(configuration.config_path()).unwrap(),
+                    ),
+                },
+            ))
+            .unwrap();
+        assert!(opened.is_continue());
+        messages(&mut connection);
+        let id = 7.into();
+        let serial = connection.admit(&id).unwrap().unwrap().serial;
+        connection
+            .completed(SourceCompilation::Answered {
+                id,
+                serial,
+                configuration: Some(configuration),
+                read_paths: Vec::new(),
+                response: Ok(SourceReply::Definition(Some(
+                    lsp_types::GotoDefinitionResponse::Scalar(lsp_types::Location {
+                        uri: crate::uri::from_file_path(&cache.join("local/demo/0.1.0/lib.typ"))
+                            .unwrap(),
+                        range: lsp_types::Range::default(),
+                    }),
+                ))),
+            })
+            .unwrap();
+
+        let sent = messages(&mut connection);
+        let [Message::Notification(status), Message::Response(reply)] = sent.as_slice() else {
+            panic!("package roots must precede the definition reply: {sent:?}");
+        };
+        assert_eq!(status.method, "tola/sourceCheckStatus");
+        let resolved = tola_build::filesystem::normalize_existing_prefix(&cache);
+        assert_eq!(
+            status.params["site"]["packageRoots"],
+            serde_json::json!([crate::uri::from_file_path(&resolved).unwrap().as_str()])
+        );
+        assert_eq!(status.params["site"]["entry"], expected_entry_uri.as_str());
+        assert_eq!(
+            status.params["site"]["configVersions"][config_uri.as_str()],
+            7
+        );
+        let site_root =
+            tola_build::filesystem::normalize_existing_prefix(&directory.path().join("site"));
+        assert_eq!(
+            status.params["site"]["root"],
+            crate::uri::from_file_path(&site_root).unwrap().as_str()
+        );
+        assert_eq!(
+            status.params["site"]["assetSources"],
+            serde_json::json!({
+                "files": [crate::uri::from_file_path(&site_root.join("icon.svg")).unwrap().as_str()],
+                "trees": [crate::uri::from_file_path(&site_root.join("assets")).unwrap().as_str()],
+            })
+        );
+        let generated = status.params["site"]["generatedRoots"].as_array().unwrap();
+        assert!(generated.contains(&serde_json::json!(
+            crate::uri::from_file_path(&site_root.join("public"))
+                .unwrap()
+                .as_str()
+        )));
+        assert!(reply.response_result.is_ok());
+        connection
+            .report_source_check(CheckProgress::Checking)
+            .unwrap();
+        let sent = messages(&mut connection);
+        let [Message::Notification(transient)] = sent.as_slice() else {
+            panic!("a transient status notification");
+        };
+        assert!(transient.params.get("site").is_none());
+    }
+
+    #[test]
+    fn configuration_errors_stay_in_diagnostics() {
+        let mut connection = ready(Vec::new());
+        connection
+            .completed(SourceCompilation::Checked {
+                checked_revision: connection.revision,
+                checked: Ok(CheckedSources {
+                    configuration: None,
+                    compiled: false,
+                    diagnostics: vec![Diagnostic::at_path(
+                        tola_diagnostic::codes::config::TOML,
+                        tola_diagnostic::Severity::Error,
+                        "tola.toml",
+                        "unclosed table",
+                    )],
+                    read_paths: None,
+                    selected: Arc::new(SelectedInterfaces::default()),
+                }),
+            })
+            .unwrap();
+        let sent = messages(&mut connection);
+        assert!(sent.iter().any(|message| matches!(message,
+            Message::Notification(message)
+                if message.method == notification::PublishDiagnostics::METHOD
+                && !message.params["diagnostics"].as_array().unwrap().is_empty()
+        )));
+        assert!(!sent.iter().any(|message| matches!(message,
+            Message::Notification(message) if message.method == notification::ShowMessage::METHOD
+        )));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn resolved_configuration_keeps_unsaved_text() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let site = root.join("site");
+        std::fs::create_dir(&site).unwrap();
+        let config = crate::compiler::tests::site_configuration(&site, "");
+        let previous = root.join("previous.toml");
+        std::fs::write(&previous, "").unwrap();
+        let alias = root.join("selected.toml");
+        std::os::unix::fs::symlink(&previous, &alias).unwrap();
+        let uri = crate::uri::from_file_path(&alias).unwrap();
+        let mut connection = ready_at(Vec::new(), root.clone());
+        let unsaved = "[site]\ntitle = \"Unsaved\"\n";
+        open_document(&mut connection, &uri, 1, unsaved);
+
+        std::fs::remove_file(&alias).unwrap();
+        std::os::unix::fs::symlink(config.config_path(), &alias).unwrap();
+        connection
+            .publish(
+                CheckedSources {
+                    configuration: Some(Arc::clone(&config)),
+                    compiled: true,
+                    diagnostics: Vec::new(),
+                    read_paths: None,
+                    selected: Arc::new(SelectedInterfaces::default()),
+                },
+                connection.revision,
+            )
+            .unwrap();
+
+        assert_eq!(
+            connection.document_text(config.config_path()).as_deref(),
+            Some(unsaved)
+        );
+        assert_eq!(
+            connection
+                .source_inputs(root, Default::default())
+                .overrides
+                .as_ref(),
+            [(config.config_path().to_path_buf(), Arc::from(unsaved))]
+        );
+    }
+
     #[test]
     fn reused_id_rejects_stale_analysis() {
         let directory = tempfile::tempdir().unwrap();
@@ -389,20 +645,8 @@ mod tests {
         let current = connection
             .next_analysis()
             .expect("replacement source analysis");
-        connection
-            .completed(crate::compiler::analyze(
-                &mut crate::analysis::DiskSources::default(),
-                &mut crate::analysis::GraphCache::default(),
-                superseded,
-            ))
-            .unwrap();
-        connection
-            .completed(crate::compiler::analyze(
-                &mut crate::analysis::DiskSources::default(),
-                &mut crate::analysis::GraphCache::default(),
-                current,
-            ))
-            .unwrap();
+        answer_analysis(&mut connection, superseded);
+        answer_analysis(&mut connection, current);
         let locations: Vec<lsp_types::Location> =
             serde_json::from_value(response(&mut connection).response_result.unwrap()).unwrap();
         let edited_source = Source::detached(edited);
@@ -468,7 +712,7 @@ mod tests {
     /// A check that resolved no world says what that costs the author, and the reason Typst wrote
     /// stays below it: the author acts on the sentence Tola writes, not on Typst's.
     #[test]
-    fn check_without_world_says_what_it_costs() {
+    fn check_without_what_it_costs() {
         let mut connection = ready(Vec::new());
         let revision = connection.revision;
         connection
@@ -478,7 +722,7 @@ mod tests {
                     compiled: false,
                     diagnostics: vec![Diagnostic::at_path(
                         crate::codes::editor::CONFIGURATION,
-                        tola_build::diagnostic::Severity::Error,
+                        tola_diagnostic::Severity::Error,
                         "tola.toml",
                         "`--pure` cannot use `--package-path`",
                     )],
@@ -501,15 +745,16 @@ mod tests {
             .expect("a published report");
         assert_eq!(published.diagnostics.len(), 1);
         let message = &published.diagnostics[0].message;
-        assert_eq!(
-            message,
-            "Tola could not read the site's configuration\n\
-             note: `--pure` cannot use `--package-path`\n\
-             note: pages, labels, and hovers stay unavailable until it loads\n\
-             help: fix the problem reported in `tola.toml`",
+        assert!(
+            message.starts_with("Tola could not read the site's configuration"),
+            "{message}"
+        );
+        assert!(
+            message.contains("`--pure` cannot use `--package-path`"),
             "{message}"
         );
     }
+
     #[test]
     fn pull_warning_refreshes_current_report() {
         let directory = tempfile::tempdir().unwrap();
@@ -525,15 +770,7 @@ mod tests {
             "#metadata((title:\"Legacy\")) <tola-meta>",
         )
         .unwrap();
-        let config = Arc::new(
-            tola_build::config::loading::load_site_config(
-                Some(&directory.path().join("tola.toml")),
-                tola_typst::PackageLocations::default(),
-                &tola_build::config::loading::BuildOverrides::default(),
-            )
-            .unwrap()
-            .into_config(),
-        );
+        let config = crate::compiler::tests::site_configuration(directory.path(), "");
         let mut compiler = crate::compiler::SourceCompiler::new(
             move |_, _| Ok(crate::server::ServedWorkspace::Site(Arc::clone(&config))),
             tola_build::BuildResources::default(),

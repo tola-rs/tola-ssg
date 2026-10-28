@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use anyhow::Result;
 use tola_typst::typst::foundations::{
-    Array, CastInfo, Content, Dict, Element, Styles, Type, Value, fields_on,
+    Array, CastInfo, Content, Dict, Element, Func, Styles, Type, Value, fields_on,
 };
 
 /// Only `Known` carries an actual value; instance and container types never manufacture one.
@@ -103,6 +103,12 @@ pub(in crate::query) struct ExpressionMember {
     pub call: Option<MemberCall>,
 }
 
+impl ExpressionMember {
+    fn field(ty: ExpressionType) -> Self {
+        Self { ty, call: None }
+    }
+}
+
 /// Values expose realized fields and styles; types expose only metadata established interfaces.
 pub(in crate::query) fn members(
     ty: &ExpressionType,
@@ -126,14 +132,10 @@ pub(in crate::query) fn members(
     {
         for (name, binding) in scope.iter() {
             ensure_active()?;
-            if let Value::Func(func) = binding.read()
-                && func.params().next().is_some_and(|param| {
-                    param.name() == Some("self")
-                        || param.to_native().is_some_and(|parameter| {
-                            parameter.positional && accepts_receiver(&parameter.input, instance)
-                        })
-                })
-            {
+            let Value::Func(func) = binding.read() else {
+                continue;
+            };
+            if is_receiver_member(func, instance) {
                 members.insert(
                     name.to_string(),
                     ExpressionMember {
@@ -144,107 +146,34 @@ pub(in crate::query) fn members(
             }
         }
     }
-    if let ExpressionType::Known(value) = ty {
-        if let Some(scope) = value.scope() {
-            for (name, binding) in scope.iter() {
-                ensure_active()?;
-                members.insert(
-                    name.to_string(),
-                    ExpressionMember {
-                        ty: ExpressionType::Known(binding.read().clone()),
-                        call: Some(MemberCall::Direct),
-                    },
-                );
-            }
+    match ty {
+        ExpressionType::Known(value) => {
+            value_members(value, instance, styles, &ensure_active, &mut members)?
         }
-        for field in fields_on(instance) {
-            ensure_active()?;
-            if let Ok(value) = value.field(field, ()) {
+        _ => {
+            for field in fields_on(instance) {
+                ensure_active()?;
                 members.insert(
                     (*field).into(),
-                    ExpressionMember {
-                        ty: ExpressionType::Known(value),
-                        call: None,
-                    },
+                    ExpressionMember::field(ExpressionType::Unknown),
                 );
             }
-        }
-        let fields = match value {
-            Value::Dict(dict) => Some(dict.clone()),
-            Value::Content(content) => Some(content.fields()),
-            Value::Args(args) => Some(args.to_named()),
-            _ => None,
-        };
-        if let Some(fields) = fields {
-            for (name, value) in fields {
-                ensure_active()?;
-                members.insert(
-                    name.to_string(),
-                    ExpressionMember {
-                        ty: ExpressionType::Known(value),
-                        call: None,
-                    },
-                );
-            }
-        }
-        if let Value::Func(func) = value
-            && let Some((element, styles)) = func.to_element().zip(styles)
-        {
-            for param in element.params() {
-                ensure_active()?;
-                if let Some(id) = element.field_id(param.name)
-                    && let Ok(value) = element.field_from_styles(
-                        id,
-                        tola_typst::typst::foundations::StyleChain::new(styles),
-                    )
-                {
-                    members.insert(
-                        param.name.into(),
-                        ExpressionMember {
-                            ty: ExpressionType::Known(value),
-                            call: None,
-                        },
-                    );
-                }
-            }
-        }
-    } else {
-        for field in fields_on(instance) {
-            ensure_active()?;
-            members.insert(
-                (*field).into(),
-                ExpressionMember {
-                    ty: ExpressionType::Unknown,
-                    call: None,
-                },
-            );
         }
     }
     match ty {
         ExpressionType::Dictionary(fields) => {
             for (name, ty) in fields {
                 ensure_active()?;
-                members.insert(
-                    name.clone(),
-                    ExpressionMember {
-                        ty: ty.clone(),
-                        call: None,
-                    },
-                );
+                members.insert(name.clone(), ExpressionMember::field(ty.clone()));
             }
         }
         ExpressionType::ElementContent(element) => {
             for param in element.params().iter().filter(|param| param.required) {
                 ensure_active()?;
                 if element.field_id(param.name).is_some() {
-                    members.insert(
-                        param.name.into(),
-                        ExpressionMember {
-                            ty: single_value(return_types(&param.input))
-                                .unwrap_or(ExpressionType::Unknown),
-                            call: None,
-                        },
-                    );
+                    let ty =
+                        single_value(return_types(&param.input)).unwrap_or(ExpressionType::Unknown);
+                    members.insert(param.name.into(), ExpressionMember::field(ty));
                 }
             }
         }
@@ -252,6 +181,79 @@ pub(in crate::query) fn members(
     }
     ensure_active()?;
     Ok(members)
+}
+
+/// The members a realized value exposes: its scope, declared fields, and construction styles.
+fn value_members(
+    value: &Value,
+    instance: Type,
+    styles: Option<&Styles>,
+    ensure_active: &impl Fn() -> Result<()>,
+    members: &mut BTreeMap<String, ExpressionMember>,
+) -> Result<()> {
+    if let Some(scope) = value.scope() {
+        for (name, binding) in scope.iter() {
+            ensure_active()?;
+            members.insert(
+                name.to_string(),
+                ExpressionMember {
+                    ty: ExpressionType::Known(binding.read().clone()),
+                    call: Some(MemberCall::Direct),
+                },
+            );
+        }
+    }
+    for field in fields_on(instance) {
+        ensure_active()?;
+        if let Ok(value) = value.field(field, ()) {
+            members.insert(
+                (*field).into(),
+                ExpressionMember::field(ExpressionType::Known(value)),
+            );
+        }
+    }
+    let fields = match value {
+        Value::Dict(dict) => Some(dict.clone()),
+        Value::Content(content) => Some(content.fields()),
+        Value::Args(args) => Some(args.to_named()),
+        _ => None,
+    };
+    if let Some(fields) = fields {
+        for (name, value) in fields {
+            ensure_active()?;
+            members.insert(
+                name.to_string(),
+                ExpressionMember::field(ExpressionType::Known(value)),
+            );
+        }
+    }
+    if let Value::Func(func) = value
+        && let Some((element, styles)) = func.to_element().zip(styles)
+    {
+        for param in element.params() {
+            ensure_active()?;
+            if let Some(id) = element.field_id(param.name)
+                && let Ok(value) = element
+                    .field_from_styles(id, tola_typst::typst::foundations::StyleChain::new(styles))
+            {
+                members.insert(
+                    param.name.into(),
+                    ExpressionMember::field(ExpressionType::Known(value)),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Whether a function's first parameter lets a value of `instance` call it as its own member.
+fn is_receiver_member(func: &Func, instance: Type) -> bool {
+    func.params().next().is_some_and(|param| {
+        param.name() == Some("self")
+            || param.to_native().is_some_and(|parameter| {
+                parameter.positional && accepts_receiver(&parameter.input, instance)
+            })
+    })
 }
 
 fn accepts_receiver(parameter: &CastInfo, receiver: Type) -> bool {

@@ -131,7 +131,7 @@ mod tests {
     }
 
     #[test]
-    fn packages_empty_without_network_access_or_cache() {
+    fn packages_without_network_access_cache() {
         let directory = tempfile::tempdir().unwrap();
         let index_bytes = br#"[{"name":"remote-only","version":"1.0.0"}]"#;
         for (scope, cache) in [

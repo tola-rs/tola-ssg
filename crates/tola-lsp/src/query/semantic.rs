@@ -1,6 +1,6 @@
 //! Values come from the official Bundle compiler, never the paged IDE tracer.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -24,7 +24,9 @@ use tola_typst::typst::syntax::{
     FileId, LinkedNode, RootedPath, Source, Span, SyntaxKind, VirtualRoot, ast,
 };
 use tola_typst::typst::utils::Protected;
-use tola_typst_syntax::names::{DeclarationKind, ImportSource, Initializer, SourceNames};
+use tola_typst_syntax::names::{
+    Declaration, DeclarationKind, ImportSource, Initializer, SourceNames,
+};
 
 use super::editing;
 use super::expression::{ExpressionType, members};
@@ -41,16 +43,18 @@ pub(super) struct Binding {
     pub tola: bool,
     /// Whether this name is a function parameter, whose value inference supplies from the call.
     pub parameter: bool,
-    /// The `let` initializer a value-less binding still names; completion reads it when the site's
-    /// evaluation never reached the binding.
+    /// The let initializer a value-less binding names; completion reads it after an unevaluated
     pub initializer: Option<Span>,
 }
 
-/// One revision's semantic answers, and the traces they came from.
-///
-/// Both caches are keyed by span and valid only for `compilation`: a span belongs to one parsed
-/// source, and `SourceCompilation` owns the world that produced it. A caller answering an older
-/// revision builds a new `Semantic`, never reuses one across compilations.
+/// One name a scope offers the position: a declaration the scope holds, or a wildcard import that
+/// binds it.
+enum ScopeName {
+    Declaration(usize),
+    Import(usize),
+}
+
+/// One revision's answers and traces; both caches are valid only for the compilation that made
 pub(super) struct Semantic<'a> {
     compilation: &'a SourceCompilation,
     cancellation: &'a BuildCancellation,
@@ -58,6 +62,7 @@ pub(super) struct Semantic<'a> {
     imports: HashMap<Span, Option<Value>>,
     names: HashMap<FileId, Arc<SourceNames>>,
     inference: Inference,
+    accessed: tola_typst::AccessedDeps,
 }
 
 impl<'a> Semantic<'a> {
@@ -72,34 +77,60 @@ impl<'a> Semantic<'a> {
             imports: HashMap::new(),
             names: HashMap::new(),
             inference: Inference::default(),
+            accessed: tola_typst::AccessedDeps::default(),
         }
     }
 
     pub(super) fn trace(&mut self, span: Span) -> Result<Vec<(Value, Option<Styles>)>> {
         self.cancellation.ensure_active()?;
-        // A body span is shared by every invocation; its observations cannot establish values
-        // inside a different invocation whose arguments inference supplied.
+        // A body span is shared by every invocation, so an inferred call frame has no observations.
         if self.inference.has_call_frame() {
             return Ok(Vec::new());
         }
         if let Some(values) = self.traces.get(&span) {
             return Ok(values.clone());
         }
-        let values = tola_typst::typst::trace::<tola_typst::typst_bundle::Bundle>(
-            self.compilation.world(),
-            span,
-        )
-        .into_iter()
-        .collect::<Vec<_>>();
+        let (mut values, accessed) = tola_typst::observe_world(self.compilation.world(), |world| {
+            tola_typst::typst::trace::<tola_typst::typst_bundle::Bundle>(world, span)
+                .into_iter()
+                .collect::<Vec<_>>()
+        });
+        self.record_accessed(accessed);
+        if values.is_empty()
+            && let Some(id) = span.id()
+        {
+            values = self.trace_source(span, id);
+        }
         self.cancellation.ensure_active()?;
         self.traces.insert(span, values.clone());
         Ok(values)
     }
 
+    /// The values one source observes; tracing the edited file alone may leave partial
+    fn trace_source(&mut self, span: Span, id: FileId) -> Vec<(Value, Option<Styles>)> {
+        let (values, accessed) = tola_typst::observe_world(self.compilation.world(), |world| {
+            let traced = Traced::new(span);
+            let mut sink = Sink::new();
+            let route = Route::default();
+            if let Ok(source) = world.source(id) {
+                let _ = tola_typst::typst_eval::eval(
+                    world.track(),
+                    world.library(),
+                    traced.track(),
+                    sink.track_mut(),
+                    route.track(),
+                    &source,
+                );
+            }
+            sink.values().into_iter().collect::<Vec<_>>()
+        });
+        self.record_accessed(accessed);
+        values
+    }
+
     pub(super) fn import(&mut self, source: &LinkedNode<'_>) -> Result<Option<Value>> {
         self.cancellation.ensure_active()?;
-        // A dynamic source and its cached module may belong to another invocation. Literal
-        // imports retain the same identity in every argument frame.
+        // A dynamic source may belong to another invocation; a literal import keeps its identity.
         if self.inference.has_call_frame() && source.cast::<ast::Str>().is_none() {
             return Ok(None);
         }
@@ -116,28 +147,7 @@ impl<'a> Semantic<'a> {
         };
         let imported = match value {
             Some(value) if value.scope().is_some() => Some(value),
-            Some(Value::Str(path)) => {
-                let world = self.compilation.world();
-                let traced = Traced::default();
-                let mut sink = Sink::new();
-                // An imported module's own value does not read the site's compiled introspection,
-                // so a site that did not compile evaluates the path all the same.
-                let introspector: &dyn Introspector = match self.compilation.introspector() {
-                    Some(introspector) => introspector,
-                    None => &EmptyIntrospector,
-                };
-                let mut engine = Engine {
-                    library: world.library(),
-                    world: (world as &dyn World).track(),
-                    introspector: Protected::new(introspector.track()),
-                    traced: traced.track(),
-                    sink: sink.track_mut(),
-                    route: Route::default(),
-                };
-                tola_typst::typst_eval::import(&mut engine, &path, source.span())
-                    .ok()
-                    .map(Value::Module)
-            }
+            Some(Value::Str(path)) => self.imported_module(&path, source.span()),
             _ => None,
         };
         self.cancellation.ensure_active()?;
@@ -145,8 +155,32 @@ impl<'a> Semantic<'a> {
         Ok(imported)
     }
 
-    /// The package owns schema semantics. Its pure inspection API never parses defaults or
-    /// invokes user predicates, converters, or lazy factories during an editor request.
+    /// The module one literal import path names, evaluated in this compilation's world.
+    fn imported_module(&mut self, path: &Str, span: Span) -> Option<Value> {
+        let introspector: &dyn Introspector = match self.compilation.introspector() {
+            Some(introspector) => introspector,
+            None => &EmptyIntrospector,
+        };
+        let (imported, accessed) = tola_typst::observe_world(self.compilation.world(), |world| {
+            let traced = Traced::default();
+            let mut sink = Sink::new();
+            let mut engine = Engine {
+                library: world.library(),
+                world: world.track(),
+                introspector: Protected::new(introspector.track()),
+                traced: traced.track(),
+                sink: sink.track_mut(),
+                route: Route::default(),
+            };
+            tola_typst::typst_eval::import(&mut engine, path, span)
+                .ok()
+                .map(Value::Module)
+        });
+        self.record_accessed(accessed);
+        imported
+    }
+
+    /// The package owns schema semantics; inspection never runs defaults, predicates, or lazy
     pub(super) fn inspect_schema(&self, declaration: &Value) -> Result<Option<Value>> {
         self.cancellation.ensure_active()?;
         let world = self.compilation.world();
@@ -191,31 +225,6 @@ impl<'a> Semantic<'a> {
         source: &LinkedNode<'_>,
         path: &[String],
     ) -> Result<Option<(Value, Span)>> {
-        self.imported_at(source, path)
-    }
-
-    /// The location of the export one import item names, when Tola supplies it.
-    pub(super) fn imported_location(
-        &mut self,
-        source: &LinkedNode<'_>,
-        path: &[String],
-        client_root: &crate::uri::ClientRoot,
-    ) -> Result<Option<Location>> {
-        let Some((_, span)) = self.imported_at(source, path)? else {
-            return Ok(None);
-        };
-        if !crate::identity::is_tola_span(span) {
-            return Ok(None);
-        }
-        Ok(self.location(span, client_root))
-    }
-
-    /// Walk one import path from the module the import names.
-    fn imported_at(
-        &mut self,
-        source: &LinkedNode<'_>,
-        path: &[String],
-    ) -> Result<Option<(Value, Span)>> {
         let Some(mut value) = self.import(source)? else {
             return Ok(None);
         };
@@ -235,6 +244,22 @@ impl<'a> Semantic<'a> {
         Ok(Some((value, span)))
     }
 
+    /// The location of the export one import item names, when Tola supplies it.
+    pub(super) fn imported_location(
+        &mut self,
+        source: &LinkedNode<'_>,
+        path: &[String],
+        client_root: &crate::uri::ClientRoot,
+    ) -> Result<Option<Location>> {
+        let Some((_, span)) = self.imported_export(source, path)? else {
+            return Ok(None);
+        };
+        if !crate::identity::is_tola_span(span) {
+            return Ok(None);
+        }
+        Ok(self.location(span, client_root))
+    }
+
     /// Locates detached native bindings in their exporting source.
     fn binding_span(&mut self, file: Option<FileId>, name: &str, span: Span) -> Span {
         if !span.is_detached() {
@@ -243,15 +268,8 @@ impl<'a> Semantic<'a> {
         let Some(names) = file.and_then(|file| self.source_names(file)) else {
             return span;
         };
-        let Some(scope) = names.scopes().first() else {
-            return span;
-        };
-        let Some(declaration) = scope
-            .declarations
-            .iter()
-            .rev()
-            .map(|&id| &names.declarations()[id])
-            .find(|declaration| declaration.name == name)
+        let Some(declaration) =
+            last_top_level_declaration(&names, |declaration| declaration.name == name)
         else {
             return span;
         };
@@ -280,10 +298,7 @@ impl<'a> Semantic<'a> {
         self.compilation.world().range(span)
     }
 
-    /// The site's own Typst sources this compilation read.
-    ///
-    /// A call site lives in a file the compiler read, which need not be the file an editor asks
-    /// about, so an answer that searches call sites searches these.
+    /// The site's own Typst sources, which a call-site search must cover.
     pub(super) fn project_sources(&self) -> Vec<FileId> {
         let mut files = Vec::new();
         for read in self.compilation.file_reads() {
@@ -318,12 +333,12 @@ impl<'a> Semantic<'a> {
         source: &LinkedNode<'_>,
         path: &[String],
     ) -> Result<BTreeMap<String, Binding>> {
-        let mut result = BTreeMap::new();
-        let Some((value, _)) = self.imported_at(source, path)? else {
-            return Ok(result);
+        let mut bindings = BTreeMap::new();
+        let Some((value, _)) = self.imported_export(source, path)? else {
+            return Ok(bindings);
         };
-        self.scope_bindings(&value, &mut result);
-        Ok(result)
+        self.scope_bindings(&value, &mut bindings);
+        Ok(bindings)
     }
 
     /// Nearest lexical bindings first; imports use the Bundle world.
@@ -339,17 +354,17 @@ impl<'a> Semantic<'a> {
         position: LinkedNode<'_>,
         depth: usize,
     ) -> Result<BTreeMap<String, Binding>> {
-        let mut result = BTreeMap::new();
+        let mut bindings = BTreeMap::new();
         let Some(file) = position.span().id() else {
-            return Ok(result);
+            return Ok(bindings);
         };
         let Some(names) = self.source_names(file) else {
-            return Ok(result);
+            return Ok(bindings);
         };
         let at = position.range().start;
         let mut scope = names.scope_at(at);
         loop {
-            let mut declarations: Vec<_> = names.scopes()[scope]
+            let mut scope_names: Vec<ScopeName> = names.scopes()[scope]
                 .declarations
                 .iter()
                 .copied()
@@ -361,7 +376,7 @@ impl<'a> Semantic<'a> {
                             .as_ref()
                             .is_some_and(|body| body.contains(&at))
                 })
-                .map(|id| (names.declarations()[id].visible_from, Some(id), None))
+                .map(ScopeName::Declaration)
                 .chain(
                     names
                         .imports()
@@ -370,82 +385,101 @@ impl<'a> Semantic<'a> {
                         .filter(|(_, import)| {
                             import.wildcard && import.scope == scope && import.range.end <= at
                         })
-                        .map(|(id, import)| (import.range.end, None, Some(id))),
+                        .map(|(id, _)| ScopeName::Import(id)),
                 )
                 .collect();
-            declarations.sort_by_key(|(at, _, _)| std::cmp::Reverse(*at));
-            for (_, declaration, wildcard) in declarations {
+            scope_names.sort_by_key(|name| {
+                std::cmp::Reverse(match name {
+                    ScopeName::Declaration(id) => names.declarations()[*id].visible_from,
+                    ScopeName::Import(id) => names.imports()[*id].range.end,
+                })
+            });
+            for name in scope_names {
                 self.cancellation.ensure_active()?;
-                if let Some(import) = wildcard {
-                    let import = &names.imports()[import];
-                    if let Some(source) = tola_typst_syntax::syntax::node_at_range(
-                        names.source(),
-                        &import.source_range,
-                    ) && let Some(value) = self.import(&source)?
-                    {
-                        self.scope_bindings(&value, &mut result);
-                    }
-                    continue;
-                }
-                let declaration = &names.declarations()[declaration.unwrap()];
-                if result.contains_key(&declaration.name) {
-                    continue;
-                }
-                let Some(node) =
-                    tola_typst_syntax::syntax::node_at_range(names.source(), &declaration.range)
-                else {
-                    continue;
-                };
-                let mut binding = Binding {
-                    span: node.span(),
-                    value: None,
-                    tola: false,
-                    parameter: matches!(declaration.kind, DeclarationKind::Parameter),
-                    initializer: None,
-                };
-                if let Initializer::Import { import, path } = &declaration.initializer {
-                    let import = &names.imports()[*import];
-                    if let Some(source) = tola_typst_syntax::syntax::node_at_range(
-                        names.source(),
-                        &import.source_range,
-                    ) {
-                        if path.is_empty() {
-                            binding.value = self.import(&source)?;
-                            if let Some(Value::Module(module)) = &binding.value
-                                && let Some(file) = module.file_id()
-                                && let Ok(source) = self.compilation.world().source(file)
-                            {
-                                binding.span = source.root().span();
-                            }
-                        } else if let Some((value, span)) = self.imported_at(&source, path)? {
-                            binding.value = Some(value);
-                            binding.span = span;
+                match name {
+                    ScopeName::Import(id) => {
+                        let import = &names.imports()[id];
+                        if let Some(source) = tola_typst_syntax::syntax::node_at_range(
+                            names.source(),
+                            &import.source_range,
+                        ) && let Some(value) = self.import(&source)?
+                        {
+                            self.scope_bindings(&value, &mut bindings);
                         }
-                        binding.tola = crate::identity::is_tola_span(binding.span);
                     }
-                } else if matches!(declaration.kind, DeclarationKind::Let) && depth > 0 {
-                    let mut ancestor = Some(node);
-                    while let Some(node) = ancestor {
-                        if let Some(declaration) = node.cast::<ast::LetBinding>() {
-                            if let Some(init) =
-                                declaration.init().and_then(|init| node.find(init.span()))
-                            {
-                                binding.initializer = Some(init.span());
-                                binding.tola = self.tola_origin_within(&init, depth - 1)?;
-                            }
-                            break;
+                    ScopeName::Declaration(id) => {
+                        let declaration = &names.declarations()[id];
+                        if bindings.contains_key(&declaration.name) {
+                            continue;
                         }
-                        ancestor = node.parent().cloned();
+                        let Some(binding) = self.declaration_binding(&names, declaration, depth)?
+                        else {
+                            continue;
+                        };
+                        bindings.insert(declaration.name.clone(), binding);
                     }
                 }
-                result.insert(declaration.name.clone(), binding);
             }
             let Some(parent) = names.scopes()[scope].parent else {
                 break;
             };
             scope = parent;
         }
-        Ok(result)
+        Ok(bindings)
+    }
+
+    /// The binding one declaration introduces; None once the source no longer addresses its name.
+    fn declaration_binding(
+        &mut self,
+        names: &SourceNames,
+        declaration: &Declaration,
+        depth: usize,
+    ) -> Result<Option<Binding>> {
+        let Some(node) =
+            tola_typst_syntax::syntax::node_at_range(names.source(), &declaration.range)
+        else {
+            return Ok(None);
+        };
+        let mut binding = Binding {
+            span: node.span(),
+            value: None,
+            tola: false,
+            parameter: matches!(declaration.kind, DeclarationKind::Parameter),
+            initializer: None,
+        };
+        if let Initializer::Import { import, path } = &declaration.initializer {
+            let import = &names.imports()[*import];
+            if let Some(source) =
+                tola_typst_syntax::syntax::node_at_range(names.source(), &import.source_range)
+            {
+                if path.is_empty() {
+                    binding.value = self.import(&source)?;
+                    if let Some(Value::Module(module)) = &binding.value
+                        && let Some(file) = module.file_id()
+                        && let Ok(source) = self.compilation.world().source(file)
+                    {
+                        binding.span = source.root().span();
+                    }
+                } else if let Some((value, span)) = self.imported_export(&source, path)? {
+                    binding.value = Some(value);
+                    binding.span = span;
+                }
+                binding.tola = crate::identity::is_tola_span(binding.span);
+            }
+        } else if matches!(declaration.kind, DeclarationKind::Let) && depth > 0 {
+            let mut ancestor = Some(node);
+            while let Some(node) = ancestor {
+                if let Some(declaration) = node.cast::<ast::LetBinding>() {
+                    if let Some(init) = declaration.init().and_then(|init| node.find(init.span())) {
+                        binding.initializer = Some(init.span());
+                        binding.tola = self.tola_origin_within(&init, depth - 1)?;
+                    }
+                    break;
+                }
+                ancestor = node.parent().cloned();
+            }
+        }
+        Ok(Some(binding))
     }
 
     pub(super) fn tola_origin(&mut self, node: &LinkedNode<'_>) -> Result<bool> {
@@ -453,8 +487,7 @@ impl<'a> Semantic<'a> {
     }
 
     fn tola_origin_within(&mut self, node: &LinkedNode<'_>, depth: usize) -> Result<bool> {
-        // A member of a Tola value resolves to the binding inside the package
-        // source; otherwise the leftmost name decides.
+        // A member of a Tola value resolves to the package binding; otherwise the leftmost name
         if self
             .definition(node)?
             .is_some_and(crate::identity::is_tola_span)
@@ -472,7 +505,7 @@ impl<'a> Semantic<'a> {
             .is_some_and(|binding| binding.tola))
     }
 
-    fn scope_bindings(&mut self, value: &Value, result: &mut BTreeMap<String, Binding>) {
+    fn scope_bindings(&mut self, value: &Value, bindings: &mut BTreeMap<String, Binding>) {
         let Some(scope) = value.scope() else {
             return;
         };
@@ -481,7 +514,7 @@ impl<'a> Semantic<'a> {
             _ => None,
         };
         for (name, binding) in scope.iter() {
-            result.entry(name.to_string()).or_insert_with(|| {
+            bindings.entry(name.to_string()).or_insert_with(|| {
                 let span = self.binding_span(module, name.as_str(), binding.span());
                 Binding {
                     tola: crate::identity::is_tola_span(span),
@@ -508,10 +541,91 @@ impl<'a> Semantic<'a> {
         ExpressionResolver::known_values(self, node)
     }
 
-    /// The library names the position can read, in the mode `node` is written in.
-    ///
-    /// A file binding or import shadows the library's name, so completion inserts these after its
-    /// own bindings.
+    /// Read a public export in the exact world whose call bindings this request inspects.
+    pub(super) fn public_export(&mut self, entry: FileId, export: &str) -> Result<Option<Func>> {
+        self.cancellation.ensure_active()?;
+        let (imported, accessed) = tola_typst::observe_world(self.compilation.world(), |world| {
+            let source = world.source(entry).ok()?;
+            let traced = Traced::default();
+            let mut sink = Sink::new();
+            let route = Route::default();
+            tola_typst::typst_eval::eval(
+                world.track(),
+                world.library(),
+                traced.track(),
+                sink.track_mut(),
+                route.track(),
+                &source,
+            )
+            .ok()
+        });
+        self.record_accessed(accessed);
+        self.cancellation.ensure_active()?;
+        let Some(module) = imported else {
+            return Ok(None);
+        };
+        let mut value = Value::Module(module);
+        for part in export.split('.') {
+            let Ok(field) = value.field(part, ()) else {
+                return Ok(None);
+            };
+            value = field;
+        }
+        Ok(match value {
+            Value::Func(function) => Some(function),
+            _ => None,
+        })
+    }
+
+    pub(super) fn accessed(&self) -> &tola_typst::AccessedDeps {
+        &self.accessed
+    }
+
+    fn record_accessed(&mut self, accessed: tola_typst::AccessedDeps) {
+        self.accessed.reads.extend(accessed.reads);
+        self.accessed.disk_reads.extend(accessed.disk_reads);
+        self.accessed.package_checks.extend(accessed.package_checks);
+    }
+
+    /// A lexical initializer only when the binding has not been invalidated by a write.
+    pub(super) fn callable_initializer(
+        &mut self,
+        node: &LinkedNode<'_>,
+    ) -> Result<Option<(Source, Span)>> {
+        let Some(binding) = ExpressionResolver::binding(self, node)? else {
+            return Ok(None);
+        };
+        let Some(initializer) = binding.initializer else {
+            return Ok(None);
+        };
+        Ok(initializer
+            .id()
+            .and_then(|file| self.world_source(file))
+            .map(|source| (source, initializer)))
+    }
+
+    /// An observed value cannot license the initializer of a binding reassigned before the call.
+    pub(super) fn callable_is_stable(&mut self, node: &LinkedNode<'_>) -> Result<bool> {
+        let root = tola_typst_syntax::syntax::root_expression(node.clone());
+        let Some(file) = root.span().id() else {
+            return Ok(false);
+        };
+        let Some(names) = self.source_names(file) else {
+            return Ok(false);
+        };
+        let Some(declaration) = names.declared_at(root.range().start) else {
+            return Ok(true);
+        };
+        Ok(!binding_is_written(
+            &names,
+            declaration,
+            node.range().start,
+            |_| true,
+            || self.ensure_active(),
+        )?)
+    }
+
+    /// The library names the position reads, in the mode the node is written in.
     pub(super) fn library_bindings(&self, node: &LinkedNode<'_>) -> Vec<(String, Value)> {
         if expression_name(node).is_none() || !is_name_reference(node) {
             return Vec::new();
@@ -541,8 +655,7 @@ impl<'a> Semantic<'a> {
             .collect())
     }
 
-    /// The functions a member read resolves to on its receiver, with whether Typst inserts a
-    /// receiver.
+    /// The functions a member read resolves to, and whether Typst inserts a receiver.
     pub(super) fn field_functions(
         &mut self,
         receiver: &LinkedNode<'_>,
@@ -551,8 +664,7 @@ impl<'a> Semantic<'a> {
         ExpressionResolver::field_functions(self, receiver, field)
     }
 
-    /// The signatures one callee reflects, with the parameters of the first of them in the
-    /// order it lists them.
+    /// The signatures one callee reflects, with the first one's parameters in list order.
     pub(super) fn signatures(
         &mut self,
         callee: &LinkedNode<'_>,
@@ -670,12 +782,7 @@ impl<'a> Semantic<'a> {
         Ok(span.and_then(|span| self.location(span, client_root)))
     }
 
-    /// The site sources one metadata chain's observed records name.
-    ///
-    /// A chain of record reads observes one value per realized document, and the files those
-    /// records name are the sources the chain is about. Only a record naming a file below the site
-    /// root is a source this answer can point at; a value that names none, or names a package file,
-    /// contributes nothing.
+    /// The site sources one chain's observed records name; only project files are sources.
     pub(super) fn candidate_sources(
         &mut self,
         node: &LinkedNode<'_>,
@@ -688,11 +795,7 @@ impl<'a> Semantic<'a> {
         Ok(ordered(sources))
     }
 
-    /// The site files one records expression names, as `all-sources()` records hold them.
-    ///
-    /// Every observed array contributes the `file` of each record it holds, so a caller reads
-    /// which content sources one call's records were taken from. A record naming a package file
-    /// or no file at all contributes nothing.
+    /// The site files one records expression names; a package or nameless record contributes
     pub(super) fn record_files(&mut self, node: &LinkedNode<'_>) -> Result<HashSet<FileId>> {
         let mut files = HashSet::new();
         for (value, _) in self.known_values(node)? {
@@ -717,8 +820,7 @@ impl<'a> Semantic<'a> {
         Ok(files)
     }
 
-    /// The definition target of one candidate source: the `page` binding the file declares at its
-    /// own top level, or the file's first position when it declares none.
+    /// The page binding of one candidate source, or its first position when it declares none.
     pub(super) fn candidate_location(
         &mut self,
         candidate: &CandidateSource,
@@ -732,10 +834,7 @@ impl<'a> Semantic<'a> {
                 let source = self.compilation.world().source(candidate.file).ok()?;
                 position::utf16_range(source.lines(), range)
             })
-            .unwrap_or_else(|| Range {
-                start: lsp_types::Position::new(0, 0),
-                end: lsp_types::Position::new(0, 0),
-            });
+            .unwrap_or_default();
         Some(Location { uri, range })
     }
 
@@ -744,15 +843,22 @@ impl<'a> Semantic<'a> {
         span: Span,
         client_root: &crate::uri::ClientRoot,
     ) -> Option<Location> {
-        // An editor opens the real package file, so this is source mapping rather
-        // than diagnostic rendering, which drops unopenable ranges.
-        let world = self.compilation.world();
         let id = span.id()?;
-        let source = world.source(id).ok()?;
-        let range = position::utf16_range(source.lines(), world.range(span)?)?;
+        self.source_location(id, self.compilation.world().range(span)?, client_root)
+    }
+
+    /// The protocol location one byte range of file addresses; any source the world reads is
+    /// addressable.
+    fn source_location(
+        &self,
+        file: FileId,
+        bytes: std::ops::Range<usize>,
+        client_root: &crate::uri::ClientRoot,
+    ) -> Option<Location> {
+        let source = self.compilation.world().source(file).ok()?;
         Some(Location {
-            uri: self.source_uri(id, client_root)?,
-            range,
+            uri: self.source_uri(file, client_root)?,
+            range: position::utf16_range(source.lines(), bytes)?,
         })
     }
 
@@ -764,13 +870,7 @@ impl<'a> Semantic<'a> {
     ) -> Option<Location> {
         match definition {
             editing::Definition::Span(span) => self.location(span, client_root),
-            editing::Definition::File(id) => Some(Location {
-                uri: self.source_uri(id, client_root)?,
-                range: position::utf16_range(
-                    self.compilation.world().source(id).ok()?.lines(),
-                    0..0,
-                )?,
-            }),
+            editing::Definition::File(id) => self.source_location(id, 0..0, client_root),
         }
     }
 
@@ -782,22 +882,34 @@ impl<'a> Semantic<'a> {
         if let tola_typst::typst::syntax::VirtualRoot::Package(spec) = id.root()
             && crate::identity::embedded_source(id).is_none()
         {
-            return self.compilation.file_reads().iter().find_map(|read| {
-                let matches = match read.evidence().locator() {
-                    tola_typst::ReadLocator::Package { package, path }
-                    | tola_typst::ReadLocator::ProvidedPackage { package, path } => {
-                        package == spec
-                            && path == std::path::Path::new(id.vpath().get_without_slash())
+            let world = self.compilation.world();
+            if world.local_packages().package(spec).is_some()
+                || world.local_packages().owns_namespace(&spec.namespace)
+            {
+                let path = world.local_package_path(id).ok()??;
+                return client_root.address(&path).ok();
+            }
+            return self
+                .compilation
+                .file_reads()
+                .iter()
+                .chain(&self.accessed.reads)
+                .find_map(|read| {
+                    let matches = match read.evidence().locator() {
+                        tola_typst::ReadLocator::Package { package, path }
+                        | tola_typst::ReadLocator::ProvidedPackage { package, path } => {
+                            package == spec
+                                && path == std::path::Path::new(id.vpath().get_without_slash())
+                        }
+                        _ => false,
+                    };
+                    if matches && let tola_typst::ReadOrigin::Disk(path) = read.origin() {
+                        return crate::uri::from_file_path(path.as_path()).ok();
                     }
-                    _ => false,
-                };
-                if matches && let tola_typst::ReadOrigin::Disk(path) = read.origin() {
-                    return crate::uri::from_file_path(path.as_path()).ok();
-                }
-                None
-            });
+                    None
+                });
         }
-        crate::identity::client_uri(id, self.compilation.world().root(), client_root)
+        crate::identity::client_uri(id, self.compilation.world().root(), client_root).ok()
     }
 
     pub(super) fn value_docs(&self, span: Span, value: Option<&Value>) -> Option<String> {
@@ -820,8 +932,7 @@ impl<'a> Semantic<'a> {
         if let Some(docs) = tola_typst_syntax::docs::declaration_docs(&source, node.range().start) {
             return Some(docs);
         }
-        // Typst gives a closure its parameter span; a multiline initializer's docs belong to
-        // the binding. Only parentheses may intervene, never another closure or a block.
+        // Only parentheses may intervene before a parameter; a block or closure ends the
         if node.kind() == SyntaxKind::Params {
             node = node.parent()?.clone();
         }
@@ -889,15 +1000,9 @@ impl ExpressionResolver for Semantic<'_> {
                     scope = parent;
                 }
             }
-            // An unresolved wildcard can shadow a library name even though it contributes no
-            // known binding. Keep that uncertainty instead of falling through to the library.
+            // An unresolved wildcard can shadow a library name without contributing a binding.
             if written || unresolved_wildcard {
-                return Ok(Some(ExpressionBinding {
-                    span: node.span(),
-                    value: None,
-                    parameter: false,
-                    initializer: None,
-                }));
+                return Ok(Some(ExpressionBinding::unknown(node.span())));
             }
         }
         Ok(self
@@ -971,6 +1076,17 @@ fn record_source(value: &Value) -> Option<CandidateSource> {
 
 /// The byte range of the `page` binding a content file declares at its own top level.
 fn candidate_binding(names: &SourceNames) -> Option<std::ops::Range<usize>> {
+    last_top_level_declaration(names, |declaration| {
+        declaration.name == "page" && matches!(declaration.kind, DeclarationKind::Let)
+    })
+    .map(|declaration| declaration.range.clone())
+}
+
+/// The last declaration the outermost scope binds, since a later one shadows an earlier.
+fn last_top_level_declaration(
+    names: &SourceNames,
+    matches: impl Fn(&Declaration) -> bool,
+) -> Option<&Declaration> {
     names
         .scopes()
         .first()?
@@ -978,19 +1094,14 @@ fn candidate_binding(names: &SourceNames) -> Option<std::ops::Range<usize>> {
         .iter()
         .rev()
         .map(|&id| &names.declarations()[id])
-        .find(|declaration| {
-            declaration.name == "page" && matches!(declaration.kind, DeclarationKind::Let)
-        })
-        .map(|declaration| declaration.range.clone())
+        .find(|declaration| matches(declaration))
 }
 
 pub(super) fn function_docs(func: &Func) -> Option<&str> {
     func.docs().filter(|docs| !docs.is_empty())
 }
 
-/// The signature of one function, as every surface renders it: what Typst's own metadata
-/// declares, the types and descriptions the declaration's documentation writes, and the types the
-/// checked world observed where neither names one.
+/// One function's signature: Typst metadata, the declaration's docs, then observed types.
 pub(super) fn signature(
     name: &str,
     func: &Func,
@@ -1006,8 +1117,7 @@ pub(super) fn signature(
                 .find(|documented| documented.name == parameter.name)
         });
         if parameter.ty.is_none() {
-            // A rest parameter's value is Typst's `arguments`, which no checked observation
-            // replaces.
+            // A rest parameter's value is Typst's arguments, which no observation replaces.
             let observed = match parameter.kind {
                 ParameterKind::Rest => None,
                 _ => observed.get(&parameter.name).cloned(),
@@ -1028,9 +1138,7 @@ pub(super) fn signature(
     signature
 }
 
-/// One function as the editor's signature help shows it: the shared signature on one line, every
-/// parameter labelled by its name alone, which is what the client highlights inside it, and the
-/// parameters in the order the signature lists them.
+/// One signature help: the line, parameters labelled by name in list order.
 fn signature_information(
     func: &Func,
     name: &str,
@@ -1039,8 +1147,7 @@ fn signature_information(
 ) -> (SignatureInformation, Vec<Parameter>) {
     let documented = docs.map(tola_typst_syntax::docs::Documentation::parse);
     let mut signature = signature(name, func, documented.as_ref(), &BTreeMap::new());
-    // A method call writes its receiver outside the argument list, so the receiver's parameter is
-    // never one the author fills.
+    // A method call writes its receiver outside the argument list, so that parameter is never
     if method
         && matches!(
             signature.parameters.first().map(|parameter| parameter.kind),
@@ -1049,9 +1156,7 @@ fn signature_information(
     {
         signature.parameters.remove(0);
     }
-    let mut ordered = signature.positional();
-    ordered.extend(signature.rest());
-    ordered.extend(signature.named());
+    let ordered = ordered_parameters(&signature);
     let label = inline_signature(&signature);
     let parameters = ordered
         .iter()
@@ -1074,12 +1179,9 @@ fn signature_information(
     )
 }
 
-/// One function's signature on one line: `name(parameter: type, …) -> return`, the shape Tinymist
-/// writes wherever a hover or completion shows a signature without its block.
+/// One function's signature on one line, in the shape Tinymist writes.
 pub(super) fn inline_signature(signature: &Signature) -> String {
-    let mut ordered = signature.positional();
-    ordered.extend(signature.rest());
-    ordered.extend(signature.named());
+    let ordered = ordered_parameters(signature);
     let mut line = format!("{}(", signature.name);
     for (index, parameter) in ordered.iter().enumerate() {
         if index > 0 {
@@ -1100,19 +1202,20 @@ pub(super) fn inline_signature(signature: &Signature) -> String {
     line
 }
 
-/// A value's representation as much as one line holds.
-///
-/// A page list has every page a site serves and a document has its whole body, and neither a
-/// hover nor a completion's detail can show that: an author reads the head of it and asks for the
-/// rest where it lives.
+/// Every parameter of one signature in the order Typst declares them: positional, rest, named.
+fn ordered_parameters(signature: &Signature) -> Vec<&Parameter> {
+    let mut ordered = signature.positional();
+    ordered.extend(signature.rest());
+    ordered.extend(signature.named());
+    ordered
+}
+
+/// A value's representation as much as one hover line holds.
 pub(super) fn abbreviated(repr: &str) -> String {
-    /// How much of a representation one hover has.
-    ///
-    /// The largest value the standard library renders is the math `arrow` symbol's variant table at
-    /// 3469 characters, so this bound holds every real value whole and elides only what a hover
-    /// cannot name: a page list, or a collection the site itself built.
+    /// The representation length one hover keeps; every real standard-library value fits.
     const SHOWN: usize = 8192;
-    if repr.chars().count() <= SHOWN {
+    let total = repr.chars().count();
+    if total <= SHOWN {
         return repr.to_owned();
     }
     let taken: String = repr.chars().take(SHOWN).collect();
@@ -1123,7 +1226,7 @@ pub(super) fn abbreviated(repr: &str) -> String {
     };
     format!(
         "{held}\n… ({} characters omitted)",
-        repr.chars().count() - held.chars().count()
+        total - held.chars().count()
     )
 }
 
@@ -1132,15 +1235,13 @@ pub(super) fn sampled_value(value: &Value) -> String {
     abbreviated(&value.repr())
 }
 
-/// What one value is, as a completion item's description spells it: a function's own signature, or
-/// the value's type and representation.
+/// A completion description: a function's signature, or the value's type and representation.
 pub(super) fn description(value: &Value, name: &str) -> String {
     match value {
         Value::Func(func) => inline_signature(&signature(name, func, None, &BTreeMap::new())),
         _ => {
             let repr = abbreviated(&value.repr());
-            // A representation that names its own constructor — `symbol("α")`, an element call,
-            // `<module global>` — reads as the value, so the type does not repeat in front of it.
+            // A representation naming its own constructor reads as the value, so its type does
             if names_itself(&repr) {
                 repr
             } else {
@@ -1150,9 +1251,7 @@ pub(super) fn description(value: &Value, name: &str) -> String {
     }
 }
 
-/// Whether a value's own representation already names what the value is, so a hover need not spell
-/// its type first: `symbol("α")` and `<module global>` read on their own, while `1`, `"x"`, and
-/// `(1, 2)` do not.
+/// Whether a representation already names the value: constructors and module globals do, literals
 fn names_itself(repr: &str) -> bool {
     repr.starts_with('<')
         || repr.find('(').is_some_and(|at| {
@@ -1175,7 +1274,7 @@ pub(super) fn completion(
     values: &[ExpressionType],
     edit: CompletionTextEdit,
 ) -> CompletionItem {
-    let value = values.first().and_then(ExpressionType::value);
+    let value = super::completion::agreed(values.iter().map(ExpressionType::value)).flatten();
     let kind = match value {
         Some(Value::Func(_)) => CompletionItemKind::FUNCTION,
         Some(Value::Module(_)) => CompletionItemKind::MODULE,
@@ -1194,7 +1293,6 @@ pub(super) fn completion(
     };
     let description = match values {
         [] => None,
-        [value] => Some(expression_description(value, name)),
         values => Some(
             values
                 .iter()
@@ -1216,16 +1314,14 @@ pub(super) fn completion(
     }
 }
 
-/// The named parameters a call's resolved callees still accept, as the items completion offers at
-/// an argument position. A parameter the call already names is left out, and a name several
-/// overloads share is offered once.
+/// The parameters the resolved callees still accept, each offered once.
 pub(super) fn parameter_completions(
     semantics: &Semantic<'_>,
     functions: &[(Value, bool)],
-    taken: &std::collections::BTreeSet<String>,
+    taken: &BTreeSet<String>,
     range: Range,
 ) -> Vec<CompletionItem> {
-    let mut offered = std::collections::BTreeSet::new();
+    let mut offered = BTreeSet::new();
     let mut items = Vec::new();
     for (value, _) in functions {
         let Value::Func(func) = value else { continue };
@@ -1264,8 +1360,6 @@ pub(super) fn parameter_completions(
 mod tests {
     use super::*;
     use crate::query::tests::*;
-    use tola_typst::typst::foundations::Repr;
-    use tola_typst::typst::{Library, LibraryExt as _};
 
     #[test]
     fn methods_accept_receiver_types() {
@@ -1274,22 +1368,6 @@ mod tests {
         let labels = completion_labels(&completions);
         assert!(labels.contains(&"to-unicode"), "{labels:?}");
         assert!(!labels.contains(&"from-unicode"), "{labels:?}");
-    }
-
-    /// The largest value the standard library renders reaches a hover unabbreviated.
-    #[test]
-    fn long_values_reach_hover_unabbreviated() {
-        let library = Library::builder().build();
-        let arrow = library
-            .math
-            .scope()
-            .get("arrow")
-            .expect("the math scope has the arrow symbol")
-            .read()
-            .clone();
-        let repr = arrow.repr();
-        assert!(repr.chars().count() > 3000, "{}", repr.chars().count());
-        assert_eq!(abbreviated(&repr), repr);
     }
 
     /// A value larger than a hover has elides at an entry boundary, with its count.

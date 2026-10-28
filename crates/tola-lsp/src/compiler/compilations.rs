@@ -9,6 +9,9 @@ use tola_build::check::{SourceDiagnosticSession, SourceRevision};
 use tola_build::config::ResolvedSiteConfig;
 use tola_typst::typst::World;
 
+use super::jobs::SourceInputs;
+use super::worker::SourceFailure;
+
 /// The compiled sources one revision retains, keyed by the exact unsaved sources they were
 /// produced from.
 ///
@@ -68,7 +71,7 @@ impl RevisionCompilations {
             if let Some(compiled) = self
                 .compilations
                 .iter()
-                .find(|compiled| same_sources(&compiled.sources, &sources))
+                .find(|compiled| compiled.sources == sources)
             {
                 return Ok(Arc::clone(&compiled.compiled));
             }
@@ -89,6 +92,23 @@ impl RevisionCompilations {
             self.retain(sources, &compiled);
         }
         Ok(compiled)
+    }
+
+    /// The revision one job's sources compile to, or the failure that stopped it.
+    pub(crate) fn inspect_job(
+        &mut self,
+        session: &mut SourceDiagnosticSession,
+        configuration: &Arc<ResolvedSiteConfig>,
+        sources: &SourceInputs,
+    ) -> Result<Arc<SourceRevision>, SourceFailure> {
+        self.inspect(
+            session,
+            configuration,
+            sources.source_revision,
+            sources.overrides.to_vec(),
+            &sources.cancellation,
+        )
+        .map_err(SourceFailure::from)
     }
 
     /// Adopt the configuration and revision this read belongs to, and report whether the
@@ -158,11 +178,11 @@ fn resolves_the_same(
     let held = compiled
         .sources
         .iter()
-        .map(|(path, text)| (path.as_path(), text))
+        .map(|(path, text)| (path.as_path(), &**text))
         .collect::<BTreeMap<_, _>>();
     let requested = sources
         .iter()
-        .map(|(path, text)| (path.as_path(), text))
+        .map(|(path, text)| (path.as_path(), &**text))
         .collect::<BTreeMap<_, _>>();
     held.keys()
         .chain(requested.keys())
@@ -173,25 +193,10 @@ fn resolves_the_same(
             let Some(requested_text) = requested.get(path) else {
                 return false;
             };
-            let world_text = crate::identity::path_id(path, configuration.get_root())
+            crate::identity::path_id(path, configuration.get_root())
                 .and_then(|id| world.source(id).ok())
-                .map(|source| source.text().to_owned());
-            Some(requested_text.to_string()) == world_text
+                .is_some_and(|resolved| resolved.text() == *requested_text)
         })
-}
-
-/// Whether two unsaved-source sets read the same text under the same paths.
-///
-/// A pin or a repair rebuilds its set for every request, so the same inputs are equal paths
-/// with equal text, never the same allocations.
-fn same_sources(left: &[(PathBuf, Arc<str>)], right: &[(PathBuf, Arc<str>)]) -> bool {
-    left.len() == right.len()
-        && left
-            .iter()
-            .zip(right)
-            .all(|((left_path, left_text), (right_path, right_text))| {
-                left_path == right_path && left_text == right_text
-            })
 }
 
 #[cfg(test)]

@@ -10,9 +10,6 @@ use super::semantic::Semantic;
 
 impl Selection<'_> {
     /// The narrowing actions one metadata chain inside a collection closure justifies.
-    ///
-    /// The checked world names the files the chain's records came from; a narrowed collection
-    /// keeps only the records whose own path is the chosen file.
     pub(super) fn narrowing(
         &self,
         uri: &lsp_types::Uri,
@@ -41,11 +38,11 @@ impl Selection<'_> {
         };
         let sources = semantics
             .candidate_sources(&node)?
-            .iter()
-            .filter_map(|candidate| {
+            .into_iter()
+            .filter_map(|source| {
                 Some(crate::code_actions::NarrowingSource {
-                    site_path: candidate.site_path.clone(),
-                    content_path: candidate.content_path.clone()?,
+                    site_path: source.site_path,
+                    content_path: source.content_path?,
                 })
             })
             .collect::<Vec<_>>();
@@ -89,7 +86,7 @@ mod tests {
 
     /// A metadata chain outside a filter closure offers no narrowing action.
     #[test]
-    fn metadata_chain_outside_filter_offers_no_action() {
+    fn chain_outside_filter_offers_nothing() {
         let program = parsed_program(PAGE_SCHEMA).replace(
             "#let kept = declared.filter(source => not source.meta.draft)",
             "#let kept = declared\n#let draft = declared.first().meta.draft",
