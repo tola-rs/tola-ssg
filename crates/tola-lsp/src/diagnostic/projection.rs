@@ -9,7 +9,9 @@ use lsp_types::{
     Diagnostic as EditorDiagnostic, DiagnosticRelatedInformation, DiagnosticSeverity,
     DiagnosticTag, Location as EditorLocation, NumberOrString, Position, Range, Uri,
 };
-use tola_build::diagnostic::{Diagnostic, Location, Severity, SourcePosition, SourceRange};
+use tola_diagnostic::{
+    Diagnostic, DiagnosticSource, Location, Severity, SourcePosition, SourceRange,
+};
 use tola_typst_syntax::position::{Utf16Position, Utf16Range, byte_offset as source_byte_offset};
 use tola_typst_syntax::typst_syntax::Lines;
 
@@ -33,7 +35,7 @@ pub(super) fn protocol_source_range(range: Range) -> SourceRange {
 }
 
 /// The record range one compiler-model range addresses.
-pub(super) fn compiler_source_range(range: Utf16Range) -> SourceRange {
+pub(crate) fn compiler_source_range(range: Utf16Range) -> SourceRange {
     let at = |position: Utf16Position| SourcePosition {
         line: position.line as usize,
         character: position.character as usize,
@@ -44,7 +46,8 @@ pub(super) fn compiler_source_range(range: Utf16Range) -> SourceRange {
     }
 }
 
-pub(super) fn diagnostic_path(root: &Path, location: &Location) -> Option<PathBuf> {
+/// The site path one diagnostic location names, absent when it names a package file.
+pub(super) fn location_path(root: &Path, location: &Location) -> Option<PathBuf> {
     if location.path.starts_with('@') {
         return None;
     }
@@ -58,48 +61,122 @@ pub(super) fn diagnostic_path(root: &Path, location: &Location) -> Option<PathBu
     ))
 }
 
-/// One diagnostic as the editor reads it.
-///
-/// `fold_related` decides where a help or trace that has a site location keeps its text:
-/// beside the location it names, or in the message for a client that reads no related
-/// information. `texts` supplies the file text every range is projected through.
-pub(super) fn editor_diagnostic(
-    mut diagnostic: Diagnostic,
+/// A validated report maps only to the exact text its host evidence describes.
+fn evidence_path(
     root: &Path,
-    entry: &Path,
-    client_root: &crate::uri::ClientRoot,
-    fold_related: bool,
+    location: &Location,
+    source: Option<&DiagnosticSource>,
     texts: &mut DiagnosticTexts<'_>,
-) -> Result<(PathBuf, EditorDiagnostic)> {
+) -> Option<PathBuf> {
+    match source {
+        Some(source) => {
+            let path = tola_build::filesystem::normalize_existing_prefix(source.editor_path()?);
+            let text = texts.text(&path)?;
+            (text.digest == source.input_identity().1).then_some(path)
+        }
+        None => location_path(root, location),
+    }
+}
+
+/// Where one diagnostic's advice goes: beside the location it names, or in the message.
+struct Advice<'a, 'b> {
+    root: &'a Path,
+    client_root: &'a crate::uri::ClientRoot,
+    fold_related: bool,
+    projected: &'b mut EditorDiagnostic,
+    texts: &'b mut DiagnosticTexts<'a>,
+    folded: Vec<String>,
+}
+
+impl<'a, 'b> Advice<'a, 'b> {
+    fn push(
+        &mut self,
+        location: Option<&Location>,
+        source: Option<&DiagnosticSource>,
+        label: &str,
+        message: &str,
+    ) -> Result<()> {
+        let located = if self.fold_related { None } else { location };
+        if let Some(location) = located
+            && let Some(path) = evidence_path(self.root, location, source, self.texts)
+        {
+            add_related(
+                self.projected,
+                self.client_root,
+                &path,
+                location,
+                message,
+                self.texts,
+            )?;
+            return Ok(());
+        }
+        self.folded
+            .push(advice_line(self.root, location, label, message));
+        Ok(())
+    }
+}
+
+/// One diagnostic as the editor reads it, with `texts` supplying each range's file text.
+pub(super) fn editor_diagnostic<'a>(
+    mut diagnostic: Diagnostic,
+    root: &'a Path,
+    entry: &Path,
+    client_root: &'a crate::uri::ClientRoot,
+    fold_related: bool,
+    texts: &mut DiagnosticTexts<'a>,
+) -> Result<Option<(PathBuf, EditorDiagnostic)>> {
     use std::fmt::Write as _;
 
-    refine_refused_source(&mut diagnostic, root);
-    refine_unresolved_import(&mut diagnostic);
+    let public_report = diagnostic.producer.is_some();
+    if !public_report {
+        refine_refused_source(&mut diagnostic, root);
+        refine_unresolved_import(&mut diagnostic);
+    }
 
     let primary = diagnostic
         .location
         .as_ref()
-        .filter(|location| !location.path.starts_with('@'))
+        .filter(|location| diagnostic.source.is_some() || !location.path.starts_with('@'))
         .or_else(|| {
+            if public_report {
+                return None;
+            }
             diagnostic
                 .trace
                 .iter()
                 .filter_map(|frame| frame.location.as_ref())
                 .find(|location| !location.path.starts_with('@'))
         });
-    let located = primary.and_then(|location| diagnostic_path(root, location));
-    let path = located
-        .as_deref()
-        .map_or_else(|| entry.to_path_buf(), Path::to_path_buf);
+    let located = primary
+        .and_then(|location| evidence_path(root, location, diagnostic.source.as_ref(), texts));
+    if public_report
+        && (located.is_none() || primary.is_none_or(|location| location.range.is_none()))
+    {
+        return Ok(None);
+    }
     let range = diagnostic_range(primary, located.as_deref(), texts);
+    let path = located.unwrap_or_else(|| entry.to_path_buf());
     let mut projected = EditorDiagnostic::new(
         range,
         Some(match diagnostic.severity {
             Severity::Error => DiagnosticSeverity::ERROR,
             Severity::Warning => DiagnosticSeverity::WARNING,
+            Severity::Info => DiagnosticSeverity::INFORMATION,
+            Severity::Hint => DiagnosticSeverity::HINT,
         }),
-        Some(NumberOrString::String(diagnostic.code.to_string())),
-        Some("tola".into()),
+        match &diagnostic.producer {
+            Some(producer) => producer.code.clone().map(NumberOrString::String),
+            None => Some(NumberOrString::String(diagnostic.code.to_string())),
+        },
+        Some(
+            diagnostic
+                .producer
+                .as_ref()
+                .map_or("tola", |producer| {
+                    producer.name.as_deref().unwrap_or("unknown")
+                })
+                .into(),
+        ),
         diagnostic.display_message().to_owned(),
         None,
         None,
@@ -110,63 +187,43 @@ pub(super) fn editor_diagnostic(
     }
     // Code no spelling reads is dead weight, and the editor greys it out rather than counting it as
     // a mistake the author must fix.
-    if diagnostic.code == tola_build::codes::check::UNUSED_IMPORT
+    if diagnostic.code == tola_diagnostic::codes::check::UNUSED_IMPORT
         || diagnostic.code == crate::codes::editor::UNUSED_BINDING
         || diagnostic.code == crate::codes::editor::DEAD_STORE
     {
         projected.tags = Some(vec![DiagnosticTag::UNNECESSARY]);
     }
-    let mut folded = Vec::new();
+    let mut advice = Advice {
+        root,
+        client_root,
+        fold_related,
+        projected: &mut projected,
+        texts,
+        folded: Vec::new(),
+    };
     for help in diagnostic.distinct_help() {
-        match &help.location {
-            Some(location) => {
-                if !fold_related && let Some(path) = diagnostic_path(root, location) {
-                    add_related(
-                        &mut projected,
-                        client_root,
-                        &path,
-                        location,
-                        help.message.clone(),
-                        texts,
-                    )?;
-                } else {
-                    folded.push(format!(
-                        "{}: help: {}",
-                        spelled_location(root, location),
-                        help.message,
-                    ));
-                }
-            }
-            None => folded.push(format!("help: {}", help.message)),
-        }
+        advice.push(help.location.as_ref(), None, "help: ", &help.message)?;
+    }
+    for related in &diagnostic.related {
+        let location = related
+            .location
+            .as_ref()
+            .filter(|location| location.range.is_some());
+        advice.push(
+            location,
+            related.source.as_ref(),
+            "related: ",
+            &related.message,
+        )?;
     }
     // A source metadata issue names a field, not a site call: the editor does not surface the
     // parse pipeline that reached it.
-    if diagnostic.code != tola_build::codes::source::METADATA {
+    if diagnostic.code != tola_diagnostic::codes::source::METADATA {
         for frame in &diagnostic.trace {
-            match &frame.location {
-                Some(location) => {
-                    if !fold_related && let Some(path) = diagnostic_path(root, location) {
-                        add_related(
-                            &mut projected,
-                            client_root,
-                            &path,
-                            location,
-                            frame.message.clone(),
-                            texts,
-                        )?;
-                    } else {
-                        folded.push(format!(
-                            "{}: {}",
-                            spelled_location(root, location),
-                            frame.message,
-                        ));
-                    }
-                }
-                None => folded.push(frame.message.clone()),
-            }
+            advice.push(frame.location.as_ref(), None, "", &frame.message)?;
         }
     }
+    let Advice { folded, .. } = advice;
     // The label lets an editor reader separate notes, help, and trace text from the message.
     for note in diagnostic.distinct_notes() {
         write!(&mut projected.message, "\nnote: {note}").expect("String formatting is infallible");
@@ -174,7 +231,7 @@ pub(super) fn editor_diagnostic(
     for line in folded {
         write!(&mut projected.message, "\n{line}").expect("String formatting is infallible");
     }
-    Ok((path, projected))
+    Ok(Some((path, projected)))
 }
 
 fn spelled_location(root: &Path, location: &Location) -> String {
@@ -194,13 +251,24 @@ fn spelled_location(root: &Path, location: &Location) -> String {
     spelled
 }
 
+/// The message line one help, related note, or trace frame reads as.
+///
+/// `label` separates it from the diagnostic's own message; an unlocated piece of advice carries
+/// the label alone.
+fn advice_line(root: &Path, location: Option<&Location>, label: &str, message: &str) -> String {
+    match location {
+        Some(location) => format!("{}: {label}{message}", spelled_location(root, location)),
+        None => format!("{label}{message}"),
+    }
+}
+
 /// One located help or trace that points into the site, as related information.
 fn add_related(
     diagnostic: &mut EditorDiagnostic,
     client_root: &crate::uri::ClientRoot,
     path: &Path,
     location: &Location,
-    description: String,
+    message: &str,
     texts: &mut DiagnosticTexts<'_>,
 ) -> Result<()> {
     diagnostic
@@ -211,7 +279,7 @@ fn add_related(
                 client_root.address(path)?,
                 diagnostic_range(Some(location), Some(path), texts),
             ),
-            message: description,
+            message: message.to_owned(),
         });
     Ok(())
 }
@@ -231,6 +299,7 @@ pub(super) struct DiagnosticTexts<'a> {
 /// breaks first disagree is a property of the text: finding it once here is what keeps projecting
 /// a file's every diagnostic from rescanning a prefix of the file per range.
 struct ProjectedText {
+    digest: tola_typst::ContentDigest,
     lines: Lines<String>,
     first_break: Option<usize>,
 }
@@ -245,27 +314,26 @@ impl DiagnosticTexts<'_> {
 
     /// The text of one file, absent when no text reaches it.
     fn text(&mut self, path: &Path) -> Option<&ProjectedText> {
-        if !self.texts.contains_key(path) {
-            let text = self
-                .open_text(path)
-                .or_else(|| std::fs::read_to_string(path).ok());
-            self.texts.insert(
-                path.to_path_buf(),
-                text.map(|text| ProjectedText {
-                    first_break: crate::position::first_break(&text),
-                    lines: Lines::new(text),
-                }),
-            );
-        }
-        self.texts.get(path).and_then(Option::as_ref)
+        let open = self.open;
+        self.texts
+            .entry(path.to_path_buf())
+            .or_insert_with(|| {
+                open_text(open, path)
+                    .or_else(|| std::fs::read_to_string(path).ok())
+                    .map(|text| ProjectedText {
+                        digest: tola_typst::ContentDigest::of(text.as_bytes()),
+                        first_break: crate::position::first_break(&text),
+                        lines: Lines::new(text),
+                    })
+            })
+            .as_ref()
     }
+}
 
-    /// The text the editor holds for one file, absent when it holds none.
-    fn open_text(&self, path: &Path) -> Option<String> {
-        let view = self.open.view();
-        let uri: Uri = self.open.versions_for_path(path).next()?.0.parse().ok()?;
-        Some(view.get(&uri)?.source.text().to_owned())
-    }
+/// The text the editor holds for one file, absent when it holds none.
+fn open_text(open: &OpenSources, path: &Path) -> Option<String> {
+    let uri: Uri = open.versions_for_path(path).next()?.0.parse().ok()?;
+    Some(open.source(&uri)?.text().to_owned())
 }
 
 /// The text of one compiler line of `lines`, without its ending.
@@ -359,15 +427,15 @@ fn inferred_source_range(
     });
     // The excerpt is the text its producer meant; only a location that retained no excerpt and a
     // column needs the file's own line read to convert it.
-    let owned = (location.source_lines.is_empty() && location.column.is_some())
-        .then(|| {
-            path.and_then(|path| texts.text(path))
-                .and_then(|text| line_text(&text.lines, line))
-        })
-        .flatten();
+    let file_line = if location.source_lines.is_empty() && location.column.is_some() {
+        path.and_then(|path| texts.text(path))
+            .and_then(|text| line_text(&text.lines, line))
+    } else {
+        None
+    };
     let text = excerpt
         .map(|excerpt| excerpt.text.as_str())
-        .or(owned.as_deref());
+        .or(file_line.as_deref());
     let start_character = excerpt.map_or(0, |excerpt| excerpt.start_character);
     let (start, end) = match text {
         Some(text) => match excerpt.and_then(|excerpt| excerpt.highlight) {
@@ -404,7 +472,7 @@ mod tests {
     use super::*;
     use crate::diagnostic::tests::Site;
     use lsp_types::Position;
-    use tola_build::diagnostic::DiagnosticCause;
+    use tola_diagnostic::DiagnosticCause;
 
     /// One location a producer named without its text.
     fn located_at(path: &str, line: usize, column: usize) -> Location {
@@ -415,6 +483,20 @@ mod tests {
             range: None,
             source_lines: Vec::new(),
         }
+    }
+
+    /// One diagnostic as the projection reads it, through the site the test built.
+    fn project(site: &Site, diagnostic: Diagnostic) -> Option<(PathBuf, EditorDiagnostic)> {
+        let mut texts = DiagnosticTexts::new(&site.open);
+        editor_diagnostic(
+            diagnostic,
+            &site.physical,
+            &site.physical.join("site.typ"),
+            &crate::uri::ClientRoot::new(&site.physical),
+            false,
+            &mut texts,
+        )
+        .unwrap()
     }
 
     /// One projected diagnostic, which every case in this module expects to be alone.
@@ -457,7 +539,7 @@ mod tests {
             let mut site = Site::new(&[("content/page.typ", "Body\n")]);
             site.publish(vec![
                 Diagnostic::at_path(
-                    tola_build::codes::typst::COMPILE,
+                    tola_diagnostic::codes::typst::COMPILE,
                     Severity::Error,
                     "content/page.typ",
                     "unrepresentable span",
@@ -476,7 +558,7 @@ mod tests {
         let mut site = Site::new(&[("content/page.typ", "one\u{2028}two\nthree\n")]);
         site.publish(vec![
             Diagnostic::at_path(
-                tola_build::codes::typst::COMPILE,
+                tola_diagnostic::codes::typst::COMPILE,
                 Severity::Error,
                 "content/page.typ",
                 "source error",
@@ -538,12 +620,12 @@ mod tests {
             for related in [false, true] {
                 let mut site = Site::new(&[("content/page.typ", "Body\n")]);
                 let mut diagnostic = Diagnostic::at_path(
-                    tola_build::codes::typst::COMPILE,
+                    tola_diagnostic::codes::typst::COMPILE,
                     Severity::Error,
                     "content/page.typ",
                     "primary failure",
                 );
-                let help = tola_build::diagnostic::Help {
+                let help = tola_diagnostic::Help {
                     message: case.advice.into(),
                     location: case.location.clone(),
                 };
@@ -577,12 +659,12 @@ mod tests {
     fn source_metadata_omits_the_parse_trace() {
         let mut site = Site::new(&[("content/page.typ", "Body\n")]);
         let mut diagnostic = Diagnostic::at_path(
-            tola_build::codes::source::METADATA,
+            tola_diagnostic::codes::source::METADATA,
             Severity::Error,
             "content/page.typ",
             "`$.published` is not set",
         );
-        diagnostic.trace.push(tola_build::diagnostic::TraceFrame {
+        diagnostic.trace.push(tola_diagnostic::TraceFrame {
             message: "while calling `select-pages`".into(),
             location: Some(located_at("site/pages.typ", 2, 2)),
         });
@@ -597,7 +679,7 @@ mod tests {
         let mut site = Site::new(&[("content/page.typ", "Body\n")]);
         site.publish(vec![
             Diagnostic::at_path(
-                tola_build::codes::typst::COMPILE,
+                tola_diagnostic::codes::typst::COMPILE,
                 Severity::Error,
                 "content/page.typ",
                 "unknown variable",
@@ -611,5 +693,255 @@ mod tests {
             diagnostic.data,
             Some(serde_json::json!({ "kind": "unknown-variable", "name": "missing" }))
         );
+    }
+    /// A report the site declares reaches the editor with its own level and code, projected
+    /// through the unsaved buffer that declared it.
+    #[test]
+    fn public_projects_through_unsaved_buffer() {
+        use std::sync::Arc;
+        use tola_build::{cancellation::BuildCancellation, check::SourceDiagnosticSession};
+        let mut site = Site::new(&[
+            (
+                "site.typ",
+                "#document(\"index.html\")[#include \"content/page.typ\"]",
+            ),
+            ("content/page.typ", "Saved body"),
+            ("tola.toml", ""),
+        ]);
+        let overlay = "#import \"@tola/diagnostic:0.0.0\": report\n#let value = emph[unsaved 🧭]\n#report(\"unknown variable\", severity: \"info\", code: \"typst.compile/中文\", at: value, hints: (\"Correction\",), related: ((message: \"Context\", at: value), (message: \"Unlocated context\", at: none)))";
+        site.open("content/page.typ", overlay);
+        let config = crate::compiler::tests::site_configuration(&site.physical, "");
+        let mut session = SourceDiagnosticSession::new(config);
+        let revision = session
+            .inspect(
+                vec![(site.physical.join("content/page.typ"), Arc::from(overlay))],
+                &BuildCancellation::new(),
+            )
+            .unwrap();
+        assert!(
+            revision.compiled(),
+            "info does not fail checking: {:?}",
+            revision.diagnostics()
+        );
+        site.publish_with(
+            &crate::diagnostic::tests::features(),
+            revision.into_diagnostics(),
+        );
+        let report = site
+            .diagnostics()
+            .into_iter()
+            .find(|diagnostic| diagnostic.source.as_deref() == Some("project"))
+            .expect("public issue reaches the open source");
+        assert_eq!(report.severity, Some(DiagnosticSeverity::INFORMATION));
+        assert_eq!(
+            report.code,
+            Some(NumberOrString::String("typst.compile/中文".into()))
+        );
+        assert!(report.data.is_none(), "report text cannot infer a core fix");
+        assert_eq!(report.range.start.line, 1);
+        assert!(report.range.end.character > report.range.start.character);
+        assert_eq!(report.related_information.as_ref().unwrap().len(), 1);
+        assert!(report.message.contains("help: Correction"));
+        assert!(report.message.contains("related: Unlocated context"));
+        assert_eq!(
+            std::fs::read_to_string(site.physical.join("content/page.typ")).unwrap(),
+            "Saved body"
+        );
+    }
+
+    #[test]
+    fn unlocated_reports_are_not_diagnostics() {
+        let site = Site::new(&[("content/page.typ", "Body")]);
+        let mut diagnostic = Diagnostic::new(
+            tola_diagnostic::codes::report::ISSUE,
+            Severity::Error,
+            "unlocated issue",
+        );
+        diagnostic.producer = Some(tola_diagnostic::DiagnosticProducer {
+            name: Some("project".into()),
+            code: None,
+        });
+        assert!(project(&site, diagnostic).is_none());
+    }
+    #[test]
+    fn external_never_editor_file_mappings() {
+        let site = Site::new(&[("content/page.typ", "Actual editor text")]);
+        let mut diagnostic = Diagnostic::at_path(
+            tola_diagnostic::codes::report::ISSUE,
+            Severity::Warning,
+            "content/page.typ",
+            "external issue",
+        );
+        diagnostic.producer = Some(tola_diagnostic::DiagnosticProducer {
+            name: Some("command:catalog".into()),
+            code: Some("rule".into()),
+        });
+        diagnostic.location.as_mut().unwrap().range = Some(SourceRange {
+            start: SourcePosition {
+                line: 0,
+                character: 0,
+            },
+            end: SourcePosition {
+                line: 0,
+                character: 1,
+            },
+        });
+        let evidence = DiagnosticSource::new(
+            tola_typst::ReadLocator::NonPersistent("snapshot-only".into()),
+            tola_typst::ContentDigest::of(b"Actual editor text"),
+        );
+        diagnostic.source = Some(evidence.clone());
+        assert!(project(&site, diagnostic.clone()).is_none());
+        let actual = site.physical.join("content/page.typ");
+        diagnostic.source = Some(evidence.with_editor_path(actual.clone()));
+        diagnostic.location.as_mut().unwrap().path = "Shared human-readable label".into();
+        diagnostic
+            .related
+            .push(tola_diagnostic::RelatedInformation {
+                message: "unmapped related snapshot".into(),
+                location: diagnostic.location.clone(),
+                source: Some(DiagnosticSource::new(
+                    tola_typst::ReadLocator::NonPersistent("related-only".into()),
+                    tola_typst::ContentDigest::of(b"Actual editor text"),
+                )),
+            });
+        let (path, projected) = project(&site, diagnostic).unwrap();
+        assert_eq!(path, actual);
+        assert!(projected.related_information.is_none());
+        assert!(
+            projected
+                .message
+                .contains("related: unmapped related snapshot")
+        );
+    }
+
+    #[test]
+    fn unlocated_report_ignores_trace_location() {
+        let site = Site::new(&[("content/page.typ", "Body")]);
+        let mut diagnostic = Diagnostic::new(
+            tola_diagnostic::codes::report::ISSUE,
+            Severity::Warning,
+            "unlocated report",
+        );
+        diagnostic.producer = Some(tola_diagnostic::DiagnosticProducer {
+            name: Some("project".into()),
+            code: None,
+        });
+        let mut location = located_at("content/page.typ", 1, 1);
+        location.range = Some(SourceRange {
+            start: SourcePosition {
+                line: 0,
+                character: 0,
+            },
+            end: SourcePosition {
+                line: 0,
+                character: 1,
+            },
+        });
+        diagnostic.trace.push(tola_diagnostic::TraceFrame {
+            message: "real caller".into(),
+            location: Some(location),
+        });
+        assert!(project(&site, diagnostic).is_none());
+    }
+    #[test]
+    fn external_ranges_need_current_digest() {
+        let mut site = Site::new(&[("content/page.typ", "abc")]);
+        site.open("content/page.typ", "🦊abc");
+        let path = site.physical.join("content/page.typ");
+        let mut diagnostic = Diagnostic::at_path(
+            tola_diagnostic::codes::report::ISSUE,
+            Severity::Warning,
+            "snapshot label",
+            "checked source",
+        );
+        diagnostic.producer = Some(tola_diagnostic::DiagnosticProducer {
+            name: Some("checker".into()),
+            code: Some("rule".into()),
+        });
+        diagnostic.location.as_mut().unwrap().range = Some(SourceRange {
+            start: SourcePosition {
+                line: 0,
+                character: 0,
+            },
+            end: SourcePosition {
+                line: 0,
+                character: 3,
+            },
+        });
+        let source = |text: &str| {
+            DiagnosticSource::new(
+                tola_typst::ReadLocator::ProvidedRoot("content/page.typ".into()),
+                tola_typst::ContentDigest::of(text.as_bytes()),
+            )
+            .with_editor_path(path.clone())
+        };
+        diagnostic.source = Some(source("abc"));
+        assert!(
+            project(&site, diagnostic.clone()).is_none(),
+            "a saved-file digest cannot authorize a range on a changed open buffer"
+        );
+        let old_location = diagnostic.location.clone();
+        diagnostic.source = Some(source("🦊abc"));
+        diagnostic.location.as_mut().unwrap().range = Some(SourceRange {
+            start: SourcePosition {
+                line: 0,
+                character: 2,
+            },
+            end: SourcePosition {
+                line: 0,
+                character: 5,
+            },
+        });
+        diagnostic
+            .related
+            .push(tola_diagnostic::RelatedInformation {
+                message: "old related range".into(),
+                location: old_location,
+                source: Some(source("abc")),
+            });
+        let (_, projected) = project(&site, diagnostic).unwrap();
+        assert_eq!(
+            projected.range,
+            Range::new(Position::new(0, 2), Position::new(0, 5))
+        );
+        assert!(
+            projected.related_information.is_none(),
+            "related positions also need matching input evidence"
+        );
+        assert!(projected.message.contains("related: old related range"));
+    }
+
+    #[test]
+    fn external_need_readable_current_text() {
+        let site = Site::new(&[]);
+        let mut diagnostic = Diagnostic::at_path(
+            tola_diagnostic::codes::report::ISSUE,
+            Severity::Warning,
+            "missing snapshot",
+            "unreadable source",
+        );
+        diagnostic.producer = Some(tola_diagnostic::DiagnosticProducer {
+            name: Some("checker".into()),
+            code: None,
+        });
+        diagnostic.location.as_mut().unwrap().range = Some(SourceRange {
+            start: SourcePosition {
+                line: 0,
+                character: 0,
+            },
+            end: SourcePosition {
+                line: 0,
+                character: 1,
+            },
+        });
+        diagnostic.source = Some(
+            DiagnosticSource::new(
+                tola_typst::ReadLocator::ProvidedRoot("absent.typ".into()),
+                tola_typst::ContentDigest::of(b"a"),
+            )
+            .with_editor_path(site.physical.join("absent.typ")),
+        );
+        assert!(project(&site, diagnostic).is_none());
     }
 }

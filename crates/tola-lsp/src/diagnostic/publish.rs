@@ -8,8 +8,7 @@ use anyhow::{Context, Result};
 use lsp_server::{Message, Notification};
 use lsp_types::notification::{Notification as LspNotification, PublishDiagnostics};
 use lsp_types::{Diagnostic as EditorDiagnostic, PublishDiagnosticsParams, Uri};
-use tola_build::diagnostic::Diagnostic;
-use tola_typst::typst::syntax::VirtualRoot;
+use tola_diagnostic::{Diagnostic, Severity};
 use tola_typst_syntax::names;
 
 use crate::sources::OpenSources;
@@ -45,9 +44,15 @@ impl ClientDiagnostics {
         // located help or trace folds into the message it belongs to below.
         let fold_related = !features.reads_related_information();
         let mut texts = DiagnosticTexts::new(open);
-        let unread = unread_import_diagnostics(unread_documents(open, None).0, selected);
+        let unread = unread_import_diagnostics(unread_documents(open, None).documents, selected);
         for diagnostic in diagnostics.into_iter().chain(unread) {
-            let (path, diagnostic) = editor_diagnostic(
+            // A diagnostic no site document reaches is logged instead, and the log line is built
+            // before the projection consumes the diagnostic.
+            let log_line = diagnostic
+                .producer
+                .is_some()
+                .then(|| log_message(&diagnostic));
+            let projected = editor_diagnostic(
                 diagnostic,
                 root,
                 entry,
@@ -55,7 +60,16 @@ impl ClientDiagnostics {
                 fold_related,
                 &mut texts,
             )?;
-            documents.entry(path).or_default().push(diagnostic);
+            if let Some((path, diagnostic)) = projected {
+                documents.entry(path).or_default().push(diagnostic);
+            } else if let Some((message, typ)) = log_line {
+                let notification: Message = Notification::new(
+                    <lsp_types::notification::LogMessage as LspNotification>::METHOD.into(),
+                    lsp_types::LogMessageParams { typ, message },
+                )
+                .into();
+                notification.write(output)?;
+            }
         }
         let mut current = BTreeSet::new();
         for (path, diagnostics) in documents {
@@ -71,7 +85,12 @@ impl ClientDiagnostics {
                 }
             }
         }
-        let stale: Vec<String> = self.published.difference(&current).cloned().collect();
+        let stale: Vec<_> = self
+            .reports
+            .keys()
+            .filter(|uri| !current.contains(*uri))
+            .cloned()
+            .collect();
         for uri in stale {
             let version = open.version(&uri);
             let uri: Uri = uri.parse().context("published document URI is invalid")?;
@@ -80,7 +99,6 @@ impl ClientDiagnostics {
         // A report answers only for a document this check addressed: any other document pulls as
         // an empty report, which is what this publish just told the client about it.
         self.reports.retain(|uri, _| current.contains(uri));
-        self.published = current;
         Ok(())
     }
 
@@ -115,7 +133,10 @@ impl ClientDiagnostics {
         if features.pull_diagnostics {
             return Ok(());
         }
-        publish_document(output, &parameters)
+        let message: Message =
+            Notification::new(PublishDiagnostics::METHOD.into(), &parameters).into();
+        message.write(output)?;
+        Ok(())
     }
 
     /// Every URI and version the client holds for one path, or the path's own URI when it holds
@@ -138,31 +159,117 @@ impl ClientDiagnostics {
 
     /// The site's own files the client holds open.
     ///
-    /// The file id has the site-relative path, and the root the id was built against is the
-    /// site root this check resolved, so joining the two names the
-    /// document exactly as the open-source table does. A document of another root — a builtin
-    /// package's own file — is not this site's to report on.
+    /// The file id has the site-relative path, and the root the id was built against is the site
+    /// root this check resolved, so joining the two names the document exactly as the open-source
+    /// table does. A document of another root — a builtin package's own file — is not this site's
+    /// to report on.
     fn held_documents(&self, root: &Path, open: &OpenSources) -> Vec<PathBuf> {
         let root = tola_build::filesystem::normalize_existing_prefix(root);
         open.view()
             .iter()
-            .filter(|parsed| matches!(parsed.source.id().root(), VirtualRoot::Project))
             .map(|parsed| root.join(parsed.source.id().vpath().get_without_slash()))
             .collect()
     }
 }
 
-fn publish_document(output: &mut impl Write, parameters: &PublishDiagnosticsParams) -> Result<()> {
-    let message: Message = Notification::new(PublishDiagnostics::METHOD.into(), parameters).into();
-    message.write(output)?;
-    Ok(())
+/// The log line one diagnostic no site document reaches reads as.
+fn log_message(diagnostic: &Diagnostic) -> (String, lsp_types::MessageType) {
+    let (level, typ) = match diagnostic.severity {
+        Severity::Error => ("error", lsp_types::MessageType::ERROR),
+        Severity::Warning => ("warning", lsp_types::MessageType::WARNING),
+        Severity::Info => ("info", lsp_types::MessageType::INFO),
+        Severity::Hint => ("hint", lsp_types::MessageType::LOG),
+    };
+    let mut message = format!(
+        "{level}[{}]: {}",
+        diagnostic.code_label(),
+        diagnostic.message
+    );
+    for help in diagnostic.distinct_help() {
+        message.push_str(&format!("\nhelp: {}", help.message));
+    }
+    for related in &diagnostic.related {
+        let location = related
+            .location
+            .as_ref()
+            .map(|location| {
+                let mut path = location.path.clone();
+                if let Some(line) = location.line {
+                    path.push_str(&format!(":{line}"));
+                }
+                path.push_str(": ");
+                path
+            })
+            .unwrap_or_default();
+        message.push_str(&format!("\nrelated: {location}{}", related.message));
+    }
+    (message, typ)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::diagnostic::tests::{features, reports, selected_interfaces};
-    use tola_build::diagnostic::{Diagnostic, Severity};
+    use tola_diagnostic::{Diagnostic, Severity};
+
+    #[test]
+    fn vanished_reports_clear_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let open = OpenSources::new(&root);
+        let selected = selected_interfaces(&root, &open);
+        let mut client = ClientDiagnostics::new(root.clone());
+        let mut sent = Vec::new();
+        for path in [Some("first.typ"), Some("second.typ"), None, None] {
+            let mut bytes = Vec::new();
+            client
+                .publish(
+                    &mut bytes,
+                    &root,
+                    &root.join("site.typ"),
+                    &open,
+                    &features(),
+                    &selected,
+                    path.into_iter()
+                        .map(|path| {
+                            Diagnostic::at_path(
+                                tola_diagnostic::codes::typst::COMPILE,
+                                Severity::Error,
+                                path,
+                                "source error",
+                            )
+                        })
+                        .collect(),
+                )
+                .unwrap();
+            sent.push(
+                reports(&mut std::io::Cursor::new(bytes))
+                    .into_iter()
+                    .map(|report| {
+                        (
+                            crate::uri::to_file_path(report.uri.as_str())
+                                .unwrap()
+                                .file_name()
+                                .unwrap()
+                                .to_str()
+                                .unwrap()
+                                .to_owned(),
+                            report.diagnostics.is_empty(),
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            );
+        }
+        assert_eq!(
+            sent,
+            [
+                vec![("first.typ".into(), false)],
+                vec![("second.typ".into(), false), ("first.typ".into(), true)],
+                vec![("second.typ".into(), true)],
+                Vec::new(),
+            ]
+        );
+    }
     /// A document the client never opened has no URI of its own, so its report is addressed under
     /// the root the client named: the resolved spelling would name a document no editor opened.
     #[test]
@@ -190,7 +297,7 @@ mod tests {
                 &features(),
                 &selected,
                 vec![Diagnostic::at_path(
-                    tola_build::codes::typst::COMPILE,
+                    tola_diagnostic::codes::typst::COMPILE,
                     Severity::Error,
                     page.to_string_lossy(),
                     "source error",

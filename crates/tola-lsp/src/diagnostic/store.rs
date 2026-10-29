@@ -1,7 +1,7 @@
 //! The reports one connection holds: each document's last report, the result id it answers a
 //! pull with, and the selection index a completed check built.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -18,7 +18,6 @@ pub(crate) struct ClientDiagnostics {
     /// A document the client holds is addressed by the URI the client opened it with; every other
     /// document — one the author never opened — is addressed under this root.
     pub(super) root: crate::uri::ClientRoot,
-    pub(super) published: BTreeSet<String>,
     /// Each document's last report, keyed by the URI the client addressed it by.
     ///
     /// A report outlives the check that produced it: a pull request answers with it. Owned by this
@@ -42,7 +41,6 @@ impl ClientDiagnostics {
     pub(super) fn with_root(root: crate::uri::ClientRoot) -> Self {
         Self {
             root,
-            published: BTreeSet::new(),
             reports: BTreeMap::new(),
             result_serial: 0,
             selection: None,
@@ -91,14 +89,17 @@ impl ClientDiagnostics {
     /// have been checked since the client opened it.
     pub(crate) fn pull(&self, uri: &Uri, previous: Option<&str>, synced: Option<i32>) -> Pulled {
         let report = self.reports.get(uri.as_str());
-        // A report that names no version, or another version, cannot be vouched for.
-        if let (Some(report), Some(synced)) = (report, synced)
-            && report.version != Some(synced)
+        if let Some(report) = report
+            && !report.vouches_for(synced)
         {
             return Pulled::Stale;
         }
-        let result_id =
-            report.map_or_else(|| self.unreported_id(), |report| report.result_id.clone());
+        // No report has taken a serial for this document yet: the first one to arrive changes this
+        // id, so a client pulling an empty report is told to ask again rather than trust it.
+        let result_id = report.map_or_else(
+            || format!("tola/{}", self.result_serial),
+            |report| report.result_id.clone(),
+        );
         if previous == Some(result_id.as_str()) {
             return Pulled::Report(DocumentDiagnosticReport::Unchanged(
                 RelatedUnchangedDocumentDiagnosticReport {
@@ -118,14 +119,6 @@ impl ClientDiagnostics {
                 },
             },
         ))
-    }
-
-    /// The result id a document no check has reported answers with.
-    ///
-    /// No report has taken a serial yet, so the first one to arrive changes this id and the client
-    /// pulls again instead of trusting an empty report.
-    fn unreported_id(&self) -> String {
-        format!("tola/{}", self.result_serial)
     }
 
     /// Versions restart on open, so an earlier session cannot vouch for the new buffer.
@@ -148,12 +141,9 @@ impl ClientDiagnostics {
         synced: Option<i32>,
     ) -> Option<&[EditorDiagnostic]> {
         let report = self.reports.get(uri.as_str())?;
-        if let Some(synced) = synced
-            && report.version != Some(synced)
-        {
-            return None;
-        }
-        Some(&report.cause_diagnostics)
+        report
+            .vouches_for(synced)
+            .then_some(&report.cause_diagnostics)
     }
 
     /// Keep one document's report, giving it a new result id only when its items change.
@@ -190,10 +180,6 @@ impl ClientDiagnostics {
 }
 
 /// What one document's pull request answers with.
-///
-/// A report is only answered for the version the client has synced: one that names another
-/// version, or none at all, is refused, which is the protocol's shape for a report the server
-/// cannot vouch for, and the client asks again once the site's own state settles.
 #[derive(Debug, PartialEq)]
 pub(crate) enum Pulled {
     /// The report to display, or the word that the one the client holds still stands.
@@ -214,17 +200,25 @@ pub(super) struct Report {
     result_id: String,
 }
 
+impl Report {
+    /// Whether this report answers for the version the client has synced.
+    ///
+    /// A report that names no version, or another version, cannot be vouched for.
+    fn vouches_for(&self, synced: Option<i32>) -> bool {
+        synced.is_none_or(|synced| self.version == Some(synced))
+    }
+}
+
 /// Whether one item has a cause a correction reads.
 ///
 /// An unread import is left out: `unused_imports` recomputes that correction from the text the
 /// editor holds, so a client's echo never has to hold it.
 pub(super) fn carries_cause(diagnostic: &EditorDiagnostic) -> bool {
-    let unread_import = match &diagnostic.code {
-        Some(NumberOrString::String(code)) => {
-            code.as_str() == tola_build::codes::check::UNUSED_IMPORT.as_str()
-        }
-        _ => false,
-    };
+    let unread_import = matches!(
+        &diagnostic.code,
+        Some(NumberOrString::String(code))
+            if code.as_str() == tola_diagnostic::codes::check::UNUSED_IMPORT.as_str()
+    );
     diagnostic.data.is_some() && !unread_import
 }
 
@@ -235,7 +229,7 @@ mod tests {
     use crate::sources::OpenSources;
     use lsp_server::Notification;
     use lsp_types::notification::Notification as LspNotification;
-    use tola_build::diagnostic::{Diagnostic, DiagnosticCause, Severity};
+    use tola_diagnostic::{Diagnostic, DiagnosticCause, Severity};
 
     /// One open document and the checks a test reports on it.
     struct Checked {
@@ -251,7 +245,7 @@ mod tests {
             let root = tempfile::tempdir().unwrap();
             let uri = crate::uri::from_file_path(&root.path().join("document.typ")).unwrap();
             let mut open = OpenSources::new(root.path());
-            open_source(&mut open, uri.clone(), 1);
+            open_source(&mut open, uri.clone(), 1, "source");
             Self {
                 client: ClientDiagnostics::new(root.path().to_path_buf()),
                 root,
@@ -280,7 +274,7 @@ mod tests {
                         .iter()
                         .map(|message| {
                             Diagnostic::at_path(
-                                tola_build::codes::typst::COMPILE,
+                                tola_diagnostic::codes::typst::COMPILE,
                                 Severity::Error,
                                 path.to_string_lossy(),
                                 *message,
@@ -394,7 +388,7 @@ mod tests {
             &bare_features(),
             vec![
                 Diagnostic::at_path(
-                    tola_build::codes::typst::COMPILE,
+                    tola_diagnostic::codes::typst::COMPILE,
                     Severity::Error,
                     "content/page.typ",
                     "unknown variable `missing`",
