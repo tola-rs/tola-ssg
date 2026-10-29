@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use lsp_types::{Diagnostic as EditorDiagnostic, Uri};
-use tola_build::diagnostic::{Diagnostic, DiagnosticCause, Severity, UnreadRemoval};
+use tola_diagnostic::{Diagnostic, DiagnosticCause, Severity, UnreadRemoval};
 use tola_typst::typst::syntax::Source;
 use tola_typst_syntax::names::{self, ImportRemoval, SourceNames};
 
@@ -37,34 +37,30 @@ impl ClientDiagnostics {
         let requested = crate::uri::to_site_path(uri.as_str())?;
         let requested = tola_build::filesystem::normalize_existing_prefix(&requested);
         let mut texts = DiagnosticTexts::new(open);
-        let (documents, file_scope) = unread_documents(open, Some(source));
+        let unread = unread_documents(open, Some(source));
         let unproven = names::SelectedInterfaces {
             unresolved: true,
             selected: Default::default(),
         };
         let selection = self.selection_for(revision, root);
-        let selected = match (&selection, file_scope) {
+        let selected = match (&selection, unread.needs_selection) {
             (Some(selected), _) => selected.as_ref(),
-            (None, false) => &unproven,
             (None, true) => return Ok(UnreadImports::NeedsSelection),
+            (None, false) => &unproven,
         };
-        let diagnostics = unread_import_diagnostics(documents, selected)
-            .into_iter()
+        let mut answered = Vec::new();
+        for diagnostic in unread_import_diagnostics(unread.documents, selected) {
             // Nothing this call builds has a located help or trace, so nothing folds.
-            .map(|diagnostic| {
-                editor_diagnostic(diagnostic, root, &requested, &self.root, false, &mut texts)
-            })
-            .filter_map(|projected| match projected {
-                Ok((path, diagnostic))
-                    if tola_build::filesystem::normalize_existing_prefix(&path) == requested =>
-                {
-                    Some(Ok(diagnostic))
-                }
-                Ok(_) => None,
-                Err(error) => Some(Err(error)),
-            })
-            .collect::<Result<Vec<_>>>()?;
-        Ok(UnreadImports::Answered(diagnostics))
+            let projected =
+                editor_diagnostic(diagnostic, root, &requested, &self.root, false, &mut texts)?;
+            let Some((path, diagnostic)) = projected else {
+                continue;
+            };
+            if tola_build::filesystem::normalize_existing_prefix(&path) == requested {
+                answered.push(diagnostic);
+            }
+        }
+        Ok(UnreadImports::Answered(answered))
     }
 }
 
@@ -86,15 +82,21 @@ pub(super) struct UnreadDocument {
     unread: Vec<names::UnreadImport>,
 }
 
-/// Every document's unread imports, and whether any statement among them needs the site's
-/// selections: a binding the file's own scope holds is another source's to select, while a nested
-/// one reaches no other source.
+/// Every document whose own text leaves an unread import, and whether any of those statements is
+/// another source's to select.
+pub(super) struct UnreadDocuments {
+    /// One entry per document holding at least one unread import.
+    pub(super) documents: Vec<UnreadDocument>,
+    /// Whether a statement's bindings the file's own scope holds is another source's to select:
+    /// only the site's own selection index can tell one unread from one another source reads.
+    pub(super) needs_selection: bool,
+}
+
+/// The unread imports every document the connection holds leaves.
 ///
-/// The connection parses each open document once, so this reads the index it already holds.
-pub(super) fn unread_documents(
-    open: &OpenSources,
-    requested: Option<&Source>,
-) -> (Vec<UnreadDocument>, bool) {
+/// An open document is read through the index the connection already parsed; a `requested` source
+/// the open table does not hold is parsed here instead.
+pub(super) fn unread_documents(open: &OpenSources, requested: Option<&Source>) -> UnreadDocuments {
     let mut documents = Vec::new();
     for parsed in open.view().iter() {
         let path = parsed.source.id().vpath().get_without_slash().to_owned();
@@ -125,10 +127,13 @@ pub(super) fn unread_documents(
             });
         }
     }
-    let file_scope = documents
+    let needs_selection = documents
         .iter()
         .any(|document| document.unread.iter().any(|unread| unread.file_scope));
-    (documents, file_scope)
+    UnreadDocuments {
+        documents,
+        needs_selection,
+    }
 }
 
 /// The unread imports of these documents that `selected` licenses.
@@ -142,8 +147,8 @@ pub(super) fn unread_import_diagnostics(
 ) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
     for document in documents {
+        let lines = document.names.source().lines();
         for unread in document.names.reportable_unread_imports(selected) {
-            let lines = document.names.source().lines();
             let Some(statement) = crate::position::utf16_range(lines, unread.statement.clone())
             else {
                 continue;
@@ -171,7 +176,7 @@ pub(super) fn unread_import_diagnostics(
             };
             diagnostics.push(
                 Diagnostic::at_path(
-                    tola_build::codes::check::UNUSED_IMPORT,
+                    tola_diagnostic::codes::check::UNUSED_IMPORT,
                     Severity::Warning,
                     document.path.clone(),
                     format!("{} imported but unused", quoted(&unread.names)),
@@ -193,7 +198,7 @@ mod tests {
     use lsp_types::{DiagnosticSeverity, DiagnosticTag, NumberOrString};
 
     #[test]
-    fn unused_import_reaches_the_client_as_unnecessary() {
+    fn unused_import_reaches_client_unnecessary() {
         let mut site = Site::new(&[("content/helpers.typ", "#let helper = 1\n#let orphan = 2\n")]);
         site.open(
             "content/partial.typ",
