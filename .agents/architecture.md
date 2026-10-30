@@ -304,6 +304,8 @@ Keep source paths, normalized physical paths, logical output paths, public URLs,
 
 ## Derived descriptions
 
+`@tola/graph` owns finite directed multigraphs of caller-supplied values. Its internal Typst indexes support ordered reachability and selections, while the public edge records preserve original input indices and payloads.
+
 A virtual package's exports have two derived descriptions outside the package source: `README.md` and `.agents/skills/tola/SKILL.md`. Changing an export, its signature, or its meaning requires updating both in the same change. `tola skill` compiles `SKILL.md` into the binary, so a stale list reaches every site author who runs it. Names come from the packages: `TolaPackage::exports` reads each entrypoint's top-level `#let` bindings (destructuring and closures included) and the members its explicit `import` statements publish, under the name the statement spells or renames with `as`, once per name; a wildcard import and a statement inside a function body publish nothing. `package_exports_match_their_entrypoints` holds every real entrypoint to the set it publishes, so a form the reader stops understanding fails a test instead of dropping a name silently.
 
 `tola-packages::docs` reads package overviews from the entrypoint's opening `//` block and export

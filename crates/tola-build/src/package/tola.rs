@@ -813,6 +813,122 @@ path = "icons/brand"
     }
 
     #[test]
+    fn graph_preserves_identity() {
+        assert_package(
+            "graph",
+            r##"
+#let nodes = ((id: "b", payload: none), (id: "a", payload: [rich]), (id: "", payload: 9), (id: "isolated", payload: none))
+#let links = ((from: "a", to: "b", payload: [one]), (from: "a", to: "b", payload: [one]), (from: "b", to: "b", payload: none), (from: "b", to: "", payload: 4))
+#let g = from-records(nodes, links, node-key: n => n.id, source: e => e.from, target: e => e.to)
+#assert.eq(node-keys(g), ("b", "a", "", "isolated"))
+#assert(has-node(g, "isolated"))
+#assert(not has-node(g, "missing"))
+#assert.eq(node-data(g, "isolated").payload, none)
+#assert.eq(node-data(g, "a").payload, [rich])
+#assert.eq(edges(g).map(e => e.index), (0, 1, 2, 3))
+#assert.eq(edges(g).at(0).data, links.at(0))
+#assert.eq(out-edges(g, "a").map(e => e.index), (0, 1))
+#assert.eq(in-edges(g, "b").map(e => e.index), (0, 1, 2))
+#assert.eq(out-edges(g, "b").map(e => e.index), (2, 3))
+#assert.eq(in-edges(g, "isolated"), ())
+#let chosen = select-edges(g, e => e.index == 1 or e.index == 3)
+#assert.eq(node-keys(chosen), node-keys(g))
+#assert.eq(edges(chosen).map(e => e.index), (1, 3))
+#assert.eq(out-edges(chosen, "a").map(e => e.index), (1,))
+#let sub = induced(g, ("", "b", "b"))
+#assert.eq(node-keys(sub), ("b", ""))
+#assert.eq(edges(sub).map(e => e.index), (2, 3))
+#assert.eq(edges(g).len(), 4)
+#let changed = edges(g)
+#changed.at(0).insert("source", "changed")
+#assert.eq(edges(g).at(0).source, "a")
+#let rich = from-records((none,), ([edge],), node-key: _ => "n", source: _ => "n", target: _ => "n")
+#assert(has-node(rich, "n"))
+#assert.eq(node-data(rich, "n"), none)
+#assert.eq(edges(rich).at(0).data, [edge])
+#assert.eq(edges(select-edges(rich, _ => true)).at(0).data, [edge])
+#let keys = ("A", "a", "é", "é")
+#let exact = from-records(keys, ())
+#assert.eq(node-keys(exact), keys)
+#let callable = from-records((x => x + 1,), (x => x + 2,), node-key: _ => "f", source: _ => "f", target: _ => "f")
+#let node-fn = node-data(callable, "f")
+#let edge-fn = edges(induced(callable, ("f",))).at(0).data
+#assert.eq(node-fn(1), 2)
+#assert.eq(edge-fn(1), 3)
+"##,
+        );
+    }
+
+    #[test]
+    fn graph_reachability_includes_roots() {
+        assert_package(
+            "graph",
+            r##"
+#let g = from-records(("b", "a", "c", "isolated"), ((source: "a", target: "b"), (source: "b", target: "a"), (source: "b", target: "c"), (source: "c", target: "c")))
+#assert.eq(reachable(g, ("a",)), ("b", "a", "c"))
+#assert.eq(reachable(g, ("a", "b", "a")), ("b", "a", "c"))
+#assert.eq(reachable(g, ("c",), direction: "in"), ("b", "a", "c"))
+#assert.eq(reachable(g, ("isolated",)), ("isolated",))
+#assert.eq(reachable(g, ()), ())
+#let chain = from-records(("a", "b"), ((source: "a", target: "b"),))
+#assert.eq(reachable(chain, ("a",)), ("a", "b"))
+#assert.eq(reachable(chain, ("a", "b")), ("a", "b"))
+"##,
+        );
+    }
+
+    #[test]
+    fn graph_rejects_invalid_values() {
+        for expression in [
+            "from-records(none, ())",
+            "from-records((), none)",
+            "from-records((1,), ())",
+            r#"from-records(("a", "a"), ())"#,
+            r#"from-records(("a",), ((source: "missing", target: "a"),))"#,
+            r#"from-records(("a",), ((source: "a", target: "missing"),))"#,
+            r#"from-records(("a",), ((source: 1, target: "a"),))"#,
+            r#"from-records(("a",), ((source: "a", target: none),))"#,
+            r#"has-node(from-records((), ()), 1)"#,
+            r#"node-data(from-records((), ()), "missing")"#,
+            r#"in-edges(from-records((), ()), "missing")"#,
+            r#"out-edges(from-records((), ()), "missing")"#,
+            r#"reachable(from-records((), ()), ("missing",))"#,
+            r#"reachable(from-records((), ()), (), direction: "both")"#,
+            r#"reachable(from-records((), ()), none)"#,
+            r#"induced(from-records((), ()), ("missing",))"#,
+            r#"induced(from-records((), ()), none)"#,
+            r#"select-edges(from-records(("a",), ((source: "a", target: "a"),)), e => none)"#,
+        ] {
+            reject_package("graph", &format!("#let value = {expression}"));
+        }
+    }
+
+    #[test]
+    fn graph_endpoints_identify_unknown_keys() {
+        for (expression, endpoint) in [
+            (
+                r#"from-records(("a",), ((source: "missing", target: "a"),))"#,
+                "source",
+            ),
+            (
+                r#"from-records(("a",), ((source: "a", target: "missing"),))"#,
+                "target",
+            ),
+        ] {
+            let (_directory, world) = package_world(&package_program(
+                "graph",
+                &format!("#let graph = {expression}"),
+            ));
+            let failure =
+                tola_typst::compile_bundle_world(&world, &Default::default()).unwrap_err();
+            let error = failure.diagnostics().unwrap().errors().next().unwrap();
+            for detail in ["index 0", endpoint, "missing"] {
+                assert!(error.message.contains(detail), "{error:?}");
+            }
+        }
+    }
+
+    #[test]
     fn package_guards_locate_calls() {
         for (package, expression, details) in [
             ("collection", "pick(none, ())", ["`fields`", "none"]),

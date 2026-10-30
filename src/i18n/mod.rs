@@ -342,6 +342,7 @@ static PACKAGES: LazyLock<BTreeMap<&'static str, PackageTranslations>> = LazyLoc
             "collection",
             include_str!("zh-Hans/packages/collection.toml"),
         ),
+        ("graph", include_str!("zh-Hans/packages/graph.toml")),
         ("schema", include_str!("zh-Hans/packages/schema.toml")),
         ("document", include_str!("zh-Hans/packages/document.toml")),
         ("code", include_str!("zh-Hans/packages/code.toml")),

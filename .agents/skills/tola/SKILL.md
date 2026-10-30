@@ -369,6 +369,17 @@ recomputing destinations is how links drift.
   from the array. Hierarchy keys must be unique and non-`none`, and the parent rule must reach
   `none`. Contracts: `tola help "@tola/collection"`.
 
+### Explicit graphs
+
+`@tola/graph:0.0.0` builds one directed graph from node and edge values you supply:
+`from-records`, `node-keys`, `has-node`, `node-data`, `edges`, `in-edges`, `out-edges`,
+`reachable`, `select-edges`, and `induced`. Node keys are exact, unique strings; extract them
+with `node-key`, and an edge's endpoints with `source` and `target`, or keep the defaults (the
+node itself, `edge.source`, `edge.target`). Parallel edges, cycles, and isolated nodes are all
+ordinary. Edge records carry `index`, `source`, `target`, and your original `data`; an `index`
+survives selections but means nothing across constructions. `reachable` includes its roots and
+returns nodes in registration order. Contracts: `tola help "@tola/graph"`.
+
 ### Breadcrumbs and a section sidebar
 
 For the scaffold, add `order: optional(int, default: 0)` to `site/schema.typ` and write an overview
