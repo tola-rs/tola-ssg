@@ -1,0 +1,223 @@
+# Simplified-Chinese documentation of `@tola/graph`. English stays authoritative in the
+# package's own Typst sources; a unit here overrides one of them.
+
+overview = '''
+用两组你自己提供的值——节点和边——建一张图，然后查看、遍历、缩小它。
+
+- 建图：`from-records`
+- 查看：`node-keys`、`has-node`、`node-data`、`edges`、`in-edges`、`out-edges`
+- 遍历：`reachable`
+- 缩小：`select-edges`、`induced`
+
+节点键是提取函数返回的字符串；默认就是节点值本身，所以字符串节点不必写提取函数。键唯一，空字符串也是普通键。边可以是平行边、环或自环；没有边的节点仍然是节点。所有结果都保持你传入的顺序：节点按登记顺序，边按输入顺序，你给的值原样返回。边记录还带有它在原图中的 `index`；这个 index 只在当前图以及从它筛出的图中标识这条边，换一次构造就不再通用。
+
+图只能通过下面的函数读取，字段是私有的。
+'''
+
+[exports.from-records]
+
+summary = [
+  '''
+从节点值和边值建图。
+
+`node-key` 读取节点的键，`source` 和 `target` 读取边的两端。默认把字符串节点当作它自己的键，并从边的 `source`、`target` 字段取端点，所以你的记录可以带上其他内容。
+
+约束：`nodes`、`edges` 必须是数组；每个提取函数对每个输入值各调用一次；`node-key` 必须返回唯一的字符串；每条边的两端都必须指向已登记的节点。
+
+Example - 建图并读回来：
+''',
+  '''
+Example - 用你自己的记录，并指定字段名：
+''',
+  '',
+]
+
+[exports.from-records.parameters]
+
+nodes = "按登记顺序排列的节点值。"
+
+edges = "按输入顺序排列的边值。"
+
+node-key = "接收一个节点，返回它的字符串键。"
+
+source = "接收一条边，返回它的源节点键。"
+
+target = "接收一条边，返回它的目标节点键。"
+
+[exports.node-keys]
+
+summary = [
+  '''
+按登记顺序返回所有节点键，孤立节点也算。
+
+Example - 没有边的节点照样出现：
+''',
+  '',
+]
+
+[exports.node-keys.parameters]
+
+graph = "要读取的图。"
+
+[exports.has-node]
+
+summary = [
+  '''
+判断 `key` 是否已登记的节点。
+
+键必须是精确的字符串；节点值为 `none` 也算已登记。
+
+约束：非字符串的键会报错。
+
+Example - 分清已登记的节点和不存在的节点：
+''',
+  '',
+]
+
+[exports.has-node.parameters]
+
+graph = "要读取的图。"
+
+key = "精确的节点键。"
+
+[exports.node-data]
+
+summary = [
+  '''
+返回你为 `key` 登记的节点所提供的原值。
+
+约束：`key` 必须是字符串，并且是已登记的节点；未知键会报错。
+
+Example - 读出节点携带的记录：
+''',
+  '',
+]
+
+[exports.node-data.parameters]
+
+graph = "要读取的图。"
+
+key = "精确的节点键。"
+
+[exports.edges]
+
+summary = [
+  '''
+按输入顺序返回所有边记录。
+
+每条记录带有 `index`、`source`、`target`，以及你提供的边值 `data`。index 只在当前图以及从它筛出的图中标识这条边，换一次构造就不再通用。
+
+Example - 读一条记录和它的原值：
+''',
+  '',
+]
+
+[exports.edges.parameters]
+
+graph = "要读取的图。"
+
+[exports.in-edges]
+
+summary = [
+  '''
+按输入顺序返回目标为 `key` 的边记录。
+
+约束：`key` 必须是字符串，并且是已登记的节点；未知键会报错。
+
+Example - 查有哪些页面链接到这里：
+''',
+  '',
+]
+
+[exports.in-edges.parameters]
+
+graph = "要读取的图。"
+
+key = "精确的节点键。"
+
+[exports.out-edges]
+
+summary = [
+  '''
+按输入顺序返回源为 `key` 的边记录。
+
+约束：`key` 必须是字符串，并且是已登记的节点；未知键会报错。
+
+Example - 查这个页面链接到哪里：
+''',
+  '',
+]
+
+[exports.out-edges.parameters]
+
+graph = "要读取的图。"
+
+key = "精确的节点键。"
+
+[exports.reachable]
+
+summary = [
+  '''
+按登记顺序返回从 `roots` 能走到的节点，起点也算在内。
+
+重复的起点只算一次。`"out"` 沿边正向走，从源到目标；`"in"` 反向走，从目标到源。即使没有任何边碰到它，起点也能走到自己；不给起点就没有节点。
+
+约束：每个起点都必须是已登记的字符串键；未知起点会报错。
+
+Example - 从一个页面正向走：
+''',
+  '''
+Example - 反向走，找出所有链接到某个页面的节点：
+''',
+  '',
+]
+
+[exports.reachable.parameters]
+
+graph = "要读取的图。"
+
+roots = "已登记的字符串节点键。"
+
+direction = '`"out"` 表示正向，`"in"` 表示反向；默认为 `"out"`。'
+
+[exports.select-edges]
+
+summary = [
+  '''
+保留 `keep` 返回 `true` 的边。
+
+`keep` 每次接收一条边记录。节点全部保留，即使一条边都不剩；留下的边保持原来的 `index` 和相对顺序，所以 index 出现空洞是正常的。
+
+约束：`keep` 必须返回 bool，其他值会报错。
+
+Example - 只保留指向某个页面的边：
+''',
+  '',
+]
+
+[exports.select-edges.parameters]
+
+graph = "要读取的图。"
+
+keep = "接收一条边记录，返回 bool。"
+
+[exports.induced]
+
+summary = [
+  '''
+保留 `keys` 里的节点，以及两端都在其中的边。
+
+重复的键只算一次。节点保持登记顺序，边保持输入顺序，你给的值原样保留；只要有一端不在 `keys` 里，这条边就会被丢掉。
+
+约束：每个键都必须是已登记的字符串节点键；未知键会报错。
+
+Example - 取一个栏目，以及栏目内部的链接：
+''',
+  '',
+]
+
+[exports.induced.parameters]
+
+graph = "要读取的图。"
+
+keys = "已登记的字符串节点键。"
