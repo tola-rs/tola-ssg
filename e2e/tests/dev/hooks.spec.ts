@@ -939,3 +939,46 @@ test('failing generator stops rebuilding after one retry', async ({ sites }) => 
   ).toBe(2)
   expect(await readHookJournal(runs)).toBe('run\nrun\n')
 })
+
+/** A before-build hook that colors its stderr and fails, so the first build never publishes. */
+async function writeColorFailureHook(root: string): Promise<void> {
+  const script = join(root, 'color-failure.mjs')
+  await writeFile(
+    script,
+    "process.stderr.write('\\u001b[31mHOOK_RED\\u001b[0m\\n');\n" +
+      "process.stderr.write('\\u001b[2J');\n" +
+      'process.exit(3);\n',
+  )
+  await writeHookConfiguration(root, [hookToml('before-build', script, { name: 'colors' })])
+}
+
+test('hook output keeps styling', async ({ sites }) => {
+  const site = await sites.dev({
+    color: 'always',
+    verbose: true,
+    beforeStart: writeColorFailureHook,
+  })
+  await expect.poll(() => site.stderr()).toContain('HOOK_RED')
+  const stderr = site.stderr()
+  // Both the live line and the failure note keep the red the hook wrote.
+  const styled = '\u001b[0;31mHOOK_RED\u001b[0m'
+  expect(stderr.split(styled).length - 1).toBeGreaterThanOrEqual(2)
+  expect(stderr).toContain('[colors stderr] ')
+  const note = stderr.indexOf('stderr:')
+  expect(note).toBeGreaterThanOrEqual(0)
+  expect(stderr.indexOf(styled, note)).toBeGreaterThan(note)
+  expect(stderr).not.toContain('\u001b[2J')
+})
+
+test('hook output drops styling without color', async ({ sites }) => {
+  const site = await sites.dev({
+    color: 'never',
+    verbose: true,
+    beforeStart: writeColorFailureHook,
+  })
+  await expect.poll(() => site.stderr()).toContain('HOOK_RED')
+  const stderr = site.stderr()
+  expect(stderr.match(/HOOK_RED/g)?.length ?? 0).toBeGreaterThanOrEqual(2)
+  expect(stderr).toContain('[colors stderr] ')
+  expect(stderr).not.toContain('\u001b')
+})

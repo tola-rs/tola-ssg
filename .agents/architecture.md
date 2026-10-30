@@ -208,6 +208,9 @@ zero-size window draws nothing and recovers on the next frame, and each visible 
 line. Left/right switch diagnostic rounds and the latest clean result, resetting scrolling only when the selection changes; Home/End address the current body. `c` copies the visible round's text onto the reader's clipboard. Short windows retain a body row and, with two or more rows, the stop key. The serving address leads the header, and header/hook regions leave space for the build result. Ctrl+C
 stops development and retains the selected transcript once after mode restoration. Each running
 hook keeps its latest 200 lines, with partial lines and stdout/stderr tracked separately. Hook
+output and the command output a diagnostic note quotes are interpreted at the terminal boundary:
+supported styling is re-emitted when `--color` grants color, every other control sequence is
+consumed before the terminal sees it, and the JSONL log keeps the bytes the command wrote. Hook
 identity includes its development span, so overlapping attempts do not share output. Redirected,
 quiet, dumb, or zero-size terminals use plain output. Command-owned JSONL logs record complete
 rounds and hook output independently of the view.
