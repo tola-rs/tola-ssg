@@ -68,10 +68,10 @@
 //! File-only clients can set `initializationOptions.packageSourceDirectory` to
 //! an explicitly prepared mirror directory. Definition replies use file URIs
 //! only after verifying that the existing file matches this server's embedded
-//! source, so a missing or stale mirror is an error there. A query about a
-//! mirrored file answers as the immutable `tola-package:` document it mirrors,
-//! and a file that mirrors no builtin source answers nothing. The server never
-//! writes them.
+//! source; a missing or stale mirror keeps the `tola-package:` URI instead. A
+//! query about a mirrored file answers as the immutable `tola-package:` document
+//! it mirrors, and a file that mirrors no builtin source answers nothing. The
+//! server never writes them.
 
 #![forbid(unsafe_code)]
 // Retaining a compiled revision asks rustc to prove `tola_build::check::SourceRevision: Send`,
