@@ -40,6 +40,7 @@ test('documentation help needs no usable site', async ({ binary, directory: root
       'image',
       'source',
       'collection',
+      'datalog',
       'schema',
       'document',
       'code',
@@ -107,10 +108,23 @@ test('documentation color follows stdout choice', async ({ binary, directory: ro
 test('package documentation follows the language', async ({ binary, directory: root }) => {
   const run = commandRunner(binary)
 
-  const english = await run(['help', '@tola/address'], root)
-  expectExited(english)
-  expect(english.stdout).toContain('Import in Typst:')
-  expect(english.stderr).toBe('')
+  const english = startCommand(binary, ['help', '@tola/address', '--color', 'never'], root, {
+    LANGUAGE: 'zh_CN.UTF-8',
+    LC_ALL: 'zh_CN.UTF-8',
+    LC_MESSAGES: 'zh_CN.UTF-8',
+    LANG: 'zh_CN.UTF-8',
+  })
+  try {
+    const exit = await english.command.waitForClose(COMMAND_TIMEOUT_MS.standard)
+    expectExited({ ...exit, stderr: english.stderr() })
+    const selected = await run(['help', '@tola/address', '--lang', 'en'], root)
+    expectExited(selected)
+    expect(english.stdout()).toBe(selected.stdout)
+    expect(english.stdout()).toContain('Import in Typst:')
+    expect(english.stderr()).toBe('')
+  } finally {
+    await english.command.terminate()
+  }
 
   const chinese = await run(['help', '@tola/address', '--lang', 'zh'], root)
   expectExited(chinese)
@@ -118,6 +132,7 @@ test('package documentation follows the language', async ({ binary, directory: r
   expect(chinese.stdout).toMatch(/\p{Script=Han}/u)
   expect(chinese.stdout).toContain('Positional Parameters')
   expect(chinese.stderr).toBe('')
+  expect(chinese.stdout).not.toBe(english.stdout())
 
   // A translation keeps every identifier it reads, so the keys it names stay the keys Tola has.
   const sources = await run(['help', '@tola/source', '--lang', 'zh'], root)

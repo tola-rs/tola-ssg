@@ -12,6 +12,7 @@ members = [
     "crates/tola-icons",
     "crates/tola-image",
     "crates/tola-config",
+    "crates/tola-datalog",
     "crates/tola-subprocess",
     "crates/tola-typst",
     "crates/tola-typst-syntax",
@@ -48,6 +49,7 @@ typstyle-core = { version = "=0.15.1", default-features = false }
 tola-address = { version = "0.8.1", path = "crates/tola-address" }
 tola-build = { version = "0.8.1", path = "crates/tola-build" }
 tola-config = { version = "0.8.1", path = "crates/tola-config" }
+tola-datalog = { version = "0.8.1", path = "crates/tola-datalog" }
 tola-config-macros = { version = "0.8.1", path = "crates/tola-config-macros" }
 tola-icons = { version = "0.8.1", path = "crates/tola-icons" }
 tola-image = { version = "0.8.1", path = "crates/tola-image" }

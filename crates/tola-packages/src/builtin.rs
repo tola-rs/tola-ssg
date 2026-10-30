@@ -181,7 +181,7 @@ fn spelling(
 }
 
 /// Holds exactly one row per variant, in the order [`TolaPackage::all`] lists them.
-const PACKAGE_DEFINITIONS: [PackageDefinition; 12] = [
+const PACKAGE_DEFINITIONS: [PackageDefinition; 13] = [
     PackageDefinition {
         name: "host",
         sources: PackageSources::Fixed(&[PackageSource::new(
@@ -230,6 +230,13 @@ const PACKAGE_DEFINITIONS: [PackageDefinition; 12] = [
             PackageSource::new("lib.typ", include_str!("embed/collection.typ")),
             PackageSource::new("keys.typ", include_str!("embed/keys.typ")),
         ]),
+    },
+    PackageDefinition {
+        name: "datalog",
+        sources: PackageSources::Fixed(&[PackageSource::new(
+            "lib.typ",
+            include_str!("embed/datalog.typ"),
+        )]),
     },
     PackageDefinition {
         name: "schema",
@@ -291,6 +298,7 @@ pub enum TolaPackage {
     Image,
     Source,
     Collection,
+    Datalog,
     Schema,
     Document,
     Code,
@@ -325,6 +333,7 @@ impl TolaPackage {
             Self::Image,
             Self::Source,
             Self::Collection,
+            Self::Datalog,
             Self::Schema,
             Self::Document,
             Self::Code,
@@ -366,6 +375,7 @@ impl TolaPackage {
             | Self::Image
             | Self::Source
             | Self::Collection
+            | Self::Datalog
             | Self::Schema
             | Self::Document
             | Self::Code
@@ -479,6 +489,7 @@ pub fn builtin_package(spec: &PackageSpec) -> Option<BuiltinPackage> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     /// Tola's own Typst surface: lowercase words joined by `-`, never `_`.
     ///
     /// The check reads the real surface: the exports each entrypoint's syntax tree publishes, the

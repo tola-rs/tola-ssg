@@ -3,4 +3,4 @@
 # headings and every other label stay English in both languages.
 
 [text]
-help-usage = "查看 CLI 命令本身，请用 `tola <command> --help`。\n\n`tola help` 用于查看 Tola 内置的离线文档：`tola.toml` 的配置选项（`tola help \"[build]\"`）与 `@tola/xxx` 的内置 packages（`tola help \"@tola/address\" slugify`）。`tola help` 还支持 `-i`/`--interactive` 交互式浏览；在该模式下，你可以直接用鼠标点击进行跳转，或按下 Tab 进行基于键盘的快速导航。`--lang` 切换语言（目前只有中英文）。\n\nTola 还提供 `tola skill` 命令方便 agent 读取；agent 可以通过 `tola help` 与 `tola skill` 快速了解 Tola 与 Typst，辅助用户组织站点，并向用户讲解 Tola 的概念。"
+help-usage = "查看命令选项，请用 `tola <command> --help`。\n\n`tola help` 提供 Tola 内置的离线文档：`tola.toml` 配置（`tola help \"[build]\"`）和 `@tola/xxx` 内置包（`tola help \"@tola/address\" slugify`）。加上 `-i` 或 `--interactive` 可交互式浏览，用鼠标点击链接，或按 Tab 选择跳转目标。文档默认使用英文；加上 `--lang zh` 可阅读简体中文。\n\n`tola skill` 提供面向 agent 的站点编写指南。agent 可以结合这份指南和 `tola help` 了解 Tola 与 Typst，帮助你组织站点、理解相关概念。"

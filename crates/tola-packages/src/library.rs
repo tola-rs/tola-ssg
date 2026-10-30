@@ -101,6 +101,7 @@ pub const TOLA_META: &str = "tola-meta";
 
 pub(crate) fn native_scope() -> Scope {
     let mut host = Scope::deduplicating();
+    super::datalog::define(&mut host);
     host.define(
         "report-error",
         Func::from(super::diagnostic::report_error::data()),

@@ -17,6 +17,7 @@ roxmltree = "0.21.1"
 serde = { version = "1.0.229", default-features = false, features = ["derive"] }
 serde_json = { version = "1.0.151", features = ["preserve_order"] }
 tola-address.workspace = true
+tola-datalog.workspace = true
 tola-slugify.workspace = true
 tola-icons.workspace = true
 tola-image.workspace = true

@@ -14,6 +14,7 @@ mod assets;
 mod builtin;
 mod code_render;
 mod code_themes;
+mod datalog;
 pub mod date;
 mod diagnostic;
 mod docs;

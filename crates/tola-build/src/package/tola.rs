@@ -814,6 +814,94 @@ path = "icons/brand"
     }
 
     #[test]
+    fn datalog_scalars_keep_types() {
+        assert_package(
+            "datalog",
+            r##"
+#let keyed = relation("keyed", 2)
+#let value = var("value")
+#let db = database(facts: (
+  keyed(1, "integer"), keyed(1.0, "float"), keyed(decimal("1"), "decimal"),
+  keyed("1", "string"), keyed(false, "boolean"), keyed(none, "none"),
+))
+#assert.eq(query(db, select: (value,), where: (keyed(1, value),)), (("integer",),))
+#assert.eq(query(db, select: (value,), where: (keyed(1.0, value),)), (("float",),))
+#assert.eq(query(db, select: (value,), where: (keyed(decimal("1"), value),)), (("decimal",),))
+#let scalar = relation("scalar", 1)
+#let values = (none, true, 7, -2.5, decimal("1.25"), "hello", bytes((0, 255)),
+  datetime(year: 2026, month: 11, day: 1), datetime(hour: 12, minute: 30, second: 0))
+#let scalars = database(facts: values.map(scalar))
+#let rows = query(scalars, select: (value,), where: (scalar(value),))
+#assert.eq(rows.len(), values.len())
+#for expected in values { assert(rows.contains((expected,))) }
+#let zero = database(facts: (scalar(-0.0), scalar(0.0)))
+#assert.eq(query(zero, select: (value,), where: (scalar(value),)), ((0.0,),))
+"##,
+        );
+    }
+
+    #[test]
+    fn datalog_queries_use_their_snapshot() {
+        assert_package(
+            "datalog",
+            r##"
+#let link = relation("link", 2)
+#let reach = relation("reach", 2)
+#let x = var("x")
+#let y = var("y")
+#let z = var("z")
+#let rules = (rule(reach(x, y), link(x, y)), rule(reach(x, z), reach(x, y), link(y, z)))
+#let before = database(facts: (link("a", "b"), link("b", "c")), rules: rules)
+#let after = database(facts: (link("a", "b"),), rules: rules)
+#let ask(db) = query(db, select: (z,), where: (reach("a", z),))
+#assert.eq(ask(before), (("b",), ("c",)))
+#assert.eq(ask(after), (("b",),))
+#assert.eq(ask(before), (("b",), ("c",)))
+#assert.eq(query(after, select: (), where: (reach("a", "b"),)), ((),))
+#assert.eq(query(after, select: (), where: (reach("a", "c"),)), ())
+"##,
+        );
+    }
+
+    #[test]
+    fn datalog_cached_errors_keep_current_location() {
+        for blank_lines in [0, 3] {
+            let source = format!(
+                "#import \"@tola/datalog:0.0.0\" as d\n\
+                 #let p = d.relation(\"p\", 1)\n\
+                 #let x = d.var(\"x\")\n\
+                 {}#let r = d.rule(p(x))\n\
+                 #let db = d.database(rules: (r,))\n",
+                "\n".repeat(blank_lines),
+            );
+            let (_directory, world) = world_from_default_config(&source, SourceRecords::default());
+            let failure =
+                tola_typst::compile_bundle_world(&world, &Default::default()).unwrap_err();
+            let error = failure.diagnostics().unwrap().errors().next().unwrap();
+            assert_eq!(error.location.path.as_deref(), Some("main.typ"));
+            assert_eq!(error.location.range.unwrap().start.line, 3 + blank_lines);
+        }
+    }
+
+    #[test]
+    fn datalog_rejects_invalid_clauses() {
+        for expression in [
+            r#"relation("", 1)"#,
+            r#"relation("p", -1)"#,
+            r#"relation("p", 2)(1)"#,
+            r#"relation("p", 1)([content])"#,
+            r#"relation("p", 1)(float("inf"))"#,
+            r#"database(facts: (relation("p", 1)(var("x")),))"#,
+            r#"database(facts: (relation("p", 1)(1), relation("p", 2)(1, 2)))"#,
+            r#"database(rules: (rule(relation("p", 1)(var("x"))),))"#,
+            r#"query(database(), select: (var("x"),), where: ())"#,
+            r#"query(database(), select: (), where: (negate(relation("p", 1)(var("x"))),))"#,
+        ] {
+            reject_package("datalog", &format!("#let value = {expression}"));
+        }
+    }
+
+    #[test]
     fn package_guards_locate_calls() {
         for (package, expression, details) in [
             ("collection", "pick(none, ())", ["`fields`", "none"]),

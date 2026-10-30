@@ -5669,6 +5669,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "tola-datalog"
+version = "0.8.1"
+
+[[package]]
 name = "tola-icons"
 version = "0.8.1"
 dependencies = [
@@ -5755,6 +5759,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tola-address",
+ "tola-datalog",
  "tola-icons",
  "tola-image",
  "tola-slugify",

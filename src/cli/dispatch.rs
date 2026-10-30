@@ -143,12 +143,9 @@ pub(crate) fn dispatch(
             fonts,
         } => commands::lsp::run(config, packages, fonts, scope, cancellation, output),
         Commands::Skill(args) => commands::skill::run(args.output.as_deref(), output, cancellation),
-        Commands::Help(args) => commands::help::run(
-            &args,
-            crate::i18n::HelpLanguage::resolve(cli.lang),
-            output,
-            cancellation,
-        ),
+        Commands::Help(args) => {
+            commands::help::run(&args, cli.lang.unwrap_or_default(), output, cancellation)
+        }
         Commands::Completions(args) => {
             destination::start(output, &cancellation.token())?;
             commands::completions::run(args.shell, output)

@@ -42,7 +42,7 @@ build-library:
 # Build the public Rust documentation and fail on broken links.
 [env('RUSTDOCFLAGS', '-D warnings')]
 docs:
-    cargo doc --locked -p tola-address -p tola-build -p tola-subprocess -p tola-icons -p tola-image -p tola-minify -p tola-packages -p tola-pronunciations -p tola-slugify --no-deps
+    cargo doc --locked -p tola-address -p tola-datalog -p tola-build -p tola-subprocess -p tola-icons -p tola-image -p tola-minify -p tola-packages -p tola-pronunciations -p tola-slugify --no-deps
     for package in tola-typst-syntax tola-typst tola-lsp; do cargo doc --locked -p "$package" --no-deps --no-default-features && cargo doc --locked -p "$package" --no-deps --all-features || exit; done
 
 # Cargo keys its temporary registry by build path; each run must verify freshly packaged sources.

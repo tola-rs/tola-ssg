@@ -1,0 +1,10 @@
+[package]
+name = "tola-datalog"
+version.workspace = true
+edition = "2024"
+rust-version.workspace = true
+description = "Demand-driven in-memory Datalog"
+license = "MIT"
+repository = "https://github.com/tola-rs/tola-ssg"
+
+[dependencies]
