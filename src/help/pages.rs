@@ -10,7 +10,7 @@ use tola_build::config::section::{
         hooks::{AfterPublishHookConfig, BeforeBuildHookConfig, OutputCommandConfig},
     },
 };
-use tola_build::diagnostic::{Diagnostic, DiagnosticCode, DiagnosticError, Severity};
+use tola_diagnostic::{Diagnostic, DiagnosticCode, DiagnosticError, Severity};
 use tola_packages::{ExportDeclaration, RelatedTarget, Signature};
 
 use crate::config::{DevConfig, DiagnosticsConfig, ServerConfig};
@@ -24,6 +24,22 @@ struct ConfigTable {
 }
 
 impl ConfigTable {
+    /// One table declared as `[section]`.
+    const fn new(section: &'static str) -> Self {
+        Self {
+            section,
+            array: false,
+        }
+    }
+
+    /// One table declared as `[[section]]`.
+    const fn new_array(section: &'static str) -> Self {
+        Self {
+            section,
+            array: true,
+        }
+    }
+
     fn header(&self) -> String {
         if self.array {
             format!("[[{}]]", self.section)
@@ -34,85 +50,26 @@ impl ConfigTable {
 }
 
 const TABLES: &[ConfigTable] = &[
-    ConfigTable {
-        section: SiteSectionConfig::TEMPLATE_SECTION,
-        array: false,
-    },
-    ConfigTable {
-        section: BuildSectionConfig::TEMPLATE_SECTION,
-        array: false,
-    },
-    ConfigTable {
-        section: MinifyConfig::TEMPLATE_SECTION,
-        array: false,
-    },
-    ConfigTable {
-        section: ReferencesConfig::TEMPLATE_SECTION,
-        array: false,
-    },
-    ConfigTable {
-        section: HooksConfig::TEMPLATE_SECTION,
-        array: false,
-    },
-    ConfigTable {
-        section: BeforeBuildHookConfig::TEMPLATE_SECTION,
-        array: true,
-    },
-    ConfigTable {
-        section: OutputCommandConfig::TEMPLATE_SECTION,
-        array: true,
-    },
-    ConfigTable {
-        section: AfterPublishHookConfig::TEMPLATE_SECTION,
-        array: true,
-    },
-    ConfigTable {
-        section: AssetsConfig::TEMPLATE_SECTION,
-        array: false,
-    },
-    ConfigTable {
-        section: TypstSectionConfig::TEMPLATE_SECTION,
-        array: false,
-    },
-    ConfigTable {
-        section: FontsConfig::TEMPLATE_SECTION,
-        array: false,
-    },
-    ConfigTable {
-        section: IconsConfig::TEMPLATE_SECTION,
-        array: false,
-    },
-    ConfigTable {
-        section: VendorConfig::TEMPLATE_SECTION,
-        array: false,
-    },
-    ConfigTable {
-        section: FormatterConfig::TEMPLATE_SECTION,
-        array: false,
-    },
-    ConfigTable {
-        section: ServerConfig::TEMPLATE_SECTION,
-        array: false,
-    },
-    ConfigTable {
-        section: DevConfig::TEMPLATE_SECTION,
-        array: false,
-    },
-    ConfigTable {
-        section: DiagnosticsConfig::TEMPLATE_SECTION,
-        array: false,
-    },
+    ConfigTable::new(SiteSectionConfig::TEMPLATE_SECTION),
+    ConfigTable::new(BuildSectionConfig::TEMPLATE_SECTION),
+    ConfigTable::new(MinifyConfig::TEMPLATE_SECTION),
+    ConfigTable::new(ReferencesConfig::TEMPLATE_SECTION),
+    ConfigTable::new(HooksConfig::TEMPLATE_SECTION),
+    ConfigTable::new_array(BeforeBuildHookConfig::TEMPLATE_SECTION),
+    ConfigTable::new_array(OutputCommandConfig::TEMPLATE_SECTION),
+    ConfigTable::new_array(AfterPublishHookConfig::TEMPLATE_SECTION),
+    ConfigTable::new(AssetsConfig::TEMPLATE_SECTION),
+    ConfigTable::new(TypstSectionConfig::TEMPLATE_SECTION),
+    ConfigTable::new(FontsConfig::TEMPLATE_SECTION),
+    ConfigTable::new(IconsConfig::TEMPLATE_SECTION),
+    ConfigTable::new("modules"),
+    ConfigTable::new(tola_build::modules::ThemeConfig::TEMPLATE_SECTION),
+    ConfigTable::new(VendorConfig::TEMPLATE_SECTION),
+    ConfigTable::new(FormatterConfig::TEMPLATE_SECTION),
+    ConfigTable::new(ServerConfig::TEMPLATE_SECTION),
+    ConfigTable::new(DevConfig::TEMPLATE_SECTION),
+    ConfigTable::new(DiagnosticsConfig::TEMPLATE_SECTION),
 ];
-
-/// Whether a page writes its cross-references as links.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum CrossRefs {
-    /// Production: a code span that names another page holds its `tola-help://` reference.
-    Emit,
-    /// The same page without links, so a test can prove the links add no visible text.
-    #[allow(dead_code)] // Production emits links; the tests compare both modes.
-    Suppress,
-}
 
 pub(crate) fn request(targets: &[String]) -> Result<LinkTarget> {
     super::target::request(targets).ok_or_else(|| {
@@ -123,48 +80,26 @@ pub(crate) fn request(targets: &[String]) -> Result<LinkTarget> {
     })
 }
 
-fn page(targets: &[String], language: HelpLanguage, cross_refs: CrossRefs) -> Result<HelpPage> {
-    let target = request(targets)?;
-    page_of(
-        target.page().expect("a help request locates a page"),
-        language,
-        cross_refs,
-    )
-}
-
-pub(crate) fn page_of(
-    id: &PageId,
-    language: HelpLanguage,
-    cross_refs: CrossRefs,
-) -> Result<HelpPage> {
+pub(crate) fn page_of(id: &PageId, language: HelpLanguage) -> Result<HelpPage> {
     match id {
-        PageId::Overview => Ok(overview_page(language, cross_refs)),
-        PageId::Index(category) => Ok(index_page(*category, cross_refs)),
-        PageId::Config { section } => table_page(section, language, cross_refs),
-        PageId::Package { name } => package_page(name, &[], language, cross_refs),
-        PageId::PackageSelection { name, exports } => {
-            package_page(name, exports, language, cross_refs)
-        }
+        PageId::Overview => Ok(overview_page(language)),
+        PageId::Index(category) => Ok(index_page(*category)),
+        PageId::Config { section } => table_page(section, language),
+        PageId::Package { name } => package_page(name, &[], language),
+        PageId::PackageSelection { name, exports } => package_page(name, exports, language),
     }
 }
 
-/// One named token, linked to the page it names when the page emits cross-references.
-///
-/// Only the token is linked: a link adds no styling of its own, so the page renders the same
-/// bytes with and without its links, and the plain renderer hides the reserved target. The
-/// command around the token stays literal text, so the quoting the reader copies stays intact.
-fn cross_reference(token: &str, target: &LinkTarget, cross_refs: CrossRefs) -> String {
-    match cross_refs {
-        CrossRefs::Emit => format!("[`{token}`]({})", target.uri()),
-        CrossRefs::Suppress => format!("`{token}`"),
-    }
+/// Link only the token so surrounding command quotes remain copyable.
+fn cross_reference(token: &str, target: &LinkTarget) -> String {
+    format!("[`{token}`]({})", target.uri())
 }
 
 /// One named token, linked to the page it names when the index can resolve it; a mention the
 /// index cannot resolve stays plain text, because the index outlives a rename.
-fn named(token: &str, target: Option<LinkTarget>, cross_refs: CrossRefs) -> String {
+fn named(token: &str, target: Option<LinkTarget>) -> String {
     match target {
-        Some(target) => cross_reference(token, &target, cross_refs),
+        Some(target) => cross_reference(token, &target),
         None => format!("`{token}`"),
     }
 }
@@ -180,25 +115,18 @@ fn export_kind(export: &tola_packages::ExportDocumentation) -> &'static str {
 
 /// The anchor of an export's own section, on the page that renders it.
 fn export_anchor(export: &tola_packages::ExportDocumentation) -> Anchor {
-    anchor(&format!("{} {} {}", export.name, '-', export_kind(export)))
+    anchor(&format!("{} - {}", export.name, export_kind(export)))
 }
 
-pub(crate) fn render(
-    targets: &[String],
-    language: HelpLanguage,
-    columns: Option<usize>,
-    color: bool,
-) -> Result<String> {
-    let documentation = Documentation::new(columns, color);
-    let page = page(targets, language, CrossRefs::Emit)?;
-    let mut text = documentation.render(&page.markdown());
+pub(crate) fn render(markdown: &str, columns: Option<usize>, color: bool) -> String {
+    let mut text = Documentation::new(columns, color).render(markdown);
     if !text.ends_with('\n') {
         text.push('\n');
     }
-    Ok(text)
+    text
 }
 
-fn overview_page(language: HelpLanguage, cross_refs: CrossRefs) -> HelpPage {
+fn overview_page(language: HelpLanguage) -> HelpPage {
     let id = PageId::Overview;
     let text = |phrase| crate::i18n::text(language, phrase);
     let mut markdown = format!("# Tola help\n\n{}\n", text(HelpText::HelpUsage));
@@ -206,11 +134,7 @@ fn overview_page(language: HelpLanguage, cross_refs: CrossRefs) -> HelpPage {
         ("Configuration", HelpCategory::Config),
         ("Packages", HelpCategory::Packages),
     ] {
-        let linked = cross_reference(
-            title,
-            &LinkTarget::Page(PageId::Index(category)),
-            cross_refs,
-        );
+        let linked = cross_reference(title, &LinkTarget::Page(PageId::Index(category)));
         markdown.push_str(&format!("\n- {linked}\n"));
     }
     markdown.push_str("\n## Examples\n\n");
@@ -221,30 +145,27 @@ fn overview_page(language: HelpLanguage, cross_refs: CrossRefs) -> HelpPage {
             &["output-of", "output-url", "route-url", "asset-url"][..],
         ),
         ("document", &["headings", "references"][..]),
+        ("diagnostic", &["report"][..]),
         ("web", &["feed", "sitemap"][..]),
     ] {
         let command = format!("tola help \"@tola/{name}\" {}", exports.join(" "));
         markdown.push_str(&format!(
             "- {}\n",
-            named(&command, package_target(name, exports), cross_refs)
+            named(&command, package_target(name, exports))
         ));
     }
     markdown.push_str(&format!(
         "- {}\n",
-        named("tola help \"[build]\"", table_target("build"), cross_refs)
+        named("tola help \"[build]\"", table_target("build"))
     ));
     markdown.push_str(&format!(
         "- {}\n",
-        named(
-            "tola help \"[build.hooks]\"",
-            table_target("build.hooks"),
-            cross_refs
-        )
+        named("tola help \"[build.hooks]\"", table_target("build.hooks"))
     ));
     HelpPage::new(id, markdown)
 }
 
-fn index_page(category: HelpCategory, cross_refs: CrossRefs) -> HelpPage {
+fn index_page(category: HelpCategory) -> HelpPage {
     let id = PageId::Index(category);
     let mut markdown = String::new();
     match category {
@@ -253,9 +174,12 @@ fn index_page(category: HelpCategory, cross_refs: CrossRefs) -> HelpPage {
             // A table with settings of its own is an entry; so is a container grouping several
             // child tables, such as `[build.hooks]`.
             for table in TABLES.iter().filter(|table| {
-                has_own_key(table.section) || child_tables(table.section).count() > 1
+                let children = child_tables(table.section).count();
+                has_own_key(table.section)
+                    || children > 1
+                    || (children == 0 && section_help(table.section).is_some())
             }) {
-                let label = named(&table.header(), table_target(table.section), cross_refs);
+                let label = named(&table.header(), table_target(table.section));
                 markdown.push_str(&format!("- {label}\n"));
             }
         }
@@ -263,27 +187,12 @@ fn index_page(category: HelpCategory, cross_refs: CrossRefs) -> HelpPage {
             markdown.push_str("# Bundled packages\n\n");
             for package in tola_packages::builtin_packages() {
                 let name = package.spec().name.to_string();
-                let label = named(
-                    &format!("@tola/{name}"),
-                    package_target(&name, &[]),
-                    cross_refs,
-                );
+                let label = named(&format!("@tola/{name}"), package_target(&name, &[]));
                 markdown.push_str(&format!("- {label}\n"));
             }
         }
     }
     HelpPage::new(id, markdown)
-}
-
-pub(crate) fn label(id: &PageId) -> String {
-    match id {
-        PageId::Overview => "tola help".into(),
-        PageId::Index(HelpCategory::Config) => "Configuration".into(),
-        PageId::Index(HelpCategory::Packages) => "Packages".into(),
-        PageId::Config { section } => table_header(section),
-        PageId::Package { name } => format!("@tola/{name}"),
-        PageId::PackageSelection { name, exports } => format!("@tola/{name} {}", exports.join(" ")),
-    }
 }
 
 /// The table page one section names, when the index names a real table.
@@ -317,7 +226,7 @@ fn package_target(name: &str, exports: &[&str]) -> Option<LinkTarget> {
     }))
 }
 
-fn table_page(target: &str, language: HelpLanguage, cross_refs: CrossRefs) -> Result<HelpPage> {
+fn table_page(target: &str, language: HelpLanguage) -> Result<HelpPage> {
     let table = TABLES
         .iter()
         .find(|table| table.section == target)
@@ -325,7 +234,7 @@ fn table_page(target: &str, language: HelpLanguage, cross_refs: CrossRefs) -> Re
     // A container whose only content is its one child shows that child's page instead, so
     // the reader lands on the table that names real settings.
     if let Some(child) = sole_child_table(table.section) {
-        return table_page(child.section, language, cross_refs);
+        return table_page(child.section, language);
     }
     let id = PageId::Config {
         section: table.section.to_owned(),
@@ -340,8 +249,8 @@ fn table_page(target: &str, language: HelpLanguage, cross_refs: CrossRefs) -> Re
         markdown.push_str(&format!("\n{documentation}\n"));
     }
     if has_own_key(table.section) {
-        markdown.push_str(&declared_keys(table.section, translations, cross_refs));
-    } else {
+        markdown.push_str(&declared_keys(table.section, translations));
+    } else if child_tables(table.section).next().is_some() {
         markdown.push_str("\nConfigure this section through its child tables:\n");
         for child in child_tables(table.section) {
             let child_id = PageId::Config {
@@ -349,7 +258,7 @@ fn table_page(target: &str, language: HelpLanguage, cross_refs: CrossRefs) -> Re
             };
             let header = child.header();
             // A table header is an array when its declaration is, so it includes its own brackets.
-            let table = cross_reference(&header, &LinkTarget::Page(child_id), cross_refs);
+            let table = cross_reference(&header, &LinkTarget::Page(child_id));
             markdown.push_str(&format!(
                 "- {table} - {}\n",
                 child_description(child, translations)
@@ -366,14 +275,7 @@ fn table_page(target: &str, language: HelpLanguage, cross_refs: CrossRefs) -> Re
     if !packages.is_empty() {
         markdown.push_str("\n### Related\n\n");
         for package in packages {
-            let name = cross_reference(
-                &format!("@tola/{package}"),
-                &LinkTarget::Page(PageId::Package {
-                    name: package.to_owned(),
-                }),
-                cross_refs,
-            );
-            markdown.push_str(&format!("- {name}\n"));
+            markdown.push_str(&package_bullet(&package));
         }
     }
     Ok(HelpPage::new(id, markdown))
@@ -445,13 +347,7 @@ fn child_description(
 /// opening a table, so that table's page is the whole content the container has.
 fn is_empty_container(section: &str) -> bool {
     let mut children = child_tables(section);
-    let Some(_) = children.next() else {
-        return false;
-    };
-    if children.next().is_some() {
-        return false;
-    }
-    !has_own_key(section)
+    children.next().is_some() && children.next().is_none() && !has_own_key(section)
 }
 
 /// Whether a table writes a key of its own: one that names a setting instead of opening a child
@@ -474,11 +370,7 @@ fn sole_child_table(section: &str) -> Option<&'static ConfigTable> {
 ///
 /// The meaning is the declaration's documentation, and one key is one rendered line: the page
 /// wraps it.
-fn declared_keys(
-    section: &str,
-    translations: Option<&crate::i18n::SectionTranslations>,
-    cross_refs: CrossRefs,
-) -> String {
+fn declared_keys(section: &str, translations: Option<&crate::i18n::SectionTranslations>) -> String {
     let mut markdown = String::new();
     for path in documented_fields(section) {
         if let Some(child) = child_table(path) {
@@ -487,7 +379,6 @@ fn declared_keys(
                 &LinkTarget::Page(PageId::Config {
                     section: child.section.to_owned(),
                 }),
-                cross_refs,
             );
             markdown.push_str(&format!(
                 "\n- {header} - {}",
@@ -519,12 +410,7 @@ fn one_line(documentation: &str) -> String {
         .join(" ")
 }
 
-fn package_page(
-    name: &str,
-    requested: &[String],
-    language: HelpLanguage,
-    cross_refs: CrossRefs,
-) -> Result<HelpPage> {
+fn package_page(name: &str, requested: &[String], language: HelpLanguage) -> Result<HelpPage> {
     let package = tola_packages::builtin_packages()
         .find(|package| package.spec().name == name)
         .ok_or_else(|| target_error(name, &package_choices()))?;
@@ -534,10 +420,7 @@ fn package_page(
             return Err(help_error(
                 crate::codes::help::MEMBER,
                 format!("`{member}` is not an export of `{target}`"),
-                format!(
-                    "Exports: {}",
-                    package.exports().map(quoted).collect::<Vec<_>>().join(", ")
-                ),
+                choice_line("Exports", package.exports().map(quoted)),
             ));
         }
     }
@@ -588,7 +471,6 @@ fn package_page(
             let name = named(
                 &export.name,
                 Some(LinkTarget::PageAnchor(id.clone(), export_anchor(export))),
-                cross_refs,
             );
             match summary {
                 Some(summary) => text.push_str(&format!("- {name} - {summary}\n")),
@@ -608,7 +490,7 @@ fn package_page(
         let header = table_header(section);
         text.push_str(&format!(
             "\n## Related\n\n- {}\n",
-            named(&header, table_target(section), cross_refs)
+            named(&header, table_target(section))
         ));
     }
     let mut page = HelpPage::new(id.clone(), text);
@@ -644,12 +526,7 @@ fn package_page(
             }
             text.push_str(&format!("\n{summary}\n"));
         }
-        text.push_str(&related_section(
-            &target,
-            &export.related,
-            &names,
-            cross_refs,
-        ));
+        text.push_str(&related_section(&target, &export.related, &names));
         page.push_export(text);
     }
     Ok(page)
@@ -702,12 +579,7 @@ fn parameter_sections(
 /// The related-targets section one export renders: the package's own exports as one command,
 /// then each bundled package as its own, in the order the block first names them. A target the
 /// page renders anyway is left out, and a block whose targets are all rendered has no section.
-fn related_section(
-    target: &str,
-    related: &[RelatedTarget],
-    rendered: &[String],
-    cross_refs: CrossRefs,
-) -> String {
+fn related_section(target: &str, related: &[RelatedTarget], rendered: &[String]) -> String {
     let mut exports: Vec<&str> = Vec::new();
     let mut packages: Vec<&str> = Vec::new();
     for related in related {
@@ -736,22 +608,26 @@ fn related_section(
         };
         let named_exports = exports
             .iter()
-            .map(|name| cross_reference(name, &LinkTarget::Page(selection.clone()), cross_refs))
+            .map(|name| cross_reference(name, &LinkTarget::Page(selection.clone())))
             .collect::<Vec<_>>()
             .join(" ");
         text.push_str(&format!("- {named_exports}\n"));
     }
     for package in packages {
-        let name = cross_reference(
-            &format!("@tola/{package}"),
-            &LinkTarget::Page(PageId::Package {
-                name: package.to_owned(),
-            }),
-            cross_refs,
-        );
-        text.push_str(&format!("- {name}\n"));
+        text.push_str(&package_bullet(package));
     }
     text
+}
+
+/// One bullet naming a bundled package's page by its Typst import.
+fn package_bullet(package: &str) -> String {
+    let name = cross_reference(
+        &format!("@tola/{package}"),
+        &LinkTarget::Page(PageId::Package {
+            name: package.to_owned(),
+        }),
+    );
+    format!("- {name}\n")
 }
 
 /// The configuration table one bundled package configures, when a site author reads both together.
@@ -791,18 +667,20 @@ fn code_block(language: &str, source: &str) -> String {
     format!("{fence}{language}\n{source}{newline}{fence}\n")
 }
 
-fn table_choices() -> String {
+/// One help line naming every selector a reader can pass instead.
+fn choice_line(label: &str, choices: impl IntoIterator<Item = String>) -> String {
     format!(
-        "Configuration tables: {}",
-        config_sections().collect::<Vec<_>>().join(", ")
+        "{label}: {}",
+        choices.into_iter().collect::<Vec<_>>().join(", ")
     )
 }
 
+fn table_choices() -> String {
+    choice_line("Configuration tables", config_sections())
+}
+
 fn package_choices() -> String {
-    format!(
-        "Bundled packages: {}",
-        package_names().collect::<Vec<_>>().join(", ")
-    )
+    choice_line("Bundled packages", package_names())
 }
 
 /// The first non-empty line of one documented unit.
@@ -863,6 +741,23 @@ fn help_error(code: DiagnosticCode, message: String, choices: String) -> anyhow:
 mod tests {
     use super::*;
     use crate::help::model::{Block, CROSS_REFERENCE_SCHEME, HelpDocument, Inline};
+
+    fn contains_anchor(blocks: &[Block], wanted: &Anchor) -> bool {
+        blocks.iter().any(|block| match block {
+            Block::Heading { anchor, .. } => anchor == wanted,
+            Block::List { items, .. } => items.iter().any(|blocks| contains_anchor(blocks, wanted)),
+            Block::Quote { blocks } => contains_anchor(blocks, wanted),
+            _ => false,
+        })
+    }
+
+    fn page(targets: &[String], language: HelpLanguage) -> Result<HelpPage> {
+        let target = request(targets)?;
+        page_of(
+            target.page().expect("a help request locates a page"),
+            language,
+        )
+    }
 
     fn targets(arguments: &[&str]) -> Vec<String> {
         arguments
@@ -927,12 +822,7 @@ mod tests {
 
     #[test]
     fn empty_container_shows_child_settings() {
-        let page = page(
-            &["[typst]".to_owned()],
-            HelpLanguage::English,
-            CrossRefs::Emit,
-        )
-        .unwrap();
+        let page = page(&["[typst]".to_owned()], HelpLanguage::English).unwrap();
         assert_eq!(
             page.id,
             PageId::Config {
@@ -944,44 +834,51 @@ mod tests {
 
     #[test]
     fn config_index_lists_grouping_containers() {
-        let index = page(
-            &targets(&["config"]),
-            HelpLanguage::English,
-            CrossRefs::Suppress,
-        )
-        .unwrap();
-        let markdown = index.markdown();
-        assert!(markdown.contains("- `[build.hooks]`"), "{markdown}");
-        assert!(!markdown.contains("- `[typst]`"), "{markdown}");
+        let index =
+            HelpDocument::parse(&page(&targets(&["config"]), HelpLanguage::English).unwrap());
+        let links = cross_references(&index);
+        for (section, shown) in [
+            ("build.hooks", true),
+            ("modules", true),
+            ("theme", true),
+            ("typst", false),
+        ] {
+            let target = PageId::Config {
+                section: section.into(),
+            };
+            assert_eq!(
+                links.iter().any(|link| link.page() == Some(&target)),
+                shown,
+                "{section}"
+            );
+        }
     }
 
-    /// One relation shows on both sides: a package page heads its related section with the
-    /// configuration table it serves, and that table names the package.
     #[test]
     fn related_targets_appear_on_both_sides() {
-        let rendered = |arguments: &[&str]| {
-            page(
-                &targets(arguments),
-                HelpLanguage::English,
-                CrossRefs::Suppress,
-            )
-            .expect("the page builds")
-            .markdown()
+        let related = |arguments: &[&str]| {
+            let document =
+                HelpDocument::parse(&page(&targets(arguments), HelpLanguage::English).unwrap());
+            cross_references(&document)
+                .into_iter()
+                .cloned()
+                .collect::<Vec<_>>()
         };
         for package in tola_packages::builtin_packages() {
             let name = package.spec().name.to_string();
             let Some(section) = package_config_table(&name) else {
                 continue;
             };
-            let header = table_header(section);
             assert!(
-                rendered(&[&format!("@tola/{name}")])
-                    .contains(&format!("\n## Related\n\n- `{header}`\n")),
-                "{name} does not head its related section with `{header}`"
+                related(&[&format!("@tola/{name}")]).contains(&LinkTarget::Page(PageId::Config {
+                    section: section.into()
+                })),
+                "{name} does not link to {section}"
             );
             assert!(
-                rendered(&[&format!("[{section}]")]).contains(&format!("@tola/{name}")),
-                "{section} does not name `@tola/{name}`"
+                related(&[&format!("[{section}]")])
+                    .contains(&LinkTarget::Page(PageId::Package { name: name.clone() })),
+                "{section} does not link to {name}"
             );
         }
     }
@@ -990,11 +887,9 @@ mod tests {
     fn help_links_resolve_registered_pages() {
         let mut loaded: Vec<(PageId, HelpDocument)> = Vec::new();
         for arguments in requests() {
-            let document = HelpDocument::parse(
-                page(&arguments, HelpLanguage::English, CrossRefs::Emit).unwrap(),
-            );
-            for (_, target) in cross_references(&document) {
-                match &target {
+            let document = HelpDocument::parse(&page(&arguments, HelpLanguage::English).unwrap());
+            for target in cross_references(&document) {
+                match target {
                     LinkTarget::External(uri) => {
                         assert!(!uri.starts_with(CROSS_REFERENCE_SCHEME), "{uri}")
                     }
@@ -1004,15 +899,14 @@ mod tests {
                         {
                             document.clone()
                         } else {
-                            let document = HelpDocument::parse(
-                                page_of(id, HelpLanguage::English, CrossRefs::Emit).unwrap(),
-                            );
+                            let document =
+                                HelpDocument::parse(&page_of(id, HelpLanguage::English).unwrap());
                             loaded.push((id.clone(), document.clone()));
                             document
                         };
-                        if let LinkTarget::PageAnchor(_, anchor) = &target {
+                        if let LinkTarget::PageAnchor(_, anchor) = target {
                             assert!(
-                                document.contains_anchor(anchor),
+                                contains_anchor(&document.blocks, anchor),
                                 "{}#{}",
                                 id.uri(),
                                 anchor.as_str()
@@ -1024,49 +918,49 @@ mod tests {
         }
     }
 
-    fn cross_references(document: &HelpDocument) -> Vec<(usize, LinkTarget)> {
+    fn cross_references(document: &HelpDocument) -> Vec<&LinkTarget> {
         let mut found = Vec::new();
-        for (block, content) in document.blocks.iter().enumerate() {
-            walk_block(content, block, &mut found);
+        for block in &document.blocks {
+            walk_block(block, &mut found);
         }
         found
     }
 
-    fn walk_block(block: &Block, at: usize, found: &mut Vec<(usize, LinkTarget)>) {
+    fn walk_block<'a>(block: &'a Block, found: &mut Vec<&'a LinkTarget>) {
         match block {
             Block::Paragraph { spans, .. } | Block::Heading { spans, .. } => {
-                walk_spans(spans, at, found)
+                walk_spans(spans, found)
             }
             Block::List { items, .. } => {
                 for item in items {
                     for block in item {
-                        walk_block(block, at, found);
+                        walk_block(block, found);
                     }
                 }
             }
             Block::Quote { blocks } => {
                 for block in blocks {
-                    walk_block(block, at, found);
+                    walk_block(block, found);
                 }
             }
             Block::Table { headers, rows } => {
                 for spans in headers.iter().chain(rows.iter().flatten()) {
-                    walk_spans(spans, at, found);
+                    walk_spans(spans, found);
                 }
             }
             Block::Code { .. } | Block::Rule => {}
         }
     }
 
-    fn walk_spans(spans: &[Inline], at: usize, found: &mut Vec<(usize, LinkTarget)>) {
+    fn walk_spans<'a>(spans: &'a [Inline], found: &mut Vec<&'a LinkTarget>) {
         for span in spans {
             match span {
                 Inline::Link { label, target } => {
-                    found.push((at, target.clone()));
-                    walk_spans(label, at, found);
+                    found.push(target);
+                    walk_spans(label, found);
                 }
                 Inline::Emph(children) | Inline::Strong(children) => {
-                    walk_spans(children, at, found);
+                    walk_spans(children, found);
                 }
                 Inline::Text(_) | Inline::Code(_) => {}
             }
@@ -1080,8 +974,7 @@ mod tests {
             "output-url".into(),
             "slugify".into(),
         ];
-        let document =
-            HelpDocument::parse(page(&selected, HelpLanguage::English, CrossRefs::Emit).unwrap());
+        let document = HelpDocument::parse(&page(&selected, HelpLanguage::English).unwrap());
         let names = document
             .blocks
             .iter()
@@ -1111,12 +1004,11 @@ mod tests {
                 "unknown".into(),
             ],
             HelpLanguage::English,
-            CrossRefs::Emit,
         )
         .err()
         .expect("an unknown export is rejected");
         assert_eq!(
-            tola_build::diagnostic::attached(&error).unwrap()[0].code,
+            tola_diagnostic::attached(&error).unwrap()[0].code,
             crate::codes::help::MEMBER
         );
     }

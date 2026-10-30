@@ -279,10 +279,22 @@ pub struct HelpArgs {
     #[arg(short = 'i', long)]
     pub interactive: bool,
 
-    /// Leave mouse selection to the terminal; use the keyboard to navigate. The reader's `c`
-    /// key hands the pointer over and back.
-    #[arg(long)]
-    pub no_mouse: bool,
+    /// Output a readable page, its original Markdown, or structured JSON.
+    #[arg(
+        long,
+        value_enum,
+        default_value = "text",
+        conflicts_with = "interactive"
+    )]
+    pub format: HelpFormat,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
+pub enum HelpFormat {
+    #[default]
+    Text,
+    Markdown,
+    Json,
 }
 
 #[derive(clap::Args, Debug, Clone)]

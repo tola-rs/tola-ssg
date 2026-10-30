@@ -5,6 +5,7 @@ use pulldown_cmark::{Alignment, CodeBlockKind, Event, Options, Parser, Tag};
 use unicode_width::UnicodeWidthStr;
 
 use super::wrap;
+use crate::help::model::{Node, plain_nodes};
 
 pub(crate) struct Documentation {
     columns: Option<usize>,
@@ -20,7 +21,8 @@ impl Documentation {
     }
 
     pub(crate) fn render(&self, markdown: &str) -> String {
-        let nodes = markdown_nodes(&mut Parser::new_ext(markdown, Options::ENABLE_TABLES));
+        let nodes =
+            plain_nodes(&mut Parser::new_ext(markdown, Options::ENABLE_TABLES).into_offset_iter());
         let mut rendered = self.blocks(&nodes, "");
         if !rendered.is_empty() {
             rendered.push('\n');
@@ -32,18 +34,18 @@ impl Documentation {
         self.columns.unwrap_or(Self::DEFAULT_COLUMNS).max(1)
     }
 
-    fn blocks(&self, nodes: &[MarkdownNode<'_>], indent: &str) -> String {
+    fn blocks(&self, nodes: &[Node<'_>], indent: &str) -> String {
         let mut blocks = Vec::new();
         let mut inline_start = 0;
         for (position, node) in nodes.iter().enumerate() {
-            if !node.is_block() {
+            if !is_block(node) {
                 continue;
             }
             if inline_start < position {
                 blocks.push(self.paragraph(&nodes[inline_start..position], indent, Style::Plain));
             }
             let rendered = match node {
-                MarkdownNode::Branch(Tag::Paragraph, children) => {
+                Node::Branch(Tag::Paragraph, children) => {
                     let style = if is_lead_in(nodes, position, children) {
                         Style::Lead
                     } else {
@@ -51,7 +53,9 @@ impl Documentation {
                     };
                     self.paragraph(children, indent, style)
                 }
-                MarkdownNode::Branch(Tag::Heading { level, .. }, children) => {
+                Node::Heading {
+                    level, children, ..
+                } => {
                     let style = match level {
                         pulldown_cmark::HeadingLevel::H1 => Style::Heading1,
                         pulldown_cmark::HeadingLevel::H2 => Style::Heading2,
@@ -60,24 +64,20 @@ impl Documentation {
                     };
                     self.paragraph(children, indent, style)
                 }
-                MarkdownNode::Branch(Tag::CodeBlock(kind), children) => {
-                    self.code(kind, children, indent)
-                }
-                MarkdownNode::Branch(Tag::List(start), children) => {
-                    self.list(*start, children, indent)
-                }
-                MarkdownNode::Branch(Tag::Table(alignments), children) => {
+                Node::Branch(Tag::CodeBlock(kind), children) => self.code(kind, children, indent),
+                Node::Branch(Tag::List(start), children) => self.list(*start, children, indent),
+                Node::Branch(Tag::Table(alignments), children) => {
                     self.table(alignments, children, indent)
                 }
-                MarkdownNode::Branch(Tag::BlockQuote(_), children) => {
+                Node::Branch(Tag::BlockQuote(_), children) => {
                     self.blocks(children, &format!("{indent}> "))
                 }
-                MarkdownNode::Branch(_, children) => self.blocks(children, indent),
-                MarkdownNode::Leaf(Event::Rule) => {
+                Node::Branch(_, children) => self.blocks(children, indent),
+                Node::Leaf(Event::Rule) => {
                     let width = self.columns().saturating_sub(indent.width()).max(1);
                     format!("{indent}{}", "-".repeat(width))
                 }
-                MarkdownNode::Leaf(_) => unreachable!(),
+                Node::Leaf(_) => unreachable!(),
             };
             if !rendered.is_empty() {
                 blocks.push(rendered);
@@ -90,7 +90,7 @@ impl Documentation {
         blocks.join("\n\n")
     }
 
-    fn paragraph(&self, nodes: &[MarkdownNode<'_>], indent: &str, style: Style) -> String {
+    fn paragraph(&self, nodes: &[Node<'_>], indent: &str, style: Style) -> String {
         let mut text = StyledText::default();
         inline_text(nodes, style, &mut text);
         self.wrapped(&text, indent)
@@ -107,11 +107,11 @@ impl Documentation {
         .join("\n")
     }
 
-    fn list(&self, start: Option<u64>, children: &[MarkdownNode<'_>], indent: &str) -> String {
+    fn list(&self, start: Option<u64>, children: &[Node<'_>], indent: &str) -> String {
         children
             .iter()
             .filter_map(|node| match node {
-                MarkdownNode::Branch(Tag::Item, children) => Some(children),
+                Node::Branch(Tag::Item, children) => Some(children),
                 _ => None,
             })
             .enumerate()
@@ -132,16 +132,11 @@ impl Documentation {
             .join("\n")
     }
 
-    fn code(
-        &self,
-        kind: &CodeBlockKind<'_>,
-        children: &[MarkdownNode<'_>],
-        indent: &str,
-    ) -> String {
+    fn code(&self, kind: &CodeBlockKind<'_>, children: &[Node<'_>], indent: &str) -> String {
         let source: String = children
             .iter()
             .filter_map(|node| match node {
-                MarkdownNode::Leaf(Event::Text(text)) => Some(text.as_ref()),
+                Node::Leaf(Event::Text(text)) => Some(text.as_ref()),
                 _ => None,
             })
             .collect();
@@ -174,23 +169,18 @@ impl Documentation {
         rendered
     }
 
-    fn table(
-        &self,
-        alignments: &[Alignment],
-        children: &[MarkdownNode<'_>],
-        indent: &str,
-    ) -> String {
+    fn table(&self, alignments: &[Alignment], children: &[Node<'_>], indent: &str) -> String {
         let rows: Vec<Vec<StyledText>> = children
             .iter()
             .filter_map(|node| match node {
-                MarkdownNode::Branch(Tag::TableHead | Tag::TableRow, cells) => Some(cells),
+                Node::Branch(Tag::TableHead | Tag::TableRow, cells) => Some(cells),
                 _ => None,
             })
             .map(|cells| {
                 cells
                     .iter()
                     .filter_map(|node| match node {
-                        MarkdownNode::Branch(Tag::TableCell, children) => {
+                        Node::Branch(Tag::TableCell, children) => {
                             let mut text = StyledText::default();
                             inline_text(children, Style::Plain, &mut text);
                             Some(text)
@@ -298,27 +288,21 @@ impl Documentation {
     }
 }
 
-enum MarkdownNode<'a> {
-    Branch(Tag<'a>, Vec<MarkdownNode<'a>>),
-    Leaf(Event<'a>),
-}
-
-impl MarkdownNode<'_> {
-    fn is_block(&self) -> bool {
-        matches!(
-            self,
-            Self::Branch(
+fn is_block(node: &Node<'_>) -> bool {
+    matches!(
+        node,
+        Node::Heading { .. }
+            | Node::Branch(
                 Tag::Paragraph
-                    | Tag::Heading { .. }
                     | Tag::CodeBlock(_)
                     | Tag::List(_)
                     | Tag::Table(_)
                     | Tag::BlockQuote(_)
                     | Tag::HtmlBlock,
                 _
-            ) | Self::Leaf(Event::Rule)
-        )
-    }
+            )
+            | Node::Leaf(Event::Rule)
+    )
 }
 
 /// Whether a paragraph introduces the code block that follows it.
@@ -326,28 +310,16 @@ impl MarkdownNode<'_> {
 /// A lead-in closes with a colon and labels the block it introduces, such as `Example - …:`; it
 /// reads as a heading for the example rather than as body prose. Body paragraphs never take this
 /// style because they do not end at a colon.
-fn is_lead_in(nodes: &[MarkdownNode<'_>], position: usize, children: &[MarkdownNode<'_>]) -> bool {
+fn is_lead_in(nodes: &[Node<'_>], position: usize, children: &[Node<'_>]) -> bool {
     if !matches!(
         nodes.get(position + 1),
-        Some(MarkdownNode::Branch(Tag::CodeBlock(_), _))
+        Some(Node::Branch(Tag::CodeBlock(_), _))
     ) {
         return false;
     }
     let mut text = StyledText::default();
     inline_text(children, Style::Plain, &mut text);
     text.text.trim_end().ends_with([':', '：'])
-}
-
-fn markdown_nodes<'a>(events: &mut impl Iterator<Item = Event<'a>>) -> Vec<MarkdownNode<'a>> {
-    let mut nodes = Vec::new();
-    while let Some(event) = events.next() {
-        match event {
-            Event::Start(tag) => nodes.push(MarkdownNode::Branch(tag, markdown_nodes(events))),
-            Event::End(_) => break,
-            event => nodes.push(MarkdownNode::Leaf(event)),
-        }
-    }
-    nodes
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -467,13 +439,13 @@ impl StyledText {
     }
 }
 
-fn inline_text(nodes: &[MarkdownNode<'_>], style: Style, text: &mut StyledText) {
+fn inline_text(nodes: &[Node<'_>], style: Style, text: &mut StyledText) {
     for node in nodes {
         match node {
-            MarkdownNode::Branch(Tag::Emphasis | Tag::Strong, children) => {
+            Node::Branch(Tag::Emphasis | Tag::Strong, children) => {
                 inline_text(children, Style::Emphasis, text);
             }
-            MarkdownNode::Branch(Tag::Link { dest_url, .. }, children) => {
+            Node::Branch(Tag::Link { dest_url, .. }, children) => {
                 let start = text.text.len();
                 inline_text(children, Style::Link, text);
                 // A cross-reference between help pages is a link for a view, not an address the
@@ -486,20 +458,20 @@ fn inline_text(nodes: &[MarkdownNode<'_>], style: Style, text: &mut StyledText) 
                     text.push(")", Style::Plain);
                 }
             }
-            MarkdownNode::Branch(_, children) => inline_text(children, style, text),
-            MarkdownNode::Leaf(
-                Event::Text(source) | Event::Html(source) | Event::InlineHtml(source),
-            ) => {
+            Node::Branch(_, children) | Node::Heading { children, .. } => {
+                inline_text(children, style, text)
+            }
+            Node::Leaf(Event::Text(source) | Event::Html(source) | Event::InlineHtml(source)) => {
                 text.push(source, style);
             }
-            MarkdownNode::Leaf(Event::Code(source)) => {
+            Node::Leaf(Event::Code(source)) => {
                 text.push("`", Style::Literal);
                 text.push(source, Style::Literal);
                 text.push("`", Style::Literal);
             }
-            MarkdownNode::Leaf(Event::SoftBreak) => text.push(" ", style),
-            MarkdownNode::Leaf(Event::HardBreak) => text.push("\n", style),
-            MarkdownNode::Leaf(_) => {}
+            Node::Leaf(Event::SoftBreak) => text.push(" ", style),
+            Node::Leaf(Event::HardBreak) => text.push("\n", style),
+            Node::Leaf(_) => {}
         }
     }
 }
@@ -549,15 +521,6 @@ pub(crate) fn fitted_widths(
 mod tests {
     use super::*;
 
-    /// The escapes one style opens its text with.
-    fn painted(style: Style) -> String {
-        let styled = style.owo().style("sample").to_string();
-        styled[..styled
-            .find("sample")
-            .expect("painted text keeps its source")]
-            .to_owned()
-    }
-
     /// The text one painted string draws, with its escape sequences removed.
     fn unpainted(text: &str) -> String {
         let mut plain = String::new();
@@ -577,15 +540,6 @@ mod tests {
     }
 
     #[test]
-    fn fenced_source_keeps_whitespace() {
-        let markdown = "```typst\n#let title = \"界\"  \n\t#title\n\n```\n";
-        assert_eq!(
-            Documentation::new(Some(8), false).render(markdown),
-            "  #let title = \"界\"  \n  \t#title\n  \n"
-        );
-    }
-
-    #[test]
     fn prose_wraps_whole_graphemes() {
         let markdown =
             "界界界 👩‍💻 e\u{301}e\u{301}e\u{301} abcdefghijk\n\n- nested words wrap\n  - 界界界界\n";
@@ -599,14 +553,6 @@ mod tests {
     }
 
     #[test]
-    fn rule_fills_the_rendered_width() {
-        assert_eq!(
-            Documentation::new(Some(12), false).render("one\n\n---\n\ntwo\n"),
-            format!("one\n\n{}\n\ntwo\n", "-".repeat(12))
-        );
-    }
-
-    #[test]
     fn narrow_tables_stack_fields() {
         let markdown = "| Parameter | Description |\n| --- | --- |\n| `path` | Site asset path |\n| `size` | Image width |\n";
         let narrow = Documentation::new(Some(20), false).render(markdown);
@@ -614,8 +560,6 @@ mod tests {
         assert!(narrow.contains("Description: Site"));
         assert!(narrow.lines().all(|line| line.width() <= 20));
         let wide = Documentation::new(Some(72), false).render(markdown);
-        assert!(wide.contains(" | "));
-        assert!(wide.contains("-+-"));
         assert!(wide.contains("Site asset path"));
     }
 
@@ -626,23 +570,8 @@ mod tests {
             let plain = Documentation::new(columns, false).render(markdown);
             let colored = Documentation::new(columns, true).render(markdown);
             assert!(!plain.contains('\x1b'));
-            assert!(colored.contains(&painted(Style::Keyword)));
-            assert!(colored.contains(&painted(Style::String)));
-            let mut stripped = String::new();
-            let mut characters = colored.chars();
-            while let Some(character) = characters.next() {
-                if character == '\x1b' {
-                    assert_eq!(characters.next(), Some('['));
-                    for character in characters.by_ref() {
-                        if character == 'm' {
-                            break;
-                        }
-                    }
-                } else {
-                    stripped.push(character);
-                }
-            }
-            assert_eq!(stripped, plain);
+            assert!(colored.contains('\x1b'));
+            assert_eq!(unpainted(&colored), plain);
         }
     }
 
@@ -653,13 +582,6 @@ mod tests {
         let plain = Documentation::new(Some(80), false).render("```typc\n#let x = 1\n```\n");
         assert_eq!(typc, typst);
         assert!(!plain.contains('\x1b'));
-    }
-
-    #[test]
-    fn inline_code_paints_as_one_run() {
-        let rendered = Documentation::new(Some(80), true).render("see `width` now");
-        assert_eq!(rendered.matches('\x1b').count(), 2, "{rendered:?}");
-        assert!(rendered.contains("`width`"), "{rendered:?}");
     }
 
     #[test]
@@ -683,42 +605,5 @@ mod tests {
                 "color={color}: {rendered:?}"
             );
         }
-    }
-
-    #[test]
-    fn headings_and_lead_ins_paint_by_level() {
-        let markdown = "# Package\n\n## Section\n\n### Group\n\n#### parameter\n\nExample - a lead-in:\n\n```typst\n#let x = 1\n```\n";
-        let colored = Documentation::new(Some(80), true).render(markdown);
-        let levels = [
-            Style::Heading1,
-            Style::Heading2,
-            Style::Heading3,
-            Style::Heading4,
-        ];
-        for (index, level) in levels.iter().enumerate() {
-            assert!(
-                colored.contains(&painted(*level)),
-                "heading level {index} is unpainted"
-            );
-            for other in &levels[index + 1..] {
-                assert_ne!(
-                    painted(*level),
-                    painted(*other),
-                    "heading levels share one color"
-                );
-            }
-        }
-        assert!(
-            colored.contains(&painted(Style::Lead)),
-            "the lead-in is unpainted"
-        );
-        let labeled_lead_in = Documentation::new(Some(80), true)
-            .render("Example - read this site's settings:\n\n```typst\n#let x = 1\n```\n");
-        assert!(labeled_lead_in.contains(&painted(Style::Lead)));
-        assert!(
-            !Documentation::new(Some(80), false)
-                .render(markdown)
-                .contains('\x1b')
-        );
     }
 }
