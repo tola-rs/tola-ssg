@@ -13,6 +13,7 @@ use codespan_reporting::term::termcolor::{Buffer, Color, ColorSpec, WriteColor};
 use codespan_reporting::term::{self, Config};
 use tola_build::diagnostic::{Diagnostic, Location, Severity};
 
+use super::ansi;
 use super::source::SourceFiles;
 use super::text;
 use source_text::RenderedFiles;
@@ -23,7 +24,7 @@ pub(crate) fn render(
     sources: Option<&SourceFiles>,
     use_color: bool,
 ) -> String {
-    let escaped = DiagnosticText::of(diagnostic);
+    let escaped = DiagnosticText::of(diagnostic, use_color);
     let files = RenderedFiles::of(&escaped, sources);
     let config = Config {
         // The Typst CLI renders with two-column tabs.
@@ -121,8 +122,9 @@ fn notes(escaped: &DiagnosticText<'_>, files: &RenderedFiles<'_>) -> Vec<String>
 /// A diagnostic record's text as a terminal may draw it.
 ///
 /// `codespan-reporting` writes messages, notes, and paths verbatim, so this is where a diagnostic
-/// stops being able to control the terminal it is printed on. Every string is escaped for display
-/// and the record is left as the producer wrote it.
+/// stops being able to control the terminal it is printed on. A message and a location are escaped
+/// as text; a note may quote the output of a command, so it keeps that output's supported styling
+/// when color is drawn.
 struct DiagnosticText<'a> {
     message: String,
     notes: Vec<String>,
@@ -135,10 +137,13 @@ struct DiagnosticText<'a> {
 }
 
 impl<'a> DiagnosticText<'a> {
-    fn of(diagnostic: &'a Diagnostic) -> Self {
+    fn of(diagnostic: &'a Diagnostic, use_color: bool) -> Self {
         Self {
             message: text::multiline(diagnostic.display_message()),
-            notes: diagnostic.distinct_notes().map(text::multiline).collect(),
+            notes: diagnostic
+                .distinct_notes()
+                .map(|note| ansi::paint(note, use_color))
+                .collect(),
             primary: diagnostic.location.as_ref().map(LocationText::primary),
             help: diagnostic
                 .distinct_help()
@@ -349,41 +354,32 @@ mod tests {
         }
     }
 
-    /// A failing hook's output is text Tola did not write: the drawn diagnostic drops the escape
-    /// sequences that colored it and shows the carriage return it has instead of obeying it.
-    /// Text Tola did not write — a failing hook's stderr — reaches the reader without its
-    /// terminal controls, and a styled render adds none of its own for it.
+    /// A failing hook's output is text Tola did not write: the drawn diagnostic keeps the styling
+    /// it carries and drops every control that could move the cursor, showing a carriage return
+    /// instead of obeying it.
     #[test]
-    fn foreign_note_text_loses_its_controls() {
+    fn foreign_note_text_keeps_styling_only() {
         let diagnostic = Diagnostic::new(
             COMMAND,
             Severity::Error,
-            "the `styles` hook in `build.hooks.before-build` failed: the command exited with \
-             status 3",
+            "the `styles` hook in `build.hooks.before-build` failed: the command exited with status 3",
         )
         .with_note(
-            "stderr:\nplain-err fail\n\u{1b}[32mansi-err\u{1b}[0m\ncr-err cccc\rdddd\neeee\n",
+            "stderr:\nplain-err fail\n\u{1b}[32mansi-err\u{1b}[0m\ncr-err cccc\rdddd\neeee\n\u{1b}[2J",
         );
-        let rendered = render(&diagnostic, None, false);
-        assert!(
-            !rendered.contains(['\u{1b}', '\r', '\u{7}']),
-            "{rendered:?}"
-        );
-        assert!(rendered.contains("plain-err fail"), "{rendered:?}");
-        assert!(rendered.contains("ansi-err"), "{rendered:?}");
-        assert!(rendered.contains("cr-err cccc\\rdddd"), "{rendered:?}");
+        let plain = render(&diagnostic, None, false);
+        assert!(!plain.contains(['\u{1b}', '\r']), "{plain:?}");
+        assert!(plain.contains("plain-err fail"), "{plain:?}");
+        assert!(plain.contains("ansi-err"), "{plain:?}");
+        assert!(plain.contains("cr-err cccc\\rdddd"), "{plain:?}");
 
-        let note = |text: &str| {
-            Diagnostic::new(COMMAND, Severity::Error, "the `styles` hook failed")
-                .with_note(text.to_owned())
-        };
-        let foreign = render(&note("stderr:\n\u{1b}[32mansi-err\u{1b}[0m\n"), None, true);
-        let plain = render(&note("stderr:\nansi-err\n"), None, true);
+        let styled = render(&diagnostic, None, true);
         assert!(
-            plain.contains('\u{1b}'),
-            "a styled render styles with escapes: {plain:?}"
+            styled.contains("\u{1b}[0;32mansi-err\u{1b}[0m"),
+            "{styled:?}"
         );
-        assert_eq!(foreign, plain, "{foreign:?}");
+        assert!(!styled.contains("\u{1b}[2J"), "{styled:?}");
+        assert!(!styled.contains('\r'), "{styled:?}");
     }
 
     /// A trace frame whose location spans many source lines draws as one marked line, and never

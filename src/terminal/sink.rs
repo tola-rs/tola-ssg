@@ -4,7 +4,8 @@ use std::io::{self, Write};
 use std::sync::{Arc, OnceLock};
 
 use super::Palette;
-use super::development::{DevScreen, HookRun, Round};
+use super::ansi::{self, Painter};
+use super::development::{DevScreen, HookRun, Round, stream_index};
 use super::session::{Claim, Holder, ProcessTerminal, Terminal as _};
 
 const OUTPUT_LOCK_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
@@ -24,13 +25,29 @@ struct SinkInner {
 #[derive(Default)]
 struct Presentation {
     hook: Option<HookLine>,
+    hook_text: Vec<HookText>,
     development: Option<DevScreen>,
 }
 
 struct HookLine {
     run: HookRun,
-    stream: String,
-    carriage_return: bool,
+    stream: usize,
+    painter: Painter,
+}
+
+/// One hook execution's text, interpreted per stream while its command runs.
+struct HookText {
+    run: HookRun,
+    streams: [ansi::Parser; 2],
+}
+
+impl HookText {
+    fn new(run: HookRun) -> Self {
+        Self {
+            run,
+            streams: [ansi::Parser::new(), ansi::Parser::new()],
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -256,6 +273,7 @@ impl OutputSink {
         {
             self.finish_hook_line(&mut presentation)?;
         }
+        presentation.hook_text.retain(|text| text.run != *run);
         Ok(false)
     }
 
@@ -285,6 +303,7 @@ impl OutputSink {
         if chunk.is_empty() {
             return Ok(());
         }
+        let stream = stream_index(stream);
         if presentation
             .hook
             .as_ref()
@@ -292,41 +311,49 @@ impl OutputSink {
         {
             self.finish_hook_line(presentation)?;
         }
-        let label = if stream == "stderr" {
-            format!("{} stderr", run.name)
-        } else {
-            run.name.clone()
+        let position = match presentation
+            .hook_text
+            .iter()
+            .position(|text| text.run == *run)
+        {
+            Some(position) => position,
+            None => {
+                presentation.hook_text.push(HookText::new(run.clone()));
+                presentation.hook_text.len() - 1
+            }
         };
-        let mut carriage_return = presentation
-            .hook
-            .as_ref()
-            .is_some_and(|line| line.carriage_return);
-        let fragments = super::text::hook_fragments(chunk, &mut carriage_return);
+        let label = if stream == 0 {
+            run.name.clone()
+        } else {
+            format!("{} stderr", run.name)
+        };
         let mut rendered = String::new();
-        for fragment in fragments {
+        for segment in presentation.hook_text[position].streams[stream].push(chunk) {
+            if segment.text == "\n" {
+                if let Some(line) = &mut presentation.hook {
+                    line.painter.reset(&mut rendered);
+                }
+                rendered.push('\n');
+                presentation.hook = None;
+                continue;
+            }
             if presentation.hook.is_none() {
                 rendered.push_str(&super::progress::stream_label(&label, palette));
                 presentation.hook = Some(HookLine {
                     run: run.clone(),
-                    stream: stream.to_owned(),
-                    carriage_return: false,
+                    stream,
+                    painter: Painter::new(palette.uses_color()),
                 });
             }
-            rendered.push_str(&fragment);
-            if fragment.ends_with('\n') {
-                presentation.hook = None;
-            }
+            presentation
+                .hook
+                .as_mut()
+                .expect("a hook line is open")
+                .painter
+                .write(&segment, &mut rendered);
         }
-        if carriage_return && presentation.hook.is_none() {
-            rendered.push_str(&super::progress::stream_label(&label, palette));
-            presentation.hook = Some(HookLine {
-                run: run.clone(),
-                stream: stream.to_owned(),
-                carriage_return: false,
-            });
-        }
-        if let Some(line) = &mut presentation.hook {
-            line.carriage_return = carriage_return;
+        if rendered.is_empty() {
+            return Ok(());
         }
         self.print(presentation, rendered.as_bytes())
     }
@@ -377,17 +404,21 @@ impl OutputSink {
     }
 
     fn finish_hook_line(&self, presentation: &mut Presentation) -> io::Result<()> {
-        if let Some(line) = presentation.hook.take() {
-            self.print(
-                presentation,
-                if line.carriage_return {
-                    b"\\r\n"
-                } else {
-                    b"\n"
-                },
-            )?;
+        let Some(mut line) = presentation.hook.take() else {
+            return Ok(());
+        };
+        let mut rendered = String::new();
+        if let Some(text) = presentation
+            .hook_text
+            .iter_mut()
+            .find(|text| text.run == line.run)
+            && let Some(carriage_return) = text.streams[line.stream].flush()
+        {
+            line.painter.write(&carriage_return, &mut rendered);
         }
-        Ok(())
+        line.painter.reset(&mut rendered);
+        rendered.push('\n');
+        self.print(presentation, rendered.as_bytes())
     }
 }
 
@@ -490,5 +521,30 @@ mod tests {
         sink.write_stderr_nonblocking(b"panic\n").unwrap();
         assert_eq!(String::from_utf8(output.bytes()).unwrap(), "panic\n");
         drop(held);
+    }
+
+    fn hook_run(name: &str) -> HookRun {
+        HookRun {
+            scope: 0,
+            name: name.to_owned(),
+        }
+    }
+
+    #[test]
+    fn hook_colors_stay_with_their_execution() {
+        let (sink, output) = OutputSink::buffered();
+        let first = hook_run("first");
+        let second = hook_run("second");
+        let palette = Palette::new(true);
+        sink.hook_output(&first, "stderr", "\x1b[31mred", palette)
+            .unwrap();
+        sink.hook_output(&second, "stderr", "\x1b[32mgreen\n", palette)
+            .unwrap();
+        sink.hook_output(&first, "stderr", "again\n", palette)
+            .unwrap();
+        let shown = String::from_utf8(output.bytes()).unwrap();
+        assert!(shown.contains("\x1b[0;31mred\x1b[0m\n"), "{shown:?}");
+        assert!(shown.contains("\x1b[0;32mgreen\x1b[0m\n"), "{shown:?}");
+        assert!(shown.contains("\x1b[0;31magain\x1b[0m\n"), "{shown:?}");
     }
 }
