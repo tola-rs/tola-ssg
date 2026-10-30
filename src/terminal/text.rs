@@ -1,8 +1,10 @@
 //! Display external text without granting it terminal control.
 
-use std::fmt::Write;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
+
+use super::ansi;
+use super::ansi::push_visible;
 
 /// Preserve line breaks and tabs while making other controls visible.
 ///
@@ -11,59 +13,7 @@ use unicode_width::UnicodeWidthStr;
 /// diagnostic note, and spelling it out buries the output the reader came for. Every control
 /// that remains is spelled out, so displayed text still cannot move a cursor.
 pub(crate) fn multiline(source: &str) -> String {
-    let mut output = String::with_capacity(source.len());
-    let mut characters = source.chars().peekable();
-    while let Some(character) = characters.next() {
-        if character == '\u{1b}' {
-            skip_escape(&mut characters);
-            continue;
-        }
-        if character == '\r' && characters.peek() == Some(&'\n') {
-            continue;
-        }
-        if matches!(character, '\n' | '\t') {
-            output.push(character);
-        } else {
-            push_visible(&mut output, character);
-        }
-    }
-    output
-}
-
-/// Consume one escape sequence, the introducer already read.
-///
-/// A sequence whose final byte never arrives takes the rest of the text with it: a half-read
-/// escape is still control text, and drawing what follows would be guessing where it ended.
-fn skip_escape(characters: &mut std::iter::Peekable<std::str::Chars<'_>>) {
-    match characters.peek() {
-        // Control Sequence Introducer, and its two-byte C1 spelling.
-        Some('[') | Some('\u{9b}') => {
-            characters.next();
-            for character in characters.by_ref() {
-                if ('\u{40}'..='\u{7e}').contains(&character) {
-                    break;
-                }
-            }
-        }
-        Some(']') => {
-            characters.next();
-            for character in characters.by_ref() {
-                match character {
-                    '\u{7}' => break,
-                    '\u{1b}' => {
-                        if characters.peek() == Some(&'\\') {
-                            characters.next();
-                        }
-                        break;
-                    }
-                    _ => {}
-                }
-            }
-        }
-        _ => {
-            characters.next();
-        }
-    }
+    ansi::paint(source, false)
 }
 
 /// Join `text`'s lines as one block, the first line flush and every later line indented one
@@ -80,32 +30,6 @@ pub(crate) fn indent_continuation_lines(text: &str) -> String {
         output.push_str(line.trim_end_matches('\r'));
     }
     output
-}
-
-/// Split one chunk of a hook's output into the display fragments it produces.
-///
-/// A hook must not control the terminal, so a carriage return becomes visible text rather than a
-/// cursor move: a chunk that continues a returned line starts with one, and a chunk that ends one
-/// keeps it pending in `carriage_return` until the next chunk decides whether it was a line break.
-/// Each fragment either ends with a line break or is the line the hook is still writing.
-pub(crate) fn hook_fragments(source: &str, carriage_return: &mut bool) -> Vec<String> {
-    let mut displayed = String::new();
-    let mut source = source;
-    if *carriage_return {
-        match source.strip_prefix('\n') {
-            Some(rest) => {
-                displayed.push('\n');
-                source = rest;
-            }
-            None => displayed.push_str("\\r"),
-        }
-    }
-    *carriage_return = source.ends_with('\r');
-    if *carriage_return {
-        source = &source[..source.len() - 1];
-    }
-    displayed.push_str(&multiline(source));
-    displayed.split_inclusive('\n').map(str::to_owned).collect()
 }
 
 /// Paths and identifiers occupy one line, even when their contents contain controls.
@@ -170,21 +94,6 @@ pub(crate) fn window(source: &str, columns: usize, focus: usize) -> DisplayWindo
     DisplayWindow {
         text: &source[start_byte..end_byte],
         start_column,
-    }
-}
-
-fn push_visible(output: &mut String, character: char) {
-    match character {
-        '\n' => output.push_str("\\n"),
-        '\r' => output.push_str("\\r"),
-        '\t' => output.push_str("\\t"),
-        character if character.is_ascii_control() => {
-            write!(output, "\\x{:02x}", character as u32).expect("writing to a String succeeds");
-        }
-        character if character.is_control() => {
-            write!(output, "\\u{{{:x}}}", character as u32).expect("writing to a String succeeds");
-        }
-        character => output.push(character),
     }
 }
 

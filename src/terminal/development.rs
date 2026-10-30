@@ -8,17 +8,17 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
-use anstyle_parse::{DefaultCharAccumulator, Params, Parser, Perform};
 use chrono::{DateTime, Local, NaiveDate};
 use crossterm::execute;
 use crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout, Rect, Size};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Paragraph, Wrap};
 use tola_build::diagnostic::Diagnostic;
 
+use super::ansi::{self, Segment};
 use super::session::{self, Claim, ProcessTerminal, ViewModes};
 use super::sink::{OutputSink, StreamWriter};
 use super::style::Palette;
@@ -75,45 +75,93 @@ pub(crate) struct HookRun {
 struct Job {
     run: HookRun,
     stage: String,
-    lines: VecDeque<(usize, String)>,
-    partial: [String; 2],
-    carriage_return: [bool; 2],
+    lines: VecDeque<(usize, Vec<Segment>)>,
+    partial: [Vec<Segment>; 2],
+    parsers: [ansi::Parser; 2],
+    omitted_lines: usize,
 }
 
 impl Job {
+    fn new(run: HookRun, stage: &str) -> Self {
+        Self {
+            run,
+            stage: stage.to_owned(),
+            lines: VecDeque::new(),
+            partial: Default::default(),
+            parsers: [ansi::Parser::new(), ansi::Parser::new()],
+            omitted_lines: 0,
+        }
+    }
+
     fn output(&mut self, stream: &str, chunk: &str) {
-        let stream = usize::from(stream == "stderr");
-        for fragment in super::text::hook_fragments(chunk, &mut self.carriage_return[stream]) {
-            let complete = fragment.ends_with('\n');
-            self.partial[stream].push_str(fragment.trim_end_matches('\n'));
-            if complete {
+        let stream = stream_index(stream);
+        for segment in self.parsers[stream].push(chunk) {
+            if segment.text == "\n" {
                 self.lines
                     .push_back((stream, std::mem::take(&mut self.partial[stream])));
                 if self.lines.len() > HOOK_LINES {
                     self.lines.pop_front();
+                    self.omitted_lines += 1;
                 }
+            } else {
+                push_segment(&mut self.partial[stream], segment);
             }
         }
     }
 
-    fn body(&self) -> Vec<String> {
-        let mut lines = vec![format!("{}/{}", self.stage, self.run.name)];
-        for (stream, text) in self
+    fn body(&self, styled: bool) -> Vec<Line<'static>> {
+        let mut header = format!("{}/{}", self.stage, self.run.name);
+        if self.omitted_lines > 0 {
+            let omitted = super::progress::plural_count(self.omitted_lines, "earlier line");
+            header.push_str(&format!(" · {omitted} not shown"));
+        }
+        let mut lines = vec![Line::from(header)];
+        let partial = self
+            .partial
+            .iter()
+            .enumerate()
+            .filter(|(_, segments)| !segments.is_empty());
+        for (stream, segments) in self
             .lines
             .iter()
-            .map(|(stream, line)| (*stream, line))
-            .chain(
-                self.partial
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, line)| !line.is_empty()),
-            )
+            .map(|(stream, segments)| (*stream, segments.as_slice()))
+            .chain(partial.map(|(stream, segments)| (stream, segments.as_slice())))
         {
-            let label = if stream == 0 { "stdout" } else { "stderr" };
-            lines.push(format!("[{label}] {text}"));
+            let label = if stream == 0 {
+                "[stdout] "
+            } else {
+                "[stderr] "
+            };
+            let mut spans = vec![Span::raw(label)];
+            for segment in segments {
+                let style = if styled {
+                    segment.style
+                } else {
+                    Style::default()
+                };
+                spans.push(Span::styled(tabs_expanded(&segment.text), style));
+            }
+            lines.push(Line::from(spans));
         }
         lines
     }
+}
+
+/// The stream index a hook event names; both streams share one execution's parsers.
+pub(crate) fn stream_index(stream: &str) -> usize {
+    usize::from(stream == "stderr")
+}
+
+/// Adjacent segments under one style are one span.
+fn push_segment(segments: &mut Vec<Segment>, segment: Segment) {
+    match segments.last_mut() {
+        Some(last) if last.style == segment.style => last.text.push_str(&segment.text),
+        _ => segments.push(segment),
+    }
+}
+
+fn tabs_expanded(text: &str) -> String {
+    text.replace('\t', "    ")
 }
 
 /// Drop stops the input worker before the development command releases its terminal.
@@ -435,13 +483,7 @@ impl DevScreen {
     }
 
     pub(crate) fn job_started(&mut self, run: HookRun, stage: &str) {
-        self.jobs.push(Job {
-            run,
-            stage: stage.to_owned(),
-            lines: VecDeque::new(),
-            partial: Default::default(),
-            carriage_return: [false; 2],
-        });
+        self.jobs.push(Job::new(run, stage));
         self.dirty = true;
     }
 
@@ -591,10 +633,14 @@ impl DevScreen {
         } else {
             header.line_count(self.size.width)
         };
+        let styled = self.palette.uses_color();
         let job_lines = self
             .jobs
             .iter()
-            .map(|job| styled_paragraph(&job.body().join("\n")).line_count(self.size.width))
+            .map(|job| {
+                let mut lines = job.body(styled);
+                job_paragraph(lines.split_off(1)).line_count(self.size.width)
+            })
             .sum::<usize>();
         let jobs = &self.jobs;
         let [header_area, counter_area, body_area, jobs_area, footer_area] = frame_areas(
@@ -637,7 +683,7 @@ impl DevScreen {
             frame.render_widget(header, header_area);
             frame.render_widget(Paragraph::new(counter), counter_area);
             frame.render_widget(body, body_area);
-            draw_jobs(frame, jobs_area, jobs);
+            draw_jobs(frame, jobs_area, jobs, styled);
             draw_footer(
                 frame,
                 footer_area,
@@ -699,19 +745,19 @@ fn draw_footer(
     );
 }
 
-fn draw_jobs(frame: &mut ratatui::Frame<'_>, area: Rect, jobs: &[Job]) {
+fn draw_jobs(frame: &mut ratatui::Frame<'_>, area: Rect, jobs: &[Job], styled: bool) {
     let mut top = area.y;
     let visible = jobs.len().min(usize::from(area.height));
     for (index, job) in jobs.iter().take(visible).enumerate() {
         let rows = usize::from(area.bottom() - top) / (visible - index);
         let rows = rows as u16;
-        let lines = job.body();
+        let mut lines = job.body(styled);
         frame.render_widget(
-            Paragraph::new(lines[0].clone()),
+            Paragraph::new(lines.remove(0)),
             Rect::new(area.x, top, area.width, 1),
         );
         let tail_area = Rect::new(area.x, top + 1, area.width, rows - 1);
-        let tail = styled_paragraph(&lines[1..].join("\n"));
+        let tail = job_paragraph(lines);
         let offset = tail
             .line_count(area.width)
             .saturating_sub(usize::from(tail_area.height));
@@ -740,6 +786,10 @@ fn styled_paragraph(text: &str) -> Paragraph<'static> {
     Paragraph::new(Text::from(styled_lines(text))).wrap(Wrap { trim: false })
 }
 
+fn job_paragraph(lines: Vec<Line<'static>>) -> Paragraph<'static> {
+    Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false })
+}
+
 /// The dev keys whose action still changes the view.
 fn live_actions(rounds: &Rounds) -> Vec<Action> {
     ACCEPTED
@@ -753,145 +803,33 @@ fn live_actions(rounds: &Rounds) -> Vec<Action> {
 /// An SGR sequence chooses the style of what follows; any other sequence, a hyperlink's OSC
 /// included, is control text that never reaches the frame as characters.
 fn styled_lines(text: &str) -> Vec<Line<'static>> {
-    struct Stylist {
-        lines: Vec<Line<'static>>,
-        run: String,
-        style: Style,
-    }
-
-    impl Stylist {
-        fn flush(&mut self) {
-            if !self.run.is_empty() {
-                push_span(
-                    self.lines.last_mut().expect("one line"),
-                    &self.run,
-                    self.style,
-                );
-                self.run.clear();
-            }
+    let mut lines = vec![Line::default()];
+    for segment in ansi::segments(text) {
+        if segment.text == "\n" {
+            lines.push(Line::default());
+            continue;
         }
+        push_span(
+            lines.last_mut().expect("one line"),
+            &tabs_expanded(&segment.text),
+            segment.style,
+        );
     }
-
-    impl Perform for Stylist {
-        fn print(&mut self, character: char) {
-            self.run.push(character);
-        }
-
-        fn execute(&mut self, byte: u8) {
-            match byte {
-                b'\n' => {
-                    self.flush();
-                    self.lines.push(Line::default());
-                }
-                b'\t' => self.run.push_str("    "),
-                _ => {}
-            }
-        }
-
-        fn csi_dispatch(
-            &mut self,
-            params: &Params,
-            _intermediates: &[u8],
-            _ignore: bool,
-            action: u8,
-        ) {
-            if action == b'm' {
-                self.flush();
-                apply_sgr(&mut self.style, params);
-            }
-        }
-    }
-
-    let mut stylist = Stylist {
-        lines: vec![Line::default()],
-        run: String::new(),
-        style: Style::default(),
-    };
-    let mut parser = Parser::<DefaultCharAccumulator>::new();
-    for byte in text.bytes() {
-        parser.advance(&mut stylist, byte);
-    }
-    stylist.flush();
-    stylist.lines
+    lines
 }
 
 /// The plain text a styled transcript prints: the clipboard takes text, not a terminal, so
 /// styling is consumed and a hyperlink's payload never becomes characters.
 fn plain_text(text: &str) -> String {
-    struct Plain(String);
-
-    impl Perform for Plain {
-        fn print(&mut self, character: char) {
-            self.0.push(character);
-        }
-
-        fn execute(&mut self, byte: u8) {
-            match byte {
-                b'\n' => self.0.push('\n'),
-                b'\t' => self.0.push_str("    "),
-                _ => {}
-            }
+    let mut plain = String::with_capacity(text.len());
+    for segment in ansi::segments(text) {
+        if segment.text == "\n" {
+            plain.push('\n');
+        } else {
+            plain.push_str(&tabs_expanded(&segment.text));
         }
     }
-
-    let mut plain = Plain(String::new());
-    let mut parser = Parser::<DefaultCharAccumulator>::new();
-    for byte in text.bytes() {
-        parser.advance(&mut plain, byte);
-    }
-    plain.0
-}
-
-fn apply_sgr(style: &mut Style, params: &Params) {
-    let mut values = params
-        .iter()
-        .map(|values| values.first().copied().unwrap_or(0));
-    while let Some(value) = values.next() {
-        match value {
-            0 => *style = Style::default(),
-            1 => *style = style.add_modifier(Modifier::BOLD),
-            2 => *style = style.add_modifier(Modifier::DIM),
-            4 => *style = style.add_modifier(Modifier::UNDERLINED),
-            22 => *style = style.remove_modifier(Modifier::BOLD | Modifier::DIM),
-            24 => *style = style.remove_modifier(Modifier::UNDERLINED),
-            30..=37 | 90..=97 => *style = style.fg(ansi_color(value)),
-            38 => {
-                if values.next() == Some(5)
-                    && let Some(color) = values.next()
-                {
-                    *style = style.fg(Color::Indexed(color as u8));
-                }
-            }
-            39 => *style = style.fg(Color::Reset),
-            _ => {}
-        }
-    }
-}
-
-fn ansi_color(value: u16) -> Color {
-    const COLORS: [Color; 16] = [
-        Color::Black,
-        Color::Red,
-        Color::Green,
-        Color::Yellow,
-        Color::Blue,
-        Color::Magenta,
-        Color::Cyan,
-        Color::Gray,
-        Color::DarkGray,
-        Color::LightRed,
-        Color::LightGreen,
-        Color::LightYellow,
-        Color::LightBlue,
-        Color::LightMagenta,
-        Color::LightCyan,
-        Color::White,
-    ];
-    COLORS[usize::from(if value >= 90 {
-        value - 90 + 8
-    } else {
-        value - 30
-    })]
+    plain
 }
 
 fn push_span(line: &mut Line<'static>, text: &str, style: Style) {
@@ -909,6 +847,7 @@ fn push_span(line: &mut Line<'static>, text: &str, style: Style) {
 mod tests {
     use super::*;
     use chrono::{Duration, TimeZone};
+    use ratatui::style::{Color, Modifier};
     use tola_build::diagnostic::Severity;
 
     fn diagnostic(path: &str) -> Diagnostic {
@@ -1142,20 +1081,19 @@ mod tests {
 
     #[test]
     fn short_hook_area_shows_jobs() {
-        let jobs = ["styles", "search", "assets"].map(|name| Job {
-            run: HookRun {
-                scope: 0,
-                name: name.to_owned(),
-            },
-            stage: "generate".to_owned(),
-            lines: VecDeque::new(),
-            partial: Default::default(),
-            carriage_return: [false; 2],
+        let jobs = ["styles", "search", "assets"].map(|name| {
+            Job::new(
+                HookRun {
+                    scope: 0,
+                    name: name.to_owned(),
+                },
+                "generate",
+            )
         });
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(24, 2)).unwrap();
         terminal
-            .draw(|frame| draw_jobs(frame, frame.area(), &jobs))
+            .draw(|frame| draw_jobs(frame, frame.area(), &jobs, false))
             .unwrap();
         let drawn = terminal
             .backend()
@@ -1250,28 +1188,85 @@ mod tests {
         assert!(rounds.live(Action::NextRound));
     }
 
+    fn body_text(line: &Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+
     #[test]
     fn hook_chunks_keep_stream_lines() {
-        let mut job = Job {
-            run: HookRun {
+        let mut job = Job::new(
+            HookRun {
                 scope: 0,
                 name: "assets".to_owned(),
             },
-            stage: String::new(),
-            lines: VecDeque::new(),
-            partial: Default::default(),
-            carriage_return: [false; 2],
-        };
+            "",
+        );
         job.output("stdout", "first");
         job.output("stdout", " line\r");
         job.output("stdout", "\n");
         job.output("stderr", "failure\n");
-        assert_eq!(
-            job.lines
-                .iter()
-                .map(|(stream, line)| (*stream, line.as_str()))
-                .collect::<Vec<_>>(),
-            [(0, "first line"), (1, "failure")]
+        let drawn = job
+            .body(false)
+            .iter()
+            .skip(1)
+            .map(body_text)
+            .collect::<Vec<_>>();
+        assert_eq!(drawn, ["[stdout] first line", "[stderr] failure"]);
+    }
+
+    #[test]
+    fn hook_lines_keep_style_when_cropped() {
+        let mut job = Job::new(
+            HookRun {
+                scope: 0,
+                name: "assets".to_owned(),
+            },
+            "",
         );
+        for index in 1..=HOOK_LINES + 1 {
+            let color = if index == 1 { "\x1b[31m" } else { "\x1b[32m" };
+            job.output("stdout", &format!("{color}line {index}\x1b[0m\n"));
+        }
+        let lines = job.body(true);
+        assert_eq!(lines.len(), HOOK_LINES + 1);
+        assert_eq!(body_text(&lines[1]), "[stdout] line 2");
+        assert_eq!(lines[1].spans[1].style.fg, Some(Color::Green));
+    }
+
+    #[test]
+    fn hook_header_names_omitted_lines() {
+        let mut job = Job::new(
+            HookRun {
+                scope: 0,
+                name: "assets".to_owned(),
+            },
+            "",
+        );
+        for index in 1..=HOOK_LINES {
+            job.output("stdout", &format!("line {index}\n"));
+        }
+        assert_eq!(body_text(&job.body(false)[0]), "/assets");
+        job.output("stdout", "one more\n");
+        assert_eq!(
+            body_text(&job.body(false)[0]),
+            "/assets · 1 earlier line not shown"
+        );
+    }
+
+    #[test]
+    fn hook_body_follows_the_color_decision() {
+        let mut job = Job::new(
+            HookRun {
+                scope: 0,
+                name: "assets".to_owned(),
+            },
+            "",
+        );
+        job.output("stdout", "\x1b[31mred\n");
+        assert_eq!(job.body(true)[1].spans[1].style.fg, Some(Color::Red));
+        assert_eq!(job.body(false)[1].spans[1].style.fg, None);
     }
 }

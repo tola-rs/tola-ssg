@@ -527,7 +527,7 @@ mod tests {
                 highlight: Some((0, 2)),
             });
             let diagnostic = Diagnostic::at_location(COMPILE, Severity::Error, location, "failure");
-            let escaped = DiagnosticText::of(&diagnostic);
+            let escaped = DiagnosticText::of(&diagnostic, false);
             let files = RenderedFiles::of(&escaped, None);
             let primary = escaped.primary.as_ref().unwrap();
             let compact = files.compact_span(primary).unwrap();
@@ -559,7 +559,7 @@ mod tests {
             message: "inspect here".into(),
             location: Some(help),
         });
-        let escaped = DiagnosticText::of(&diagnostic);
+        let escaped = DiagnosticText::of(&diagnostic, false);
         let files = RenderedFiles::of(&escaped, None);
         assert_eq!(files.source("site.typ").unwrap(), "abcdefgh");
         let rendered = render(&diagnostic, None, false);
@@ -592,7 +592,7 @@ mod tests {
             message: "inspect here".into(),
             location: Some(snippet(3, "next[]")),
         });
-        let escaped = DiagnosticText::of(&diagnostic);
+        let escaped = DiagnosticText::of(&diagnostic, false);
         let files = RenderedFiles::of(&escaped, None);
         let compact = files
             .compact_span(escaped.primary.as_ref().unwrap())
@@ -623,7 +623,7 @@ mod tests {
                 message: "inspect here".into(),
                 location: Some(snippet(2, "]")),
             });
-            let escaped = DiagnosticText::of(&diagnostic);
+            let escaped = DiagnosticText::of(&diagnostic, false);
             let files = RenderedFiles::of(&escaped, None);
             let primary = escaped.primary.as_ref().unwrap();
             assert!(files.is_span_shortened(primary));
