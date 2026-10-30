@@ -1,16 +1,13 @@
 //! The structured form of one `tola help` page.
 //!
-//! The page builders write the Markdown once; the plain renderer parses it through
-//! `terminal::documentation`, and the interactive view reads it through this model. `PageId`
-//! names a page; the target module gives CLI requests and help URLs the same identity.
+//! Both help renderers parse the page builders' Markdown through this model. `PageId` names a
+//! page; the target module gives CLI requests and help URLs the same identity.
 
 use std::collections::BTreeSet;
 use std::iter::Peekable;
 use std::ops::Range;
 
-use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag};
-
-use crate::terminal::code::{self, CodeKind};
+use pulldown_cmark::{Event, Options, Parser, Tag};
 
 pub(crate) use super::target::{CROSS_REFERENCE_SCHEME, HelpCategory, LinkTarget, PageId};
 
@@ -52,7 +49,6 @@ impl HelpPage {
 
 #[derive(Clone)]
 pub(crate) struct HelpDocument {
-    pub id: PageId,
     pub blocks: Vec<Block>,
 }
 
@@ -73,18 +69,13 @@ pub(crate) enum Block {
     },
     Paragraph {
         spans: Vec<Inline>,
-        /// Whether the paragraph introduces the code block that follows it.
-        lead: bool,
     },
     /// A list; each item holds its own blocks.
     List {
-        start: Option<u64>,
         items: Vec<Vec<Block>>,
     },
     Code {
         source: String,
-        /// Language-level runs depend on source, not terminal width or palette.
-        runs: Vec<(Range<usize>, CodeKind)>,
     },
     /// A table; its first row heads the rest.
     Table {
@@ -146,7 +137,7 @@ pub(crate) fn anchor(heading: &str) -> Anchor {
 
 impl HelpDocument {
     /// Parses the Markdown of one page the builder wrote.
-    pub(crate) fn parse(page: HelpPage) -> Self {
+    pub(crate) fn parse(page: &HelpPage) -> Self {
         let markdown = page.markdown();
         let mut offset = 0;
         let mut exports = Vec::new();
@@ -171,23 +162,9 @@ impl HelpDocument {
         unique_anchors(&mut document_blocks, &mut used, HeadingRole::Export);
         unique_anchors(&mut document_blocks, &mut used, HeadingRole::Documentation);
         Self {
-            id: page.id,
             blocks: document_blocks,
         }
     }
-
-    pub(crate) fn contains_anchor(&self, anchor: &Anchor) -> bool {
-        contains_anchor(&self.blocks, anchor)
-    }
-}
-
-fn contains_anchor(blocks: &[Block], wanted: &Anchor) -> bool {
-    blocks.iter().any(|block| match block {
-        Block::Heading { anchor, .. } => anchor == wanted,
-        Block::List { items, .. } => items.iter().any(|blocks| contains_anchor(blocks, wanted)),
-        Block::Quote { blocks } => contains_anchor(blocks, wanted),
-        _ => false,
-    })
 }
 
 fn unique_anchors(blocks: &mut [Block], used: &mut BTreeSet<Anchor>, selected: HeadingRole) {
@@ -219,7 +196,7 @@ fn unique_anchors(blocks: &mut [Block], used: &mut BTreeSet<Anchor>, selected: H
 }
 
 /// One Markdown fragment as a tree of balanced events.
-enum Node<'a> {
+pub(crate) enum Node<'a> {
     Heading {
         level: pulldown_cmark::HeadingLevel,
         children: Vec<Node<'a>>,
@@ -266,6 +243,13 @@ fn nodes<'a>(
     tree
 }
 
+/// One Markdown fragment as a tree of balanced events, with no page section marked as an export.
+pub(crate) fn plain_nodes<'a>(
+    events: &mut impl Iterator<Item = (Event<'a>, Range<usize>)>,
+) -> Vec<Node<'a>> {
+    nodes(events, &mut std::iter::empty().peekable())
+}
+
 fn blocks(nodes: &[Node<'_>], page: &PageId) -> Vec<Block> {
     let mut blocks = Vec::new();
     let mut inline_start = 0;
@@ -289,11 +273,7 @@ fn block(nodes: &[Node<'_>], position: usize, page: &PageId) -> Option<Block> {
     match &nodes[position] {
         Node::Branch(Tag::Paragraph, children) => {
             let spans = inline(children, page);
-            let lead = matches!(
-                nodes.get(position + 1),
-                Some(Node::Branch(Tag::CodeBlock(_), _))
-            ) && plain_text(&spans).trim_end().ends_with([':', '：']);
-            Some(Block::Paragraph { spans, lead })
+            Some(Block::Paragraph { spans })
         }
         Node::Heading {
             level,
@@ -308,13 +288,11 @@ fn block(nodes: &[Node<'_>], position: usize, page: &PageId) -> Option<Block> {
                 role: *role,
             })
         }
-        Node::Branch(Tag::CodeBlock(kind), children) => {
+        Node::Branch(Tag::CodeBlock(_), children) => {
             let source = code_source(children);
-            let runs = code::spans(&source, &fence_language(kind));
-            Some(Block::Code { source, runs })
+            Some(Block::Code { source })
         }
-        Node::Branch(Tag::List(start), children) => Some(Block::List {
-            start: *start,
+        Node::Branch(Tag::List(_), children) => Some(Block::List {
             items: children
                 .iter()
                 .filter_map(|node| match node {
@@ -361,7 +339,6 @@ fn block(nodes: &[Node<'_>], position: usize, page: &PageId) -> Option<Block> {
 fn inline_paragraph(nodes: &[Node<'_>], page: &PageId) -> Block {
     Block::Paragraph {
         spans: inline(nodes, page),
-        lead: false,
     }
 }
 
@@ -404,7 +381,7 @@ fn push_text(spans: &mut Vec<Inline>, text: &str) {
 }
 
 /// The text of inline spans, with each code span and label unwrapped.
-fn plain_text(spans: &[Inline]) -> String {
+pub(crate) fn plain_text(spans: &[Inline]) -> String {
     let mut text = String::new();
     for span in spans {
         match span {
@@ -416,13 +393,6 @@ fn plain_text(spans: &[Inline]) -> String {
         }
     }
     text
-}
-
-fn fence_language(kind: &CodeBlockKind<'_>) -> String {
-    match kind {
-        CodeBlockKind::Fenced(info) => info.split_whitespace().next().unwrap_or("").to_owned(),
-        CodeBlockKind::Indented => String::new(),
-    }
 }
 
 fn code_source(children: &[Node<'_>]) -> String {
@@ -438,6 +408,21 @@ fn code_source(children: &[Node<'_>]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    impl HelpDocument {
+        fn contains_anchor(&self, anchor: &Anchor) -> bool {
+            contains_anchor(&self.blocks, anchor)
+        }
+    }
+
+    fn contains_anchor(blocks: &[Block], wanted: &Anchor) -> bool {
+        blocks.iter().any(|block| match block {
+            Block::Heading { anchor, .. } => anchor == wanted,
+            Block::List { items, .. } => items.iter().any(|blocks| contains_anchor(blocks, wanted)),
+            Block::Quote { blocks } => contains_anchor(blocks, wanted),
+            _ => false,
+        })
+    }
 
     #[test]
     fn heading_slugs_keep_domain_spelling() {
@@ -474,17 +459,6 @@ mod tests {
     }
 
     #[test]
-    fn export_fragments_preserve_markdown() {
-        let prefix = "# Package\n\nOverview.\n";
-        let function = "\n## callable - function\n\n```typst-code\nlet callable();\n```\n";
-        let value = "\n---\n\n## constant - value\n\nThe value.\n";
-        let mut page = HelpPage::new(PageId::Overview, prefix.to_owned());
-        page.push_export(function.to_owned());
-        page.push_export(value.to_owned());
-        assert_eq!(page.markdown(), [prefix, function, value].concat());
-    }
-
-    #[test]
     fn reference_links_cross_export_fragments() {
         let mut page = HelpPage::new(
             PageId::Overview,
@@ -493,7 +467,7 @@ mod tests {
         page.push_export(
             "## callable - function\n\n[destination]: tola-help://overview\n".to_owned(),
         );
-        let document = HelpDocument::parse(page);
+        let document = HelpDocument::parse(&page);
         let Block::Paragraph { spans, .. } = &document.blocks[0] else {
             panic!("a paragraph")
         };
@@ -517,7 +491,7 @@ mod tests {
                 .to_owned(),
         );
         page.push_export("\n---\n\n## constant - value\n\nThe value.\n".to_owned());
-        let document = HelpDocument::parse(page);
+        let document = HelpDocument::parse(&page);
         let primary = document
             .blocks
             .iter()
@@ -555,7 +529,7 @@ mod tests {
         let document = document(
             "# [Details](#details)\n\nSee [this](#details).\n\n| Topic |\n| --- |\n| [details](#details) |\n",
         );
-        let target = LinkTarget::PageAnchor(document.id.clone(), anchor("details"));
+        let target = LinkTarget::PageAnchor(PageId::Overview, anchor("details"));
         let Block::Heading { spans, .. } = &document.blocks[0] else {
             panic!("heading")
         };
@@ -575,15 +549,13 @@ mod tests {
     }
 
     #[test]
-    fn lists_keep_starting_ordinal() {
+    fn lists_keep_items() {
         let document = document("7. first\n8. second\n");
-        assert!(
-            matches!(&document.blocks[0], Block::List { start: Some(7), items } if items.len() == 2)
-        );
+        assert!(matches!(&document.blocks[0], Block::List { items } if items.len() == 2));
     }
 
     fn document(markdown: &str) -> HelpDocument {
-        HelpDocument::parse(HelpPage::new(PageId::Overview, markdown.to_owned()))
+        HelpDocument::parse(&HelpPage::new(PageId::Overview, markdown.to_owned()))
     }
 
     fn collect_anchors(blocks: &[Block], names: &mut BTreeSet<Anchor>) {
