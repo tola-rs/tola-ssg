@@ -1,5 +1,6 @@
 //! Helix language-server configuration in TOML.
 
+use std::path::Path;
 use std::str::FromStr;
 
 use anyhow::{Context, Result};
@@ -21,6 +22,7 @@ pub(super) fn merge(source: Option<&str>, directory: &EditorDirectory) -> Result
     for argument in &command.arguments {
         arguments.push(argument.as_str());
     }
+    drop_discovered_configuration_argument(server, directory);
     set_if_absent_or_equal(
         server,
         "language-server.tola-lsp",
@@ -28,18 +30,11 @@ pub(super) fn merge(source: Option<&str>, directory: &EditorDirectory) -> Result
         Value::Array(arguments),
     )?;
     let tola = ensure_table(&mut document, &["language-server", "tola-lsp", "config"])?;
-    set_if_absent_or_equal(
-        tola,
-        "language-server.tola-lsp.config",
+    // Relative to the site root, so the settings survive a move to another machine.
+    tola.insert(
         "packageSourceDirectory",
-        Value::from(
-            directory
-                .root()
-                .join(tola_build::filesystem::PACKAGE_MIRROR_DIRECTORY)
-                .to_str()
-                .context("editor package path is not UTF-8")?,
-        ),
-    )?;
+        toml_edit::value(tola_build::filesystem::PACKAGE_MIRROR_DIRECTORY),
+    );
     merge_language_servers(&mut document)?;
     Ok(crate::writes::with_final_newline(document.to_string()))
 }
@@ -222,6 +217,40 @@ fn ensure_table<'a>(document: &'a mut DocumentMut, path: &[&str]) -> Result<&'a 
     Ok(table)
 }
 
+/// Drops a `--config` naming the file the client root discovers: it only records the host that
+/// wrote it, and would turn a site that moved into a conflict.
+fn drop_discovered_configuration_argument(server: &mut Table, directory: &EditorDirectory) {
+    if !directory.configuration_file_is_discoverable() {
+        return;
+    }
+    let Some(name) = directory
+        .configuration_file()
+        .and_then(Path::file_name)
+        .and_then(std::ffi::OsStr::to_str)
+    else {
+        return;
+    };
+    let Some(Item::Value(Value::Array(arguments))) = server.get_mut("args") else {
+        return;
+    };
+    let mut index = 0;
+    while index + 1 < arguments.len() {
+        let flag = arguments.get(index).and_then(Value::as_str) == Some("--config");
+        let restates = arguments
+            .get(index + 1)
+            .and_then(Value::as_str)
+            .and_then(|value| Path::new(value).file_name())
+            .and_then(std::ffi::OsStr::to_str)
+            .is_some_and(|value| value == name);
+        if flag && restates {
+            arguments.remove(index);
+            arguments.remove(index);
+        } else {
+            index += 1;
+        }
+    }
+}
+
 fn set_if_absent_or_equal(
     table: &mut Table,
     section: &str,
@@ -274,21 +303,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn conflicting_settings_report_both_values() {
-        let source = "[language-server.tola-lsp.config]\npackageSourceDirectory = \"elsewhere\"\n";
-        let error = merge(Some(source), &editor_directory(".")).unwrap_err();
-        let diagnostics = tola_build::diagnostic::attached(&error).unwrap();
-        assert!(
-            diagnostics[0]
-                .notes
-                .iter()
-                .any(|note| note.contains("elsewhere"))
+    fn foreign_mirror_path_is_rewritten() {
+        let source = "[language-server.tola-lsp.config]\npackageSourceDirectory = \"/other/host/.tola/builtin-packages\"\n";
+        let merged = merge(Some(source), &editor_directory(".")).unwrap();
+        let value: toml::Value = toml::from_str(&merged).unwrap();
+        assert_eq!(
+            value["language-server"]["tola-lsp"]["config"]["packageSourceDirectory"].as_str(),
+            Some(".tola/builtin-packages")
         );
-        assert!(
-            diagnostics[0]
-                .help
-                .iter()
-                .any(|help| help.message.contains(".tola/builtin-packages"))
+        assert!(!merged.contains("/other/host"), "{merged}");
+    }
+
+    #[test]
+    fn discovered_configuration_argument_is_dropped() {
+        let source = "[language-server.tola-lsp]\nargs = [\"lsp\", \"--config\", \"/other/host/tola.toml\"]\n";
+        let merged = merge(Some(source), &editor_directory(".")).unwrap();
+        let value: toml::Value = toml::from_str(&merged).unwrap();
+        assert_eq!(
+            value["language-server"]["tola-lsp"]["args"]
+                .as_array()
+                .unwrap(),
+            &[toml::Value::String("lsp".into())]
         );
     }
 

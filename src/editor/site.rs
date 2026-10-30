@@ -124,6 +124,19 @@ impl EditorDirectory {
         self.configuration_file.as_deref()
     }
 
+    /// Whether a bare `tola lsp` discovers this directory's configuration itself.
+    pub(super) fn configuration_file_is_discoverable(&self) -> bool {
+        let Some(file) = &self.configuration_file else {
+            return true;
+        };
+        file.file_name()
+            .is_some_and(|name| name == tola_build::config::loading::CONFIG_FILE_NAME)
+            && file.parent().is_some_and(|parent| {
+                tola_build::filesystem::normalize_existing_prefix(parent)
+                    == tola_build::filesystem::normalize_existing_prefix(&self.root)
+            })
+    }
+
     pub(crate) fn root(&self) -> &Path {
         &self.root
     }
@@ -136,7 +149,9 @@ impl EditorDirectory {
     /// declared is what the entry has to name.
     pub(super) fn server_command(&self) -> ServerCommand {
         let mut arguments = vec!["lsp".to_owned()];
-        if let Some(configuration_file) = &self.configuration_file {
+        if let Some(configuration_file) = &self.configuration_file
+            && !self.configuration_file_is_discoverable()
+        {
             arguments.push("--config".to_owned());
             arguments.push(
                 configuration_file
@@ -236,16 +251,33 @@ mod tests {
     }
 
     #[test]
-    fn site_settings_name_the_configuration() {
+    fn discovered_configuration_is_not_named() {
         let directory = EditorDirectory::initial(Path::new("."), &Default::default()).unwrap();
 
-        assert_eq!(
-            directory.server_command().arguments[..2],
-            ["lsp".to_owned(), "--config".to_owned()]
-        );
+        assert_eq!(directory.server_command().arguments, ["lsp".to_owned()]);
         assert_eq!(
             directory.tola_settings()["configPath"],
             serde_json::json!("./tola.toml")
+        );
+    }
+
+    #[test]
+    fn named_configuration_file_reaches_the_entry() {
+        let directory = EditorDirectory {
+            root: PathBuf::from("/site"),
+            configuration_file: Some(PathBuf::from("/site/alternate.toml")),
+            entry: None,
+            font_directories: Vec::new(),
+            packages: Default::default(),
+        };
+
+        assert_eq!(
+            directory.server_command().arguments,
+            [
+                "lsp".to_owned(),
+                "--config".to_owned(),
+                "/site/alternate.toml".to_owned(),
+            ]
         );
     }
 
@@ -264,8 +296,6 @@ mod tests {
             settings.server_command().arguments,
             [
                 "lsp".to_owned(),
-                "--config".to_owned(),
-                "./tola.toml".to_owned(),
                 "--package-path".to_owned(),
                 directory.path().to_str().unwrap().to_owned(),
             ]

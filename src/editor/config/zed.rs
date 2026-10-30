@@ -35,7 +35,7 @@ mod tests {
         assert_eq!(settings["lsp"]["tinymist"]["binary"]["path"], "tola");
         assert_eq!(
             settings["lsp"]["tinymist"]["binary"]["arguments"],
-            serde_json::json!(["lsp", "--config", "./tola.toml"])
+            serde_json::json!(["lsp"])
         );
     }
 }
