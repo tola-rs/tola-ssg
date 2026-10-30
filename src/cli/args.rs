@@ -44,7 +44,7 @@ pub struct Cli {
     #[arg(long, global = true, display_order = 106)]
     pub pure: bool,
 
-    /// Write `tola help` documentation in this language.
+    /// Write `tola help` documentation in `en` (default) or `zh`.
     #[arg(long, global = true, value_name = "LANGUAGE", display_order = 107, value_parser = parse_help_language)]
     pub lang: Option<HelpLanguage>,
 
@@ -757,6 +757,28 @@ fn requested_color(arguments: &[OsString]) -> ColorChoice {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn help_language_follows_explicit_flag() {
+        for (arguments, expected) in [
+            (vec!["tola", "help"], None),
+            (
+                vec!["tola", "help", "--lang", "en"],
+                Some(HelpLanguage::English),
+            ),
+            (
+                vec!["tola", "--lang", "zh", "help"],
+                Some(HelpLanguage::SimplifiedChinese),
+            ),
+            (
+                vec!["tola", "help", "--lang", "zh-Hans"],
+                Some(HelpLanguage::SimplifiedChinese),
+            ),
+        ] {
+            let cli = Cli::try_parse_from(arguments).unwrap();
+            assert_eq!(cli.lang, expected);
+        }
+    }
 
     fn path_text(path: &Option<PathBuf>) -> String {
         path.as_deref()

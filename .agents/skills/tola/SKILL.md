@@ -32,6 +32,7 @@ tola help "[build.hooks]"
 `tola <command> --help` lists command options. `tola help -i` browses the bundled documentation;
 `TOLA_PAGER` applies to ordinary help output. Package pages describe functions and values;
 configuration pages describe fields and defaults.
+Documentation is in English by default; add `--lang zh` for Simplified Chinese.
 
 Package imports use `0.0.0`, independently of the executable release. Import members, or rename the
 module: a bare `@tola/document` import shadows Typst's `document(...)`. `@tola/host` is internal.
@@ -381,6 +382,18 @@ recomputing destinations is how links drift.
 - **Hierarchy** — `key`/`keys` receive members, and `parent` receives keys, including keys absent
   from the array. Hierarchy keys must be unique and non-`none`, and the parent rule must reach
   `none`. Contracts: `tola help "@tola/collection"`.
+
+### Relations and rules
+
+`@tola/datalog:0.0.0` provides `relation`, `var`, `rule`, `negate`, `database`, and `query`.
+Build ground facts from your records, add recursive rules, and query an immutable database.
+A relation has one arity per name. Variables belong to one rule or query; strings are constants.
+Negative conditions must be bound by positive conditions, and negative dependency cycles are errors.
+
+Queries return distinct tuples in deterministic order, even for one selected variable. Map the
+rows back to your records and sort for display. Use rules for relations such as transclusion scope
+and references; keep actual rendered occurrences for a page's TOC. Examples:
+`tola help "@tola/datalog" database query`.
 
 ### Breadcrumbs and a section sidebar
 

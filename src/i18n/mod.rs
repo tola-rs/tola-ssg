@@ -13,14 +13,15 @@ use std::sync::LazyLock;
 use serde::Deserialize;
 
 /// The language `tola help` writes its pages in.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum HelpLanguage {
+    #[default]
     English,
     SimplifiedChinese,
 }
 
 impl HelpLanguage {
-    /// The language one `--lang` or environment value names, when it names one Tola writes.
+    /// The language one `--lang` value names, when it names one Tola writes.
     ///
     /// A tag is lowercased and stripped of its codeset and modifier, so `zh_CN.UTF-8` and
     /// `zh-Hans-CN` both read `zh`. `C` and `POSIX` name English. Every `zh` variant currently
@@ -40,38 +41,6 @@ impl HelpLanguage {
             _ => None,
         }
     }
-
-    /// The language this invocation writes `tola help` in.
-    ///
-    /// The flag decides. Otherwise the environment follows the gettext lookup order —
-    /// `TOLA_LANG`, `LANGUAGE`, `LC_ALL`, `LC_MESSAGES`, `LANG` — and the first variable that
-    /// names anything decides, so an unsupported value reads English rather than reaching a
-    /// variable below it. A value Tola writes no catalog for reads English.
-    pub(crate) fn resolve(explicit: Option<Self>) -> Self {
-        explicit.unwrap_or_else(|| {
-            resolve_from_environment(|name| std::env::var(name).ok()).unwrap_or(Self::English)
-        })
-    }
-}
-
-/// The language the environment names, if any.
-fn resolve_from_environment(lookup: impl Fn(&str) -> Option<String>) -> Option<HelpLanguage> {
-    for name in ["TOLA_LANG", "LANGUAGE", "LC_ALL", "LC_MESSAGES", "LANG"] {
-        let Some(value) = lookup(name) else { continue };
-        if value.trim().is_empty() {
-            continue;
-        }
-        if name == "LANGUAGE" {
-            return Some(
-                value
-                    .split(':')
-                    .find_map(HelpLanguage::parse)
-                    .unwrap_or(HelpLanguage::English),
-            );
-        }
-        return Some(HelpLanguage::parse(&value).unwrap_or(HelpLanguage::English));
-    }
-    None
 }
 
 /// One phrase a `tola help` page writes, translated where the language carries one.
@@ -96,16 +65,16 @@ impl HelpText {
     fn english(self) -> &'static str {
         match self {
             Self::HelpUsage => {
-                "To read a command's own help, use `tola <command> --help`.\n\n\
-                 `tola help` reads Tola's bundled offline documentation: `tola.toml` settings \
+                "For command options, use `tola <command> --help`.\n\n\
+                 `tola help` provides Tola's bundled offline documentation: `tola.toml` settings \
                  (`tola help \"[build]\"`) and the bundled `@tola/xxx` packages (`tola help \
-                 \"@tola/address\" slugify`). It also supports `-i`/`--interactive` for \
-                 interactive browsing: there you can jump by clicking with the mouse, or press Tab \
-                 for quick keyboard navigation. `--lang` switches the language (English and Chinese \
-                 today).\n\n\
-                 Tola also offers `tola skill` for agents to read: with `tola help` and `tola \
-                 skill`, an agent can learn Tola and Typst quickly, help you organize a site, and \
-                 explain Tola's concepts."
+                 \"@tola/address\" slugify`). Add `-i` or `--interactive` to browse: click links \
+                 with the mouse, or press Tab to choose a jump target. Documentation is in English \
+                 by default; use \
+                 `--lang zh` for Simplified Chinese.\n\n\
+                 `tola skill` provides a site-writing guide for agents. An agent can use this \
+                 guide with `tola help` to learn Tola and Typst, help you organize a site, and \
+                 explain their concepts."
             }
         }
     }
@@ -342,6 +311,7 @@ static PACKAGES: LazyLock<BTreeMap<&'static str, PackageTranslations>> = LazyLoc
             "collection",
             include_str!("zh-Hans/packages/collection.toml"),
         ),
+        ("datalog", include_str!("zh-Hans/packages/datalog.toml")),
         ("schema", include_str!("zh-Hans/packages/schema.toml")),
         ("document", include_str!("zh-Hans/packages/document.toml")),
         ("code", include_str!("zh-Hans/packages/code.toml")),
