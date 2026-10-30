@@ -5,7 +5,7 @@ command = "tola"
 args = ["lsp"]
 
 [language-server.tola-lsp.config]
-packageSourceDirectory = "/Users/kawayww/projects/tola-ssg-dev/.tola/builtin-packages"
+packageSourceDirectory = ".tola/builtin-packages"
 
 [[language]]
 name = "typst"
