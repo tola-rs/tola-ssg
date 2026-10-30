@@ -11,7 +11,15 @@ import {
   test as base,
 } from './process.ts'
 
-const SERVING_LINE = /^Serving (https?:\/\/[^\s]+)\r?\n/m
+const SERVING_LINE = /^Serving (.+)$/m
+
+/** The address a serving line carries; `--color` wraps it in SGR sequences. */
+function servingAddress(line: string): string {
+  const start = line.indexOf('http')
+  if (start === -1) return line.trim()
+  const escape = line.indexOf('\u001b', start)
+  return line.slice(start, escape === -1 ? undefined : escape)
+}
 
 type RunningSite = {
   root: string
@@ -34,6 +42,10 @@ type SiteOptions = {
   inputScope?: '--offline' | '--pure'
   /** `dev` only; `false` serves without installing revisions from filesystem changes. */
   watch?: boolean
+  /** The command's colour decision; omitted leaves the CLI's `auto`. */
+  color?: 'auto' | 'always' | 'never'
+  /** Show debug events and live hook output. */
+  verbose?: boolean
   environment?: NodeJS.ProcessEnv
   beforeStart?: (siteRoot: string) => Promise<void>
 }
@@ -74,7 +86,7 @@ function waitForServing(server: RunningCommand): Promise<string> {
       const serving = server.stderr().match(SERVING_LINE)?.[1]
       if (serving !== undefined) {
         cleanup()
-        resolveUrl(serving)
+        resolveUrl(servingAddress(serving))
       }
     }
     const timeout = setTimeout(() => {
@@ -164,6 +176,8 @@ async function startSite(
   const siteRoot = join(temporaryRoot, 'site')
   const contentRoot = options.contentRoot ?? 'content'
   const watchArguments = options.watch === undefined ? [] : [`--watch=${options.watch}`]
+  const colorArguments = options.color === undefined ? [] : ['--color', options.color]
+  const verboseArguments = options.verbose ? ['--verbose'] : []
   let activeCommand: RunningCommand | undefined
 
   try {
@@ -208,6 +222,8 @@ async function startSite(
         '0',
         ...watchArguments,
         ...(options.inputScope ? [options.inputScope] : []),
+        ...colorArguments,
+        ...verboseArguments,
       ],
       siteRoot,
       environment,
@@ -238,6 +254,8 @@ async function startSite(
             new URL(url).port,
             ...watchArguments,
             ...(options.inputScope ? [options.inputScope] : []),
+            ...colorArguments,
+            ...verboseArguments,
           ],
           siteRoot,
           environment,

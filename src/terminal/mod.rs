@@ -1,5 +1,6 @@
 //! Terminal presentation and interactive input.
 
+mod ansi;
 pub(crate) mod clipboard;
 pub(crate) mod code;
 pub(crate) mod color;
