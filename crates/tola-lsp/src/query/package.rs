@@ -718,8 +718,10 @@ fn package_source_uri(
         crate::identity::embedded_source(id).context("unknown embedded package source")?;
     let path = crate::identity::package_view_path(id, directory)?;
     cancellation.ensure_active()?;
-    crate::identity::verify_package_view(&path, &expected)?;
-    *uri = client_root.address(&path)?;
+    // A missing or stale mirror keeps the package URI; `tola editor doctor` reports it.
+    if crate::identity::verify_package_view(&path, &expected).is_ok() {
+        *uri = client_root.address(&path)?;
+    }
     Ok(())
 }
 pub(crate) fn missing_import(
@@ -866,7 +868,8 @@ mod tests {
 
     /// A definition into a package is answered as a file in the spelling the client named its root
     /// by: both the mirror path the compiler wrote and the package URI a scheme-aware client opens
-    /// reach it, and a mirror that is not there is an error rather than an invented path.
+    /// reach it, and a mirror that is not there keeps the package URI rather than an invented path
+    /// or a failed request.
     #[test]
     fn package_source_rewrite_keeps_the_client_spelling() {
         let directory = tempfile::tempdir().unwrap();
@@ -911,18 +914,22 @@ mod tests {
         }
         // A site whose mirror is not there keeps the package URI rather than inventing a path.
         std::fs::remove_file(&mirror).unwrap();
-        assert!(
-            package_source_definition(
-                &mut GotoDefinitionResponse::Scalar(Location {
-                    uri: crate::identity::source_uri(id, &resolved).unwrap(),
-                    range: Range::default(),
-                }),
-                &view,
-                &client_root,
-                &BuildCancellation::new(),
-            )
-            .is_err(),
-            "a missing mirror is an error, not a fabricated path"
+        let mut definition = GotoDefinitionResponse::Scalar(Location {
+            uri: crate::identity::source_uri(id, &resolved).unwrap(),
+            range: Range::default(),
+        });
+        let before = definition.clone();
+        package_source_definition(
+            &mut definition,
+            &view,
+            &client_root,
+            &BuildCancellation::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(&definition).unwrap(),
+            serde_json::to_value(before).unwrap(),
+            "a missing mirror keeps the package URI"
         );
     }
 
@@ -1182,29 +1189,27 @@ mod tests {
                 _ => panic!("definition shape changed"),
             }
         }
-        std::fs::write(&path, "modified source").unwrap();
-        for definition in &definitions {
-            assert!(
+        for prepare in [
+            (|path: &std::path::Path| std::fs::write(path, "modified source").unwrap())
+                as fn(&Path),
+            |path: &Path| std::fs::remove_file(path).unwrap(),
+        ] {
+            prepare(&path);
+            for definition in &definitions {
+                let mut projected = definition.clone();
                 package_source_definition(
-                    &mut definition.clone(),
+                    &mut projected,
                     &sources,
                     &client_root,
                     &BuildCancellation::new(),
                 )
-                .is_err()
-            );
-        }
-        std::fs::remove_file(path).unwrap();
-        for definition in &definitions {
-            assert!(
-                package_source_definition(
-                    &mut definition.clone(),
-                    &sources,
-                    &client_root,
-                    &BuildCancellation::new(),
-                )
-                .is_err()
-            );
+                .unwrap();
+                assert_eq!(
+                    serde_json::to_value(&projected).unwrap(),
+                    serde_json::to_value(definition).unwrap(),
+                    "an unavailable mirror leaves the definition as the client named it"
+                );
+            }
         }
     }
 

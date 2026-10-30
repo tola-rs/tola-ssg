@@ -35,9 +35,6 @@ mod tests {
         let settings = parsed_settings(&snippet(&editor_directory(".")));
         let client = &settings["settings"]["LSP"]["tola-lsp"];
         assert_eq!(client["selector"], "text.typst");
-        assert_eq!(
-            client["command"],
-            serde_json::json!(["tola", "lsp", "--config", "./tola.toml"])
-        );
+        assert_eq!(client["command"], serde_json::json!(["tola", "lsp"]));
     }
 }

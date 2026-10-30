@@ -59,7 +59,7 @@ mod tests {
     fn eglot_entry_passes_the_site_arguments() {
         let snippet = snippet(&editor_directory("."));
         assert!(
-            snippet.contains(r#"'(typst-ts-mode . ("tola" "lsp" "--config" "./tola.toml"))"#),
+            snippet.contains(r#"'(typst-ts-mode . ("tola" "lsp"))"#),
             "Eglot reads the entry as the mode paired with the command list: {snippet}"
         );
     }
