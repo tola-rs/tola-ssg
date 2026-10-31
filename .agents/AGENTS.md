@@ -103,7 +103,7 @@ Excess is the original sin: a change leaving code no smaller/clearer than it fou
 Names MUST state what value owns, represents, validates, transforms, or publishes.
 
 - Do not introduce `plan`, `artifact`, `fact`, `fixture`, `probe`, `reading` in variable, function, type, trait, module, file, directory names, including compound forms. `read`, `reads`, `readable`, `unreadable` name compiler input — stay.
-- Use repository vocabulary consistently: source, content unit, document, route, resource, output, candidate, snapshot, revision, dependency evidence, diagnostic, publication — each distinct.
+- Use repository vocabulary consistently: source, content unit, document, route, resource, output, candidate, snapshot, revision, dependency evidence, diagnostic, publication — each distinct. `CONTEXT.md` defines each term and the value that owns it; read it before naming anything outside this list's obvious sense.
 - Do not create abstraction until its boundary + invariant can be named precisely.
 
 Existing vague names are not authorization for more. Rename existing one only when inside requested change + rename makes change materially clearer.
@@ -118,7 +118,7 @@ Every rendered diagnostic — message, note, help, trace frame; on terminal, dev
 - Speak in site vocabulary: site for the thing being built, page or document for a rendered thing; sources, content, routes, assets, configuration keys, commands name the rest. Name exact file, route, class, option — not "invalid input".
 - Literal author can see/type goes in backticks — path, configuration key, value, command, syntax fragment (`content/post.typ`, `build.output`, `tola dev`, `..`). Never wrap site text in single quotes; shell snippets `tola init` prints keep own quoting.
 - Message: one plain-language phrase/sentence, lowercase unless first word proper noun, no trailing period. Help: imperative sentence naming concrete next action. Note: user-relevant consequence, never internal cause.
-- Diagnostic paths site-root-relative, forward slashes, exact line/column when producer knows. Codes stable, lowercase, dotted; each producing surface declares own once in its crate's `codes` module: construction site names constant, never text.
+- Diagnostic paths site-root-relative, forward slashes, exact line/column when producer knows. Codes stable, lowercase, dotted; every published code is declared once in `tola-diagnostic`'s `codes` module, grouped by the surface that produces it: construction site names constant, never text.
 - `tola_build::filesystem::display_path` is the one renderer for path inside site; application layers invocation-relative fallback in `src/terminal/path.rs` on top. Producers never spell relative path by hand.
 - Typst can only locate diagnostic inside a package ⇒ still tells site author where to act: carries `imported_by`; note names site files importing that package, at most three + count.
 - Unexpected internal failure still produces human sentence, never error dump.
@@ -175,8 +175,8 @@ Harness/repo-specific skill notes:
 - `grill-with-docs` is a one-line delegation to `grilling` + `domain-modeling`; body names those two explicitly because this harness has no `Skill` tool to call them. Only first link installed: `grill-with-docs` does not hand off to `to-spec`, `to-tickets`, `implement`; work continues in same conversation.
 - `handoff` names skills for reader to open via `skill://<name>`, same reason.
 - `code-review` names `.agents/AGENTS.md` as standards source, takes spec from user, because this repo has no issue tracker.
-- `trim` holds test names, renames, merges, deletions, and verification to rules this repo enforces.
-- `tola` is user-facing: `.agents/skills/tola/SKILL.md` (exported verbatim by `tola skill`) guides the site author, not the Tola developer. Speak in site vocabulary — sources, pages, routes, assets, commands, configuration keys, package calls, the browser result — and keep Tola's internal machinery (pipeline stages, caches, revisions, Rust modules, repository files, terminal rendering) out of the guide.
+- `trim` guides test value, names, consolidation, deletion, and verification.
+- `TOLA-SKILL.md` is the user-facing authoring guide. `tola skill` derives topic and section navigation from its Markdown headings; it guides the site author, not the Tola developer. Speak in site vocabulary — sources, pages, routes, assets, commands, configuration keys, package calls, the browser result — and keep Tola's internal machinery (pipeline stages, caches, revisions, Rust modules, repository files, terminal rendering) out of the guide.
 
 `CONTEXT.md` at repo root + `docs/adr/` created by these skills first time a term/decision qualifies, committed like any other documentation.
 
@@ -212,7 +212,7 @@ The over-design and dead-weight removals below, and the four bars a survivor mee
 - Preserve unrelated user changes in dirty worktree: version control read-only — inspect with `git show`, `git diff`, `git log` — no operation rewriting worktree/index/history runs without user's explicit authorization for that exact operation.
 - Update current docs, examples, embedded templates, CLI help when user-visible behavior changes. Do not update historical notes as though current specifications.
 - `tola help` translations live in `src/i18n/zh-Hans/`; changing a page phrase in `src/cli/commands/help.rs` or a bundled package's overview, export documentation, or parameter documentation requires the matching translation in the same change. `cargo test -p tola` enforces coverage, stale keys, and fenced-example parity. Translations keep Tola's English terms (`metadata`, `route`, `output`, `URL`, `label`, `location`, `fragment`, `anchor`, `helper`, `tag`, `lineage`) and translate only the prose around them.
-- Virtual package export carries two derived descriptions — `README.md` and `.agents/skills/tola/SKILL.md` — changing export, signature, or meaning updates every one in same change; `.agents/architecture.md` records how they + packages kept in agreement.
+- A virtual package change must update affected guidance in `TOLA-SKILL.md` in the same change. Keep exact signatures and parameter contracts in the package documentation surfaced by `tola help`, rather than copying them into the guide.
 - Match existing visibility. Do not make item `pub`/`pub(crate)` merely to make test/call site convenient.
 - Keep parsing, normalization, validation, rendering distinct when different failure semantics.
 - Preserve structured errors until presentation boundary. String matching is not an internal protocol.
@@ -238,7 +238,7 @@ The over-design and dead-weight removals below, and the four bars a survivor mee
 - Real-process e2e cases MUST create isolated site directory, own + terminate every child process they start, wait for observable process/server/revision events. No fixed sleeps as synchronization.
 - Tests use the documented project test toolchain, without separately installed application CLIs. Generator-hook cases run repository-owned deterministic scripts through the harness runtime; missing third-party generators are not a reason to skip coverage.
 - Group e2e cases by user surface: `cli/` command outcomes, `dev/` long-running edit-to-publication lifecycle, `site/` interactions with published pages. Create group only when it owns a test; do not classify tests by current runner/browser driver.
-- Test name is the contract body proves: one behaviour, domain's words, short enough for failure line. `just scripts::test-names` refuses name breaking `skill://trim` rules, reading both Rust test functions + case titles of e2e, VS Code, maintenance suites; test declaration/case title whose name audit cannot read fails the gate instead of going unjudged. Name breaking rules is unfinished work; rename reaches every name you touch.
+- Test name states the observable behaviour its body proves, in domain language. Review names with the tests in the changed scope; `skill://trim` guides the judgement.
 
 Test selection follows changed contract:
 
@@ -270,6 +270,8 @@ Run checks at meaningful checkpoints, not after every edit. Builds, tests, lints
 
 Use `--locked` for repository verification.
 
+The documented environment is `nix develop`, which supplies Rust, Just, Deno, `nixfmt`, and `actionlint`; `just doctor` reports which pinned tools are missing and how to get them.
+
 Baseline commands (run at completion):
 
 ```sh
@@ -278,9 +280,9 @@ cargo test --locked --workspace --all-features
 cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 ```
 
-`just check` runs full workspace gate in one command: Rust formatting, TypeScript formatting and linting, justfile formatting, test names, maintenance script checks, library builds, tests, clippy, documentation, package checks.
+`just check` runs full workspace gate in one command: Rust formatting, TypeScript formatting and linting, justfile formatting, maintenance script checks, library builds, tests, clippy, documentation, package checks.
 
-Focused command per changed surface keeps failures attributable; surface-to-check map in `.agents/architecture.md`.
+Focused command per changed surface keeps failures attributable; the "Validation surface" section of `.agents/architecture.md` maps a changed surface to its check.
 
 For changes to e2e harness, embedded SPA, reload JavaScript, or CLI/development/browser flows it covers, run:
 
