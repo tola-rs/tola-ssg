@@ -5691,7 +5691,7 @@ dependencies = [
  "fearless_simd 1.0.0",
  "image",
  "jpeg-encoder",
- "moxcms 0.7.11",
+ "moxcms 0.8.1",
  "rayon",
  "roxmltree 0.21.1",
  "serde",
