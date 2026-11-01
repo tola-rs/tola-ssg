@@ -1007,6 +1007,7 @@ fn analyze_source(
                 tola_packages::Declaration::One(declared) => {
                     Some(crate::content::SourceMetadataDeclaration {
                         metadata: crate::metadata::SourceMetadata::from_dict(declared.metadata),
+                        file: declared.file,
                         range: declared.range,
                     })
                 }
@@ -1103,16 +1104,15 @@ fn declared_before_failure(
     header: &tola_packages::CaptureHeader,
     world: &tola_typst::TypstWorld,
 ) -> Option<crate::content::SourceMetadataDeclaration> {
-    let Ok(source) = world.source(world.main()) else {
-        return None;
-    };
-    let Ok(capture) = tola_packages::decode_capture(captured, header, &source) else {
+    let source = captured.source(world.main())?;
+    let Ok(capture) = tola_packages::decode_capture(captured, header, source) else {
         return None;
     };
     match capture.declaration {
         tola_packages::Declaration::One(declared) => {
             Some(crate::content::SourceMetadataDeclaration {
                 metadata: crate::metadata::SourceMetadata::from_dict(declared.metadata),
+                file: declared.file,
                 range: declared.range,
             })
         }
@@ -1165,16 +1165,21 @@ fn duplicate_declaration_error(
     declared: &[tola_packages::DeclaredMeta],
 ) -> tola_typst::CompileError {
     // The second declaration is the one that made this source ambiguous.
-    let range = declared
+    let declaration = declared
         .get(1)
         .or_else(|| declared.first())
-        .map(|declared| declared.range.clone())
-        .unwrap_or(0..0);
+        .expect("duplicate declaration");
     let diagnostic = typst::diag::SourceDiagnostic::error(
-        typst::syntax::DiagSpan::from_range(scan.source().id(), range),
+        typst::syntax::DiagSpan::from_range(
+            typst::syntax::FileId::new(declaration.file.clone()),
+            declaration.range.clone(),
+        ),
         format!("this source declares its metadata {} times", declared.len()),
     )
-    .with_hint("Keep one `#tola-meta((...))` call; a source declares once");
+    .with_hint(format!(
+        "Keep one metadata declaration for `{}`",
+        scan.source().id().vpath().get_without_slash()
+    ));
     let mut diagnostics = tola_typst::Diagnostics::resolve(world, &[diagnostic.into()]);
     diagnostics.extend(scan.diagnostics());
     tola_typst::CompileError::Compilation { diagnostics }
@@ -1516,8 +1521,7 @@ mod tests {
             r#"#let attributes() = (
   title: [Document],
   callback: value => value,
-  card: [#import "@tola/source:0.0.0": tola-meta
-#tola-meta((nested: true))],
+  card: [#metadata((nested: true))],
 )"#,
         )
         .unwrap();

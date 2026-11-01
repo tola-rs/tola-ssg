@@ -255,17 +255,33 @@ Grouped reference diagnostics count distinct pages in first-seen order.
 
 ### Source attributes
 
-The source dictionary is collected only from a source's own `tola-meta(...)` declaration, an event that source's evaluation wrote, matched to its actual Source AST. A `metadata(...)` call carrying a `<tola-meta>` label registers nothing and is reported once for the site as `source.declaration_deprecated`. Do not execute an AST prefix or inspect metadata payloads as declarations. Field names and value types are user-defined; page and feed field mappings belong to editable site code. Ordinary compiled metadata/query semantics remain Typst's authority. A repeated source state and an exhausted iteration budget are distinct outcomes.
+The source dictionary comes from eager native `tola-meta(...)` events. Ordinary imported functions,
+multi-level wrappers, and native callbacks inherit the source being evaluated; imported or included
+modules keep their own scope. `scan_world_observed` discovers the exact source FileIds before
+freezing them through a private tracked file and reevaluating the same `Source` and `FileView`.
+`capture_source_value` uses those IDs with Typst's tracked route membership to separate function
+calls from module evaluation without changing Typst. Generated `eval` spans retain their lexical
+source attribution. Deferred `context` and selector show calls declare nothing; a `show: ...`
+wrapper runs only after its body evaluates.
 
-An accepted native declaration's dictionary and exact call range travel as one optional
+A `metadata(...)` call carrying a `<tola-meta>` label registers nothing and is reported once for the
+site as `source.declaration_deprecated`. Do not execute an AST prefix or inspect metadata payloads
+as declarations. Field names and value types are user-defined; page and feed field mappings belong
+to editable site code. Ordinary compiled metadata/query semantics remain Typst's authority. A
+repeated source state and an exhausted iteration budget are distinct outcomes.
+
+An accepted native declaration's dictionary and actual declaration file/range travel as one optional
 `SourceMetadataDeclaration` through source inputs and analysis caches. Absence means no native
-declaration; a present declaration carries both. A declaration emitted before evaluation fails
-still contributes to the next metadata round.
+declaration. The event retains its marker's true span; decoding resolves it against that file's
+Source AST, which may be an imported wrapper. A declaration emitted before evaluation fails still
+contributes to the next metadata round.
 
 `parse-sources` carries complete Issues to its native reporter. Primary messages, notes, and nested
-causes remain separate diagnostic fields. A literal dictionary/array path selects its exact value
-expression; missing fields, computed metadata, and generated defaults/conversions use the retained
-declaration range, or file start when absent.
+causes remain separate diagnostic fields. The message names the source whose metadata failed;
+the location points into the actual declaration file. A literal dictionary/array path selects its
+exact value expression; missing fields, computed metadata, and generated defaults/conversions use
+the retained declaration range, or source file start when absent. Arbitrary wrapper argument
+provenance is not reconstructed.
 
 ### Native document relations
 

@@ -58,13 +58,13 @@ fn source_issue(
     path: &str,
     problem: &Issue,
 ) -> SourceResult<SourceDiagnostic> {
-    let (file, declaration) = source_origin(engine, path).at(span)?;
-    let site_path = file.vpath().get_without_slash().to_owned();
-    let file = FileId::new(file);
+    let source_origin = source_origin(engine, path).at(span)?;
+    let site_path = source_origin.owner.vpath().get_without_slash();
+    let file = FileId::new(source_origin.file);
     let source = engine.world.source(file).at(span)?;
     let origin = IssueOrigin {
         source: &source,
-        declaration,
+        declaration: source_origin.range,
     };
     let message = match &problem.origin {
         Some(problem_origin) => eco_format!(

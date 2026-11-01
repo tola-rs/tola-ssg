@@ -53,8 +53,8 @@ pub(crate) fn tola_parse_source(
         .clone()
         .cast::<typst::foundations::Str>()
         .at(span)?;
-    let (file, _) = source_origin(engine, path.as_str()).at(span)?;
-    let path = file.vpath().get_without_slash();
+    let origin = source_origin(engine, path.as_str()).at(span)?;
+    let path = origin.owner.vpath().get_without_slash();
     let is_factory = matches!(schema, Value::Func(_));
     let declaration = if let Value::Func(factory) = schema {
         factory

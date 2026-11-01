@@ -1,15 +1,19 @@
 //! Compile-scoped world and access evidence.
 
 use std::collections::BTreeSet;
-use std::sync::{Arc, OnceLock};
+use std::num::NonZeroU16;
+#[cfg(feature = "scan")]
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, LazyLock, OnceLock};
 
 use parking_lot::RwLock;
 use rustc_hash::FxHashMap;
 use typst::Library;
 use typst::World;
 use typst::diag::{FileError, FileResult, SourceDiagnostic};
-use typst::foundations::{Bytes, Datetime, Duration};
-use typst::syntax::{FileId, Source};
+use typst::engine::Engine;
+use typst::foundations::{Bytes, Datetime, Duration, Value};
+use typst::syntax::{FileId, RootedPath, Source, Span, VirtualPath, VirtualRoot};
 use typst::text::{Font, FontBook};
 use typst::utils::LazyHash;
 
@@ -140,12 +144,69 @@ macro_rules! failure_evidence {
 
 pub(crate) use failure_evidence;
 
+static SOURCE_CAPTURE_FILE: LazyLock<FileId> = LazyLock::new(|| {
+    FileId::unique(RootedPath::new(
+        VirtualRoot::Project,
+        VirtualPath::new("/tola-source-capture").expect("source capture path is valid"),
+    ))
+});
+
+enum SourceCaptureScope {
+    Disabled,
+    #[cfg(feature = "scan")]
+    Discover(AtomicBool),
+    #[cfg(feature = "scan")]
+    Ready(Bytes),
+}
+
+impl SourceCaptureScope {
+    fn read(&self) -> Bytes {
+        match self {
+            #[cfg(feature = "scan")]
+            Self::Discover(requested) => {
+                requested.store(true, Ordering::Relaxed);
+                Bytes::new([])
+            }
+            Self::Disabled => Bytes::new([]),
+            #[cfg(feature = "scan")]
+            Self::Ready(files) => files.clone(),
+        }
+    }
+}
+
+/// Capture a value only while the scanned source's own module is being evaluated.
+///
+/// Ordinary function calls inherit the source scope, including callbacks made by native
+/// functions. Imported or included modules have their own scope. Only `scan_world_observed`
+/// opens this channel; other compilations capture nothing. The value is retained even if later
+/// evaluation fails, and memoized evaluation replays the capture.
+pub fn capture_source_value(engine: &mut Engine, span: Span, value: Value) {
+    let Ok(files) = engine.world.file(*SOURCE_CAPTURE_FILE) else {
+        return;
+    };
+    let main = engine.world.main();
+    if files.is_empty() {
+        return;
+    }
+    let has_nested_module = files.as_slice().as_chunks::<2>().0.iter().any(|bytes| {
+        let raw = NonZeroU16::new(u16::from_le_bytes([bytes[0], bytes[1]]))
+            .expect("source capture contains only interned file ids");
+        let id = FileId::from_raw(raw);
+        id != main && engine.route.contains(id)
+    });
+    // `eval_string` starts an empty route; its synthesized span names the source of the eval call.
+    if !has_nested_module && (engine.route.contains(main) || span.id() == Some(main)) {
+        engine.sink.value(value, None);
+    }
+}
+
 pub(crate) struct CompileSession<'a> {
     world: &'a TypstWorld,
     /// The file this session compiles: the world's own main, unless a caller chose another file.
     main: FileId,
     view: Arc<FileView>,
     files: SessionFiles,
+    source_capture: SourceCaptureScope,
 }
 
 impl<'a> CompileSession<'a> {
@@ -161,7 +222,72 @@ impl<'a> CompileSession<'a> {
             main,
             view: world.file_view(),
             files: SessionFiles::default(),
+            source_capture: SourceCaptureScope::Disabled,
         }
+    }
+
+    #[cfg(feature = "scan")]
+    pub(crate) fn start_observed(world: &'a TypstWorld) -> Self {
+        Self {
+            source_capture: SourceCaptureScope::Discover(AtomicBool::new(false)),
+            ..Self::start(world)
+        }
+    }
+
+    #[cfg(feature = "scan")]
+    pub(crate) fn freeze_source_capture(self) -> (Self, bool) {
+        let requested = matches!(
+            &self.source_capture,
+            SourceCaptureScope::Discover(requested) if requested.load(Ordering::Relaxed)
+        );
+        if !requested {
+            return (self, false);
+        }
+        let mut ids = self
+            .files
+            .slots
+            .read()
+            .values()
+            .filter(|slot| slot.source.get().is_some())
+            .map(|slot| slot.id.into_raw().get())
+            .collect::<Vec<_>>();
+        ids.sort_unstable();
+        let bytes = ids
+            .into_iter()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>();
+        // Reuse the first evaluation's source cells and file view: freezing capture must not
+        // observe a newer source or change the program's branches between the two evaluations.
+        let Self {
+            world,
+            main,
+            view,
+            files,
+            ..
+        } = self;
+        (
+            Self {
+                world,
+                main,
+                view,
+                files,
+                source_capture: SourceCaptureScope::Ready(Bytes::new(bytes)),
+            },
+            true,
+        )
+    }
+
+    #[cfg(feature = "scan")]
+    pub(crate) fn sources(&self) -> Vec<Source> {
+        let mut sources = self
+            .files
+            .slots
+            .read()
+            .values()
+            .filter_map(|slot| Some(slot.source.get()?.result.as_ref().ok()?.value.clone()))
+            .collect::<Vec<_>>();
+        sources.sort_unstable_by_key(|source| source.id().into_raw());
+        sources
     }
 
     /// Consume the session after all compilation and diagnostic reads are complete.
@@ -361,6 +487,9 @@ impl World for CompileSession<'_> {
     }
 
     fn file(&self, id: FileId) -> FileResult<Bytes> {
+        if id == *SOURCE_CAPTURE_FILE {
+            return Ok(self.source_capture.read());
+        }
         self.read_file(id)
     }
 

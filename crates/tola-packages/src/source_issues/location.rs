@@ -105,22 +105,30 @@ fn literal_field<'a>(expression: ast::Expr<'a>, path: &[Value]) -> Option<ast::E
     }
 }
 
-/// Where `path` lives and declares its metadata, as the file it is addressed by and the byte range
-/// of its `<tola-meta>` declaration.
+pub(super) struct SourceOrigin {
+    pub(super) owner: RootedPath,
+    pub(super) file: RootedPath,
+    pub(super) range: std::ops::Range<usize>,
+}
+
+/// The owner and declaration location for `path`.
 ///
 /// A source that declares no metadata has no range, and the file's start answers for it: the
 /// diagnostic still names the file and the field, and there is no declaration to point at. A path
 /// no origin covers is not one of this compilation's sources, which is a programming error rather
 /// than a position to guess.
-pub(super) fn source_origin(
-    engine: &Engine<'_>,
-    path: &str,
-) -> Result<(RootedPath, std::ops::Range<usize>), EcoString> {
+pub(super) fn source_origin(engine: &Engine<'_>, path: &str) -> Result<SourceOrigin, EcoString> {
     let Some(Value::Dict(origin)) =
         crate::library::source_origins(engine).and_then(|origins| origins.get(path).ok())
     else {
         return Err(eco_format!("`{path}` is not a source of this compilation"));
     };
+    let owner = origin
+        .get("source")
+        .map_err(|_| eco_format!("`{path}` has an origin without a source"))?
+        .clone()
+        .cast::<RootedPath>()
+        .map_err(|_| eco_format!("`{path}` has an origin whose source is not a path"))?;
     let file = origin
         .get("file")
         .map_err(|_| eco_format!("`{path}` has an origin without a file"))?
@@ -136,7 +144,7 @@ pub(super) fn source_origin(
             ));
         }
     };
-    Ok((file, range))
+    Ok(SourceOrigin { owner, file, range })
 }
 
 /// The byte range of one source's `<tola-meta>` declaration, as its two integer bounds.

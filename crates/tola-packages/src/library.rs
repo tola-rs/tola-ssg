@@ -34,7 +34,7 @@ pub struct HostInputs {
     pub source_records: Array,
     /// Lexical source file views keyed by source path.
     pub source_records_by_file: Dict,
-    /// Each source's authoritative file and declaration range, keyed by source path.
+    /// Each source's declaration file and range, keyed by source path.
     pub source_origins: Dict,
 }
 
@@ -290,11 +290,7 @@ pub(super) fn source_records_by_file<'a>(engine: &Engine<'a>) -> Option<&'a Dict
     }
 }
 
-/// Each source's authoritative file and declaration range, keyed by source path.
-///
-/// A value is `(file: <site-root path>, range: none | (start, end))`; `none` is a source that
-/// declares no metadata. A caller takes both the diagnostic's file and its range from this one
-/// entry, so the two always describe the same source snapshot.
+/// Each source's declaration file and range, keyed by source path.
 pub(super) fn source_origins<'a>(engine: &Engine<'a>) -> Option<&'a Dict> {
     match sys_inputs(engine)?.get(SOURCE_ORIGINS_MEMBER) {
         Ok(Value::Dict(origins)) => Some(origins),

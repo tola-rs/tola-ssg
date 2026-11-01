@@ -69,16 +69,18 @@
 
 /// Declare the metadata of this source.
 ///
-/// The call is the declaration: pass a dictionary that describes the source. Write it once,
-/// directly in the source's ordinary evaluation, outside deferred `context` or show rules. If
-/// later evaluation fails, Tola still reads a declaration whose call already ran; the source's
-/// errors still fail the build, even when your site excludes that source as a draft.
+/// The call is the declaration: pass a dictionary that describes the source. Call it once during
+/// ordinary evaluation, directly or through a function imported from another file. Calls deferred
+/// by `context` or selector show rules declare nothing. A `#show: ...` wrapper runs after its
+/// trailing body has been evaluated, so a body error can prevent its declaration from running.
+/// A declaration whose call already ran survives a later error; the source's errors still fail
+/// the build, even when your site excludes that source as a draft.
 ///
 /// The call returns an invisible `<tola-meta>` marker that carries the same dictionary, and
 /// `query(<tola-meta>)` finds it. Where the marker ends up changes nothing: the declaration comes
 /// from the call alone. A second call in one source is an error, because a source declares its
-/// metadata once. Only a call written in the source declares. A call that a helper in another
-/// file makes belongs to that file, so it declares nothing here.
+/// metadata once. An imported function declares for the source evaluating that call. Top-level
+/// declarations in imported or included files remain those files' own declarations.
 ///
 /// Example - declare metadata and read its marker:
 ///
@@ -88,6 +90,17 @@
 /// #assert.eq(marker.value, (title: "Hello"))
 /// #assert.eq(marker.label, <tola-meta>)
 /// ```
+///
+/// Example - wrap named metadata fields:
+///
+/// ```typst
+/// #import "@tola/source:0.0.0": tola-meta
+/// #let note(..fields) = tola-meta(fields.named())
+/// ```
+///
+/// Save this definition in `site/metadata.typ`. In `content/post.typ`, import it with
+/// `#import "../site/metadata.typ": note`, then declare with `#note(title: "Hello")`.
+///
 /// Related: all-sources, parse-sources
 #import "@tola/host:0.0.0": tola-meta
 
@@ -97,10 +110,12 @@
 /// `@tola/schema` declaration of the metadata you expect. To choose different declarations for
 /// different sources, pass a function instead: it receives the complete source record and returns
 /// that source's declaration. The call resolves every record before it reports field issues,
-/// including sources with different declarations. A field issue points at the matching literal
-/// metadata value when its location is known, otherwise at the source's `tola-meta` call, or the
-/// file start when it declares no metadata. Notes and nested causes remain separate diagnostic
-/// hints. An invalid declaration reports its expected and actual type at the calling site; a
+/// including sources with different declarations. A field issue names the source whose metadata
+/// failed and points at the matching literal value when its location is known, otherwise at the
+/// actual `tola-meta` declaration, including inside an imported function. It points at the source's
+/// file start when no metadata was declared. Wrapper arguments are not traced back to their
+/// callers. Notes and nested causes remain separate diagnostic hints. An invalid declaration
+/// reports its expected and actual type at the calling site; a
 /// schema function returning an invalid declaration names the source it was choosing for. A callback
 /// execution error keeps its own location and stops compilation. Put complete-set validation in
 /// the root program: declarations may still be incomplete while the content sources themselves

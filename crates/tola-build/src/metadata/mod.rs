@@ -18,9 +18,9 @@ pub const SOURCE_METADATA_LABEL: &str = "tola-meta";
 /// Equality follows Typst's memoization semantics without rendering or serialization.
 /// The dictionary is evaluated eagerly; final document queries use the compiled Bundle.
 ///
-/// The declaration is one `#tola-meta((...))` call written in the source itself: a helper another
-/// file imports declares for that helper's own file, never for its callers. Compiled metadata
-/// queries are unrestricted.
+/// One eager `tola-meta(...)` call declares for the source evaluating it, including through
+/// imported functions. Imported or included modules retain their own declarations. Compiled
+/// metadata queries are unrestricted.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SourceMetadata {
     fields: Arc<LazyHash<Dict>>,

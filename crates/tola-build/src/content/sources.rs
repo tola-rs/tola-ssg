@@ -117,6 +117,7 @@ impl SourceDescriptorField {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SourceMetadataDeclaration {
     pub(crate) metadata: SourceMetadata,
+    pub(crate) file: RootedPath,
     pub(crate) range: Range<usize>,
 }
 
@@ -228,7 +229,16 @@ impl SourceInput {
 /// The source file and declaration range supplied to native source diagnostics.
 fn source_origin(source: &SourceInput) -> Dict {
     let mut origin = Dict::new();
-    origin.insert("file".into(), source.file.file.clone().into_value());
+    origin.insert("source".into(), source.file.file.clone().into_value());
+    origin.insert(
+        "file".into(),
+        source
+            .declaration
+            .as_ref()
+            .map_or(&source.file.file, |declaration| &declaration.file)
+            .clone()
+            .into_value(),
+    );
     origin.insert(
         "range".into(),
         source
@@ -455,6 +465,10 @@ mod tests {
                     .into_iter()
                     .collect(),
                 ),
+                file: typst::syntax::RootedPath::new(
+                    typst::syntax::VirtualRoot::Project,
+                    typst::syntax::VirtualPath::new("content/posts/rust/index.typ").unwrap(),
+                ),
                 range: 0..0,
             }),
         )]);
@@ -555,6 +569,10 @@ mod tests {
             units[0].source.clone(),
             Some(SourceMetadataDeclaration {
                 metadata: metadata(StrongElem::new(TextElem::packed("important")).pack()),
+                file: typst::syntax::RootedPath::new(
+                    typst::syntax::VirtualRoot::Project,
+                    typst::syntax::VirtualPath::new("content/post.typ").unwrap(),
+                ),
                 range: 0..0,
             }),
         )]);
@@ -562,6 +580,10 @@ mod tests {
             units[0].source.clone(),
             Some(SourceMetadataDeclaration {
                 metadata: metadata(EmphElem::new(TextElem::packed("important")).pack()),
+                file: typst::syntax::RootedPath::new(
+                    typst::syntax::VirtualRoot::Project,
+                    typst::syntax::VirtualPath::new("content/post.typ").unwrap(),
+                ),
                 range: 0..0,
             }),
         )]);
@@ -591,6 +613,10 @@ mod tests {
                     [("title".into(), TextElem::packed("Deep").into_value())]
                         .into_iter()
                         .collect(),
+                ),
+                file: typst::syntax::RootedPath::new(
+                    typst::syntax::VirtualRoot::Project,
+                    typst::syntax::VirtualPath::new("content/posts/deep.typ").unwrap(),
                 ),
                 range: 0..0,
             }),
