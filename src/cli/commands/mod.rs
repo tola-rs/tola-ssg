@@ -19,12 +19,23 @@ pub(super) mod init;
 pub(super) mod inspect;
 pub(super) mod lsp;
 pub(super) mod manpage;
+pub(super) mod nu;
 pub(super) mod preview;
+pub(super) mod query;
+pub(super) mod read;
+pub(super) mod report;
 pub(super) mod skill;
 pub(super) mod vendor;
 
 use crate::cancellation::Cancellation;
 use crate::cli::output::CommandOutput;
+
+/// Whether any diagnostic fails the command that reported it.
+pub(super) fn holds_error(diagnostics: &[tola_diagnostic::Diagnostic]) -> bool {
+    diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.severity == tola_diagnostic::Severity::Error)
+}
 
 /// What every site command receives from the command line: the site it acts on, and the run's
 /// borrowed context. Bundling them keeps each command's signature to what it adds on top.

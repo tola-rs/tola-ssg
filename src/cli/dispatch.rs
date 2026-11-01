@@ -7,31 +7,75 @@ use anyhow::Result;
 
 use super::{Cli, Commands, commands};
 use crate::cli::output::CommandOutput;
+use crate::cli::{BuildOverrideArgs, CompilerFontArgs, TypstPackageArgs};
+use tola_build::InputScope;
 
 pub(crate) fn dispatch(
     cli: Cli,
     output: &CommandOutput,
     cancellation: &Cancellation,
 ) -> Result<()> {
-    cancellation.token().ensure_active()?;
-    validate_log_outputs(&cli.command, output)?;
+    let failure = FailureReport::of(&cli);
+    if let Err(error) = cancellation.token().ensure_active() {
+        return report_failure(failure, output, error.into());
+    }
+    if let Err(error) = validate_log_outputs(&cli.command, output) {
+        return report_failure(failure, output, error);
+    }
     let scope = cli.input_scope();
     match cli.command {
+        Commands::Nu(_) => unreachable!("script runs before cancellation is installed"),
+        Commands::Extension(arguments) => {
+            commands::extensions::run(arguments, scope, output, cancellation)
+        }
+        Commands::Module { config, command } => {
+            let request = commands::SiteRequest::new(
+                config,
+                TypstPackageArgs::default(),
+                scope,
+                BuildOverrideArgs::default(),
+                CompilerFontArgs::default(),
+                output,
+                cancellation,
+            )?;
+            let loaded = request.load_config(&crate::config::ConfigOverrides::default())?;
+            let super::args::ModuleCommand::Fetch { alias } = command;
+            output.status("Fetching remote modules")?;
+            tola_build::modules::fetch_modules(
+                loaded.config().get_root(),
+                loaded.config().modules(),
+                alias.as_deref(),
+                scope,
+                &cancellation.token(),
+            )?;
+            output.status("Remote modules are ready")?;
+            Ok(())
+        }
         Commands::Init(args) => commands::init::run(&args, scope, output, cancellation),
+        Commands::Edit { config, command } => {
+            commands::edit::run(config, command, output, cancellation)
+        }
         Commands::Build {
             config,
             packages,
             build,
             fonts,
-        } => commands::build::run(commands::SiteRequest {
-            config_file: config,
-            packages,
-            scope,
-            build,
-            resources: crate::cli::config::build_resources_with_fonts(scope, &fonts)?,
-            output,
-            cancellation,
-        }),
+            json,
+        } => {
+            let request = match commands::SiteRequest::new(
+                config,
+                packages,
+                scope,
+                build,
+                fonts,
+                output,
+                cancellation,
+            ) {
+                Ok(request) => request,
+                Err(error) => return report_failure(failure, output, error),
+            };
+            commands::build::run(request, json)
+        }
         Commands::Dev {
             config,
             packages,
