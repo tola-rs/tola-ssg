@@ -1,0 +1,38 @@
+[package]
+name = "tola-nu"
+version.workspace = true
+edition = "2024"
+rust-version.workspace = true
+license = "MIT"
+
+[dependencies]
+anyhow = "1.0.104"
+blake3 = "1.8.7"
+thiserror = "2.0.20"
+crossbeam-channel = "0.5.15"
+lsp-server = "0.10.0"
+lsp-textdocument = "0.5.0"
+lsp-types = "0.97.0"
+serde_json = "1.0.151"
+serde = { version = "1.0.229", features = ["derive"] }
+tempfile = "3.27.0"
+toml = "1.1.4"
+url = "2.5.8"
+tola-highlight.workspace = true
+tola-image.workspace = true
+ctrlc = "3.5.2"
+same-file = "1.0.6"
+nu-cli = { version = "=0.116.1", features = ["sqlite"] }
+nu-cmd-extra = "=0.116.1"
+nu-cmd-lang = { version = "=0.116.1", features = ["os"] }
+nu-command = { version = "=0.116.1", features = ["trash-support"] }
+nu-engine = { version = "=0.116.1", features = ["os"] }
+nu-experimental = "=0.116.1"
+nu-explore = "=0.116.1"
+nu-lsp = "=0.116.1"
+nu-parser = "=0.116.1"
+nu-path = "=0.116.1"
+nu-protocol = { version = "=0.116.1", features = ["os"] }
+nu-std = { version = "=0.116.1", features = ["sqlite"] }
+nu-tui = "=0.116.1"
+nu-utils = "=0.116.1"

@@ -249,24 +249,58 @@ pub enum Commands {
     /// Print or export the Tola site authoring skill.
     Skill(SkillArgs),
 
-    /// Show resolved site paths and selected settings as JSON.
-    Config {
-        #[command(flatten)]
-        config: ConfigFileArgs,
-        #[command(flatten)]
-        packages: TypstPackageArgs,
-        #[command(flatten)]
-        build: BuildOverrideArgs,
-    },
-
     /// Write a shell completion script to stdout.
     Completions(CompletionsArgs),
 
     /// Generate a roff manual page.
     Manpage(ManpageArgs),
 
+    /// Run the embedded Nushell runtime or its language server.
+    #[command(
+        override_usage = "tola nu [OPTIONS] <ENTRY> [ARGS]...\n       tola nu --lsp",
+        after_long_help = "Examples:\n  tola nu tools/build.nu\n  tola nu @tola/image metadata photo.png\n  tola nu @tola/image resize photo.png photo.webp --width 640 --op fit-width --format webp\n  tola nu @tola-modules/catalog --help\n\nIn Nu, `use tola` provides `tola query`; `use tola query` imports\nthe unqualified `query`. Import `use tola cli` for finite `cli capture`\nand `use tola image` for `image metadata-file` and `image resize-file`.\nUse `tola dev --json` as a native external command for continuous JSON lines.\nSite libraries use `use tola-modules catalog` and declare `[nu]` with\n`entry = \"tools/mod.nu\"` in tola-module.toml. Direct module invocations\nrun that entry's exported main command."
+    )]
+    Nu(NuArgs),
+
     /// Read configuration and package documentation.
     Help(HelpArgs),
+
+    /// Run a command declared by one of this site’s modules.
+    #[command(external_subcommand)]
+    Extension(Vec<OsString>),
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum ModuleCommand {
+    /// Fetch and lock remote modules.
+    Fetch { alias: Option<String> },
+}
+
+#[derive(clap::Args, Debug, Clone)]
+pub struct NuArgs {
+    #[command(flatten)]
+    pub config: ConfigFileArgs,
+
+    /// Serve the Nushell language server over standard input and output.
+    #[arg(long, conflicts_with_all = ["stdin", "invocation", "lsp_worker", "lsp_snapshot"])]
+    pub lsp: bool,
+
+    #[arg(long, hide = true, requires = "lsp_snapshot", conflicts_with_all = ["stdin", "invocation", "lsp"])]
+    pub lsp_worker: bool,
+
+    #[arg(long, hide = true, requires = "lsp_worker", value_name = "FILE")]
+    pub lsp_snapshot: Option<PathBuf>,
+
+    #[arg(long, hide = true, conflicts_with_all = ["path", "lsp", "lsp_worker", "lsp_snapshot"])]
+    pub no_site: bool,
+
+    /// Pass standard input to the script.
+    #[arg(long)]
+    pub stdin: bool,
+
+    /// Script file or @tola/NAME / @tola-modules/ALIAS, followed by its arguments.
+    #[arg(value_name = "ENTRY", num_args = 1.., trailing_var_arg = true, required_unless_present_any = ["lsp", "lsp_worker"])]
+    pub invocation: Vec<OsString>,
 }
 
 #[derive(clap::Args, Debug, Clone, Default)]
@@ -645,36 +679,39 @@ impl Commands {
             Self::Check { .. } => "check",
             Self::Fmt { .. } => "fmt",
             Self::Inspect { .. } => "inspect",
+            Self::Query { .. } => "query",
+            Self::Edit { .. } => "edit",
             Self::Vendor { .. } => "vendor",
             Self::Doctor(_) => "doctor",
-            Self::Fonts(_) => "fonts",
             Self::Editor { .. } => "editor",
             Self::Lsp { .. } => "lsp",
             Self::Skill(_) => "skill",
-            Self::Config { .. } => "config",
             Self::Completions(_) => "completions",
             Self::Manpage(_) => "manpage",
+            Self::Nu(_) => "nu",
             Self::Help(_) => "help",
+            Self::Extension(_) => "extension",
         }
     }
 
     /// Site configuration this command loads, when it loads one.
     pub(crate) fn config_file(&self) -> Option<&ConfigFileArgs> {
         match self {
-            Self::Build { config, .. }
+            Self::Module { config, .. }
+            | Self::Build { config, .. }
             | Self::Check { config, .. }
             | Self::Fmt { config, .. }
             | Self::Vendor { config, .. }
             | Self::Dev { config, .. }
             | Self::Preview { config, .. }
             | Self::Inspect { config, .. }
+            | Self::Edit { config, .. }
             | Self::Lsp { config, .. }
-            | Self::Config { config, .. }
+            | Self::Query { config, .. }
             | Self::Editor {
                 command: EditorCommand::Setup { config, .. },
             } => Some(config),
             Self::Doctor(args) => Some(&args.config),
-            Self::Fonts(args) => Some(&args.config),
             _ => None,
         }
     }

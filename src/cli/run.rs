@@ -36,14 +36,30 @@ fn session_log_path(cli: &Cli) -> Option<(std::path::PathBuf, LogOrigin)> {
 /// The next development session log below the site's reserved directory.
 fn default_session_log_path(config: &super::ConfigFileArgs) -> Option<std::path::PathBuf> {
     let root = super::config::source_root(config).ok()?;
-    let directory = root.join(tola_build::filesystem::INTERNAL_DIR).join("logs");
+    let directory = tola_build::filesystem::layout::logs(&root);
     Some(directory.join(format!("dev-{}.jsonl", super::log::session_stamp())))
 }
 
 pub(crate) fn run() -> ExitCode {
+    if let Some(code) = super::site_help::for_process() {
+        return code;
+    }
     let cli = Cli::parse_for_process();
-    let pages_documentation =
-        matches!(&cli.command, super::Commands::Help(args) if !args.interactive);
+    super::theme::install(cli.color);
+    if let super::Commands::Nu(args) = &cli.command {
+        let scope = if cli.pure {
+            Some("pure")
+        } else if cli.offline {
+            Some("offline")
+        } else {
+            None
+        };
+        return super::commands::nu::run(args, scope);
+    }
+    let events = crate::dev::events::Events(
+        matches!(&cli.command, super::Commands::Dev { development, .. } if development.json),
+    );
+    let pages_documentation = matches!(&cli.command, super::Commands::Help(args) if args.format == super::args::HelpFormat::Text);
     let pager = match if cli.no_pager || !pages_documentation {
         Ok(None)
     } else {
