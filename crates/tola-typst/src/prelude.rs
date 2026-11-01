@@ -13,7 +13,7 @@ pub use crate::compile::{
     CompileFailure, CompileResult, compile_source_with_evidence, compile_world,
     compile_world_with_evidence,
 };
-pub use crate::session::AccessedDeps;
+pub use crate::session::{AccessedDeps, capture_source_value};
 pub use crate::svg::{SvgCrop, SvgError, SvgSource};
 pub use crate::world::ExplicitSources;
 pub use typst_bundle::BundleOptions;

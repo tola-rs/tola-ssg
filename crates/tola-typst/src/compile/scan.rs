@@ -27,7 +27,7 @@ use typst::diag::SourceDiagnostic;
 use typst::engine::{Route, Sink, Traced};
 use typst::foundations::{Content, Label, Module, Styles, Value};
 use typst::introspection::MetadataElem;
-use typst::syntax::{Source, Span};
+use typst::syntax::{FileId, Source, Span};
 
 pub use crate::extract::{
     Extractor, Heading, HeadingExtractor, Link, LinkExtractor, LinkSource, extract,
@@ -89,12 +89,21 @@ failure_evidence!(ScanFailure, "evaluation");
 #[derive(Debug, Clone, Default)]
 pub struct CapturedValues {
     records: Vec<(Value, Option<Styles>)>,
+    sources: Vec<Source>,
 }
 
 impl CapturedValues {
     /// The records in write order.
     pub fn records(&self) -> &[(Value, Option<Styles>)] {
         &self.records
+    }
+
+    /// The source snapshot a captured span addresses, retained even when evaluation fails.
+    pub fn source(&self, id: FileId) -> Option<&Source> {
+        self.sources
+            .binary_search_by_key(&id.into_raw(), |source| source.id().into_raw())
+            .ok()
+            .map(|index| &self.sources[index])
     }
 
     /// Whether the sink reached its capacity, discarding every write that followed.
@@ -356,7 +365,7 @@ pub fn scan_world_observed(
     world: &TypstWorld,
     header: impl IntoIterator<Item = Value>,
 ) -> ObservedScan {
-    let session = CompileSession::start(world);
+    let session = CompileSession::start_observed(world);
     let source = match session.source(session.main()) {
         Ok(source) => source,
         Err(error) => {
@@ -371,26 +380,20 @@ pub fn scan_world_observed(
         }
     };
 
-    let mut sink = Sink::new();
-    for value in header {
-        sink.value(value, None);
-    }
-
-    let traced = Traced::default();
-    let route = Route::default();
-    let result = typst_eval::eval(
-        (&session as &dyn World).track(),
-        session.library(),
-        traced.track(),
-        sink.track_mut(),
-        route.track(),
-        &source,
-    );
+    let header = header.into_iter().collect::<Vec<_>>();
+    let (result, sink) = evaluate_source(&session, &source, &header);
+    let (session, capture_requested) = session.freeze_source_capture();
+    let (result, mut sink) = if capture_requested {
+        evaluate_source(&session, &source, &header)
+    } else {
+        (result, sink)
+    };
 
     // `values(self)` and `warnings(self)` both consume the sink, so the capture is read first,
     // from a copy; `delayed(&mut self)` only borrows it.
     let captured = CapturedValues {
         records: sink.clone().values().into_iter().collect(),
+        sources: session.sources(),
     };
     let delayed = sink.delayed();
     let warnings = sink.warnings().to_vec();
@@ -427,6 +430,28 @@ pub fn scan_world_observed(
     )
 }
 
+fn evaluate_source(
+    session: &CompileSession<'_>,
+    source: &Source,
+    header: &[Value],
+) -> (typst::diag::SourceResult<Module>, Sink) {
+    let mut sink = Sink::new();
+    for value in header {
+        sink.value(value.clone(), None);
+    }
+    let traced = Traced::default();
+    let route = Route::default();
+    let result = typst_eval::eval(
+        (session as &dyn World).track(),
+        session.library(),
+        traced.track(),
+        sink.track_mut(),
+        route.track(),
+        source,
+    );
+    (result, sink)
+}
+
 /// The next action for one unreadable file, when Typst named a plain reason.
 fn unreadable_file_help(error: &typst::diag::FileError) -> &'static str {
     use typst::diag::{FileError, PackageError};
@@ -461,7 +486,7 @@ mod tests {
     use tempfile::TempDir;
     use typst::diag::SourceResult;
     use typst::engine::Engine;
-    use typst::foundations::{Func, NativeFunc, func};
+    use typst::foundations::{Func, NativeElement, NativeFunc, Str, func};
     use typst::utils::LazyHash;
     use typst::{Feature, Features, Library, LibraryExt};
 
@@ -493,6 +518,19 @@ mod tests {
         Ok(Value::None)
     }
 
+    #[func]
+    fn declare(engine: &mut Engine, span: Span, payload: Value) -> SourceResult<Content> {
+        RUNS.with(|runs| runs.set(runs.get() + 1));
+        crate::capture_source_value(engine, span, payload.clone());
+        Ok(MetadataElem::new(payload).pack())
+    }
+
+    #[func]
+    fn change_source(path: Str) -> SourceResult<Value> {
+        fs::write(path.as_str(), "#let note(value) = declare(\"changed\")").unwrap();
+        Ok(Value::None)
+    }
+
     /// The runs of the recording native since the last read, on this thread.
     fn runs() -> usize {
         RUNS.with(|runs| runs.replace(0))
@@ -507,6 +545,14 @@ mod tests {
             .global
             .scope_mut()
             .define("record", Func::from(record::data()));
+        library
+            .global
+            .scope_mut()
+            .define("declare", Func::from(declare::data()));
+        library
+            .global
+            .scope_mut()
+            .define("change-source", Func::from(change_source::data()));
         Arc::new(LazyHash::new(library))
     }
 
@@ -601,6 +647,169 @@ mod tests {
             captured(&second),
             captured(&first),
             "the reused evaluation wrote its records back into the sink"
+        );
+    }
+
+    #[test]
+    fn source_capture_follows_module_scope() {
+        for (name, body, count, completes) in [
+            ("wrapper", "#note(\"own\")", 1, true),
+            (
+                "nested wrapper",
+                "#import \"layer.typ\": outer\n#outer(\"own\")",
+                1,
+                true,
+            ),
+            ("callback", "#let ignored = (\"own\",).map(note)", 1, true),
+            (
+                "direct eval",
+                "#eval(\"declare(\\\"own\\\")\", scope: (declare: declare))",
+                1,
+                true,
+            ),
+            (
+                "helper eval",
+                "#import \"theme.typ\": generated\n#generated(\"foreign\")\n#note(\"own\")",
+                1,
+                true,
+            ),
+            (
+                "generated wrapper",
+                "#import \"theme.typ\": compiled\n#compiled(\"own\")",
+                1,
+                true,
+            ),
+            (
+                "import callback",
+                "#import \"included.typ\": number\n#note(\"own\")",
+                1,
+                true,
+            ),
+            (
+                "include callback",
+                "#include \"included.typ\"\n#note(\"own\")",
+                1,
+                true,
+            ),
+            (
+                "import eval",
+                "#import \"evaluated.typ\": number\n#note(\"own\")",
+                1,
+                true,
+            ),
+            (
+                "include eval",
+                "#include \"evaluated.typ\"\n#note(\"own\")",
+                1,
+                true,
+            ),
+            ("loop", "#for _ in range(2) { note(\"own\") }", 2, true),
+            (
+                "reused marker",
+                "#let marker = note(\"own\")\n#marker\n#marker",
+                1,
+                true,
+            ),
+            ("discarded marker", "#let ignored = note(\"own\")", 1, true),
+            (
+                "later failure",
+                "#note(\"own\")\n#panic(\"stopped\")",
+                1,
+                false,
+            ),
+        ] {
+            let directory = TempDir::new().unwrap();
+            let file = directory.path().join("main.typ");
+            fs::write(&file, format!("#import \"theme.typ\": note\n{body}")).unwrap();
+            fs::write(
+                directory.path().join("theme.typ"),
+                "#let note(value) = declare(value)\n\
+                 #let generated(value) = eval(\"declare(value)\", scope: (declare: declare, value: value))\n\
+                 #let compiled = eval(\"value => declare(value)\", scope: (declare: declare))",
+            )
+            .unwrap();
+            fs::write(
+                directory.path().join("layer.typ"),
+                "#import \"theme.typ\": note\n#let outer(value) = note(value)",
+            )
+            .unwrap();
+            fs::write(
+                directory.path().join("included.typ"),
+                "#import \"theme.typ\": note\n#let number = 1\n#(\"foreign\",).map(note)",
+            )
+            .unwrap();
+            fs::write(
+                directory.path().join("evaluated.typ"),
+                "#eval(\"declare(\\\"foreign\\\")\", scope: (declare: declare))\n#let number = 1",
+            )
+            .unwrap();
+            let world = recording_world(directory.path(), &file);
+            let header = Value::Str("capture header".into());
+            let mut expected = vec![header.clone()];
+            expected.extend(std::iter::repeat_n(Value::Str("own".into()), count));
+
+            runs();
+            let cold = scan_world_observed(&world, [header.clone()]);
+            assert_eq!(cold.result().is_ok(), completes, "{name}");
+            assert_eq!(captured(&cold), expected, "{name}");
+            assert!(
+                cold.captured()
+                    .source(crate::file_id("theme.typ"))
+                    .is_some(),
+                "{name} retains the helper source"
+            );
+            let accessed = match cold.result() {
+                Ok(scan) => scan.accessed(),
+                Err(failure) => failure.accessed(),
+            };
+            assert!(
+                accessed
+                    .reads
+                    .iter()
+                    .all(|read| read.evidence().locator().is_persistent())
+            );
+            runs();
+            let warm = scan_world_observed(&world, [header]);
+            assert_eq!(warm.result().is_ok(), completes, "{name}");
+            assert_eq!(captured(&warm), expected, "{name}");
+            assert_eq!(runs(), 0, "{name} replays cached captures");
+        }
+    }
+
+    #[test]
+    fn source_capture_keeps_source_snapshot() {
+        let directory = TempDir::new().unwrap();
+        let file = directory.path().join("main.typ");
+        let theme = directory.path().join("theme.typ");
+        fs::write(&theme, "#let note(value) = declare(value)").unwrap();
+        fs::write(
+            &file,
+            format!(
+                "#import \"theme.typ\": note\n#change-source({:?})\n#note(\"original\")",
+                theme.to_str().unwrap()
+            ),
+        )
+        .unwrap();
+        let world = TypstWorld::builder(&file, directory.path())
+            .with_shared_cache(Arc::new(crate::SharedFileCache::new()))
+            .no_fonts()
+            .with_shared_library(recording_library())
+            .build(&crate::BundleCancellation::default())
+            .unwrap();
+        let observation = scan_world_observed(&world, []);
+        assert!(observation.result().is_ok());
+        assert_eq!(captured(&observation), [Value::Str("original".into())]);
+        assert_eq!(
+            observation
+                .captured()
+                .source(crate::file_id("theme.typ"))
+                .unwrap()
+                .text(),
+            "#let note(value) = declare(value)"
+        );
+        assert_eq!(
+            fs::read_to_string(theme).unwrap(),
+            "#let note(value) = declare(\"changed\")"
         );
     }
 }

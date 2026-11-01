@@ -131,13 +131,25 @@ A source declares its metadata with one `tola-meta` call in its ordinary evaluat
 ))
 ```
 
-- Call it once, outside `context` and outside show rules. A call made by a helper in another file
-  belongs to that file and declares nothing for the source that called the helper.
+- Call it once during ordinary evaluation, directly or through an imported function. Top-level
+  declarations in imported or included files remain those files' own declarations.
+- Calls deferred by `context` or selector show rules declare nothing. A `#show: ...` wrapper
+  runs after its trailing body is evaluated, so a body error can prevent its declaration.
 - A declaration whose call already ran survives a later error, but the error still fails the build.
   Draft sources are evaluated too.
 - Metadata fields belong to the site. The scaffold's schema covers title, description, authors,
   tags, draft, permalink, feed and sitemap flags, publication dates, and feed bodies.
 - Extend `site/schema.typ` before using a new field: its default rejects unknown keys.
+
+For a shared shorthand, put this definition in `site/metadata.typ`:
+
+```typst
+#import "@tola/source:0.0.0": tola-meta
+#let note(..fields) = tola-meta(fields.named())
+```
+
+In `content/post.typ`, use `#import "../site/metadata.typ": note`, then
+`#note(title: "Hello")`.
 
 A Typst type such as `str` is already a schema. `optional(S)` accepts an absent key; without a
 default the key stays absent. `nullable(S)` accepts explicit `none`. An invalid supplied value never
@@ -175,10 +187,11 @@ Each record carries `id`/`path`, `file` (a Typst input path for `include` or `re
 `route-segments` (the default identity from the file layout), and `meta` (the declaration).
 
 The root program receives settled declarations. Parse the complete set there, then filter, sort,
-and choose outputs. `parse-sources` points field failures at the literal metadata value when its
-location is known, otherwise at the `tola-meta` call, or the file start when absent. Notes and
-nested causes remain separate hints. It treats absent metadata as an empty dictionary and keeps
-each record's identity and order, replacing only `meta`. Pass one declaration, or
+and choose outputs. `parse-sources` names the source whose metadata failed and points at the literal
+value when its location is known, otherwise at the actual `tola-meta` declaration, including inside
+an imported function, or the source's file start when absent. Wrapper arguments are not traced
+back to callers. Notes and nested causes remain separate hints. It treats absent metadata as an
+empty dictionary and keeps each record's identity and order, replacing only `meta`. Pass one declaration, or
 `source => declaration` to choose by each complete source record; the call resolves every record
 before reporting field issues, so one run collects all field errors. Neither `all-sources()` nor
 `tola inspect sources` is changed by that parse.

@@ -25,11 +25,9 @@ pub const ASSET_ORIGINS_MEMBER: &str = "__tola_asset_origins";
 /// The `sys.inputs` member holding each source's origin, keyed by the source path the records
 /// carry.
 ///
-/// A value is `(file: <site-root path>, range: none | (start, end))`: the file the source lives in
-/// and the byte range of its `<tola-meta>` declaration, or `none` when it declares no metadata.
-/// A value cannot carry the position it was written at, so the engine resolves both from one
-/// source of the same immutable snapshot and passes them here; a diagnostic then takes its file
-/// and its range from this one entry rather than pairing an independent file with a path.
+/// A value holds `source`, the owning source's Typst path, plus `file` and `range`, the
+/// declaration's Typst path and `none | (start, end)` byte range. A shared helper can supply the
+/// declaration. Without one, `file` names the source itself and `range` is `none`.
 pub const SOURCE_ORIGINS_MEMBER: &str = "__tola_source_origins";
 
 /// The virtual path naming the capability observation one source-analysis read records.

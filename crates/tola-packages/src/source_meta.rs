@@ -6,24 +6,23 @@
 //! not the source program ran to completion. A capture header, which the host writes before
 //! evaluation, opens that channel, and [`decode_capture`] reads the header and the events back.
 //!
-//! The channel carries `(value, styles)` and no span, so an event carries the byte range of its
-//! own call site inside its value.
+//! Each event retains the marker's source span separately from the source it declares for.
 
 use std::fmt;
 use std::ops::Range;
 
 use tola_typst::CapturedValues;
 use typst::World;
-use typst::diag::{At, SourceResult, bail};
+use typst::diag::SourceResult;
 use typst::ecow::EcoString;
 use typst::engine::Engine;
 use typst::foundations::{Content, Dict, Label, NativeElement, Str, Value, func};
 use typst::introspection::MetadataElem;
-use typst::syntax::{FileId, Source, Span, SpanKind};
+use typst::syntax::{FileId, RootedPath, Source, Span, SpanKind};
 use typst::utils::PicoStr;
 
 /// The protocol every declaration event carries.
-const DECLARATION_PROTOCOL: &str = "tola.source-declaration/1";
+const DECLARATION_PROTOCOL: &str = "tola.source-declaration/2";
 
 /// The protocol every capture header carries.
 const CAPTURE_PROTOCOL: &str = "tola.source-capture/1";
@@ -35,24 +34,16 @@ const DECLARATION_LABEL: &str = "tola-meta";
 // host writes, and what the decoder reads.
 const PROTOCOL: &str = "protocol";
 const OWNER: &str = "owner";
-const SPAN: &str = "span";
 const VALUE: &str = "value";
 const INPUT_IDENTITY: &str = "input_identity";
-const START: &str = "start";
-const END: &str = "end";
 
 /// Declare the metadata of the source that calls this.
 ///
-/// The call is the declaration: the dictionary, at the byte range of this call site, is recorded
-/// in the tracked sink of the scan this runs in, so a build reads it whether or not the rest of
-/// the source program succeeds. Only a call written in the file being scanned declares; a helper
-/// in another file names its own file, and the scan of that file is what reads it.
+/// Ordinary function calls retain the source's declaration ownership, including helpers in
+/// another file. Importing or including a module does not transfer its declarations to the caller.
 ///
-/// Only eager evaluation declares. A call that `context` or a show rule defers to realization
-/// reaches no scan sink, so it declares nothing, and the build reports nothing: the declaration a
-/// document carries is never compared with the one the build selected on. Comparing them would
-/// take a second capture during the render phase to catch a call written in a deferred position,
-/// where naming that call directly is the cheaper and more precise report.
+/// Only eager evaluation declares. Contextual realization can still produce the returned marker,
+/// but does not change the declarations used to select the site's documents.
 ///
 /// The returned marker is an invisible metadata element carrying the same dictionary at this call
 /// site, labelled `tola-meta` so `query(<tola-meta>)` still finds it. Placing the marker any
@@ -64,21 +55,10 @@ pub(super) fn tola_meta(
     /// The declared metadata: the source's own view of itself.
     payload: Dict,
 ) -> SourceResult<Content> {
-    let main = engine.world.main();
-    if span.id() == Some(main) {
-        let source = engine.world.source(main).at(span)?;
-        let Some(range) = call_range(&source, span) else {
-            bail!(
-                span,
-                "this `tola-meta` call cannot be located in the source being scanned"
-            );
-        };
-        let owner = owner_of(main);
-        engine
-            .sink
-            .value(declaration_event(&owner, range, payload.clone()), None);
-    }
-    Ok(declaration_marker(payload, span))
+    let marker = declaration_marker(payload, span);
+    let owner = owner_of(engine.world.main());
+    tola_typst::capture_source_value(engine, span, declaration_event(&owner, marker.clone()));
+    Ok(marker)
 }
 
 /// The header a host writes into a scan's sink before it evaluates one source.
@@ -143,16 +123,16 @@ pub enum Declaration {
 pub struct DeclaredMeta {
     /// The declared metadata.
     pub metadata: Dict,
-    /// The byte range of the declaring call site in the source.
+    /// The file containing the declaration, which can be a shared helper.
+    pub file: RootedPath,
+    /// The byte range of the declaration within `file`.
     pub range: Range<usize>,
 }
 
 /// Read one source's declaration out of the values a scan captured.
 ///
-/// `header` is the header the host wrote before evaluation and `source` is the file it evaluated:
-/// the channel must still start with that header, its owner must be this source, and every
-/// declaration must lie inside it. Any other shape refuses the whole capture, so a caller never
-/// reads a protocol failure as "this source declared nothing".
+/// The header and every event must name `source`. Declaration locations use captured source
+/// snapshots, so a helper's span cannot be resolved against its caller or a later file version.
 ///
 /// A channel that reached [`typst::engine::Sink::MAX_VALUES`] records is always refused: the sink
 /// drops the writes beyond its capacity without a trace, so a full channel cannot say whether it
@@ -205,26 +185,27 @@ pub fn decode_capture(
                 found: named.into(),
             });
         }
-        let Ok(Value::Dict(span)) = record.get(SPAN) else {
-            return Err(CaptureError::Malformed { field: SPAN });
-        };
-        let start = match span.get(START) {
-            Ok(Value::Int(start)) => *start,
-            _ => return Err(CaptureError::Malformed { field: START }),
-        };
-        let end = match span.get(END) {
-            Ok(Value::Int(end)) => *end,
-            _ => return Err(CaptureError::Malformed { field: END }),
-        };
-        if start < 0 || end < start || (end as u64) > source.text().len() as u64 {
-            return Err(CaptureError::SpanOutside { start, end });
-        }
-        let Ok(Value::Dict(metadata)) = record.get(VALUE) else {
+        let Ok(Value::Content(marker)) = record.get(VALUE) else {
             return Err(CaptureError::Malformed { field: VALUE });
         };
+        let Some(element) = marker.to_packed::<MetadataElem>() else {
+            return Err(CaptureError::Malformed { field: VALUE });
+        };
+        let Value::Dict(metadata) = &element.value else {
+            return Err(CaptureError::Malformed { field: VALUE });
+        };
+        let span = marker.span();
+        let file = span.id().ok_or(CaptureError::UnlocatedDeclaration)?;
+        let source = captured
+            .source(file)
+            .ok_or(CaptureError::UnlocatedDeclaration)?;
+        let range = call_range(source, span)
+            .filter(|range| range.start <= range.end && range.end <= source.text().len())
+            .ok_or(CaptureError::UnlocatedDeclaration)?;
         declared.push(DeclaredMeta {
             metadata: metadata.clone(),
-            range: start as usize..end as usize,
+            file: file.get().clone(),
+            range,
         });
     }
 
@@ -272,13 +253,8 @@ pub enum CaptureError {
         /// The source the record named.
         found: EcoString,
     },
-    /// A declared position is not a byte range inside the source being decoded.
-    SpanOutside {
-        /// The first byte the record declared.
-        start: i64,
-        /// The byte after the last one the record declared.
-        end: i64,
-    },
+    /// A declaration's span cannot be located in its own source.
+    UnlocatedDeclaration,
     /// The channel held as many records as it can, so writes may have been dropped and no
     /// declaration can be read from what remains.
     Saturated,
@@ -310,10 +286,9 @@ impl fmt::Display for CaptureError {
                 formatter,
                 "the capture belongs to `{found}`, not `{expected}`"
             ),
-            Self::SpanOutside { start, end } => write!(
-                formatter,
-                "a declaration at bytes {start}..{end} lies outside the source it declares in"
-            ),
+            Self::UnlocatedDeclaration => {
+                write!(formatter, "a declaration has no readable source location")
+            }
             Self::Saturated => write!(
                 formatter,
                 "the capture channel is full, so a declaration may have been dropped"
@@ -361,16 +336,11 @@ fn declaration_label() -> Label {
 }
 
 /// One declaration event, as the wire encodes it.
-fn declaration_event(owner: &str, range: Range<usize>, payload: Dict) -> Value {
-    let mut span = Dict::new();
-    span.insert(Str::from(START), Value::Int(range.start as i64));
-    span.insert(Str::from(END), Value::Int(range.end as i64));
-
+fn declaration_event(owner: &str, marker: Content) -> Value {
     let mut event = Dict::new();
     event.insert(Str::from(PROTOCOL), Value::Str(DECLARATION_PROTOCOL.into()));
     event.insert(Str::from(OWNER), Value::Str(owner.into()));
-    event.insert(Str::from(SPAN), Value::Dict(span));
-    event.insert(Str::from(VALUE), Value::Dict(payload));
+    event.insert(Str::from(VALUE), Value::Content(marker));
     Value::Dict(event)
 }
 
@@ -403,24 +373,18 @@ mod tests {
     }
 
     /// The observed scan of one site whose main is `main.typ`, header included.
-    fn scan(files: &[(&str, &str)], records: Vec<Value>) -> ObservedScan {
+    fn scan(files: &[(&str, &str)], records: Vec<Value>) -> (TypstWorld, ObservedScan) {
         let mut written = vec![header().value()];
         written.extend(records);
-        scan_world_observed(&site(files), written)
+        let world = site(files);
+        let scanned = scan_world_observed(&world, written);
+        (world, scanned)
     }
 
     /// The declaration of the source one scan evaluated.
-    fn decode(scan: &ObservedScan) -> Result<SourceCapture, CaptureError> {
-        decode_with(scan, &header())
-    }
-
-    /// The declaration one scan made, read against the header its host wrote.
-    fn decode_with(
-        scan: &ObservedScan,
-        header: &CaptureHeader,
-    ) -> Result<SourceCapture, CaptureError> {
-        let source = scan.result().expect("the source evaluates").source();
-        decode_capture(scan.captured(), header, source)
+    fn decode(world: &TypstWorld, scan: &ObservedScan) -> Result<SourceCapture, CaptureError> {
+        let source = scan.captured().source(world.main()).unwrap();
+        decode_capture(scan.captured(), &header(), source)
     }
 
     /// One virtual site: `files` are its sources, and the builtin packages serve themselves.
@@ -499,8 +463,8 @@ mod tests {
     #[test]
     fn own_call_records_declaration() {
         let text = IMPORT.to_owned() + "#tola-meta((title: \"Post\"))";
-        let scan = scan(&[("main.typ", &text)], Vec::new());
-        let capture = decode(&scan).unwrap();
+        let (world, scan) = scan(&[("main.typ", &text)], Vec::new());
+        let capture = decode(&world, &scan).unwrap();
         let declared = match capture.declaration {
             Declaration::One(declared) => declared,
             other => panic!("expected one declaration, decoded {other:?}"),
@@ -517,12 +481,36 @@ mod tests {
     }
 
     #[test]
+    fn wrapper_retains_declaration_source() {
+        let helper = IMPORT.to_owned() + "#let note(..fields) = tola-meta(fields.named())";
+        let (world, scan) = scan(
+            &[
+                (
+                    "main.typ",
+                    "#import \"theme.typ\": note\n#note(title: \"Post\")",
+                ),
+                ("theme.typ", &helper),
+            ],
+            Vec::new(),
+        );
+        let Declaration::One(declared) = decode(&world, &scan).unwrap().declaration else {
+            panic!("the wrapper declares once");
+        };
+        assert_eq!(
+            declared.metadata.get("title"),
+            Ok(&Value::Str("Post".into()))
+        );
+        assert_eq!(declared.file, file_id("theme.typ").get().clone());
+        assert_eq!(&helper[declared.range], "tola-meta(fields.named())");
+    }
+
+    #[test]
     fn reused_marker_declares_once() {
         let text =
             IMPORT.to_owned() + "#let marker = tola-meta((title: \"Post\"))\n#marker\n#marker\n";
-        let scan = scan(&[("main.typ", &text)], Vec::new());
+        let (world, scan) = scan(&[("main.typ", &text)], Vec::new());
         assert!(matches!(
-            decode(&scan).unwrap().declaration,
+            decode(&world, &scan).unwrap().declaration,
             Declaration::One(_)
         ));
     }
@@ -530,7 +518,7 @@ mod tests {
     #[test]
     fn declaration_marker_keeps_label_and_span() {
         let text = IMPORT.to_owned() + "#tola-meta((title: \"Post\"))";
-        let scan = scan(&[("main.typ", &text)], Vec::new());
+        let (_world, scan) = scan(&[("main.typ", &text)], Vec::new());
         let result = scan.result().expect("the source evaluates");
         let declarations = result.metadata_declarations(DECLARATION_LABEL);
         assert_eq!(declarations.len(), 1);
@@ -543,17 +531,21 @@ mod tests {
     #[test]
     fn foreign_owner_is_refused() {
         let text = IMPORT.to_owned() + "#tola-meta((title: \"Post\"))";
-        let foreign = declaration_event("/other.typ", 0..1, payload("Post"));
-        let scan = scan(&[("main.typ", "= Post\n")], vec![foreign]);
+        let foreign = declaration_event(
+            "/other.typ",
+            declaration_marker(payload("Post"), Span::detached()),
+        );
+        let (world, scan) = scan(&[("main.typ", "= Post\n")], vec![foreign]);
         assert!(matches!(
-            decode(&scan),
+            decode(&world, &scan),
             Err(CaptureError::ForeignOwner { .. })
         ));
 
         let other = CaptureHeader::new(file_id("other.typ"), "input-1");
-        let scan = scan_world_observed(&site(&[("main.typ", &text)]), [other.value()]);
+        let world = site(&[("main.typ", &text)]);
+        let scan = scan_world_observed(&world, [other.value()]);
         assert!(matches!(
-            decode_with(&scan, &other),
+            decode_capture(scan.captured(), &other, scan.result().unwrap().source()),
             Err(CaptureError::ForeignOwner { .. })
         ));
     }
@@ -565,7 +557,7 @@ mod tests {
         for index in 0..Sink::MAX_VALUES + 2 {
             text.push_str(&format!("#tola-meta((index: {index}))\n"));
         }
-        let scan = scan(&[("main.typ", &text)], Vec::new());
+        let (_world, scan) = scan(&[("main.typ", &text)], Vec::new());
         let records = scan.captured().records();
         assert_eq!(records.len(), Sink::MAX_VALUES, "the sink stops at its cap");
 
@@ -584,8 +576,12 @@ mod tests {
                 let Value::Dict(event) = value else {
                     panic!("a declaration event is a dictionary");
                 };
-                let Ok(Value::Dict(metadata)) = event.get(VALUE) else {
-                    panic!("a declaration event holds its metadata");
+                let Ok(Value::Content(marker)) = event.get(VALUE) else {
+                    panic!("a declaration event holds its marker");
+                };
+                let metadata = &marker.to_packed::<MetadataElem>().unwrap().value;
+                let Value::Dict(metadata) = metadata else {
+                    panic!("a declaration marker holds its dictionary");
                 };
                 let Ok(Value::Int(index)) = metadata.get("index") else {
                     panic!("a declaration event holds the index it was written with");

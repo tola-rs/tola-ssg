@@ -243,6 +243,7 @@ path = "icons/brand"
         {
             tola_packages::Declaration::One(declared) => Some(SourceMetadataDeclaration {
                 metadata: SourceMetadata::from_dict(declared.metadata),
+                file: declared.file,
                 range: declared.range,
             }),
             _ => None,
@@ -2590,9 +2591,22 @@ path = "icons/brand"
             program: &str,
             sources: &[(&str, &str)],
         ) -> (TempDir, tola_typst::TypstWorld) {
+            source_world_with_files(program, sources, &[])
+        }
+
+        fn source_world_with_files(
+            program: &str,
+            sources: &[(&str, &str)],
+            files: &[(&str, &str)],
+        ) -> (TempDir, tola_typst::TypstWorld) {
             let directory = TempDir::new().unwrap();
             let config = crate::config::tests::load_test_config(directory.path(), "");
             let root = config.get_root();
+            for (path, body) in files {
+                let path = root.join(path);
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(path, body).unwrap();
+            }
             let content = root.join("content");
             let files =
                 Arc::new(tola_typst::FileResolver::new().with_provider(IconFiles::default()));
@@ -2641,6 +2655,61 @@ path = "icons/brand"
                 .errors()
                 .cloned()
                 .collect()
+        }
+
+        #[test]
+        fn shared_declarations_reach_sources() {
+            let (_directory, world) = source_world_with_files(
+                r#"
+#import "@tola/source:0.0.0": all-sources, parse-sources
+#import "@tola/schema:0.0.0": schema
+#let sources = all-sources()
+#assert.eq(sources.first().meta, (title: "Shared"))
+#assert.eq(parse-sources(sources, schema((title: str))).first().meta.title, "Shared")
+#document("index.html")[]
+"#,
+                &[(
+                    "note.typ",
+                    "#import \"../theme.typ\": note\n#note(title: \"Shared\")",
+                )],
+                &[(
+                    "theme.typ",
+                    "#import \"@tola/source:0.0.0\": tola-meta\n#let note(..fields) = tola-meta(fields.named())",
+                )],
+            );
+            tola_typst::compile_bundle_world(&world, &Default::default()).unwrap();
+        }
+
+        #[test]
+        fn shared_declaration_issues_name_owner() {
+            let helper = "#import \"@tola/source:0.0.0\": tola-meta\n#let note(..fields) = tola-meta(fields.named())";
+            let (_directory, world) = source_world_with_files(
+                r#"
+#import "@tola/source:0.0.0": all-sources, parse-sources
+#import "@tola/schema:0.0.0": schema
+#parse-sources(all-sources(), schema((title: str)))
+#document("index.html")[]
+"#,
+                &[(
+                    "note.typ",
+                    "#import \"../theme.typ\": note\n#note(title: 1)",
+                )],
+                &[("theme.typ", helper)],
+            );
+            let failure =
+                tola_typst::compile_bundle_world(&world, &Default::default()).unwrap_err();
+            let errors = failure.diagnostics().unwrap().errors().collect::<Vec<_>>();
+            assert_eq!(errors.len(), 1);
+            let error = errors[0];
+            assert!(error.message.contains("content/note.typ"), "{error:?}");
+            assert_eq!(error.location.path.as_deref(), Some("theme.typ"));
+            let range = error.location.range.as_ref().unwrap();
+            assert_eq!(range.start.line, range.end.line);
+            let line = helper.lines().nth(range.start.line).unwrap();
+            assert_eq!(
+                &line[range.start.character..range.end.character],
+                "tola-meta"
+            );
         }
 
         #[test]
