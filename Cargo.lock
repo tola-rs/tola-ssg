@@ -4521,9 +4521,9 @@ checksum = "6c20b6793b5c2fa6553b250154b78d6d0db37e72700ae35fad9387a46f487c97"
 
 [[package]]
 name = "roxmltree"
-version = "0.21.1"
+version = "0.21.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1964b10c76125c36f8afe190065a4bf9a87bf324842c05701330bba9f1cacbb"
+checksum = "9da7f59328b09405b181fee1018925fad50f157afb43c0c0f5c522c256dd5907"
 dependencies = [
  "memchr",
 ]
@@ -5613,7 +5613,7 @@ dependencies = [
  "process-wrap",
  "rayon",
  "reqwest",
- "roxmltree 0.21.1",
+ "roxmltree 0.21.2",
  "rss",
  "rustc-hash",
  "rustix",
@@ -5675,7 +5675,7 @@ dependencies = [
  "cssparser",
  "cssparser-color",
  "percent-encoding",
- "roxmltree 0.21.1",
+ "roxmltree 0.21.2",
  "serde",
  "serde_json",
  "svgtypes",
@@ -5693,7 +5693,7 @@ dependencies = [
  "jpeg-encoder",
  "moxcms 0.7.11",
  "rayon",
- "roxmltree 0.21.1",
+ "roxmltree 0.21.2",
  "serde",
  "serde_json",
  "thiserror",
@@ -5751,7 +5751,7 @@ dependencies = [
  "comemo",
  "hex",
  "miniz_oxide 0.9.1",
- "roxmltree 0.21.1",
+ "roxmltree 0.21.2",
  "serde",
  "serde_json",
  "tola-address",
@@ -5802,7 +5802,7 @@ dependencies = [
  "parking_lot",
  "rayon",
  "resvg",
- "roxmltree 0.21.1",
+ "roxmltree 0.21.2",
  "rustc-hash",
  "ruzstd",
  "serde",
@@ -6334,7 +6334,7 @@ dependencies = [
  "rayon",
  "regex",
  "regex-syntax",
- "roxmltree 0.21.1",
+ "roxmltree 0.21.2",
  "rust_decimal",
  "rustc-hash",
  "rustybuzz",
@@ -6753,7 +6753,7 @@ dependencies = [
  "kurbo",
  "log",
  "pico-args",
- "roxmltree 0.21.1",
+ "roxmltree 0.21.2",
  "rustybuzz",
  "simplecss",
  "siphasher",
