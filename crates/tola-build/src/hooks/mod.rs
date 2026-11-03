@@ -10,7 +10,8 @@ mod runner;
 pub(crate) use crate::config::section::build::hooks::hook_identity;
 pub use evidence::{FailedHookOutputs, HookOutputEvidence, SourceHookOutputs};
 pub(crate) use generate::generate_outputs;
-pub(crate) use reuse::ReusableHookOutputs;
+pub use reuse::AfterPublishDependencies;
+pub(crate) use reuse::{ReusableHookOutputs, observe_after_publish};
 pub use runner::*;
 
 use crate::config::section::build::DevParticipation;

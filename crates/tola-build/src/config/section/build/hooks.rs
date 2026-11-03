@@ -589,9 +589,11 @@ builds and caches for the command's own products are the producer's logic
 
 Development skips this stage by default. With `dev = \"run\"`, consumers run serially without
 holding up browser updates. While one revision is running, only the latest waiting revision is
-kept, so intermediate revisions may receive no consumer call. Stopping `tola dev` cancels the
-running command and discards waiting work. Use this mode for consumers that can handle the latest
-site, rather than for an audit of every revision.
+kept, so intermediate revisions may receive no consumer call. A rebuild that changes nothing —
+the same site, commands, and `rerun-on` contents as the previous run — keeps that run's result,
+failure included, instead of running the commands again. Stopping `tola dev` cancels the running
+command and discards waiting work. Use this mode for consumers that can handle the latest site,
+rather than for an audit of every revision.
 
 The command environment for this stage:
 - `TOLA_HOOK_INPUT_DIR`: the command's input — a read-only snapshot of the site just committed,
