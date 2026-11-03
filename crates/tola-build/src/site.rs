@@ -88,6 +88,17 @@ impl SiteRevision {
         )
     }
 
+    /// What an after-publish run of this revision consumes.
+    pub fn after_publish_dependencies(
+        &self,
+    ) -> anyhow::Result<crate::hooks::AfterPublishDependencies> {
+        crate::hooks::observe_after_publish(
+            &self.config,
+            self.mode,
+            self.outputs.manifest().revision(),
+        )
+    }
+
     pub fn config(&self) -> &Arc<ResolvedSiteConfig> {
         &self.config
     }
@@ -167,5 +178,38 @@ mod tests {
         )]));
         let present = site_revision(Arc::new(site_config.config), outputs);
         assert_eq!(present.page_availability(), PageAvailability::Present);
+    }
+
+    const CONSUMER_CONFIG: &str = "\
+[[build.hooks.after-publish]]
+name = \"consumer\"
+command = [\"consume\"]
+rerun-on = [\"consume.mjs\"]
+";
+
+    #[test]
+    fn identical_revisions_share_after_publish_dependencies() {
+        let site_config = OwnedSiteConfig::new(CONSUMER_CONFIG);
+        let config = Arc::new(site_config.config.clone());
+        let first = site_revision(Arc::clone(&config), empty_revision());
+        let second = site_revision(config, empty_revision());
+
+        assert_eq!(
+            first.after_publish_dependencies().unwrap(),
+            second.after_publish_dependencies().unwrap()
+        );
+    }
+
+    #[test]
+    fn rerun_on_edit_changes_after_publish_dependencies() {
+        let site_config = OwnedSiteConfig::new(CONSUMER_CONFIG);
+        let script = site_config.config.get_root().join("consume.mjs");
+        std::fs::write(&script, "first").unwrap();
+        let revision = site_revision(Arc::new(site_config.config.clone()), empty_revision());
+        let before = revision.after_publish_dependencies().unwrap();
+
+        std::fs::write(&script, "second").unwrap();
+
+        assert_ne!(revision.after_publish_dependencies().unwrap(), before);
     }
 }
