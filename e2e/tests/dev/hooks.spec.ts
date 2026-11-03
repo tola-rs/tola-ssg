@@ -795,6 +795,78 @@ test('consumer failure keeps published page', async ({ page, sites }) => {
   await expect(page.locator('#tola-dev-status')).toBeVisible()
 })
 
+/** A Typst comment line rebuilds `index.typ` into the bytes it already published; a blank line
+ *  before it would start a new paragraph and change the page. */
+const UNCHANGED_OUTPUT_EDIT = '// rebuilt into the same page\n'
+
+async function completedRounds(root: string): Promise<number> {
+  return (await readSessionRecords(root)).filter((record) =>
+    record.fields.kind === 'summary' && typeof record.fields.round === 'number'
+  ).length
+}
+
+test('unchanged rebuild keeps consumer outcome', async ({ sites }) => {
+  let runs!: string
+  const site = await sites.dev({
+    initialContent: { relativePath: 'index.typ', source: 'Consumed page.\n' },
+    beforeStart: async (root) => {
+      runs = hookJournal(root, 'consumer-runs.txt')
+      const consumer = join(root, 'consume.mjs')
+      await writeFile(
+        consumer,
+        `
+        import { appendFileSync, readFileSync } from 'node:fs';
+        appendFileSync(${JSON.stringify(runs)}, readFileSync('marker.txt', 'utf8') + '\\n');
+      `,
+      )
+      await writeFile(join(root, 'marker.txt'), 'first')
+      await writeHookConfiguration(root, [
+        hookToml('after-publish', consumer, {
+          name: 'consumer',
+          dev: 'run',
+          rerunOn: ['marker.txt'],
+        }),
+      ])
+    },
+  })
+  await expect.poll(() => readHookJournal(runs)).toBe('first\n')
+
+  // The round queues its revision before reporting, so the idle consumer has taken it by the
+  // time the marker edit starts the next round.
+  await site.writeContent('index.typ', `Consumed page.\n${UNCHANGED_OUTPUT_EDIT}`)
+  await expect.poll(() => completedRounds(site.root)).toBe(2)
+
+  await writeFile(join(site.root, 'marker.txt'), 'second')
+  await expect.poll(() => readHookJournal(runs)).toBe('first\nsecond\n')
+})
+
+test('unchanged rebuild repeats consumer failure', async ({ sites }) => {
+  let runs!: string
+  const site = await sites.dev({
+    initialContent: { relativePath: 'index.typ', source: 'Rejected page.\n' },
+    beforeStart: async (root) => {
+      runs = hookJournal(root, 'consumer-runs.txt')
+      const consumer = join(root, 'rejecting-consumer.mjs')
+      await writeFile(
+        consumer,
+        `
+        import { appendFileSync } from 'node:fs';
+        appendFileSync(${JSON.stringify(runs)}, 'run\\n');
+        process.exit(7);
+      `,
+      )
+      await writeHookConfiguration(root, [
+        hookToml('after-publish', consumer, { name: 'consumer', dev: 'run' }),
+      ])
+    },
+  })
+  await expect.poll(() => site.stderr().match(/hook\.after_publish/g)?.length ?? 0).toBe(1)
+
+  await site.writeContent('index.typ', `Rejected page.\n${UNCHANGED_OUTPUT_EDIT}`)
+  await expect.poll(() => site.stderr().match(/hook\.after_publish/g)?.length ?? 0).toBe(2)
+  expect(await readHookJournal(runs)).toBe('run\n')
+})
+
 test('hook write of an unread file keeps the first build', async ({ page, sites }) => {
   let invocations!: string
   const site = await sites.dev({

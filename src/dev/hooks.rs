@@ -161,21 +161,53 @@ impl HookQueue {
         let worker = std::thread::Builder::new()
             .name("tola-after-publish".into())
             .spawn(move || {
+                let mut completed: Option<CompletedRun> = None;
                 while let Some(pending) = pending.next(&worker_cancellation, &worker_shutdown) {
-                    if let Err(error) = consume_revision(&pending, &worker_shutdown) {
-                        if worker_cancellation.is_cancelled()
-                            || worker_shutdown.is_cancelled()
-                            || error.chain().any(|cause| cause.is::<BuildCancelled>())
+                    let revision = pending.site.manifest().revision().as_str();
+                    let failure = match pending.site.after_publish_dependencies() {
+                        Ok(dependencies)
+                            if completed
+                                .as_ref()
+                                .is_some_and(|run| run.dependencies == dependencies) =>
                         {
-                            break;
+                            tracing::debug!(
+                                target: "tola::dev",
+                                revision,
+                                "kept the previous after-publish outcome for unchanged dependencies"
+                            );
+                            completed.as_ref().and_then(|run| run.failure.clone())
                         }
-                        tracing::debug!(
-                            target: "tola::dev",
-                            revision = pending.site.manifest().revision().as_str(),
-                            %error,
-                            "after-publish command failed"
-                        );
-                        let diagnostic = after_publish_failure(&error);
+                        Ok(dependencies) => {
+                            let failure = match consume_revision(&pending, &worker_shutdown) {
+                                Ok(()) => None,
+                                Err(error) => {
+                                    if worker_cancellation.is_cancelled()
+                                        || worker_shutdown.is_cancelled()
+                                        || error.chain().any(|cause| cause.is::<BuildCancelled>())
+                                    {
+                                        break;
+                                    }
+                                    tracing::debug!(
+                                        target: "tola::dev",
+                                        revision,
+                                        %error,
+                                        "after-publish command failed"
+                                    );
+                                    Some(after_publish_failure(&error))
+                                }
+                            };
+                            completed = Some(CompletedRun {
+                                dependencies,
+                                failure: failure.clone(),
+                            });
+                            failure
+                        }
+                        Err(error) => {
+                            completed = None;
+                            Some(after_publish_failure(&error))
+                        }
+                    };
+                    if let Some(diagnostic) = failure {
                         let _ = output.status("Site built; an after-publish command failed");
                         let _ = output.diagnostic(&diagnostic);
                         if let Some(browser) = &browser {
@@ -224,6 +256,17 @@ impl Drop for HookQueue {
     }
 }
 
+/// The latest completed after-publish run: what it consumed, and the failure it reported.
+///
+/// A later revision with equal dependencies reports this outcome again instead of running the
+/// commands: materializing the site for them writes enough files that macOS may coalesce the
+/// writes into a rescan of the whole site, and running again for that rescan's unchanged
+/// rebuild would never settle.
+struct CompletedRun {
+    dependencies: tola_build::hooks::AfterPublishDependencies,
+    failure: Option<Diagnostic>,
+}
+
 /// Run one revision's after-publish commands under its published identity.
 ///
 /// The span is entered for the synchronous command run, so a command's hook events name their
@@ -254,7 +297,7 @@ fn after_publish_failure(error: &anyhow::Error) -> Diagnostic {
             tola_build::diagnostic::fallback(crate::codes::hook::AFTER_PUBLISH, error)
         })
         .with_help(
-            "Fix the failing command in `build.hooks.after-publish`, then save a file to rebuild",
+            "Fix the failing command in `build.hooks.after-publish`, then change the site or one of its `rerun-on` paths to run it again",
         )
 }
 
