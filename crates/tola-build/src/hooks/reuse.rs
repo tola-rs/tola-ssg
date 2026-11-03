@@ -1,4 +1,5 @@
-//! Reuse of one `generate-outputs` hook's previous development outputs.
+//! Development reuse of hook work: one `generate-outputs` hook's previous outputs, and the
+//! outcome of the latest after-publish run.
 //!
 //! Tola already identifies file contents with [`ContentDigest`], so reuse compares a
 //! structured observation directly instead of inventing a second digest: the built site's
@@ -12,8 +13,13 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-use crate::config::section::build::hooks::{CommandOutput, OutputCommandConfig};
+use crate::config::ResolvedSiteConfig;
+use crate::config::section::build::hooks::{
+    AfterPublishHookConfig, CommandOutput, OutputCommandConfig,
+};
+use crate::mode::BuildMode;
 use crate::output::graph::{OutputFile, OutputKind};
+use crate::output::manifest::RevisionId;
 use crate::output::owner::OutputRootOwnership;
 use tola_address::OutputPath;
 use tola_typst::ContentDigest;
@@ -106,6 +112,43 @@ pub(crate) fn observe(
         command: command.command.clone(),
         outputs,
         upstream,
+        rerun_on,
+    })
+}
+
+/// Everything Tola can observe that one revision's after-publish run consumes: the committed
+/// revision, the participating commands in configuration order, and their `rerun-on` contents.
+///
+/// Equal dependencies give the commands nothing new to consume, so development keeps the
+/// previous run's outcome instead of materializing the site and running them again.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AfterPublishDependencies {
+    revision: RevisionId,
+    hooks: Vec<AfterPublishHookConfig>,
+    rerun_on: Vec<RerunOnPath>,
+}
+
+pub(crate) fn observe_after_publish(
+    config: &ResolvedSiteConfig,
+    mode: BuildMode,
+    revision: &RevisionId,
+) -> Result<AfterPublishDependencies> {
+    let hooks: Vec<AfterPublishHookConfig> = config
+        .build
+        .hooks
+        .after_publish
+        .iter()
+        .filter(|hook| super::hook_participates(hook.enable, hook.dev, mode))
+        .cloned()
+        .collect();
+    let rerun_on = hooks
+        .iter()
+        .flat_map(|hook| &hook.rerun_on)
+        .map(|path| observe_rerun_path(config.get_root(), path))
+        .collect::<Result<_>>()?;
+    Ok(AfterPublishDependencies {
+        revision: revision.clone(),
+        hooks,
         rerun_on,
     })
 }
