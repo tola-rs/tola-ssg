@@ -85,7 +85,7 @@ jobs:
           RELEASE_TAG: ${{ needs.validate.outputs.tag }}
           RELEASE_MODE: ${{ needs.validate.outputs.mode }}
         run: deno run -A scripts/release/check.ts packages "$RELEASE_TAG" --commit "$GITHUB_SHA" --mode "$RELEASE_MODE"
-      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+      - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
         with:
           tool: cargo-about@0.9.2
           fallback: none
@@ -94,7 +94,7 @@ jobs:
           just licenses
           deno run --allow-read --allow-write --allow-env scripts/release/package.ts licenses --output "$RUNNER_TEMP/release-licenses"
       - name: Upload release license material
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: artifact-licenses
           overwrite: true
@@ -158,7 +158,7 @@ jobs:
           TARGET: ${{ matrix.target }}
         run: deno run --allow-read --allow-write --allow-run --allow-env scripts/release/package.ts build "$TARGET" --output artifacts
       - name: Upload verified artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: artifact-${{ matrix.target }}
           overwrite: true
@@ -183,7 +183,7 @@ jobs:
       - uses: ./.github/actions/setup-typescript
       - uses: ./.github/actions/setup-rust
       - name: Download verified build artifacts outside the checkout
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: artifact-*
           merge-multiple: true
