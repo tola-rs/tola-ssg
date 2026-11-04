@@ -1,7 +1,7 @@
 {
   "imports": {
     "@vscode/test-electron": "npm:@vscode/test-electron@3.1.0",
-    "@vscode/vsce": "npm:@vscode/vsce@4.0.0",
+    "@vscode/vsce": "npm:@vscode/vsce@4.1.0",
     "esbuild": "npm:esbuild@0.28.2",
     "ovsx": "npm:ovsx@1.3.0",
     "vscode": "npm:@types/vscode@1.140.0",
