@@ -5,6 +5,7 @@ mod hooks;
 mod http;
 mod rebuild;
 mod reload;
+pub(crate) mod round;
 mod session;
 mod site;
 mod watch;

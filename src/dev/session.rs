@@ -409,7 +409,7 @@ fn build_site_once_inner(
                 attempt_diagnostics.clone_from(&diagnostics);
             }
             output.report_round(
-                crate::cli::output::CompletedRound::failed(
+                crate::dev::round::CompletedRound::failed(
                     None,
                     "Build failed; fix the errors and restart `tola dev`",
                 ),
@@ -445,7 +445,7 @@ fn build_site_once_inner(
     );
     let diagnostics = current.diagnostics().to_vec();
     output.report_round(
-        crate::cli::output::CompletedRound::initial(&summary),
+        crate::dev::round::CompletedRound::initial(&summary),
         &diagnostics,
     )?;
     Ok(())

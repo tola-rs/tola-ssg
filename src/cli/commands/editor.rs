@@ -5,6 +5,7 @@
 use std::path::Path;
 
 use anyhow::Result;
+use serde::Serialize;
 
 use crate::cancellation::Cancellation;
 use crate::cli::log::LogFile;
@@ -184,6 +185,12 @@ fn start_session_log(
     }
 }
 
+#[derive(Serialize)]
+struct EditorChoice {
+    index: usize,
+    editor: String,
+}
+
 fn select_editors(scope: InputScope, cancellation: &Cancellation) -> Result<Vec<Editor>> {
     if !crate::cli::interaction::available() {
         anyhow::bail!(
@@ -194,7 +201,10 @@ fn select_editors(scope: InputScope, cancellation: &Cancellation) -> Result<Vec<
     let choices = crate::editor::selection_choices()
         .into_iter()
         .enumerate()
-        .map(|(index, label)| serde_json::json!({"index": index, "editor": label}))
+        .map(|(index, label)| EditorChoice {
+            index,
+            editor: label,
+        })
         .collect::<Vec<_>>();
     let selected: Option<Vec<usize>> = crate::cli::interaction::run(
         include_str!("editor_select.nu"),

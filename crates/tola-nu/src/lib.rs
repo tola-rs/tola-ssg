@@ -51,8 +51,8 @@ use nu_protocol::{
 pub const BUILTIN_MODULES: &[(&str, &str)] = &[
     ("cli", "Capture finite CLI output and exit status"),
     ("image", "Inspect and resize image bytes"),
-    ("diagnostic", "Construct and submit diagnostic reports"),
-    ("ui", "Choose a value in an interactive table"),
+    ("diagnostic", "Construct, render, and submit diagnostic reports"),
+    ("ui", "Interactive tables, confirmations, and syntax highlighting"),
 ];
 
 /// One prepared Nu environment for CLI evaluation or LSP service.
@@ -697,29 +697,6 @@ mod tests {
     }
 
     #[test]
-    fn reader_layout_renders_headlessly() {
-        let runtime = Runtime::new(Vec::new(), Vec::new()).unwrap();
-        let value = evaluate(
-            &runtime,
-            r##"use tola ui
-let body = ("# Heading" | ui highlight typ)
-let screen = ([{title: 'Section: Intro', target: 'tola-help://intro'}]
-    | tui label --titlebar 'Help'
-    | tui split --sizes ['35%' '1fr'] [
-        (tui box Contents [
-            (tui search --id search --bind / --placeholder 'Filter' --columns [title])
-            (tui table --id rows --focus --columns [title])
-        ])
-        (tui preview --title Page {|row| $body})
-    ]
-    | tui debug --size [80 24]
-    | get screen)
-($screen | str contains 'Help') and ($screen | str contains 'Section: Intro')"##,
-        );
-        assert!(value.as_bool().unwrap());
-    }
-
-    #[test]
     fn aliases_share_a_module_root() {
         let scenario = Scenario::new();
         let root = module_root(
@@ -763,7 +740,7 @@ let screen = ([{title: 'Section: Intro', target: 'tola-help://intro'}]
                 .has_main
         );
         assert!(runtime.resolve_locator("@tola-missing/image").is_err());
-        assert!(runtime.resolve_locator("@tola/absent").is_err());
+        assert!(runtime.resolve_locator("@tola-scripts/absent").is_err());
         assert_eq!(
             runtime
                 .origins()

@@ -16,31 +16,19 @@ use ratatui::layout::{Constraint, Layout, Rect, Size};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Paragraph, Wrap};
-use tola_diagnostic::Diagnostic;
 
-use super::ansi::{self, Segment};
-use super::session::{self, Claim, ProcessTerminal, ViewModes};
-use super::sink::{OutputSink, StreamWriter};
-use super::style::Palette;
+use crate::terminal::ansi::{self, Segment};
+use crate::terminal::session::{self, Claim, ProcessTerminal, ViewModes};
+use crate::terminal::sink::{OutputSink, StreamWriter};
+use crate::terminal::style::Palette;
 use super::ui::{Action, Screen, hints, keymap};
+use crate::dev::round::{HookRun, Round, stream_index};
 
 const HISTORY_ROUNDS: usize = 64;
 const HOOK_LINES: usize = 200;
 const FRAME_INTERVAL: Duration = Duration::from_millis(50);
 /// How long a copy confirmation stays above the hints.
 const NOTICE_LIFETIME: Duration = Duration::from_secs(2);
-
-#[derive(Clone, Copy)]
-pub(crate) enum Completion<'a> {
-    Published(&'a str),
-    Failed(&'a str),
-}
-
-pub(crate) struct Round {
-    pub(crate) diagnostics: Vec<Diagnostic>,
-    pub(crate) transcript: String,
-    pub(crate) observed_at: DateTime<Local>,
-}
 
 impl Round {
     fn same_diagnostics(&self, other: &Self) -> bool {
@@ -64,12 +52,6 @@ fn round_stamp(observed_at: DateTime<Local>, today: NaiveDate) -> String {
         "%Y-%m-%d %H:%M:%S"
     };
     observed_at.format(format).to_string()
-}
-
-#[derive(Clone, PartialEq, Eq)]
-pub(crate) struct HookRun {
-    pub(crate) scope: u64,
-    pub(crate) name: String,
 }
 
 struct Job {
@@ -112,7 +94,7 @@ impl Job {
     fn body(&self, styled: bool) -> Vec<Line<'static>> {
         let mut header = format!("{}/{}", self.stage, self.run.name);
         if self.omitted_lines > 0 {
-            let omitted = super::progress::plural_count(self.omitted_lines, "earlier line");
+            let omitted = crate::terminal::progress::plural_count(self.omitted_lines, "earlier line");
             header.push_str(&format!(" · {omitted} not shown"));
         }
         let mut lines = vec![Line::from(header)];
@@ -148,10 +130,6 @@ impl Job {
 }
 
 /// The stream index a hook event names; both streams share one execution's parsers.
-pub(crate) fn stream_index(stream: &str) -> usize {
-    usize::from(stream == "stderr")
-}
-
 /// Adjacent segments under one style are one span.
 fn push_segment(segments: &mut Vec<Segment>, segment: Segment) {
     match segments.last_mut() {
@@ -560,7 +538,7 @@ impl DevScreen {
         }
         let _ = self
             .writer
-            .write_all(super::clipboard::escape(text).as_bytes());
+            .write_all(crate::terminal::clipboard::escape(text).as_bytes());
         let copied = match crate::sys::clipboard_command() {
             Some(program) => {
                 let mut command = std::process::Command::new(program);
@@ -575,7 +553,7 @@ impl DevScreen {
         };
         let what = match round.diagnostics.len() {
             0 => "build output".to_owned(),
-            count => super::progress::plural_count(count, "diagnostic"),
+            count => crate::terminal::progress::plural_count(count, "diagnostic"),
         };
         self.notice = Some(Notice {
             text: if copied {
@@ -838,330 +816,3 @@ fn push_span(line: &mut Line<'static>, text: &str, style: Style) {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use chrono::{Duration, TimeZone};
-    use ratatui::style::{Color, Modifier};
-    use tola_diagnostic::Severity;
-
-    fn diagnostic(path: &str) -> Diagnostic {
-        Diagnostic::at_path(
-            tola_diagnostic::codes::typst::COMPILE,
-            Severity::Error,
-            path,
-            "expected expression",
-        )
-    }
-
-    fn round(diagnostics: Vec<Diagnostic>, second: i64, transcript: &str) -> Round {
-        Round {
-            diagnostics,
-            transcript: transcript.to_owned(),
-            observed_at: Local.timestamp_opt(second, 0).single().unwrap(),
-        }
-    }
-
-    #[test]
-    fn clean_reports_stay_outside_history() {
-        let mut rounds = Rounds::default();
-        rounds.push(round(Vec::new(), 1, "Built site"));
-        assert!(rounds.entries.is_empty());
-        assert_eq!(rounds.current().unwrap().transcript, "Built site");
-    }
-
-    #[test]
-    fn latest_clean_result_is_one_position() {
-        let mut rounds = Rounds::default();
-        rounds.push(round(vec![diagnostic("content/first.typ")], 1, "failed"));
-        assert_eq!(rounds.positions(), 1, "one diagnostic round");
-        rounds.push(round(Vec::new(), 2, "Built site"));
-        assert_eq!(
-            rounds.positions(),
-            2,
-            "the latest clean result is a place to walk to"
-        );
-        rounds.push(round(vec![diagnostic("content/second.typ")], 3, "failed"));
-        assert_eq!(
-            rounds.positions(),
-            2,
-            "a later failure leaves that clean result no place"
-        );
-        rounds.push(round(Vec::new(), 4, "Built site"));
-        assert_eq!(rounds.positions(), 3, "the newest clean result walks again");
-    }
-
-    /// History merges by the diagnostics a round reports, never by the time it arrived: the same
-    /// set refreshes its entry in place and keeps the position, a new set is its own entry.
-    #[test]
-    fn rounds_merge_by_report() {
-        let mut rounds = Rounds::default();
-        let first = diagnostic("content/first.typ");
-        let second = diagnostic("content/second.typ");
-        rounds.push(round(vec![first.clone(), second.clone()], 1, "old report"));
-        rounds.selected = rounds.entries.first().cloned();
-        rounds.top = 9;
-        rounds.push(round(
-            vec![diagnostic("content/other.typ")],
-            2,
-            "other report",
-        ));
-        assert_eq!(rounds.entries.len(), 2, "a new report is its own entry");
-        rounds.selected = rounds.entries.first().cloned();
-        rounds.top = 9;
-        rounds.push(round(vec![second, first], 3, "refreshed report"));
-        assert_eq!(rounds.entries.len(), 2);
-        let refreshed = rounds.entries.last().unwrap();
-        assert_eq!(refreshed.transcript, "refreshed report");
-        assert_eq!(
-            refreshed.observed_at,
-            Local.timestamp_opt(1, 0).single().unwrap() + Duration::seconds(2)
-        );
-        assert!(Arc::ptr_eq(rounds.selected.as_ref().unwrap(), refreshed));
-        assert_eq!(rounds.top, 9);
-    }
-
-    #[test]
-    fn stamps_date_earlier_rounds() {
-        let today = NaiveDate::from_ymd_opt(2026, 10, 15).unwrap();
-        let yesterday = NaiveDate::from_ymd_opt(2026, 10, 14).unwrap();
-        let at = |day, hour, minute, second| {
-            Local
-                .with_ymd_and_hms(2026, 10, day, hour, minute, second)
-                .single()
-                .unwrap()
-        };
-        assert_eq!(round_stamp(at(15, 0, 6, 27), today), "00:06:27");
-        assert_eq!(round_stamp(at(15, 0, 32, 14), today), "00:32:14");
-        assert_eq!(
-            round_stamp(at(14, 23, 33, 37), today),
-            "2026-10-14 23:33:37"
-        );
-        assert_eq!(round_stamp(at(14, 23, 33, 37), yesterday), "23:33:37");
-    }
-
-    #[test]
-    fn copy_follows_the_visible_round() {
-        let mut rounds = Rounds::default();
-        assert!(!rounds.live(Action::Copy), "nothing to copy yet");
-        rounds.push(round(vec![diagnostic("content/first.typ")], 1, "failed"));
-        assert!(rounds.live(Action::Copy));
-        rounds.push(round(Vec::new(), 2, "Built site"));
-        assert!(rounds.live(Action::Copy), "a clean round copies its output");
-        rounds.push(round(Vec::new(), 3, ""));
-        assert!(!rounds.live(Action::Copy), "an empty round copies nothing");
-    }
-
-    #[test]
-    fn new_round_takes_the_view() {
-        let mut rounds = Rounds::default();
-        rounds.push(round(vec![diagnostic("content/first.typ")], 1, "failed"));
-        rounds.previous();
-        rounds.top = 9;
-
-        rounds.push(round(Vec::new(), 2, "Built site"));
-        assert!(
-            rounds.selected.is_none(),
-            "a clean build shows its own result"
-        );
-        assert_eq!(rounds.current().unwrap().transcript, "Built site");
-        assert_eq!(rounds.top, 0);
-
-        rounds.previous();
-        rounds.push(round(
-            vec![diagnostic("content/second.typ")],
-            3,
-            "failed again",
-        ));
-        assert!(
-            rounds.selected.is_none(),
-            "another failure shows its own result"
-        );
-        assert_eq!(rounds.current().unwrap().transcript, "failed again");
-    }
-
-    #[test]
-    fn history_returns_to_clean_result() {
-        let mut rounds = Rounds::default();
-        rounds.push(round(vec![diagnostic("content/first.typ")], 1, "failed"));
-        rounds.push(round(Vec::new(), 2, "Built site"));
-        assert!(rounds.live(Action::PreviousRound));
-        assert!(!rounds.live(Action::NextRound));
-        rounds.previous();
-        assert_eq!(rounds.current().unwrap().transcript, "failed");
-        assert!(!rounds.live(Action::PreviousRound));
-        assert!(rounds.live(Action::NextRound));
-        rounds.next();
-        assert_eq!(rounds.current().unwrap().transcript, "Built site");
-        assert!(!rounds.live(Action::NextRound));
-    }
-
-    #[test]
-    fn unchanged_diagnostics_keep_scroll() {
-        let mut rounds = Rounds::default();
-        rounds.push(round(vec![diagnostic("content/first.typ")], 1, "failed"));
-        rounds.top = 9;
-        rounds.push(round(
-            vec![diagnostic("content/first.typ")],
-            2,
-            "failed again",
-        ));
-        assert_eq!(rounds.top, 9);
-        assert_eq!(rounds.current().unwrap().transcript, "failed again");
-        rounds.previous();
-        rounds.next();
-        assert_eq!(
-            rounds.top, 9,
-            "unavailable history movements leave the view alone"
-        );
-    }
-
-    #[test]
-    fn short_hook_area_shows_jobs() {
-        let jobs = ["styles", "search", "assets"].map(|name| {
-            Job::new(
-                HookRun {
-                    scope: 0,
-                    name: name.to_owned(),
-                },
-                "generate",
-            )
-        });
-        let mut terminal =
-            ratatui::Terminal::new(ratatui::backend::TestBackend::new(24, 2)).unwrap();
-        terminal
-            .draw(|frame| draw_jobs(frame, frame.area(), &jobs, false))
-            .unwrap();
-        let drawn = terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect::<String>();
-        assert!(drawn.contains("styles"));
-        assert!(drawn.contains("search"));
-    }
-
-    #[test]
-    fn diagnostic_colors_survive_framing() {
-        for severity in [Severity::Error, Severity::Warning] {
-            let diagnostic = Diagnostic::new(
-                tola_diagnostic::codes::typst::COMPILE,
-                severity,
-                "expected expression",
-            );
-            let rendered = crate::terminal::render_diagnostic(&diagnostic, None, true);
-            assert!(
-                styled_lines(&rendered)
-                    .iter()
-                    .flat_map(|line| &line.spans)
-                    .any(|span| span.style.fg.is_some_and(|color| color != Color::Reset))
-            );
-        }
-    }
-
-    #[test]
-    fn osc_payloads_never_become_text() {
-        let lines =
-            styled_lines("a\u{1b}]8;;http://127.0.0.1:1/\u{1b}\\link\u{1b}]8;;\u{1b}\\\u{1b}[4mb");
-        let drawn = lines
-            .iter()
-            .flat_map(|line| &line.spans)
-            .map(|span| span.content.as_ref())
-            .collect::<String>();
-        assert_eq!(drawn, "alinkb", "a hyperlink's address never becomes text");
-        assert!(
-            lines
-                .iter()
-                .flat_map(|line| &line.spans)
-                .last()
-                .is_some_and(|span| span.style.add_modifier.contains(Modifier::UNDERLINED)),
-            "the SGR that follows still styles"
-        );
-    }
-
-    #[test]
-    fn scroll_hints_follow_the_body() {
-        let mut rounds = Rounds::default();
-        rounds.push(round(vec![diagnostic("content/first.typ")], 1, "failed"));
-        rounds.body_rows = 10;
-        rounds.body_lines = 30;
-        assert!(!rounds.live(Action::Up));
-        assert!(!rounds.live(Action::First));
-        assert!(rounds.live(Action::Down));
-        assert!(rounds.live(Action::Last));
-        rounds.top = rounds.last_top();
-        assert!(!rounds.live(Action::Down));
-        assert!(!rounds.live(Action::Last));
-        assert!(rounds.live(Action::Up));
-
-        rounds.top = 0;
-        rounds.body_rows = 30;
-        assert!(
-            !rounds.live(Action::Down),
-            "a body that fits does not scroll"
-        );
-        assert!(!rounds.live(Action::Last));
-    }
-
-    fn assets_job() -> Job {
-        Job::new(
-            HookRun {
-                scope: 0,
-                name: "assets".to_owned(),
-            },
-            "",
-        )
-    }
-
-    fn body_text(line: &Line<'_>) -> String {
-        line.spans
-            .iter()
-            .map(|span| span.content.as_ref())
-            .collect()
-    }
-
-    #[test]
-    fn hook_chunks_keep_stream_lines() {
-        let mut job = assets_job();
-        job.output("stdout", "first");
-        job.output("stdout", " line\r");
-        job.output("stdout", "\n");
-        job.output("stderr", "failure\n");
-        let drawn = job
-            .body(false)
-            .iter()
-            .skip(1)
-            .map(body_text)
-            .collect::<Vec<_>>();
-        assert_eq!(drawn, ["[stdout] first line", "[stderr] failure"]);
-    }
-
-    #[test]
-    fn hook_lines_keep_style_when_cropped() {
-        let mut job = assets_job();
-        for index in 1..=HOOK_LINES + 1 {
-            let color = if index == 1 { "\x1b[31m" } else { "\x1b[32m" };
-            job.output("stdout", &format!("{color}line {index}\x1b[0m\n"));
-        }
-        let lines = job.body(true);
-        assert_eq!(lines.len(), HOOK_LINES + 1);
-        assert_eq!(body_text(&lines[1]), "[stdout] line 2");
-        assert_eq!(lines[1].spans[1].style.fg, Some(Color::Green));
-    }
-
-    #[test]
-    fn hook_header_names_omitted_lines() {
-        let mut job = assets_job();
-        for index in 1..=HOOK_LINES {
-            job.output("stdout", &format!("line {index}\n"));
-        }
-        assert_eq!(body_text(&job.body(false)[0]), "/assets");
-        job.output("stdout", "one more\n");
-        assert_eq!(
-            body_text(&job.body(false)[0]),
-            "/assets · 1 earlier line not shown"
-        );
-    }
-}

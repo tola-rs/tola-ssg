@@ -2,7 +2,7 @@
 
 use std::ops::Range;
 
-use crate::terminal::documentation::{Style, StyledText};
+use crate::terminal::text::{Style, StyledText};
 
 /// What one run of code text is, in the vocabulary both renderers colour by.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

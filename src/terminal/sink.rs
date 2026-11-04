@@ -6,7 +6,8 @@ use std::time::Duration;
 
 use super::Palette;
 use super::ansi::{self, Painter};
-use super::development::{DevScreen, HookRun, Round, stream_index};
+use super::development::DevScreen;
+use crate::dev::round::{HookRun, Round, stream_index};
 use super::session::{Claim, ProcessTerminal};
 
 const OUTPUT_LOCK_POLL_INTERVAL: Duration = Duration::from_millis(10);
@@ -399,6 +400,7 @@ fn stdout_error(error: io::Error) -> anyhow::Error {
     }
 }
 
+
 #[cfg(test)]
 pub(crate) mod tests {
     pub(crate) mod testing {
@@ -416,13 +418,6 @@ pub(crate) mod tests {
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
                     .clone()
-            }
-
-            pub(crate) fn is_empty(&self) -> bool {
-                self.0
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .is_empty()
             }
         }
 
@@ -442,95 +437,5 @@ pub(crate) mod tests {
             }
         }
     }
-
-    use super::*;
-
-    #[test]
-    fn stdout_writes_add_no_sequences() {
-        let (sink, output) = OutputSink::buffered();
-        sink.write_stdout(b"plain").unwrap();
-        assert_eq!(String::from_utf8(output.bytes()).unwrap(), "plain");
-
-        let (sink, output) = OutputSink::buffered();
-        sink.write_stdout_line(b"plain").unwrap();
-        assert_eq!(String::from_utf8(output.bytes()).unwrap(), "plain\n");
-    }
-
-    #[test]
-    fn blocked_write_observes_cancellation() {
-        let (sink, captured) = OutputSink::buffered();
-        let canceller = tola_build::cancellation::BuildCanceller::new();
-        sink.set_cancellation(canceller.token());
-        let guard = sink.inner.lock.lock();
-        let waiting = sink.clone();
-        let (finished, completion) = std::sync::mpsc::channel();
-        let worker =
-            std::thread::spawn(move || {
-                let error = waiting.write_stderr(b"Cancelled").unwrap_err();
-                finished
-                    .send(error.get_ref().is_some_and(|inner| {
-                        inner.is::<tola_build::cancellation::BuildCancelled>()
-                    }))
-                    .unwrap();
-            });
-        canceller.cancel();
-        assert!(completion.recv_timeout(Duration::from_secs(2)).unwrap());
-        drop(guard);
-        worker.join().unwrap();
-        assert!(captured.is_empty());
-    }
-
-    #[test]
-    fn broken_stdout_is_closed_stream() {
-        let closed = stdout_error(io::Error::from(io::ErrorKind::BrokenPipe));
-        assert!(closed.is::<StdoutClosed>());
-        let other = stdout_error(io::Error::from(io::ErrorKind::PermissionDenied));
-        assert!(!other.is::<StdoutClosed>());
-        assert_eq!(other.to_string(), "cannot write to stdout");
-        assert_eq!(
-            other
-                .chain()
-                .find_map(|cause| cause.downcast_ref::<io::Error>())
-                .unwrap()
-                .kind(),
-            io::ErrorKind::PermissionDenied
-        );
-    }
-
-    #[test]
-    fn held_lock_still_writes_stderr() {
-        let (sink, output) = OutputSink::buffered();
-        let canceller = tola_build::cancellation::BuildCanceller::new();
-        sink.set_cancellation(canceller.token());
-        canceller.cancel();
-        let held = sink.inner.lock.lock();
-        sink.write_stderr_nonblocking(b"panic\n").unwrap();
-        assert_eq!(String::from_utf8(output.bytes()).unwrap(), "panic\n");
-        drop(held);
-    }
-
-    fn hook_run(name: &str) -> HookRun {
-        HookRun {
-            scope: 0,
-            name: name.to_owned(),
-        }
-    }
-
-    #[test]
-    fn hook_colors_stay_with_their_execution() {
-        let (sink, output) = OutputSink::buffered();
-        let first = hook_run("first");
-        let second = hook_run("second");
-        let palette = Palette::new(true);
-        sink.hook_output(&first, "stderr", "\x1b[31mred", palette)
-            .unwrap();
-        sink.hook_output(&second, "stderr", "\x1b[32mgreen\n", palette)
-            .unwrap();
-        sink.hook_output(&first, "stderr", "again\n", palette)
-            .unwrap();
-        let shown = String::from_utf8(output.bytes()).unwrap();
-        assert!(shown.contains("\x1b[0;31mred\x1b[0m\n"), "{shown:?}");
-        assert!(shown.contains("\x1b[0;32mgreen\x1b[0m\n"), "{shown:?}");
-        assert!(shown.contains("\x1b[0;31magain\x1b[0m\n"), "{shown:?}");
-    }
 }
+

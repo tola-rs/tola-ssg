@@ -6,6 +6,7 @@ export def issue [
   --code: string
   --location: record # Host source ID and UTF-16 range, when supplied by the host.
   --hints: list<string> = []
+  --notes: list<string> = []
   --related: list<record> = []
 ]: nothing -> record {
   if $severity not-in [error warning info hint] {
@@ -15,8 +16,15 @@ export def issue [
   if $code != null { $issue = ($issue | insert code $code) }
   if $location != null { $issue = ($issue | insert location $location) }
   if not ($hints | is-empty) { $issue = ($issue | insert hints $hints) }
+  if not ($notes | is-empty) { $issue = ($issue | insert notes $notes) }
   if not ($related | is-empty) { $issue = ($issue | insert related $related) }
   $issue
+}
+
+# Render issues through the same Rust renderer the build uses.
+export def render []: list<record> -> nothing {
+  let executable = ($env.TOLA_EXECUTABLE? | default "tola")
+  $in | to json | ^$executable diagnostic render
 }
 
 # Submit a complete report to the host, including an empty list when there are no issues.

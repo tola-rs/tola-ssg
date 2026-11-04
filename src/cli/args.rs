@@ -258,16 +258,28 @@ pub enum Commands {
     /// Run the embedded Nushell runtime or its language server.
     #[command(
         override_usage = "tola nu [OPTIONS] <ENTRY> [ARGS]...\n       tola nu --lsp",
-        after_long_help = "Examples:\n  tola nu tools/build.nu\n  tola nu @tola/image metadata photo.png\n  tola nu @tola/image resize photo.png photo.webp --width 640 --op fit-width --format webp\n  tola nu @tola-modules/catalog --help\n\nIn Nu, `use tola` provides `tola query`; `use tola query` imports\nthe unqualified `query`. Import `use tola cli` for finite `cli capture`\nand `use tola image` for `image metadata-file` and `image resize-file`.\nUse `tola dev --json` as a native external command for continuous JSON lines.\nSite libraries use `use tola-modules catalog` and declare `[nu]` with\n`entry = \"tools/mod.nu\"` in tola-module.toml. Direct module invocations\nrun that entry's exported main command."
+        after_long_help = "Examples:\n  tola nu tools/build.nu\n  tola nu @tola-scripts/image metadata photo.png\n  tola nu @tola-scripts/image resize photo.png photo.webp --width 640 --op fit-width --format webp\n  tola nu @tola-modules/catalog --help\n\nIn Nu, `use tola` provides `tola query`; `use tola query` imports\nthe unqualified `query`. Import `use tola cli` for finite `cli capture`\nand `use tola image` for `image metadata-file` and `image resize-file`.\nUse `tola dev --json` as a native external command for continuous JSON lines.\nSite libraries use `use tola-modules catalog` and declare `[nu]` with\n`entry = \"tools/mod.nu\"` in tola-module.toml. Direct module invocations\nrun that entry's exported main command."
     )]
     Nu(NuArgs),
 
     /// Read configuration and package documentation.
     Help(HelpArgs),
 
+    /// Render a diagnostic JSON report through the build renderer.
+    Diagnostic {
+        #[command(subcommand)]
+        command: DiagnosticCommand,
+    },
+
     /// Run a command declared by one of this site’s modules.
     #[command(external_subcommand)]
     Extension(Vec<OsString>),
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum DiagnosticCommand {
+    /// Read diagnostic JSON from stdin and print the rendered report.
+    Render,
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -298,14 +310,14 @@ pub struct NuArgs {
     #[arg(long)]
     pub stdin: bool,
 
-    /// Script file or @tola/NAME / @tola-modules/ALIAS, followed by its arguments.
+    /// Script file or @tola-scripts/NAME / @tola-modules/ALIAS, followed by its arguments.
     #[arg(value_name = "ENTRY", num_args = 1.., trailing_var_arg = true, required_unless_present_any = ["lsp", "lsp_worker"])]
     pub invocation: Vec<OsString>,
 }
 
 #[derive(clap::Args, Debug, Clone, Default)]
 pub struct HelpArgs {
-    /// `"[TABLE]"`, `"@tola/NAME" [EXPORT...]`, or a `tola-help://` address.
+    /// `"[TABLE]"`, `"@tola-scripts/NAME" [EXPORT...]`, or a `tola-help://` address.
     #[arg(value_name = "TARGET", num_args = 0..)]
     pub targets: Vec<String>,
 
@@ -690,6 +702,7 @@ impl Commands {
             Self::Manpage(_) => "manpage",
             Self::Nu(_) => "nu",
             Self::Help(_) => "help",
+            Self::Diagnostic { .. } => "diagnostic",
             Self::Extension(_) => "extension",
         }
     }

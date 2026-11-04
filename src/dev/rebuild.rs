@@ -974,7 +974,7 @@ impl RebuildLoop {
             self.output.apply_diagnostic_limits(candidate.diagnostics());
         }
         let summary = format_rebuild_summary(changed_groups, rebuild_started.elapsed(), recovered);
-        let round = crate::cli::output::CompletedRound::published(
+        let round = crate::dev::round::CompletedRound::published(
             self.round,
             current.manifest().revision().as_str(),
             &summary,
@@ -1102,7 +1102,7 @@ impl RebuildLoop {
         let diagnostics = retained_with_previous_warnings(&self.reported_diagnostics, diagnostics);
         self.reported_diagnostics.clone_from(&diagnostics);
         if let Err(error) = self.output.report_round(
-            crate::cli::output::CompletedRound::failed(Some(self.round), status),
+            crate::dev::round::CompletedRound::failed(Some(self.round), status),
             &self.reported_diagnostics,
         ) {
             self.output.record_failure(&anyhow::Error::new(error));
@@ -1299,7 +1299,7 @@ mod tests {
         producer_reuse_capabilities, resolved_diagnostics, retained_with_previous_warnings,
     };
     use crate::config::{DevConfig, ServerConfig};
-    use crate::dev::watch::{FileChangeSource, RebuildScope, WatchError};
+    use crate::dev::watch::RebuildScope;
     use std::collections::BTreeSet;
     use std::path::PathBuf;
     use tola_build::config::ResolvedSiteConfig;

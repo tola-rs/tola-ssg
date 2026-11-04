@@ -57,7 +57,10 @@ fn string(value: &str) -> Value {
     Value::string(value, Span::unknown())
 }
 
-fn palette(choice: ThemeChoice) -> (Vec<(&'static str, Value)>, Vec<(&'static str, Value)>) {
+type Slot = (&'static str, Value);
+type Slots = (Vec<Slot>, Vec<Slot>);
+
+fn palette(choice: ThemeChoice) -> Slots {
     let dark = choice == ThemeChoice::Dark;
     let tui = vec![
         (

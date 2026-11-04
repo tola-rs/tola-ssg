@@ -3,9 +3,77 @@
 //!
 //! Preparing modules resolves their declared paths without executing a driver, so the document
 //! states what a build would use while running none of the site's code.
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
 use anyhow::Result;
+use serde::Serialize;
+use tola_typst_syntax::style::ProseWrap;
 
 use crate::cli::BuildOverrideArgs;
+
+#[derive(Serialize)]
+struct ModuleDocument<'a> {
+    root: &'a Path,
+    manifest: &'a Path,
+    package: Option<&'a str>,
+    version: Option<String>,
+    library: Option<PathBuf>,
+    site_entry: Option<PathBuf>,
+}
+
+#[derive(Serialize)]
+struct MinifyDocument {
+    html: bool,
+    css: bool,
+    javascript: bool,
+}
+
+#[derive(Serialize)]
+struct SiteDocument<'a> {
+    origin: Option<&'a str>,
+    base_path: String,
+    url: Option<String>,
+}
+
+#[derive(Serialize)]
+struct FormatterDocument<'a> {
+    indent: usize,
+    print_width: usize,
+    prose_wrap: &'a ProseWrap,
+}
+
+#[derive(Serialize)]
+struct ServerDocument {
+    interface: String,
+    port: u16,
+}
+
+#[derive(Serialize)]
+struct DevDocument {
+    watch: bool,
+}
+
+#[derive(Serialize)]
+struct ConfigDocument<'a> {
+    config: &'a Path,
+    root: &'a Path,
+    content: &'a Path,
+    entry: &'a Path,
+    theme: Option<&'a str>,
+    modules: BTreeMap<String, ModuleDocument<'a>>,
+    output: &'a Path,
+    minify: MinifyDocument,
+    site: SiteDocument<'a>,
+    formatter: FormatterDocument<'a>,
+    package_path: Option<&'a Path>,
+    package_cache_path: Option<&'a Path>,
+    vendored_package_path: Option<PathBuf>,
+    icon_cache_directory: PathBuf,
+    system_fonts: bool,
+    server: ServerDocument,
+    dev: DevDocument,
+}
 
 pub(super) fn value(
     request: &super::SiteRequest<'_>,
@@ -20,56 +88,61 @@ pub(super) fn value(
         .map(|(alias, module)| {
             (
                 alias.to_owned(),
-                serde_json::json!({
-                    "root": module.root,
-                    "manifest": module.manifest,
-                    "package": module.package_name,
-                    "version": module.version.map(|version| version.to_string()),
-                    "library": module.typst.as_ref().map(|entry| module.root.join(&entry.entry)),
-                    "site_entry": module.site.as_ref().map(|entry| module.root.join(&entry.entry)),
-                }),
+                ModuleDocument {
+                    root: module.root.as_path(),
+                    manifest: module.manifest.as_path(),
+                    package: module.package_name.as_deref(),
+                    version: module.version.map(|version| version.to_string()),
+                    library: module
+                        .typst
+                        .as_ref()
+                        .map(|entry| module.root.join(&entry.entry)),
+                    site_entry: module
+                        .site
+                        .as_ref()
+                        .map(|entry| module.root.join(&entry.entry)),
+                },
             )
         })
-        .collect::<serde_json::Map<_, _>>();
-    let value = serde_json::json!({
-        "config": config.config_path(),
-        "root": config.get_root(),
-        "content": config.build().content_dir,
-        "entry": config.build().entry,
-        "theme": config.theme().module,
-        "modules": modules,
-        "output": config.build().publish_dir,
-        "minify": {
-            "html": config.build().minify.html,
-            "css": config.build().minify.css,
-            "javascript": config.build().minify.javascript,
+        .collect();
+    let document = ConfigDocument {
+        config: config.config_path(),
+        root: config.get_root(),
+        content: config.build().content_dir.as_path(),
+        entry: config.build().entry.as_path(),
+        theme: config.theme().module.as_deref(),
+        modules,
+        output: config.build().publish_dir.as_path(),
+        minify: MinifyDocument {
+            html: config.build().minify.html,
+            css: config.build().minify.css,
+            javascript: config.build().minify.javascript,
         },
-        "site": {
-            "origin": config.site().origin,
-            "base_path": config.site().base_path.base_path(),
-            "url": config.site_url(),
+        site: SiteDocument {
+            origin: config.site().origin.as_deref(),
+            base_path: config.site().base_path.base_path(),
+            url: config.site_url(),
         },
-        "formatter": {
-            "indent": config.formatter().indent,
-            "print_width": config.formatter().print_width,
-            "prose_wrap": config.formatter().prose_wrap,
+        formatter: FormatterDocument {
+            indent: config.formatter().indent,
+            print_width: config.formatter().print_width,
+            prose_wrap: &config.formatter().prose_wrap,
         },
-        "package_path": config.package_locations().data().map(|location| location.root()),
-        "package_cache_path": config.package_locations().cache().map(|location| location.root()),
-        "vendored_package_path": config.vendor().typst_packages(),
-        "icon_cache_directory": tola_build::BuildResources::icon_cache_directory(config.get_root()),
-        "system_fonts": config.system_fonts_allowed(&request.resources),
-        "server": {
-            "interface": loaded.server().interface,
-            "port": loaded.server().port,
+        package_path: config.package_locations().data().map(|location| location.root()),
+        package_cache_path: config.package_locations().cache().map(|location| location.root()),
+        vendored_package_path: config.vendor().typst_packages(),
+        icon_cache_directory: tola_build::BuildResources::icon_cache_directory(config.get_root()),
+        system_fonts: config.system_fonts_allowed(&request.resources),
+        server: ServerDocument {
+            interface: loaded.server().interface.to_string(),
+            port: loaded.server().port,
         },
-        "dev": {
-            "watch": loaded.dev().watch,
+        dev: DevDocument {
+            watch: loaded.dev().watch,
         },
-    });
-    Ok(value)
+    };
+    Ok(serde_json::to_value(document)?)
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;

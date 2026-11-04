@@ -1,4 +1,4 @@
-//! `tola help`: one page of the configuration and package reference per request.
+//! `tola help`: documentation pages and the interactive tree browser.
 //!
 //! Pages are composed in `crate::help` from the packages' own declarations and the bundled
 //! translations, so this command loads no caller site: it parses the request, picks the language,

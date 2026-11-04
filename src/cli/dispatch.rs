@@ -221,6 +221,9 @@ pub(crate) fn dispatch(
             output,
             cancellation,
         ),
+        Commands::Diagnostic {
+            command: super::args::DiagnosticCommand::Render,
+        } => commands::diagnostic::render(output),
         Commands::Completions(args) => {
             destination::start(output, &cancellation.token())?;
             commands::completions::run(args.shell, output)

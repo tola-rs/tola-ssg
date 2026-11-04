@@ -16,7 +16,7 @@ use tola_packages::{ExportDeclaration, RelatedTarget, Signature};
 use crate::config::{DevConfig, DiagnosticsConfig, ServerConfig};
 use crate::help::model::{Anchor, HelpCategory, HelpPage, LinkTarget, PageId, anchor};
 use crate::i18n::{HelpLanguage, HelpText, PackageTranslations};
-use crate::terminal::documentation::Documentation;
+use super::documentation::Documentation;
 
 struct ConfigTable {
     section: &'static str,
