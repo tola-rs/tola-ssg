@@ -8,7 +8,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, bail};
-use serde_json::{Value, json};
+use serde::Serialize;
+use serde_json::Value;
+#[cfg(test)]
+use serde_json::json;
 use tracing_subscriber::fmt::format::Writer;
 use tracing_subscriber::fmt::time::{FormatTime, SystemTime};
 
@@ -338,10 +341,11 @@ impl LogFile {
             file.write_all(&record_bytes(
                 "WARN",
                 "tola::log",
-                json!({
-                    "kind": "startup_omitted", "omitted": startup.omitted_records,
-                    "message": "early log records exceeded the startup buffer",
-                }),
+                StartupOmitted {
+                    kind: "startup_omitted",
+                    omitted: startup.omitted_records,
+                    message: "early log records exceeded the startup buffer",
+                },
             ))
             .with_context(|| unwritable_log(self.path()))?;
         }
@@ -411,18 +415,20 @@ impl LogFile {
             .copied()
             .or_else(|| panic.payload().downcast_ref::<String>().map(String::as_str))
             .unwrap_or("non-string panic payload");
-        let location = panic.location().map(|location| {
-            json!({
-                "file": location.file(), "line": location.line(), "column": location.column(),
-            })
+        let location = panic.location().map(|location| PanicLocation {
+            file: location.file(),
+            line: location.line(),
+            column: location.column(),
         });
         let record = record_bytes(
             "ERROR",
             "tola::panic",
-            json!({
-                "kind": "panic", "message": message, "location": location,
-                "backtrace": std::backtrace::Backtrace::force_capture().to_string(),
-            }),
+            PanicRecord {
+                kind: "panic",
+                message,
+                location,
+                backtrace: std::backtrace::Backtrace::force_capture().to_string(),
+            },
         );
         file.write_all(&record).is_ok()
     }
@@ -541,8 +547,31 @@ fn record_line(level: &str, target: &str, spans: Option<&[String]>, fields: &str
     line
 }
 
-fn record_bytes(level: &str, target: &str, fields: Value) -> Vec<u8> {
-    record_line(level, target, None, &fields.to_string()).into_bytes()
+#[derive(Serialize)]
+struct StartupOmitted {
+    kind: &'static str,
+    omitted: usize,
+    message: &'static str,
+}
+
+#[derive(Serialize)]
+struct PanicLocation<'a> {
+    file: &'a str,
+    line: u32,
+    column: u32,
+}
+
+#[derive(Serialize)]
+struct PanicRecord<'a> {
+    kind: &'static str,
+    message: &'a str,
+    location: Option<PanicLocation<'a>>,
+    backtrace: String,
+}
+
+fn record_bytes(level: &str, target: &str, fields: impl Serialize) -> Vec<u8> {
+    let fields = serde_json::to_string(&fields).expect("log fields serialize");
+    record_line(level, target, None, &fields).into_bytes()
 }
 
 pub(crate) struct LogWriter {
@@ -608,31 +637,6 @@ mod tests {
             .lines()
             .map(|line| serde_json::from_str(line).unwrap())
             .collect()
-    }
-
-    /// One record line with the timestamp and process id replaced by placeholders, so a test can
-    /// assert the bytes the envelope writes around them.
-    pub(super) fn normalized_record(bytes: &[u8]) -> String {
-        let line = std::str::from_utf8(bytes).expect("log records are UTF-8");
-        let (head, rest) = line
-            .split_once("\"timestamp\":\"")
-            .expect("every record names its time");
-        let (timestamp, rest) = rest.split_once('"').expect("a timestamp is a JSON string");
-        assert!(!timestamp.is_empty(), "{line}");
-        let (middle, rest) = rest
-            .split_once("\"pid\":")
-            .expect("every record names its process");
-        let end = rest
-            .find(|character: char| !character.is_ascii_digit())
-            .unwrap_or(rest.len());
-        assert!(
-            end != 0 && rest[..end].chars().all(|c| c.is_ascii_digit()),
-            "{line}"
-        );
-        format!(
-            "{head}\"timestamp\":\"<timestamp>\"{middle}\"pid\":<pid>{}",
-            &rest[end..]
-        )
     }
 
     #[test]

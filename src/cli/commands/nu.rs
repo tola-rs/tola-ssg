@@ -62,7 +62,7 @@ fn execute(args: &NuArgs, input_scope: Option<&str>) -> Result<i32> {
         .context("Nu entry must be valid UTF-8")?;
     if entry.starts_with('@') {
         ensure!(
-            entry.starts_with("@tola/") || entry.starts_with("@tola-modules/"),
+            entry.starts_with("@tola-scripts/") || entry.starts_with("@tola-modules/"),
             "`{entry}` is not a configured Nu module; use `./` for a file whose name begins with `@`"
         );
     }
@@ -225,7 +225,7 @@ fn prepare(
     load_site: bool,
 ) -> Result<Runtime> {
     // Built-in tools remain usable without a valid site's configuration.
-    let builtin = entry.is_some_and(|entry| entry.starts_with("@tola/"));
+    let builtin = entry.is_some_and(|entry| entry.starts_with("@tola-scripts/"));
     let site = if !load_site || (builtin && explicit.is_none()) {
         None
     } else {
@@ -489,23 +489,23 @@ mod tests {
         .err()
         .unwrap();
         assert!(format!("{error:#}").contains("declares no `[nu]` entry"));
-        std::fs::create_dir_all(root.join("@tola")).unwrap();
-        std::fs::write(root.join("@tola/missing"), "export def main [] { 42 }").unwrap();
+        std::fs::create_dir_all(root.join("@tola-scripts")).unwrap();
+        std::fs::write(root.join("@tola-scripts/missing"), "export def main [] { 42 }").unwrap();
         let builtin = prepare(
             &root,
             None,
             InputScope::Pure,
-            Some("@tola/image"),
+            Some("@tola-scripts/image"),
             &[],
             true,
         )
         .unwrap();
-        assert!(builtin.resolve_locator("@tola/image").is_ok());
-        assert!(builtin.resolve_locator("@tola/missing").is_err());
+        assert!(builtin.resolve_locator("@tola-scripts/image").is_ok());
+        assert!(builtin.resolve_locator("@tola-scripts/missing").is_err());
         assert!(builtin.resolve_locator("@other/image").is_err());
         assert_eq!(
-            file_path("./@tola/missing", &root, None),
-            root.join("./@tola/missing")
+            file_path("./@tola-scripts/missing", &root, None),
+            root.join("./@tola-scripts/missing")
         );
     }
 
@@ -543,8 +543,8 @@ mod tests {
             false,
         )
         .unwrap();
-        assert!(runtime.resolve_locator("@tola/image").is_ok());
-        assert!(runtime.resolve_locator("@tola/diagnostic").is_ok());
+        assert!(runtime.resolve_locator("@tola-scripts/image").is_ok());
+        assert!(runtime.resolve_locator("@tola-scripts/diagnostic").is_ok());
         assert!(argument_values(&runtime, "TOLA_CONFIG_PATH").is_none());
     }
 

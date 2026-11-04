@@ -255,9 +255,9 @@ pub(super) fn for_process() -> Option<ExitCode> {
         );
         help.push_str("\nBuilt-in Nu modules (import with `use tola NAME`):\n");
         for (name, summary) in tola_nu::BUILTIN_MODULES {
-            help.push_str(&format!("  @tola/{name:<16} {summary}\n"));
+            help.push_str(&format!("  @tola-scripts/{name:<16} {summary}\n"));
         }
-        help.push_str("\nRun a module with `tola nu @tola/NAME --help` when it exports main.\n");
+        help.push_str("\nRun a module with `tola nu @tola-scripts/NAME --help` when it exports main.\n");
     }
     if let Ok(modules) = discover(&request) {
         append_site_help(&mut help, &request.page, &modules);

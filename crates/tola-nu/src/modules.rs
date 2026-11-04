@@ -32,7 +32,7 @@ pub enum Origin {
     },
 }
 
-/// One resolvable `@tola/…` or `@tola-modules/…` entry: its file, its origin, and whether it
+/// One resolvable `@tola-scripts/…` or `@tola-modules/…` entry: its file, its origin, and whether it
 /// exports `main`.
 #[derive(Clone, Debug)]
 pub struct ModuleEntry {
@@ -182,8 +182,8 @@ pub(super) fn register(
         let main = module_has_main(&working, id);
         root.add_submodule(builtin.alias.as_bytes().to_vec(), id);
         entries.insert(
-            format!("@tola/{}", builtin.alias),
-            entry(builtin, main, "@tola"),
+            format!("@tola-scripts/{}", builtin.alias),
+            entry(builtin, main, "@tola-scripts"),
         );
     }
     working.exit_scope();

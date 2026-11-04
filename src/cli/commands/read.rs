@@ -1,6 +1,7 @@
 //! Selection and JSON output shared by read-only commands.
 
 use anyhow::Result;
+use serde::Serialize;
 use serde_json::Value;
 use tola_build::InputScope;
 
@@ -13,6 +14,13 @@ pub(super) fn check_output(args: &JsonOutputArgs, output: &CommandOutput) -> Res
         crate::cli::log::destination::check_file(output.log().map(|log| log.path()), path)?;
     }
     Ok(())
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum Browse<'a> {
+    Rows { title: &'a str, rows: &'a Value },
+    Value { title: &'a str, value: &'a Value },
 }
 
 pub(super) fn select(
@@ -32,9 +40,12 @@ pub(super) fn select(
     }
     let array = value.is_array();
     let input = if array {
-        serde_json::json!({"title": title, "rows": value})
+        Browse::Rows {
+            title,
+            rows: value,
+        }
     } else {
-        serde_json::json!({"title": title, "value": value})
+        Browse::Value { title, value }
     };
     let selected: Option<Value> =
         crate::cli::interaction::run(include_str!("browse.nu"), &input, scope, cancellation)?;

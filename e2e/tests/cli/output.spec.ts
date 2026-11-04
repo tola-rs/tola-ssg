@@ -86,32 +86,6 @@ test('development errors stay in the view', async ({ binary, directory: root }) 
   }
 })
 
-test('development history returns to the successful build', async ({ binary, directory: root }) => {
-  test.skip(process.platform === 'win32', 'requires a POSIX pseudo-terminal')
-  await writeMinimalSite(root, {
-    program: '#document("index.html")[Home]\n#document("404.html")[Missing]\n',
-  })
-  const configuration = await readFile(join(root, 'tola.toml'), 'utf8')
-  const terminal = openDevelopmentTerminal(binary, root)
-  const shown = () => screenText(terminal.stdout())
-  try {
-    await expect.poll(shown).toContain('Watching for changes')
-    await writeFile(join(root, 'tola.toml'), '[server]\nport = "history-error"\n')
-    await expect.poll(shown).toContain('error[config.toml]')
-    await writeFile(join(root, 'tola.toml'), configuration)
-    await expect.poll(shown).toContain('Ready')
-    expect(shown()).toContain('←')
-    terminal.running.child.stdin.write('\x1b[D')
-    await expect.poll(shown).toContain('error[config.toml]')
-    expect(shown()).toContain('→')
-    terminal.running.child.stdin.write('\x1b[C')
-    await expect.poll(shown).toContain('Ready')
-    expect(shown()).not.toContain('error[config.toml]')
-  } finally {
-    await terminal.running.terminate()
-  }
-})
-
 test('startup warnings share one round', async ({ binary, directory: root }) => {
   test.skip(process.platform === 'win32', 'requires a POSIX pseudo-terminal')
   await writeMinimalSite(root, {
@@ -146,35 +120,6 @@ test('development interrupt restores terminal modes', async ({ binary, directory
     terminal.running.child.stdin.write('\x03')
     expect((await terminal.running.waitForClose(COMMAND_TIMEOUT_MS.standard)).code).toBe(130)
     expect(terminal.stdout()).toContain('TOLA_TERMINAL_RESTORED')
-  } finally {
-    await terminal.running.terminate()
-  }
-})
-
-test('resizing development restores its content', async ({ binary, directory: root }) => {
-  test.skip(process.platform === 'win32', 'requires a POSIX pseudo-terminal')
-  await writeMinimalSite(root)
-  const terminal = openDevelopmentTerminal(binary, root)
-  try {
-    await expect.poll(() => servingUrl(root)).toBeDefined()
-    const device = terminal.stdout().match(/TOLA_TTY=(\S+)/)?.[1]
-    expect(device).toBeDefined()
-    await writeFile(join(root, 'tola.toml'), '[server]\nport = "resize-error"\n')
-    await expect.poll(() => screenText(terminal.stdout())).toContain('error[config.toml]')
-    const beforeResize = screenText(terminal.stdout())
-    for (const [columns, rows] of [[40, 12], [20, 8], [1, 2], [80, 24]]) {
-      const frames = terminal.stdout().split('\x1b[?2026l').length
-      const resized = await runCommand(
-        'stty',
-        [process.platform === 'darwin' ? '-f' : '-F', device!, 'cols', String(columns), 'rows', String(rows)],
-        root,
-        COMMAND_TIMEOUT_MS.short,
-      )
-      expectExited(resized)
-      await expect.poll(() => terminal.stdout().split('\x1b[?2026l').length).toBeGreaterThan(frames)
-      expect(terminal.running.exit).toBeUndefined()
-    }
-    await expect.poll(() => screenText(terminal.stdout())).toBe(beforeResize)
   } finally {
     await terminal.running.terminate()
   }

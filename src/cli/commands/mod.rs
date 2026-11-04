@@ -8,6 +8,7 @@ pub(super) mod check;
 pub(super) mod completions;
 pub(super) mod config;
 pub(super) mod dev;
+pub(super) mod diagnostic;
 pub(super) mod doctor;
 pub(super) mod edit;
 pub(super) mod editor;

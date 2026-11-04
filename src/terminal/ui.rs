@@ -11,7 +11,7 @@ use ratatui::{Frame, Terminal, TerminalOptions, Viewport};
 use super::style::Palette;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Action {
+pub(crate) enum Action {
     PreviousRound,
     NextRound,
     Up,
@@ -23,18 +23,18 @@ pub(super) enum Action {
     Copy,
 }
 
-pub(super) fn cancels(key: &KeyEvent) -> bool {
+pub(crate) fn cancels(key: &KeyEvent) -> bool {
     (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
         || (key.code == KeyCode::Char('q') && key.modifiers.is_empty())
 }
 
-pub(super) struct Screen<B: Backend<Error = io::Error>> {
+pub(crate) struct Screen<B: Backend<Error = io::Error>> {
     terminal: Terminal<B>,
     size: Size,
 }
 
 impl<B: Backend<Error = io::Error>> Screen<B> {
-    pub(super) fn new(backend: B, width: u16, height: u16) -> io::Result<Self> {
+    pub(crate) fn new(backend: B, width: u16, height: u16) -> io::Result<Self> {
         Ok(Self {
             terminal: Terminal::with_options(
                 backend,
@@ -46,7 +46,7 @@ impl<B: Backend<Error = io::Error>> Screen<B> {
         })
     }
 
-    pub(super) fn draw_frame(
+    pub(crate) fn draw_frame(
         &mut self,
         size: Size,
         draw: impl FnOnce(&mut Frame<'_>),
@@ -61,11 +61,11 @@ impl<B: Backend<Error = io::Error>> Screen<B> {
     }
 }
 
-pub(super) mod keymap {
+pub(crate) mod keymap {
     use super::{Action, KeyCode, KeyEvent, KeyModifiers};
 
     /// The action one development key asks for, when it asks for one.
-    pub(in crate::terminal) fn action(key: &KeyEvent) -> Option<Action> {
+    pub(crate) fn action(key: &KeyEvent) -> Option<Action> {
         if key
             .modifiers
             .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
@@ -87,10 +87,10 @@ pub(super) mod keymap {
     }
 }
 
-pub(super) mod hints {
+pub(crate) mod hints {
     use super::{Action, Frame, Palette, Paragraph, Rect};
 
-    pub(in crate::terminal) fn draw(
+    pub(crate) fn draw(
         frame: &mut Frame<'_>,
         area: Rect,
         notice: &str,

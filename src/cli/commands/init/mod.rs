@@ -7,6 +7,8 @@ mod source;
 mod tree;
 mod validate;
 
+use serde::Serialize;
+
 use crate::cancellation::Cancellation;
 use crate::cli::args::InitArgs;
 use crate::cli::log::{LogFile, destination};
@@ -74,6 +76,12 @@ pub(in crate::cli) fn run(
     Ok(())
 }
 
+#[derive(Serialize)]
+struct Confirm<'a> {
+    target: &'a Path,
+    files: String,
+}
+
 fn confirm(
     root: &Path,
     writes: &FileWrites,
@@ -81,7 +89,10 @@ fn confirm(
     cancellation: &Cancellation,
 ) -> Result<bool> {
     // The interaction script owns presentation; Rust owns the exact write plan.
-    let input = serde_json::json!({"target": root, "files": tree::render(writes)});
+    let input = Confirm {
+        target: root,
+        files: tree::render(writes),
+    };
     let result: Option<bool> =
         crate::cli::interaction::run(include_str!("confirm.nu"), &input, scope, cancellation)?;
     Ok(result.unwrap_or(false))

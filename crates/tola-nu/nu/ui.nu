@@ -113,59 +113,6 @@ def detail-text [row: any]: nothing -> string {
     if $title == '' { $body } else { $title + (char nl) + (char nl) + $body }
 }
 
-# Pick zero or more rows from a searchable list.
-export def pick [
-    --title: string = 'Select'
-    --display: string # Column shown for each record; defaults to the first field.
-    --search-columns: list<string> = [] # Columns searched; empty searches all fields.
-    --fuzzy # Match a subsequence instead of a substring.
-]: list<any> -> record {
-    let rows = $in
-    if ($rows | is-empty) { return {action: quit, selected: []} }
-    let fields = $rows | enumerate | each {|row|
-        if ($row.item | describe --detailed | get type) == 'record' {
-            $row.item | columns
-        } else {
-            ['item']
-        }
-    } | flatten | uniq
-    let records = $rows | all {|row| (value-type $row) == 'record' }
-    let display = if $display != null {
-        $display
-    } else if $records and (($fields | length) > 0) {
-        $fields | first
-    } else {
-        null
-    }
-    let filter_columns = if ($search_columns | is-empty) {
-        if $records { $fields } else { [] }
-    } else {
-        $search_columns
-    }
-    let view = if $display == null {
-        tui select --id rows --multi --focus
-    } else {
-        tui select --id rows --multi --focus --display $display
-    }
-    let outcome = $rows
-        | tui label --titlebar $title
-        | tui box Choices [
-            (tui search --id search --bind / --placeholder 'Filter rows' --columns $filter_columns --fuzzy=$fuzzy)
-            $view
-        ]
-        | tui label --status '/: filter · Space: mark · Enter: select · q: quit'
-        | tui run
-    if $outcome.action != 'submit' or $outcome.selected == null {
-        return {action: quit, selected: []}
-    }
-    let selected = if (value-type $outcome.selected) == 'list' {
-        $outcome.selected
-    } else {
-        [$outcome.selected]
-    }
-    {action: submit, selected: $selected}
-}
-
 # Confirm a prepared action. The first row is the safe cancel choice.
 export def confirm [
     --title: string = 'Confirm'
@@ -193,38 +140,13 @@ export def confirm [
     }
 }
 
-# Read a rendered help page beside its sections and links.
-export def reader [
-    --title: string = 'Help'
-    --body: string = '' # Rendered page text, ANSI included.
-]: list<any> -> record {
-    let choices = $in
-    if ($choices | is-empty) { return {action: quit, selected: null} }
-    let body = $body
-    let outcome = $choices
-        | tui label --titlebar $title
-        | tui split --sizes ['35%' '1fr'] [
-            (tui box Contents [
-                (tui search --id search --bind / --placeholder 'Filter sections' --columns [title])
-                (tui table --id rows --focus --columns [title])
-            ])
-            (tui preview --title Page {|row| $body})
-        ]
-        | tui label --status '/: filter · Enter: open · q: quit'
-        | tui run
-    if $outcome.action == 'submit' and $outcome.selected != null {
-        {action: submit, selected: $outcome.selected}
-    } else {
-        {action: quit, selected: null}
-    }
-}
-
 # Choose one original value from a searchable table.
 export def choose [
     --title: string = 'Choose'
     --columns: list<string> = [] # Columns shown in the table.
     --search-columns: list<string> = [] # Columns searched; empty searches all fields.
     --fuzzy # Match a subsequence instead of a substring.
+    --multi # Choose several rows with Space.
     --preview: closure # Produce preview text from the original row.
 ]: list<any> -> record {
     let rows = $in
@@ -261,24 +183,43 @@ export def choose [
             do $preview ($rows | get ($row | get $index_name))
         }
     }
-    let outcome = $indexed
+    let app = $indexed
         | tui label --titlebar $title
         | tui split --sizes ['55%' '1fr'] [
             (tui box Rows [
                 (tui search --id search --bind / --placeholder 'Filter rows' --columns $filter_columns --fuzzy=$fuzzy)
-                (tui table --id rows --focus --columns $table_columns)
+                (tui table --id rows --focus --columns $table_columns --multi=$multi)
             ])
             $detail
         ]
-        | tui label --status '/: filter · Tab: focus · Enter: select · q: quit'
-        | tui bind enter {|state|
+        | tui label --status (if $multi {
+            '/: filter · Space: mark · Enter: select · q: quit'
+        } else {
+            '/: filter · Tab: focus · Enter: select · q: quit'
+        })
+    let app = if $multi {
+        $app
+    } else {
+        $app | tui bind enter {|state|
             if $state.values.rows.row? != null { {action: submit, selected: true} }
         }
-        | tui run
-    if $outcome.action == 'submit' and $outcome.values.rows.row? != null {
-        let index = $outcome.values.rows.row | get $index_name
-        {action: submit, selected: ($rows | get $index)}
+    }
+    let outcome = $app | tui run
+    if $outcome.action != 'submit' { return {action: quit} }
+    let picked = if $multi {
+        if (($outcome.selected | describe) | str starts-with 'table') {
+            $outcome.selected
+        } else {
+            [$outcome.selected]
+        }
     } else {
-        {action: quit}
+        [$outcome.values.rows.row?]
+    }
+    if ($picked | is-empty) { return {action: quit} }
+    let selected = $picked | each {|row| $rows | get ($row | get $index_name)}
+    if $multi {
+        {action: submit, selected: $selected}
+    } else {
+        {action: submit, selected: ($selected | first)}
     }
 }

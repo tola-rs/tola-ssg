@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
+use serde::Serialize;
 use tola_build::InputScope;
 use tola_build::font_failure;
 use tola_diagnostic::DiagnosticError;
@@ -54,7 +55,7 @@ pub(super) fn value(
         Err(error) => return Err(font_load_error(error, root)),
     };
 
-    Ok(serde_json::Value::Array(json_records(&fonts)))
+    Ok(serde_json::to_value(json_records(&fonts))?)
 }
 
 /// The failure `tola inspect fonts` reports when the compiler fonts could not be prepared.
@@ -70,19 +71,35 @@ fn font_load_error(error: FontLoadError, root: Option<&Path>) -> anyhow::Error {
     ))
 }
 
+#[derive(Serialize)]
+struct FontRecord {
+    family: String,
+    style: &'static str,
+    weight: u16,
+    stretch: String,
+    axes: Vec<AxisRecord>,
+    file: Option<String>,
+}
+
+#[derive(Serialize)]
+struct AxisRecord {
+    tag: String,
+    min: f32,
+    max: f32,
+    default: f32,
+}
+
 /// Every face as one record, the shape scripts read.
-fn json_records(fonts: &[CompilerFont]) -> Vec<serde_json::Value> {
+fn json_records(fonts: &[CompilerFont]) -> Vec<FontRecord> {
     fonts
         .iter()
-        .map(|font| {
-            serde_json::json!({
-                "family": font.family,
-                "style": style_text(font.variant.style),
-                "weight": font.variant.weight.to_number(),
-                "stretch": font.variant.stretch.to_string(),
-                "axes": axes_records(&font.axes),
-                "file": face_file(&font.input).map(|file| file.display().to_string()),
-            })
+        .map(|font| FontRecord {
+            family: font.family.clone(),
+            style: style_text(font.variant.style),
+            weight: font.variant.weight.to_number(),
+            stretch: font.variant.stretch.to_string(),
+            axes: axes_records(&font.axes),
+            file: face_file(&font.input).map(|file| file.display().to_string()),
         })
         .collect()
 }
@@ -105,16 +122,14 @@ fn face_file(input: &CompilerFontInput) -> Option<&Path> {
 }
 
 /// Every variation axis a face declares, in the order Typst lists them.
-fn axes_records(axes: &[FontAxis]) -> Vec<serde_json::Value> {
+fn axes_records(axes: &[FontAxis]) -> Vec<AxisRecord> {
     ordered_axes(axes)
         .iter()
-        .map(|axis| {
-            serde_json::json!({
-                "tag": axis.tag.to_str_lossy(),
-                "min": axis.min.0,
-                "max": axis.max.0,
-                "default": axis.default.0,
-            })
+        .map(|axis| AxisRecord {
+            tag: axis.tag.to_str_lossy().into_owned(),
+            min: axis.min.0,
+            max: axis.max.0,
+            default: axis.default.0,
         })
         .collect()
 }
@@ -154,10 +169,11 @@ mod tests {
 
     #[test]
     fn json_records_name_file_embedded() {
-        let records = json_records(&[
+        let records = serde_json::to_value(json_records(&[
             configured_face("Libertinus Serif", "LibertinusSerif-Regular.otf"),
             embedded_face("New Computer Modern"),
-        ]);
+        ]))
+        .unwrap();
 
         assert_eq!(records[0]["family"], "Libertinus Serif");
         assert_eq!(records[0]["style"], "normal");
@@ -195,7 +211,7 @@ mod tests {
             },
         ];
 
-        let records = json_records(std::slice::from_ref(&face));
+        let records = serde_json::to_value(json_records(std::slice::from_ref(&face))).unwrap();
         assert_eq!(records[0]["axes"][0]["tag"], "ital");
         assert_eq!(records[0]["axes"][1]["tag"], "wght");
         assert_eq!(records[0]["axes"][1]["min"], 100.0);

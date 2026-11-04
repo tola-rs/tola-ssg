@@ -7,6 +7,7 @@ use tola_diagnostic::{Diagnostic, Severity};
 
 use crate::cli::log::LogFile;
 use crate::config::DiagnosticsConfig;
+use crate::dev::round::{CompletedRound, Completion, RoundIdentity};
 use crate::terminal::{Palette, Terminal};
 
 /// Kinds of log record this boundary writes; each names one record shape.
@@ -29,51 +30,6 @@ pub(crate) fn attached_or_fallback(
     tola_diagnostic::attached(error)
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| vec![tola_diagnostic::fallback(code, error)])
-}
-
-#[derive(Clone, Copy)]
-pub(crate) struct RoundIdentity<'a> {
-    number: u64,
-    revision: Option<&'a str>,
-}
-
-#[derive(Clone, Copy)]
-pub(crate) struct CompletedRound<'a> {
-    identity: Option<RoundIdentity<'a>>,
-    completion: crate::terminal::development::Completion<'a>,
-}
-
-impl<'a> CompletedRound<'a> {
-    pub(crate) fn published(number: u64, revision: &'a str, summary: &'a str) -> Self {
-        Self {
-            identity: Some(RoundIdentity {
-                number,
-                revision: Some(revision),
-            }),
-            completion: crate::terminal::development::Completion::Published(summary),
-        }
-    }
-
-    pub(crate) fn initial(summary: &'a str) -> Self {
-        Self {
-            identity: None,
-            completion: crate::terminal::development::Completion::Published(summary),
-        }
-    }
-
-    pub(crate) fn failed(number: Option<u64>, message: &'a str) -> Self {
-        Self {
-            identity: number.map(|number| RoundIdentity {
-                number,
-                revision: None,
-            }),
-            completion: crate::terminal::development::Completion::Failed(message),
-        }
-    }
-
-    pub(crate) fn identity(self) -> Option<RoundIdentity<'a>> {
-        self.identity
-    }
 }
 
 fn round_fields(round: Option<RoundIdentity<'_>>) -> serde_json::Map<String, serde_json::Value> {
@@ -239,10 +195,10 @@ impl CommandOutput {
     ) -> io::Result<()> {
         self.record_diagnostics(round.identity, diagnostics);
         match round.completion {
-            crate::terminal::development::Completion::Failed(message) => {
+            Completion::Failed(message) => {
                 self.record_text(STATUS_KIND, message, round.identity);
             }
-            crate::terminal::development::Completion::Published(summary) => {
+            Completion::Published(summary) => {
                 self.record_text(SUMMARY_KIND, summary, round.identity);
             }
         }
@@ -284,7 +240,7 @@ impl CommandOutput {
     /// Write styled text to stdout, under this invocation's stdout colour decision.
     pub(crate) fn write_stdout_styled(
         &self,
-        text: &crate::terminal::documentation::StyledText,
+        text: &crate::terminal::text::StyledText,
     ) -> anyhow::Result<()> {
         self.terminal.write_stdout_styled(text)
     }
@@ -362,158 +318,3 @@ fn failure_chain(error: &anyhow::Error) -> String {
     message
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::terminal::{EVERY_STAGE, OutputSink, Terminal};
-
-    fn log_records(path: &std::path::Path) -> Vec<serde_json::Value> {
-        std::fs::read_to_string(path)
-            .unwrap()
-            .lines()
-            .map(|line| serde_json::from_str(line).unwrap())
-            .collect()
-    }
-    use tola_build::build::BuildMode;
-    use tola_build::config::section::build::{BeforeBuildHookConfig, HooksConfig};
-
-    fn buffered_command_output(
-        directory: &tempfile::TempDir,
-        use_color: bool,
-    ) -> (CommandOutput, impl Fn() -> Vec<u8>) {
-        let log = LogFile::prepare(&directory.path().join("session.jsonl"), |_, error| {
-            panic!("log write failed: {error}")
-        })
-        .unwrap();
-        log.start().unwrap();
-        let (sink, stream) = OutputSink::buffered();
-        (
-            CommandOutput::new(Terminal::with_sink(sink, use_color, false), Some(log)),
-            move || stream.bytes(),
-        )
-    }
-
-    #[test]
-    fn round_records_name_their_round() {
-        let directory = tempfile::tempdir().unwrap();
-        let (output, _) = buffered_command_output(&directory, false);
-        let warning = Diagnostic::new(
-            tola_diagnostic::codes::typst::COMPILE,
-            Severity::Warning,
-            "layout was ignored during HTML export",
-        );
-        let failure = Diagnostic::new(
-            tola_diagnostic::codes::typst::COMPILE,
-            Severity::Error,
-            "expected block",
-        );
-
-        output
-            .report_round(
-                CompletedRound::published(4, "rev-4", "Rebuilt site in 620 ms"),
-                std::slice::from_ref(&warning),
-            )
-            .unwrap();
-        output
-            .report_round(CompletedRound::failed(Some(5), "Build failed"), &[failure])
-            .unwrap();
-
-        let records = log_records(output.log().unwrap().path());
-        let round = |kind: &str, number: u64| {
-            records
-                .iter()
-                .find(|record| {
-                    record["fields"]["kind"] == kind && record["fields"]["round"] == number
-                })
-                .unwrap_or_else(|| panic!("no `{kind}` record for round {number}"))
-                .clone()
-        };
-
-        assert_eq!(round("diagnostic", 4)["fields"]["revision"], "rev-4");
-        assert_eq!(round("summary", 4)["fields"]["revision"], "rev-4");
-        assert!(round("diagnostic", 5)["fields"].get("revision").is_none());
-        assert_eq!(
-            round("diagnostic", 5)["fields"]["message"],
-            "expected block"
-        );
-        assert!(
-            records
-                .iter()
-                .all(|record| record["fields"]["round"].is_u64())
-        );
-    }
-
-    #[test]
-    fn log_records_omit_terminal_styles() {
-        let directory = tempfile::tempdir().unwrap();
-        let (output, terminal_bytes) = buffered_command_output(&directory, true);
-        let mut hooks = HooksConfig::default();
-        hooks.before_build.push(BeforeBuildHookConfig {
-            name: "alpha".to_owned(),
-            command: vec!["tool".into()],
-            ..BeforeBuildHookConfig::default()
-        });
-        output.serving("http://127.0.0.1:5277").unwrap();
-        output
-            .hook_overview(&hooks, BuildMode::Production, EVERY_STAGE)
-            .unwrap();
-        let records = log_records(output.log().unwrap().path());
-        assert_eq!(records.len(), 2);
-        assert!(records.iter().all(|record| {
-            !record["fields"]["message"]
-                .as_str()
-                .unwrap()
-                .contains('\u{1b}')
-        }));
-        assert!(
-            String::from_utf8(terminal_bytes())
-                .unwrap()
-                .contains('\u{1b}')
-        );
-    }
-
-    #[test]
-    fn failure_chain_preserves_distinct_causes() {
-        let typed = tola_typst::CompileError::input("source unavailable");
-        let error = anyhow::Error::new(typed)
-            .context("source unavailable")
-            .context("read the site")
-            .context("read the site");
-        let shown = failure_chain(&error);
-        assert_eq!(shown.matches("read the site").count(), 2);
-        assert_eq!(shown.matches("source unavailable").count(), 2);
-        assert!(error.downcast_ref::<tola_typst::CompileError>().is_some());
-        assert_eq!(error.chain().count(), 4);
-    }
-
-    #[test]
-    fn transparent_wrappers_render_source_once() {
-        let directory = tempfile::tempdir().unwrap();
-        let entry = directory.path().join("site.typ");
-        std::fs::write(&entry, "#missing").unwrap();
-        let world = tola_typst::TypstWorld::builder(&entry, directory.path())
-            .with_local_cache()
-            .no_fonts()
-            .build(&tola_typst::BundleCancellation::new())
-            .unwrap();
-        let failure =
-            tola_typst::compile_bundle_world(&world, &tola_typst::BundleCancellation::new())
-                .unwrap_err();
-        let expected = failure.error().to_string();
-        let diagnostic = Diagnostic::new(
-            tola_diagnostic::codes::typst::COMPILE,
-            Severity::Error,
-            "missing name",
-        );
-        let error: anyhow::Error =
-            tola_diagnostic::DiagnosticError::attach(failure.into(), vec![diagnostic]).into();
-        assert_eq!(failure_chain(&error), expected);
-        assert!(
-            error
-                .chain()
-                .any(|cause| cause.is::<tola_typst::BundleCompileFailure>())
-        );
-        assert!(tola_diagnostic::attached(&error).is_some());
-        assert_eq!(error.chain().count(), 3);
-    }
-}

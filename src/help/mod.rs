@@ -2,6 +2,7 @@
 //! cross-reference targets that link them.
 
 pub(crate) mod data;
+pub(crate) mod documentation;
 pub(crate) mod model;
 pub(crate) mod pages;
 mod target;
