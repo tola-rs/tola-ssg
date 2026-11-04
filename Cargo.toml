@@ -25,7 +25,7 @@ resolver = "3"
 
 # The Rust workspace version; editor extensions under extensions/ are versioned independently.
 [workspace.package]
-version = "0.8.1"
+version = "0.8.2-pre.1"
 rust-version = "1.96.1"
 
 [workspace.dependencies]
@@ -49,25 +49,25 @@ typstyle-core = { version = "=0.15.1", default-features = false }
 
 # Internal crates stay path dependencies of the workspace and are released in
 # lockstep, so published packages resolve through crates.io.
-tola-address = { version = "0.8.1", path = "crates/tola-address" }
-tola-build = { version = "0.8.1", path = "crates/tola-build" }
-tola-config = { version = "0.8.1", path = "crates/tola-config" }
-tola-datalog = { version = "0.8.1", path = "crates/tola-datalog" }
-tola-config-macros = { version = "0.8.1", path = "crates/tola-config-macros" }
-tola-diagnostic = { version = "0.8.1", path = "crates/tola-diagnostic" }
-tola-highlight = { version = "0.8.1", path = "crates/tola-highlight" }
-tola-icons = { version = "0.8.1", path = "crates/tola-icons" }
-tola-image = { version = "0.8.1", path = "crates/tola-image" }
-tola-lsp = { version = "0.8.1", path = "crates/tola-lsp" }
-tola-minify = { version = "0.8.1", path = "crates/tola-minify" }
-tola-packages = { version = "0.8.1", path = "crates/tola-packages" }
-tola-pronunciations = { version = "0.8.1", path = "crates/tola-pronunciations" }
-tola-slugify = { version = "0.8.1", path = "crates/tola-slugify" }
-tola-subprocess = { version = "0.8.1", path = "crates/tola-subprocess" }
-tola-nu = { version = "0.8.1", path = "crates/tola-nu" }
-tola-typst = { version = "0.8.1", path = "crates/tola-typst" }
-tola-typst-syntax = { version = "0.8.1", path = "crates/tola-typst-syntax" }
-tola-webp = { version = "0.8.1", path = "crates/tola-webp" }
+tola-address = { version = "0.8.2-pre.1", path = "crates/tola-address" }
+tola-build = { version = "0.8.2-pre.1", path = "crates/tola-build" }
+tola-config = { version = "0.8.2-pre.1", path = "crates/tola-config" }
+tola-datalog = { version = "0.8.2-pre.1", path = "crates/tola-datalog" }
+tola-config-macros = { version = "0.8.2-pre.1", path = "crates/tola-config-macros" }
+tola-diagnostic = { version = "0.8.2-pre.1", path = "crates/tola-diagnostic" }
+tola-highlight = { version = "0.8.2-pre.1", path = "crates/tola-highlight" }
+tola-icons = { version = "0.8.2-pre.1", path = "crates/tola-icons" }
+tola-image = { version = "0.8.2-pre.1", path = "crates/tola-image" }
+tola-lsp = { version = "0.8.2-pre.1", path = "crates/tola-lsp" }
+tola-minify = { version = "0.8.2-pre.1", path = "crates/tola-minify" }
+tola-packages = { version = "0.8.2-pre.1", path = "crates/tola-packages" }
+tola-pronunciations = { version = "0.8.2-pre.1", path = "crates/tola-pronunciations" }
+tola-slugify = { version = "0.8.2-pre.1", path = "crates/tola-slugify" }
+tola-subprocess = { version = "0.8.2-pre.1", path = "crates/tola-subprocess" }
+tola-nu = { version = "0.8.2-pre.1", path = "crates/tola-nu" }
+tola-typst = { version = "0.8.2-pre.1", path = "crates/tola-typst" }
+tola-typst-syntax = { version = "0.8.2-pre.1", path = "crates/tola-typst-syntax" }
+tola-webp = { version = "0.8.2-pre.1", path = "crates/tola-webp" }
 
 [package]
 name = "tola"
@@ -95,7 +95,6 @@ debug = "line-tables-only"
 [profile.release]
 opt-level = 3
 lto = "thin"
-codegen-units = 1
 strip = true
 
 [profile.flamegraph]
@@ -118,7 +117,6 @@ tola-config.workspace = true
 tola-typst = { workspace = true, features = ["embed-fonts"] }
 tola-typst-syntax = { workspace = true, features = ["format"] }
 anyhow = "1.0.104"
-dirs = "6.0.0"
 anstream = "1.0.0"
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 cap-std = "4.0.3"
@@ -187,17 +185,7 @@ rustix = { version = "1.1.4", features = ["fs", "event"] }
 winapi-util = "0.1.11"
 windows-sys = { version = "0.61.2", features = ["Win32_Storage_FileSystem", "Win32_Foundation", "Win32_System_IO"] }
 
-# `typst-kit`'s downloader reaches `native-tls`, and a musl target has no OpenSSL to link: the
-# release archive builds the vendored one, which the runner's `musl-tools`, perl, and make
-# already support.
-[target.'cfg(target_env = "musl")'.dependencies]
-openssl-sys = { version = "0.9", features = ["vendored"] }
-
 [dev-dependencies]
-rss = { version = "2.1.0", default-features = false, features = [
-    "builders",
-    "validation",
-] }
 oxc = { version = "0.147.0", default-features = false, features = [
     "minifier",
     "codegen",

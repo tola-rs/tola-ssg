@@ -490,7 +490,11 @@ mod tests {
         .unwrap();
         assert!(format!("{error:#}").contains("declares no `[nu]` entry"));
         std::fs::create_dir_all(root.join("@tola-scripts")).unwrap();
-        std::fs::write(root.join("@tola-scripts/missing"), "export def main [] { 42 }").unwrap();
+        std::fs::write(
+            root.join("@tola-scripts/missing"),
+            "export def main [] { 42 }",
+        )
+        .unwrap();
         let builtin = prepare(
             &root,
             None,

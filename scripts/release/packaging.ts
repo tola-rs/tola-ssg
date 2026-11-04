@@ -111,8 +111,6 @@ export async function verifyDirectory(
 
 /**
  * Build one release target with Cargo and package its binary.
- *
- * The release profile's fat LTO is requested here so the workspace default stays thin.
  */
 export async function build(
   targetName: TargetName,
@@ -128,7 +126,6 @@ export async function build(
     {
       env: {
         ...process.env,
-        CARGO_PROFILE_RELEASE_LTO: 'fat',
         // A Linux archive is the static one: the vendored OpenSSL and the C runtime both link
         // statically. The musl target does this by default; naming it makes the requirement
         // unmistakable, and a dynamic input then fails the link instead of the archive check.

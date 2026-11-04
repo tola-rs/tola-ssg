@@ -3,11 +3,13 @@ name: Dependabot auto-merge
 # Triggered by Check rather than by the pull request so the job keeps a write token:
 # a run started by `pull_request` on a Dependabot branch is read-only. A rebase
 # cancels the previous run, and a cancelled run reports `cancelled` here, so only a
-# complete green run ever reaches the merge step.
+# complete green run ever reaches the merge step. The branch filter keeps the workflow
+# out of pushes to main, where the run has no pull request to merge.
 on:
   workflow_run:
     workflows: [Check]
     types: [completed]
+    branches: ['dependabot/**']
 
 permissions: {}
 

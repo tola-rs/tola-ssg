@@ -2,8 +2,8 @@ import { expect } from '@playwright/test'
 import { readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import {
-  COMMAND_TIMEOUT_MS,
   captureOutput,
+  COMMAND_TIMEOUT_MS,
   commandRunner,
   expectExited,
   RunningProcess,

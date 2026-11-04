@@ -17,12 +17,12 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Paragraph, Wrap};
 
+use super::ui::{Action, Screen, hints, keymap};
+use crate::dev::round::{HookRun, Round, stream_index};
 use crate::terminal::ansi::{self, Segment};
 use crate::terminal::session::{self, Claim, ProcessTerminal, ViewModes};
 use crate::terminal::sink::{OutputSink, StreamWriter};
 use crate::terminal::style::Palette;
-use super::ui::{Action, Screen, hints, keymap};
-use crate::dev::round::{HookRun, Round, stream_index};
 
 const HISTORY_ROUNDS: usize = 64;
 const HOOK_LINES: usize = 200;
@@ -94,7 +94,8 @@ impl Job {
     fn body(&self, styled: bool) -> Vec<Line<'static>> {
         let mut header = format!("{}/{}", self.stage, self.run.name);
         if self.omitted_lines > 0 {
-            let omitted = crate::terminal::progress::plural_count(self.omitted_lines, "earlier line");
+            let omitted =
+                crate::terminal::progress::plural_count(self.omitted_lines, "earlier line");
             header.push_str(&format!(" · {omitted} not shown"));
         }
         let mut lines = vec![Line::from(header)];
@@ -815,4 +816,3 @@ fn push_span(line: &mut Line<'static>, text: &str, style: Style) {
         line.spans.push(Span::styled(text.to_owned(), style));
     }
 }
-

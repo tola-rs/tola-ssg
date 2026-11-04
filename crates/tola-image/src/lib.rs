@@ -47,14 +47,7 @@ pub use resample::ResampledPixels;
 /// a dependency, feature, or native compiler option that carries one. Every derivative name and
 /// every request descriptor carries this revision, so a derivative rendered under another revision
 /// is never reused as if it were this one.
-///
-/// The pure-Rust WebP encoder is a distinct profile from libwebp.
-pub const IMAGE_PIPELINE_REVISION: u32 =
-    if cfg!(all(feature = "pure-webp", not(feature = "libwebp"))) {
-        10
-    } else {
-        7
-    };
+pub const IMAGE_PIPELINE_REVISION: u32 = 10;
 
 /// The container an image's own bytes are in.
 ///

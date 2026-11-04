@@ -2,14 +2,14 @@ import { expect, test } from '@playwright/test'
 import {
   currentRevision,
   expectReloads,
+  fulfillCss,
+  fulfillHtml,
+  fulfillPng,
+  fulfillSvg,
   installReload,
   modifiedOutput,
   runtimeState,
   sendNextRevision,
-  fulfillHtml,
-  fulfillCss,
-  fulfillPng,
-  fulfillSvg,
 } from '../../../support/reload.ts'
 
 declare global {
@@ -78,8 +78,10 @@ test('in-place edits preserve page state', async ({ page }) => {
 
 test('text edits preserve ongoing scrolling', async ({ page }) => {
   let text = 'First'
-  await page.route('https://scrolling-edit.test/**', (route) =>
-    fulfillHtml(route, documentBody(text).replace('<main>', '<main style="height:6000px">')))
+  await page.route(
+    'https://scrolling-edit.test/**',
+    (route) => fulfillHtml(route, documentBody(text).replace('<main>', '<main style="height:6000px">')),
+  )
   await page.goto('https://scrolling-edit.test/index.html', { waitUntil: 'load' })
   await installReload(page)
   await page.evaluate(() => {
@@ -142,8 +144,8 @@ for (const identity of ['id', 'position']) {
       return fulfillHtml(
         route,
         `<!doctype html><html><head><link rel="stylesheet" href="/theme.css"></head><body><main><section ${
-            identity === 'id' ? 'id="panel"' : ''
-          } class="${sourceClasses}"><h1>Title</h1><div id="widget"></div></section></main><script>${script}</script></body></html>`,
+          identity === 'id' ? 'id="panel"' : ''
+        } class="${sourceClasses}"><h1>Title</h1><div id="widget"></div></section></main><script>${script}</script></body></html>`,
       )
     })
     await page.goto('https://class-widget.test/index.html', { waitUntil: 'load' })

@@ -1655,6 +1655,7 @@ mod tests {
     #[cfg(feature = "fsevents-tests")]
     mod fsevents_tests {
         use super::*;
+        use crate::dev::watch::{FileChangeSource, WatchError};
 
         #[tokio::test]
         async fn rejected_config_frees_generator_events() {

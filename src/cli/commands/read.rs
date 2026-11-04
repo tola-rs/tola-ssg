@@ -40,10 +40,7 @@ pub(super) fn select(
     }
     let array = value.is_array();
     let input = if array {
-        Browse::Rows {
-            title,
-            rows: value,
-        }
+        Browse::Rows { title, rows: value }
     } else {
         Browse::Value { title, value }
     };

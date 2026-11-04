@@ -358,4 +358,3 @@ fn report_log_failure(terminal: &Terminal, origin: LogOrigin, path: &std::path::
     });
     report_diagnostic(terminal, &diagnostic);
 }
-

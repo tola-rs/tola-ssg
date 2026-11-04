@@ -96,3 +96,42 @@ test('an absent package does not hide a later occupied version', async () => {
     ),
   ).rejects.toThrow(`${PACKAGE.name} 0.8.0`)
 })
+
+test('a fully published workspace is accepted when the caller allows published versions', async () => {
+  const other: WorkspacePackage = { ...PACKAGE, id: 'other', name: 'other-crate' }
+  const availability = await checkAvailable(
+    [PACKAGE, other],
+    '0.8.0',
+    (url) =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({
+            name: url.endsWith('/other-crate') ? 'other-crate' : PACKAGE.name,
+            vers: '0.8.0',
+          }),
+        ),
+      ),
+    undefined,
+    { allowPublished: true },
+  )
+  expect(availability.published).toEqual([PACKAGE.name, other.name])
+  expect(availability.unpublished).toEqual([])
+})
+
+test('a half-published workspace is refused even when published versions are allowed', async () => {
+  const missing: WorkspacePackage = { ...PACKAGE, id: 'absent', name: 'absent-crate' }
+  await expect(
+    checkAvailable(
+      [PACKAGE, missing],
+      '0.8.0',
+      (url) =>
+        Promise.resolve(
+          url.endsWith('/absent-crate')
+            ? new Response('missing', { status: 404 })
+            : new Response(JSON.stringify({ name: PACKAGE.name, vers: '0.8.0' })),
+        ),
+      undefined,
+      { allowPublished: true },
+    ),
+  ).rejects.toThrow('a release cannot mix them')
+})

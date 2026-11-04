@@ -5,10 +5,10 @@ use std::path::{Path, PathBuf};
 #[cfg(feature = "network")]
 use std::sync::Arc;
 
+#[cfg(feature = "network")]
+use crate::download::HttpDownloader;
 use typst::diag::{FileError, FileResult, PackageError};
 pub use typst::syntax::package::{PackageSpec, PackageVersion};
-#[cfg(feature = "network")]
-use typst_kit::downloader::SystemDownloader;
 use typst_kit::packages::FsPackages;
 #[cfg(feature = "network")]
 use typst_kit::packages::UniversePackages;
@@ -401,9 +401,7 @@ impl PackageStore {
             locations: Ok(locations),
             fetch_policy,
             boundary: crate::world::SourceBoundary::default(),
-            universe: Arc::new(UniversePackages::new(SystemDownloader::new(
-                user_agent.into(),
-            ))),
+            universe: Arc::new(UniversePackages::new(HttpDownloader::new(user_agent))),
         }
     }
 
@@ -414,7 +412,7 @@ impl PackageStore {
             locations,
             fetch_policy,
             boundary: crate::world::SourceBoundary::default(),
-            universe: Arc::new(UniversePackages::new(SystemDownloader::new(concat!(
+            universe: Arc::new(UniversePackages::new(HttpDownloader::new(concat!(
                 "tola-typst/",
                 env!("CARGO_PKG_VERSION")
             )))),

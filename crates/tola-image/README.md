@@ -14,5 +14,5 @@ let encoded = tola_image::render(&source, &recipe, &NO_CANCELLATION)?;
 Reads JPEG, PNG, WebP, GIF, BMP, and SVG (measured, not resized); AVIF is unsupported.
 Operations: `Scale`, `FitWidth`, `FitHeight`, `Fit`, `Fill`. Filters: `Nearest`, `Triangle`,
 `CatmullRom`, `Gaussian`, `Lanczos3`. Formats: `Auto`, `Jpeg`, `Png`, `WebP`. `DecodedSource`
-decodes once for several recipes; `Cancellation` is polled around every stage. The `pure-webp`
-feature selects the Rust encoder instead of `libwebp`.
+decodes once for several recipes; `Cancellation` is polled around every stage. WebP encoding uses
+the pure Rust `tola-webp` encoder by default; the `libwebp` feature selects the native one.

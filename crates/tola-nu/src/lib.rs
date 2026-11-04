@@ -51,8 +51,14 @@ use nu_protocol::{
 pub const BUILTIN_MODULES: &[(&str, &str)] = &[
     ("cli", "Capture finite CLI output and exit status"),
     ("image", "Inspect and resize image bytes"),
-    ("diagnostic", "Construct, render, and submit diagnostic reports"),
-    ("ui", "Interactive tables, confirmations, and syntax highlighting"),
+    (
+        "diagnostic",
+        "Construct, render, and submit diagnostic reports",
+    ),
+    (
+        "ui",
+        "Interactive tables, confirmations, and syntax highlighting",
+    ),
 ];
 
 /// One prepared Nu environment for CLI evaluation or LSP service.

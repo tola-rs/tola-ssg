@@ -896,7 +896,7 @@ export async function run(): Promise<void> {
       ] as const
       const cancellation = new vscode.CancellationTokenSource()
       try {
-        for (const [name, expected] of names) {
+        for (const [name] of names) {
           const [drop]: vscode.DocumentDropEdit[] = await assetDrops.provideDocumentDropEdits(
             document,
             new vscode.Position(0, 0),

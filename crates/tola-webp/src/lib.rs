@@ -4,8 +4,8 @@
 //! integer SIMD transforms, and VP8L-compressed alpha. Within one encoder revision, the same
 //! pixels and quality produce the same bytes with scalar or SIMD code, including wasm.
 //!
-//! The public API is experimental. `tola-image` keeps libwebp as its native default and delegates
-//! whole-image lossless WebP to `image-webp`.
+//! The public API is experimental. `tola-image` selects it by default and delegates whole-image
+//! lossless WebP to `image-webp`.
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 

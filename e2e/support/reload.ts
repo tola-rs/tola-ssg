@@ -21,7 +21,10 @@ export const fulfillPng = (route: Route): Promise<void> =>
 export async function serveResources(route: Route, html: string): Promise<void> {
   const url = new URL(route.request().url())
   if (url.pathname === '/site.css') {
-    await fulfillCss(route, `body { color: ${url.searchParams.has('tola-representation') ? 'blue' : 'red'}; }`)
+    await fulfillCss(
+      route,
+      `body { color: ${url.searchParams.has('tola-representation') ? 'blue' : 'red'}; }`,
+    )
   } else if (url.pathname === '/cover.png') {
     await fulfillPng(route)
   } else {

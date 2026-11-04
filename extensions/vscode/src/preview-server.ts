@@ -155,7 +155,9 @@ export class PreviewServer {
         break
       case 'stopped':
         this.cancellation.abort()
-        this.rejectStartup(new Error('Tola stopped before its preview became available. Open Tola output for details'))
+        this.rejectStartup(
+          new Error('Tola stopped before its preview became available. Open Tola output for details'),
+        )
         this.lifetime.dispose()
         break
     }
@@ -174,26 +176,26 @@ export class PreviewServer {
   }
 
   get buildDescription(): string {
-    switch (this.build) {
-      case 'failed':
-        return this.revision
-          ? 'Build failed; preview still shows the previous publication.'
-          : 'Build failed; no preview has been published.'
-      case 'cancelled':
-        return 'The latest build was cancelled.'
-      case 'building':
-        return 'Building saved inputs.'
-      case 'succeeded':
-        return 'Saved inputs built successfully.'
-      case 'starting':
-        return 'Waiting for the first build.'
+    if (this.build === 'failed') {
+      return this.revision
+        ? 'Build failed; preview still shows the previous publication.'
+        : 'Build failed; no preview has been published.'
     }
+    const descriptions: Record<Exclude<BuildStatus, 'failed'>, string> = {
+      cancelled: 'The latest build was cancelled.',
+      building: 'Building saved inputs.',
+      succeeded: 'Saved inputs built successfully.',
+      starting: 'Waiting for the first build.',
+    }
+    return descriptions[this.build]
   }
 
   get hookFailure(): string | undefined {
     const failure = this.failedHook
     return failure && failure.revision === this.revision
-      ? `${failure.hook === null ? 'After-publish preparation' : `Publication hook ${failure.hook}`} failed; the page remains published.`
+      ? `${
+        failure.hook === null ? 'After-publish preparation' : `Publication hook ${failure.hook}`
+      } failed; the page remains published.`
       : undefined
   }
 

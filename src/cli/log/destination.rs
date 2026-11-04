@@ -344,4 +344,3 @@ pub(crate) fn check_writes(log: Option<&Path>, writes: &FileWrites, dry_run: boo
     }
     Ok(())
 }
-

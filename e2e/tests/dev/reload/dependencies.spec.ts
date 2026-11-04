@@ -3,15 +3,14 @@ import {
   addedOutput,
   currentRevision,
   expectReloads,
+  fulfillHtml,
+  fulfillSvg,
   installReload,
   modifiedOutput,
   recordReloads,
   reloadDocument,
   sendNextRevision,
   serveDocument,
-  fulfillHtml,
-  fulfillCss,
-  fulfillSvg,
   serveResources,
 } from '../../../support/reload.ts'
 

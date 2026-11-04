@@ -3,6 +3,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import {
   expectReloads,
+  fulfillHtml,
   installReload,
   modifiedOutput,
   reloadDocument,
@@ -12,7 +13,6 @@ import {
   type TolaRuntime,
   type TolaWindow,
   waitForOpenSocket,
-  fulfillHtml,
 } from '../../../support/reload.ts'
 import { type Sites, test } from '../../../support/server.ts'
 

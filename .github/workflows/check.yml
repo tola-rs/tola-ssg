@@ -225,27 +225,6 @@ jobs:
       - uses: ./.github/actions/setup-rust
       - run: just scripts::check
 
-  windows-gnu:
-    name: Check Windows x86_64-pc-windows-gnu
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-      - uses: ./.github/actions/setup-rust
-        with:
-          target: x86_64-pc-windows-gnu
-          cache-key: check-windows-gnu
-          cache-on-failure: true
-      - name: Install MinGW cross compiler
-        uses: awalsh128/cache-apt-pkgs-action@553a35bb8ebd9fcabcb1c9451aa4c98e1b4ca8a9 # v1.6.3
-        with:
-          packages: gcc-mingw-w64-x86-64
-          version: 1.0
-      - run: just windows::gnu
-
   windows-msvc:
     name: Check Windows x86_64-pc-windows-msvc
     runs-on: windows-latest

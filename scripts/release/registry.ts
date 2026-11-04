@@ -38,14 +38,28 @@ function registryVersion(line: string, name: string): RegistryVersion {
   return { name: value.name, vers: value.vers }
 }
 
+export interface PackageAvailability {
+  readonly published: readonly string[]
+  readonly unpublished: readonly string[]
+}
+
+export interface AvailabilityOptions {
+  /** Accept a workspace whose packages are all published at this version. */
+  readonly allowPublished?: boolean
+}
+
 export async function checkAvailable(
   packages: readonly WorkspacePackage[],
   version: string,
   request: RegistryRequest = fetch,
   signal?: AbortSignal,
-): Promise<void> {
+  options: AvailabilityOptions = {},
+): Promise<PackageAvailability> {
   signal?.throwIfAborted()
   const requested = versionKey(version)
+  const allowPublished = options.allowPublished === true
+  const published: string[] = []
+  const unpublished: string[] = []
   for (const item of packages) {
     signal?.throwIfAborted()
     if (item.publish?.length === 0) continue
@@ -64,6 +78,7 @@ export async function checkAvailable(
       signal?.throwIfAborted()
       if (response.status === 404) {
         await response.body?.cancel()
+        unpublished.push(name)
         console.log(`crates.io: no published package named ${name}.`)
         continue
       }
@@ -90,17 +105,33 @@ export async function checkAvailable(
     if (!entries.trim()) throw new ReleaseError(`crates.io returned an empty index entry for ${name}`)
     const lines = entries.split(/\r\n|[\n\r]/)
     if (lines.at(-1) === '') lines.pop()
+    let occupied = false
     for (const line of lines) {
       const entry = registryVersion(line, name)
       if (entry.name.replaceAll('_', '-').toLowerCase() !== name.replaceAll('_', '-').toLowerCase()) {
         throw new ReleaseError(`crates.io returned a different package in the index entry for ${name}`)
       }
-      if (compareVersions(versionKey(entry.vers), requested) === 0) {
+      if (compareVersions(versionKey(entry.vers), requested) === 0) occupied = true
+    }
+    if (occupied) {
+      if (!allowPublished) {
         throw new ReleaseError(
           `${name} ${version} is already published (including yanked versions); it cannot be replaced`,
         )
       }
+      published.push(name)
+      console.log(`crates.io: ${name} ${version} is already published.`)
+      continue
     }
+    unpublished.push(name)
     console.log(`crates.io: ${name} ${version} has no published version collision.`)
   }
+  if (published.length && unpublished.length) {
+    throw new ReleaseError(
+      `${published.join(', ')} ${version} are published while ${
+        unpublished.join(', ')
+      } are not; a release cannot mix them`,
+    )
+  }
+  return { published, unpublished }
 }
