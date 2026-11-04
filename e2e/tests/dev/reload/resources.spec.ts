@@ -2,16 +2,16 @@ import { expect, type Page, test } from '@playwright/test'
 import {
   currentRevision,
   expectReloads,
+  fulfillCss,
+  fulfillHtml,
+  fulfillPng,
+  fulfillSvg,
   installReload,
   modifiedOutput,
   runtimeState,
   sendNextRevision,
-  type TolaWindow,
-  fulfillPng,
-  fulfillCss,
-  fulfillHtml,
-  fulfillSvg,
   serveResources,
+  type TolaWindow,
 } from '../../../support/reload.ts'
 
 declare global {
@@ -160,10 +160,10 @@ test.describe('development resource updates', () => {
         return fulfillHtml(
           route,
           `<!doctype html><html><head><link rel="stylesheet" href="/site.css"></head><body><section id="panel" class="${
-              request.headers()['x-tola-revision'] === '0'.repeat(64) ? 'first' : classes
-            }"><input id="search" value="seed"></section>${
-              behavior === 'scripted' ? '<script>window.resourceApplication = {};</script>' : ''
-            }</body></html>`,
+            request.headers()['x-tola-revision'] === '0'.repeat(64) ? 'first' : classes
+          }"><input id="search" value="seed"></section>${
+            behavior === 'scripted' ? '<script>window.resourceApplication = {};</script>' : ''
+          }</body></html>`,
         )
       })
       await page.goto('https://class-background.test/index.html', { waitUntil: 'load' })
@@ -687,9 +687,7 @@ test.describe('development resource updates', () => {
       if (url.pathname === '/site.css') {
         return fulfillCss(
           route,
-          url.searchParams.has('tola-representation')
-            ? 'body { color: blue; }'
-            : 'body { color: red; }',
+          url.searchParams.has('tola-representation') ? 'body { color: blue; }' : 'body { color: red; }',
         )
       }
       if (url.searchParams.has('tola-representation')) await released

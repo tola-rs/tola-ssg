@@ -199,7 +199,7 @@ export async function runPreviewChecks(): Promise<void> {
       withPreview((opened) =>
         withSite(async (site) => {
           const input = vscode.window.showInputBox
-          vscode.window.showInputBox = (async () => 'part%2F中文') as typeof input
+          vscode.window.showInputBox = (() => Promise.resolve('part%2F中文')) as typeof input
           try {
             await vscode.window.showTextDocument(site.source)
             await vscode.commands.executeCommand('tola.openPreviewFragment', site.source)

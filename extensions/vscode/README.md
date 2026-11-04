@@ -41,10 +41,10 @@ Preview prompts to save unsaved package files discovered by the language service
 actually published from a package source. A shared package cache is used only when one running site owns the
 source; Tola does not choose a site for an ambiguous path.
 
-The preview process reports its actual address and build outcomes through `tola dev --json`.
-The status bar distinguishes a failed rebuild with the previous page still available from a
-site that has not published any page. A failed after-publish task leaves the published page
-available and is reported separately. Opening a page remains an explicit command.
+The preview process reports its actual address and build outcomes through `tola dev --json`. The status bar
+distinguishes a failed rebuild with the previous page still available from a site that has not published any
+page. A failed after-publish task leaves the published page available and is reported separately. Opening a
+page remains an explicit command.
 
 Drop or paste a file into a site's author source to choose **Publish … as site asset**. The edit copies its
 bytes into `tola.assetDirectory`. If `[assets]` already publishes that source, the configuration owns

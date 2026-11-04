@@ -61,7 +61,19 @@ export async function checkPackages(
   signal?: AbortSignal,
   mode: ReleaseMode = 'create',
 ): Promise<void> {
-  if (mode === 'create') await checkAvailable(source.packages, source.version, undefined, signal)
+  if (mode === 'create') {
+    // The release publishes binaries for a tag; crates.io is a separate publication lane, so a
+    // version that is already on the registry must not block the GitHub Release. Only a workspace
+    // that is half published is refused, because that state has no single interpretation.
+    const availability = await checkAvailable(source.packages, source.version, undefined, signal, {
+      allowPublished: true,
+    })
+    if (availability.published.length > 0) {
+      console.log(
+        `crates.io: every workspace package is published at ${source.version}; the release only adds binaries.`,
+      )
+    }
+  }
   await mkdir(join(root, 'target'), { recursive: true })
   const directory = await mkdtemp(join(root, 'target', 'package-check-'))
   try {

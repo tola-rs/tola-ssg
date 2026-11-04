@@ -349,4 +349,3 @@ fn short_target(target: &str) -> &str {
         .next()
         .unwrap_or(target)
 }
-

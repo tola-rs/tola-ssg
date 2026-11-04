@@ -8,6 +8,7 @@ accepted = [
   "BSD-3-Clause",
   "BSL-1.0",
   "CC-BY-SA-4.0",
+  "CC-PDDC",
   "CC0-1.0",
   "CDLA-Permissive-2.0",
   "IJG",
@@ -16,5 +17,6 @@ accepted = [
   "MIT-0",
   "MPL-2.0",
   "Unicode-3.0",
+  "Unlicense",
   "Zlib",
 ]

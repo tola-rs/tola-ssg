@@ -1,6 +1,11 @@
 import { expect, type Page, test } from '@playwright/test'
-import { installReload, modifiedOutput, runtimeState, sendNextRevision   fulfillCss,
+import {
+  fulfillCss,
   fulfillHtml,
+  installReload,
+  modifiedOutput,
+  runtimeState,
+  sendNextRevision,
 } from '../../../support/reload.ts'
 
 declare global {
@@ -95,8 +100,8 @@ if (mode !== 'none') window.addEventListener('tola:before-update', event => {
     return fulfillHtml(
       route,
       `<!doctype html><html><head><link rel="stylesheet" href="/theme.css"></head><body><section id="panel" class="${
-          sourceUpdated ? 'blue' : 'red'
-        }"><input id="query" value="seed"><button id="search">Search</button><p id="result"></p></section><script>${script}</script></body></html>`,
+        sourceUpdated ? 'blue' : 'red'
+      }"><input id="query" value="seed"><button id="search">Search</button><p id="result"></p></section><script>${script}</script></body></html>`,
     )
   })
   await page.goto('https://consumer-updates.test/index.html', { waitUntil: 'load' })

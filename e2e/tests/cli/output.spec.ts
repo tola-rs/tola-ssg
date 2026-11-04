@@ -11,7 +11,6 @@ import {
   COMMAND_TIMEOUT_MS,
   commandRunner,
   expectExited,
-  runCommand,
   RunningProcess,
   startCommand,
 } from '../../support/process.ts'

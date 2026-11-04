@@ -191,14 +191,14 @@ impl HookQueue {
                             }
                         }
                         Ok(dependencies) => {
-                            let outcome =
-                                match consume_revision(&pending, &worker_shutdown, events) {
-                                    Ok(outcome) => outcome,
-                                    Err(error) => {
-                                        worker_cancellation.request();
-                                        return Err(error);
-                                    }
-                                };
+                            let outcome = match consume_revision(&pending, &worker_shutdown, events)
+                            {
+                                Ok(outcome) => outcome,
+                                Err(error) => {
+                                    worker_cancellation.request();
+                                    return Err(error);
+                                }
+                            };
                             let failure = match outcome {
                                 Ok(diagnostics) => {
                                     let _ = output.diagnostics(&diagnostics);
@@ -222,8 +222,8 @@ impl HookQueue {
                                         &error,
                                         crate::codes::hook::AFTER_PUBLISH,
                                     );
-                                    let _ =
-                                        output.status("Site built; an after-publish command failed");
+                                    let _ = output
+                                        .status("Site built; an after-publish command failed");
                                     let _ = output.diagnostics(&diagnostics);
                                     if let Some(browser) = &browser {
                                         browser.after_publish_failed(&pending.site, &diagnostic);
@@ -231,7 +231,10 @@ impl HookQueue {
                                     Some(diagnostics)
                                 }
                             };
-                            completed = Some(CompletedRun { dependencies, failure });
+                            completed = Some(CompletedRun {
+                                dependencies,
+                                failure,
+                            });
                         }
                         Err(error) => {
                             completed = None;

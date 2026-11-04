@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag matching the workspace version (e.g. v0.8.0 or v0.8.0-pre.1)."
+        description: "Release tag matching the workspace version, with or without a prerelease suffix."
         required: true
         type: string
       mode:
@@ -120,9 +120,13 @@ jobs:
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
             packages: musl-tools
+          # The hosted ARM runners are reclaimed under memory pressure while several crates are
+          # code-generated at once, so the two aarch64 builds compile fewer crates at a time.
+          # The binary settings stay unchanged.
           - target: aarch64-unknown-linux-musl
             os: ubuntu-24.04-arm
             packages: musl-tools
+            cargo_jobs: '2'
           # The GNU-linked Linux archives link the system OpenSSL each runner carries.
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
@@ -130,6 +134,7 @@ jobs:
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-24.04-arm
             packages: ''
+            cargo_jobs: '2'
           - target: aarch64-apple-darwin
             os: macos-latest
             packages: ''
@@ -153,10 +158,39 @@ jobs:
         with:
           packages: ${{ matrix.packages }}
           version: 1.0
+      - name: Give the Linux build more swap to link in
+        if: ${{ runner.os == 'Linux' }}
+        run: |
+          # This link once drove the Linux runners' free memory to 200 MB and got the runner
+          # reclaimed. The image already mounts its own swapfile at /swapfile, so add a second one
+          # beside it as headroom.
+          sudo fallocate -l 16G /swapfile.tola
+          sudo chmod 600 /swapfile.tola
+          sudo mkswap --quiet /swapfile.tola
+          sudo swapon /swapfile.tola
+          free -m
       - name: Build and verify release archive
         env:
           TARGET: ${{ matrix.target }}
-        run: deno run --allow-read --allow-write --allow-run --allow-env scripts/release/package.ts build "$TARGET" --output artifacts
+          CARGO_BUILD_JOBS: ${{ matrix.cargo_jobs }}
+        run: |
+          set -euo pipefail
+          if [ "$RUNNER_OS" = Linux ]; then
+            # Real numbers for the next failure or success.
+            ( while :; do
+                echo "runner-resources $(date -u +%H:%M:%S)" \
+                  "mem_available_mb=$(awk '/^MemAvailable:/ {print int($2 / 1024)}' /proc/meminfo)" \
+                  "swap_free_mb=$(awk '/^SwapFree:/ {print int($2 / 1024)}' /proc/meminfo)" \
+                  "disk_free_mb=$(df -m --output=avail . | tail -n 1 | tr -d ' ')"
+                sleep 60
+              done ) &
+            sampler=$!
+            trap 'kill "$sampler"' EXIT
+          fi
+          if [ -z "${CARGO_BUILD_JOBS:-}" ]; then
+            unset CARGO_BUILD_JOBS
+          fi
+          deno run --allow-read --allow-write --allow-run --allow-env scripts/release/package.ts build "$TARGET" --output artifacts
       - name: Upload verified artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

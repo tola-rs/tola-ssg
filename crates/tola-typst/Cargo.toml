@@ -22,7 +22,9 @@ scan = []
 # compilation and export fan out on.
 parallel = ["dep:rayon"]
 embed-fonts = ["dep:ruzstd"]
-network = ["typst-kit/system-downloader", "typst-kit/universe-packages"]
+# Fetches Typst Universe packages over the workspace's `rustls` client instead of
+# `typst-kit`'s `ureq`/`native-tls` downloader, which would link OpenSSL beside it.
+network = ["dep:reqwest", "typst-kit/universe-packages"]
 
 [dependencies]
 typst.workspace = true
@@ -57,6 +59,11 @@ serde = { version = "1.0.229", features = ["derive"] }
 toml = "1.1.4"
 blake3 = "1.8.7"
 ruzstd = { version = "0.9.1", optional = true }
+reqwest = { version = "0.13", default-features = false, features = [
+    "blocking",
+    "rustls",
+    "system-proxy",
+], optional = true }
 
 [dev-dependencies]
 tempfile = "3.27.0"

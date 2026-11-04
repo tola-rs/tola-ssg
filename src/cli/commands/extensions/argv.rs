@@ -98,4 +98,3 @@ pub(super) fn complete_report(
     output.diagnostics(&diagnostics)?;
     Ok(())
 }
-

@@ -18,13 +18,13 @@ mod argv;
 mod help;
 mod init;
 
-pub(in crate::cli) use help::module_command_signatures;
 use argv::{complete_report, process_command};
-use init::run_initializer;
+pub(in crate::cli) use help::module_command_signatures;
 use help::{
     command_help, command_signatures, is_help, namespace_command, namespace_help, render_help,
     signature_command,
 };
+use init::run_initializer;
 
 struct Invocation {
     namespace: String,
@@ -228,7 +228,6 @@ pub(super) fn check_namespaces<T>(modules: &BTreeMap<String, T>) -> Result<()> {
     }
     Ok(())
 }
-
 
 #[cfg(test)]
 mod tests;

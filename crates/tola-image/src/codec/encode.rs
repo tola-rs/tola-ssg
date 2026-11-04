@@ -186,58 +186,25 @@ fn encode_webp<T>(
     cancellation: &dyn Cancellation,
     destination: impl FnOnce(&[u8]) -> Result<T>,
 ) -> Result<T> {
-    #[cfg(feature = "libwebp")]
-    {
-        let encoder = webp::Encoder::from_rgba(rgba, width, height);
-        let mut config =
-            webp::WebPConfig::new().map_err(|_| anyhow::anyhow!(WEBP_ENCODE_FAILURE))?;
-        config.lossless = i32::from(quality.is_none());
-        config.quality = f32::from(quality.unwrap_or(75));
-        config.method = 4;
-        config.thread_level = 0;
-        // Lossless WebP must reproduce the pixels it was given, hidden RGB included; lossy WebP
-        // may drop RGB no one can see, which keeps transparent derivatives smaller.
-        config.exact = i32::from(quality.is_none());
-        config.alpha_quality = 100;
-        config.near_lossless = 100;
-        cancellation.ensure_active()?;
-        // The safe libwebp wrapper has no cancellation callback. Never publish its result if
-        // cancellation arrived during this indivisible codec call.
-        let encoded = encoder.encode_advanced(&config);
-        cancellation.ensure_active()?;
-        let encoded = encoded.map_err(|_| anyhow::anyhow!(WEBP_ENCODE_FAILURE))?;
-        destination(&encoded)
-    }
-    #[cfg(all(not(feature = "libwebp"), feature = "pure-webp"))]
-    {
-        cancellation.ensure_active()?;
-        let encoded = match quality {
-            Some(quality) => tola_webp::encode_rgba(rgba, width, height, quality)
-                .map_err(|_| anyhow::anyhow!(WEBP_ENCODE_FAILURE))?,
-            None => {
-                let mut bytes = Vec::new();
-                image::ImageEncoder::write_image(
-                    image::codecs::webp::WebPEncoder::new_lossless(&mut bytes),
-                    rgba,
-                    width,
-                    height,
-                    ExtendedColorType::Rgba8,
-                )
-                .map_err(|_| anyhow::anyhow!(WEBP_ENCODE_FAILURE))?;
-                bytes
-            }
-        };
-        cancellation.ensure_active()?;
-        destination(&encoded)
-    }
-    #[cfg(not(any(feature = "libwebp", feature = "pure-webp")))]
-    {
-        let _ = (rgba, width, height, quality, cancellation, destination);
-        return Err(ImageError::EncodingUnavailable {
-            format: crate::OutputFormat::WebP,
+    cancellation.ensure_active()?;
+    let encoded = match quality {
+        Some(quality) => tola_webp::encode_rgba(rgba, width, height, quality)
+            .map_err(|_| anyhow::anyhow!(WEBP_ENCODE_FAILURE))?,
+        None => {
+            let mut bytes = Vec::new();
+            image::ImageEncoder::write_image(
+                image::codecs::webp::WebPEncoder::new_lossless(&mut bytes),
+                rgba,
+                width,
+                height,
+                ExtendedColorType::Rgba8,
+            )
+            .map_err(|_| anyhow::anyhow!(WEBP_ENCODE_FAILURE))?;
+            bytes
         }
-        .into());
-    }
+    };
+    cancellation.ensure_active()?;
+    destination(&encoded)
 }
 
 /// Encode one plane as JPEG with half-resolution colour: 4:2:0.
@@ -305,56 +272,6 @@ mod tests {
     use crate::{ImageFormat, OutputFormat, ResizeOperation, ResizeOptions};
     use std::io::Cursor;
 
-    #[cfg(feature = "libwebp")]
-    #[test]
-    fn opaque_webp_keeps_rgb_encoding_bytes() {
-        for (width, height) in [(1u32, 1u32), (3, 7), (17, 13), (64, 65)] {
-            for pattern in 0..3u32 {
-                let pixels: Vec<u8> = (0..width * height)
-                    .flat_map(|index| {
-                        let value = match pattern {
-                            0 => 79,
-                            1 => index.wrapping_mul(2_654_435_761),
-                            _ => (index % width) * 7 + (index / width) * 11,
-                        };
-                        [value as u8, (value >> 8) as u8, (value >> 16) as u8, 255]
-                    })
-                    .collect();
-                let source = png(&pixels, width, height, ExtendedColorType::Rgba8, None, None);
-                let rgb: Vec<_> = pixels
-                    .as_chunks::<4>()
-                    .0
-                    .iter()
-                    .flat_map(|pixel| pixel[..3].iter().copied())
-                    .collect();
-                for quality in [None, Some(0), Some(75), Some(100)] {
-                    let mut config = webp::WebPConfig::new().unwrap();
-                    config.lossless = i32::from(quality.is_none());
-                    config.quality = f32::from(quality.unwrap_or(75));
-                    config.method = 4;
-                    config.thread_level = 0;
-                    config.exact = i32::from(quality.is_none());
-                    config.alpha_quality = 100;
-                    config.near_lossless = 100;
-                    let rgb_encoded = webp::Encoder::from_rgb(&rgb, width, height)
-                        .encode_advanced(&config)
-                        .unwrap();
-                    let encoded = render(
-                        &source,
-                        &recipe(&source, width, height, OutputFormat::WebP, quality),
-                        &NO_CANCELLATION,
-                    )
-                    .unwrap();
-                    assert_eq!(
-                        &encoded[..],
-                        &rgb_encoded[..],
-                        "{width}x{height}, pattern {pattern}, quality {quality:?}"
-                    );
-                }
-            }
-        }
-    }
-
     #[test]
     fn cancellation_precedes_encoding_mismatch() {
         let source = png(
@@ -406,48 +323,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             [0, 127, 255]
         );
-    }
-
-    /// Transparent areas cost no more than they must: RGB under fully transparent pixels is not
-    /// displayed, so the encoder drops it instead of paying for it.
-    #[cfg(feature = "libwebp")]
-    #[test]
-    fn transparent_webp_lets_the_encoder_drop_hidden_rgb() {
-        let (width, height) = (16u32, 16u32);
-        let pixels: Vec<u8> = (0..width * height)
-            .flat_map(|index| {
-                let x = index % width;
-                let y = index / width;
-                let alpha = if x < width / 2 { 255 } else { 0 };
-                [
-                    (x * 13 + y * 7) as u8,
-                    (x * 29 + y * 3) as u8,
-                    (x * 5 + y * 31) as u8,
-                    alpha as u8,
-                ]
-            })
-            .collect();
-        let source = png(&pixels, width, height, ExtendedColorType::Rgba8, None, None);
-
-        let mut config = webp::WebPConfig::new().unwrap();
-        config.lossless = 0;
-        config.quality = 75.0;
-        config.method = 4;
-        config.thread_level = 0;
-        config.exact = 0;
-        config.alpha_quality = 100;
-        config.near_lossless = 100;
-        let reference = webp::Encoder::from_rgba(&pixels, width, height)
-            .encode_advanced(&config)
-            .unwrap();
-
-        let encoded = render(
-            &source,
-            &recipe(&source, width, height, OutputFormat::WebP, Some(75)),
-            &NO_CANCELLATION,
-        )
-        .unwrap();
-        assert_eq!(&encoded[..], &reference[..]);
     }
 
     /// The quality knob is the trade it is documented to be: a lower quality publishes fewer

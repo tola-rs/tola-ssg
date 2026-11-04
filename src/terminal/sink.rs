@@ -7,8 +7,8 @@ use std::time::Duration;
 use super::Palette;
 use super::ansi::{self, Painter};
 use super::development::DevScreen;
-use crate::dev::round::{HookRun, Round, stream_index};
 use super::session::{Claim, ProcessTerminal};
+use crate::dev::round::{HookRun, Round, stream_index};
 
 const OUTPUT_LOCK_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
@@ -400,7 +400,6 @@ fn stdout_error(error: io::Error) -> anyhow::Error {
     }
 }
 
-
 #[cfg(test)]
 pub(crate) mod tests {
     pub(crate) mod testing {
@@ -438,4 +437,3 @@ pub(crate) mod tests {
         }
     }
 }
-

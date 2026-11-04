@@ -317,4 +317,3 @@ fn failure_chain(error: &anyhow::Error) -> String {
     }
     message
 }
-

@@ -116,4 +116,3 @@ fn resolve(
         };
     Ok(Some(PagerCommand { program, arguments }))
 }
-

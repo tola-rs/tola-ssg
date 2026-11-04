@@ -128,8 +128,14 @@ pub(super) fn value(
             print_width: config.formatter().print_width,
             prose_wrap: &config.formatter().prose_wrap,
         },
-        package_path: config.package_locations().data().map(|location| location.root()),
-        package_cache_path: config.package_locations().cache().map(|location| location.root()),
+        package_path: config
+            .package_locations()
+            .data()
+            .map(|location| location.root()),
+        package_cache_path: config
+            .package_locations()
+            .cache()
+            .map(|location| location.root()),
         vendored_package_path: config.vendor().typst_packages(),
         icon_cache_directory: tola_build::BuildResources::icon_cache_directory(config.get_root()),
         system_fonts: config.system_fonts_allowed(&request.resources),

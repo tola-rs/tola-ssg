@@ -228,10 +228,7 @@ impl Terminal {
     ///
     /// Paging stays with [`Terminal::write_documentation`]: text a command prints as part of its
     /// own output must not open a pager.
-    pub(crate) fn write_stdout_styled(
-        &self,
-        text: &text::StyledText,
-    ) -> anyhow::Result<()> {
+    pub(crate) fn write_stdout_styled(&self, text: &text::StyledText) -> anyhow::Result<()> {
         let rendered = text.paint_all(self.stdout_use_color);
         self.sink.write_stdout(rendered.as_bytes())
     }

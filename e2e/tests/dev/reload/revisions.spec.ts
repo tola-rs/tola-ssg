@@ -2,14 +2,14 @@ import { expect, test } from '@playwright/test'
 import {
   currentRevision,
   expectReloads,
+  fulfillCss,
+  fulfillHtml,
   modifiedOutput,
   reloadDocument,
   sendRevision,
   serveDocument,
   type TolaRuntime,
   type TolaWindow,
-  fulfillHtml,
-  fulfillCss,
 } from '../../../support/reload.ts'
 
 declare global {
@@ -172,8 +172,10 @@ test.describe('development revision protocol', () => {
       fragment.textContent = "window.fragmentExecutions = (window.fragmentExecutions || 0) + 1;";
       document.head.appendChild(fragment);
     </script>`
-    await page.route('https://early-fragment.test/**', (route) =>
-      fulfillHtml(route, reloadDocument({ head, body: '<main>Canonical page</main>' })))
+    await page.route(
+      'https://early-fragment.test/**',
+      (route) => fulfillHtml(route, reloadDocument({ head, body: '<main>Canonical page</main>' })),
+    )
     await page.goto('https://early-fragment.test/index.html', { waitUntil: 'load' })
 
     expect(

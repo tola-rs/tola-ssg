@@ -2,7 +2,6 @@
 
 use std::error::Error;
 
-use crate::recipe::OutputFormat;
 use crate::{ImageCancelled, ImageFormat};
 
 /// The result of one image operation.
@@ -38,12 +37,6 @@ pub enum ImageError {
     /// The operation works on raster images only.
     #[error("{}", needs_raster_sentence())]
     NeedsRaster,
-    /// This build does not encode the requested format.
-    #[error("{}", encoding_unavailable_sentence(format))]
-    EncodingUnavailable {
-        /// The requested output format.
-        format: OutputFormat,
-    },
     /// Anything else: bytes Tola cannot read, a damaged container, a codec's own refusal.
     #[error("{reason}")]
     Decode {
@@ -82,7 +75,6 @@ impl ImageError {
             Self::Reexport { format, problem } => reexport_note(format, problem),
             Self::TooLarge { limit, allowed, .. } => too_large_note(limit, allowed),
             Self::NeedsRaster => needs_raster_note().to_owned(),
-            Self::EncodingUnavailable { format } => encoding_unavailable_note(format),
             Self::Decode { reason, .. } => reason.to_string(),
             Self::Cancelled(cancelled) => cancelled.to_string(),
         }
@@ -94,7 +86,6 @@ impl ImageError {
             Self::Reexport { problem, .. } => Some(reexport_help(problem)),
             Self::TooLarge { limit, allowed, .. } => Some(too_large_help(limit, allowed)),
             Self::NeedsRaster => Some(needs_raster_help().to_owned()),
-            Self::EncodingUnavailable { .. } => Some(encoding_unavailable_help().to_owned()),
             Self::Decode { .. } | Self::Cancelled(_) => None,
         }
     }
@@ -188,21 +179,6 @@ fn needs_raster_help() -> &'static str {
     "use a PNG, JPEG, WebP, GIF, or BMP image"
 }
 
-fn encoding_unavailable_sentence(format: &OutputFormat) -> String {
-    encoding_unavailable_note(format)
-}
-
-fn encoding_unavailable_note(format: &OutputFormat) -> String {
-    format!(
-        "{} encoding is not enabled in this build",
-        output_name(*format)
-    )
-}
-
-fn encoding_unavailable_help() -> &'static str {
-    "use a build with that encoding enabled, or choose another `format`"
-}
-
 /// The short name one source container has in a sentence.
 fn source_name(format: ImageFormat) -> &'static str {
     match format {
@@ -212,16 +188,6 @@ fn source_name(format: ImageFormat) -> &'static str {
         ImageFormat::Gif => "GIF",
         ImageFormat::Bmp => "BMP",
         ImageFormat::Svg => "SVG",
-    }
-}
-
-/// The short name one requested output format has in a sentence.
-fn output_name(format: OutputFormat) -> &'static str {
-    match format {
-        OutputFormat::Auto => "automatic",
-        OutputFormat::Jpeg => "JPEG",
-        OutputFormat::Png => "PNG",
-        OutputFormat::WebP => "WebP",
     }
 }
 

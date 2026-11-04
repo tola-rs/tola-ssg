@@ -1,6 +1,7 @@
 # Two groups per ecosystem keep the PR count flat: `*-minor-patch` is the lane
 # .github/workflows/dependabot-auto-merge.yml merges once Check is green, `*-major`
 # is reviewed by hand. Order matters, Dependabot assigns the first matching group.
+# Open bumps never rebase on a base-branch update; only the monthly run moves a pull request.
 version: 2
 updates:
   # `directory: "/"` does not reach .github/actions/setup-typescript, hence the glob entry.
@@ -12,6 +13,7 @@ updates:
       interval: monthly
       time: "09:00"
       timezone: Asia/Shanghai # matches this repository's commit times (UTC+8)
+    rebase-strategy: disabled
     cooldown:
       default-days: 7 # a week of soak instead of the 3-day default
     groups:
@@ -28,6 +30,7 @@ updates:
     directory: "/"
     schedule:
       interval: monthly
+    rebase-strategy: disabled
     cooldown:
       default-days: 7
     versioning-strategy: lockfile-only
@@ -49,6 +52,7 @@ updates:
     directory: "/"
     schedule:
       interval: monthly
+    rebase-strategy: disabled
     cooldown:
       default-days: 7
     groups:
@@ -64,6 +68,7 @@ updates:
     directory: "/extensions/vscode"
     schedule:
       interval: monthly
+    rebase-strategy: disabled
     cooldown:
       default-days: 7
     versioning-strategy: increase-if-necessary
@@ -80,6 +85,7 @@ updates:
     directory: "/"
     schedule:
       interval: monthly
+    rebase-strategy: disabled
     cooldown:
       default-days: 7
     groups:

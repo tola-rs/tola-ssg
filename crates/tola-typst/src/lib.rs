@@ -16,6 +16,8 @@ pub mod spelling;
 pub mod svg;
 pub mod world;
 
+#[cfg(feature = "network")]
+mod download;
 mod extract;
 mod session;
 

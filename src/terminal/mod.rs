@@ -2,9 +2,9 @@
 
 pub(crate) mod ansi;
 pub(crate) mod clipboard;
-mod console;
 pub(crate) mod code;
 pub(crate) mod color;
+mod console;
 pub(crate) mod development;
 mod diagnostic;
 mod hooks;
@@ -58,4 +58,3 @@ pub(crate) fn append_indent(output: &mut String, level: usize) {
         output.push_str(INDENT_UNIT);
     }
 }
-

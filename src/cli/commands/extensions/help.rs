@@ -261,4 +261,3 @@ pub(super) fn signature_command(
     }
     command
 }
-

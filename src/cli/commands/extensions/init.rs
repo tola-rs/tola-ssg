@@ -41,4 +41,3 @@ pub(super) fn run_initializer(
     let args = crate::cli::args::InitArgs::from_arg_matches(&matches)?;
     super::super::init::run(&args, scope, output, cancellation)
 }
-

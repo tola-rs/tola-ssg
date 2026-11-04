@@ -3,7 +3,10 @@ name = "tola-nu"
 version.workspace = true
 edition = "2024"
 rust-version.workspace = true
+description = "Embedded Nushell runtime for Tola"
 license = "MIT"
+repository = "https://github.com/tola-rs/tola-ssg"
+documentation = "https://docs.rs/tola-nu"
 
 [dependencies]
 anyhow = "1.0.104"

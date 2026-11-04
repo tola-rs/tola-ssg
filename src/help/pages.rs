@@ -13,10 +13,10 @@ use tola_build::config::section::{
 use tola_diagnostic::{Diagnostic, DiagnosticCode, DiagnosticError, Severity};
 use tola_packages::{ExportDeclaration, RelatedTarget, Signature};
 
+use super::documentation::Documentation;
 use crate::config::{DevConfig, DiagnosticsConfig, ServerConfig};
 use crate::help::model::{Anchor, HelpCategory, HelpPage, LinkTarget, PageId, anchor};
 use crate::i18n::{HelpLanguage, HelpText, PackageTranslations};
-use super::documentation::Documentation;
 
 struct ConfigTable {
     section: &'static str,

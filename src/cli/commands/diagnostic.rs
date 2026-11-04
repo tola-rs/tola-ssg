@@ -62,7 +62,10 @@ pub(in crate::cli) fn render(output: &CommandOutput) -> Result<()> {
         .read_to_string(&mut input)
         .context("read diagnostic JSON from stdin")?;
     let issues = match serde_json::from_str::<Input>(&input).context("parse diagnostic JSON")? {
-        Input::List(issues) | Input::Report { diagnostics: issues } => issues,
+        Input::List(issues)
+        | Input::Report {
+            diagnostics: issues,
+        } => issues,
     };
     if issues.is_empty() {
         return Ok(());

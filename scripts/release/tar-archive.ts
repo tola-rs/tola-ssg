@@ -3,7 +3,7 @@ import { createReadStream, createWriteStream } from 'node:fs'
 import { Transform, type TransformCallback } from 'node:stream'
 import { finished, pipeline } from 'node:stream/promises'
 import { createGunzip, createGzip } from 'node:zlib'
-import { extract, type Headers, pack } from 'tar-stream'
+import { extract, pack } from 'tar-stream'
 import { COPY_SIZE, exactFileNumber, openRegularFile, type OpenReleaseFile } from './packaging-file.ts'
 import type { Target } from './targets.ts'
 
@@ -311,7 +311,7 @@ export async function licenseArchiveMembers(
 ): Promise<string[]> {
   const names: string[] = []
   const extractor = extract()
-  extractor.on('entry', (header: Headers, stream: NodeJS.ReadableStream, next: () => void) => {
+  extractor.on('entry', (header, stream, next) => {
     names.push(header.name)
     stream.on('end', next)
     stream.resume()

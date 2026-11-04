@@ -59,11 +59,6 @@ export interface Carried {
   readonly bytes: Uint8Array
 }
 
-/** The member name tar-stream presents for one archive entry. */
-interface TarEntry {
-  readonly name: string
-}
-
 /** The typst-assets version and checksum the workspace locks. */
 export function pinned(lock: string): { version: string; sha256: string } {
   const entry = lock.match(
@@ -94,8 +89,10 @@ async function untar(archive: Uint8Array): Promise<Map<string, Uint8Array>> {
   const { promise, resolve, reject } = Promise.withResolvers<void>()
   extractor.on('finish', () => resolve())
   extractor.on('error', reject)
-  extractor.on('entry', (header: TarEntry, stream: Readable, next: () => void) => {
-    collect(stream).then((bytes) => {
+  extractor.on('entry', (header, stream, next) => {
+    // tar-stream 3.2.2 types its entry streams as streamx Readable, which is the same event
+    // API as node's Readable but a different declaration.
+    collect(stream as unknown as Readable).then((bytes) => {
       members.set(header.name, bytes)
       next()
     }, reject)
