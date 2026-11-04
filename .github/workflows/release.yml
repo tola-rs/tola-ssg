@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag matching the workspace version (e.g. v0.8.0 or v0.8.0-pre.1)."
+        description: "Release tag matching the workspace version, with or without a prerelease suffix."
         required: true
         type: string
       mode:

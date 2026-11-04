@@ -9556,7 +9556,7 @@ dependencies = [
 
 [[package]]
 name = "tola"
-version = "0.8.1"
+version = "0.8.2-pre.1"
 dependencies = [
  "anstream",
  "anstyle-parse",
@@ -9627,7 +9627,7 @@ dependencies = [
 
 [[package]]
 name = "tola-address"
-version = "0.8.1"
+version = "0.8.2-pre.1"
 dependencies = [
  "caseless",
  "percent-encoding",
@@ -9641,7 +9641,7 @@ dependencies = [
 
 [[package]]
 name = "tola-build"
-version = "0.8.1"
+version = "0.8.2-pre.1"
 dependencies = [
  "anyhow",
  "atom_syndication",
@@ -9693,7 +9693,7 @@ dependencies = [
 
 [[package]]
 name = "tola-config"
-version = "0.8.1"
+version = "0.8.2-pre.1"
 dependencies = [
  "rustc-hash",
  "serde",
@@ -9704,7 +9704,7 @@ dependencies = [
 
 [[package]]
 name = "tola-config-macros"
-version = "0.8.1"
+version = "0.8.2-pre.1"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -9714,7 +9714,7 @@ dependencies = [
 
 [[package]]
 name = "tola-datalog"
-version = "0.8.1"
+version = "0.8.2-pre.1"
 dependencies = [
  "smallvec",
  "thiserror 2.0.21",
@@ -9722,7 +9722,7 @@ dependencies = [
 
 [[package]]
 name = "tola-diagnostic"
-version = "0.8.1"
+version = "0.8.2-pre.1"
 dependencies = [
  "anyhow",
  "schemars",
@@ -9735,7 +9735,7 @@ dependencies = [
 
 [[package]]
 name = "tola-highlight"
-version = "0.8.1"
+version = "0.8.2-pre.1"
 dependencies = [
  "syntect",
  "two-face",
@@ -9744,7 +9744,7 @@ dependencies = [
 
 [[package]]
 name = "tola-icons"
-version = "0.8.1"
+version = "0.8.2-pre.1"
 dependencies = [
  "cssparser",
  "cssparser-color",
@@ -9758,7 +9758,7 @@ dependencies = [
 
 [[package]]
 name = "tola-image"
-version = "0.8.1"
+version = "0.8.2-pre.1"
 dependencies = [
  "anyhow",
  "crc32fast",
@@ -9779,7 +9779,7 @@ dependencies = [
 
 [[package]]
 name = "tola-lsp"
-version = "0.8.1"
+version = "0.8.2-pre.1"
 dependencies = [
  "anyhow",
  "biblatex",
@@ -9810,7 +9810,7 @@ dependencies = [
 
 [[package]]
 name = "tola-minify"
-version = "0.8.1"
+version = "0.8.2-pre.1"
 dependencies = [
  "lightningcss",
  "oxc",
@@ -9819,7 +9819,7 @@ dependencies = [
 
 [[package]]
 name = "tola-nu"
-version = "0.8.1"
+version = "0.8.2-pre.1"
 dependencies = [
  "anyhow",
  "blake3",
@@ -9855,7 +9855,7 @@ dependencies = [
 
 [[package]]
 name = "tola-packages"
-version = "0.8.1"
+version = "0.8.2-pre.1"
 dependencies = [
  "anyhow",
  "blake3",
@@ -9883,14 +9883,14 @@ dependencies = [
 
 [[package]]
 name = "tola-pronunciations"
-version = "0.8.1"
+version = "0.8.2-pre.1"
 dependencies = [
  "ruzstd",
 ]
 
 [[package]]
 name = "tola-slugify"
-version = "0.8.1"
+version = "0.8.2-pre.1"
 dependencies = [
  "deunicode",
  "proptest",
@@ -9900,7 +9900,7 @@ dependencies = [
 
 [[package]]
 name = "tola-subprocess"
-version = "0.8.1"
+version = "0.8.2-pre.1"
 dependencies = [
  "libc",
  "process-wrap",
@@ -9911,7 +9911,7 @@ dependencies = [
 
 [[package]]
 name = "tola-typst"
-version = "0.8.1"
+version = "0.8.2-pre.1"
 dependencies = [
  "blake3",
  "comemo",
@@ -9941,7 +9941,7 @@ dependencies = [
 
 [[package]]
 name = "tola-typst-syntax"
-version = "0.8.1"
+version = "0.8.2-pre.1"
 dependencies = [
  "serde",
  "thiserror 2.0.21",
@@ -9952,7 +9952,7 @@ dependencies = [
 
 [[package]]
 name = "tola-webp"
-version = "0.8.1"
+version = "0.8.2-pre.1"
 dependencies = [
  "fearless_simd 1.0.0",
  "image",

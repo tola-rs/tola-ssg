@@ -25,6 +25,3 @@ test:
 
 # Check and test the published Windows target.
 msvc: (check 'x86_64-pc-windows-msvc') test
-
-# Cross-check the GNU target; releases ship MSVC only.
-gnu: (check 'x86_64-pc-windows-gnu')

@@ -16,7 +16,7 @@ let
     ../Cargo.lock
     ../src
     ../crates
-    ../.agents/skills/tola/SKILL.md
+    ../TOLA-SKILL.md
   ];
   src = lib.fileset.toSource {
     root = ../.;
