@@ -102,9 +102,8 @@ output paths they use. For example, this converts the discovered segments to def
 #let outputs = all-sources().map(source => output-of(join-route(source.route-segments)))
 ```
 
-For example, the `tola init` scaffold's `select-pages` validates metadata, drops sources that
-declare `draft: true`, and slugifies each source's default `route-segments` field into the final
-route; these policies are yours to define and handle. Its schema parses `permalink` with
+A site that validates metadata can drop drafts and slugify each source's `route-segments` in its
+entry; these policies are yours to define and handle. A schema parses `permalink` with
 `url-path`, so the selected metadata already holds a decoded route. That route overrides the
 file layout, keeping the URL unchanged when the source moves.
 

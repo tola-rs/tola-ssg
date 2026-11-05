@@ -395,7 +395,7 @@ a page imports it to produce a document or another output.
 trees = [{ source = \"static/web-assets\", url-prefix = \"/assets\" }]
 ```
 
-Every page links it in its head (`site/page.typ` and `site/not-found.typ`):
+Every page links it in its head (`site.typ` or a page template):
 
 ```typst
 #html.link(rel: \"stylesheet\", href: asset-url(\"/assets/tailwind-output/site.css\"))

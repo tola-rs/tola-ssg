@@ -322,7 +322,7 @@ async function writeContentFile(
   await writeFile(contentPath, source)
 }
 
-/** Empties the content root: the scaffold ships a first source, and no initial content means none. */
+/** Empties the content root: no initial content means an empty directory. */
 async function emptyContentRoot(siteRoot: string, contentRoot: string): Promise<void> {
   const directory = resolveSiteRelative(siteRoot, contentRoot, 'content root')
   await rm(directory, { recursive: true, force: true })

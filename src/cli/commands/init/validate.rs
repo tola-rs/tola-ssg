@@ -25,7 +25,7 @@ pub(super) fn scaffold(writes: &FileWrites, force: bool) -> Result<()> {
 /// The conflict a real run reports before it asks anything: the target policy alone, then the
 /// first scaffold file that already exists.
 ///
-/// The staged set is the built-in starter.
+/// The staged set is the built-in site.
 pub(super) fn preflight(root: &Path, force: bool) -> Result<()> {
     let directory_refused = refuses(root, force)?;
     let existing = first_existing_file(root)?;

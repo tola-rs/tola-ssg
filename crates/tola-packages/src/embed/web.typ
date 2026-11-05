@@ -479,16 +479,16 @@
 /// )
 /// ```
 ///
-/// The starter's `site/seo.typ` maps source metadata `feed-summary` to an entry's `summary`, and
-/// `feed-content` to its `content`. When `feed-content` is omitted or `none`, that recipe selects
-/// the page's whole body. Setting only `feed-summary` therefore still publishes full-text RSS.
-/// For an excerpt-only feed, change that recipe to pass `content: none`.
+/// A site that publishes feeds maps source metadata to each entry: `feed-summary` to `summary`
+/// and `feed-content` to `content`. An entry without `content` publishes no full-text body, so
+/// a summary alone makes an excerpt-only entry. To publish the whole page, pass a document
+/// selection as `content`.
 ///
-/// Example - give a starter page a separate, portable feed body:
+/// Example - give a page a separate, portable feed body:
 ///
-/// In a site created with the `feed` feature, put this declaration at the start of
-/// `content/note.typ`, followed by the page's normal body. Set `site.origin` and `site.title` for
-/// the starter's feed output. `feed-content` below uses only the supported text fragment elements.
+/// Put this declaration at the start of `content/note.typ`, followed by the page's normal body.
+/// Set `site.origin` and `site.title` so every entry has an absolute URL and a non-blank title.
+/// `feed-content` below uses only the supported text fragment elements.
 ///
 /// ```typst site
 /// #import "@tola/source:0.0.0": tola-meta

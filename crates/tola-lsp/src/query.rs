@@ -1157,7 +1157,7 @@ mod tests {
         }
     }
 
-    /// The scaffold-shaped site program: records parsed against a schema, then filtered.
+    /// A site program that parses records against a schema, then filters drafts.
     pub(crate) fn parsed_program(schema: &str) -> String {
         format!(
             r#"#import "@tola/source:0.0.0": all-sources, parse-sources
@@ -1176,7 +1176,7 @@ mod tests {
         )
     }
 
-    /// The scaffold program with a third declared field, so a `#tola-meta` key has a declaration
+    /// The same program with a third declared field, so a `#tola-meta` key has a declaration
     /// whose line and description an answer has.
     pub(crate) fn summary_program() -> String {
         parsed_program(&format!(
@@ -1184,11 +1184,11 @@ mod tests {
         ))
     }
 
-    /// The schema the scaffold writes for the two fields a metadata chain reads.
+    /// The schema that program writes for the two fields a metadata chain reads.
     pub(crate) const PAGE_SCHEMA: &str = "  title: describe(optional(str, default: \"Untitled\"), \"the page title\"),\n  draft: describe(optional(bool, default: false), \"keeps the page out of the published site\"),";
 
-    /// One content page whose metadata the scaffold's schema resolves, with the binding a chain
-    /// points at.
+    /// One content page whose metadata that schema resolves, with the binding a chain points
+    /// at.
     pub(crate) const SCHEMA_PAGE: &str = r#"#import "@tola/source:0.0.0": tola-meta
 #tola-meta((title: "Page"))
 #let page = (title: "Page")

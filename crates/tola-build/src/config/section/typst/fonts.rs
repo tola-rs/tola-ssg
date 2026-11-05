@@ -32,7 +32,7 @@ impl FontsConfig {
     /// What `tola help "[typst.fonts]"` adds under its table.
     pub const HELP: &'static str = "\
 Compiler fonts lay out and export Typst content; their files are not published. `paths` lists
-site-relative directories to search recursively. The scaffold's directory is the default:
+site-relative directories to search recursively. The default is `static/typst-fonts`:
 
 ```toml
 [typst.fonts]

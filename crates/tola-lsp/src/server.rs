@@ -57,7 +57,7 @@ pub(crate) mod tests {
 
         use crate::{position, uri};
 
-        /// The scaffold-shaped entry program: every content file becomes one page.
+        /// The entry program: every content file becomes one page.
         pub(crate) const ENTRY_PROGRAM: &str = r#"#import "@tola/source:0.0.0": all-sources
 #import "@tola/site:0.0.0": site
 #import "@tola/address:0.0.0": decode-url-path, join-route, output-of, slugify

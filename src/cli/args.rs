@@ -412,7 +412,7 @@ pub struct InitArgs {
     #[arg(long, value_name = "NAME", requires = "from")]
     pub alias: Option<String>,
 
-    /// Confirm the starter or enable the module's interactive setup.
+    /// Confirm the files to write or enable the module's interactive setup.
     #[arg(short = 'i', long)]
     pub interactive: bool,
 
