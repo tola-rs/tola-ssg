@@ -2,7 +2,7 @@
 
 use super::{
     Assets, Command, CommandAction, Entry, Initializer, ManifestEvidence, ModuleDeclaration,
-    ModuleSource, OptionsSchema, Query, QueryFormat, hooks, is_relative_path, semantics,
+    ModuleSource, OptionsSchema, Query, QueryFormat, Skill, hooks, is_relative_path, semantics,
     valid_name,
 };
 use crate::InputScope;
@@ -40,6 +40,8 @@ pub(super) struct Manifest {
     pub(super) commands: BTreeMap<String, Command>,
     #[serde(default)]
     pub(super) init: Option<Initializer>,
+    #[serde(default)]
+    pub(super) skill: Option<Skill>,
     #[serde(default)]
     pub(super) hooks: Vec<hooks::ModuleHook>,
 }
@@ -285,6 +287,8 @@ pub enum ManifestError {
     CommandUnknownQuery { command: String, query: String },
     #[error("command `{command}` has an empty projection field")]
     CommandProjection { command: String },
+    #[error("command `{command}` needs a `[skill]` table")]
+    CommandMissingSkill { command: String },
     #[error("Tola could not read the initializer's module directory")]
     InitializerRoot {
         #[source]
@@ -481,6 +485,10 @@ pub(super) fn read_one(
         }
         relative(&query.entry, format!("query {query_label} entry"))?;
     }
+    if let Some(skill) = &manifest.skill {
+        relative(&skill.path, "skill.path".to_owned())?;
+        super::validate_module_path(&site, name, &root, &skill.path, false)?;
+    }
     semantics::validate(
         &manifest.semantics,
         manifest.typst.is_some(),
@@ -531,6 +539,13 @@ pub(super) fn read_one(
                 }
                 if !projection.iter().all(|field| !field.is_empty()) {
                     return Err(ManifestError::CommandProjection {
+                        command: command_label,
+                    });
+                }
+            }
+            CommandAction::Skill => {
+                if manifest.skill.is_none() {
+                    return Err(ManifestError::CommandMissingSkill {
                         command: command_label,
                     });
                 }

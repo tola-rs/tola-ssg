@@ -462,6 +462,13 @@ pub struct Assets {
     pub directory: PathBuf,
 }
 
+/// A module-authored authoring guide, printed by a `skill` command.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Skill {
+    pub path: PathBuf,
+}
+
 /// A private metadata query declared by a module.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
@@ -512,6 +519,7 @@ pub enum CommandAction {
         #[serde(default)]
         projection: Vec<String>,
     },
+    Skill,
 }
 
 pub mod manifest;
@@ -693,6 +701,7 @@ pub struct ModuleCommands {
     pub summary: String,
     pub commands: BTreeMap<String, Command>,
     pub initializer: Option<Initializer>,
+    pub skill: Option<PathBuf>,
 }
 
 /// Command declarations remain available when unrelated build inputs need repair.
@@ -704,6 +713,11 @@ pub fn resolve_command_modules(
     Ok(manifest::read_selected(site_root, declarations, scope)?
         .into_iter()
         .map(|(name, loaded)| {
+            let skill = loaded
+                .manifest
+                .skill
+                .as_ref()
+                .map(|skill| loaded.root.join(&skill.path));
             (
                 name.clone(),
                 ModuleCommands {
@@ -713,6 +727,7 @@ pub fn resolve_command_modules(
                     summary: loaded.manifest.summary,
                     commands: loaded.manifest.commands,
                     initializer: loaded.manifest.init,
+                    skill,
                 },
             )
         })

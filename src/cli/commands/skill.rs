@@ -23,14 +23,24 @@ struct Section {
     own_end: usize,
 }
 
+pub(in crate::cli) fn run_builtin(
+    args: &SkillArgs,
+    output: &CommandOutput,
+    cancellation: &Cancellation,
+) -> Result<()> {
+    run(SKILL, "tola skill", args, output, cancellation)
+}
+
 pub(in crate::cli) fn run(
+    source: &str,
+    command: &str,
     args: &SkillArgs,
     output: &CommandOutput,
     cancellation: &Cancellation,
 ) -> Result<()> {
     let cancellation = cancellation.token();
     cancellation.ensure_active()?;
-    let markdown = requested(SKILL, args)?;
+    let markdown = requested(source, command, args)?;
     let Some(path) = &args.output else {
         destination::start(output, &cancellation)?;
         return output.write_stdout(markdown);
@@ -47,13 +57,14 @@ pub(in crate::cli) fn run(
     destination::start(output, &cancellation)?;
     writes.apply(&cancellation)?;
     output.status(format!(
-        "Wrote Tola skill to {}",
+        "Wrote {} to {}",
+        command,
         display_path_as_given(path)
     ))?;
     Ok(())
 }
 
-fn requested(source: &str, args: &SkillArgs) -> Result<String> {
+fn requested(source: &str, command: &str, args: &SkillArgs) -> Result<String> {
     let sections = sections(source);
     let path: Vec<String> = args
         .sections
@@ -79,7 +90,7 @@ fn requested(source: &str, args: &SkillArgs) -> Result<String> {
                     Severity::Error,
                     message.clone(),
                 )
-                .with_help("Run `tola skill --list` and choose a listed section");
+                .with_help(format!("Run {command} --list and choose a listed section"));
                 DiagnosticError::new(message, vec![diagnostic])
             })?;
         (section.range.start, section.range.end, section.own_end)
@@ -107,7 +118,7 @@ fn requested(source: &str, args: &SkillArgs) -> Result<String> {
         first = false;
         let indent = "  ".repeat(depth - path.len() - 1);
         markdown.push_str(&format!(
-            "{indent}- `tola skill {}` — {}\n",
+            "{indent}- `{command} {}` — {}\n",
             section.path.join(" "),
             section.title,
         ));
@@ -238,7 +249,7 @@ Two
             else {
                 panic!("expected skill request");
             };
-            assert!(!requested(SKILL, &args).unwrap().is_empty());
+            assert!(!requested(SKILL, "tola skill", &args).unwrap().is_empty());
         }
     }
 
@@ -249,12 +260,13 @@ Two
             sections: vec!["math".into(), "rendering".into()],
             ..Default::default()
         };
-        let overview = requested(source, &args).unwrap();
+        let overview = requested(source, "tola skill", &args).unwrap();
         assert!(overview.contains("Browser"));
         assert!(overview.contains("tola skill math rendering svg"));
         assert!(!overview.contains("Artwork"));
         let complete = requested(
             source,
+            "tola skill",
             &SkillArgs {
                 all: true,
                 ..args.clone()
@@ -263,16 +275,17 @@ Two
         .unwrap();
         assert!(complete.contains("Artwork"));
         assert!(!complete.contains("Targets"));
-        let index = requested(source, &SkillArgs { list: true, ..args }).unwrap();
+        let index = requested(source, "tola skill", &SkillArgs { list: true, ..args }).unwrap();
         assert!(index.contains("tola skill math rendering svg"));
         assert!(!index.contains("Browser"));
-        let root = requested(source, &SkillArgs::default()).unwrap();
+        let root = requested(source, "tola skill", &SkillArgs::default()).unwrap();
         assert!(root.contains("Core"));
         assert!(root.contains("tola skill math"));
         assert!(!root.contains("Common"));
         assert!(
             requested(
                 source,
+                "tola skill",
                 &SkillArgs {
                     sections: vec!["math".into(), "missing".into()],
                     ..Default::default()

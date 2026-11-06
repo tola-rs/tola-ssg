@@ -10,6 +10,7 @@ use tola_build::InputScope;
 use tola_build::modules::{CommandAction, ModuleCommands};
 
 use super::argv::expand;
+use crate::cli::args::{GlobalArgs, SkillArgs};
 
 pub(super) fn is_help(arguments: &[OsString]) -> bool {
     arguments.len() == 1 && (arguments[0] == "--help" || arguments[0] == "-h")
@@ -45,7 +46,7 @@ pub(super) fn namespace_command(
                 .about(description.lines().next().unwrap_or("").to_owned()),
         );
     }
-    command
+    GlobalArgs::augment(command)
 }
 
 pub(super) fn namespace_help(
@@ -172,8 +173,14 @@ pub(super) fn command_help(
                 .allow_hyphen_values(true)
                 .help("Arguments passed to the command"),
         ),
+        CommandAction::Skill => SkillArgs::augment_args(command),
     };
     render_help(command, use_color, long)
+}
+
+pub(super) fn skill_command(module: &ModuleCommands, name: &str) -> clap::Command {
+    let command = clap::Command::new(name.to_owned()).bin_name(format!("tola {} {name}", module.name));
+    SkillArgs::augment_args(command)
 }
 
 pub(super) fn signature_command(
