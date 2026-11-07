@@ -10,13 +10,14 @@ pub mod site;
 pub mod typst;
 pub mod vendor;
 
+pub use crate::inputs::Sha256Digest;
 pub use assets::{
     AssetFileDeclaration, AssetTreeDeclaration, AssetUrl, AssetUrlError, AssetUrlPrefix,
     AssetsConfig,
 };
 pub use build::BuildSectionConfig;
 pub use formatter::FormatterConfig;
-pub use icons::{IconCollectionSource, IconsConfig, Sha256Digest};
+pub use icons::{IconCollectionSource, IconsConfig};
 pub use site::{SiteAuthor, SiteSectionConfig};
 pub use typst::{FontsConfig, TypstSectionConfig};
 pub use vendor::VendorConfig;

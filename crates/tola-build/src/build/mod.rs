@@ -135,6 +135,12 @@ pub(crate) mod tests {
         std::fs::write(log, format!("{runs}run\n")).unwrap();
     }
 
+    /// Install a built site's caches as the session's accepted baseline.
+    pub(super) fn accept_build(session: &mut BuildSession, build: SiteBuild) {
+        let checked = check_fresh(build.into_unchecked_revision(None));
+        session.install_revision(checked, |_| Ok(())).unwrap();
+    }
+
     /// Re-executed by hook environment tests as the command's child process.
     #[test]
     fn child_records_hook_environment() {
@@ -163,12 +169,6 @@ pub(crate) mod tests {
             .unwrap()
             .into_checked()
             .unwrap()
-    }
-
-    /// Install a built site's caches as the session's accepted baseline.
-    pub(super) fn accept_build(session: &mut BuildSession, build: SiteBuild) {
-        let checked = check_fresh(build.into_unchecked_revision(None));
-        session.install_revision(checked, |_| Ok(())).unwrap();
     }
 
     /// Install a candidate built outside `session`, attributing it to that session.

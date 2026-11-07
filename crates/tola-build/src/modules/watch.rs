@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
+use crate::inputs::InputMode;
 use crate::{InputScope, config::ResolvedSiteConfig};
 
 /// Conservative paths declared by hooks that may run in development.
@@ -51,9 +52,10 @@ impl PreparedHookWatch {
 /// Freeze the module configuration and derive development watch paths without running commands.
 pub fn prepare_hook_watch(
     config: &ResolvedSiteConfig,
-    scope: InputScope,
+    mode: InputMode,
+    cancellation: &crate::cancellation::BuildCancellation,
 ) -> Result<PreparedHookWatch> {
-    let config = Arc::new(super::prepared::configure(config, scope)?);
+    let config = Arc::new(super::prepared::configure(config, mode, cancellation)?);
     let mut inputs = HookWatchInputs::default();
     for module in config.module_inputs.configured.values() {
         super::hooks::watch_inputs(
@@ -70,7 +72,7 @@ pub fn prepare_hook_watch(
     Ok(PreparedHookWatch {
         config,
         inputs,
-        scope,
+        scope: mode.scope(),
     })
 }
 
@@ -92,7 +94,6 @@ mod tests {
         fs::write(
             &manifest,
             r#"
-schema-version = 1
 [[hooks]]
 stage = "before-build"
 name = "conditional"
@@ -110,7 +111,12 @@ rerun-on = [{project = "not-watched"}]
         .unwrap();
         let config =
             crate::config::tests::load_test_config(root, "[modules.notes]\npath=\"module\"\n");
-        let prepared = prepare_hook_watch(&config, InputScope::Online).unwrap();
+        let prepared = prepare_hook_watch(
+            &config,
+            InputMode::new(InputScope::Online, false),
+            &Default::default(),
+        )
+        .unwrap();
         assert!(
             prepared
                 .inputs()
@@ -143,7 +149,7 @@ rerun-on = [{project = "not-watched"}]
         let attempt = session
             .prepare_with_hook_watch(&prepared, BuildRequest::default())
             .unwrap();
-        fs::write(&manifest, "schema-version = 1\n# changed before hook\n").unwrap();
+        fs::write(&manifest, "# changed before hook\n").unwrap();
         let Err(failure) = attempt.run() else {
             panic!("a changed manifest must invalidate the prepared attempt");
         };
@@ -155,7 +161,12 @@ rerun-on = [{project = "not-watched"}]
     fn prepared_cannot_cross_input_scope() {
         let site = tempfile::tempdir().unwrap();
         let config = crate::config::tests::load_test_config(site.path(), "");
-        let prepared = prepare_hook_watch(&config, InputScope::Online).unwrap();
+        let prepared = prepare_hook_watch(
+            &config,
+            InputMode::new(InputScope::Online, false),
+            &Default::default(),
+        )
+        .unwrap();
         let mut pure = BuildSession::with_resources(
             crate::BuildResources::new().with_input_scope(InputScope::Pure),
         );

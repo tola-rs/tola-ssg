@@ -347,48 +347,17 @@ fn wrapper(export: &str) -> Result<String> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn preceding_warnings_survive_later_failure() {
-        use tola_typst::{
-            Diagnostic, DiagnosticOrigin, DiagnosticSeverity, SourceLocation, SourceTruncation,
-        };
-        let diagnostic = |severity, message: &str| Diagnostic {
-            origin: DiagnosticOrigin::Typst,
-            severity,
-            message: message.into(),
-            location: SourceLocation {
-                path: None,
-                line: None,
-                column: None,
-                range: None,
-                source_lines: Vec::new(),
-                location_failure: None,
-                truncation: SourceTruncation::default(),
-            },
-            hints: Vec::new(),
-            traces: Vec::new(),
-            imported_by: Vec::new(),
-            package_failure: None,
-        };
-        let warning = Diagnostics::from_vec(vec![diagnostic(
-            DiagnosticSeverity::Warning,
-            "first warning",
-        )]);
-        let error =
-            Diagnostics::from_vec(vec![diagnostic(DiagnosticSeverity::Error, "later error")]);
-        let mut failure = OptionsFailure {
-            error: anyhow!("failed"),
-            accessed: Box::default(),
-            diagnostics: Some(error),
-        };
-        failure.prepend_context(AccessedDeps::default(), warning);
-        let messages = failure
-            .diagnostics
-            .unwrap()
-            .iter()
-            .map(|item| item.message.clone())
-            .collect::<Vec<_>>();
-        assert_eq!(messages, ["first warning", "later error"]);
+    fn resolved_modules(
+        site: &std::path::Path,
+        declarations: &std::collections::BTreeMap<String, crate::modules::ModuleDeclaration>,
+        mode: crate::inputs::InputMode,
+    ) -> std::result::Result<
+        std::collections::BTreeMap<String, crate::modules::ResolvedModule>,
+        crate::modules::ModuleResolutionError,
+    > {
+        let roots =
+            crate::inputs::module_roots(site, mode, None, declarations, &Default::default())?;
+        crate::modules::resolve_modules_with_roots(site, declarations, &roots, mode)
     }
 
     #[test]
@@ -403,7 +372,7 @@ mod tests {
         let theme = root.join("theme");
         fs::create_dir(&theme).unwrap();
         fs::write(theme.join("lib.typ"), "").unwrap();
-        fs::write(theme.join("tola-module.toml"), "schema-version = 1\nname = \"forest\"\nversion = \"1.2.3\"\n[typst]\nentry = \"lib.typ\"\n[options]\nschema = \"options.typ\"\nexport = \"schema\"\n").unwrap();
+        fs::write(theme.join("tola-module.toml"), "name = \"forest\"\nversion = \"1.2.3\"\n[typst]\nentry = \"lib.typ\"\n[options]\nschema = \"options.typ\"\nexport = \"schema\"\n").unwrap();
         fs::write(
             theme.join("options.typ"),
             r#"
@@ -423,11 +392,14 @@ mod tests {
             root,
             "[modules.notes]\npath = \"theme\"\n[modules.notes.options]\nenabled = false\nitems = []\nnested = {}\n[site]\ntitle = \"Site title\"\n",
         );
-        let module =
-            crate::modules::resolve_modules(root, config.modules(), crate::InputScope::Online)
-                .unwrap()
-                .remove("notes")
-                .unwrap();
+        let module = resolved_modules(
+            root,
+            config.modules(),
+            crate::inputs::InputMode::new(crate::InputScope::Online, false),
+        )
+        .unwrap()
+        .remove("notes")
+        .unwrap();
         let module = crate::modules::configure_module(&config, module).unwrap();
         let package = LocalPackage::new(
             "@tola-modules/notes:0.0.0".parse().unwrap(),

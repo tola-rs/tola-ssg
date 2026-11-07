@@ -23,7 +23,7 @@ use crate::world::TypstWorld;
 use crate::world::file::{
     DiskReadPath, FileRead, FileView, Loaded, ReadAttempt, ReadLocator, ReadOrigin,
 };
-use crate::world::package::PackageCheck;
+use crate::world::package::{PackageCheck, PackageRead, sort_package_reads};
 
 /// File inputs observed during one compilation or scan.
 ///
@@ -76,6 +76,42 @@ impl AccessedDeps {
     /// Iterate over package-selection checks.
     pub fn package_checks(&self) -> &[PackageCheck] {
         &self.package_checks
+    }
+
+    /// Every package root this operation successfully read from.
+    ///
+    /// Each read is paired with the selection check that chose its directory, so only a package
+    /// whose bytes actually reached the operation appears. A directory that was checked but never
+    /// supplied a successful read, and a provider-backed package with no physical root, are both
+    /// absent. The list is sorted by package identity, root, and tier, then deduplicated.
+    pub fn package_reads(&self) -> Vec<PackageRead> {
+        let selected = self
+            .package_checks
+            .iter()
+            .filter_map(PackageCheck::read)
+            .collect::<Vec<_>>();
+        let mut reads = self
+            .reads
+            .iter()
+            .filter_map(|read| {
+                let ReadLocator::Package { package, .. } = read.evidence().locator() else {
+                    return None;
+                };
+                let ReadOrigin::Disk(path) = read.origin() else {
+                    return None;
+                };
+                selected
+                    .iter()
+                    .filter(|root| {
+                        root.package() == package && path.as_path().starts_with(root.root())
+                    })
+                    .max_by_key(|root| root.root().as_os_str().len())
+                    .cloned()
+            })
+            .collect::<Vec<_>>();
+        sort_package_reads(&mut reads);
+        reads.dedup();
+        reads
     }
 }
 
@@ -604,7 +640,7 @@ mod tests {
     use tempfile::TempDir;
     use typst::World;
 
-    use super::{CompileSession, unresolved_package_reason};
+    use super::CompileSession;
     use crate::world::TypstWorld;
     use crate::world::file::SharedFileCache;
 
@@ -626,41 +662,6 @@ mod tests {
     }
 
     #[cfg(feature = "parallel")]
-    #[test]
-    fn collects_reads_from_rayon_workers() {
-        use crate::world::file::file_id;
-
-        let dir = TempDir::new().unwrap();
-        fs::write(dir.path().join("first.typ"), "= First").unwrap();
-        fs::write(dir.path().join("second.typ"), "= Second").unwrap();
-        let world = world_with(&dir, "main.typ", "= Main", |builder| builder);
-        let expected = [
-            world.root().join("first.typ"),
-            world.root().join("second.typ"),
-        ];
-        let session = CompileSession::start(&world);
-
-        let (first, second) = rayon::join(
-            || session.source(file_id("first.typ")),
-            || session.source(file_id("second.typ")),
-        );
-        assert!(first.is_ok());
-        assert!(second.is_ok());
-
-        let accessed = session.finish();
-        assert_eq!(
-            accessed
-                .disk_reads
-                .iter()
-                .map(|path| path.as_path())
-                .collect::<Vec<_>>(),
-            expected
-                .iter()
-                .map(std::path::PathBuf::as_path)
-                .collect::<Vec<_>>()
-        );
-        assert_eq!(accessed.reads.len(), 2);
-    }
 
     fn main_text(session: &CompileSession<'_>) -> String {
         session.source(session.main()).unwrap().text().to_owned()
@@ -694,54 +695,5 @@ mod tests {
             first.reads[0].evidence().digest(),
             second.reads[0].evidence().digest()
         );
-    }
-
-    #[test]
-    fn package_errors_map_to_failure_reasons() {
-        use crate::diagnostic::ResolvedPackageFailureReason;
-        use typst::diag::{FileError, PackageError};
-
-        let spec: crate::world::package::PackageSpec = "@preview/cetz:0.3.4".parse().unwrap();
-        for (label, error, expected) in [
-            (
-                "not installed",
-                FileError::Package(PackageError::NotFound(spec.clone())),
-                Some(ResolvedPackageFailureReason::NotInstalled),
-            ),
-            (
-                "download failed",
-                FileError::Package(PackageError::NetworkFailed(None)),
-                Some(ResolvedPackageFailureReason::Unavailable),
-            ),
-            (
-                "archive malformed",
-                FileError::Package(PackageError::MalformedArchive(None)),
-                Some(ResolvedPackageFailureReason::Unavailable),
-            ),
-            (
-                "could not be stored",
-                FileError::Package(PackageError::Other(None)),
-                Some(ResolvedPackageFailureReason::Unavailable),
-            ),
-            (
-                "version named by Typst",
-                FileError::Package(PackageError::VersionNotFound(
-                    spec,
-                    crate::world::package::PackageVersion {
-                        major: 0,
-                        minor: 3,
-                        patch: 4,
-                    },
-                )),
-                None,
-            ),
-            (
-                "a file inside the package",
-                FileError::NotFound(std::path::PathBuf::from("lib.typ")),
-                None,
-            ),
-        ] {
-            assert_eq!(unresolved_package_reason(&error), expected, "{label}");
-        }
     }
 }

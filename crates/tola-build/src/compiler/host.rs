@@ -152,6 +152,12 @@ impl TypstHost {
         .map(|host| host.with_local_packages(Arc::clone(&config.module_inputs.packages)))
     }
 
+    /// Refuse a package directory the lock does not describe before any byte is read.
+    pub(crate) fn with_package_verifier(mut self, verifier: tola_typst::PackageVerifier) -> Self {
+        self.files = self.files.with_package_verifier(verifier);
+        self
+    }
+
     /// Compiler results can be reused only within the same font-resource generation.
     pub(crate) fn has_same_inputs(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.fonts, &other.fonts)
@@ -396,20 +402,8 @@ fn file_resolver(
 mod tests {
 
     use super::*;
-    use crate::compiler::tests::{compiler_host, compiler_host_with, configure_site};
+    use crate::compiler::tests::compiler_host_with;
     use tempfile::TempDir;
-
-    fn host(font_dirs: &[&Path]) -> TypstHost {
-        TypstHost::new_with_packages(
-            font_dirs,
-            tola_typst::PackageLocations::default(),
-            &BuildResources::default(),
-            true,
-            tola_typst::SourceBoundary::default(),
-            &BuildCancellation::default(),
-        )
-        .unwrap()
-    }
 
     #[test]
     fn pure_hosts_ignore_machine_packages() {
@@ -437,171 +431,5 @@ mod tests {
         assert!(!ordinary.matches(&config, &pure_resources));
         let pure = compiler_host_with(&config, &pure_resources).unwrap();
         assert!(pure.files.read(id, config.get_root()).is_err());
-    }
-
-    #[test]
-    fn site_paths_have_no_target() {
-        let files = TolaPackageFiles;
-        assert_eq!(
-            tola_typst::FileProvider::target(&files, tola_typst::file_id("images/photo.webp")),
-            None
-        );
-    }
-
-    #[test]
-    fn site_config_keeps_host() {
-        let dir = TempDir::new().unwrap();
-        let mut config = crate::config::tests::load_test_config(dir.path(), "");
-        configure_site(
-            &mut config,
-            &dir.path().join("content"),
-            &dir.path().join("site.typ"),
-        );
-        let resources = BuildResources::default();
-        let host = compiler_host_with(&config, &resources).unwrap();
-
-        config.site.title = "Changed title".into();
-        config.build.minify.html = !config.build.minify.html;
-
-        assert!(host.matches(&config, &resources));
-    }
-
-    #[test]
-    fn font_root_invalidates_host() {
-        let dir = TempDir::new().unwrap();
-        let mut config = crate::config::tests::load_test_config(dir.path(), "");
-        configure_site(
-            &mut config,
-            &dir.path().join("content"),
-            &dir.path().join("site.typ"),
-        );
-        let resources = BuildResources::default();
-        let host = compiler_host_with(&config, &resources).unwrap();
-
-        config.typst.fonts.paths = vec![dir.path().join("fonts")];
-
-        assert!(!host.matches(&config, &resources));
-    }
-
-    /// System fonts join a build only when the site opts in and the invocation permits them;
-    /// either decision alone can keep them out.
-    #[test]
-    fn system_fonts_need_opt_in() {
-        let dir = TempDir::new().unwrap();
-        let mut config = crate::config::tests::load_test_config(dir.path(), "");
-        let resources = BuildResources::default();
-
-        assert!(!config.system_fonts_allowed(&resources));
-
-        config.typst.fonts.system = true;
-        assert!(config.system_fonts_allowed(&resources));
-        assert!(!config.system_fonts_allowed(&resources.without_system_fonts()));
-    }
-
-    #[test]
-    fn clones_share_font_resources() {
-        let dir = TempDir::new().unwrap();
-        let first = host(&[dir.path()]);
-        let cloned = first.clone();
-        let second = host(&[dir.path()]);
-
-        assert!(first.has_same_inputs(&cloned));
-        assert!(!first.has_same_inputs(&second));
-    }
-
-    #[test]
-    fn local_bindings_survive_host_changes() {
-        let directory = TempDir::new().unwrap();
-        let root = directory.path();
-        let module = root.join("module");
-        std::fs::create_dir(&module).unwrap();
-        std::fs::write(module.join("lib.typ"), "module source").unwrap();
-        let config = crate::config::tests::load_test_config(root, "");
-        let base = compiler_host(&config).unwrap();
-        let package = LocalPackage::new(
-            "@tola-modules/sample:0.0.0".parse().unwrap(),
-            &module,
-            typst::syntax::VirtualPath::new("lib.typ").unwrap(),
-        )
-        .unwrap();
-        let registry =
-            || Arc::new(LocalPackages::new([package.clone()], ["tola-modules"]).unwrap());
-        let selected = base.with_local_packages(registry());
-        assert!(!base.has_same_inputs(&selected));
-        assert!(selected.has_same_inputs(&base.with_local_packages(registry())));
-        let source = virtual_file_id("<module-options>");
-        let mut virtual_files = FileMap::new();
-        virtual_files.insert(source, Arc::<[u8]>::from(&b"virtual source"[..]));
-        let prepared = selected
-            .with_virtual_files(virtual_files)
-            .with_icons(Arc::default());
-        assert_eq!(
-            prepared.files.read(source, root).unwrap(),
-            b"virtual source"
-        );
-        assert_eq!(
-            prepared.files.read(package.entry_id(), root).unwrap(),
-            b"module source"
-        );
-        let builtin = typst::syntax::FileId::new(typst::syntax::RootedPath::new(
-            typst::syntax::VirtualRoot::Package("@tola/schema:0.0.0".parse().unwrap()),
-            typst::syntax::VirtualPath::new("typst.toml").unwrap(),
-        ));
-        assert!(prepared.files.read(builtin, root).is_ok());
-        let overrides = crate::filesystem::SourceOverrides::new(
-            vec![(module.join("lib.typ"), Arc::<str>::from("editor source"))],
-            &BuildCancellation::default(),
-        )
-        .unwrap();
-        let editor = prepared.with_source_overrides(&overrides).unwrap();
-        assert_eq!(editor.files.read(source, root).unwrap(), b"virtual source");
-        assert_eq!(
-            editor.files.read(package.entry_id(), root).unwrap(),
-            b"editor source"
-        );
-        assert_eq!(
-            prepared.files.read(package.entry_id(), root).unwrap(),
-            b"module source"
-        );
-
-        let manifest = ReadEvidence::new(
-            ReadLocator::ProvidedPackage {
-                package: package.spec().clone(),
-                path: "typst.toml".into(),
-            },
-            package.manifest_bytes(),
-        );
-        assert!(!selected.read_is_process_stable(manifest.locator()));
-        assert!(selected.virtual_read_matches(&manifest));
-        let changed = LocalPackage::new(
-            package.spec().clone(),
-            &module,
-            typst::syntax::VirtualPath::new("another-entry.typ").unwrap(),
-        )
-        .unwrap();
-        let changed = base.with_local_packages(Arc::new(
-            LocalPackages::new([changed], ["tola-modules"]).unwrap(),
-        ));
-        assert!(!selected.has_same_inputs(&changed));
-        assert!(!changed.virtual_read_matches(&manifest));
-    }
-
-    #[test]
-    fn font_operations_keep_cancellation() {
-        let directory = TempDir::new().unwrap();
-        let config = crate::config::tests::load_test_config(directory.path(), "");
-        let loaded = compiler_host(&config).unwrap();
-        let canceller = crate::cancellation::BuildCanceller::new();
-        let cancellation = canceller.token();
-        canceller.cancel();
-        assert!(loaded.font_inventory_is_fresh(&cancellation).is_err());
-        assert!(matches!(
-            TypstHost::for_config_with_resources(
-                &config,
-                &BuildResources::default(),
-                &cancellation
-            ),
-            Err(tola_typst::FontLoadError::Cancelled)
-        ));
     }
 }

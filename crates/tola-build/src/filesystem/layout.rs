@@ -19,7 +19,8 @@ fn below_working_root(site: &Path, name: &str) -> PathBuf {
     site.join(INTERNAL_DIR).join(name)
 }
 
-/// Fetched remote module sources, at the commits `tola.lock` pins.
+/// Remote module sources fetched while resolving `tola.lock`: the resolution cache an online or
+/// offline build may read when its `vendor/` tree has no copy. A pure build never reads it.
 pub fn modules(site: &Path) -> PathBuf {
     below_working_root(site, "modules")
 }

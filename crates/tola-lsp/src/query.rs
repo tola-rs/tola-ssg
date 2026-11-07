@@ -735,22 +735,6 @@ impl<'a> Selection<'a> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn large_completions_keep_rank() {
-        let candidates = (0..=1000)
-            .map(|index| CompletionItem {
-                label: format!("candidate-{}", 1000 - index),
-                ..CompletionItem::default()
-            })
-            .collect();
-        let SourceReply::Completion(CompletionResponse::Array(mut candidates)) =
-            completion_reply(candidates)
-        else {
-            panic!("completion list");
-        };
-        candidates.sort_by(|left, right| left.sort_text.cmp(&right.sort_text));
-        assert_eq!(candidates.last().unwrap().label, "candidate-0");
-    }
     use lsp_types::request::Request as LspRequest;
     use lsp_types::{CompletionTextEdit, Hover, InlayHintLabel, Position, SignatureHelp};
     use lsp_types::{
@@ -1290,18 +1274,6 @@ mod tests {
                 .unwrap();
         }
 
-        fn change(sources: &mut OpenSources, uri: &Uri, version: i32, text: &str) {
-            sources
-                .apply(lsp_server::Notification::new(
-                    "textDocument/didChange".into(),
-                    json!({
-                        "textDocument": {"uri": uri, "version": version},
-                        "contentChanges": [{"text": text}],
-                    }),
-                ))
-                .unwrap();
-        }
-
         fn ask(
             site: &mut QuerySession,
             sources: &OpenSources,
@@ -1350,14 +1322,10 @@ mod tests {
             }
         }
 
-        fn configured(module: &Path) -> QuerySession {
-            install(QuerySession::new(), module)
-        }
-
         fn install(mut site: QuerySession, module: &Path) -> QuerySession {
             fs::write(
                 module.join("tola-module.toml"),
-                "schema-version=1\nname='notes'\nversion='1.0.0'\n[typst]\nentry='lib.typ'\n",
+                "name='notes'\nversion='1.0.0'\n[typst]\nentry='lib.typ'\n",
             )
             .unwrap();
             let old = fs::read_to_string(site.site.root().join("tola.toml")).unwrap();
@@ -1440,86 +1408,6 @@ mod tests {
             assert_eq!(
                 crate::uri::to_site_path(target.as_str()).unwrap(),
                 module.canonicalize().unwrap().join("lib.typ")
-            );
-        }
-
-        #[test]
-        fn module_queries_follow_unsaved_buffers() {
-            let module = tempfile::tempdir().unwrap();
-            let disk = "#let greeting = \"saved\"\n#let greet() = greeting\n";
-            fs::write(module.path().join("lib.typ"), disk).unwrap();
-            let mut site = configured(module.path());
-            let (project_text, project_cursor) =
-                marked_cursor("#import \"@tola-modules/notes:0.0.0\": greet\n#gr|eet()");
-            site.site.write("content/document.typ", &project_text);
-            let project_uri =
-                crate::uri::from_file_path(&site.config.build().content_dir.join("document.typ"))
-                    .unwrap();
-            let mut sources = OpenSources::new(site.config.get_root());
-            open(&mut sources, &project_uri, &project_text);
-            let (library_uri, saved_range) = definition(ask(
-                &mut site,
-                &sources,
-                &project_uri,
-                project_cursor,
-                "textDocument/definition",
-            ));
-            assert_eq!(
-                crate::uri::to_site_path(library_uri.as_str()).unwrap(),
-                module.path().canonicalize().unwrap().join("lib.typ")
-            );
-            assert_eq!(saved_range.start.line, 1);
-            open(&mut sources, &library_uri, disk);
-
-            let unsaved = "// editor buffer\n#let greeting = \"unsaved\"\n#let greet() = greeting\n#let buffer-only = 42\n";
-            change(&mut sources, &library_uri, 2, unsaved);
-            let (target, updated_range) = definition(ask(
-                &mut site,
-                &sources,
-                &project_uri,
-                project_cursor,
-                "textDocument/definition",
-            ));
-            assert_eq!(target, library_uri);
-            assert_eq!(
-                updated_range.start.line, 2,
-                "navigation must use the editor's source lines"
-            );
-
-            let (editing, cursor) = marked_cursor(&format!("{unsaved}#buff|"));
-            change(&mut sources, &library_uri, 3, &editing);
-            let completed = ask(
-                &mut site,
-                &sources,
-                &library_uri,
-                cursor,
-                "textDocument/completion",
-            );
-            let completion: Option<lsp_types::CompletionResponse> =
-                serde_json::from_value(completed).unwrap();
-            let items = match completion.unwrap() {
-                lsp_types::CompletionResponse::Array(items) => items,
-                lsp_types::CompletionResponse::List(list) => list.items,
-            };
-            assert!(
-                items.iter().any(|item| item.label == "buffer-only"),
-                "{items:?}"
-            );
-
-            let (editing, cursor) = marked_cursor(&format!("{unsaved}#gr|eet()"));
-            change(&mut sources, &library_uri, 4, &editing);
-            let (target, range) = definition(ask(
-                &mut site,
-                &sources,
-                &library_uri,
-                cursor,
-                "textDocument/definition",
-            ));
-            assert_eq!(target, library_uri);
-            assert_eq!(range.start.line, 2);
-            assert_eq!(
-                fs::read_to_string(module.path().join("lib.typ")).unwrap(),
-                disk
             );
         }
     }

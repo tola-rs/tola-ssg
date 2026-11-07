@@ -851,18 +851,20 @@ Remote modules use an HTTPS repository, one revision selector and an optional re
 
 ```toml
 [modules.notes]
-repository = "https://github.com/example/notebook"
+git = "https://github.com/example/notebook"
 tag = "v1.0.0"
 subdir = "theme"
 ```
 
-Use a real repository URL and replace `tag` with `branch` or a full-commit `rev` when appropriate.
-Run `tola module fetch notes`; omit the alias to fetch all remote modules. Fetch uses gix,
-without a system Git command, and records the exact commit in `tola.lock`. Keep that lock
-file with the site. Ordinary builds and tools use prepared `.tola/modules` sources without
-network access; run fetch explicitly to refresh a tag or branch. The selected directory
-contains `tola-module.toml`; it need not be the repository root. Remote init is not supported
-yet; a module initializer still takes a local directory.
+`git` and `path` are mutually exclusive. Replace `tag` with `branch` or a full-commit
+`rev` when appropriate; omitting all three selects the default branch. Resolution writes
+`tola.lock` with the resolved commit and the digest of the module directory; keep that lock with
+the site. `tola build`, `tola dev`, and `tola check` resolve missing or changed inputs when
+the network is allowed; `--locked` refuses to write the lock, `--offline` refuses the network,
+and `--pure` reads only the site, `vendor/`, and `tola.lock`. Run `tola update` to refresh a
+tag, branch, or default branch, then `tola vendor` to update the frozen copies. The selected
+directory contains `tola-module.toml`; it need not be the repository root. Remote init is not
+supported yet; a module initializer still takes a local directory.
 
 A local theme can supply the site's root program and public writing API. Read its manifest
 and exported schema before changing its options; do not assume scaffold fields or filenames
@@ -944,8 +946,6 @@ ordinary filename beginning with `@`. `tola nu --lsp` serves these same Nu libra
 Register a Nu tool through the module's existing argv command, in `tola-module.toml`:
 
 ```toml
-schema-version = 1
-
 [commands.greet]
 kind = "argv"
 argv = ["{tola}", "nu", "tools/greet.nu"]

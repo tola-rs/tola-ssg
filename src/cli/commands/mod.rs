@@ -26,6 +26,7 @@ pub(super) mod query;
 pub(super) mod read;
 pub(super) mod report;
 pub(super) mod skill;
+pub(super) mod update;
 pub(super) mod vendor;
 
 use crate::cancellation::Cancellation;

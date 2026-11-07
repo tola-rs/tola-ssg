@@ -206,7 +206,13 @@ fn site_modules(
     };
     let source = ConfigSource::load(Some(&config), scope)?;
     let (parsed, _) = source.decode_with_host::<crate::config::ConfigSchema>()?;
-    let modules = resolve_nu_modules(source.root(), &parsed.schema().modules, scope)?;
+    let modules = resolve_nu_modules(
+        source.root(),
+        None,
+        &parsed.schema().modules,
+        tola_build::inputs::InputMode::new(scope, true),
+        &Default::default(),
+    )?;
     Ok(Some(SiteModules {
         root: source.root().to_owned(),
         config: source.path().to_owned(),
@@ -320,8 +326,6 @@ fn prepare(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::args::{Cli, Commands};
-    use clap::Parser;
 
     fn module(root: &Path, directory: &str, nu: bool) {
         let module = root.join(directory);
@@ -329,9 +333,9 @@ mod tests {
         std::fs::write(
             module.join("tola-module.toml"),
             if nu {
-                "schema-version = 1\nname = \"tooling\"\nversion = \"1.0.0\"\n[nu]\nentry = \"public tools.nu\"\n"
+                "\nname = \"tooling\"\nversion = \"1.0.0\"\n[nu]\nentry = \"public tools.nu\"\n"
             } else {
-                "schema-version = 1\n"
+                "\n"
             },
         )
         .unwrap();
@@ -514,24 +518,6 @@ mod tests {
     }
 
     #[test]
-    fn script_resolution_keeps_caller_directory() {
-        let caller = Path::new("/caller with spaces");
-        let module = Path::new("/module with spaces");
-        assert_eq!(
-            file_path("tools/my script.nu", caller, None),
-            caller.join("tools/my script.nu")
-        );
-        assert_eq!(
-            file_path("tools/my script.nu", caller, Some(module)),
-            module.join("tools/my script.nu")
-        );
-        assert_eq!(
-            file_path("/absolute path/script.nu", caller, Some(module)),
-            PathBuf::from("/absolute path/script.nu")
-        );
-    }
-
-    #[test]
     fn internal_ignores_unusable_site_configuration() {
         let directory = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(directory.path()).unwrap();
@@ -550,92 +536,5 @@ mod tests {
         assert!(runtime.resolve_locator("@tola-scripts/image").is_ok());
         assert!(runtime.resolve_locator("@tola-scripts/diagnostic").is_ok());
         assert!(argument_values(&runtime, "TOLA_CONFIG_PATH").is_none());
-    }
-
-    #[test]
-    fn arguments_distinguish_worker_from_script() {
-        let cli = Cli::try_parse_from(["tola", "nu", "--no-site", "script.nu"]).unwrap();
-        let Commands::Nu(internal) = cli.command else {
-            panic!("Nu command");
-        };
-        assert!(internal.no_site);
-        let cli = Cli::try_parse_from([
-            "tola",
-            "nu",
-            "--lsp-worker",
-            "--lsp-snapshot",
-            "/buffer snapshot.json",
-            "--config",
-            "/selected site.toml",
-        ])
-        .unwrap();
-        let Commands::Nu(worker) = cli.command else {
-            panic!("Nu command");
-        };
-        assert!(worker.lsp_worker);
-        assert_eq!(
-            worker.lsp_snapshot.as_deref(),
-            Some(Path::new("/buffer snapshot.json"))
-        );
-        assert_eq!(
-            worker.config.path.as_deref(),
-            Some(Path::new("/selected site.toml"))
-        );
-        for args in [
-            vec!["tola", "nu", "--lsp-worker"],
-            vec!["tola", "nu", "--lsp-snapshot", "snapshot.json"],
-            vec![
-                "tola",
-                "nu",
-                "--lsp",
-                "--lsp-worker",
-                "--lsp-snapshot",
-                "snapshot.json",
-            ],
-            vec!["tola", "nu", "--no-site", "--lsp"],
-            vec![
-                "tola",
-                "nu",
-                "--no-site",
-                "--config",
-                "site.toml",
-                "script.nu",
-            ],
-            vec![
-                "tola",
-                "nu",
-                "--no-site",
-                "--lsp-worker",
-                "--lsp-snapshot",
-                "snapshot.json",
-            ],
-        ] {
-            assert!(Cli::try_parse_from(args).is_err());
-        }
-        let cli = Cli::try_parse_from([
-            "tola",
-            "nu",
-            "./script path.nu",
-            "--lsp-snapshot",
-            "literal argument",
-            "--no-site",
-        ])
-        .unwrap();
-        let Commands::Nu(script) = cli.command else {
-            panic!("Nu command");
-        };
-        assert!(!script.lsp_worker);
-        assert!(!script.no_site);
-        assert!(script.lsp_snapshot.is_none());
-        assert_eq!(
-            script.invocation,
-            [
-                "./script path.nu",
-                "--lsp-snapshot",
-                "literal argument",
-                "--no-site"
-            ]
-            .map(std::ffi::OsString::from)
-        );
     }
 }

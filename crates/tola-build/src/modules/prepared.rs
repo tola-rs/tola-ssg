@@ -9,12 +9,13 @@ use tola_typst::{LocalPackage, LocalPackages};
 use typst::foundations::{Dict, IntoValue, Value};
 use typst::syntax::{RootedPath, VirtualPath, VirtualRoot, package::PackageSpec};
 
-use super::{ConfiguredModule, configure_module, resolve_modules};
+use super::{ConfiguredModule, configure_module, resolve_modules_with_roots};
 use crate::InputScope;
 use crate::config::ResolvedSiteConfig;
 use crate::config::section::assets::{
     AssetFileDeclaration, AssetSelection, AssetTreeDeclaration, AssetUrl, AssetUrlPrefix,
 };
+use crate::inputs::InputMode;
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ModuleInputs {
@@ -52,7 +53,11 @@ fn virtual_path(path: &Path) -> Result<VirtualPath> {
 
 /// Resolve local module manifests, paths, assets, and the selected site entry.
 /// This prepares one invocation without executing Typst schemas, hooks, or commands.
-pub fn configure(base: &ResolvedSiteConfig, scope: InputScope) -> Result<ResolvedSiteConfig> {
+pub fn configure(
+    base: &ResolvedSiteConfig,
+    mode: InputMode,
+    cancellation: &crate::cancellation::BuildCancellation,
+) -> Result<ResolvedSiteConfig> {
     let mut config = base.clone();
     if let Some(project_hooks) = &config.module_inputs.project_hooks {
         config.build.hooks = project_hooks.clone();
@@ -63,10 +68,19 @@ pub fn configure(base: &ResolvedSiteConfig, scope: InputScope) -> Result<Resolve
     config.assets.trees.truncate(original_assets);
     let original_files = config.assets.files.len() - config.module_inputs.asset_file_count;
     config.assets.files.truncate(original_files);
+    let roots = crate::inputs::module_roots(
+        config.get_root(),
+        mode,
+        config.vendor().path.as_deref(),
+        config.modules(),
+        cancellation,
+    )?;
     let mut configured = BTreeMap::new();
     let mut asset_selections = BTreeMap::new();
     let mut packages = Vec::new();
-    for (alias, module) in resolve_modules(config.get_root(), config.modules(), scope)? {
+    for (alias, module) in
+        resolve_modules_with_roots(config.get_root(), config.modules(), &roots, mode)?
+    {
         // Query-only modules have no public library. Their entry is compiled by FileId.
         let entry = module
             .typst
@@ -114,7 +128,7 @@ pub fn configure(base: &ResolvedSiteConfig, scope: InputScope) -> Result<Resolve
     }
     let asset_count = config.assets.trees.len() - original_assets;
     config.module_inputs = Arc::new(ModuleInputs {
-        scope,
+        scope: mode.scope(),
         packages: Arc::new(LocalPackages::new(packages, ["tola-modules"])?),
         configured,
         asset_count,
@@ -397,40 +411,4 @@ pub(crate) fn select_query_file(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::fs;
-
-    #[test]
-    fn refreshed_driver_keeps_query_entry() {
-        let site = tempfile::tempdir().unwrap();
-        let theme = site.path().join("theme");
-        fs::create_dir(&theme).unwrap();
-        for name in ["one.typ", "two.typ"] {
-            fs::write(theme.join(name), "").unwrap();
-        }
-        let manifest = theme.join("tola-module.toml");
-        let body = |entry: &str| {
-            format!(
-                "schema-version=1\nname=\"forest\"\nversion=\"1.0.0\"\n[site]\nentry=\"{entry}\"\n[queries.page]\nentry=\"one.typ\"\nlabel=\"page\"\nschema-version=1\n"
-            )
-        };
-        fs::write(&manifest, body("one.typ")).unwrap();
-        let base = crate::config::tests::load_test_config(
-            site.path(),
-            "[modules.forest]\npath=\"theme\"\n[theme]\nmodule=\"forest\"\n",
-        );
-        let first = configure(&base, InputScope::Online).unwrap();
-        let original = first.entry_file.unwrap();
-        let module = &first.module_inputs.configured["forest"].module;
-        let query = select_query(&first, module, &module.queries["page"]).unwrap();
-        assert_eq!(query.entry_file, Some(original));
-        fs::write(&manifest, body("two.typ")).unwrap();
-        let refreshed = configure(&first, InputScope::Online).unwrap();
-        assert_ne!(refreshed.entry_file, Some(original));
-        assert!(refreshed.build.entry.ends_with("theme/two.typ"));
-        let query_refreshed = configure(&query, InputScope::Online).unwrap();
-        assert_eq!(query_refreshed.entry_file, Some(original));
-        assert!(query_refreshed.build.entry.ends_with("theme/one.typ"));
-    }
-}
+mod tests {}

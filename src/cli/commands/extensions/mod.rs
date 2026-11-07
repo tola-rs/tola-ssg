@@ -89,8 +89,13 @@ pub(in crate::cli) fn run(
     )?;
     let loaded = request.load_config(&crate::config::ConfigOverrides::default())?;
     let config = std::sync::Arc::new(loaded.into_config());
-    let modules =
-        tola_build::modules::resolve_command_modules(config.get_root(), config.modules(), scope)?;
+    let modules = tola_build::modules::resolve_command_modules(
+        config.get_root(),
+        config.vendor().path.as_deref(),
+        config.modules(),
+        tola_build::inputs::InputMode::new(scope, false),
+        &cancellation.token(),
+    )?;
     check_namespaces(&modules)?;
     let module = modules
         .get(&invocation.namespace)
@@ -188,8 +193,13 @@ pub(in crate::cli) fn run(
             complete_report(completion, reports, output)
         }
         CommandAction::Query { query, projection } => {
-            let modules =
-                tola_build::modules::resolve_modules(config.get_root(), config.modules(), scope)?;
+            let modules = tola_build::modules::resolve_modules(
+                config.get_root(),
+                config.vendor().path.as_deref(),
+                config.modules(),
+                tola_build::inputs::InputMode::new(scope, false),
+                &cancellation.token(),
+            )?;
             let module = modules
                 .get(&invocation.namespace)
                 .context("module declarations changed; run the command again")?;

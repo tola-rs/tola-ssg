@@ -1,49 +1,58 @@
-//! Integrity-addressed remote collection bytes; cache entries never select a version.
+//! Locked remote collection bytes.
+//!
+//! The lock decides which bytes a build reads. A vendored copy, the site cache, and the network are
+//! only ways to obtain those bytes again; none of them may choose a different collection, version,
+//! or digest. A resolving build (online, not `--locked`) turns a declaration into a lock entry and
+//! records it; every other build verifies the bytes it reads against that entry.
 
-use std::io::Write;
-use std::path::Path;
-
-use anyhow::Context;
-
-use sha2::{Digest, Sha256};
+use std::path::{Path, PathBuf};
 
 use crate::cancellation::BuildCancellation;
-use crate::config::section::Sha256Digest;
+use crate::filesystem::SourceOverrides;
+use crate::inputs::{IconSource, InputMode, LockedIcon, Sha256Digest};
 use crate::resources::{BuildResources, HttpDownloadError};
 
 use super::IconError;
-use super::input::MAX_COLLECTION_BYTES;
+use super::iconify;
+use super::input::{IconFileRead, MAX_COLLECTION_BYTES, read_bounded, read_file};
 
 /// One remote collection request and the context every read in this build shares.
 pub(super) struct RemoteCollection<'a> {
-    pub namespace: &'a str,
-    pub urls: Vec<String>,
-    pub sha256: Sha256Digest,
-    pub vendored: Option<std::path::PathBuf>,
-    pub cache_root: std::path::PathBuf,
-    pub cancellation: &'a BuildCancellation,
-    pub resources: &'a BuildResources,
-    pub boundary: &'a tola_typst::SourceBoundary,
+    pub(super) namespace: &'a str,
+    pub(super) preset: Option<&'a str>,
+    pub(super) version: Option<&'a str>,
+    pub(super) url: Option<&'a str>,
+    pub(super) mirrors: &'a [String],
+    /// The lock entry the declaration resolved to, when the site has one.
+    pub(super) locked: Option<LockedIcon>,
+    pub(super) vendored: Option<PathBuf>,
+    pub(super) cache_root: PathBuf,
+    pub(super) mode: InputMode,
+    pub(super) cancellation: &'a BuildCancellation,
+    pub(super) resources: &'a BuildResources,
+    pub(super) boundary: &'a tola_typst::SourceBoundary,
+}
+
+/// The verified bytes of one remote collection, and where they came from.
+pub(super) struct CollectionBytes {
+    pub(super) bytes: Vec<u8>,
+    pub(super) read_from: Option<PathBuf>,
+    pub(super) source: Option<IconFileRead>,
+    /// The cache entry a freshly downloaded collection belongs in once it has parsed.
+    pending_cache: Option<PathBuf>,
 }
 
 pub(super) fn load_collection(
     request: RemoteCollection<'_>,
-) -> anyhow::Result<(tola_icons::IconCollection, CollectionBytes)> {
+) -> Result<(tola_icons::IconCollection, CollectionBytes), IconError> {
     let verified = collection_bytes(&request)?;
-    let namespace = request.namespace;
-    let collection =
-        super::parse_collection(namespace, verified.read_from.as_deref(), &verified.bytes)?;
-    store_downloaded(namespace, &verified);
+    let collection = super::parse_collection(
+        request.namespace,
+        verified.read_from.as_deref(),
+        &verified.bytes,
+    )?;
+    store_downloaded(request.namespace, &verified);
     Ok((collection, verified))
-}
-
-/// The bytes of one remote collection, and where they came from.
-pub(super) struct CollectionBytes {
-    pub(super) bytes: Vec<u8>,
-    pub(super) read_from: Option<std::path::PathBuf>,
-    pub(super) source: Option<super::input::IconFileRead>,
-    /// The cache entry a freshly downloaded collection belongs in once it has parsed.
-    pending_cache: Option<std::path::PathBuf>,
 }
 
 /// Keep a downloaded collection, which the caller has already parsed, without failing over it.
@@ -57,143 +66,396 @@ pub(super) fn store_downloaded(namespace: &str, verified: &CollectionBytes) {
     }
 }
 
-/// The bytes one remote collection resolves to, checked against its digest.
-pub(super) fn collection_bytes(request: &RemoteCollection<'_>) -> anyhow::Result<CollectionBytes> {
-    let namespace = request.namespace;
-    let urls = &request.urls;
-    let sha256 = request.sha256;
-    let vendored = request.vendored.as_deref();
-    let cache_root = &request.cache_root;
-    let cancellation = request.cancellation;
-    let resources = request.resources;
-    let boundary = request.boundary;
-    cancellation.ensure_active()?;
-    let primary = urls
-        .first()
-        .map(String::as_str)
-        .expect("configuration names at least one address");
-    // A site's own copy is authoritative: missing falls back, wrong fails the build.
-    if let Some(vendored) = vendored {
-        boundary.check(vendored)?;
-        let bytes =
-            read_collection_file(vendored, cancellation, Some(boundary)).with_context(|| {
-                format!("could not read the vendored copy of icon collection `{namespace}`")
-            })?;
-        if let Some((bytes, source)) = bytes {
-            verify_integrity(namespace, primary, sha256, &bytes, Some(vendored))?;
+/// Resolve one declaration to bytes: reuse the lock entry, or record a new one.
+fn collection_bytes(request: &RemoteCollection<'_>) -> Result<CollectionBytes, IconError> {
+    match matched_lock(request)? {
+        Some(locked) => locked_bytes(request, locked),
+        None => {
+            let (bytes, lock) = resolve(request)?;
+            let pending_cache = request
+                .mode
+                .may_write_lock()
+                .then(|| cache_entry(&request.cache_root, lock.sha256));
+            Ok(CollectionBytes {
+                bytes,
+                read_from: None,
+                source: None,
+                pending_cache,
+            })
+        }
+    }
+}
+
+/// The lock entry this declaration still describes, if any.
+///
+/// A build that may not write the lock may not resolve a new entry either: a missing or changed
+/// entry is then the author's repair, never a silent re-resolution.
+fn matched_lock<'a>(
+    request: &'a RemoteCollection<'a>,
+) -> Result<Option<&'a LockedIcon>, IconError> {
+    let Some(locked) = request.locked.as_ref() else {
+        if request.mode.requires_lock() {
+            return Err(IconError::Unlocked {
+                namespace: request.namespace.into(),
+            });
+        }
+        return Ok(None);
+    };
+    if declaration_matches(request, locked) {
+        return Ok(Some(locked));
+    }
+    if request.mode.requires_lock() {
+        return Err(IconError::LockMismatch {
+            namespace: request.namespace.into(),
+            recorded: describe_lock(locked),
+            declared: describe_declaration(request),
+        });
+    }
+    Ok(None)
+}
+
+/// Whether the declaration still asks for exactly the input the lock records.
+fn declaration_matches(request: &RemoteCollection<'_>, locked: &LockedIcon) -> bool {
+    match (&locked.source, request.preset, request.url) {
+        (IconSource::Preset { preset, version }, Some(declared), None) => {
+            declared == preset.as_str()
+                && request
+                    .version
+                    .is_none_or(|declared| declared == version.as_str())
+        }
+        (IconSource::Url { url }, None, Some(declared)) => declared == url,
+        _ => false,
+    }
+}
+
+/// A declaration and its lock entry, for a diagnostic that names both.
+fn describe_declaration(request: &RemoteCollection<'_>) -> String {
+    match (request.preset, request.url) {
+        (Some(preset), None) => match request.version {
+            Some(version) => format!("preset `{preset}` release `{version}`"),
+            None => format!("preset `{preset}`"),
+        },
+        (None, Some(url)) => format!("url `{url}`"),
+        _ => "no remote source".to_owned(),
+    }
+}
+
+fn describe_lock(locked: &LockedIcon) -> String {
+    match &locked.source {
+        IconSource::Preset { preset, version } => {
+            format!("preset `{preset}` release `{version}`")
+        }
+        IconSource::Url { url } => format!("url `{url}`"),
+    }
+}
+
+/// Read the bytes the lock records: vendored copy first, then the site cache, then the network.
+fn locked_bytes(
+    request: &RemoteCollection<'_>,
+    locked: &LockedIcon,
+) -> Result<CollectionBytes, IconError> {
+    if let Some(vendored) = request.vendored.as_deref() {
+        if let Some((bytes, read)) = read_if_present(request, vendored)? {
+            verify_locked(request, locked, &bytes, Some(vendored))?;
             return Ok(CollectionBytes {
                 bytes,
                 read_from: Some(vendored.to_path_buf()),
+                source: Some(read),
                 pending_cache: None,
-                source,
             });
         }
     }
-
-    let cache_path = cache_entry(cache_root, sha256);
-    if resources.input_scope() != crate::InputScope::Pure {
-        match read_collection_file(&cache_path, cancellation, None) {
-            Ok(Some((bytes, _))) => {
-                match verify_integrity(namespace, primary, sha256, &bytes, Some(&cache_path)) {
-                    Ok(()) => {
-                        return Ok(CollectionBytes {
-                            bytes,
-                            read_from: Some(cache_path),
-                            pending_cache: None,
-                            source: None,
-                        });
-                    }
-                    Err(_) => tracing::warn!(target: "tola::compile",
-                    "the cached copy of icon collection `{namespace}` could not be used; Tola will download it again"),
-                }
-            }
-            Ok(None) => {}
-            Err(_) => {
-                cancellation.ensure_active()?;
-                tracing::warn!(target: "tola::compile",
-                    "the cached copy of icon collection `{namespace}` could not be read; Tola will download it again");
-            }
+    if request.mode.may_read_cache() {
+        let cached = cache_entry(&request.cache_root, locked.sha256);
+        if let Some(bytes) = read_cache(request, &cached)? {
+            verify_locked(request, locked, &bytes, Some(&cached))?;
+            return Ok(CollectionBytes {
+                bytes,
+                read_from: Some(cached),
+                source: None,
+                pending_cache: None,
+            });
         }
     }
+    if !request.mode.may_use_network() {
+        return Err(IconError::MissingBytes {
+            namespace: request.namespace.into(),
+            sha256: locked.sha256,
+        });
+    }
+    let bytes = fetch_locked(request, locked)?;
+    verify_locked(request, locked, &bytes, None)?;
+    Ok(CollectionBytes {
+        bytes,
+        read_from: None,
+        source: None,
+        pending_cache: request
+            .mode
+            .may_write_lock()
+            .then(|| cache_entry(&request.cache_root, locked.sha256)),
+    })
+}
 
-    let mut tried: Vec<String> = Vec::new();
-    let mut unreachable = None;
-    for url in urls {
-        cancellation.ensure_active()?;
-        tried.push(url.clone());
-        match download(namespace, url, cancellation, resources) {
-            Ok(bytes) => {
-                verify_integrity(namespace, url, sha256, &bytes, None)?;
-                cancellation.ensure_active()?;
-                return Ok(CollectionBytes {
-                    bytes,
-                    read_from: None,
-                    pending_cache: Some(cache_path),
-                    source: None,
-                });
+/// Turn one declaration into bytes and the lock entry that records them.
+fn resolve(request: &RemoteCollection<'_>) -> Result<(Vec<u8>, LockedIcon), IconError> {
+    match (request.preset, request.url) {
+        (Some(preset), None) => resolve_preset(request, preset),
+        (None, Some(url)) => resolve_url(request, url),
+        _ => Err(IconError::NotRemote {
+            namespace: request.namespace.into(),
+        }),
+    }
+}
+
+/// Resolve one preset through the npm registry's release metadata.
+fn resolve_preset(
+    request: &RemoteCollection<'_>,
+    preset: &str,
+) -> Result<(Vec<u8>, LockedIcon), IconError> {
+    let release = iconify::release(
+        request.namespace,
+        preset,
+        request.version,
+        request.resources,
+        request.cancellation,
+    )?;
+    let mut urls: Vec<String> = request
+        .mirrors
+        .iter()
+        .map(|template| fill_mirror(template, &release.preset, &release.version))
+        .collect();
+    urls.push(release.tarball.clone());
+    let (tarball, _) = download_first(request, &urls, iconify::tarball_limit())?;
+    release.verify(request.namespace, &tarball)?;
+    let json = release.collection_json(request.namespace, &tarball)?;
+    let lock = LockedIcon {
+        source: IconSource::Preset {
+            preset: release.preset.clone(),
+            version: release.version.clone(),
+        },
+        url: release.tarball,
+        sha256: Sha256Digest::of_bytes(&json),
+        size: json.len() as u64,
+    };
+    Ok((json, lock))
+}
+
+/// Resolve one authored address. Its first download is trusted; the lock records its digest.
+fn resolve_url(
+    request: &RemoteCollection<'_>,
+    url: &str,
+) -> Result<(Vec<u8>, LockedIcon), IconError> {
+    let mut urls: Vec<String> = request.mirrors.to_vec();
+    urls.push(url.to_owned());
+    let (bytes, served) = download_first(request, &urls, MAX_COLLECTION_BYTES)?;
+    let lock = LockedIcon {
+        source: IconSource::Url {
+            url: url.to_owned(),
+        },
+        url: served,
+        sha256: Sha256Digest::of_bytes(&bytes),
+        size: bytes.len() as u64,
+    };
+    Ok((bytes, lock))
+}
+
+/// Fetch the bytes one existing lock entry records.
+fn fetch_locked(request: &RemoteCollection<'_>, locked: &LockedIcon) -> Result<Vec<u8>, IconError> {
+    match &locked.source {
+        IconSource::Preset { preset, version } => {
+            let mut urls = vec![locked.url.clone()];
+            urls.extend(
+                request
+                    .mirrors
+                    .iter()
+                    .map(|template| fill_mirror(template, preset, version)),
+            );
+            let (tarball, _) = download_first(request, &urls, iconify::tarball_limit())?;
+            iconify::collection_json(request.namespace, preset, version, &tarball)
+        }
+        IconSource::Url { url } => {
+            let mut urls = vec![locked.url.clone()];
+            if !urls.contains(url) {
+                urls.push(url.clone());
             }
+            urls.extend(request.mirrors.iter().cloned());
+            let (bytes, _) = download_first(request, &urls, MAX_COLLECTION_BYTES)?;
+            Ok(bytes)
+        }
+    }
+}
+
+/// The addresses in the order first written, so a mirror repeated by hand is visited once.
+fn distinct(urls: Vec<String>) -> Vec<String> {
+    let mut ordered: Vec<String> = Vec::new();
+    for url in urls {
+        if !ordered.contains(&url) {
+            ordered.push(url);
+        }
+    }
+    ordered
+}
+
+/// The address one authored mirror template names for this release.
+fn fill_mirror(template: &str, name: &str, version: &str) -> String {
+    template
+        .replace("{name}", name)
+        .replace("{version}", version)
+}
+
+/// Download the first address that delivers, and say which one did.
+fn download_first(
+    request: &RemoteCollection<'_>,
+    urls: &[String],
+    limit: usize,
+) -> Result<(Vec<u8>, String), IconError> {
+    let mut tried = Vec::new();
+    let mut refused = None;
+    for url in distinct(urls.to_vec()) {
+        request
+            .cancellation
+            .ensure_active()
+            .map_err(IconError::Cancelled)?;
+        tried.push(url.clone());
+        match download(request, &url, limit) {
+            Ok(bytes) => return Ok((bytes, url)),
             // A mirror that cannot deliver the bytes says nothing about the next one.
-            Err(error) if refused(&error) => unreachable = Some(error),
+            Err(error @ IconError::Remote { .. }) => refused = Some(error),
             Err(error) => return Err(error),
         }
     }
-    Err(all_mirrors_failed(namespace, tried, unreachable).into())
+    Err(all_mirrors_failed(request.namespace, tried, refused))
 }
 
-/// The cache entry one digest is stored in.
-fn cache_entry(cache_root: &Path, sha256: Sha256Digest) -> std::path::PathBuf {
-    cache_root.join(format!("{sha256}.json"))
+/// Whether a failed download says the address could not deliver.
+fn all_mirrors_failed(namespace: &str, urls: Vec<String>, last: Option<IconError>) -> IconError {
+    match last {
+        Some(IconError::Remote {
+            namespace: _,
+            urls: _,
+            source,
+        }) => IconError::Remote {
+            namespace: namespace.into(),
+            urls,
+            source,
+        },
+        Some(other) => other,
+        None => IconError::NetworkWorker,
+    }
 }
 
-fn verify_integrity(
-    namespace: &str,
-    url: &str,
-    expected: Sha256Digest,
+fn download(request: &RemoteCollection<'_>, url: &str, limit: usize) -> Result<Vec<u8>, IconError> {
+    request
+        .resources
+        .download(url, limit, request.cancellation)
+        .map_err(|error| match error {
+            HttpDownloadError::Cancelled(cancelled) => IconError::Cancelled(cancelled),
+            HttpDownloadError::NetworkDenied => IconError::NetworkDenied {
+                namespace: request.namespace.into(),
+                url: url.into(),
+            },
+            HttpDownloadError::Runtime(source) => IconError::NetworkRuntime(source),
+            HttpDownloadError::Request(source) => IconError::Remote {
+                namespace: request.namespace.into(),
+                urls: vec![url.into()],
+                source: HttpDownloadError::Request(source),
+            },
+            HttpDownloadError::TooLarge { limit } => IconError::RemoteTooLarge {
+                namespace: request.namespace.into(),
+                url: url.into(),
+                limit,
+            },
+            HttpDownloadError::WorkerStopped => IconError::NetworkWorker,
+        })
+}
+
+/// Check bytes against the digest and length the lock records.
+fn verify_locked(
+    request: &RemoteCollection<'_>,
+    locked: &LockedIcon,
     bytes: &[u8],
     path: Option<&Path>,
 ) -> Result<(), IconError> {
-    let received: [u8; 32] = Sha256::digest(bytes).into();
-    if expected.bytes() != received {
-        return Err(IconError::Integrity {
-            namespace: namespace.into(),
-            url: url.into(),
-            expected: expected.to_string(),
-            received: hex::encode(received),
-            path: path.map(Path::to_path_buf),
-        });
+    let received = Sha256Digest::of_bytes(bytes);
+    if received == locked.sha256 && bytes.len() as u64 == locked.size {
+        return Ok(());
     }
-    Ok(())
+    Err(IconError::Integrity {
+        namespace: request.namespace.into(),
+        url: locked.url.clone(),
+        expected: locked.sha256.to_string(),
+        received: received.to_string(),
+        size_expected: locked.size,
+        size_received: bytes.len() as u64,
+        path: path.map(Path::to_path_buf),
+    })
 }
 
-fn read_collection_file(
+/// The cache entry one digest is stored in.
+fn cache_entry(cache_root: &Path, sha256: Sha256Digest) -> PathBuf {
+    cache_root.join(format!("{sha256}.json"))
+}
+
+/// Read one source file, treating a missing file as no copy at all.
+fn read_if_present(
+    request: &RemoteCollection<'_>,
     path: &Path,
-    cancellation: &BuildCancellation,
-    boundary: Option<&tola_typst::SourceBoundary>,
-) -> anyhow::Result<Option<(Vec<u8>, Option<super::input::IconFileRead>)>> {
+) -> Result<Option<(Vec<u8>, IconFileRead)>, IconError> {
     match std::fs::symlink_metadata(path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error.into()),
+        Err(source) => {
+            return Err(IconError::Read {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
         Ok(metadata) if !metadata.is_file() => {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "an icon collection source is not a regular file",
-            )
-            .into());
+            return Err(IconError::Read {
+                path: path.to_path_buf(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "an icon collection source is not a regular file",
+                ),
+            });
         }
         Ok(_) => {}
     }
-    if let Some(boundary) = boundary {
-        let overrides = Default::default();
-        let (bytes, read) = super::input::read_file(path, &overrides, cancellation, boundary)?;
-        Ok(Some((bytes.into_owned(), Some(read))))
-    } else {
-        let mut file = crate::filesystem::open_regular_file(path, false)?;
-        let bytes = super::input::read_bounded(&mut file, path, cancellation)?;
-        Ok(Some((bytes, None)))
+    let overrides = SourceOverrides::default();
+    let (bytes, read) = read_file(path, &overrides, request.cancellation, request.boundary)?;
+    Ok(Some((bytes.into_owned(), read)))
+}
+
+/// Read one verified cache entry; the cache is not a source and is not watched.
+fn read_cache(request: &RemoteCollection<'_>, path: &Path) -> Result<Option<Vec<u8>>, IconError> {
+    match std::fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => {
+            return Err(IconError::Read {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
+        Ok(metadata) if !metadata.is_file() => {
+            return Err(IconError::Read {
+                path: path.to_path_buf(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "an icon cache entry is not a regular file",
+                ),
+            });
+        }
+        Ok(_) => {}
     }
+    let mut file =
+        crate::filesystem::open_regular_file(path, false).map_err(|source| IconError::Read {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    read_bounded(&mut file, path, request.cancellation).map(Some)
 }
 
 fn write_cache(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
     let parent = path
         .parent()
         .expect("icon cache entries have a parent directory");
@@ -203,455 +465,4 @@ fn write_cache(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     temporary.as_file().sync_all()?;
     temporary.persist(path).map_err(|error| error.error)?;
     Ok(())
-}
-
-/// Whether a failed download says the address could not deliver.
-fn refused(error: &anyhow::Error) -> bool {
-    matches!(
-        error.downcast_ref::<IconError>(),
-        Some(IconError::Remote { .. })
-    )
-}
-
-/// The failure every mirror shares, carrying the last transport error.
-fn all_mirrors_failed(
-    namespace: &str,
-    urls: Vec<String>,
-    last: Option<anyhow::Error>,
-) -> IconError {
-    let source = last
-        .and_then(|error| match error.downcast::<IconError>() {
-            Ok(IconError::Remote { source, .. }) => Some(source),
-            _ => None,
-        })
-        .expect("a refused download carries its transport error");
-    IconError::Remote {
-        namespace: namespace.into(),
-        urls,
-        source,
-    }
-}
-
-fn download(
-    namespace: &str,
-    url: &str,
-    cancellation: &BuildCancellation,
-    resources: &BuildResources,
-) -> anyhow::Result<Vec<u8>> {
-    resources
-        .download(url, MAX_COLLECTION_BYTES, cancellation)
-        .map_err(|error| match error {
-            HttpDownloadError::Cancelled(cancelled) => anyhow::Error::new(cancelled),
-            HttpDownloadError::NetworkDenied => IconError::NetworkDenied {
-                namespace: namespace.into(),
-                url: url.into(),
-            }
-            .into(),
-            HttpDownloadError::Runtime(error) => IconError::NetworkRuntime(error).into(),
-            HttpDownloadError::Request(source) => IconError::Remote {
-                namespace: namespace.into(),
-                urls: vec![url.into()],
-                source,
-            }
-            .into(),
-            HttpDownloadError::TooLarge { limit } => IconError::RemoteTooLarge {
-                namespace: namespace.into(),
-                url: url.into(),
-                limit,
-            }
-            .into(),
-            HttpDownloadError::WorkerStopped => IconError::NetworkWorker.into(),
-        })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::resources::NetworkAccess;
-    use std::io::{Read, Write};
-    use std::net::TcpListener;
-    use std::sync::mpsc;
-    use std::time::Duration;
-
-    const COLLECTION: &[u8] = br#"{"prefix":"ui","icons":{"mark":{"body":"<path fill=\"currentColor\" d=\"M0 0h16v16H0z\"/>"}}}"#;
-
-    fn digest(bytes: &[u8]) -> Sha256Digest {
-        hex::encode(Sha256::digest(bytes)).try_into().unwrap()
-    }
-
-    fn load_offline(
-        cache_root: &Path,
-        sha256: Sha256Digest,
-        vendored: Option<&Path>,
-    ) -> anyhow::Result<tola_icons::IconCollection> {
-        load_collection(RemoteCollection {
-            namespace: "ui",
-            urls: vec!["http://127.0.0.1:1/icons.json".to_owned()],
-            sha256,
-            vendored: vendored.map(Path::to_path_buf),
-            cache_root: cache_root.to_path_buf(),
-            cancellation: &BuildCancellation::new(),
-            resources: &BuildResources::new().with_network_access(NetworkAccess::Denied),
-            boundary: &tola_typst::SourceBoundary::default(),
-        })
-        .map(|(collection, _)| collection)
-    }
-
-    fn load_online(
-        cache_root: &Path,
-        url: &str,
-        sha256: Sha256Digest,
-    ) -> anyhow::Result<tola_icons::IconCollection> {
-        load_mirrors(cache_root, &[url.to_owned()], sha256)
-    }
-
-    fn load_mirrors(
-        cache_root: &Path,
-        urls: &[String],
-        sha256: Sha256Digest,
-    ) -> anyhow::Result<tola_icons::IconCollection> {
-        load_collection(RemoteCollection {
-            namespace: "ui",
-            urls: urls.to_vec(),
-            sha256,
-            vendored: None,
-            cache_root: cache_root.to_path_buf(),
-            cancellation: &BuildCancellation::new(),
-            resources: &BuildResources::new(),
-            boundary: &tola_typst::SourceBoundary::default(),
-        })
-        .map(|(collection, _)| collection)
-    }
-
-    #[test]
-    fn cached_icons_fail_pure() {
-        let directory = tempfile::tempdir().unwrap();
-        let sha256 = digest(COLLECTION);
-        let config = crate::config::tests::load_test_config(
-            directory.path(),
-            &format!(
-                "[icons.collections.ui]\nsource-type = \"remote-json\"\nurl = \"http://127.0.0.1:1/icons.json\"\nsha256 = \"{sha256}\"\n"
-            ),
-        );
-        let cache = BuildResources::icon_cache_directory(config.get_root());
-        write_cache(&cache.join(format!("{sha256}.json")), COLLECTION).unwrap();
-        let cancellation = BuildCancellation::new();
-        let offline = BuildResources::new().with_input_scope(crate::InputScope::Offline);
-        let previous =
-            super::super::prepare(&config, &cancellation, None, &offline, &Default::default())
-                .unwrap();
-        assert!(previous.collections().get("ui", "mark").is_some());
-        let pure = offline.with_input_scope(crate::InputScope::Pure);
-        let error = super::super::prepare(
-            &config,
-            &cancellation,
-            Some(&previous),
-            &pure,
-            &Default::default(),
-        )
-        .unwrap_err();
-        assert!(matches!(
-            error.downcast_ref::<IconError>(),
-            Some(IconError::NetworkDenied { .. })
-        ));
-    }
-
-    #[test]
-    fn removing_vendor_invalidates_pure_icons() {
-        let directory = tempfile::tempdir().unwrap();
-        let sha256 = digest(COLLECTION);
-        let config = crate::config::tests::load_test_config(
-            directory.path(),
-            &format!(
-                "[vendor]\npath = \"vendor\"\n[icons.collections.ui]\nsource-type = \"remote-json\"\nurl = \"http://127.0.0.1:1/icons.json\"\nsha256 = \"{sha256}\"\n"
-            ),
-        );
-        let vendored = config.vendor.icon_collection("ui").unwrap();
-        std::fs::create_dir_all(vendored.parent().unwrap()).unwrap();
-        std::fs::write(&vendored, COLLECTION).unwrap();
-        let cancellation = BuildCancellation::new();
-        let pure = BuildResources::new().with_input_scope(crate::InputScope::Pure);
-        let previous =
-            super::super::prepare(&config, &cancellation, None, &pure, &Default::default())
-                .unwrap();
-        assert!(previous.collections().get("ui", "mark").is_some());
-        std::fs::remove_file(&vendored).unwrap();
-        assert!(!previous.evidence().is_fresh(&cancellation).unwrap());
-        assert!(
-            super::super::prepare(
-                &config,
-                &cancellation,
-                Some(&previous),
-                &pure,
-                &Default::default(),
-            )
-            .is_err()
-        );
-    }
-
-    fn read_request_headers(stream: &mut std::net::TcpStream) {
-        stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
-        let mut headers = Vec::new();
-        let mut chunk = [0; 1024];
-        loop {
-            let read = stream.read(&mut chunk).unwrap();
-            assert!(read > 0, "request ended before its headers");
-            headers.extend_from_slice(&chunk[..read]);
-            if headers.windows(4).any(|ending| ending == b"\r\n\r\n") {
-                return;
-            }
-            assert!(
-                headers.len() <= 16 * 1024,
-                "unexpectedly large test request"
-            );
-        }
-    }
-
-    fn serve_collection(bytes: &'static [u8]) -> (String, std::thread::JoinHandle<()>) {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let url = format!("http://{}/icons.json", listener.local_addr().unwrap());
-        let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            read_request_headers(&mut stream);
-            write!(
-                stream,
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                bytes.len()
-            )
-            .unwrap();
-            stream.write_all(bytes).unwrap();
-        });
-        (url, server)
-    }
-
-    /// A server that answers every request with one status, and no bytes.
-    fn serve_status(status: u16) -> (String, std::thread::JoinHandle<()>) {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let url = format!("http://{}/icons.json", listener.local_addr().unwrap());
-        let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            read_request_headers(&mut stream);
-            write!(
-                stream,
-                "HTTP/1.1 {status} Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-            )
-            .unwrap();
-        });
-        (url, server)
-    }
-
-    #[test]
-    fn refused_download_tries_mirror() {
-        let directory = tempfile::tempdir().unwrap();
-        let (refused, refused_server) = serve_status(503);
-        let (served, served_server) = serve_collection(COLLECTION);
-        let collection =
-            load_mirrors(directory.path(), &[refused, served], digest(COLLECTION)).unwrap();
-        assert!(collection.get("mark").is_some());
-        refused_server.join().unwrap();
-        served_server.join().unwrap();
-    }
-
-    #[test]
-    fn all_mirrors_refusing_are_named() {
-        let directory = tempfile::tempdir().unwrap();
-        let (first, first_server) = serve_status(503);
-        let (second, second_server) = serve_status(404);
-        let error = load_mirrors(
-            directory.path(),
-            &[first.clone(), second.clone()],
-            digest(COLLECTION),
-        )
-        .unwrap_err();
-        let IconError::Remote { urls, .. } = error
-            .downcast_ref::<IconError>()
-            .expect("a refused download is a download failure")
-        else {
-            panic!("expected a download failure")
-        };
-        assert_eq!(urls, &[first, second]);
-        first_server.join().unwrap();
-        second_server.join().unwrap();
-    }
-
-    #[test]
-    fn verified_cache_serves_offline() {
-        let directory = tempfile::tempdir().unwrap();
-        let sha256 = digest(COLLECTION);
-        write_cache(&directory.path().join(format!("{sha256}.json")), COLLECTION).unwrap();
-        let collection = load_offline(directory.path(), sha256, None).unwrap();
-        assert!(collection.get("mark").is_some());
-    }
-
-    #[test]
-    fn vendored_copy_serves_without_network() {
-        let directory = tempfile::tempdir().unwrap();
-        let vendored = directory.path().join("vendor/icons/ui.json");
-        std::fs::create_dir_all(vendored.parent().unwrap()).unwrap();
-        std::fs::write(&vendored, COLLECTION).unwrap();
-        let collection =
-            load_offline(directory.path(), digest(COLLECTION), Some(&vendored)).unwrap();
-        assert!(collection.get("mark").is_some());
-    }
-
-    #[test]
-    fn stale_vendored_copy_fails() {
-        let directory = tempfile::tempdir().unwrap();
-        let vendored = directory.path().join("vendor/icons/ui.json");
-        std::fs::create_dir_all(vendored.parent().unwrap()).unwrap();
-        std::fs::write(&vendored, b"an older collection").unwrap();
-        let error =
-            load_offline(directory.path(), digest(COLLECTION), Some(&vendored)).unwrap_err();
-        assert!(matches!(
-            error.downcast_ref::<IconError>(),
-            Some(IconError::Integrity {
-                path: Some(path),
-                ..
-            }) if path == &vendored
-        ));
-    }
-
-    #[test]
-    fn uncached_offline_source_is_denied() {
-        let directory = tempfile::tempdir().unwrap();
-        let error = load_offline(directory.path(), digest(COLLECTION), None).unwrap_err();
-        assert!(matches!(
-            error.downcast_ref::<IconError>(),
-            Some(IconError::NetworkDenied { .. })
-        ));
-    }
-
-    #[test]
-    fn digest_mismatch_is_never_cached() {
-        let directory = tempfile::tempdir().unwrap();
-        let (url, server) = serve_collection(COLLECTION);
-        let sha256 = digest(b"different bytes");
-        let error = load_online(directory.path(), &url, sha256).unwrap_err();
-        server.join().unwrap();
-        assert!(matches!(
-            error.downcast_ref::<IconError>(),
-            Some(IconError::Integrity { .. })
-        ));
-        assert!(!directory.path().join(format!("{sha256}.json")).exists());
-    }
-
-    #[test]
-    fn corrupt_cache_is_replaced() {
-        let directory = tempfile::tempdir().unwrap();
-        let sha256 = digest(COLLECTION);
-        let cache_path = directory.path().join(format!("{sha256}.json"));
-        std::fs::write(&cache_path, "wrong content").unwrap();
-        let (url, server) = serve_collection(COLLECTION);
-        let collection = load_online(directory.path(), &url, sha256).unwrap();
-        server.join().unwrap();
-        assert!(collection.get("mark").is_some());
-        assert_eq!(std::fs::read(&cache_path).unwrap(), COLLECTION);
-    }
-
-    #[test]
-    fn pinned_collection_survives_local_edits() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path();
-        let sha256 = digest(COLLECTION);
-        let cache = BuildResources::icon_cache_directory(root);
-        write_cache(&cache.join(format!("{sha256}.json")), b"corrupt").unwrap();
-        std::fs::write(root.join("local.json"), COLLECTION).unwrap();
-        let (url, server) = serve_collection(COLLECTION);
-        let source = format!(
-            r#"
-            [icons.collections.remote]
-            source-type = "remote-json"
-            url = "{url}"
-            sha256 = "{sha256}"
-            [icons.collections.local]
-            source-type = "local-json"
-            path = "local.json"
-        "#
-        );
-        let config = crate::config::tests::load_test_config(root, &source);
-        let cancellation = BuildCancellation::new();
-        let first = super::super::prepare(
-            &config,
-            &cancellation,
-            None,
-            &BuildResources::new(),
-            &Default::default(),
-        )
-        .unwrap();
-        server.join().unwrap();
-        std::fs::write(
-            root.join("local.json"),
-            br#"{"prefix":"ui","icons":{"mark":{"body":"<circle r='2'/>"}}}"#,
-        )
-        .unwrap();
-        let changed = super::super::prepare(
-            &config,
-            &cancellation,
-            Some(&first),
-            &BuildResources::new(),
-            &Default::default(),
-        )
-        .unwrap();
-        assert!(std::ptr::eq(
-            changed.collections().collection("remote").unwrap(),
-            first.collections().collection("remote").unwrap(),
-        ));
-    }
-
-    #[test]
-    fn invalid_collection_is_never_cached() {
-        let directory = tempfile::tempdir().unwrap();
-        let bytes = b"{invalid JSON";
-        let sha256 = digest(bytes);
-        let (url, server) = serve_collection(bytes);
-        let error = load_online(directory.path(), &url, sha256).unwrap_err();
-        server.join().unwrap();
-        assert!(matches!(
-            error.downcast_ref::<IconError>(),
-            Some(IconError::Collection { .. })
-        ));
-        assert!(!directory.path().join(format!("{sha256}.json")).exists());
-    }
-
-    #[test]
-    fn cancellation_ends_pending_download() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let url = format!("http://{}/icons.json", listener.local_addr().unwrap());
-        let (accepted, request) = mpsc::sync_channel(1);
-        let (finish, release) = mpsc::sync_channel(1);
-        let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            read_request_headers(&mut stream);
-            accepted.send(()).unwrap();
-            release.recv().unwrap();
-        });
-        let canceller = crate::cancellation::BuildCanceller::new();
-        let worker_cancellation = canceller.token();
-        let (completed, completion) = mpsc::sync_channel(1);
-        let worker = std::thread::spawn(move || {
-            completed
-                .send(download(
-                    "ui",
-                    &url,
-                    &worker_cancellation,
-                    &BuildResources::new(),
-                ))
-                .unwrap();
-        });
-        request.recv_timeout(Duration::from_secs(5)).unwrap();
-        canceller.cancel();
-        let outcome = completion.recv_timeout(Duration::from_secs(2));
-        finish.send(()).unwrap();
-        server.join().unwrap();
-        worker.join().unwrap();
-        let error = outcome
-            .expect("cancelled remote wait did not terminate promptly")
-            .unwrap_err();
-        assert!(matches!(
-            error.downcast_ref::<crate::cancellation::BuildCancelled>(),
-            Some(crate::cancellation::BuildCancelled)
-        ));
-    }
 }

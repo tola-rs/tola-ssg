@@ -20,6 +20,6 @@ mod theme;
 pub(crate) use args::{
     BuildOverrideArgs, Cli, Commands, CompilerFontArgs, CompletionShell, ConfigFileArgs,
     DevelopmentArgs, EditorCommand, HelpArgs, IconInspectArgs, InspectCommand, ServerArgs,
-    SourceInspectArgs, TypstPackageArgs, VendorArgs,
+    SourceInspectArgs, TypstPackageArgs, UpdateArgs, VendorArgs,
 };
 pub(crate) use run::run;

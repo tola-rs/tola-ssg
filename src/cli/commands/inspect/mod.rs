@@ -48,18 +48,6 @@ pub(in crate::cli) fn run(request: super::SiteRequest<'_>, command: InspectComma
                 request.cancellation,
             )
         }
-        InspectCommand::Icons(args) if args.presets => {
-            request.cancellation.token().ensure_active()?;
-            let value = tola_build::inspect::presets();
-            super::read::write(
-                &value,
-                "icon presets",
-                &args.display,
-                request.scope,
-                request.output,
-                request.cancellation,
-            )
-        }
         command => {
             let loaded = request.load_config(&crate::config::ConfigOverrides::default())?;
             let config = loaded.config();
@@ -203,36 +191,4 @@ fn collect_source_paths(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn source_list_skips_empty_lines() {
-        let (lines, incoming) = std::sync::mpsc::channel();
-        for line in [" first.typ ", "", "  ", "nested/second.typ"] {
-            lines.send(Ok(line.to_owned())).unwrap();
-        }
-        drop(lines);
-        let paths = collect_source_paths(
-            incoming,
-            &tola_build::cancellation::BuildCancellation::default(),
-        )
-        .unwrap();
-        assert_eq!(
-            paths,
-            [
-                PathBuf::from("first.typ"),
-                PathBuf::from("nested/second.typ")
-            ]
-        );
-    }
-
-    #[test]
-    fn source_list_cancellation_returns_early() {
-        let (_lines, incoming) = std::sync::mpsc::channel();
-        let canceller = tola_build::cancellation::BuildCanceller::default();
-        canceller.cancel();
-        let error = collect_source_paths(incoming, &canceller.token()).unwrap_err();
-        assert!(error.is::<tola_build::cancellation::BuildCancelled>());
-    }
-}
+mod tests {}

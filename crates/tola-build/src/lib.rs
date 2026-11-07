@@ -24,6 +24,7 @@ pub mod hooks;
 pub mod html;
 mod icon;
 mod image;
+pub mod inputs;
 pub mod inspect;
 pub mod metadata;
 mod mode;

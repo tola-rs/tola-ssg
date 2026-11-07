@@ -63,8 +63,13 @@ pub(in crate::cli) fn run(
         let (namespace, local) = target.split_once('.').context(
             "choose a module-qualified query such as `notes.nodes`, or an explicit `./query.typ` file",
         )?;
-        let modules =
-            tola_build::modules::resolve_modules(config.get_root(), config.modules(), scope)?;
+        let modules = tola_build::modules::resolve_modules(
+            config.get_root(),
+            config.vendor().path.as_deref(),
+            config.modules(),
+            resources.input_mode(),
+            &cancellation.token(),
+        )?;
         super::extensions::check_namespaces(&modules)?;
         let module = modules
             .get(namespace)

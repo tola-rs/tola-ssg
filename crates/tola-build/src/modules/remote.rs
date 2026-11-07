@@ -9,28 +9,28 @@ use gix::protocol::transport::client::blocking_io::http;
 use super::RemoteRevision;
 use crate::cancellation::BuildCancellation;
 
-pub(super) struct FetchedRevision {
-    pub(super) commit: String,
-    pub(super) root: PathBuf,
+pub(crate) struct FetchedRevision {
+    pub(crate) commit: String,
+    pub(crate) root: PathBuf,
 }
 
-pub(super) fn fetch(
-    repository: &str,
-    revision: &RemoteRevision,
+pub(crate) fn fetch(
+    git: &str,
+    revision: Option<&RemoteRevision>,
     destination: &Path,
     cancellation: &BuildCancellation,
 ) -> Result<FetchedRevision> {
     cancellation.ensure_active()?;
-    let url = gix::Url::try_from(repository)?;
+    let url = gix::Url::try_from(git)?;
     ensure!(
         url.scheme == gix::url::Scheme::Https,
-        "a remote module repository must be an `https` URL"
+        "a module `git` must be an `https` URL"
     );
-    let revision = match revision {
+    let revision: Option<String> = revision.map(|revision| match revision {
         RemoteRevision::Tag(tag) => format!("refs/tags/{tag}"),
         RemoteRevision::Branch(branch) => format!("refs/heads/{branch}"),
         RemoteRevision::Rev(commit) => commit.clone(),
-    };
+    });
     std::fs::create_dir_all(destination)?;
     // Isolated configuration excludes Git discovery, credential helpers, and configured filter commands.
     let mut prepared = gix::clone::PrepareFetch::new(
@@ -40,7 +40,7 @@ pub(super) fn fetch(
         gix::create::Options::default(),
         gix::open::Options::isolated(),
     )?
-    .with_revision(Some(revision))?
+    .with_revision(revision)?
     .with_shallow(gix::remote::fetch::Shallow::DepthAtRemote(NonZeroU32::MIN))
     .configure_connection(|connection| {
         connection.set_credentials(|_| Ok(None));

@@ -58,7 +58,11 @@ impl<'a> PackageAccess<'a> {
         resources: &tola_build::BuildResources,
         published: &'a [PublishedPackage],
     ) -> anyhow::Result<Self> {
-        let prepared = tola_build::modules::prepare(config, resources.input_scope())?;
+        let prepared = tola_build::modules::prepare(
+            config,
+            tola_build::inputs::InputMode::new(resources.input_scope(), true),
+            &Default::default(),
+        )?;
         Ok(Self::new(&prepared, resources, published))
     }
 }

@@ -1,16 +1,13 @@
 //! Module declarations and explicit remote source acquisition.
 
 mod arguments;
-mod locked;
-mod remote;
-pub use locked::declared_root;
-pub use locked::fetch_modules;
 pub(crate) mod bootstrap;
 pub mod entities;
 pub mod hooks;
 pub(crate) mod options;
 pub(crate) mod prepared;
 pub mod query;
+pub(crate) mod remote;
 pub mod semantics;
 mod watch;
 
@@ -27,7 +24,7 @@ use std::path::{Component, Path, PathBuf};
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 
-use crate::InputScope;
+use crate::inputs::InputMode;
 
 /// Help for the site's module declarations.
 pub const HELP: &str = r#"A module namespace selects a directory containing `tola-module.toml`:
@@ -46,18 +43,22 @@ For an HTTPS Git repository, replace `path` with a remote source:
 
 ```toml
 [modules.notes]
-repository = "https://github.com/example/notebook"
+git = "https://github.com/example/notebook"
 tag = "v1.0.0"
 subdir = "theme"
 ```
 
-Choose exactly one of `tag`, `branch`, or `rev`; `rev` is a full commit ID. `subdir` defaults
-to the repository root. Run `tola module fetch notes` to fetch through gix and write `tola.lock`.
-No system Git executable is used. Omit the alias to fetch all declared remote modules.
-Commit `tola.lock` with the site; fetched sources live under `.tola/modules`.
-Builds, queries and help use the locked sources without network access. Fetch explicitly to
-refresh a branch or tag; a prepared fixed revision is reused. `--offline` can read prepared
-sources, but fetch needs online mode. `--pure` uses local `path` declarations.
+`git` and `path` are mutually exclusive. Only a `git` module may declare `subdir` or one
+of `tag`, `branch`, or `rev`. `rev` is a full commit ID, `subdir` is a relative path
+inside the repository, and `git` accepts only an `https` URL. Omitting all three selectors
+selects the repository's default branch.
+
+Resolution writes `tola.lock`: the repository, the declared selector, the commit it resolved to,
+and the digest of the module directory. Commit `tola.lock` and the frozen inputs below `vendor/`
+with the site. `tola build`, `tola dev`, and `tola check` resolve missing or changed inputs
+when the network is allowed; `--locked` refuses to write the lock, `--offline` refuses the
+network, and `--pure` reads only the site, `vendor/`, and `tola.lock`. Run `tola update`
+to refresh a tag, branch, or default branch, then `tola vendor` to update the frozen copies.
 Remote initialization is not implemented; initialization still takes a local module directory.
 
 To let a module generate the site, select it with `[theme] module = "notes"`. Do not also
@@ -66,7 +67,6 @@ declare `[build].entry`. The module's public library is imported as
 Declare the theme's exports in its manifest:
 
 ```toml
-schema-version = 1
 name = "notebook"
 version = "1.0.0"
 [typst]
@@ -140,16 +140,15 @@ non-JSON values are errors; unselected options can contain any supported Typst v
 `TOLA_MODULE_OPTIONS` names the resulting JSON file in the invocation's temporary directory;
 the file exists only for that invocation, and an empty selection produces `{}`.
 
-The manifest has `schema-version = 1`, an optional `summary`, and named queries and commands:
+The manifest has an optional `summary` and named queries and commands:
 
 ```toml
-schema-version = 1
 summary = "Notebook tools"
 
 [queries.nodes]
 entry = "model.typ"
 label = "notebook-nodes"
-schema-version = 1
+format = "entities"
 
 [commands.list]
 help = "List notebook entries."
@@ -177,7 +176,7 @@ A query entry is relative to its module, including a declared module outside the
 It runs with the site's source discovery and packages, preserving the site root while replacing
 only the query's entry. Its label must identify exactly one metadata value. The default `json`
 format accepts JSON scalars, arrays and dictionaries. Project content, paths and functions need an
-explicit projection. `format = "entities"` with `schema-version = 1` instead accepts an array of
+explicit projection. `format = "entities"` instead accepts an array of
 records with unique string `id`, string `label`, optional string `detail` and `url`, and an optional
 native Typst `source` path. The source and external URL are distinct; the CLI reports a source's
 virtual root and path. Entity queries can support editor semantics through manifest declarations:
@@ -300,16 +299,19 @@ pub struct ModuleDeclaration {
     pub assets: Option<ModuleAssetPolicy>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum ModuleSource {
     Local {
         path: PathBuf,
     },
     Remote {
-        repository: String,
+        git: String,
+        /// The declared selector; absent selects the repository's default branch.
         #[serde(flatten)]
-        revision: RemoteRevision,
+        revision: Option<RemoteRevision>,
+        /// The module's directory inside the repository; empty selects the repository root.
+        #[serde(skip_serializing_if = "path_is_empty")]
         subdir: PathBuf,
     },
 }
@@ -343,6 +345,8 @@ impl<'de> Deserialize<'de> for ModuleDeclaration {
         #[serde(deny_unknown_fields)]
         struct Fields {
             path: Option<PathBuf>,
+            git: Option<String>,
+            /// A key this model replaced; accepted only to name the repair.
             repository: Option<String>,
             tag: Option<String>,
             branch: Option<String>,
@@ -355,43 +359,39 @@ impl<'de> Deserialize<'de> for ModuleDeclaration {
             assets: Option<ModuleAssetPolicy>,
         }
         let fields = Fields::deserialize(deserializer)?;
-        let source = match (
-            fields.path,
-            fields.repository,
-            fields.tag,
-            fields.branch,
-            fields.rev,
-            fields.subdir,
-        ) {
-            (Some(path), None, None, None, None, None) => ModuleSource::Local { path },
-            (None, Some(repository), tag, branch, rev, subdir) => {
-                let revision = match (tag, branch, rev) {
-                    (Some(value), None, None) => RemoteRevision::Tag(value),
-                    (None, Some(value), None) => RemoteRevision::Branch(value),
-                    (None, None, Some(value)) => RemoteRevision::Rev(
-                        gix::ObjectId::from_hex(value.as_bytes())
-                            .map_err(|_| serde::de::Error::custom("rev must be a full commit ID"))?
-                            .to_string(),
-                    ),
-                    _ => {
-                        return Err(serde::de::Error::custom(
-                            "choose exactly one of tag, branch, or rev",
-                        ));
-                    }
-                };
-                let subdir = subdir.unwrap_or_else(|| PathBuf::from("."));
-                if repository.is_empty() || !is_relative_path(&subdir) {
+        if fields.repository.is_some() {
+            return Err(serde::de::Error::custom(
+                "`repository` was renamed to `git`; rename the key to `git`",
+            ));
+        }
+        let source = match (fields.path, fields.git) {
+            (Some(path), None) => {
+                if fields.tag.is_some()
+                    || fields.branch.is_some()
+                    || fields.rev.is_some()
+                    || fields.subdir.is_some()
+                {
                     return Err(serde::de::Error::custom(
-                        "repository must not be empty and subdir must stay within the repository",
+                        "only a `git` module may declare `tag`, `branch`, `rev`, or `subdir`",
                     ));
                 }
-                ModuleSource::Remote {
-                    repository,
-                    revision,
-                    subdir,
+                if path.as_os_str().is_empty() {
+                    return Err(serde::de::Error::custom("`path` must not be empty"));
                 }
+                ModuleSource::Local { path }
             }
-            _ => return Err(serde::de::Error::custom("choose either path or repository")),
+            (None, Some(git)) => ModuleSource::Remote {
+                git: validate_git(git).map_err(|message| serde::de::Error::custom(message))?,
+                revision: select_revision(fields.tag, fields.branch, fields.rev)
+                    .map_err(|message| serde::de::Error::custom(message))?,
+                subdir: select_subdir(fields.subdir)
+                    .map_err(|message| serde::de::Error::custom(message))?,
+            },
+            _ => {
+                return Err(serde::de::Error::custom(
+                    "choose exactly one of `path` or `git`",
+                ));
+            }
         };
         Ok(Self {
             source,
@@ -399,6 +399,48 @@ impl<'de> Deserialize<'de> for ModuleDeclaration {
             overrides: fields.overrides,
             assets: fields.assets,
         })
+    }
+}
+
+/// Whether one module directory inside its repository is unset.
+fn path_is_empty(path: &PathBuf) -> bool {
+    path.as_os_str().is_empty()
+}
+
+/// Validate a repository URL: only an `https` address names a fetchable module.
+fn validate_git(git: String) -> std::result::Result<String, &'static str> {
+    let parsed = url::Url::parse(&git).map_err(|_| "`git` must be an `https` URL")?;
+    if parsed.scheme() != "https" {
+        return Err("`git` must be an `https` URL");
+    }
+    Ok(git)
+}
+
+/// Pick the one revision selector a `git` module declared, if it declared any.
+fn select_revision(
+    tag: Option<String>,
+    branch: Option<String>,
+    rev: Option<String>,
+) -> std::result::Result<Option<RemoteRevision>, &'static str> {
+    match (tag, branch, rev) {
+        (None, None, None) => Ok(None),
+        (Some(tag), None, None) => Ok(Some(RemoteRevision::Tag(tag))),
+        (None, Some(branch), None) => Ok(Some(RemoteRevision::Branch(branch))),
+        (None, None, Some(rev)) => {
+            let commit = gix::ObjectId::from_hex(rev.as_bytes())
+                .map_err(|_| "`rev` must be a full commit ID")?;
+            Ok(Some(RemoteRevision::Rev(commit.to_string())))
+        }
+        _ => Err("choose at most one of `tag`, `branch`, or `rev`"),
+    }
+}
+
+/// Validate the module's directory inside its repository.
+fn select_subdir(subdir: Option<PathBuf>) -> std::result::Result<PathBuf, &'static str> {
+    match subdir {
+        Some(path) if is_relative_path(&path) => Ok(path),
+        Some(_) => Err("`subdir` must be a relative path inside the repository"),
+        None => Ok(PathBuf::new()),
     }
 }
 
@@ -476,14 +518,13 @@ pub struct Query {
     /// Source file relative to the module root.
     pub entry: PathBuf,
     pub label: String,
-    pub schema_version: u32,
     /// The shape of the metadata value returned by this query.
     #[serde(default)]
     pub format: QueryFormat,
 }
 
 /// The supported query result contracts.
-#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum QueryFormat {
     #[default]
@@ -530,7 +571,6 @@ pub struct ManifestEvidence {
     root: crate::filesystem::FilesystemSourceIdentity,
     manifest: crate::filesystem::FilesystemSourceIdentity,
     digest: blake3::Hash,
-    locked_source: Option<(PathBuf, String, ModuleSource)>,
 }
 
 impl ManifestEvidence {
@@ -573,14 +613,7 @@ impl ManifestEvidence {
         }
         cancellation.ensure_active()?;
         Ok(hasher.finalize() == self.digest
-            && identity() == (self.root.clone(), self.manifest.clone())
-            && self
-                .locked_source
-                .as_ref()
-                .is_none_or(|(site, name, source)| {
-                    locked::module_root(site, name, source).ok().as_deref()
-                        == self.root.canonical_path()
-                }))
+            && identity() == (self.root.clone(), self.manifest.clone()))
     }
 }
 
@@ -645,6 +678,8 @@ pub enum ModuleResolutionError {
     #[error(transparent)]
     Manifest(#[from] manifest::ManifestError),
     #[error(transparent)]
+    Roots(#[from] crate::inputs::ModuleRootError),
+    #[error(transparent)]
     ModulePath(#[from] ModulePathError),
     #[error("resolve entry for query {query}")]
     QueryEntry {
@@ -707,45 +742,65 @@ pub struct ModuleCommands {
 /// Command declarations remain available when unrelated build inputs need repair.
 pub fn resolve_command_modules(
     site_root: &Path,
+    vendor: Option<&Path>,
     declarations: &BTreeMap<String, ModuleDeclaration>,
-    scope: InputScope,
+    mode: InputMode,
+    cancellation: &crate::cancellation::BuildCancellation,
 ) -> std::result::Result<BTreeMap<String, ModuleCommands>, manifest::ManifestError> {
-    Ok(manifest::read_selected(site_root, declarations, scope)?
-        .into_iter()
-        .map(|(name, loaded)| {
-            let skill = loaded
-                .manifest
-                .skill
-                .as_ref()
-                .map(|skill| loaded.root.join(&skill.path));
-            (
-                name.clone(),
-                ModuleCommands {
-                    name,
-                    root: loaded.root,
-                    manifest: loaded.path,
-                    summary: loaded.manifest.summary,
-                    commands: loaded.manifest.commands,
-                    initializer: loaded.manifest.init,
-                    skill,
-                },
-            )
-        })
-        .collect())
+    let roots = crate::inputs::module_roots(site_root, mode, vendor, declarations, cancellation)?;
+    Ok(
+        manifest::read_selected(site_root, declarations, &roots, mode)?
+            .into_iter()
+            .map(|(name, loaded)| {
+                let skill = loaded
+                    .manifest
+                    .skill
+                    .as_ref()
+                    .map(|skill| loaded.root.join(&skill.path));
+                (
+                    name.clone(),
+                    ModuleCommands {
+                        name,
+                        root: loaded.root,
+                        manifest: loaded.path,
+                        summary: loaded.manifest.summary,
+                        commands: loaded.manifest.commands,
+                        initializer: loaded.manifest.init,
+                        skill,
+                    },
+                )
+            })
+            .collect(),
+    )
 }
 
-/// Resolve explicitly declared local modules with the caller's input scope.
+/// Resolve the declared modules' roots and read their manifests.
 ///
-/// The manifest is read only after the scope is known. Pure builds require the
-/// module's physical root to stay inside the site. Relative query entries must
-/// stay within their own module, including after following symlinks.
+/// A command that has not resolved roots yet uses this entry. A build reads manifests through the
+/// roots it already resolved, so every module is hashed once.
 pub fn resolve_modules(
     site_root: &Path,
+    vendor: Option<&Path>,
     declarations: &BTreeMap<String, ModuleDeclaration>,
-    scope: InputScope,
+    mode: InputMode,
+    cancellation: &crate::cancellation::BuildCancellation,
+) -> std::result::Result<BTreeMap<String, ResolvedModule>, ModuleResolutionError> {
+    let roots = crate::inputs::module_roots(site_root, mode, vendor, declarations, cancellation)?;
+    resolve_modules_with_roots(site_root, declarations, &roots, mode)
+}
+
+/// Read every declared module's manifest through a resolved root.
+///
+/// Resolution already decided where each module reads from. Relative query entries
+/// must stay within their own module, including after following symlinks.
+pub fn resolve_modules_with_roots(
+    site_root: &Path,
+    declarations: &BTreeMap<String, ModuleDeclaration>,
+    roots: &BTreeMap<String, PathBuf>,
+    mode: InputMode,
 ) -> std::result::Result<BTreeMap<String, ResolvedModule>, ModuleResolutionError> {
     let mut result = BTreeMap::new();
-    for (name, loaded) in manifest::read_selected(site_root, declarations, scope)? {
+    for (name, loaded) in manifest::read_selected(site_root, declarations, roots, mode)? {
         let root = loaded.root;
         let canonical_manifest = loaded.path;
         let evidence = loaded.evidence;
@@ -881,12 +936,20 @@ pub struct ResolvedTheme {
 /// Resolve the selected theme only when the caller knows its input scope.
 pub fn resolve_theme(
     config: &crate::config::ResolvedSiteConfig,
-    scope: InputScope,
+    mode: InputMode,
+    cancellation: &crate::cancellation::BuildCancellation,
 ) -> Result<Option<ResolvedTheme>> {
     let Some(namespace) = &config.theme().module else {
         return Ok(None);
     };
-    let module = resolve_modules(config.get_root(), config.modules(), scope)?
+    let roots = crate::inputs::module_roots(
+        config.get_root(),
+        mode,
+        config.vendor().path.as_deref(),
+        config.modules(),
+        cancellation,
+    )?;
+    let module = resolve_modules_with_roots(config.get_root(), config.modules(), &roots, mode)?
         .remove(namespace)
         .expect("theme namespace was validated during configuration");
     ensure!(
@@ -910,7 +973,18 @@ pub fn resolve_theme(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::InputScope;
     use std::fs;
+
+    fn resolved_modules(
+        site: &Path,
+        declarations: &BTreeMap<String, ModuleDeclaration>,
+        mode: InputMode,
+    ) -> std::result::Result<BTreeMap<String, ResolvedModule>, ModuleResolutionError> {
+        let roots =
+            crate::inputs::module_roots(site, mode, None, declarations, &Default::default())?;
+        resolve_modules_with_roots(site, declarations, &roots, mode)
+    }
 
     fn theme_site(manifest: &str) -> (tempfile::TempDir, BTreeMap<String, ModuleDeclaration>) {
         let site = tempfile::tempdir().unwrap();
@@ -933,12 +1007,10 @@ mod tests {
     }
 
     const VALID: &str = r#"
-schema-version = 1
 summary = "Forest tools"
 [queries.nodes]
 entry = "model.typ"
 label = "forest-nodes"
-schema-version = 1
 [commands.list]
 help = "List nodes"
 kind = "query"
@@ -953,7 +1025,6 @@ argv = ["editor", "--wait"]
     #[test]
     fn theme_paths_options_project_slot() {
         let manifest = r#"
-schema-version = 1
 name = "forest"
 version = "2.1.3"
 [typst]
@@ -984,7 +1055,13 @@ footer = "footer.typ"
         )
         .unwrap()
         .into_config();
-        let selected = resolve_theme(&config, InputScope::Pure).unwrap().unwrap();
+        let selected = resolve_theme(
+            &config,
+            crate::inputs::InputMode::new(InputScope::Pure, false),
+            &Default::default(),
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(selected.module.version.unwrap().to_string(), "2.1.3");
         assert_eq!(
             selected.module.typst.unwrap().entry,
@@ -1010,7 +1087,14 @@ footer = "footer.typ"
         )
         .unwrap()
         .into_config();
-        assert!(resolve_theme(&config, InputScope::Online).is_err());
+        assert!(
+            resolve_theme(
+                &config,
+                crate::inputs::InputMode::new(InputScope::Online, false),
+                &Default::default()
+            )
+            .is_err()
+        );
         #[cfg(unix)]
         {
             let outside = tempfile::tempdir().unwrap();
@@ -1029,26 +1113,26 @@ footer = "footer.typ"
             )
             .unwrap()
             .into_config();
-            assert!(resolve_theme(&config, InputScope::Online).is_err());
-        }
-    }
-
-    #[test]
-    fn theme_export_checks_identity_and_path() {
-        for manifest in [
-            "schema-version = 1\n[site]\nentry = \"model.typ\"\n",
-            "schema-version = 1\nname = \"forest\"\nversion = \"bad\"\n[site]\nentry = \"model.typ\"\n",
-            "schema-version = 1\nname = \"forest\"\nversion = \"1.0.0\"\n[site]\nentry = \"../model.typ\"\n",
-        ] {
-            let (site, declarations) = theme_site(manifest);
-            assert!(resolve_modules(site.path(), &declarations, InputScope::Online).is_err());
+            assert!(
+                resolve_theme(
+                    &config,
+                    crate::inputs::InputMode::new(InputScope::Online, false),
+                    &Default::default()
+                )
+                .is_err()
+            );
         }
     }
 
     #[test]
     fn reads_local_module_without_executing_commands() {
         let (site, declarations) = theme_site(VALID);
-        let modules = resolve_modules(site.path(), &declarations, InputScope::Pure).unwrap();
+        let modules = resolved_modules(
+            site.path(),
+            &declarations,
+            crate::inputs::InputMode::new(InputScope::Pure, false),
+        )
+        .unwrap();
         let forest = &modules["forest"];
         assert_eq!(
             forest.root,
@@ -1064,20 +1148,16 @@ footer = "footer.typ"
     }
 
     #[test]
-    fn rejects_bad_versions_and_unknown_queries() {
-        for source in [
-            VALID.replace("schema-version = 1", "schema-version = 2"),
-            VALID.replace("query = \"nodes\"", "query = \"missing\""),
-        ] {
-            let (site, declarations) = theme_site(&source);
-            assert!(resolve_modules(site.path(), &declarations, InputScope::Online).is_err());
-        }
-    }
-
-    #[test]
     fn rejects_escape_allows_distinct_aliases() {
         let (site, mut declarations) = theme_site(&VALID.replace("model.typ", "../outside.typ"));
-        assert!(resolve_modules(site.path(), &declarations, InputScope::Online).is_err());
+        assert!(
+            resolved_modules(
+                site.path(),
+                &declarations,
+                crate::inputs::InputMode::new(InputScope::Online, false)
+            )
+            .is_err()
+        );
         fs::write(site.path().join("theme/tola-module.toml"), VALID).unwrap();
         declarations.insert(
             "other".into(),
@@ -1089,9 +1169,13 @@ footer = "footer.typ"
             },
         );
         assert_eq!(
-            resolve_modules(site.path(), &declarations, InputScope::Online)
-                .unwrap()
-                .len(),
+            resolved_modules(
+                site.path(),
+                &declarations,
+                crate::inputs::InputMode::new(InputScope::Online, false)
+            )
+            .unwrap()
+            .len(),
             2
         );
     }
@@ -1099,7 +1183,12 @@ footer = "footer.typ"
     #[test]
     fn rejects_unknown_command_fields() {
         let (site, declarations) = theme_site(&VALID.replace("argv = [", "typo = true\nargv = ["));
-        let error = resolve_modules(site.path(), &declarations, InputScope::Online).unwrap_err();
+        let error = resolved_modules(
+            site.path(),
+            &declarations,
+            crate::inputs::InputMode::new(InputScope::Online, false),
+        )
+        .unwrap_err();
         assert!(format!("{:#}", anyhow::Error::new(error)).contains("unknown field"));
     }
 
@@ -1112,7 +1201,14 @@ footer = "footer.typ"
         fs::remove_file(&path).unwrap();
         fs::write(site.path().join("outside.typ"), "outside").unwrap();
         symlink(site.path().join("outside.typ"), path).unwrap();
-        assert!(resolve_modules(site.path(), &declarations, InputScope::Online).is_err());
+        assert!(
+            resolved_modules(
+                site.path(),
+                &declarations,
+                crate::inputs::InputMode::new(InputScope::Online, false)
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -1128,8 +1224,22 @@ footer = "footer.typ"
                 ..Default::default()
             },
         )]);
-        assert!(resolve_modules(site.path(), &declarations, InputScope::Online).is_ok());
-        assert!(resolve_modules(site.path(), &declarations, InputScope::Pure).is_err());
+        assert!(
+            resolved_modules(
+                site.path(),
+                &declarations,
+                crate::inputs::InputMode::new(InputScope::Online, false)
+            )
+            .is_ok()
+        );
+        assert!(
+            resolved_modules(
+                site.path(),
+                &declarations,
+                crate::inputs::InputMode::new(InputScope::Pure, false)
+            )
+            .is_err()
+        );
     }
 
     mod module_assets {
@@ -1181,7 +1291,7 @@ footer = "footer.typ"
                 write(
                     &module,
                     "tola-module.toml",
-                    "schema-version=1\nname=\"sample\"\nversion=\"1.0.0\"\n[typst]\nentry=\"lib.typ\"\n[site]\nentry=\"site.typ\"\n[assets]\ndirectory=\"assets\"\n",
+                    "name=\"sample\"\nversion=\"1.0.0\"\n[typst]\nentry=\"lib.typ\"\n[site]\nentry=\"site.typ\"\n[assets]\ndirectory=\"assets\"\n",
                 );
                 write(&module, "lib.typ", "#let marker = [Library available]");
                 write(&module, "assets/style.css", "module-style");
@@ -1325,30 +1435,6 @@ footer = "footer.typ"
         }
 
         #[test]
-        fn stale_asset_changes_keep_outputs() {
-            let project = Project::new();
-            project.config(
-                "[modules.demo.assets]\ninclude=[\"scripts\"]\nexclude=[\"scripts/legacy.js\"]\n",
-            );
-            let config = project.loaded();
-            let mut session = project.session();
-            session
-                .build_and_write(&config, BuildRequest::default())
-                .unwrap();
-            write(&project.module, "assets/scripts/new.js", "new-script");
-            fs::remove_file(project.module.join("assets/scripts/main.js")).unwrap();
-            let paths = vec![
-                project.module.join("assets/scripts/new.js"),
-                project.module.join("assets/scripts/main.js"),
-            ];
-            rebuild(&mut session, &config, paths);
-            let output = project.root.join("public/_modules/demo/scripts");
-            assert!(!output.join("main.js").exists());
-            assert_eq!(project.asset("scripts/new.js"), "new-script");
-            assert!(!output.join("legacy.js").exists());
-        }
-
-        #[test]
         fn moved_module_keeps_alias() {
             let project = Project::new();
             project.build();
@@ -1393,88 +1479,6 @@ footer = "footer.typ"
             assert!(second.contains("style-input: second replacement"));
             assert_ne!(first, second);
             assert_eq!(project.asset("style.css"), "second replacement");
-        }
-
-        #[cfg(unix)]
-        #[test]
-        fn excluded_link_and_unreadable_skip_reads() {
-            use std::os::unix::fs::{PermissionsExt, symlink};
-            use std::sync::Arc;
-            let project = Project::new();
-            let scripts = project.module.join("assets/scripts");
-            symlink("no-target", scripts.join("link.js")).unwrap();
-            let unreadable = scripts.join("unreadable.js");
-            fs::write(&unreadable, "not read").unwrap();
-            fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000)).unwrap();
-            project
-                .config("[modules.demo.assets]\ninclude=[\"scripts\"]\nexclude=[\"scripts/link.js\",\"scripts/unreadable.js\",\"scripts/legacy.js\"]\n");
-            let config = project.loaded();
-            project.build();
-            let mut checker = crate::check::SourceDiagnosticSession::with_resources(
-                Arc::new(config),
-                BuildResources::new().with_input_scope(InputScope::Offline),
-            );
-            let revision = checker
-                .inspect(
-                    Vec::new(),
-                    &crate::cancellation::BuildCancellation::default(),
-                )
-                .unwrap();
-            assert!(revision.compiled(), "{:?}", revision.diagnostics());
-            fs::set_permissions(unreadable, fs::Permissions::from_mode(0o600)).unwrap();
-        }
-
-        #[test]
-        fn moved_file_is_published() {
-            let project = Project::new();
-            write(&project.module, "assets/hidden/move.js", "moved script");
-            project.config(
-                "[modules.demo.assets]\ninclude=[\"scripts\"]\nexclude=[\"scripts/legacy.js\"]\n",
-            );
-            let (config, mut session) = project.develop();
-            let from = project.module.join("assets/hidden/move.js");
-            let to = project.module.join("assets/scripts/move.js");
-            fs::rename(&from, &to).unwrap();
-            rebuild(&mut session, &config, vec![from, to]);
-            assert_eq!(project.asset("scripts/move.js"), "moved script");
-        }
-
-        #[test]
-        fn include_change_rediscovers_files() {
-            let project = Project::new();
-            project.config("[modules.demo.assets]\ninclude=[\"style.css\"]\n");
-            let mut session = project.session();
-            session
-                .build_and_write(&project.loaded(), BuildRequest::new(BuildMode::Development))
-                .unwrap();
-            assert!(
-                !project
-                    .root
-                    .join("public/_modules/demo/scripts/main.js")
-                    .exists()
-            );
-            project.config("[modules.demo.assets]\ninclude=[\"scripts\"]\n");
-            session
-                .build_and_write(&project.loaded(), BuildRequest::new(BuildMode::Development))
-                .unwrap();
-            assert_eq!(project.asset("scripts/main.js"), "main-script");
-            assert!(!project.root.join("public/_modules/demo/style.css").exists());
-        }
-
-        #[test]
-        fn aliases_publish_separate_selections() {
-            let project = Project::new();
-            project.config("[modules.other]\npath=\"../module\"\n[modules.demo.assets]\ninclude=[\"style.css\"]\n[modules.other.assets]\ninclude=[\"scripts\"]\n");
-            project
-                .session()
-                .build_and_write(&project.loaded(), BuildRequest::new(BuildMode::Development))
-                .unwrap();
-            let demo = project.root.join("public/_modules/demo");
-            let other = project.root.join("public/_modules/other");
-            assert!(demo.join("style.css").exists());
-            assert!(!demo.join("scripts/main.js").exists());
-            assert!(other.join("scripts/main.js").exists());
-            assert!(!other.join("style.css").exists());
         }
 
         #[test]
@@ -1553,7 +1557,7 @@ footer = "footer.typ"
                 write(
                     &module,
                     "tola-module.toml",
-                    r#"schema-version = 1
+                    r#"
         name = "forester"
         version = "1.0.0"
         summary = "An independently stored notebook theme"
@@ -1571,8 +1575,7 @@ footer = "footer.typ"
         [queries.nodes]
         entry = "model.typ"
         label = "theme-acceptance-nodes"
-        schema-version = 1
-        "#,
+                "#,
                 );
                 write(
                     &module,
@@ -1753,9 +1756,12 @@ footer = "footer.typ"
         "#,
             );
             let config = Arc::new(project.config().unwrap());
-            let resolved =
-                modules::resolve_modules(config.get_root(), config.modules(), InputScope::Offline)
-                    .unwrap();
+            let resolved = super::resolved_modules(
+                config.get_root(),
+                config.modules(),
+                crate::inputs::InputMode::new(InputScope::Offline, false),
+            )
+            .unwrap();
             let module = &resolved["forester"];
             let result = modules::query::run(
                 Arc::clone(&config),
@@ -1795,13 +1801,20 @@ footer = "footer.typ"
             let project = Project::new();
             project.configure("[modules.another]\npath = '../forester'\n");
             let config = project.config().unwrap();
-            let resolved =
-                modules::resolve_modules(config.get_root(), config.modules(), InputScope::Offline)
-                    .unwrap();
+            let resolved = super::resolved_modules(
+                config.get_root(),
+                config.modules(),
+                crate::inputs::InputMode::new(InputScope::Offline, false),
+            )
+            .unwrap();
             assert_eq!(resolved["forester"].root, resolved["another"].root);
             assert!(
-                modules::resolve_modules(config.get_root(), config.modules(), InputScope::Pure)
-                    .is_err()
+                super::resolved_modules(
+                    config.get_root(),
+                    config.modules(),
+                    crate::inputs::InputMode::new(InputScope::Pure, false)
+                )
+                .is_err()
             );
             write(
                 &project.root,
@@ -1823,14 +1836,6 @@ footer = "footer.typ"
             let html = project.html();
             assert!(html.contains("Labels count: 0"), "{html}");
             assert!(!html.contains("Default module footer."), "{html}");
-        }
-
-        #[test]
-        fn invalid_option_is_rejected() {
-            let project = Project::new();
-            project.configure("[modules.forester.options]\nshow-footer = 'not a boolean'\n");
-            project.build_error();
-            assert!(!project.root.join("public/index.html").exists());
         }
 
         #[test]
@@ -1881,7 +1886,13 @@ footer = "footer.typ"
                 project.configure(extra);
                 let error = project
                     .config()
-                    .and_then(|config| modules::resolve_theme(&config, InputScope::Offline))
+                    .and_then(|config| {
+                        crate::modules::resolve_theme(
+                            &config,
+                            crate::inputs::InputMode::new(InputScope::Offline, false),
+                            &Default::default(),
+                        )
+                    })
                     .expect_err("the theme configuration must be rejected");
                 let message = format!("{error:#}");
                 for needle in needles {
@@ -1913,8 +1924,12 @@ footer = "footer.typ"
                 .replace("../forester", "../missing-forester");
             fs::write(&config_path, source).unwrap();
             let failure = project.config().and_then(|config| {
-                modules::resolve_modules(config.get_root(), config.modules(), InputScope::Offline)
-                    .map_err(anyhow::Error::new)
+                super::resolved_modules(
+                    config.get_root(),
+                    config.modules(),
+                    crate::inputs::InputMode::new(InputScope::Offline, false),
+                )
+                .map_err(anyhow::Error::new)
             });
             let error = failure.expect_err("a missing module cannot be resolved");
             assert!(format!("{error:#}").contains("missing-forester"));

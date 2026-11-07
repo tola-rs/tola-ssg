@@ -124,6 +124,7 @@ Each document has one job; a fact lives in exactly one of them.
 - Workspace crates live under `crates/`; the application is `src/` (`tola`).
 - Focused loops: `cargo test --locked -p tola <name>`, `cargo test --locked -p tola-build`.
 - Format with `cargo fmt --all`; lint with `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`.
+- Test-only imports and helpers live inside `mod tests`. Never mark an item or import `#[cfg(test)]` beside production code: a helper two test modules share is written in each `mod tests` where it is used.
 
 ### Nushell
 

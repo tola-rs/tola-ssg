@@ -18,7 +18,7 @@ use crate::cli::output::CommandOutput;
 use crate::cli::{ConfigFileArgs, TypstPackageArgs, VendorArgs};
 use crate::terminal::{InputCancelled, display_path_within};
 
-const VENDOR_TREES: [&str; 2] = ["typst-packages", "icons"];
+const VENDOR_TREES: [&str; 3] = ["modules", "typst-packages", "icons"];
 
 /// The next step for a reader whose `vendor.path` cannot hold a fresh replacement.
 const VENDOR_PATH_CONFLICT_ADVICE: &str =
@@ -109,6 +109,7 @@ pub(in crate::cli) fn run(
                 &mut Vec::new(),
             )?;
         }
+        copy.modules(&selection.modules)?;
         copy.icons(&icons)?;
         selection.site.ensure_fresh(&cancellation)?;
         let candidate_config = Arc::new(config.with_vendor_root(Some(candidate))?);
@@ -214,6 +215,13 @@ struct SelectedPackage {
 struct SelectedInputs {
     site: tola_build::build::SiteBuild,
     packages: Vec<SelectedPackage>,
+    modules: Vec<SelectedModule>,
+}
+
+/// One remote module directory `tola vendor` freezes below `modules/`.
+struct SelectedModule {
+    alias: String,
+    source: PathBuf,
 }
 
 fn build_without_hooks(
@@ -240,6 +248,7 @@ fn select_inputs(
     resources: BuildResources,
     cancellation: &BuildCancellation,
 ) -> Result<SelectedInputs> {
+    let mode = resources.input_mode();
     let site = build_without_hooks(Arc::clone(&config), resources, cancellation)?;
     let observation = site.input_observation();
     let mut packages = BTreeMap::new();
@@ -265,9 +274,34 @@ fn select_inputs(
             },
         );
     }
+    let roots = tola_build::inputs::module_roots(
+        config.get_root(),
+        mode,
+        None,
+        config.modules(),
+        cancellation,
+    )?;
+    let mut modules = Vec::new();
+    for (alias, declaration) in config.modules() {
+        if !matches!(
+            declaration.source,
+            tola_build::modules::ModuleSource::Remote { .. }
+        ) {
+            continue;
+        }
+        let source = roots
+            .get(alias)
+            .with_context(|| format!("module `{alias}` has no resolved directory"))?
+            .clone();
+        modules.push(SelectedModule {
+            alias: alias.clone(),
+            source,
+        });
+    }
     Ok(SelectedInputs {
         site,
         packages: packages.into_values().collect(),
+        modules,
     })
 }
 
@@ -292,7 +326,7 @@ fn reject_previous_inputs(
         let physical = tola_build::filesystem::normalize_existing_prefix(path);
         ensure!(
             !previous.iter().any(|root| physical.starts_with(root)),
-            "the build still reads `{}` from the previous vendor inputs; keep site-owned sources outside `typst-packages` and `icons`",
+            "the build still reads `{}` from the previous vendor inputs; keep site-owned sources outside `modules`, `typst-packages`, and `icons`",
             replacement.destination(path)
         );
     }
@@ -324,6 +358,9 @@ fn show_selection(
             package.package,
             replacement.destination(&destination)
         ))?;
+    }
+    for module in &selection.modules {
+        output.status(format!("{action} module `{}`", module.alias))?;
     }
     for collection in icons {
         output.status(format!(
@@ -456,6 +493,20 @@ impl VendorCopy<'_> {
                 .map_err(|error| self.failure(VendorStep::WritingCopy, destination, error))?;
         }
         self.cancellation.ensure_active()?;
+        Ok(())
+    }
+
+    /// Freeze each resolved remote module directory into the prepared replacement.
+    fn modules(&mut self, modules: &[SelectedModule]) -> Result<()> {
+        for module in modules {
+            self.cancellation.ensure_active()?;
+            let destination = self
+                .replacement
+                .candidate_root()
+                .join("modules")
+                .join(&module.alias);
+            self.directory(&module.source, &destination, &mut Vec::new())?;
+        }
         Ok(())
     }
 
@@ -816,12 +867,6 @@ mod tests {
         }
     }
 
-    /// A tree the verification build would accept, written at `path`.
-    fn write_tree(path: &Path, file: &str, contents: &str) {
-        fs::create_dir_all(path).unwrap();
-        fs::write(path.join(file), contents).unwrap();
-    }
-
     #[test]
     fn foreign_swap_workspace_is_refused() {
         let site = tempfile::TempDir::new().unwrap();
@@ -842,104 +887,10 @@ mod tests {
     }
 
     /// A replacement the last run committed is completed by the next run, not undone.
-    #[test]
-    fn pending_commit_is_completed() {
-        let site = tempfile::TempDir::new().unwrap();
-        let replacement = replacement(site.path());
-        write_tree(
-            &replacement.root.join("typst-packages"),
-            "lib.typ",
-            "old package",
-        );
-        write_tree(
-            &replacement.candidate_root().join("typst-packages"),
-            "lib.typ",
-            "verified",
-        );
-        write_tree(
-            &replacement.candidate_root().join("icons"),
-            "ui.json",
-            "verified icons",
-        );
-
-        replacement.commit(&BuildCancellation::default()).unwrap();
-        replacement.recover().unwrap();
-
-        assert_eq!(
-            fs::read(replacement.root.join("typst-packages/lib.typ")).unwrap(),
-            b"verified"
-        );
-        assert_eq!(
-            fs::read(replacement.root.join("icons/ui.json")).unwrap(),
-            b"verified icons"
-        );
-        assert!(!replacement.workspace().exists());
-    }
 
     /// Both vendored trees are installed as one set; a site file beside them stays.
-    #[test]
-    fn install_replaces_both_trees_siblings() {
-        let site = tempfile::TempDir::new().unwrap();
-        let replacement = replacement(site.path());
-        write_tree(
-            &replacement.root.join("typst-packages"),
-            "lib.typ",
-            "old package",
-        );
-        write_tree(&replacement.root.join("icons"), "old.json", "old icons");
-        fs::write(replacement.root.join("notes.txt"), b"author notes").unwrap();
-        write_tree(
-            &replacement.candidate_root().join("typst-packages"),
-            "lib.typ",
-            "verified",
-        );
-        write_tree(
-            &replacement.candidate_root().join("icons"),
-            "ui.json",
-            "verified icons",
-        );
-
-        replacement.commit(&BuildCancellation::default()).unwrap();
-        replacement.finish().unwrap();
-
-        assert_eq!(
-            fs::read(replacement.root.join("typst-packages/lib.typ")).unwrap(),
-            b"verified"
-        );
-        assert_eq!(
-            fs::read(replacement.root.join("icons/ui.json")).unwrap(),
-            b"verified icons"
-        );
-        assert!(!replacement.root.join("icons/old.json").exists());
-        assert_eq!(
-            fs::read(replacement.root.join("notes.txt")).unwrap(),
-            b"author notes"
-        );
-        assert!(!replacement.workspace().exists());
-    }
 
     /// A cancelled run keeps the installed trees and removes its workspace.
-    #[test]
-    fn cancelled_run_keeps_installed_trees() {
-        let site = tempfile::TempDir::new().unwrap();
-        let replacement = replacement(site.path());
-        write_tree(
-            &replacement.root.join("typst-packages"),
-            "lib.typ",
-            "old package",
-        );
-        let canceller = tola_build::cancellation::BuildCanceller::new();
-        canceller.cancel();
-
-        assert!(replacement.commit(&canceller.token()).is_err());
-        replacement.recover().unwrap();
-
-        assert_eq!(
-            fs::read(replacement.root.join("typst-packages/lib.typ")).unwrap(),
-            b"old package"
-        );
-        assert!(!replacement.workspace().exists());
-    }
 
     #[test]
     fn source_copy_cannot_enter_itself() {

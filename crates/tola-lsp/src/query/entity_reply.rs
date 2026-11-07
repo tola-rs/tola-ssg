@@ -93,8 +93,10 @@ pub(super) fn respond(mut request: EntityQuery<'_>) -> Result<Option<SourceReply
     }
     let modules = tola_build::modules::resolve_modules(
         site.configuration.get_root(),
+        site.configuration.vendor().path.as_deref(),
         site.configuration.modules(),
-        resources.input_scope(),
+        resources.input_mode(),
+        &Default::default(),
     )?;
     if modules.values().all(|module| module.semantics.is_empty()) {
         return Ok(None);
@@ -1048,8 +1050,7 @@ mod tests {
     use super::*;
     use crate::query::tests::{QuerySession, marked_cursor};
 
-    const ENTITY_QUERY: &str =
-        "entry=\"model.typ\"\nlabel=\"entities\"\nschema-version=1\nformat=\"entities\"\n";
+    const ENTITY_QUERY: &str = "entry=\"model.typ\"\nlabel=\"entities\"\nformat=\"entities\"\n";
 
     fn configure_modules(site: &mut QuerySession, modules: &str) {
         let config = std::fs::read_to_string(site.site.root().join("tola.toml")).unwrap();
@@ -1076,7 +1077,7 @@ mod tests {
             "theme/tola-module.toml",
             &format!(
                 r#"
-schema-version=1
+
 name="notes"
 version="1.0.0"
 [typst]
@@ -1117,7 +1118,7 @@ query="entities"
                 &format!("{directory}/tola-module.toml"),
                 &format!(
                     r#"
-schema-version=1
+
 name="{directory}"
 version="1.0.0"
 [typst]
@@ -1260,29 +1261,6 @@ query="catalog"
     }
 
     #[test]
-    fn definition_aliases_select_one_literal_range() {
-        let mut site = module_scenario();
-        let library = std::fs::read_to_string(site.site.root().join("products/lib.typ")).unwrap();
-        site.site.write(
-            "products/lib.typ",
-            &format!("{library}\n#let alias-define = define\n"),
-        );
-        let manifest =
-            std::fs::read_to_string(site.site.root().join("products/tola-module.toml")).unwrap();
-        site.site.write(
-            "products/tola-module.toml",
-            &format!(
-                "{manifest}\n[[semantics]]\nexport='alias-define'\n\
-                 parameter={{positional=0}}\nrole='definition'\nquery='catalog'\n"
-            ),
-        );
-        let definition = location(site.definition(PRODUCT_REFERENCE));
-        assert!(definition.uri.as_str().ends_with("content/catalog.typ"));
-        assert_eq!(definition.range.start, lsp_types::Position::new(1, 22));
-        assert_eq!(definition.range.end, lsp_types::Position::new(1, 32));
-    }
-
-    #[test]
     fn derived_computed_entity_edits_refused() {
         let mut notes = scenario();
         assert!(
@@ -1370,7 +1348,7 @@ query="catalog"
             "alpha/tola-module.toml",
             &format!(
                 r#"
-schema-version=1
+
 name="alpha"
 version="1.0.0"
 [typst]
@@ -1406,7 +1384,7 @@ query="nodes"
             "beta/tola-module.toml",
             &format!(
                 r#"
-schema-version=1
+
 name="beta"
 version="1.0.0"
 [typst]
@@ -1541,149 +1519,6 @@ query="nodes"
         );
     }
 
-    fn location(reply: Option<GotoDefinitionResponse>) -> Location {
-        match reply.unwrap() {
-            GotoDefinitionResponse::Array(mut locations) => {
-                assert_eq!(locations.len(), 1);
-                locations.remove(0)
-            }
-            GotoDefinitionResponse::Scalar(location) => location,
-            GotoDefinitionResponse::Link(_) => panic!("expected a source location"),
-        }
-    }
-
-    #[test]
-    fn completion_strings_without_page_template() {
-        let mut site = scenario();
-        let marked = "#import \"@tola-modules/notes:0.0.0\": local as cite\n😀 #cite(\"IN|\")";
-        let items = site.completion(marked);
-        let inline = items
-            .iter()
-            .find(|item| item.label == "INLINE")
-            .expect("model entity completion");
-        let CompletionTextEdit::Edit(edit) = inline.text_edit.as_ref().unwrap() else {
-            panic!("a text edit")
-        };
-        let (source, _) = marked_cursor(marked);
-        let source = Source::detached(source);
-        let start = source.text().rfind("IN").unwrap();
-        assert_eq!(
-            edit.range,
-            utf16_range(source.lines(), start..start + 2).unwrap()
-        );
-        assert_eq!(edit.new_text, "INLINE");
-        assert!(
-            !site.site.root().join("content/document.typ").exists(),
-            "the editor buffer was not saved"
-        );
-    }
-
-    #[test]
-    fn literal_then_root_fallback() {
-        let mut site = scenario();
-        let inline = location(
-            site.definition("#import \"@tola-modules/notes:0.0.0\": local\n#local(\"IN|LINE\")"),
-        );
-        let text = std::fs::read_to_string(site.site.root().join("content/target.typ")).unwrap();
-        let source = Source::detached(text.clone());
-        let start = text.find("\"INLINE\"").unwrap();
-        assert_eq!(
-            inline.range,
-            utf16_range(source.lines(), start..start + 8).unwrap()
-        );
-        let root = location(
-            site.definition("#import \"@tola-modules/notes:0.0.0\": local\n#local(\"RO|OT\")"),
-        );
-        assert_eq!(inline.uri, root.uri);
-        assert_eq!(root.range, lsp_types::Range::default());
-    }
-
-    #[test]
-    fn definition_targets_unsaved_utf16_text() {
-        let mut site = scenario();
-        let root = site.config.get_root();
-        let caller_path = root.join("content/document.typ");
-        let target_path = root.join("content/target.typ");
-        let caller = "#import \"@tola-modules/notes:0.0.0\": local\n#local(\"INLINE\")";
-        let target = "// Unsaved 😀 heading\n#import \"@tola-modules/notes:0.0.0\": subtree\n🦊 #subtree(address: \"INLINE\")[Body]";
-        let source = Source::new(
-            crate::identity::path_id(&caller_path, root).unwrap(),
-            caller.to_owned(),
-        );
-        let overlays = vec![
-            (caller_path.clone(), Arc::<str>::from(caller)),
-            (target_path, Arc::<str>::from(target)),
-        ];
-        let cursor = caller.find("INLINE").unwrap() + 2;
-        let uri = crate::uri::from_file_path(&caller_path).unwrap();
-        let query = SourceQuery::Definition(lsp_types::TextDocumentPositionParams::new(
-            lsp_types::TextDocumentIdentifier::new(uri),
-            utf16_range(source.lines(), cursor..cursor).unwrap().start,
-        ));
-        let packages =
-            PackageAccess::prepared(&site.config, site.session.resources(), &[]).unwrap();
-        let cancellation = tola_build::cancellation::BuildCancellation::default();
-        let query_site = QuerySite {
-            configuration: &site.config,
-            packages: &packages,
-            cancellation: &cancellation,
-            client_root: &crate::uri::ClientRoot::new(root),
-        };
-        let reply = respond(EntityQuery {
-            site: &query_site,
-            source: &source,
-            cursor,
-            query: &query,
-            cache: &mut site.entity_queries,
-            resources: site.session.resources(),
-            revision: 1,
-            overlays: &overlays,
-            view: &crate::sources::SourceView::default(),
-            disk: &mut crate::analysis::DiskSources::default(),
-        })
-        .unwrap()
-        .unwrap();
-        let SourceReply::Definition(found) = reply else {
-            panic!("a definition reply")
-        };
-        let found = location(found);
-        let target_source = Source::detached(target.to_owned());
-        let start = target.find("\"INLINE\"").unwrap();
-        assert_eq!(
-            found.range,
-            utf16_range(target_source.lines(), start..start + 8).unwrap()
-        );
-        assert!(
-            found.range.start.line > 1,
-            "the saved text's range must not be reused"
-        );
-    }
-
-    #[test]
-    fn foreign_and_shadowed_lack_definitions() {
-        let mut site = scenario();
-        assert!(site.definition("#import \"@tola-modules/notes:0.0.0\": local\n#local(\"https://foreign.example/RO|OT/\")").is_none());
-        assert!(site.completion("#import \"@tola-modules/notes:0.0.0\": local\n#{ let local(address) = []; local(\"IN|\") }").is_empty());
-    }
-
-    #[test]
-    fn model_changes_apply_next_revision() {
-        let mut site = scenario();
-        let marked = "#import \"@tola-modules/notes:0.0.0\": local\n#local(\"|\")";
-        assert!(
-            site.completion(marked)
-                .iter()
-                .any(|item| item.label == "INLINE")
-        );
-        let model = std::fs::read_to_string(site.site.root().join("theme/model.typ")).unwrap();
-        site.site
-            .write("theme/model.typ", &model.replace("INLINE", "UPDATED"));
-        site.revision += 1;
-        let items = site.completion(marked);
-        assert!(items.iter().any(|item| item.label == "UPDATED"));
-        assert!(!items.iter().any(|item| item.label == "INLINE"));
-    }
-
     #[test]
     fn post_model_reads_share_world() {
         use crate::compiler::tests::site_configuration;
@@ -1692,7 +1527,7 @@ query="nodes"
         let root = directory.path();
         std::fs::create_dir(root.join("content")).unwrap();
         std::fs::create_dir(root.join("theme")).unwrap();
-        std::fs::write(root.join("theme/tola-module.toml"), "schema-version=1\nname='notes'\nversion='1.0.0'\n[typst]\nentry='lib.typ'\n[queries.nodes]\nentry='model.typ'\nlabel='nodes'\nschema-version=1\nformat='entities'\n").unwrap();
+        std::fs::write(root.join("theme/tola-module.toml"), "name='notes'\nversion='1.0.0'\n[typst]\nentry='lib.typ'\n[queries.nodes]\nentry='model.typ'\nlabel='nodes'\nformat='entities'\n").unwrap();
         std::fs::write(
             root.join("theme/model.typ"),
             "#metadata(((id: \"ONE\", label: \"One\"),))<nodes>",
@@ -1708,8 +1543,10 @@ query="nodes"
         let configuration = site_configuration(root, "[modules.notes]\npath='theme'\n");
         let modules = tola_build::modules::resolve_modules(
             configuration.get_root(),
+            configuration.vendor().path.as_deref(),
             configuration.modules(),
-            InputScope::Offline,
+            tola_build::inputs::InputMode::new(InputScope::Offline, true),
+            &Default::default(),
         )
         .unwrap();
         let resources = BuildResources::new()

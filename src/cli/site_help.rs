@@ -125,8 +125,10 @@ fn discover(request: &Request) -> anyhow::Result<BTreeMap<String, ModuleDeclarat
     let schema = core.into_schema();
     let mut modules = tola_build::modules::manifest::read_declarations(
         source.root(),
+        None,
         &schema.modules,
-        request.scope,
+        tola_build::inputs::InputMode::new(request.scope, true),
+        &Default::default(),
     )?;
     let builtins = super::Cli::command();
     anyhow::ensure!(
@@ -138,8 +140,10 @@ fn discover(request: &Request) -> anyhow::Result<BTreeMap<String, ModuleDeclarat
     if request.page == Page::Top
         && let Ok(commands) = tola_build::modules::resolve_command_modules(
             source.root(),
+            None,
             &schema.modules,
-            request.scope,
+            tola_build::inputs::InputMode::new(request.scope, true),
+            &Default::default(),
         )
     {
         let declared = commands.values().flat_map(|module| {

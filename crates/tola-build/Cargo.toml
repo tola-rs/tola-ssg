@@ -41,6 +41,8 @@ typst-utils.workspace = true
 typst-html.workspace = true
 roxmltree = "0.21.1"
 sha2 = "0.10"
+flate2 = "1.1.10"
+tar = "0.4.46"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "system-proxy"] }
 tokio = { version = "1.53.1", features = ["rt", "rt-multi-thread", "time", "net", "macros"] }
 rustc-hash = "2.1.3"

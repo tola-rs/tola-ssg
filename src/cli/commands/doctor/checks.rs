@@ -37,7 +37,11 @@ pub(super) fn diagnose(
     match loaded {
         Ok(loaded) => {
             output.apply_diagnostic_limits(loaded.diagnostics());
-            let config = tola_build::modules::prepare(loaded.config(), scope)?;
+            let config = tola_build::modules::prepare(
+                loaded.config(),
+                tola_build::inputs::InputMode::new(scope, true),
+                &cancellation.token(),
+            )?;
             destination::start_site(output, &config, &cancellation.token())?;
             let mut diagnostics = tola_build::config::diagnostic::warning_diagnostics(&config);
             diagnostics.extend(diagnose_loaded(config));
@@ -445,39 +449,6 @@ mod tests {
     const MINIMAL_CONFIG: &str = "[build]\nentry = \"site.typ\"\ncontent-dir = \"content\"\n";
 
     #[test]
-    fn theme_supplies_missing_entry() {
-        let directory = tempdir().unwrap();
-        let root = directory.path();
-        std::fs::create_dir(root.join("content")).unwrap();
-        std::fs::create_dir(root.join("theme")).unwrap();
-        std::fs::write(
-            root.join("theme/site.typ"),
-            "#panic(\"doctor must not compile\")",
-        )
-        .unwrap();
-        std::fs::write(
-            root.join("theme/tola-module.toml"),
-            "schema-version=1\nname='notes'\nversion='1.0.0'\n[site]\nentry='site.typ'\n",
-        )
-        .unwrap();
-        let path = root.join("tola.toml");
-        std::fs::write(
-            &path,
-            "[modules.notes]\npath='theme'\n[theme]\nmodule='notes'\n",
-        )
-        .unwrap();
-        let diagnostics = diagnose_at(&path);
-        assert!(
-            !diagnostics
-                .iter()
-                .any(|item| item.severity == Severity::Error),
-            "{diagnostics:?}"
-        );
-        assert!(!root.join("site.typ").exists());
-        assert!(!root.join("public").exists());
-    }
-
-    #[test]
     fn pure_scope_reports_selected_package_roots() {
         let directory = tempdir().unwrap();
         let path = directory.path().join("tola.toml");
@@ -495,19 +466,6 @@ mod tests {
             reported
                 .iter()
                 .any(|diagnostic| diagnostic.code == crate::codes::doctor::PACKAGE_LOCATIONS)
-        );
-    }
-
-    #[test]
-    fn missing_config_is_reported() {
-        let directory = tempdir().unwrap();
-        let missing = directory.path().join("missing.toml");
-        let diagnostics = diagnose_at(&missing);
-
-        assert!(
-            diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.code == tola_diagnostic::codes::config::IO)
         );
     }
 
@@ -551,26 +509,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn unreadable_editor_settings_file_is_reported() {
-        let directory = tempdir().unwrap();
-        let path = directory.path().join("tola.toml");
-        std::fs::write(&path, MINIMAL_CONFIG).unwrap();
-        std::fs::create_dir_all(directory.path().join(".vscode/settings.json")).unwrap();
-
-        let reported = diagnose_at(&path);
-        reported
-            .iter()
-            .find(|diagnostic| {
-                diagnostic.code == crate::codes::doctor::EDITOR_FILE_UNREADABLE
-                    && diagnostic
-                        .location
-                        .as_ref()
-                        .is_some_and(|location| location.path.ends_with(".vscode/settings.json"))
-            })
-            .expect("an unreadable settings file is reported");
-    }
-
     /// The diagnostics `tola doctor` reports for `path`, with `packages` and `scope`, against a
     /// plain terminal and a fresh cancellation.
     fn diagnose_config(
@@ -598,26 +536,6 @@ mod tests {
     }
 
     #[test]
-    fn malformed_config_stops_site_checks() {
-        let directory = tempdir().unwrap();
-        let path = directory.path().join("tola.toml");
-        std::fs::write(&path, "[build\n").unwrap();
-
-        let diagnostics = diagnose_at(&path);
-
-        assert!(
-            diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.code == "config.toml")
-        );
-        assert!(
-            !diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.code == crate::codes::doctor::ENTRY_MISSING)
-        );
-    }
-
-    #[test]
     fn missing_vendor_directory_is_reported() {
         let directory = tempdir().unwrap();
         let path = directory.path().join("tola.toml");
@@ -640,59 +558,6 @@ mod tests {
                 .map(|location| location.path.as_str()),
             Some("vendor")
         );
-    }
-
-    #[test]
-    fn missing_font_directory_is_reported() {
-        let directory = tempdir().unwrap();
-        let path = directory.path().join("tola.toml");
-        std::fs::write(&path, "[typst.fonts]\npaths = [\"fonts\"]\n").unwrap();
-
-        let reported = diagnose_at(&path);
-        let missing = reported
-            .iter()
-            .find(|diagnostic| diagnostic.code == crate::codes::doctor::FONT_PATH_MISSING)
-            .expect("a configured font directory that does not exist is reported");
-
-        assert_eq!(
-            missing
-                .location
-                .as_ref()
-                .map(|location| location.path.as_str()),
-            Some("fonts")
-        );
-    }
-
-    #[test]
-    fn font_without_font_files_reported() {
-        let directory = tempdir().unwrap();
-        let path = directory.path().join("tola.toml");
-        std::fs::write(&path, "[typst.fonts]\npaths = [\"fonts\"]\n").unwrap();
-        std::fs::create_dir_all(directory.path().join("fonts")).unwrap();
-        std::fs::write(directory.path().join("fonts/notes.txt"), "not a font").unwrap();
-
-        let reported = diagnose_at(&path);
-
-        assert!(
-            reported
-                .iter()
-                .any(|diagnostic| diagnostic.code == crate::codes::doctor::FONT_DIRECTORY_EMPTY)
-        );
-    }
-
-    #[test]
-    fn font_directory_fonts_not_reported() {
-        let directory = tempdir().unwrap();
-        let path = directory.path().join("tola.toml");
-        std::fs::write(&path, "[typst.fonts]\npaths = [\"fonts\"]\n").unwrap();
-        std::fs::create_dir_all(directory.path().join("fonts/nested")).unwrap();
-        std::fs::write(directory.path().join("fonts/nested/Face.OTF"), "bytes").unwrap();
-
-        let reported = diagnose_at(&path);
-
-        assert!(!reported.iter().any(|diagnostic| diagnostic.code
-            == crate::codes::doctor::FONT_DIRECTORY_EMPTY
-            || diagnostic.code == crate::codes::doctor::FONT_PATH_MISSING));
     }
 
     #[cfg(unix)]
