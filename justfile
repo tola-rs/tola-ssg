@@ -22,6 +22,10 @@ help:
 # Run the full workspace gate: formatting, lints, script checks, tests, docs, packaging.
 check: quality fmt-nix scripts::check build-library test clippy docs package-check
 
+# Read a context document by section: FILE, then topic and section names.
+ctx *args:
+    @nu tools/ctx.nu {{ args }}
+
 # Rewrite every file that `just check` verifies for formatting.
 fmt:
     cargo fmt --all

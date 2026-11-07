@@ -35,6 +35,7 @@ pkgs.mkShell {
       just
       actionlint
       deno
+      nushell
       nixfmt
       # Maintenance suites and release tooling drive git checkouts.
       git
