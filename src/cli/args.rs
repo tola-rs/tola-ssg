@@ -54,12 +54,18 @@ pub struct GlobalArgs {
 impl GlobalArgs {
     /// Parse global flags that a module invocation carries before its command name.
     pub fn adopt_prefix(&mut self, arguments: &mut Vec<OsString>) -> Result<(), String> {
-        while let Some(argument) = arguments.first().and_then(|value| value.to_str()).map(str::to_owned) {
+        while let Some(argument) = arguments
+            .first()
+            .and_then(|value| value.to_str())
+            .map(str::to_owned)
+        {
             let mut consumed = 1;
             match argument.as_str() {
                 "--" => break,
                 "--color" => {
-                    let value = arguments.get(1).and_then(|value| value.to_str())
+                    let value = arguments
+                        .get(1)
+                        .and_then(|value| value.to_str())
                         .ok_or_else(|| "--color requires a value".to_owned())?;
                     self.color = Self::parse_color(value)?;
                     consumed = 2;
@@ -68,7 +74,9 @@ impl GlobalArgs {
                     self.color = Self::parse_color(&value["--color=".len()..])?;
                 }
                 "--log-file" => {
-                    let value = arguments.get(1).ok_or_else(|| "--log-file requires a path".to_owned())?;
+                    let value = arguments
+                        .get(1)
+                        .ok_or_else(|| "--log-file requires a path".to_owned())?;
                     self.log_file = Some(PathBuf::from(value));
                     consumed = 2;
                 }
@@ -76,7 +84,9 @@ impl GlobalArgs {
                     self.log_file = Some(PathBuf::from(&value["--log-file=".len()..]));
                 }
                 "--lang" => {
-                    let value = arguments.get(1).and_then(|value| value.to_str())
+                    let value = arguments
+                        .get(1)
+                        .and_then(|value| value.to_str())
                         .ok_or_else(|| "--lang requires a value".to_owned())?;
                     self.lang = Some(parse_help_language(value)?);
                     consumed = 2;
@@ -102,18 +112,20 @@ impl GlobalArgs {
         }
         Ok(())
     }
-    
+
     /// Build a clap command augmented with these options.
     pub fn augment(command: clap::Command) -> clap::Command {
         <Self as clap::Args>::augment_args(command)
     }
-    
+
     pub fn parse_color(value: &str) -> Result<ColorChoice, String> {
         match value {
             "auto" => Ok(ColorChoice::Auto),
             "always" => Ok(ColorChoice::Always),
             "never" => Ok(ColorChoice::Never),
-            value => Err(format!("{value} is not a color choice; use auto, always, or never")),
+            value => Err(format!(
+                "{value} is not a color choice; use auto, always, or never"
+            )),
         }
     }
 }

@@ -110,12 +110,13 @@ Each document has one job; a fact lives in exactly one of them.
 ### just
 
 - `just` is the entry point. `just --list` shows recipes.
-- `just check` runs the workspace gate; `just test`, `just fmt`, `just docs`, `just package-check` are focused pieces.
+- `just check` runs the workspace gate; `just test`, `just fmt`, `just docs`, `just clippy` are focused pieces.
 - Recipes hold no hidden logic; put scripts in `tools/` and forward.
 
 ### Nix
 
-- `nix develop` supplies the pinned toolchain; `just doctor` reports what is missing.
+- `nix develop` supplies the pinned toolchain; a missing tool fails the recipe that needs it.
+- `direnv` loads the same shell from `.envrc` when installed; `nix develop` remains the documented entry point.
 - Change tool versions in `flake.nix` or `.tool-versions`, never by assuming the host has them.
 
 ### Rust
@@ -788,7 +789,7 @@ just check
 cargo fmt --all -- --check
 cargo test --locked --workspace --all-features
 cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
-just e2e   # browser and CLI flows; slow, full CI only
+just tools::check   # parse every Nushell script without running it
 ```
 
 ### Skipping

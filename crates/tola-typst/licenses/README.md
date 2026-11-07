@@ -1,13 +1,13 @@
 # Fonts
 
-`tola-typst` carries these fonts when its `embed-fonts` feature is enabled. They are
+`tola-typst` includes these fonts when its `embed-fonts` feature is enabled. They are
 redistributed unmodified from [typst-assets](https://github.com/typst/typst-assets)
 0.15.1, the release the workspace locks with checksum `bcee505dac6702dd1c5e65aa2e94a6179d19ee09e2e5637d7313db91765dc4e0`. The crate's
 `NOTICE` is that release's notice.
 
-The fonts are carried compressed in `assets/embedded-fonts.bin`, behind an index naming each
-one; a build reads the file and never fetches it. Regenerate with `just scripts::fonts`,
-which also fails when the carried fonts stop matching this release.
+The fonts are embedded compressed in `assets/embedded-fonts.bin`, behind an index naming each
+one; a build reads the file and never fetches it. Regenerate with `just tools::fonts`,
+which also fails when the embedded fonts stop matching this release.
 
 | File | Bytes | SHA-256 |
 | --- | ---: | --- |

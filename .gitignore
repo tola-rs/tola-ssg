@@ -1,10 +1,9 @@
 .DS_Store
 node_modules/
-/e2e/test-results/
-/e2e/playwright-report/
 .tola/
 /.agents/tmp/
 /.agents/designs/
+/.direnv/
 target/
 /result
 /release/

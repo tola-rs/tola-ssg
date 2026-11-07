@@ -1,7 +1,9 @@
 src/**
 test/**
 dist/test.cjs
-deno.json
+build.ts
+tsconfig.json
+package-lock.json
 **/*.ts
 **/*.map
 .gitignore

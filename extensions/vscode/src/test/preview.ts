@@ -3,7 +3,7 @@ import * as fs from 'node:fs/promises'
 import type { ServerResponse } from 'node:http'
 import * as path from 'node:path'
 import * as vscode from 'vscode'
-import { startGate } from '../../../../e2e/support/gate.ts'
+import { startGate } from './gate.ts'
 import { SiteCli } from '../site-cli.ts'
 import { selectSite } from '../selection.ts'
 import {

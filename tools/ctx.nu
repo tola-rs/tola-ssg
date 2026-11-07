@@ -1,3 +1,6 @@
+#!/usr/bin/env nu
+# Read a context document by section, or check its heading structure.
+
 def read-doc [file] {
     let raw = (open --raw $file)
     let lines = ($raw | lines)
@@ -205,6 +208,7 @@ def check-file [file] {
     }
 }
 
+# Print a document's headings, one section named by TOPIC and SECTION, or check its structure.
 def main [
     --check
     file?: string

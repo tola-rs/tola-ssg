@@ -179,7 +179,8 @@ pub(super) fn command_help(
 }
 
 pub(super) fn skill_command(module: &ModuleCommands, name: &str) -> clap::Command {
-    let command = clap::Command::new(name.to_owned()).bin_name(format!("tola {} {name}", module.name));
+    let command =
+        clap::Command::new(name.to_owned()).bin_name(format!("tola {} {name}", module.name));
     SkillArgs::augment_args(command)
 }
 
