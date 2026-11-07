@@ -87,7 +87,8 @@ impl BuildResources {
         self.scope
     }
 
-    /// Refuse to write `tola.lock`; `--pure` implies this through [`InputMode::new`].
+    /// Refuse to write `tola.lock`; `--pure` implies this through
+    /// [`InputMode::new`](crate::inputs::InputMode::new).
     pub fn with_locked(mut self, locked: bool) -> Self {
         self.locked = locked;
         self

@@ -20,6 +20,10 @@ help:
 # Run the full workspace gate: formatting, lints, script checks, tests, and docs.
 check: quality fmt-nix tools::check build-library test clippy docs
 
+# Private-module fetch/auth checks; needs TOLA_CI_* environment.
+private-module *args:
+    cargo run --locked -p tola -- nu tools/private-module.nu {{ args }}
+
 # Read a context document by section: FILE, then topic and section names.
 ctx *args:
     @nu tools/ctx.nu {{ args }}

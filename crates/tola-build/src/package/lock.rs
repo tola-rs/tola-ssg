@@ -51,6 +51,18 @@ impl LockedPackageRoot {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "the package tree of `{name}` at {path} does not match `tola.lock` (lock: {expected}, directory: {actual}); {advice}"
+)]
+pub struct TreeMismatchError {
+    pub name: String,
+    pub path: String,
+    pub expected: Sha256Digest,
+    pub actual: Sha256Digest,
+    pub advice: &'static str,
+}
+
 /// The failure of recording, verifying, or materializing locked packages.
 #[derive(Debug, thiserror::Error)]
 pub enum PackageLockError {
@@ -70,16 +82,8 @@ pub enum PackageLockError {
         locked: String,
         read: String,
     },
-    #[error(
-        "the package tree of `{name}` at {path} does not match `tola.lock` (lock: {expected}, directory: {actual}); {advice}"
-    )]
-    TreeMismatch {
-        name: String,
-        path: String,
-        expected: Sha256Digest,
-        actual: Sha256Digest,
-        advice: &'static str,
-    },
+    #[error(transparent)]
+    TreeMismatch(Box<TreeMismatchError>),
     #[error(
         "this build read package `{name}` at two versions, {first} and {second}; a lock records one version per package, so pin one version in the imports"
     )]
@@ -296,13 +300,15 @@ pub fn resolve_locked_packages(
             source,
         })?;
         if actual != locked.tree_sha256 {
-            return Err(PackageLockError::TreeMismatch {
-                name: name.clone(),
-                path: describe_root(&root, tier, Some(site_root)),
-                expected: locked.tree_sha256,
-                actual,
-                advice: "run `tola update` to resolve the package again",
-            });
+            return Err(PackageLockError::TreeMismatch(Box::new(
+                TreeMismatchError {
+                    name: name.clone(),
+                    path: describe_root(&root, tier, Some(site_root)),
+                    expected: locked.tree_sha256,
+                    actual,
+                    advice: "run `tola update` to resolve the package again",
+                },
+            )));
         }
         packages.push(LockedPackageRoot {
             name: name.clone(),
@@ -388,13 +394,15 @@ fn verify_package_root(
         source,
     })?;
     if actual != locked.tree_sha256 {
-        return Err(PackageLockError::TreeMismatch {
-            name,
-            path,
-            expected: locked.tree_sha256,
-            actual,
-            advice: repair_advice(root, site_root),
-        });
+        return Err(PackageLockError::TreeMismatch(Box::new(
+            TreeMismatchError {
+                name,
+                path,
+                expected: locked.tree_sha256,
+                actual,
+                advice: repair_advice(root, site_root),
+            },
+        )));
     }
     Ok(())
 }
@@ -428,13 +436,15 @@ fn verify_vendored_root(
         source,
     })?;
     if actual != locked.tree_sha256 {
-        return Err(PackageLockError::TreeMismatch {
-            name: name.to_owned(),
-            path,
-            expected: locked.tree_sha256,
-            actual,
-            advice: "run `tola vendor` to restore the vendored copy",
-        });
+        return Err(PackageLockError::TreeMismatch(Box::new(
+            TreeMismatchError {
+                name: name.to_owned(),
+                path,
+                expected: locked.tree_sha256,
+                actual,
+                advice: "run `tola vendor` to restore the vendored copy",
+            },
+        )));
     }
     Ok(())
 }
@@ -652,7 +662,7 @@ mod tests {
         std::fs::write(vendored.join("lib.typ"), "= changed").unwrap();
         let error = verify_vendored_packages(&vendor, &lock, site.path()).unwrap_err();
         assert!(
-            matches!(error, PackageLockError::TreeMismatch { .. }),
+            matches!(error, PackageLockError::TreeMismatch(_)),
             "{error}"
         );
         std::fs::write(vendored.join("lib.typ"), "= demo").unwrap();

@@ -104,8 +104,7 @@ pub(super) fn read_file<'a>(
         if !physical_path_is_unchanged(&source) {
             return Err(IconError::Changed {
                 path: path.to_path_buf(),
-            }
-            .into());
+            });
         }
         return Ok((
             Cow::Borrowed(unsaved.text.as_bytes()),
@@ -131,8 +130,7 @@ pub(super) fn read_file<'a>(
     if confirmed_digest != digest || !physical_path_is_unchanged(&source) {
         return Err(IconError::Changed {
             path: path.to_path_buf(),
-        }
-        .into());
+        });
     }
     let byte_len = bytes.len();
     Ok((
@@ -224,7 +222,7 @@ fn read_chunks(
         crate::filesystem::FileReadError::Cancelled(cancelled) => IconError::Cancelled(cancelled),
     })?;
     if let Some(error) = overflow {
-        return Err(error.into());
+        return Err(error);
     }
     Ok(())
 }
@@ -460,7 +458,6 @@ mod tests {
 
     /// Recorded evidence stops being fresh once the bytes behind the recorded path change:
     /// rewriting the file, removing it, and retargeting a symlink all invalidate one claim.
-
     #[cfg(unix)]
     #[test]
     fn retargeted_alias_invalidates_evidence() {

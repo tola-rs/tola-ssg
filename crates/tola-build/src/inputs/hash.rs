@@ -169,6 +169,10 @@ impl TreeHashError {
 /// its contents, both length-prefixed, in byte order of the paths. Empty directories contribute
 /// nothing, so an unused directory cannot change an input's identity, and a symbolic link may not
 /// resolve outside `root`.
+///
+/// The digest covers materialized bytes, not a Git tree. A producer that materializes a remote
+/// module must pin EOL conversion and disable external filter drivers, or one commit can hash
+/// differently on another host.
 pub fn tree_sha256(root: &Path) -> Result<Sha256Digest, TreeHashError> {
     let root = root
         .canonicalize()

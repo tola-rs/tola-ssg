@@ -122,6 +122,20 @@ impl IconInventoryEvidence {
 }
 
 #[derive(Debug, thiserror::Error)]
+#[error(
+    "SHA-256 mismatch for icon collection `{namespace}` from `{url}`: expected {expected}, received {received}"
+)]
+pub(crate) struct IntegrityError {
+    pub(crate) namespace: String,
+    pub(crate) url: String,
+    pub(crate) expected: String,
+    pub(crate) received: String,
+    pub(crate) size_expected: u64,
+    pub(crate) size_received: u64,
+    pub(crate) path: Option<PathBuf>,
+}
+
+#[derive(Debug, thiserror::Error)]
 pub(crate) enum IconError {
     #[error("Tola could not read an icon source file")]
     Read {
@@ -164,18 +178,8 @@ pub(crate) enum IconError {
         "network access is disabled, so Tola cannot download icon collection `{namespace}` from `{url}`"
     )]
     NetworkDenied { namespace: String, url: String },
-    #[error(
-        "SHA-256 mismatch for icon collection `{namespace}` from `{url}`: expected {expected}, received {received}"
-    )]
-    Integrity {
-        namespace: String,
-        url: String,
-        expected: String,
-        received: String,
-        size_expected: u64,
-        size_received: u64,
-        path: Option<PathBuf>,
-    },
+    #[error(transparent)]
+    Integrity(Box<IntegrityError>),
     /// A configured icon source lies outside what this build may read.
     #[error("Tola may not read icon source `{path}`")]
     Boundary {
@@ -279,7 +283,7 @@ impl IconError {
             | Self::LinkedDirectoryMember { path }
             | Self::InternalSource { path } => Some(path),
             Self::Collection { path, .. } => path.as_deref(),
-            Self::Integrity { path, .. } => path.as_deref(),
+            Self::Integrity(error) => error.path.as_deref(),
             Self::Remote { .. }
             | Self::RemoteTooLarge { .. }
             | Self::NetworkDenied { .. }
@@ -377,7 +381,7 @@ pub(crate) fn error_diagnostic(error: &anyhow::Error, root: &Path) -> Option<Dia
         IconError::NetworkDenied { .. } => diagnostic.with_help(
             "Run `tola vendor` while online, or declare a local icon collection",
         ),
-        IconError::Integrity { .. } => diagnostic
+        IconError::Integrity(_) => diagnostic
             .with_note("update `sha256` only when you intend to publish the bytes it now serves")
             .with_help("Run `tola vendor --refresh` to restore the site's copy"),
         IconError::NetworkRuntime(_) => {

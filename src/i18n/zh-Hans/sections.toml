@@ -461,7 +461,7 @@ path = "theme"
 
 路径相对于站点根目录，也可以写绝对路径。使用模块时，Tola 按本次调用的输入范围读取清单；`--pure` 要求模块的物理目录位于站点内。模块目录是构建输入，发布目录和 before-build 生成器不能覆盖它。只加载项目明确声明的模块，不自动合并多份站点配置。
 
-使用 HTTPS Git 仓库时，将 `path` 换成远程来源：
+使用 `https` 或 `ssh` Git 仓库时，将 `path` 换成远程来源：
 
 ```toml
 [modules.notes]
@@ -470,7 +470,9 @@ tag = "v1.0.0"
 subdir = "theme"
 ```
 
-`git` 与 `path` 互斥。`rev` 是完整提交 ID；三个选择器都不写时选择默认分支。解析会写入 `tola.lock`，记录解析出的提交与模块目录摘要；随站点一起提交。
+`git` 与 `path` 互斥，接受 `https://`、`ssh://` 或 `git@host:path`。`rev` 是完整提交 ID；三个选择器都不写时选择默认分支。解析会写入 `tola.lock`，记录解析出的提交与模块目录摘要；随站点一起提交。
+
+私有 `https` 仓库使用你自己配置的 Git credential helper；`ssh` 地址（包括 `git@host:path`）使用系统 `ssh`，因此 SSH agent、`~/.ssh/config` 与 `known_hosts` 照常生效。`tola.lock` 不保存任何凭据。
 
 允许联网时，`tola build`、`tola dev`、`tola check` 会解析缺失或已变化的输入；`--locked` 禁止写锁，`--offline` 禁止联网，`--pure` 只读站点、`vendor/` 与 `tola.lock`。运行 `tola update` 刷新 tag、branch 或默认分支，再运行 `tola vendor` 更新冻结副本。远程初始化尚未实现，初始化仍接收本地模块目录。
 

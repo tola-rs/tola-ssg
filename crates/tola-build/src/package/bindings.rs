@@ -180,8 +180,3 @@ fn language_fields(language: &SiteLanguage) -> Dict {
     fields.insert("region".into(), language.region().into_value());
     fields
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-}

@@ -2,6 +2,8 @@
 
 mod arguments;
 pub(crate) mod bootstrap;
+pub(crate) mod checkout;
+mod declaration;
 pub mod entities;
 pub mod hooks;
 pub(crate) mod options;
@@ -14,15 +16,18 @@ mod watch;
 pub use watch::{HookWatchInputs, PreparedHookWatch, prepare_hook_watch};
 
 pub use arguments::expand_argument;
+pub use checkout::CheckoutError;
+pub use declaration::*;
+pub(crate) use declaration::{is_relative_path, valid_name};
 pub use manifest::{InitializerSource, NuModule, resolve_initializer, resolve_nu_modules};
 pub use options::{OptionsFailure, validate_options};
 pub use prepared::configure as prepare;
+pub use remote::FetchError;
 
 use std::collections::BTreeMap;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
-use serde::{Deserialize, Serialize};
 
 use crate::inputs::InputMode;
 
@@ -39,7 +44,7 @@ under the invocation's input scope. `--pure` requires its physical directory ins
 Module directories are inputs: publication and before-build generators cannot overwrite them.
 Only explicitly declared modules are loaded; there is no automatic configuration merging.
 
-For an HTTPS Git repository, replace `path` with a remote source:
+For an `https` or `ssh` Git repository, replace `path` with a remote source:
 
 ```toml
 [modules.notes]
@@ -50,8 +55,12 @@ subdir = "theme"
 
 `git` and `path` are mutually exclusive. Only a `git` module may declare `subdir` or one
 of `tag`, `branch`, or `rev`. `rev` is a full commit ID, `subdir` is a relative path
-inside the repository, and `git` accepts only an `https` URL. Omitting all three selectors
-selects the repository's default branch.
+inside the repository, and `git` accepts `https://`, `ssh://`, or `git@host:path`.
+Omitting all three selectors selects the repository's default branch.
+
+A private `https` repository uses your Git credential helper. An `ssh` address, including
+`git@host:path`, uses the system `ssh` with its agent, `~/.ssh/config`, and `known_hosts`.
+`tola.lock` records addresses, selectors, commits, and digests, never credentials.
 
 Resolution writes `tola.lock`: the repository, the declared selector, the commit it resolved to,
 and the digest of the module directory. Commit `tola.lock` and the frozen inputs below `vendor/`
@@ -286,283 +295,6 @@ For another configuration, use `tola notes --config other.toml COMMAND ...`; aft
 arguments belong to that command. A declared tool never silently falls back to a global plugin.
 "#;
 
-/// A module selected by the site.
-#[derive(Debug, Clone, Serialize, PartialEq)]
-pub struct ModuleDeclaration {
-    #[serde(flatten)]
-    pub source: ModuleSource,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub options: BTreeMap<String, toml::Value>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub overrides: BTreeMap<String, PathBuf>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub assets: Option<ModuleAssetPolicy>,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-#[serde(untagged)]
-pub enum ModuleSource {
-    Local {
-        path: PathBuf,
-    },
-    Remote {
-        git: String,
-        /// The declared selector; absent selects the repository's default branch.
-        #[serde(flatten)]
-        revision: Option<RemoteRevision>,
-        /// The module's directory inside the repository; empty selects the repository root.
-        #[serde(skip_serializing_if = "path_is_empty")]
-        subdir: PathBuf,
-    },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum RemoteRevision {
-    Tag(String),
-    Branch(String),
-    Rev(String),
-}
-
-impl Default for ModuleDeclaration {
-    fn default() -> Self {
-        Self {
-            source: ModuleSource::Local {
-                path: PathBuf::new(),
-            },
-            options: BTreeMap::new(),
-            overrides: BTreeMap::new(),
-            assets: None,
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for ModuleDeclaration {
-    fn deserialize<D: serde::Deserializer<'de>>(
-        deserializer: D,
-    ) -> std::result::Result<Self, D::Error> {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Fields {
-            path: Option<PathBuf>,
-            git: Option<String>,
-            /// A key this model replaced; accepted only to name the repair.
-            repository: Option<String>,
-            tag: Option<String>,
-            branch: Option<String>,
-            rev: Option<String>,
-            subdir: Option<PathBuf>,
-            #[serde(default)]
-            options: BTreeMap<String, toml::Value>,
-            #[serde(default)]
-            overrides: BTreeMap<String, PathBuf>,
-            assets: Option<ModuleAssetPolicy>,
-        }
-        let fields = Fields::deserialize(deserializer)?;
-        if fields.repository.is_some() {
-            return Err(serde::de::Error::custom(
-                "`repository` was renamed to `git`; rename the key to `git`",
-            ));
-        }
-        let source = match (fields.path, fields.git) {
-            (Some(path), None) => {
-                if fields.tag.is_some()
-                    || fields.branch.is_some()
-                    || fields.rev.is_some()
-                    || fields.subdir.is_some()
-                {
-                    return Err(serde::de::Error::custom(
-                        "only a `git` module may declare `tag`, `branch`, `rev`, or `subdir`",
-                    ));
-                }
-                if path.as_os_str().is_empty() {
-                    return Err(serde::de::Error::custom("`path` must not be empty"));
-                }
-                ModuleSource::Local { path }
-            }
-            (None, Some(git)) => ModuleSource::Remote {
-                git: validate_git(git).map_err(|message| serde::de::Error::custom(message))?,
-                revision: select_revision(fields.tag, fields.branch, fields.rev)
-                    .map_err(|message| serde::de::Error::custom(message))?,
-                subdir: select_subdir(fields.subdir)
-                    .map_err(|message| serde::de::Error::custom(message))?,
-            },
-            _ => {
-                return Err(serde::de::Error::custom(
-                    "choose exactly one of `path` or `git`",
-                ));
-            }
-        };
-        Ok(Self {
-            source,
-            options: fields.options,
-            overrides: fields.overrides,
-            assets: fields.assets,
-        })
-    }
-}
-
-/// Whether one module directory inside its repository is unset.
-fn path_is_empty(path: &PathBuf) -> bool {
-    path.as_os_str().is_empty()
-}
-
-/// Validate a repository URL: only an `https` address names a fetchable module.
-fn validate_git(git: String) -> std::result::Result<String, &'static str> {
-    let parsed = url::Url::parse(&git).map_err(|_| "`git` must be an `https` URL")?;
-    if parsed.scheme() != "https" {
-        return Err("`git` must be an `https` URL");
-    }
-    Ok(git)
-}
-
-/// Pick the one revision selector a `git` module declared, if it declared any.
-fn select_revision(
-    tag: Option<String>,
-    branch: Option<String>,
-    rev: Option<String>,
-) -> std::result::Result<Option<RemoteRevision>, &'static str> {
-    match (tag, branch, rev) {
-        (None, None, None) => Ok(None),
-        (Some(tag), None, None) => Ok(Some(RemoteRevision::Tag(tag))),
-        (None, Some(branch), None) => Ok(Some(RemoteRevision::Branch(branch))),
-        (None, None, Some(rev)) => {
-            let commit = gix::ObjectId::from_hex(rev.as_bytes())
-                .map_err(|_| "`rev` must be a full commit ID")?;
-            Ok(Some(RemoteRevision::Rev(commit.to_string())))
-        }
-        _ => Err("choose at most one of `tag`, `branch`, or `rev`"),
-    }
-}
-
-/// Validate the module's directory inside its repository.
-fn select_subdir(subdir: Option<PathBuf>) -> std::result::Result<PathBuf, &'static str> {
-    match subdir {
-        Some(path) if is_relative_path(&path) => Ok(path),
-        Some(_) => Err("`subdir` must be a relative path inside the repository"),
-        None => Ok(PathBuf::new()),
-    }
-}
-
-/// Project selection and replacement of one module's published assets.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(default, deny_unknown_fields)]
-pub struct ModuleAssetPolicy {
-    pub enabled: bool,
-    pub include: Option<Vec<String>>,
-    pub exclude: Vec<String>,
-    pub replace: BTreeMap<String, PathBuf>,
-}
-
-impl Default for ModuleAssetPolicy {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            include: None,
-            exclude: Vec::new(),
-            replace: BTreeMap::new(),
-        }
-    }
-}
-
-/// Selects the module providing the site's entry point.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, tola_config::Config)]
-#[serde(default, deny_unknown_fields)]
-#[config(section = "theme")]
-pub struct ThemeConfig {
-    /// Namespace of the module providing this site.
-    pub module: Option<String>,
-}
-
-impl ThemeConfig {
-    pub const HELP: &str = "Select one declared module whose `[site].entry` generates the site.\n\n\
-```toml\n[theme]\nmodule = \"notes\"\n\n[modules.notes]\npath = \"theme\"\n```\n\n\
-The project needs no copied entry program. An explicitly configured `[build].entry` conflicts\n\
-with this selection. Other modules can still provide libraries, queries, and commands.\n\
-Read `[modules]` for module manifests, options, paths, and public imports.";
-}
-
-/// A module-relative Typst program.
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct Entry {
-    pub entry: PathBuf,
-}
-
-/// A module-relative Typst schema and the value it exports.
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct OptionsSchema {
-    pub schema: PathBuf,
-    pub export: String,
-}
-
-/// A module-relative asset directory.
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct Assets {
-    pub directory: PathBuf,
-}
-
-/// A module-authored authoring guide, printed by a `skill` command.
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct Skill {
-    pub path: PathBuf,
-}
-
-/// A private metadata query declared by a module.
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields, rename_all = "kebab-case")]
-pub struct Query {
-    /// Source file relative to the module root.
-    pub entry: PathBuf,
-    pub label: String,
-    /// The shape of the metadata value returned by this query.
-    #[serde(default)]
-    pub format: QueryFormat,
-}
-
-/// The supported query result contracts.
-#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
-pub enum QueryFormat {
-    #[default]
-    Json,
-    Entities,
-}
-
-/// A command's statically inspectable description and action.
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-pub struct Command {
-    #[serde(default)]
-    pub help: String,
-    #[serde(flatten)]
-    pub action: CommandAction,
-}
-
-/// A module-owned site initializer, invoked through the same argv convention as commands.
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct Initializer {
-    pub argv: Vec<String>,
-}
-
-/// External commands execute an explicit argv; query commands name a declared query.
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
-pub enum CommandAction {
-    Argv {
-        argv: Vec<String>,
-    },
-    Query {
-        query: String,
-        #[serde(default)]
-        projection: Vec<String>,
-    },
-    Skill,
-}
-
 pub mod manifest;
 
 /// The paths and exact bytes from which a module manifest was parsed.
@@ -639,20 +371,6 @@ pub struct ResolvedModule {
     pub commands: BTreeMap<String, Command>,
     pub initializer: Option<Initializer>,
     pub hooks: Vec<hooks::ModuleHook>,
-}
-
-fn valid_name(name: &str) -> bool {
-    let mut bytes = name.bytes();
-    bytes.next().is_some_and(|b| b.is_ascii_lowercase())
-        && bytes.all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-}
-
-/// Whether `path` is a nonempty spelling of plain path segments: no `..`, root, or prefix.
-fn is_relative_path(path: &Path) -> bool {
-    !path.as_os_str().is_empty()
-        && path
-            .components()
-            .all(|part| matches!(part, Component::Normal(_) | Component::CurDir))
 }
 
 /// A module path Tola could not read, or one that leaves its module.

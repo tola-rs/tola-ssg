@@ -3,7 +3,9 @@
 use std::collections::BTreeMap;
 
 use anyhow::{Result, ensure};
-use tola_build::inputs::{InputLock, InputMode, LockedModule, LockedRevision, record_module_roots};
+use tola_build::inputs::{
+    InputLock, InputMode, LockedModule, LockedRevision, refresh_module_roots,
+};
 use tola_build::modules::{ModuleDeclaration, ModuleSource, RemoteRevision};
 
 use crate::cancellation::Cancellation;
@@ -38,11 +40,7 @@ pub(in crate::cli) fn run(
     let original = lock.clone();
 
     let selected = refreshable(config.modules(), &update.names, output)?;
-    for alias in selected.keys() {
-        // Dropping the fact is what makes the next resolution fetch the selector again.
-        lock.modules.remove(alias);
-    }
-    record_module_roots(
+    refresh_module_roots(
         site_root,
         mode,
         vendor,

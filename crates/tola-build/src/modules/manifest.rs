@@ -2,7 +2,7 @@
 
 use super::{
     Assets, Command, CommandAction, Entry, Initializer, ManifestEvidence, ModuleDeclaration,
-    ModuleSource, OptionsSchema, Query, Skill, hooks, is_relative_path, semantics, valid_name,
+    OptionsSchema, Query, Skill, hooks, is_relative_path, semantics, valid_name,
 };
 use crate::InputScope;
 use crate::inputs::InputMode;
@@ -73,8 +73,8 @@ pub(super) fn read_selected(
         .canonicalize()
         .map_err(|source| ManifestError::SiteRoot { source })?;
     declarations
-        .iter()
-        .map(|(name, _)| {
+        .keys()
+        .map(|name| {
             let root = roots
                 .get(name)
                 .cloned()
@@ -575,6 +575,7 @@ pub(super) fn read_one(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::modules::ModuleSource;
 
     fn resolved_modules(
         site: &std::path::Path,

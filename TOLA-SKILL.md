@@ -847,7 +847,8 @@ logic; separately exercise actual terminal cancellation and restoration before s
 
 ## Modules
 
-Remote modules use an HTTPS repository, one revision selector and an optional repository subdirectory:
+Remote modules use an `https` or `ssh` repository, one revision selector and an optional
+repository subdirectory:
 
 ```toml
 [modules.notes]
@@ -855,6 +856,12 @@ git = "https://github.com/example/notebook"
 tag = "v1.0.0"
 subdir = "theme"
 ```
+
+`git` accepts an `https://` address, an `ssh://` address, or the scp form `git@host:path`;
+`http://`, `git://`, and `file://` are rejected. A private HTTPS repository authenticates
+through your configured Git credential helper; a private SSH repository uses the system `ssh`,
+so your SSH agent, `~/.ssh/config`, and `known_hosts` apply. Tola stores no credentials in
+`tola.lock`.
 
 `git` and `path` are mutually exclusive. Replace `tag` with `branch` or a full-commit
 `rev` when appropriate; omitting all three selects the default branch. Resolution writes

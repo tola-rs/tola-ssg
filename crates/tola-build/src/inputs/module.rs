@@ -14,7 +14,7 @@ use crate::inputs::{
     InputLock, InputMode, LockError, LockedModule, LockedRevision, Sha256Digest, TreeHashError,
     tree_sha256,
 };
-use crate::modules::{ModuleDeclaration, ModuleSource, RemoteRevision, remote};
+use crate::modules::{ModuleDeclaration, ModuleSource, RemoteRevision, checkout, remote};
 
 /// The directory every declared module reads.
 ///
@@ -56,34 +56,32 @@ pub fn record_module_roots(
     lock: &mut InputLock,
     cancellation: &BuildCancellation,
 ) -> Result<BTreeMap<String, PathBuf>, ModuleRootError> {
-    let mut roots = BTreeMap::new();
-    for (alias, declaration) in declarations {
-        cancellation.ensure_active()?;
-        let root = match &declaration.source {
-            ModuleSource::Local { path } => {
-                let root = local_root(site_root, mode, alias, path)?;
-                record_local(site_root, lock, alias, path, &root)?;
-                root
-            }
-            ModuleSource::Remote {
-                git,
-                revision,
-                subdir,
-            } => remote_root(
-                site_root,
-                mode,
-                vendor,
-                lock,
-                alias,
-                git,
-                revision.as_ref(),
-                subdir,
-                cancellation,
-            )?,
-        };
-        roots.insert(alias.clone(), root);
+    ModuleResolution {
+        site_root,
+        mode,
+        vendor,
+        lock,
+        cancellation,
     }
-    Ok(roots)
+    .record(declarations)
+}
+
+/// Forget the fact of every selected module, then resolve and record it again.
+///
+/// Refreshing a module starts by dropping what the lock knew, so the next resolution asks the
+/// repository for the declared selector instead of reusing the recorded commit.
+pub fn refresh_module_roots(
+    site_root: &Path,
+    mode: InputMode,
+    vendor: Option<&Path>,
+    declarations: &BTreeMap<String, ModuleDeclaration>,
+    lock: &mut InputLock,
+    cancellation: &BuildCancellation,
+) -> Result<BTreeMap<String, PathBuf>, ModuleRootError> {
+    for alias in declarations.keys() {
+        lock.modules.remove(alias);
+    }
+    record_module_roots(site_root, mode, vendor, declarations, lock, cancellation)
 }
 
 /// The directory one declaration points at, without fetching or verifying it.
@@ -132,144 +130,209 @@ pub fn declaration_root(
     }
 }
 
-/// A local module's directory, which must stay inside the site.
-fn local_root(
-    site_root: &Path,
+/// The site, mode, frozen copy, lock, and cancellation one attempt resolves module roots under.
+struct ModuleResolution<'a> {
+    site_root: &'a Path,
     mode: InputMode,
-    alias: &str,
-    path: &Path,
-) -> Result<PathBuf, ModuleRootError> {
-    let declared = site_root.join(path);
-    if !declared.is_dir() {
-        return Err(ModuleRootError::NotDirectory {
-            alias: alias.to_owned(),
-            path: declared,
-        });
+    vendor: Option<&'a Path>,
+    lock: &'a mut InputLock,
+    cancellation: &'a BuildCancellation,
+}
+
+impl ModuleResolution<'_> {
+    /// Record the root and digest of every declaration into the lock.
+    fn record(
+        &mut self,
+        declarations: &BTreeMap<String, ModuleDeclaration>,
+    ) -> Result<BTreeMap<String, PathBuf>, ModuleRootError> {
+        let mut roots = BTreeMap::new();
+        for (alias, declaration) in declarations {
+            self.cancellation.ensure_active()?;
+            let root = self.resolve(alias, declaration)?;
+            roots.insert(alias.clone(), root);
+        }
+        Ok(roots)
     }
-    if mode.scope() == InputScope::Pure {
-        let canonical = declared
-            .canonicalize()
-            .map_err(|source| ModuleRootError::Root {
-                alias: alias.to_owned(),
-                path: declared.clone(),
-                source,
-            })?;
-        if !canonical.starts_with(site_root) {
-            return Err(ModuleRootError::OutsideSite { path: canonical });
+
+    /// The directory one declaration reads, and the fact the lock records for it.
+    fn resolve(
+        &mut self,
+        alias: &str,
+        declaration: &ModuleDeclaration,
+    ) -> Result<PathBuf, ModuleRootError> {
+        match &declaration.source {
+            ModuleSource::Local { path } => self.local(alias, path),
+            ModuleSource::Remote {
+                git,
+                revision,
+                subdir,
+            } => self.remote(alias, git, revision.as_ref(), subdir),
         }
     }
-    Ok(declared)
-}
 
-/// Record what a local module read, which only proves the bytes a build saw.
-fn record_local(
-    site_root: &Path,
-    lock: &mut InputLock,
-    alias: &str,
-    path: &Path,
-    root: &Path,
-) -> Result<(), ModuleRootError> {
-    let tree_sha256 = tree_sha256(root).map_err(|source| ModuleRootError::Tree {
-        alias: alias.to_owned(),
-        path: root.to_path_buf(),
-        source,
-    })?;
-    let recorded = path
-        .strip_prefix(site_root)
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|_| path.to_path_buf());
-    let entry = LockedModule::Local {
-        path: recorded,
-        tree_sha256,
-    };
-    lock.modules.insert(alias.to_owned(), entry);
-    Ok(())
-}
+    /// A local module's directory, recorded as the bytes a build reads.
+    fn local(&mut self, alias: &str, path: &Path) -> Result<PathBuf, ModuleRootError> {
+        let root = self.local_root(alias, path)?;
+        self.record_local(alias, path, &root)?;
+        Ok(root)
+    }
 
-/// A remote module's directory, fetched when this attempt may write and the lock has no fact yet.
-#[allow(clippy::too_many_arguments)]
-fn remote_root(
-    site_root: &Path,
-    mode: InputMode,
-    vendor: Option<&Path>,
-    lock: &mut InputLock,
-    alias: &str,
-    git: &str,
-    revision: Option<&RemoteRevision>,
-    subdir: &Path,
-    cancellation: &BuildCancellation,
-) -> Result<PathBuf, ModuleRootError> {
-    let selector = locked_revision(revision);
-    let recorded = match lock.modules.get(alias) {
-        Some(LockedModule::Remote {
-            git: recorded_git,
-            revision: recorded_revision,
-            subdir: recorded_subdir,
-            commit,
+    /// A local module's directory, which must stay inside the site.
+    fn local_root(&self, alias: &str, path: &Path) -> Result<PathBuf, ModuleRootError> {
+        let declared = self.site_root.join(path);
+        if !declared.is_dir() {
+            return Err(ModuleRootError::NotDirectory {
+                alias: alias.to_owned(),
+                path: declared,
+            });
+        }
+        if self.mode.scope() == InputScope::Pure {
+            let canonical = declared
+                .canonicalize()
+                .map_err(|source| ModuleRootError::Root {
+                    alias: alias.to_owned(),
+                    path: declared.clone(),
+                    source,
+                })?;
+            if !canonical.starts_with(self.site_root) {
+                return Err(ModuleRootError::OutsideSite { path: canonical });
+            }
+        }
+        Ok(declared)
+    }
+
+    /// Record what a local module read, which only proves the bytes a build saw.
+    fn record_local(
+        &mut self,
+        alias: &str,
+        path: &Path,
+        root: &Path,
+    ) -> Result<(), ModuleRootError> {
+        let tree_sha256 = tree_digest(alias, root)?;
+        let recorded = path
+            .strip_prefix(self.site_root)
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|_| path.to_path_buf());
+        let entry = LockedModule::Local {
+            path: recorded,
             tree_sha256,
-        }) if recorded_git == git
-            && recorded_revision == &selector
-            && recorded_subdir == subdir =>
-        {
-            Some((commit.clone(), *tree_sha256))
-        }
-        Some(_) => {
-            return Err(ModuleRootError::DeclarationChanged {
-                alias: alias.to_owned(),
-            });
-        }
-        None => None,
-    };
-    let (commit, digest) = match recorded {
-        Some(recorded) => recorded,
-        None if mode.may_write_lock() => {
-            let (commit, digest) = fetch(site_root, alias, git, revision, subdir, cancellation)?;
-            lock.modules.insert(
-                alias.to_owned(),
-                LockedModule::Remote {
-                    git: git.to_owned(),
-                    revision: selector,
-                    subdir: subdir.to_path_buf(),
-                    commit: commit.clone(),
-                    tree_sha256: digest,
-                },
-            );
-            (commit, digest)
-        }
-        None => {
-            return Err(ModuleRootError::NotLocked {
-                alias: alias.to_owned(),
-            });
-        }
-    };
-    let root = select_root(site_root, mode, vendor, alias, &commit, subdir)?;
-    if mode.requires_lock() {
-        let found = tree_sha256(&root).map_err(|source| ModuleRootError::Tree {
-            alias: alias.to_owned(),
-            path: root.clone(),
-            source,
-        })?;
-        if found != digest {
-            return Err(ModuleRootError::DigestMismatch {
-                alias: alias.to_owned(),
-                path: root,
-                expected: digest,
-                found,
-            });
-        }
+        };
+        self.lock.modules.insert(alias.to_owned(), entry);
+        Ok(())
     }
-    Ok(root)
+
+    /// A remote module's directory, fetched when this attempt may write and the lock has no fact.
+    fn remote(
+        &mut self,
+        alias: &str,
+        git: &str,
+        revision: Option<&RemoteRevision>,
+        subdir: &Path,
+    ) -> Result<PathBuf, ModuleRootError> {
+        let selector = locked_revision(revision);
+        let recorded = match self.lock.modules.get(alias) {
+            Some(LockedModule::Remote {
+                git: recorded_git,
+                revision: recorded_revision,
+                subdir: recorded_subdir,
+                commit,
+                tree_sha256,
+            }) if recorded_git == git
+                && recorded_revision == &selector
+                && recorded_subdir == subdir =>
+            {
+                Some((commit.clone(), *tree_sha256))
+            }
+            Some(_) => {
+                return Err(ModuleRootError::DeclarationChanged {
+                    alias: alias.to_owned(),
+                });
+            }
+            None => None,
+        };
+        let (commit, digest) = match recorded {
+            Some(recorded) => recorded,
+            None if self.mode.may_write_lock() => {
+                let (commit, digest) = self.fetch(alias, git, revision, subdir)?;
+                self.lock.modules.insert(
+                    alias.to_owned(),
+                    LockedModule::Remote {
+                        git: git.to_owned(),
+                        revision: selector,
+                        subdir: subdir.to_path_buf(),
+                        commit: commit.clone(),
+                        tree_sha256: digest,
+                    },
+                );
+                (commit, digest)
+            }
+            None => {
+                return Err(ModuleRootError::NotLocked {
+                    alias: alias.to_owned(),
+                });
+            }
+        };
+        let root = select_root(
+            self.site_root,
+            self.mode,
+            self.vendor,
+            alias,
+            &commit,
+            subdir,
+        )?;
+        if self.mode.requires_lock() {
+            let found = tree_digest(alias, &root)?;
+            if found != digest {
+                return Err(ModuleRootError::DigestMismatch {
+                    alias: alias.to_owned(),
+                    path: root,
+                    expected: digest,
+                    found,
+                });
+            }
+        }
+        Ok(root)
+    }
+
+    /// Fetch one module revision into the resolution cache and digest the directory it reads.
+    fn fetch(
+        &self,
+        alias: &str,
+        git: &str,
+        revision: Option<&RemoteRevision>,
+        subdir: &Path,
+    ) -> Result<(String, Sha256Digest), ModuleRootError> {
+        let staging = stage(self.site_root, alias)?;
+        let commit = acquire(alias, git, revision, &staging, self.cancellation)?;
+        let root = select_subdir(alias, &staging.source(), subdir)?;
+        let digest = tree_digest(alias, &root)?;
+        store(&staging, &commit)?;
+        Ok((commit, digest))
+    }
 }
 
-/// Fetch one module revision into the resolution cache and digest the directory it reads.
-fn fetch(
-    site_root: &Path,
-    alias: &str,
-    git: &str,
-    revision: Option<&RemoteRevision>,
-    subdir: &Path,
-    cancellation: &BuildCancellation,
-) -> Result<(String, Sha256Digest), ModuleRootError> {
+/// One fetch attempt's staging area, removed unless its source tree moves into the cache.
+struct Staging {
+    /// The module cache directory that holds one snapshot per commit.
+    parent: PathBuf,
+    /// The temporary directory below `.tola` that holds the repository and its checkout.
+    directory: tempfile::TempDir,
+}
+
+impl Staging {
+    /// Where the bare repository is fetched.
+    fn git_dir(&self) -> PathBuf {
+        self.directory.path().join("objects.git")
+    }
+
+    /// Where the fetched tree is materialized.
+    fn source(&self) -> PathBuf {
+        self.directory.path().join("source")
+    }
+}
+
+/// Prepare the cache directory and the temporary workspace one fetch writes through.
+fn stage(site_root: &Path, alias: &str) -> Result<Staging, ModuleRootError> {
     let parent = layout::modules(site_root).join(alias);
     std::fs::create_dir_all(&parent).map_err(|source| ModuleRootError::Io {
         action: "create the module cache for",
@@ -282,33 +345,69 @@ fn fetch(
         path: internal.clone(),
         source,
     })?;
-    let stage = tempfile::tempdir_in(&internal).map_err(|source| ModuleRootError::Io {
+    let directory = tempfile::tempdir_in(&internal).map_err(|source| ModuleRootError::Io {
         action: "stage",
         path: internal,
         source,
     })?;
-    let fetched = remote::fetch(git, revision, stage.path(), cancellation).map_err(|source| {
-        ModuleRootError::Fetch {
+    Ok(Staging { parent, directory })
+}
+
+/// Fetch the declared revision and materialize its tree into the staging area.
+fn acquire(
+    alias: &str,
+    git: &str,
+    revision: Option<&RemoteRevision>,
+    staging: &Staging,
+    cancellation: &BuildCancellation,
+) -> Result<String, ModuleRootError> {
+    let git_dir = staging.git_dir();
+    let request = remote::FetchRequest {
+        git,
+        revision,
+        git_dir: &git_dir,
+        options: remote::FetchOptions::default(),
+    };
+    let fetched = match remote::fetch(request, cancellation) {
+        Ok(fetched) => fetched,
+        Err(source) => {
+            cancellation.ensure_active()?;
+            return Err(ModuleRootError::Fetch {
+                alias: alias.to_owned(),
+                source,
+            });
+        }
+    };
+    cancellation.ensure_active()?;
+    let root = staging.source();
+    if let Err(source) =
+        checkout::materialize(&fetched.repository, fetched.tree, &root, cancellation)
+    {
+        cancellation.ensure_active()?;
+        return Err(ModuleRootError::Extract {
             alias: alias.to_owned(),
             source,
-        }
-    })?;
-    let root =
-        fetched
-            .root
-            .join(subdir)
-            .canonicalize()
-            .map_err(|source| ModuleRootError::Root {
-                alias: alias.to_owned(),
-                path: fetched.root.join(subdir),
-                source,
-            })?;
-    let snapshot = fetched
-        .root
+        });
+    }
+    cancellation.ensure_active()?;
+    Ok(fetched.commit)
+}
+
+/// The declared subdirectory of one snapshot, which must stay inside it and name a directory.
+fn select_subdir(alias: &str, snapshot: &Path, subdir: &Path) -> Result<PathBuf, ModuleRootError> {
+    let declared = snapshot.join(subdir);
+    let root = declared
         .canonicalize()
         .map_err(|source| ModuleRootError::Root {
             alias: alias.to_owned(),
-            path: fetched.root.clone(),
+            path: declared,
+            source,
+        })?;
+    let snapshot = snapshot
+        .canonicalize()
+        .map_err(|source| ModuleRootError::Root {
+            alias: alias.to_owned(),
+            path: snapshot.to_path_buf(),
             source,
         })?;
     if !root.starts_with(&snapshot) || !root.is_dir() {
@@ -316,20 +415,29 @@ fn fetch(
             alias: alias.to_owned(),
         });
     }
-    let digest = tree_sha256(&root).map_err(|source| ModuleRootError::Tree {
+    Ok(root)
+}
+
+/// The digest of one module directory.
+fn tree_digest(alias: &str, root: &Path) -> Result<Sha256Digest, ModuleRootError> {
+    tree_sha256(root).map_err(|source| ModuleRootError::Tree {
         alias: alias.to_owned(),
-        path: root,
+        path: root.to_path_buf(),
         source,
-    })?;
-    let destination = parent.join(&fetched.commit);
+    })
+}
+
+/// Move the staged source tree into the cache under its commit.
+fn store(staging: &Staging, commit: &str) -> Result<(), ModuleRootError> {
+    let destination = staging.parent.join(commit);
     if !destination.exists() {
-        std::fs::rename(&fetched.root, &destination).map_err(|source| ModuleRootError::Io {
+        std::fs::rename(staging.source(), &destination).map_err(|source| ModuleRootError::Io {
             action: "store",
             path: destination,
             source,
         })?;
     }
-    Ok((fetched.commit, digest))
+    Ok(())
 }
 
 /// The directory a remote module reads: the frozen copy, then the verified cache.
@@ -341,11 +449,40 @@ fn select_root(
     commit: &str,
     subdir: &Path,
 ) -> Result<PathBuf, ModuleRootError> {
+    root_strategy(site_root, mode, vendor, alias, commit)?.materialize(alias, subdir)
+}
+
+/// Which copy of a remote module a resolution reads.
+enum RootStrategy {
+    /// The frozen copy below `vendor/modules/<alias>`.
+    Frozen(PathBuf),
+    /// The commit snapshot below `.tola/modules/<alias>`.
+    Cached(PathBuf),
+}
+
+impl RootStrategy {
+    /// The directory this copy makes readable, validated against `subdir`.
+    fn materialize(self, alias: &str, subdir: &Path) -> Result<PathBuf, ModuleRootError> {
+        match self {
+            Self::Frozen(root) => Ok(root),
+            Self::Cached(snapshot) => select_subdir(alias, &snapshot, subdir),
+        }
+    }
+}
+
+/// Decide which copy of a remote module resolution reads.
+fn root_strategy(
+    site_root: &Path,
+    mode: InputMode,
+    vendor: Option<&Path>,
+    alias: &str,
+    commit: &str,
+) -> Result<RootStrategy, ModuleRootError> {
     let frozen = vendor.map(|vendor| vendor.join("modules").join(alias));
     if let Some(frozen) = &frozen
         && frozen.is_dir()
     {
-        return Ok(frozen.clone());
+        return Ok(RootStrategy::Frozen(frozen.clone()));
     }
     if mode.scope() == InputScope::Pure {
         return Err(ModuleRootError::VendorMissing {
@@ -353,28 +490,9 @@ fn select_root(
             path: frozen.unwrap_or_else(|| PathBuf::from("vendor/modules").join(alias)),
         });
     }
-    let snapshot = layout::modules(site_root).join(alias).join(commit);
-    let root = snapshot
-        .join(subdir)
-        .canonicalize()
-        .map_err(|source| ModuleRootError::Root {
-            alias: alias.to_owned(),
-            path: snapshot.join(subdir),
-            source,
-        })?;
-    let snapshot = snapshot
-        .canonicalize()
-        .map_err(|source| ModuleRootError::Root {
-            alias: alias.to_owned(),
-            path: snapshot,
-            source,
-        })?;
-    if !root.starts_with(&snapshot) || !root.is_dir() {
-        return Err(ModuleRootError::Subdir {
-            alias: alias.to_owned(),
-        });
-    }
-    Ok(root)
+    Ok(RootStrategy::Cached(
+        layout::modules(site_root).join(alias).join(commit),
+    ))
 }
 
 /// The lock's spelling of one declared selector.
@@ -435,11 +553,17 @@ pub enum ModuleRootError {
     },
     #[error("the `subdir` of module `{alias}` does not exist inside the resolved revision")]
     Subdir { alias: String },
-    #[error("Tola could not fetch module `{alias}`")]
+    #[error("Tola could not fetch module `{alias}`: {source}")]
     Fetch {
         alias: String,
         #[source]
-        source: anyhow::Error,
+        source: crate::modules::FetchError,
+    },
+    #[error("Tola could not extract module `{alias}` from its revision: {source}")]
+    Extract {
+        alias: String,
+        #[source]
+        source: crate::modules::CheckoutError,
     },
     #[error("Tola could not {action} `{path}`")]
     Io {

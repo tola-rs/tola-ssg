@@ -661,8 +661,6 @@ mod tests {
         .expect("valid test world")
     }
 
-    #[cfg(feature = "parallel")]
-
     fn main_text(session: &CompileSession<'_>) -> String {
         session.source(session.main()).unwrap().text().to_owned()
     }

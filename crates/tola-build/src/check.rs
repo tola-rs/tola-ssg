@@ -876,7 +876,7 @@ mod tests {
         (directory, config)
     }
 
-    /// A check reports Typst's failure at the author's own source line, and never writes output.
+    // A check reports Typst's failure at the author's own source line, and never writes output.
 
     /// A pure check refuses text for a path outside the site root, and writes nothing there.
     #[cfg(unix)]
@@ -971,8 +971,8 @@ mod tests {
         }
     }
 
-    /// A source of a site whose own program does not compile checks on its own, because that is
-    /// what the editor answers about the file the author is editing from.
+    // A source of a site whose own program does not compile checks on its own, because that is
+    // what the editor answers about the file the author is editing from.
 
     /// A compiled document records what it read from disk, which is the evidence an editor
     /// filters file-change notifications by.
@@ -1002,7 +1002,7 @@ mod tests {
         assert!(reads.contains(&data), "{reads:?}");
     }
 
-    /// A failed compilation establishes no read evidence.
+    // A failed compilation establishes no read evidence.
 
     /// A site session requires the content root it is configured with, and says so.
     #[test]
@@ -1030,17 +1030,17 @@ mod tests {
 
     /// A failed revision keeps the world its own sources resolve against, so an editor still
     /// answers about the file it is being asked about.
-
+    ///
     /// A source that disappears between checks stops being diagnosed, and the site compiles again.
-
+    ///
     /// Reuse follows every input the source analysis read: an unchanged revision reuses, and a
     /// change to an unsaved source, a read file on disk, or the set of sources re-derives.
-
+    ///
     /// A revision that reuses its analysis realizes the same documents at the same routes as one
     /// that does not.
-
+    ///
     /// The same warning reaches a published build that reuses its compilation.
-
+    ///
     /// A cancelled revision reports cancellation rather than a compilation failure.
     #[test]
     fn public_reports_keep_unsaved_evidence() {

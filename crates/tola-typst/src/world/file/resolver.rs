@@ -582,17 +582,6 @@ mod tests {
     use tempfile::TempDir;
     use typst::syntax::FileId;
 
-    struct DiskMapping {
-        id: FileId,
-        path: PathBuf,
-    }
-
-    impl FileProvider for DiskMapping {
-        fn target(&self, id: FileId) -> Option<FileTarget> {
-            (id == self.id).then(|| FileTarget::Disk(self.path.clone()))
-        }
-    }
-
     #[cfg(unix)]
     #[test]
     fn package_verifier_refuses_before_the_read() {

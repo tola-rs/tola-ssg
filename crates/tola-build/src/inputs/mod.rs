@@ -15,4 +15,6 @@ pub use lock::{
     LockedRevision,
 };
 pub use mode::InputMode;
-pub use module::{ModuleRootError, declaration_root, module_roots, record_module_roots};
+pub use module::{
+    ModuleRootError, declaration_root, module_roots, record_module_roots, refresh_module_roots,
+};

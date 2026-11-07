@@ -12,9 +12,9 @@ use crate::filesystem::SourceOverrides;
 use crate::inputs::{IconSource, InputMode, LockedIcon, Sha256Digest};
 use crate::resources::{BuildResources, HttpDownloadError};
 
-use super::IconError;
 use super::iconify;
 use super::input::{IconFileRead, MAX_COLLECTION_BYTES, read_bounded, read_file};
+use super::{IconError, IntegrityError};
 
 /// One remote collection request and the context every read in this build shares.
 pub(super) struct RemoteCollection<'a> {
@@ -154,16 +154,16 @@ fn locked_bytes(
     request: &RemoteCollection<'_>,
     locked: &LockedIcon,
 ) -> Result<CollectionBytes, IconError> {
-    if let Some(vendored) = request.vendored.as_deref() {
-        if let Some((bytes, read)) = read_if_present(request, vendored)? {
-            verify_locked(request, locked, &bytes, Some(vendored))?;
-            return Ok(CollectionBytes {
-                bytes,
-                read_from: Some(vendored.to_path_buf()),
-                source: Some(read),
-                pending_cache: None,
-            });
-        }
+    if let Some(vendored) = request.vendored.as_deref()
+        && let Some((bytes, read)) = read_if_present(request, vendored)?
+    {
+        verify_locked(request, locked, &bytes, Some(vendored))?;
+        return Ok(CollectionBytes {
+            bytes,
+            read_from: Some(vendored.to_path_buf()),
+            source: Some(read),
+            pending_cache: None,
+        });
     }
     if request.mode.may_read_cache() {
         let cached = cache_entry(&request.cache_root, locked.sha256);
@@ -380,7 +380,7 @@ fn verify_locked(
     if received == locked.sha256 && bytes.len() as u64 == locked.size {
         return Ok(());
     }
-    Err(IconError::Integrity {
+    Err(IconError::Integrity(Box::new(IntegrityError {
         namespace: request.namespace.into(),
         url: locked.url.clone(),
         expected: locked.sha256.to_string(),
@@ -388,7 +388,7 @@ fn verify_locked(
         size_expected: locked.size,
         size_received: bytes.len() as u64,
         path: path.map(Path::to_path_buf),
-    })
+    })))
 }
 
 /// The cache entry one digest is stored in.
