@@ -4,7 +4,7 @@
 # Open bumps never rebase on a base-branch update; only the monthly run moves a pull request.
 version: 2
 updates:
-  # `directory: "/"` does not reach .github/actions/setup-typescript, hence the glob entry.
+  # `directory: "/"` does not reach the composite actions, hence the glob entry.
   - package-ecosystem: github-actions
     directories:
       - "/"
@@ -23,8 +23,7 @@ updates:
       actions-major:
         patterns: ["*"]
         update-types: [major]
-    ignore:
-      - dependency-name: "denoland/setup-deno"
+    open-pull-requests-limit: 3
 
   - package-ecosystem: cargo
     directory: "/"
@@ -47,23 +46,7 @@ updates:
       - dependency-name: "typst*" # the family ships as one release; owned by hand
       - dependency-name: "oxc*"
 
-  # One entry covers all three workspace members, which the root deno.jsonc declares.
-  - package-ecosystem: deno
-    directory: "/"
-    schedule:
-      interval: monthly
-    rebase-strategy: disabled
-    cooldown:
-      default-days: 7
-    groups:
-      deno-minor-patch:
-        patterns: ["*"]
-        update-types: [minor, patch]
-      deno-major:
-        patterns: ["*"]
-        update-types: [major]
-
-  # extensions/vscode devDependencies; there is no package-lock.json.
+  # extensions/vscode dependencies, with a committed package-lock.json.
   - package-ecosystem: npm
     directory: "/extensions/vscode"
     schedule:

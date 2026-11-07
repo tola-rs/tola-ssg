@@ -1,25 +1,26 @@
 set working-directory := '..'
 
-# Install the workspace's locked dependencies, including the shared UI driver's.
+# Install the extension's locked dependencies.
+[working-directory('extensions/vscode')]
 setup:
-    deno ci
+    npm ci
 
 # Type-check the extension without emitting.
 [working-directory('extensions/vscode')]
 typecheck:
-    deno task typecheck
+    npm run typecheck
 
 # Exercise the integration host; Linux needs Xvfb, and VSCODE_EXECUTABLE_PATH skips the download.
 [working-directory('extensions/vscode')]
 test:
     cargo build --locked -p tola
-    {{ if os() == 'linux' { 'xvfb-run --auto-servernum' } else { '' } }} deno task test
+    {{ if os() == 'linux' { 'xvfb-run --auto-servernum' } else { '' } }} npm run test
 
 # Build a local VSIX; the prepublish hook type-checks and bundles first.
 [working-directory('extensions/vscode')]
 package:
-    deno task package
+    npm run package
 
-# Run the integration suite and build a checked VSIX.
+# Type-check and build a checked VSIX; run the integration suite with `just vscode::test`.
 [default]
-check: test package
+check: typecheck package

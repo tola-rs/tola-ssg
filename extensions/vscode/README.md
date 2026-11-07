@@ -61,5 +61,5 @@ instruction to change `tola.assetDirectory`.
 ## Development
 
 Build the workspace binary with `cargo build --locked --release -p tola`, build the bundle with
-`deno task build:production`, and install the packaged VSIX. A development install uses the extension id
+`npm run build:production`, and install the packaged VSIX. A development install uses the extension id
 `tola.tola-dev` with display name `Tola Dev` and keeps the source package at `tola`.

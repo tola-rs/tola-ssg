@@ -32,7 +32,7 @@ A successful build exposes one sealed graph. Publication follows validation; no 
 - `src/` — the `tola` binary: CLI policy, development runtime, editor integration, terminal presentation.
 - `crates/` — workspace libraries, one responsibility per crate; see [`crates/CONTEXT.md`](../crates/CONTEXT.md).
 - `extensions/vscode/`, `extensions/zed/` — editor clients.
-- `tools/` — maintenance and release scripts; `ctx.nu` reads these documents by section.
+- `tools/` — Nushell scripts: `lib/` shared primitives, `release/` publication, `assets/` embedded-resource generators; `ctx.nu` reads these documents by section.
 - `just/` — recipe modules; `justfile` is the entry point.
 - `nix/` — flake wiring, packages, development shell, checks.
 - `.agents/` — the development skill, this overview, and design notes.

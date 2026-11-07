@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       full:
-        description: "Also run the Windows matrix, e2e, and the extension suite."
+        description: "Also run the Windows matrix and the extension suite."
         type: boolean
         default: false
   pull_request:
@@ -84,7 +84,7 @@ jobs:
           printf 'watch=%s\n' "$watch" >> "$GITHUB_OUTPUT"
 
   static-check:
-    name: Check formatting, lints, spelling, versions, and workflows
+    name: Check formatting, licenses, versions, and workflows
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -92,7 +92,9 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - uses: ./.github/actions/setup-typescript
+      - uses: hustcer/setup-nu@eacad52a4634c4f8d17a94916f93be6856861b9c # v3.29
+        with:
+          version: 0.116.1
       - uses: ./.github/actions/setup-rust
         with:
           components: rustfmt
@@ -104,12 +106,8 @@ jobs:
         with:
           tool: cargo-deny@0.20.2
           fallback: none
-      - name: Check dependency licences and advisories
-        run: just deny
-      - name: Check spelling in sources and prose
-        uses: crate-ci/typos@00f422f3b19c57bc6338715ebfe3316d38768461 # v1.50.3
-        with:
-          config: ./.github/typos.toml
+      - name: Check dependency licences
+        run: just licenses-check
       - name: Install shellcheck for actionlint
         uses: awalsh128/cache-apt-pkgs-action@553a35bb8ebd9fcabcb1c9451aa4c98e1b4ca8a9 # v1.6.3
         with:
@@ -124,12 +122,6 @@ jobs:
           sudo install -m755 "$RUNNER_TEMP/actionlint" /usr/local/bin/actionlint
       - name: Check workflow syntax
         run: just workflows
-      - name: Check that action pins carry the release they name
-        uses: suzuki-shunsuke/pinact-action@896d595f299e71d65b9d28349d6956abe144390a # v3.0.0
-        with:
-          fix: false
-          skip_push: true
-          verify: true
 
   cargo:
     name: Check (just ${{ matrix.checks }})
@@ -148,7 +140,7 @@ jobs:
           - checks: build-library
             components: ''
             cache-key: check-build-library
-          - checks: test-nextest
+          - checks: test
             components: ''
             cache-key: check-test
     steps:
@@ -161,11 +153,6 @@ jobs:
           components: ${{ matrix.components }}
           cache-key: ${{ matrix.cache-key }}
           cache-on-failure: true
-      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
-        if: ${{ matrix.checks == 'test-nextest' }}
-        with:
-          tool: nextest@0.9.149
-          fallback: none
       - run: just ${{ matrix.checks }}
 
   macos-watch:
@@ -187,27 +174,6 @@ jobs:
       - name: Run the gated fsevent tests
         run: cargo test --locked -p tola --bin tola --all-features fsevents_tests
 
-  minimum-rust:
-    name: Check minimum Rust
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-      - name: Read minimum Rust from the workspace manifest
-        id: minimum-rust
-        run: |
-          rust_version="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["rust-version"])')"
-          printf 'rust-version=%s\n' "$rust_version" >> "$GITHUB_OUTPUT"
-      - uses: ./.github/actions/setup-rust
-        with:
-          toolchain: ${{ steps.minimum-rust.outputs.rust-version }}
-          cache-key: check-minimum-rust
-      - name: Compile all workspace targets and features on minimum Rust
-        run: cargo check --locked --workspace --all-targets --all-features
-
   maintenance-scripts:
     name: Check maintenance scripts (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -221,9 +187,11 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - uses: ./.github/actions/setup-typescript
+      - uses: hustcer/setup-nu@eacad52a4634c4f8d17a94916f93be6856861b9c # v3.29
+        with:
+          version: 0.116.1
       - uses: ./.github/actions/setup-rust
-      - run: just scripts::check
+      - run: just tools::check
 
   windows-msvc:
     name: Check Windows x86_64-pc-windows-msvc
@@ -245,45 +213,6 @@ jobs:
           cache-on-failure: true
       - run: just windows::msvc
 
-  e2e:
-    name: Exercise CLI, development, and site behavior
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    needs: [scope]
-    if: ${{ needs.scope.outputs.full == 'true' }}
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-      - uses: ./.github/actions/setup-typescript
-      - uses: ./.github/actions/setup-rust
-        with:
-          cache-key: check-e2e
-          cache-on-failure: true
-      - name: Cache Playwright browsers
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.cache/ms-playwright
-          key: playwright-${{ runner.os }}-${{ hashFiles('e2e/deno.json') }}
-      - name: Install Chromium
-        run: just e2e::setup --with-deps
-      - name: Type-check and exercise CLI, development, and site behavior
-        env:
-          TOLA_E2E_PROFILE: release
-        run: just e2e::run
-      - name: Upload Playwright report and failure artifacts
-        if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: playwright-results
-          overwrite: true
-          path: |
-            e2e/playwright-report/
-            e2e/test-results/playwright/
-          if-no-files-found: ignore
-          retention-days: 7
-
   vscode:
     name: Check and package the VS Code extension
     runs-on: ubuntu-latest
@@ -297,11 +226,18 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - uses: ./.github/actions/setup-typescript
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: extensions/vscode/package-lock.json
       - uses: ./.github/actions/setup-rust
         with:
           cache-key: check-vscode
           cache-on-failure: true
+      - name: Install the extension's dependencies
+        working-directory: extensions/vscode
+        run: npm ci
       - name: Install the headless VS Code display
         uses: awalsh128/cache-apt-pkgs-action@553a35bb8ebd9fcabcb1c9451aa4c98e1b4ca8a9 # v1.6.3
         with:

@@ -1,5 +1,4 @@
 {
-  lib,
   pkgs,
   buildEnvironment,
 }:
@@ -10,19 +9,7 @@ let
     nativeBuildTools
     nativeDependencies
     ;
-  denoVersion = builtins.head (
-    lib.concatMap (
-      line:
-      let
-        version = builtins.match "deno[[:blank:]]+([^[:blank:]]+)[[:blank:]]*" line;
-      in
-      lib.optionals (version != null) version
-    ) (lib.splitString "\n" (builtins.readFile ../.tool-versions))
-  );
 in
-assert lib.assertMsg (
-  pkgs.deno.version == denoVersion
-) "The Nix development shell's Deno version must match .tool-versions";
 pkgs.mkShell {
   env = cargoEnv pkgs;
   packages =
@@ -34,16 +21,20 @@ pkgs.mkShell {
       rust.rustfmt
       just
       actionlint
-      deno
       nushell
+      nodejs_24
       nixfmt
+      # The maintenance scripts archive, compress, and fetch release inputs.
+      zstd
+      gzip
+      gnutar
+      curl
       # Maintenance suites and release tooling drive git checkouts.
       git
     ]
     ++ nativeBuildTools
     ++ nativeDependencies pkgs;
-  # Deno refuses to pass a DYLD_* variable to a child of a scoped `--allow-run`, and
-  # this shell exports LD_DYLD_PATH; rustc and cc link without it.
+  # This shell exports LD_DYLD_PATH; rustc and cc link without it.
   shellHook = ''
     unset LD_DYLD_PATH
   '';

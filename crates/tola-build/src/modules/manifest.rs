@@ -487,7 +487,7 @@ pub(super) fn read_one(
     }
     if let Some(skill) = &manifest.skill {
         relative(&skill.path, "skill.path".to_owned())?;
-        super::validate_module_path(&site, name, &root, &skill.path, false)?;
+        super::validate_module_path(site, name, &root, &skill.path, false)?;
     }
     semantics::validate(
         &manifest.semantics,

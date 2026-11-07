@@ -234,7 +234,10 @@ pub(in crate::cli) fn run(
                 path.display()
             );
             let text = std::fs::read_to_string(&canonical).with_context(|| {
-                format!("Tola could not read the module skill at {}", canonical.display())
+                format!(
+                    "Tola could not read the module skill at {}",
+                    canonical.display()
+                )
             })?;
             super::skill::run(
                 &text,

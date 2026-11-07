@@ -7,7 +7,7 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import { promisify } from 'node:util'
 import * as vscode from 'vscode'
-import { startGate } from '../../../../e2e/support/gate.ts'
+import { startGate } from './gate.ts'
 
 const channelLog: string[] = []
 const channelLines = new vscode.EventEmitter<string>()
