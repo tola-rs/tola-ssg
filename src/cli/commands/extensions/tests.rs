@@ -81,6 +81,7 @@ fn module() -> ModuleCommands {
             },
         )]),
         initializer: None,
+        skill: None,
     }
 }
 

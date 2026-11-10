@@ -4,38 +4,20 @@ import { createServer } from 'node:http'
 import { createRequire } from 'node:module'
 import * as os from 'node:os'
 import * as path from 'node:path'
-import { fileURLToPath } from 'node:url'
 import { runTests } from '@vscode/test-electron'
+import type { Browser } from 'playwright'
 
-const require = createRequire(import.meta.url)
+// This launcher is the entry script, so Node reports its path in `argv[1]`; the package has no
+// `"type"` field, so TypeScript checks this file as CommonJS, where `import.meta` does not type-check.
+const directory = path.dirname(process.argv[1])
+const nodeRequire = createRequire(process.argv[1])
 
 /** The VS Code release the integration host downloads: the oldest the extension declares, so
  * the suite proves its API floor rather than whatever stable shipped this week. */
 const VSCODE_VERSION = '1.97.0'
 
-/** The Playwright surface this driver uses: one CDP connection and the workbench notification. */
-type DriverBrowser = { contexts(): DriverContext[]; close(): Promise<void> }
-
-/** The Playwright module this driver loads, resolved from the extension's own dependencies. */
-type DriverModule = { chromium: { connectOverCDP(endpoint: string): Promise<DriverBrowser> } }
-type DriverContext = { pages(): DriverPage[] }
-type DriverPage = {
-  url(): string
-  locator(selector: string): DriverLocator
-  getByRole(role: string, options: { name: string | RegExp; exact?: boolean }): DriverLocator
-  screenshot(options: { path: string }): Promise<unknown>
-}
-type DriverLocator = {
-  filter(options: { has?: DriverLocator; hasText?: string | RegExp }): DriverLocator
-  getByRole(role: string, options: { name: string | RegExp; exact?: boolean }): DriverLocator
-  last(): DriverLocator
-  waitFor(options: { state: string; timeout: number }): Promise<void>
-  innerText(): Promise<string>
-  hover(): Promise<void>
-  click(): Promise<void>
-}
-
-type WorkbenchAction = {
+/** One workbench interaction the suite posts to this driver. */
+interface WorkbenchAction {
   button?: string
   dismiss?: boolean
   contains?: string
@@ -54,28 +36,26 @@ function quoted(value: string): string {
 }
 
 async function main(): Promise<void> {
-  const directory = import.meta.dirname ?? path.dirname(fileURLToPath(import.meta.url))
   const repository = path.resolve(directory, '../../..')
   const executable = process.env.TOLA_TEST_BINARY ||
     path.join(repository, 'target/debug', process.platform === 'win32' ? 'tola.exe' : 'tola')
   await fs.access(executable)
-  const { chromium } = require('playwright') as DriverModule
+  const { chromium } = nodeRequire('playwright') as typeof import('playwright')
   const temporary = await fs.mkdtemp(path.join(os.tmpdir(), 'tola-vscode-'))
   const userData = path.join(temporary, 'user-data')
-  // The suite's helper scripts — the service proxy and the publication hooks — run under this
-  // driver's own runtime, which needs the permission flag they would otherwise go without.
+  // The suite's helper scripts run under this driver's own runtime.
   const helperRuntime = path.join(temporary, 'helper-runtime')
   await fs.writeFile(
     helperRuntime,
-    `#!/bin/sh\nexec ${quoted(process.execPath)}${'deno' in process.versions ? ' run -A' : ''} "$@"\n`,
+    `#!/bin/sh\nexec ${quoted(process.execPath)} "$@"\n`,
     { mode: 0o755 },
   )
-  let browser: DriverBrowser | undefined
+  let browser: Browser | undefined
   const driver = createServer(async (request, response) => {
     try {
       let body = ''
       for await (const chunk of request) body += chunk
-      const action = JSON.parse(body) as WorkbenchAction
+      const action: WorkbenchAction = JSON.parse(body)
       if (!browser) {
         const [port] = (await fs.readFile(path.join(userData, 'DevToolsActivePort'), 'utf8')).split('\n')
         if (!port) throw new Error('The workbench did not publish its debugging port')

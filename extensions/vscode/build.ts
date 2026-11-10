@@ -1,7 +1,7 @@
 import * as esbuild from 'esbuild'
 import * as fs from 'node:fs/promises'
 
-// `--production` is the VSIX build the `package` task runs; it omits source maps so the shipped
+// `--production` is the VSIX build the `package` script runs; it omits source maps so the shipped
 // bundle never references a file the package omits.
 const production = process.argv.includes('--production')
 
@@ -22,7 +22,7 @@ async function build(): Promise<void> {
   })
 }
 
-await build().catch((error: unknown) => {
+build().catch((error: unknown) => {
   console.error(error)
   process.exitCode = 1
 })

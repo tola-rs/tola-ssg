@@ -819,7 +819,7 @@ two implementations built from the same assumptions.
 
 A supported official `nu` can be a development runner. Final acceptance must use the actual
 `tola nu` consumers will run. Keep the tested executable path explicit in the harness; do
-not silently fall back to a different binary. Test the consumer workflow without extra Nu/Deno/Node on
+not silently fall back to a different binary. Test the consumer workflow without extra Nu/Node on
 PATH. Neither a parse check nor a headless UI test proves the full workflow.
 
 ### TUI

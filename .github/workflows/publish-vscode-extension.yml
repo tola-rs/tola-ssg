@@ -53,8 +53,15 @@ jobs:
         with:
           ref: ${{ github.event.inputs.ref || github.ref }}
           persist-credentials: false
-      - uses: ./.github/actions/setup-typescript
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: extensions/vscode/package-lock.json
       - uses: extractions/setup-just@f8a3cce218d9f83db3a2ecd90e41ac3de6cdfd9b # v3.1.0
+      - name: Install the extension's locked dependencies
+        working-directory: extensions/vscode
+        run: npm ci
       - name: Package the extension this ref ships
         run: just vscode::package
       - name: Check the ref ships one package
@@ -71,7 +78,7 @@ jobs:
           echo "built $1 from ${SOURCE_REF}"
       - name: List what the package contains
         working-directory: extensions/vscode
-        run: deno run -A @vscode/vsce ls --no-dependencies
+        run: npx vsce ls --no-dependencies
       - name: Keep the package for the Marketplace upload
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -90,12 +97,12 @@ jobs:
             exit 1
           fi
           set -- *.vsix
-          deno run -A ovsx publish --skip-duplicate "$1"
+          npx ovsx publish --skip-duplicate "$1"
       - name: Record what this run built
         working-directory: extensions/vscode
         run: |
           set -euo pipefail
-          version=$(deno eval 'console.log(JSON.parse(Deno.readTextFileSync("package.json")).version)')
+          version=$(node -p "require('./package.json').version")
           {
             echo "### Built $version"
             echo

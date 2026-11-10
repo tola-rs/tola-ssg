@@ -23,26 +23,3 @@ allow = [
   "Zlib",
 ]
 
-# Vulnerability scanning, from the RustSec database.
-[advisories]
-# A `-[RUSTSEC]` entry names the crate and what blocks the fixed release; delete it once that
-# dependency reaches the release.
-ignore = [
-  { id = "RUSTSEC-2024-0320", reason = "syntect 5.3.0 under typst-library 0.15.1; no fixed release" },
-  { id = "RUSTSEC-2024-0436", reason = "biblatex 0.12.0 under hayagriva 0.10.1; no fixed release" },
-  { id = "RUSTSEC-2024-0449", reason = "unsafe-libyaml 0.2.11 under serde_yaml 0.9.34 via hayagriva 0.10.1 and typst-library 0.15.1; no maintained release" },
-  { id = "RUSTSEC-2025-0141", reason = "syntect 5.3.0 under typst-library 0.15.1; no fixed release" },
-  { id = "RUSTSEC-2026-0118", reason = "hickory-resolver 0.25.2 under reqwest 0.12; no fixed release there" },
-  { id = "RUSTSEC-2026-0119", reason = "hickory-resolver 0.25.2 pins hickory-proto ^0.25; needs 0.26.1" },
-  { id = "RUSTSEC-2026-0192", reason = "fontdb 0.23.0 and usvg 0.47.0 under typst 0.15.1; no fixed release" },
-  { id = "RUSTSEC-2026-0194", reason = "citationberg 0.7.0 pins quick-xml ^0.38; needs 0.41.0" },
-  { id = "RUSTSEC-2026-0195", reason = "citationberg 0.7.0 pins quick-xml ^0.38; needs 0.41.0" },
-  { id = "RUSTSEC-2026-0206", reason = "typst-layout 0.15.1, usvg 0.47.0, and krilla 0.8.2; no fixed release" },
-  # The embedded Nushell brings the rest; the fixed releases need a newer nu-command.
-  { id = "RUSTSEC-2026-0436", reason = "calamine 0.36.1 under nu-command 0.116.1; needs 0.38.0" },
-  { id = "RUSTSEC-2026-0367", reason = "zip 8.6.0 under nu-command 0.116.1; needs 9.0.0" },
-  { id = "RUSTSEC-2026-0368", reason = "zip 8.6.0 under nu-command 0.116.1; needs 9.0.0" },
-  { id = "RUSTSEC-2026-0369", reason = "zip 8.6.0 under nu-command 0.116.1; needs 9.0.0" },
-  { id = "RUSTSEC-2026-0429", reason = "zip 8.6.0 under nu-command 0.116.1; needs 9.0.0" },
-  { id = "RUSTSEC-2026-0433", reason = "pulldown-cmark 0.13.5 is pinned for rendering output; wikilinks stay off and 0.13.6 changes the workspace pin" },
-]

@@ -56,5 +56,4 @@ Package files follow the compiler's package-root precedence, including when a se
 missing a requested file.
 
 Source answers belong to `tola-typst-syntax`, site semantics to `tola-build`, configuration and
-pipe I/O to the application. Layout and ownership:
-[`.agents/architecture.md`](../../.agents/architecture.md).
+pipe I/O to the application. Layout and ownership: [`CONTEXT.md`](CONTEXT.md).
