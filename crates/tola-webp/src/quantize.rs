@@ -35,6 +35,13 @@ pub(crate) struct Factors {
     pub(crate) chroma_ac: i32,
 }
 
+pub(crate) const RECIPROCAL_SHIFT: u32 = 16;
+
+pub(crate) const fn reciprocal(step: i32) -> i32 {
+    (1 << RECIPROCAL_SHIFT) / step
+}
+
+#[derive(Clone, Copy)]
 pub(crate) struct Matrix {
     factors: [i32; 4],
     half_steps: [i32; 4],
@@ -47,7 +54,7 @@ impl Matrix {
         Self {
             factors,
             half_steps: factors.map(|factor| factor / 2),
-            reciprocals: factors.map(|factor| 65536 / factor),
+            reciprocals: factors.map(reciprocal),
         }
     }
 
@@ -117,7 +124,7 @@ impl Matrix {
         for (chunk, levels) in quantized.iter_mut().enumerate() {
             let coefficients = i32x4::from_slice(simd, &coefficients[chunk * 4..chunk * 4 + 4]);
             let numerator = coefficients.abs() + half_steps;
-            let estimate = (numerator * reciprocals) >> 16u32;
+            let estimate = (numerator * reciprocals) >> RECIPROCAL_SHIFT;
             // For VP8's bounded coefficients numerator < 65536, so the reciprocal misses by at most one.
             let correction = (numerator - estimate * factors)
                 .simd_ge(factors)
@@ -145,13 +152,19 @@ impl Matrix {
 /// quality 94 to index 6 at 95; index 7 is the measured rate-distortion point for quality
 /// 95, where the finer index 6 spends about 8% more bytes for 0.18 dB on the photographic
 /// matrix while the coarser index 7 stays below libwebp at matched PSNR.
-pub(crate) fn quantizer_index(quality: u8) -> u8 {
-    // The rounded linear map skips index 7; it is the measured RD point for quality 95.
-    const Q95_QUANTIZER_INDEX: u8 = 7;
-    if quality == 95 {
-        return Q95_QUANTIZER_INDEX;
-    }
-    (((100 - quality.min(100)) as u32 * 127 + 50) / 100) as u8
+pub(crate) fn frame_quantizer(quality: u8) -> (u8, u64) {
+    const MAX_QUALITY: u32 = 100;
+    let quality = u32::from(quality).min(MAX_QUALITY);
+    // Quality 95 pairs index 7 with a 5% increase in the rate-distortion weight.
+    let (index, rate_percent) = if quality == 95 {
+        (7, 105)
+    } else {
+        let max_index = (QUANTIZER_LEVELS - 1) as u32;
+        let index = ((MAX_QUALITY - quality) * max_index + MAX_QUALITY / 2) / MAX_QUALITY;
+        (index as u8, 100)
+    };
+    let lambda = 16 * u64::from(index).pow(2) * rate_percent / 100;
+    (index, lambda)
 }
 
 pub(crate) fn factors(index: u8) -> Factors {
@@ -180,7 +193,7 @@ fn quantize_lane<S: Simd>(
     simd: S,
 ) -> i32x4<S> {
     let numerator = coefficient.abs() + half_step;
-    let estimate = (numerator * reciprocal) >> 16u32;
+    let estimate = (numerator * reciprocal) >> RECIPROCAL_SHIFT;
     let correction = (numerator - estimate * factor)
         .simd_ge(factor)
         .select(one, zero);
@@ -220,14 +233,14 @@ mod tests {
 
     #[test]
     fn quality_refines_quantizer_monotonically() {
-        assert_eq!(quantizer_index(100), 0);
-        assert_eq!(quantizer_index(0), 127);
-        assert_eq!(quantizer_index(94), 8);
-        assert_eq!(quantizer_index(95), 7);
-        assert_eq!(quantizer_index(96), 5);
+        assert_eq!(frame_quantizer(100).0, 0);
+        assert_eq!(frame_quantizer(0).0, 127);
+        assert_eq!(frame_quantizer(94).0, 8);
+        assert_eq!(frame_quantizer(95).0, 7);
+        assert_eq!(frame_quantizer(96).0, 5);
         let mut previous = 127;
         for quality in 0..=100 {
-            let index = quantizer_index(quality);
+            let index = frame_quantizer(quality).0;
             assert!(index <= previous, "q{quality} regressed");
             previous = index;
         }

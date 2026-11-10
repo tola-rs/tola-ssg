@@ -9555,7 +9555,7 @@ name = "tola-highlight"
 version = "0.8.2-pre.1"
 dependencies = [
  "syntect",
- "two-face",
+ "typst-library",
  "typst-syntax",
 ]
 
@@ -9577,12 +9577,12 @@ dependencies = [
 name = "tola-image"
 version = "0.8.2-pre.1"
 dependencies = [
- "anyhow",
  "crc32fast",
  "fearless_simd 1.0.0",
  "image",
  "jpeg-encoder",
  "moxcms 0.7.11",
+ "png",
  "rayon",
  "roxmltree 0.21.2",
  "serde",
@@ -9729,6 +9729,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tola-address",
  "tola-datalog",
+ "tola-highlight",
  "tola-icons",
  "tola-image",
  "tola-slugify",

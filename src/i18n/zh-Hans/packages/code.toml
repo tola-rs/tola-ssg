@@ -1,7 +1,29 @@
 # Simplified-Chinese documentation of `@tola/code`. English stays authoritative in the package's
 # own Typst sources; a unit here overrides one of them.
 
-overview = "代码主题、Typst 自带的高亮和共享的代码样式表"
+overview = "代码语法、主题和共享的代码样式表"
+
+[exports.code-syntaxes]
+
+summary = [
+  '''
+按语言索引的附加语法。可以给 `raw.syntaxes` 传入单份语法，或在代码块前用
+`#set raw(syntaxes: code-syntaxes.values())` 启用全部语法。
+''',
+]
+
+[exports.code-language]
+
+summary = [
+  '''
+把源码标签映射到 Typst 的内置语法名，用于构造 `raw(..., lang: ...)`。
+例如 `code-language("sbcl")` 和 `code-language("ccl")` 返回 `"lisp"`。
+''',
+]
+
+[exports.code-language.parameters]
+
+language = "要查找的源码标签。"
 
 [exports.code-themes]
 

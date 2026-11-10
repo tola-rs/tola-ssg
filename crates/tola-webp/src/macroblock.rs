@@ -12,6 +12,12 @@ const BLOCKS: usize = 24;
 const MAX_VALUES: usize = BLOCKS * BLOCK_COEFFICIENTS;
 /// Values per spool chunk. Whole macroblocks stay inside one chunk.
 const CHUNK: usize = 32_768;
+/// Small coefficient spools write directly as i16. Once a strip retains 2 MiB, pack later
+/// spans to bytes when they fit so large frames save memory without scanning small ones twice.
+const COMPACT_AFTER_WIDE_CHUNKS: usize = 2 * 1024 * 1024 / (CHUNK * size_of::<i16>());
+// A 16,383² frame has at most 1,024² macroblocks. Even with chunk gaps,
+// 384 coefficients per macroblock fit below this offset bit.
+const WIDE_OFFSET: u32 = 1 << 31;
 
 #[derive(Clone, Copy)]
 pub(crate) enum Luma {
@@ -31,106 +37,212 @@ pub(crate) struct DenseMacroblock {
 }
 
 /// A macroblock's coefficients as per-block scan prefixes in a shared spool.
+#[derive(Clone, Copy)]
 pub(crate) struct Macroblock {
     pub(crate) luma: Luma,
     pub(crate) chroma_mode: u8,
     /// Scan-prefix length (highest nonzero scan position + 1) of each y, u, v block.
     pub(crate) lengths: [u8; BLOCKS],
-    pub(crate) offset: u32,
+    // Zero denotes an empty span. Other offsets are one-based, with the width in the high bit.
+    offset: u32,
+    has_residual: bool,
 }
 
 impl Macroblock {
+    pub(crate) fn has_residual(&self) -> bool {
+        self.has_residual
+    }
+
     pub(crate) fn pack(dense: DenseMacroblock, spool: &mut CoefficientSpool) -> Self {
-        let offset = spool.begin_macroblock();
         let mut lengths = [0; BLOCKS];
-        let mut index = 0;
-        for block in &dense.y {
-            lengths[index] = spool.push_block(block);
-            index += 1;
-        }
-        for block in &dense.u {
-            lengths[index] = spool.push_block(block);
-            index += 1;
-        }
-        for block in &dense.v {
-            lengths[index] = spool.push_block(block);
-            index += 1;
-        }
+        let blocks = dense.y.iter().chain(&dense.u).chain(&dense.v);
+        let offset = spool.append(blocks, &mut lengths);
+        let has_residual =
+            offset != 0 || matches!(&dense.luma, Luma::Intra16 { dc, .. } if *dc != [0; 16]);
         Self {
             luma: dense.luma,
             chroma_mode: dense.chroma_mode,
             lengths,
             offset,
-        }
-    }
-
-    /// Point this macroblock at the same coefficients in a concatenated spool.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn rebase(&self, base: u32) -> Self {
-        Self {
-            luma: self.luma,
-            chroma_mode: self.chroma_mode,
-            lengths: self.lengths,
-            offset: self.offset + base,
+            has_residual,
         }
     }
 }
 
-/// Append-only, chunked coefficient storage. Chunks avoid reallocation copies, so peak memory
-/// tracks the packed coefficients instead of a doubled capacity.
+/// Append-only coefficient chunks. A macroblock uses signed bytes when every coefficient fits.
 pub(crate) struct CoefficientSpool {
-    chunks: Vec<Box<[i16]>>,
-    used: usize,
+    narrow: Vec<Vec<i8>>,
+    wide: Vec<Vec<i16>>,
+}
+
+pub(crate) enum PackedLevels<'a> {
+    Narrow(&'a [i8]),
+    Wide(&'a [i16]),
 }
 
 impl CoefficientSpool {
+    pub(crate) fn estimated_bytes(macroblocks: u64, strips: u64) -> u64 {
+        let blocks_per_chunk = (CHUNK / MAX_VALUES) as u64;
+        // Allow a partial chunk in each of the two spools per strip.
+        let chunks = macroblocks.div_ceil(blocks_per_chunk) + 2 * strips - 1;
+        chunks * CHUNK as u64 * size_of::<i16>() as u64
+    }
+
     pub(crate) fn new() -> Self {
         Self {
-            chunks: Vec::new(),
-            used: 0,
+            narrow: Vec::new(),
+            wide: Vec::new(),
         }
     }
 
-    /// Start one macroblock and return its base spool index.
-    pub(crate) fn begin_macroblock(&mut self) -> u32 {
-        if self.chunks.is_empty() || self.used + MAX_VALUES > CHUNK {
-            self.chunks.push(vec![0; CHUNK].into_boxed_slice());
-            self.used = 0;
+    fn append<'a>(
+        &mut self,
+        blocks: impl Iterator<Item = &'a [i16; 16]> + Clone,
+        lengths: &mut [u8; BLOCKS],
+    ) -> u32 {
+        if self.wide.len() < COMPACT_AFTER_WIDE_CHUNKS {
+            let mut offset = 0;
+            for (block, length) in blocks.zip(lengths) {
+                let prefix = &ZIGZAG[..prefix_len(block)];
+                *length = prefix.len() as u8;
+                if prefix.is_empty() {
+                    continue;
+                }
+                if offset == 0 {
+                    offset = reserve_coefficients(&mut self.wide, MAX_VALUES) | WIDE_OFFSET;
+                }
+                self.wide
+                    .last_mut()
+                    .unwrap()
+                    .extend(prefix.iter().map(|&position| block[position]));
+            }
+            return offset;
         }
-        ((self.chunks.len() - 1) * CHUNK + self.used) as u32
+
+        let mut count = 0;
+        for (block, length) in blocks.clone().zip(lengths.iter_mut()) {
+            let prefix = prefix_len(block);
+            *length = prefix as u8;
+            count += prefix;
+        }
+        if count == 0 {
+            return 0;
+        }
+        let prefixes = blocks.zip(*lengths);
+        let mut shifted_levels = 0u16;
+        let narrow_offset =
+            append_coefficients(&mut self.narrow, count, prefixes.clone(), |level| {
+                // In unsigned arithmetic, adding 128 maps the i8 range to 0..=255.
+                shifted_levels |= (level as u16).wrapping_add(128);
+                level as i8
+            });
+        if shifted_levels <= u16::from(u8::MAX) {
+            return narrow_offset;
+        }
+
+        let chunk = self.narrow.last_mut().unwrap();
+        chunk.truncate(chunk.len() - count);
+        append_coefficients(&mut self.wide, count, prefixes, |level| level) | WIDE_OFFSET
     }
 
-    /// Append one block's scan prefix and return its length.
-    fn push_block(&mut self, levels: &[i16; 16]) -> u8 {
-        let mut length = 0;
-        for position in (0..16).rev() {
-            if levels[ZIGZAG[position]] != 0 {
-                length = position + 1;
-                break;
+    /// The coefficient span starts at the macroblock offset and is partitioned by its lengths.
+    pub(crate) fn levels(&self, macroblock: &Macroblock) -> PackedLevels<'_> {
+        let offset = macroblock.offset;
+        if offset == 0 {
+            PackedLevels::Narrow(&[])
+        } else if offset & WIDE_OFFSET == 0 {
+            PackedLevels::Narrow(coefficient_tail(&self.narrow, offset))
+        } else {
+            PackedLevels::Wide(coefficient_tail(&self.wide, offset & !WIDE_OFFSET))
+        }
+    }
+}
+
+fn append_coefficients<'a, T>(
+    chunks: &mut Vec<Vec<T>>,
+    count: usize,
+    prefixes: impl Iterator<Item = (&'a [i16; 16], u8)>,
+    mut convert: impl FnMut(i16) -> T,
+) -> u32 {
+    let offset = reserve_coefficients(chunks, count);
+    let chunk = chunks.last_mut().unwrap();
+    for (block, length) in prefixes {
+        chunk.extend(
+            ZIGZAG[..usize::from(length)]
+                .iter()
+                .map(|&position| convert(block[position])),
+        );
+    }
+    offset
+}
+
+fn reserve_coefficients<T>(chunks: &mut Vec<Vec<T>>, count: usize) -> u32 {
+    if chunks
+        .last()
+        .is_none_or(|chunk| chunk.len() + count > CHUNK)
+    {
+        chunks.push(Vec::with_capacity(CHUNK));
+    }
+    let index = chunks.len() - 1;
+    (index * CHUNK + chunks[index].len()) as u32 + 1
+}
+
+fn prefix_len(block: &[i16; 16]) -> usize {
+    ZIGZAG
+        .iter()
+        .rposition(|&position| block[position] != 0)
+        .map_or(0, |position| position + 1)
+}
+
+fn coefficient_tail<T>(chunks: &[Vec<T>], offset: u32) -> &[T] {
+    let offset = (offset - 1) as usize;
+    &chunks[offset / CHUNK][offset % CHUNK..]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn coefficient_spans_preserve_signs_across_chunks() {
+        let dense = |level| DenseMacroblock {
+            luma: Luma::Intra4 { modes: [0; 16] },
+            chroma_mode: 0,
+            y: [[level; 16]; 16],
+            u: [[level; 16]; 4],
+            v: [[level; 16]; 4],
+        };
+        let mut spool = CoefficientSpool::new();
+        let empty = Macroblock::pack(dense(0), &mut spool);
+        assert!(matches!(spool.levels(&empty), PackedLevels::Narrow([])));
+        assert!(!empty.has_residual());
+        assert!(spool.narrow.is_empty() && spool.wide.is_empty());
+
+        let small = Macroblock::pack(dense(127), &mut spool);
+        assert!(matches!(spool.levels(&small), PackedLevels::Wide(_)));
+        while spool.wide.len() < COMPACT_AFTER_WIDE_CHUNKS {
+            Macroblock::pack(dense(1), &mut spool);
+        }
+
+        let mut packed = Vec::new();
+        for _ in 0..=CHUNK / (2 * MAX_VALUES) {
+            for level in [-128, 127, -129, 128] {
+                packed.push((level, Macroblock::pack(dense(level), &mut spool)));
             }
         }
-        let chunk = self.chunks.len() - 1;
-        let values = &mut self.chunks[chunk][self.used..self.used + length];
-        for (position, value) in values.iter_mut().enumerate() {
-            *value = levels[ZIGZAG[position]];
+        for (level, macroblock) in packed {
+            match spool.levels(&macroblock) {
+                PackedLevels::Narrow(levels) => {
+                    assert_eq!(
+                        levels[..MAX_VALUES],
+                        [i8::try_from(level).unwrap(); MAX_VALUES]
+                    );
+                }
+                PackedLevels::Wide(levels) => {
+                    assert!(i8::try_from(level).is_err());
+                    assert_eq!(levels[..MAX_VALUES], [level; MAX_VALUES]);
+                }
+            }
         }
-        self.used += length;
-        length as u8
-    }
-
-    pub(crate) fn block(&self, start: usize, length: u8) -> &[i16] {
-        let chunk = start / CHUNK;
-        let offset = start % CHUNK;
-        &self.chunks[chunk][offset..offset + usize::from(length)]
-    }
-
-    /// Move another spool's chunks to the end of this one and return its base index.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn absorb(&mut self, other: CoefficientSpool) -> u32 {
-        let base = (self.chunks.len() * CHUNK) as u32;
-        self.chunks.extend(other.chunks);
-        // Later pushes must start a fresh chunk; `other`'s last chunk may be partially used.
-        self.used = CHUNK;
-        base
     }
 }

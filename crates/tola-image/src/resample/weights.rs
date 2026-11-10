@@ -2,11 +2,10 @@
 
 use std::f64::consts::PI;
 
-use anyhow::{Context, Result, ensure};
-
 use crate::RESIZE_TOO_LARGE;
 use crate::cancellation::Cancellation;
 use crate::recipe::ResizeFilter;
+use crate::{ImageError, ImageResult};
 
 /// Fractional bits of a quantized weight.
 ///
@@ -32,21 +31,21 @@ pub(super) fn quantize_coverage(total: i64) -> i64 {
     (total + i64::from(WEIGHT_ONE / 2)) >> WEIGHT_PRECISION
 }
 
-pub(super) fn check_coverage_bounds(first: &AxisWeights, second: &AxisWeights) -> Result<()> {
+pub(super) fn check_coverage_bounds(first: &AxisWeights, second: &AxisWeights) -> ImageResult<()> {
     let lane = quantize_coverage(65_025 * i64::from(first.absolute_sum));
     let sum = lane
         .checked_mul(i64::from(second.absolute_sum))
         .and_then(|sum| sum.checked_add(i64::from(WEIGHT_ONE / 2)))
-        .context(RESAMPLE_FAILURE)?;
+        .ok_or_else(|| ImageError::unreadable(RESAMPLE_FAILURE))?;
     let output = sum >> WEIGHT_PRECISION;
-    ensure!(
-        lane <= i64::from(i32::MAX)
-            && output
-                .checked_mul(255)
-                .and_then(|value| value.checked_add(output / 2))
-                .is_some(),
-        RESAMPLE_FAILURE
-    );
+    if lane > i64::from(i32::MAX)
+        || output
+            .checked_mul(255)
+            .and_then(|value| value.checked_add(output / 2))
+            .is_none()
+    {
+        return Err(ImageError::unreadable(RESAMPLE_FAILURE));
+    }
     Ok(())
 }
 
@@ -64,6 +63,7 @@ pub(super) struct AxisWeights {
     offsets: Vec<usize>,
     weights: Vec<i16>,
     absolute_sum: i32,
+    max_taps: u32,
 }
 
 impl AxisWeights {
@@ -72,38 +72,38 @@ impl AxisWeights {
         output: u32,
         filter: ResizeFilter,
         cancellation: &dyn Cancellation,
-    ) -> Result<Self> {
+    ) -> ImageResult<Self> {
         let scale = f64::from(input) / f64::from(output);
         let filter_scale = scale.max(1.0);
         let support = filter.support() * filter_scale;
-        let taps = 2usize
-            .saturating_mul(support.ceil() as usize)
-            .saturating_add(1);
+        let taps = filter.tap_count_bound(input, output) as usize;
         let mut axis = Self {
             starts: Vec::new(),
             offsets: Vec::new(),
             weights: Vec::new(),
             absolute_sum: 0,
+            max_taps: 0,
         };
         axis.starts
             .try_reserve_exact(output as usize)
-            .context(RESIZE_TOO_LARGE)?;
+            .map_err(|error| ImageError::codec(RESIZE_TOO_LARGE, error))?;
         axis.offsets
-            .try_reserve_exact((output as usize).checked_add(1).context(RESIZE_TOO_LARGE)?)
-            .context(RESIZE_TOO_LARGE)?;
+            .try_reserve_exact(
+                (output as usize)
+                    .checked_add(1)
+                    .ok_or_else(|| ImageError::unreadable(RESIZE_TOO_LARGE))?,
+            )
+            .map_err(|error| ImageError::codec(RESIZE_TOO_LARGE, error))?;
         axis.weights
             .try_reserve_exact(
                 (output as usize)
                     .checked_mul(taps)
-                    .context(RESIZE_TOO_LARGE)?,
+                    .ok_or_else(|| ImageError::unreadable(RESIZE_TOO_LARGE))?,
             )
-            .context(RESIZE_TOO_LARGE)?;
+            .map_err(|error| ImageError::codec(RESIZE_TOO_LARGE, error))?;
         let mut raw = Vec::new();
-        raw.try_reserve_exact(taps).context(RESIZE_TOO_LARGE)?;
-        let mut quantized = Vec::new();
-        quantized
-            .try_reserve_exact(taps)
-            .context(RESIZE_TOO_LARGE)?;
+        raw.try_reserve_exact(taps)
+            .map_err(|error| ImageError::codec(RESIZE_TOO_LARGE, error))?;
         for index in 0..output {
             cancellation.ensure_active()?;
             // The output sample's center in source coordinates; a downscale widens the support so
@@ -112,6 +112,7 @@ impl AxisWeights {
             let start =
                 ((center - support + 0.5).floor().max(0.0) as u64).min(u64::from(input) - 1);
             let end = ((center + support + 0.5).floor() as u64).clamp(start + 1, u64::from(input));
+            axis.max_taps = axis.max_taps.max((end - start) as u32);
             raw.clear();
             let mut total = 0.0f64;
             for source in start..end {
@@ -119,49 +120,58 @@ impl AxisWeights {
                 raw.push(weight);
                 total += weight;
             }
-            ensure!(total > 0.0, RESAMPLE_FAILURE);
+            if total.is_nan() || total <= 0.0 {
+                return Err(ImageError::unreadable(RESAMPLE_FAILURE));
+            }
             axis.starts.push(start as u32);
-            axis.offsets.push(axis.weights.len());
-            quantized.clear();
+            let first_weight = axis.weights.len();
+            axis.offsets.push(first_weight);
             let mut magnitude = 0i32;
             let mut sum = 0i32;
             let mut largest = (0usize, 0.0f64);
             for (offset, weight) in raw.iter().enumerate() {
                 let scaled = (weight / total * f64::from(WEIGHT_ONE)).round();
-                ensure!(scaled.abs() < f64::from(i16::MAX), RESAMPLE_FAILURE);
-                quantized.push(scaled as i16);
-                sum += i32::from(quantized[offset]);
-                magnitude = magnitude.saturating_add(i32::from(quantized[offset]).abs());
+                if scaled.is_nan() || scaled.abs() >= f64::from(i16::MAX) {
+                    return Err(ImageError::unreadable(RESAMPLE_FAILURE));
+                }
+                let weight_i16 = scaled as i16;
+                axis.weights.push(weight_i16);
+                sum += i32::from(weight_i16);
+                magnitude = magnitude.saturating_add(i32::from(weight_i16).abs());
                 if weight.abs() > largest.1 {
                     largest = (offset, weight.abs());
                 }
             }
             // Make the sum exactly one so every axis divides by the same constant; the residual is
             // a fraction of one weight step, far below a sample step.
-            let adjusted = i32::from(quantized[largest.0]) + (WEIGHT_ONE - sum);
-            ensure!(
-                (-i32::from(i16::MAX)..=i32::from(i16::MAX)).contains(&adjusted),
-                RESAMPLE_FAILURE
-            );
-            magnitude += adjusted.abs() - i32::from(quantized[largest.0]).abs();
-            quantized[largest.0] = adjusted as i16;
+            let strongest = &mut axis.weights[first_weight + largest.0];
+            let old_weight = i32::from(*strongest);
+            let adjusted = old_weight + (WEIGHT_ONE - sum);
+            if !(-i32::from(i16::MAX)..=i32::from(i16::MAX)).contains(&adjusted) {
+                return Err(ImageError::unreadable(RESAMPLE_FAILURE));
+            }
+            magnitude += adjusted.abs() - old_weight.abs();
+            *strongest = adjusted as i16;
             // Every tap multiplies a sample, so the accumulator bound depends on the absolute
             // weights rather than on their sum, which a kernel with negative lobes holds near one.
             // The first pass rounds a tap sum into an `i16` lane, and the second accumulates those
             // lanes, so the lane bound and the accumulator each have to fit their own width. An
             // opaque pass forces one lane to `u8::MAX`, which the bound never falls below.
             let lane_bound = first_pass_lane_bound(magnitude).max(i64::from(u8::MAX));
-            ensure!(
-                lane_bound <= i64::from(i16::MAX)
-                    && i64::from(magnitude) * lane_bound + i64::from(WEIGHT_ONE) / 2
-                        <= i64::from(i32::MAX),
-                RESAMPLE_FAILURE
-            );
+            if lane_bound > i64::from(i16::MAX)
+                || i64::from(magnitude) * lane_bound + i64::from(WEIGHT_ONE) / 2
+                    > i64::from(i32::MAX)
+            {
+                return Err(ImageError::unreadable(RESAMPLE_FAILURE));
+            }
             axis.absolute_sum = axis.absolute_sum.max(magnitude);
-            axis.weights.extend_from_slice(&quantized);
         }
         axis.offsets.push(axis.weights.len());
         Ok(axis)
+    }
+
+    pub(super) const fn max_taps(&self) -> u32 {
+        self.max_taps
     }
 
     pub(super) fn at(&self, index: u32) -> (u32, &[i16]) {
@@ -174,6 +184,13 @@ impl AxisWeights {
 }
 
 impl ResizeFilter {
+    /// Upper bound on taps for one output sample.
+    pub(super) fn tap_count_bound(self, input: u32, output: u32) -> u32 {
+        let scale = (f64::from(input) / f64::from(output)).max(1.0);
+        let taps = (2.0 * (self.support() * scale).ceil() + 1.0) as u32;
+        taps.min(input)
+    }
+
     /// The kernel's support in source samples at unit scale: a tap beyond it has no weight.
     fn support(self) -> f64 {
         match self {

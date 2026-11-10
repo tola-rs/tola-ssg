@@ -1,12 +1,13 @@
 //! VP8 coefficient tokens: the scan, contexts, token tree, and extra bits (RFC 6386 §13).
 
-use crate::bool_writer::{BoolWriter, LengthWriter, tree_path};
-use crate::cost::CostWriter;
-use crate::macroblock::{CoefficientSpool, Luma, Macroblock};
+#[cfg(test)]
+use crate::bool_writer::tree_path;
+use crate::bool_writer::{BoolWriter, LengthWriter};
+use crate::cost::{CostWriter, bool_cost};
+use crate::macroblock::{CoefficientSpool, Luma, Macroblock, PackedLevels};
 use crate::tables::{COEFF_UPDATE_PROBS, DEFAULT_COEFF_PROBS};
 use std::sync::{Arc, LazyLock};
 
-/// RFC 6386 §13.2: the coefficient token tree.
 /// Coefficient positions per block (4x4).
 pub(crate) const BLOCK_COEFFICIENTS: usize = 16;
 /// Probability contexts for a coefficient band.
@@ -32,6 +33,7 @@ pub(crate) const PAIR_ENTRIES: usize = PAIR_MAGNITUDES * PAIR_MAGNITUDES;
 /// Rows in the pair table: the 96 entries rounded up so the row mask is a power of two.
 const PAIR_ROWS: usize = ENTRIES.next_power_of_two();
 
+/// RFC 6386 §13.2: the coefficient token tree.
 const COEFF_TREE: [i8; 22] = [
     -11, 2, 0, 4, -1, 6, 8, 12, -2, 10, -3, -4, 14, 16, -5, -6, 18, 20, -7, -8, -9, -10,
 ];
@@ -96,12 +98,12 @@ pub(crate) const COEFF_BANDS: [usize; BLOCK_COEFFICIENTS] =
 
 /// Probability entry for each plane and scan position, before adding the context.
 const ENTRY_BASE: [[u16; BLOCK_COEFFICIENTS]; 4] = {
-    let mut table = [[0u16; 16]; 4];
+    let mut table = [[0u16; BLOCK_COEFFICIENTS]; 4];
     let mut plane = 0;
-    while plane < 4 {
+    while plane < table.len() {
         let mut position = 0;
-        while position < 16 {
-            table[plane][position] = ((plane * 8 + COEFF_BANDS[position]) * 3) as u16;
+        while position < BLOCK_COEFFICIENTS {
+            table[plane][position] = band_entry(plane, COEFF_BANDS[position], 0) as u16;
             position += 1;
         }
         plane += 1;
@@ -114,28 +116,23 @@ pub(crate) const ZIGZAG: [usize; 16] = [0, 1, 4, 8, 5, 2, 3, 6, 9, 12, 13, 10, 7
 
 /// Raster offsets of each scan pair packed four bits each, for planes whose first
 /// coefficient is position 0 or 1.
-const PAIR_SCAN: [[u8; 8]; 2] = [
-    [
-        1 << 4,
-        4 | 8 << 4,
-        5 | 2 << 4,
-        3 | 6 << 4,
-        9 | 12 << 4,
-        13 | 10 << 4,
-        7 | 11 << 4,
-        14 | 15 << 4,
-    ],
-    [
-        1 | 4 << 4,
-        8 | 5 << 4,
-        2 | 3 << 4,
-        6 | 9 << 4,
-        12 | 13 << 4,
-        10 | 7 << 4,
-        11 | 14 << 4,
-        0,
-    ],
-];
+const PAIR_SCAN: [[u8; BLOCK_COEFFICIENTS / 2]; 2] = {
+    let mut scan = [[0; BLOCK_COEFFICIENTS / 2]; 2];
+    let mut first = 0;
+    while first < scan.len() {
+        let mut position = first;
+        while position + 1 < BLOCK_COEFFICIENTS {
+            scan[first][position / 2] = (ZIGZAG[position] | (ZIGZAG[position + 1] << 4)) as u8;
+            position += 2;
+        }
+        first += 1;
+    }
+    scan
+};
+
+const fn band_entry(plane: usize, band: usize, context: usize) -> usize {
+    (plane * BANDS + band) * CONTEXTS + context
+}
 
 /// RFC 6386 §13.2: extra-bit probabilities for each magnitude category.
 const CATEGORY_ONE: [u8; 1] = [159];
@@ -160,6 +157,8 @@ pub(crate) enum CoefficientPlane {
 }
 
 impl CoefficientPlane {
+    pub(crate) const ALL: [Self; 4] = [Self::LumaAc, Self::LumaDc, Self::Chroma, Self::Luma];
+
     pub(crate) fn first_position(self) -> usize {
         usize::from(matches!(self, Self::LumaAc))
     }
@@ -233,15 +232,18 @@ impl TokenCosts {
         let mut tokens = [[0; TOKENS]; ENTRIES];
         let mut roots = [0; ENTRIES];
         let magnitudes = &*MAGNITUDE_COSTS;
-        for entry in 0..96 {
+        for entry in 0..ENTRIES {
             let probabilities =
                 &probs[entry * PROBABILITIES_PER_ENTRY..(entry + 1) * PROBABILITIES_PER_ENTRY];
-            roots[entry] = crate::cost::bool_cost(probabilities[0], true) as u16;
-            for token in 0..TOKENS as u8 {
-                let mut writer = CostWriter::new();
-                writer.write_tree_from(&COEFF_TREE, probabilities, token, 0);
-                tokens[entry][usize::from(token)] = writer.bits() as u16;
-            }
+            roots[entry] = bool_cost(probabilities[0], true) as u16;
+            tokens[entry] = COEFF_PATHS[0].map(|path| {
+                path.branches()
+                    .iter()
+                    .map(|&(offset, branch)| {
+                        bool_cost(probabilities[usize::from(offset)], branch) as u16
+                    })
+                    .sum()
+            });
         }
         let small_coefficients: Arc<[[u16; SMALL_MAGNITUDES]; ENTRIES]> =
             Arc::new(std::array::from_fn(|entry| {
@@ -251,10 +253,10 @@ impl TokenCosts {
                         + magnitudes[magnitude]
                 })
             }));
-        let table: Box<[[u16; PAIR_ENTRIES]; PAIR_ROWS]> = (0..PAIR_ROWS)
+        let pairs: Arc<[[u16; PAIR_ENTRIES]]> = (0..PAIR_ROWS)
             .map(|entry| {
-                if entry >= 96 {
-                    return [0; 4096];
+                if entry >= ENTRIES {
+                    return [0; PAIR_ENTRIES];
                 }
                 let context = entry % CONTEXTS;
                 let group = entry / CONTEXTS % BANDS;
@@ -266,8 +268,8 @@ impl TokenCosts {
                     }
                     let first = packed & (PAIR_MAGNITUDES - 1);
                     let second = packed >> PAIR_MAGNITUDES.trailing_zeros();
-                    let first_entry = (plane * 8 + COEFF_BANDS[position]) * 3 + context;
-                    let second_entry = (plane * 8 + COEFF_BANDS[position + 1]) * 3 + first.min(2);
+                    let first_entry = band_entry(plane, COEFF_BANDS[position], context);
+                    let second_entry = band_entry(plane, COEFF_BANDS[position + 1], first.min(2));
                     let first_cost = small_coefficients[first_entry][first]
                         - if group != 0 && context == 0 {
                             roots[first_entry]
@@ -279,11 +281,10 @@ impl TokenCosts {
                     first_cost + second_cost
                 })
             })
-            .collect::<Vec<_>>()
-            .into_boxed_slice()
+            .collect();
+        let coefficient_pairs6 = pairs
             .try_into()
-            .expect("the pair table has 128 entries");
-        let coefficient_pairs6 = Arc::from(table);
+            .expect("the pair table has a fixed row count");
         Self {
             tokens,
             roots,
@@ -302,44 +303,28 @@ impl TokenCosts {
         previous_was_zero: bool,
         magnitude: u16,
     ) -> u32 {
-        if magnitude < SMALL_MAGNITUDES as u16 {
-            let entry = (plane.index() * 8 + COEFF_BANDS[position]) * 3 + context;
-            return u32::from(self.small_coefficients[entry][usize::from(magnitude)])
-                - if previous_was_zero {
-                    u32::from(self.roots[entry])
-                } else {
-                    0
-                };
+        let entry = usize::from(ENTRY_BASE[plane.index()][position]) + context;
+        let rate = if magnitude < SMALL_MAGNITUDES as u16 {
+            u32::from(self.small_coefficients[entry][usize::from(magnitude)])
+        } else {
+            let token = usize::from(token_for_magnitude(magnitude));
+            u32::from(self.tokens[entry][token]) + self.magnitude_cost(magnitude)
+        };
+        rate - if previous_was_zero {
+            u32::from(self.roots[entry])
+        } else {
+            0
         }
-        self.token(
-            plane,
-            position,
-            context,
-            previous_was_zero,
-            token_for_magnitude(magnitude),
-        ) + self.magnitude_cost(magnitude)
     }
 
-    pub(crate) fn root(&self, plane: CoefficientPlane, position: usize, context: usize) -> u32 {
-        let entry = (plane.index() * 8 + COEFF_BANDS[position]) * 3 + context;
-        u32::from(self.roots[entry])
-    }
-
-    pub(crate) fn token(
+    pub(crate) fn band(
         &self,
         plane: CoefficientPlane,
-        position: usize,
+        band: usize,
         context: usize,
-        previous_was_zero: bool,
-        token: u8,
-    ) -> u32 {
-        let entry = (plane.index() * 8 + COEFF_BANDS[position]) * 3 + context;
-        u32::from(self.tokens[entry][usize::from(token)])
-            - if previous_was_zero {
-                u32::from(self.roots[entry])
-            } else {
-                0
-            }
+    ) -> (u16, [u16; TOKENS]) {
+        let entry = band_entry(plane.index(), band, context);
+        (self.roots[entry], self.tokens[entry])
     }
 
     pub(crate) fn magnitude_cost(&self, magnitude: u16) -> u32 {
@@ -348,7 +333,7 @@ impl TokenCosts {
 
     #[inline(always)]
     pub(crate) fn end(&self, plane: CoefficientPlane, position: usize, context: usize) -> u32 {
-        let entry = (plane.index() * 8 + COEFF_BANDS[position]) * 3 + context;
+        let entry = usize::from(ENTRY_BASE[plane.index()][position]) + context;
         u32::from(self.tokens[entry][usize::from(TOKEN_END)])
     }
 
@@ -405,23 +390,8 @@ impl TokenCosts {
         if position == last {
             let magnitude = levels[ZIGZAG[position]].unsigned_abs();
             let previous_was_zero = position != first && levels[ZIGZAG[position - 1]] == 0;
-            if magnitude < SMALL_MAGNITUDES as u16 {
-                let entry = (plane.index() * 8 + COEFF_BANDS[position]) * 3 + context;
-                rate += u64::from(self.small_coefficients[entry][usize::from(magnitude)])
-                    - if previous_was_zero {
-                        u64::from(self.roots[entry])
-                    } else {
-                        0
-                    };
-            } else {
-                rate += u64::from(self.coefficient(
-                    plane,
-                    position,
-                    context,
-                    previous_was_zero,
-                    magnitude,
-                ));
-            }
+            rate +=
+                u64::from(self.coefficient(plane, position, context, previous_was_zero, magnitude));
             context = magnitude_context(magnitude);
         }
         if last < 15 {
@@ -493,6 +463,21 @@ pub(crate) struct MacroblockContexts {
 }
 
 impl MacroblockContexts {
+    /// Rates for an empty Intra16 luma plane (including Y2) and the two empty chroma planes.
+    pub(crate) fn empty_rates(&self, costs: &TokenCosts) -> (u64, u64) {
+        let end = |plane: CoefficientPlane| {
+            std::array::from_fn(|context| {
+                u64::from(costs.end(plane, plane.first_position(), context))
+            })
+        };
+        let y2 = u64::from(costs.end(CoefficientPlane::LumaDc, 0, self.y2()));
+        let luma = y2 + empty_grid_rate(end(CoefficientPlane::LumaAc), &self.above.y, &self.left.y);
+        let chroma = end(CoefficientPlane::Chroma);
+        let chroma = empty_grid_rate(chroma, &self.above.u, &self.left.u)
+            + empty_grid_rate(chroma, &self.above.v, &self.left.v);
+        (luma, chroma)
+    }
+
     pub(crate) fn y2(&self) -> usize {
         usize::from(self.above.y2) + usize::from(self.left.y2)
     }
@@ -529,6 +514,7 @@ impl MacroblockContexts {
         self.left.v[index / 2] = nonzero;
     }
 
+    #[cfg(test)]
     pub(crate) fn luma_cost(
         &mut self,
         costs: &TokenCosts,
@@ -575,6 +561,23 @@ impl MacroblockContexts {
     }
 }
 
+/// Empty blocks replace the above and left contexts with zero as they are visited in scan order.
+fn empty_grid_rate<const N: usize>(
+    rates: [u64; CONTEXTS],
+    above: &[bool; N],
+    left: &[bool; N],
+) -> u64 {
+    let first = usize::from(above[0]) + usize::from(left[0]);
+    // Only the rest of the top row and left column can still see one nonzero neighbor.
+    let ones = above[1..]
+        .iter()
+        .chain(&left[1..])
+        .map(|&nonzero| u64::from(nonzero))
+        .sum::<u64>();
+    let zeros = (N * N - 1) as u64 - ones;
+    rates[first] + ones * rates[1] + zeros * rates[0]
+}
+
 /// Coefficient branches carry probability indices; fixed extra bits and signs do not.
 pub(crate) trait TokenSink {
     fn write_bool(&mut self, probability: u8, value: bool);
@@ -582,7 +585,6 @@ pub(crate) trait TokenSink {
     fn coefficient_branch(&mut self, _index: usize, probability: u8, value: bool) {
         self.write_bool(probability, value);
     }
-    fn write_tree_from(&mut self, tree: &[i8], probabilities: &[u8], value: u8, start: usize);
     /// Whether this sink only counts coefficient branches and can skip fixed extra bits.
     fn counts_only(&self) -> bool {
         false
@@ -608,29 +610,15 @@ impl TokenSink for BoolWriter {
     fn write_bool(&mut self, probability: u8, value: bool) {
         BoolWriter::write_bool(self, probability, value);
     }
-
-    fn write_tree_from(&mut self, tree: &[i8], probabilities: &[u8], value: u8, start: usize) {
-        BoolWriter::write_tree_from(self, tree, probabilities, value, start);
-    }
 }
 
 impl TokenSink for CostWriter {
     fn write_bool(&mut self, probability: u8, value: bool) {
         CostWriter::write_bool(self, probability, value);
     }
-
-    fn write_tree_from(&mut self, tree: &[i8], probabilities: &[u8], value: u8, start: usize) {
-        let mut path = [false; 8];
-        let len = tree_path(tree, start, value, &mut path).expect("the value must be a tree leaf");
-        let mut node = start;
-        for branch in path.into_iter().take(len) {
-            CostWriter::write_bool(self, probabilities[node >> 1], branch);
-            node = tree[node + usize::from(branch)] as usize;
-        }
-    }
 }
 
-const TOKEN_END: u8 = 11;
+pub(crate) const TOKEN_END: u8 = 11;
 
 /// Branch outcomes per coefficient-probability entry: `[zero, one]`.
 pub(crate) type BranchCounts = Box<[[u32; 2]; 1056]>;
@@ -685,24 +673,6 @@ impl TokenSink for TokenCounts {
         // Masked power-of-two indices keep both dimensions provably in bounds.
         self.tokens[(entry * 2 + usize::from(skip_end_branch)) & 255][usize::from(token) & 15] += 1;
     }
-
-    fn write_tree_from(&mut self, _tree: &[i8], _probabilities: &[u8], _value: u8, _start: usize) {}
-}
-
-impl TokenSink for LengthWriter {
-    fn write_bool(&mut self, probability: u8, value: bool) {
-        LengthWriter::write_bool(self, probability, value);
-    }
-
-    fn write_tree_from(&mut self, tree: &[i8], probabilities: &[u8], value: u8, start: usize) {
-        let mut path = [false; 8];
-        let len = tree_path(tree, start, value, &mut path).expect("the value must be a tree leaf");
-        let mut node = start;
-        for branch in path.into_iter().take(len) {
-            LengthWriter::write_bool(self, probabilities[node >> 1], branch);
-            node = tree[node + usize::from(branch)] as usize;
-        }
-    }
 }
 
 /// Emits the fitted residual partition while a length-only state tracks the default table.
@@ -742,13 +712,6 @@ impl TokenSink for FittedPartition<'_> {
         self.writer.write_bool(probability, value);
         self.default_length
             .write_bool(DEFAULT_COEFF_PROBS[index], value);
-    }
-
-    fn write_tree_from(&mut self, tree: &[i8], probabilities: &[u8], value: u8, start: usize) {
-        self.writer
-            .write_tree_from(tree, probabilities, value, start);
-        self.default_length
-            .write_tree_from(tree, probabilities, value, start);
     }
 }
 
@@ -833,7 +796,17 @@ impl TokenWriter {
         }
     }
 
-    #[inline(always)]
+    pub(crate) fn skip_macroblock(&mut self, macroblock_x: usize, luma: &Luma) {
+        let mut neighbors = MacroblockContexts::default();
+        if matches!(luma, Luma::Intra4 { .. }) {
+            let previous = self.contexts.contexts(macroblock_x);
+            neighbors.above.y2 = previous.above.y2;
+            neighbors.left.y2 = previous.left.y2;
+        }
+        self.contexts.commit(macroblock_x, neighbors);
+    }
+
+    #[inline]
     pub(crate) fn write_macroblock<W: TokenSink>(
         &mut self,
         writer: &mut W,
@@ -842,52 +815,68 @@ impl TokenWriter {
         spool: &CoefficientSpool,
     ) {
         let mut neighbors = self.contexts.contexts(macroblock_x);
-        let (plane, first_position) = match &macroblock.luma {
-            Luma::Intra4 { .. } => (PLANE_Y_WITHOUT_Y2, 0),
+        let plane = match &macroblock.luma {
+            Luma::Intra4 { .. } => CoefficientPlane::Luma,
             Luma::Intra16 { dc, .. } => {
                 let (prefix, length) = scan_prefix(dc);
                 let nonzero = write_block(
                     writer,
                     &prefix[..length],
-                    PLANE_Y2,
-                    0,
+                    CoefficientPlane::LumaDc,
                     neighbors.y2(),
                     &self.probs,
                 );
                 neighbors.set_y2(nonzero);
-                (PLANE_Y_AFTER_Y2, 1)
+                CoefficientPlane::LumaAc
             }
         };
-        let mut start = macroblock.offset as usize;
-        for (index, &length) in macroblock.lengths[..16].iter().enumerate() {
-            let block = spool.block(start, length);
-            let nonzero = write_block(
-                writer,
-                block,
-                plane,
-                first_position,
-                neighbors.y(index),
-                &self.probs,
-            );
+        match spool.levels(macroblock) {
+            PackedLevels::Narrow(levels) => {
+                self.write_blocks(writer, levels, macroblock, plane, &mut neighbors);
+            }
+            PackedLevels::Wide(levels) => {
+                self.write_blocks(writer, levels, macroblock, plane, &mut neighbors);
+            }
+        }
+        self.contexts.commit(macroblock_x, neighbors);
+    }
+
+    fn write_blocks<W: TokenSink, C: Copy + Into<i16>>(
+        &self,
+        writer: &mut W,
+        mut levels: &[C],
+        macroblock: &Macroblock,
+        plane: CoefficientPlane,
+        neighbors: &mut MacroblockContexts,
+    ) {
+        let lengths = &macroblock.lengths;
+        for (index, &length) in lengths[..16].iter().enumerate() {
+            let (block, rest) = levels.split_at(usize::from(length));
+            levels = rest;
+            let nonzero = write_block(writer, block, plane, neighbors.y(index), &self.probs);
             neighbors.set_y(index, nonzero);
-            start += usize::from(length);
         }
         for (base, above, left) in [
             (16, &mut neighbors.above.u, &mut neighbors.left.u),
             (20, &mut neighbors.above.v, &mut neighbors.left.v),
         ] {
-            for (index, &length) in macroblock.lengths[base..base + 4].iter().enumerate() {
+            for (index, &length) in lengths[base..base + 4].iter().enumerate() {
                 let column = index % 2;
                 let row = index / 2;
                 let context = usize::from(above[column]) + usize::from(left[row]);
-                let block = spool.block(start, length);
-                let nonzero = write_block(writer, block, PLANE_CHROMA, 0, context, &self.probs);
+                let (block, rest) = levels.split_at(usize::from(length));
+                levels = rest;
+                let nonzero = write_block(
+                    writer,
+                    block,
+                    CoefficientPlane::Chroma,
+                    context,
+                    &self.probs,
+                );
                 above[column] = nonzero;
                 left[row] = nonzero;
-                start += usize::from(length);
             }
         }
-        self.contexts.commit(macroblock_x, neighbors);
     }
 }
 
@@ -914,13 +903,7 @@ fn last_nonzero(levels: &[i16; 16], first: usize) -> Option<usize> {
 
 /// The dense block's scan-order prefix and its length.
 fn scan_prefix(levels: &[i16; 16]) -> ([i16; 16], usize) {
-    let mut length = 0;
-    for position in (0..16).rev() {
-        if levels[ZIGZAG[position]] != 0 {
-            length = position + 1;
-            break;
-        }
-    }
+    let length = last_nonzero(levels, 0).map_or(0, |last| last + 1);
     let prefix = std::array::from_fn(|position| levels[ZIGZAG[position]]);
     (prefix, length)
 }
@@ -928,14 +911,15 @@ fn scan_prefix(levels: &[i16; 16]) -> ([i16; 16], usize) {
 /// Write one block from its scan-order prefix and return whether it carries a coefficient at or
 /// after `first_position`.
 #[inline(always)]
-fn write_block<W: TokenSink>(
+fn write_block<W: TokenSink, C: Copy + Into<i16>>(
     writer: &mut W,
-    levels: &[i16],
-    plane: usize,
-    first_position: usize,
+    levels: &[C],
+    plane: CoefficientPlane,
     first_context: usize,
     probs: &[u8; 1056],
 ) -> bool {
+    let first_position = plane.first_position();
+    let plane = plane.index();
     if levels.len() <= first_position {
         write_token(
             writer,
@@ -951,6 +935,7 @@ fn write_block<W: TokenSink>(
     let mut context = first_context;
     let mut previous_was_zero = false;
     for (position, &level) in levels.iter().enumerate().skip(first_position) {
+        let level = level.into();
         let magnitude = level.unsigned_abs();
         let token = token_for_magnitude(magnitude);
         write_token(
@@ -992,13 +977,11 @@ fn write_token<W: TokenSink>(
     probs: &[u8; 1056],
 ) {
     let entry = usize::from(ENTRY_BASE[plane][position]) + context;
-    if !writer.counts_only() {
-        assert_ne!(
-            COEFF_PATHS[usize::from(skip_end_branch)][usize::from(token)].len,
-            0,
-            "the token must be a tree leaf"
-        );
-    }
+    debug_assert_ne!(
+        COEFF_PATHS[usize::from(skip_end_branch)][usize::from(token)].len,
+        0,
+        "the token must be a tree leaf"
+    );
     writer.coefficient_token(entry, token, skip_end_branch, probs);
 }
 
@@ -1019,11 +1002,7 @@ fn write_extra_bits<W: TokenSink>(writer: &mut W, magnitude: u16, token: u8) {
     }
 }
 
-pub(crate) fn token_for_level(level: u16) -> u8 {
-    token_for_magnitude(level)
-}
-
-fn token_for_magnitude(magnitude: u16) -> u8 {
+pub(crate) const fn token_for_magnitude(magnitude: u16) -> u8 {
     match magnitude {
         0 => 0,
         1 => 1,
@@ -1036,7 +1015,7 @@ fn token_for_magnitude(magnitude: u16) -> u8 {
         19..=34 => 8,
         35..=66 => 9,
         67..=2114 => 10,
-        _ => unreachable!("coefficient magnitude exceeds the VP8 token range"),
+        _ => panic!("coefficient magnitude exceeds the VP8 token range"),
     }
 }
 
@@ -1103,14 +1082,7 @@ mod tests {
         let length = last_nonzero(levels, plane.first_position()).map_or(0, |last| last + 1);
         let prefix: [i16; 16] = std::array::from_fn(|position| levels[ZIGZAG[position]]);
         let mut writer = CostWriter::new();
-        write_block(
-            &mut writer,
-            &prefix[..length],
-            plane.index(),
-            plane.first_position(),
-            first_context,
-            probs,
-        );
+        write_block(&mut writer, &prefix[..length], plane, first_context, probs);
         writer.bits()
     }
 
@@ -1386,7 +1358,7 @@ mod tests {
                 block[0] = 0;
             }
         }
-        macroblock.u[round % 4][15] = -67;
+        macroblock.u[round % 4][15] = [-128, 127, -129, 128][round % 4];
         macroblock.v[(round + 1) % 4][4] = 1;
         macroblock
     }
@@ -1406,9 +1378,7 @@ mod tests {
             let dense = dense_macroblock(round);
             let (macroblock, _spool) = pack(dense);
             let neighbors = tokens.contexts.contexts(column);
-            let mut empty_neighbors = neighbors;
-            let zero_chroma = empty_neighbors.chroma_cost(&costs, &[[0; 16]; 4], &[[0; 16]; 4]);
-            let zero_luma = empty_neighbors.luma_cost(&costs, Some(&[0; 16]), &[[0; 16]; 16]);
+            let (zero_luma, zero_chroma) = neighbors.empty_rates(&costs);
             let luma_only = DenseMacroblock {
                 luma: dense.luma,
                 y: dense.y,

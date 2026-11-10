@@ -1,74 +1,157 @@
 //! BT.601 limited-range RGBA-to-YUV420 conversion with macroblock padding.
 
+use std::ops::Range;
+
+use crate::macroblock::{CHROMA_SIDE, MACROBLOCK_SIDE};
 use fearless_simd::{Simd, i16x8, prelude::*, u8x16, u16x8};
 
-/// One frame's luma and chroma planes, padded to whole macroblocks.
-pub(crate) struct YuvPlanes {
+const RGBA_CHANNELS: usize = 4;
+pub(crate) const YUV_BYTES_PER_MACROBLOCK: usize =
+    MACROBLOCK_SIDE * MACROBLOCK_SIDE + 2 * CHROMA_SIDE * CHROMA_SIDE;
+
+#[derive(Clone, Copy)]
+pub(crate) struct RgbaFrame<'a> {
+    rgba: &'a [u8],
+    width: usize,
+    height: usize,
+}
+
+impl<'a> RgbaFrame<'a> {
+    pub(crate) fn new(rgba: &'a [u8], width: usize, height: usize) -> Self {
+        Self {
+            rgba,
+            width,
+            height,
+        }
+    }
+
+    pub(crate) fn columns(self) -> usize {
+        self.width.div_ceil(MACROBLOCK_SIDE)
+    }
+
+    pub(crate) fn rows(self) -> usize {
+        self.height.div_ceil(MACROBLOCK_SIDE)
+    }
+
+    fn row(self, y: usize, (start, end): (usize, usize)) -> &'a [u8] {
+        let offset = y * self.width;
+        &self.rgba[(offset + start) * RGBA_CHANNELS..(offset + end) * RGBA_CHANNELS]
+    }
+
+    fn pixels(self, columns: Range<usize>) -> (usize, usize) {
+        (
+            columns.start * MACROBLOCK_SIDE,
+            (columns.end * MACROBLOCK_SIDE).min(self.width),
+        )
+    }
+
+    /// Convert just the luma of one sampled macroblock for the activity estimate.
+    pub(crate) fn luma_block<S: Simd>(
+        self,
+        simd: S,
+        x: usize,
+        y: usize,
+    ) -> [u8; MACROBLOCK_SIDE * MACROBLOCK_SIDE] {
+        let first = y * MACROBLOCK_SIDE;
+        let rows = (self.height - first).min(MACROBLOCK_SIDE);
+        let pixels = self.pixels(x..x + 1);
+        let mut block = [0; MACROBLOCK_SIDE * MACROBLOCK_SIDE];
+        for (line, destination) in block
+            .as_chunks_mut::<MACROBLOCK_SIDE>()
+            .0
+            .iter_mut()
+            .take(rows)
+            .enumerate()
+        {
+            luma_row(simd, self.row(first + line, pixels), destination);
+        }
+        pad_rows(&mut block, MACROBLOCK_SIDE, rows);
+        block
+    }
+}
+
+/// The source samples for one macroblock row of an analysis strip.
+pub(crate) struct YuvRow {
     pub(crate) y: Vec<u8>,
     pub(crate) u: Vec<u8>,
     pub(crate) v: Vec<u8>,
-    pub(crate) y_stride: usize,
-    pub(crate) chroma_stride: usize,
+    columns: Range<usize>,
 }
 
-/// Convert straight-alpha RGBA8 pixels to limited-range YUV420.
-///
-/// Chroma averages 2×2 RGB cells before conversion. Padding repeats source pixels before
-/// averaging, so an even-width frame's right chroma padding can differ from its last cell.
-pub(crate) fn from_rgba<S: Simd>(simd: S, rgba: &[u8], width: usize, height: usize) -> YuvPlanes {
-    let y_stride = width.div_ceil(16) * 16;
-    let y_height = height.div_ceil(16) * 16;
-    let chroma_stride = width.div_ceil(16) * 8;
-    let chroma_height = height.div_ceil(16) * 8;
-
-    let mut y = vec![0u8; y_stride * y_height];
-    let mut u = vec![0u8; chroma_stride * chroma_height];
-    let mut v = vec![0u8; chroma_stride * chroma_height];
-
-    for row in 0..height {
-        let source = &rgba[row * width * 4..(row + 1) * width * 4];
-        let destination = &mut y[row * y_stride..(row + 1) * y_stride];
-        luma_row(simd, source, &mut destination[..width]);
-        let last = destination[width - 1];
-        destination[width..].fill(last);
-    }
-    pad_rows(&mut y, y_stride, height, y_height);
-
-    let chroma_rows = height.div_ceil(2);
-    for row in 0..chroma_rows {
-        let top = row * 2;
-        let bottom = (top + 1).min(height - 1);
-        chroma_row(
-            simd,
-            &rgba[top * width * 4..(top + 1) * width * 4],
-            &rgba[bottom * width * 4..(bottom + 1) * width * 4],
-            &mut u[row * chroma_stride..(row + 1) * chroma_stride],
-            &mut v[row * chroma_stride..(row + 1) * chroma_stride],
-        );
-    }
-    if chroma_rows < chroma_height {
-        let last = &rgba[(height - 1) * width * 4..height * width * 4];
-        chroma_row(
-            simd,
-            last,
-            last,
-            &mut u[chroma_rows * chroma_stride..(chroma_rows + 1) * chroma_stride],
-            &mut v[chroma_rows * chroma_stride..(chroma_rows + 1) * chroma_stride],
-        );
-        pad_rows(&mut u, chroma_stride, chroma_rows + 1, chroma_height);
-        pad_rows(&mut v, chroma_stride, chroma_rows + 1, chroma_height);
+impl YuvRow {
+    pub(crate) fn new(columns: Range<usize>) -> Self {
+        let width = columns.len();
+        Self {
+            y: vec![0; width * MACROBLOCK_SIDE * MACROBLOCK_SIDE],
+            u: vec![0; width * CHROMA_SIDE * CHROMA_SIDE],
+            v: vec![0; width * CHROMA_SIDE * CHROMA_SIDE],
+            columns,
+        }
     }
 
-    YuvPlanes {
-        y,
-        u,
-        v,
-        y_stride,
-        chroma_stride,
+    pub(crate) fn y_stride(&self) -> usize {
+        self.y.len() / MACROBLOCK_SIDE
+    }
+
+    pub(crate) fn chroma_stride(&self) -> usize {
+        self.u.len() / CHROMA_SIDE
+    }
+
+    pub(crate) fn local_column(&self, x: usize) -> usize {
+        x - self.columns.start
+    }
+
+    pub(crate) fn load<S: Simd>(&mut self, simd: S, frame: RgbaFrame<'_>, macroblock_y: usize) {
+        let first = macroblock_y * MACROBLOCK_SIDE;
+        let rows = (frame.height - first).min(MACROBLOCK_SIDE);
+        let pixels = frame.pixels(self.columns.clone());
+        let y_stride = self.y_stride();
+        let chroma_stride = self.chroma_stride();
+        let chroma_rows = rows.div_ceil(2);
+
+        for cell in 0..chroma_rows {
+            let row = cell * 2;
+            let top = frame.row(first + row, pixels);
+            let bottom = frame.row(first + (row + 1).min(rows - 1), pixels);
+            luma_row(simd, top, &mut self.y[row * y_stride..][..y_stride]);
+            if row + 1 < rows {
+                luma_row(
+                    simd,
+                    bottom,
+                    &mut self.y[(row + 1) * y_stride..][..y_stride],
+                );
+            }
+            chroma_row(
+                simd,
+                top,
+                bottom,
+                &mut self.u[cell * chroma_stride..][..chroma_stride],
+                &mut self.v[cell * chroma_stride..][..chroma_stride],
+            );
+        }
+        pad_rows(&mut self.y, y_stride, rows);
+
+        // When the last real cell used two distinct rows, the bottom padding instead
+        // averages the final source row with itself.
+        let mut chroma_rows = chroma_rows;
+        if chroma_rows < CHROMA_SIDE && rows.is_multiple_of(2) {
+            let last = frame.row(first + rows - 1, pixels);
+            chroma_row(
+                simd,
+                last,
+                last,
+                &mut self.u[chroma_rows * chroma_stride..][..chroma_stride],
+                &mut self.v[chroma_rows * chroma_stride..][..chroma_stride],
+            );
+            chroma_rows += 1;
+        }
+        pad_rows(&mut self.u, chroma_stride, chroma_rows);
+        pad_rows(&mut self.v, chroma_stride, chroma_rows);
     }
 }
 
 fn luma_row<S: Simd>(simd: S, rgba: &[u8], y: &mut [u8]) {
+    let (y, padding) = y.split_at_mut(rgba.len() / RGBA_CHANNELS);
     let blocks = y.len() / 16;
     for block in 0..blocks {
         let [red, green, blue, _] =
@@ -90,6 +173,7 @@ fn luma_row<S: Simd>(simd: S, rgba: &[u8], y: &mut [u8]) {
     {
         *destination = luma(pixel[0], pixel[1], pixel[2]);
     }
+    padding.fill(y[y.len() - 1]);
 }
 
 #[inline(always)]
@@ -164,8 +248,8 @@ fn average_rgb(top: &[u8], bottom: &[u8], left: usize, right: usize) -> (u8, u8,
     (channel(0), channel(1), channel(2))
 }
 
-fn pad_rows(plane: &mut [u8], stride: usize, rows: usize, padded_rows: usize) {
-    for row in rows..padded_rows {
+fn pad_rows(plane: &mut [u8], stride: usize, rows: usize) {
+    for row in rows..plane.len() / stride {
         plane.copy_within((rows - 1) * stride..rows * stride, row * stride);
     }
 }
@@ -193,37 +277,35 @@ mod tests {
     use super::*;
     use fearless_simd::Fallback;
 
-    fn solid(red: u8, green: u8, blue: u8) -> Vec<u8> {
-        [red, green, blue, 255].repeat(16 * 16)
-    }
-
     #[test]
     fn limited_range_endpoints_convert_to_their_codes() {
-        let white = from_rgba(Fallback::new(), &solid(255, 255, 255), 16, 16);
-        assert_eq!(white.y[0], 235);
-        assert_eq!(white.u[0], 128);
-        assert_eq!(white.v[0], 128);
-
-        let black = from_rgba(Fallback::new(), &solid(0, 0, 0), 16, 16);
-        assert_eq!(black.y[0], 16);
-        assert_eq!(black.u[0], 128);
-        assert_eq!(black.v[0], 128);
-
-        let gray = from_rgba(Fallback::new(), &solid(128, 128, 128), 16, 16);
-        assert_eq!(gray.y[0], 126);
-        assert_eq!(gray.u[0], 128);
-        assert_eq!(gray.v[0], 128);
+        let mut samples = YuvRow::new(0..1);
+        for (value, y) in [(255, 235), (0, 16), (128, 126)] {
+            let rgba = [value, value, value, 255].repeat(16 * 16);
+            let source = RgbaFrame::new(&rgba, 16, 16);
+            samples.load(Fallback::new(), source, 0);
+            assert_eq!(samples.y[0], y);
+            assert_eq!(samples.u[0], 128);
+            assert_eq!(samples.v[0], 128);
+        }
     }
 
     #[test]
     fn planes_are_padded_to_whole_macroblocks() {
-        let rgba = [10, 20, 30, 255].repeat(17 * 9);
-        let planes = from_rgba(Fallback::new(), &rgba, 17, 9);
-        assert_eq!(planes.y.len(), 32 * 16);
-        assert_eq!(planes.y_stride, 32);
-        assert_eq!(planes.u.len(), 16 * 8);
-        assert_eq!(planes.chroma_stride, 16);
-        assert_eq!(planes.y[0], planes.y[15 * 32 + 31]);
-        assert_eq!(planes.u[0], planes.u[7 * 16 + 15]);
+        let rgba: Vec<_> = (0..18)
+            .flat_map(|y| (0..18).flat_map(move |x| [x * 7, y * 7, (x + y) * 7, 255]))
+            .collect();
+        let source = RgbaFrame::new(&rgba, 18, 18);
+        let mut samples = YuvRow::new(1..2);
+        samples.load(Fallback::new(), source, 1);
+        assert_eq!(samples.y.len(), 16 * 16);
+        assert_eq!(samples.u.len(), 8 * 8);
+        assert_eq!(samples.y[15 * 16 + 15], luma(119, 119, 238));
+        assert_eq!(samples.u[0], chroma_u(115, 115, 231));
+        assert_eq!(samples.v[0], chroma_v(115, 115, 231));
+        assert_eq!(samples.u[7], chroma_u(119, 115, 234));
+        assert_eq!(samples.v[7], chroma_v(119, 115, 234));
+        assert_eq!(samples.u[7 * 8 + 7], chroma_u(119, 119, 238));
+        assert_eq!(samples.v[7 * 8 + 7], chroma_v(119, 119, 238));
     }
 }

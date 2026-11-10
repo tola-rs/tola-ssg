@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 
-use anyhow::{Context, Result, ensure};
+use crate::{ImageError, ImageResult};
 
 use super::super::{ContainerMetadata, SampleColor};
 use super::le32;
@@ -8,15 +8,17 @@ use super::le32;
 /// How a damaged BMP reads to a site author.
 const DAMAGED: &str = "the BMP image is damaged or incomplete; re-export it";
 
-pub(in crate::codec) fn scan_bmp(bytes: &[u8]) -> Result<ContainerMetadata<'_>> {
-    ensure!(bytes.len() >= 18, DAMAGED);
+pub(in crate::codec) fn scan_bmp(bytes: &[u8]) -> ImageResult<ContainerMetadata<'_>> {
+    if bytes.len() < 18 {
+        return Err(ImageError::unreadable(DAMAGED));
+    }
     let header_length = le32(&bytes[14..18]) as usize;
-    ensure!(
-        14usize
-            .checked_add(header_length)
-            .is_some_and(|end| end <= bytes.len()),
-        DAMAGED
-    );
+    if 14usize
+        .checked_add(header_length)
+        .is_none_or(|end| end > bytes.len())
+    {
+        return Err(ImageError::unreadable(DAMAGED));
+    }
     let mut metadata = ContainerMetadata::default();
     if header_length >= 108 {
         // LCS_sRGB and LCS_WINDOWS_COLOR_SPACE both describe sRGB samples; LCS_PROFILE_EMBEDDED
@@ -27,14 +29,22 @@ pub(in crate::codec) fn scan_bmp(bytes: &[u8]) -> Result<ContainerMetadata<'_>> 
             0x4d42_4544 if header_length >= 124 => {
                 let offset = le32(&bytes[126..130]) as usize;
                 let length = le32(&bytes[130..134]) as usize;
-                ensure!(
-                    length > 0,
-                    "the BMP image has an empty color profile; re-export it with sRGB colors"
-                );
-                let start = 14usize.checked_add(offset).context(DAMAGED)?;
-                let end = start.checked_add(length).context(DAMAGED)?;
-                metadata.color =
-                    SampleColor::StoredIcc(Cow::Borrowed(bytes.get(start..end).context(DAMAGED)?));
+                if length == 0 {
+                    return Err(ImageError::unreadable(
+                        "the BMP image has an empty color profile; re-export it with sRGB colors",
+                    ));
+                }
+                let start = 14usize
+                    .checked_add(offset)
+                    .ok_or_else(|| ImageError::unreadable(DAMAGED))?;
+                let end = start
+                    .checked_add(length)
+                    .ok_or_else(|| ImageError::unreadable(DAMAGED))?;
+                metadata.color = SampleColor::StoredIcc(Cow::Borrowed(
+                    bytes
+                        .get(start..end)
+                        .ok_or_else(|| ImageError::unreadable(DAMAGED))?,
+                ));
             }
             _ => {
                 metadata.color = SampleColor::Unsupported(

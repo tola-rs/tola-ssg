@@ -237,12 +237,9 @@ impl CommandOutput {
         self.terminal.write_stdout(bytes)
     }
 
-    /// Write styled text to stdout, under this invocation's stdout colour decision.
-    pub(crate) fn write_stdout_styled(
-        &self,
-        text: &crate::terminal::text::StyledText,
-    ) -> anyhow::Result<()> {
-        self.terminal.write_stdout_styled(text)
+    /// Write source text to stdout under this invocation's stdout colour decision.
+    pub(crate) fn write_stdout_code(&self, source: &str, language: &str) -> anyhow::Result<()> {
+        self.terminal.write_stdout_code(source, language)
     }
 
     /// Write documentation to stdout, through this invocation's pager when it has one.

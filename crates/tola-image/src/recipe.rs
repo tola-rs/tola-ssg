@@ -1,6 +1,5 @@
 use std::hash::{Hash, Hasher};
 
-use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use super::{ImageFormat, ImageMetadata, check_dimensions};
@@ -335,10 +334,10 @@ impl From<Exact> for u64 {
 }
 
 impl TryFrom<u64> for Exact {
-    type Error = anyhow::Error;
+    type Error = ImageRequestError;
 
-    fn try_from(bits: u64) -> Result<Self> {
-        Self::checked(f64::from_bits(bits)).map_err(anyhow::Error::from)
+    fn try_from(bits: u64) -> Result<Self, Self::Error> {
+        Self::checked(f64::from_bits(bits))
     }
 }
 
@@ -504,8 +503,6 @@ pub struct PixelRecipe {
     pub(super) background: Option<Background>,
 }
 
-pub(crate) const VECTOR_RECIPE_IS_RENDERED: &str = "vector recipes are rendered, not resampled";
-
 impl PixelRecipe {
     /// The width these pixels are rendered to.
     pub const fn width(self) -> u32 {
@@ -620,9 +617,9 @@ impl From<ImageRecipe> for RecipeFields {
 }
 
 impl TryFrom<RecipeFields> for ImageRecipe {
-    type Error = anyhow::Error;
+    type Error = ImageRequestError;
 
-    fn try_from(fields: RecipeFields) -> Result<Self> {
+    fn try_from(fields: RecipeFields) -> Result<Self, Self::Error> {
         let mut recipe = Self {
             pixels: PixelRecipe {
                 width: fields.width,

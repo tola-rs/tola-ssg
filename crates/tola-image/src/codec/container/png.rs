@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, ensure};
+use crate::ImageResult;
 
 use super::super::{ContainerMetadata, SampleColor};
 use super::be32;
@@ -17,7 +17,7 @@ const DAMAGED_COLOR: &str =
 pub(in crate::codec) fn scan_png<'a>(
     bytes: &'a [u8],
     cancellation: Option<&dyn Cancellation>,
-) -> Result<ContainerMetadata<'a>> {
+) -> ImageResult<ContainerMetadata<'a>> {
     let mut metadata = ContainerMetadata::default();
     let mut offset = 8usize;
     let mut cicp = None;
@@ -31,17 +31,20 @@ pub(in crate::codec) fn scan_png<'a>(
     let mut ended = false;
     while offset < bytes.len() {
         ensure_active_if_present(cancellation)?;
-        let header = bytes.get(offset..offset + 8).context(DAMAGED)?;
-        ensure!(
-            header[4..8].iter().all(u8::is_ascii_alphabetic) && header[6].is_ascii_uppercase(),
-            DAMAGED
-        );
+        let header = bytes
+            .get(offset..offset + 8)
+            .ok_or_else(|| ImageError::unreadable(DAMAGED))?;
+        if !header[4..8].iter().all(u8::is_ascii_alphabetic) || !header[6].is_ascii_uppercase() {
+            return Err(ImageError::unreadable(DAMAGED));
+        }
         let length = be32(header) as usize;
         let end = offset
             .checked_add(12)
             .and_then(|start| start.checked_add(length))
-            .context(DAMAGED)?;
-        ensure!(end <= bytes.len(), DAMAGED);
+            .ok_or_else(|| ImageError::unreadable(DAMAGED))?;
+        if end > bytes.len() {
+            return Err(ImageError::unreadable(DAMAGED));
+        }
         let data = &bytes[offset + 8..end - 4];
         // Inspect metadata without inflating image data. The pixel decoder checks IDAT itself;
         // metadata after IDAT still needs its own integrity check before orientation is trusted.
@@ -51,48 +54,59 @@ pub(in crate::codec) fn scan_png<'a>(
                 ensure_active_if_present(cancellation)?;
                 checksum.update(block);
             }
-            ensure!(checksum.finalize() == be32(&bytes[end - 4..end]), DAMAGED);
+            if checksum.finalize() != be32(&bytes[end - 4..end]) {
+                return Err(ImageError::unreadable(DAMAGED));
+            }
         }
         if matches!(
             &header[4..8],
             b"PLTE" | b"iCCP" | b"sRGB" | b"gAMA" | b"cHRM" | b"cICP"
         ) {
-            ensure!(!seen_pixels, DAMAGED);
+            if seen_pixels {
+                return Err(ImageError::unreadable(DAMAGED));
+            }
         }
         match &header[4..8] {
             b"IHDR" => {
-                ensure!(offset == 8 && data.len() == 13, DAMAGED);
+                if offset != 8 || data.len() != 13 {
+                    return Err(ImageError::unreadable(DAMAGED));
+                }
                 check_dimensions(be32(data), be32(&data[4..]))?;
             }
             b"acTL" | b"fcTL" | b"fdAT" => metadata.is_animated = true,
             b"IDAT" => seen_pixels = true,
             b"iCCP" => {
-                ensure!(
-                    !seen_profile,
-                    "the PNG image has more than one color profile; re-export it with sRGB colors"
-                );
+                if seen_profile {
+                    return Err(ImageError::unreadable(
+                        "the PNG image has more than one color profile; re-export it with sRGB colors",
+                    ));
+                }
                 seen_profile = true;
             }
             b"eXIf" => {
-                ensure!(
-                    metadata.exif.is_none(),
-                    "the PNG image has more than one EXIF block; re-export it"
-                );
+                if metadata.exif.is_some() {
+                    return Err(ImageError::unreadable(
+                        "the PNG image has more than one EXIF block; re-export it",
+                    ));
+                }
                 metadata.exif = Some(data);
             }
             b"sRGB" => {
-                ensure!(!srgb && data.len() == 1 && data[0] <= 3, DAMAGED_COLOR);
+                if srgb || data.len() != 1 || data[0] > 3 {
+                    return Err(ImageError::unreadable(DAMAGED_COLOR));
+                }
                 srgb = true;
             }
             b"gAMA" => {
-                ensure!(
-                    gamma.is_none() && data.len() == 4 && be32(data) > 0,
-                    DAMAGED_COLOR
-                );
+                if gamma.is_some() || data.len() != 4 || be32(data) == 0 {
+                    return Err(ImageError::unreadable(DAMAGED_COLOR));
+                }
                 gamma = Some(be32(data));
             }
             b"cHRM" => {
-                ensure!(!seen_chromaticities && data.len() == 32, DAMAGED_COLOR);
+                if seen_chromaticities || data.len() != 32 {
+                    return Err(ImageError::unreadable(DAMAGED_COLOR));
+                }
                 seen_chromaticities = true;
                 let expected = [31270, 32900, 64000, 33000, 30000, 60000, 15000, 6000];
                 standard_chromaticities = data
@@ -103,15 +117,18 @@ pub(in crate::codec) fn scan_png<'a>(
                     .all(|(value, expected)| be32(value) == expected);
             }
             b"cICP" => {
-                ensure!(cicp.is_none() && data.len() == 4, DAMAGED_COLOR);
+                if cicp.is_some() || data.len() != 4 {
+                    return Err(ImageError::unreadable(DAMAGED_COLOR));
+                }
                 cicp = Some([data[0], data[1], data[2], data[3]]);
             }
             b"mDCV" | b"cLLI" => mastering = true,
             b"IEND" => {
-                ensure!(
-                    length == 0 && end == bytes.len(),
-                    "the PNG image has extra data after its end; re-export it"
-                );
+                if length != 0 || end != bytes.len() {
+                    return Err(ImageError::unreadable(
+                        "the PNG image has extra data after its end; re-export it",
+                    ));
+                }
                 ended = true;
                 break;
             }
@@ -120,14 +137,15 @@ pub(in crate::codec) fn scan_png<'a>(
                 return Err(ImageError::Reexport {
                     format: ImageFormat::Png,
                     problem: ReexportProblem::UnsupportedFeature,
-                }
-                .into());
+                });
             }
             _ => {}
         }
         offset = end;
     }
-    ensure!(ended, DAMAGED);
+    if !ended {
+        return Err(ImageError::unreadable(DAMAGED));
+    }
     // Colour chunks are read by the precedence the format defines — cICP, iCCP, sRGB, then cHRM
     // with gAMA — while every one of them was still checked above for the place, count, and shape
     // the format requires. HDR mastering data outranks the colour chunks it accompanies.

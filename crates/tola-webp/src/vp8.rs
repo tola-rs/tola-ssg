@@ -16,12 +16,15 @@ const UV_MODE_TREE: [i8; 6] = [0, 2, -1, 4, -2, -3];
 /// Branch probabilities of [`UV_MODE_TREE`].
 const KF_UV_MODE_PROBS: [u8; 3] = [142, 114, 183];
 
+pub(crate) const FIRST_PARTITION_LIMIT: usize = 1 << 19;
+
 /// Write the bool-coded key-frame header (RFC 6386 §19.2).
 pub(crate) fn write_frame_header(
     writer: &mut BoolWriter,
     quantizer: u8,
     filter_level: u8,
     updates: &[u8; 1056],
+    skip_probability: Option<u8>,
 ) {
     writer.write_literal(0, 1); // color_space: BT.601
     writer.write_literal(0, 1); // clamping_type: no clamping
@@ -44,7 +47,10 @@ pub(crate) fn write_frame_header(
             writer.write_literal(u32::from(updates[index]), 8);
         }
     }
-    writer.write_literal(0, 1); // mb_no_skip_coeff: every macroblock carries tokens
+    writer.write_bool(128, skip_probability.is_some()); // mb_no_skip_coeff
+    if let Some(probability) = skip_probability {
+        writer.write_literal(u32::from(probability), 8);
+    }
 }
 
 /// RFC 6386 §11.3: the 4×4 luma subblock mode tree.
@@ -312,42 +318,57 @@ impl BmodeContexts {
     }
 }
 
-/// Assemble the VP8 frame header and its partitions (RFC 6386 §9.1).
-pub(crate) fn assemble_frame(
-    width: u16,
-    height: u16,
-    first: &[u8],
-    residual: &[u8],
-) -> Option<Vec<u8>> {
-    if first.len() >= 1 << 19 {
-        return None;
-    }
-    let first_size = first.len() as u32;
+/// The uncompressed VP8 header and its two encoded partitions.
+pub(crate) struct Frame {
+    header: [u8; 10],
+    first: Vec<u8>,
+    residual: Vec<u8>,
+}
 
-    let mut out = Vec::with_capacity(10 + first.len() + residual.len());
-    // Key frame, version 0, show frame, then the first partition's size.
-    let tag = (first_size << 5) | (1 << 4);
-    out.extend_from_slice(&tag.to_le_bytes()[..3]);
-    out.extend_from_slice(&[0x9d, 0x01, 0x2a]);
-    out.extend_from_slice(&width.to_le_bytes());
-    out.extend_from_slice(&height.to_le_bytes());
-    out.extend_from_slice(first);
-    out.extend_from_slice(residual);
-    Some(out)
+impl Frame {
+    pub(crate) const HEADER_BYTES: usize = 10;
+
+    pub(crate) fn new(width: u16, height: u16, first: Vec<u8>, residual: Vec<u8>) -> Option<Self> {
+        if first.len() >= FIRST_PARTITION_LIMIT {
+            return None;
+        }
+        // Key frame, version 0, show frame, then the first partition's size.
+        let tag = ((first.len() as u32) << 5) | (1 << 4);
+        let mut header = [0; Self::HEADER_BYTES];
+        header[..3].copy_from_slice(&tag.to_le_bytes()[..3]);
+        header[3..6].copy_from_slice(&[0x9d, 0x01, 0x2a]);
+        header[6..8].copy_from_slice(&width.to_le_bytes());
+        header[8..].copy_from_slice(&height.to_le_bytes());
+        Some(Self {
+            header,
+            first,
+            residual,
+        })
+    }
+
+    pub(crate) fn chunks(&self) -> [&[u8]; 3] {
+        [&self.header, &self.first, &self.residual]
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        Self::HEADER_BYTES + self.first.len() + self.residual.len()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bool_writer::tree_path;
     use crate::cost::CostWriter;
 
     #[test]
     fn frame_headers_respect_size_limit() {
-        let header = vec![0; (1 << 19) - 1];
-        let frame = assemble_frame(16, 16, &header, &[]).unwrap();
-        let tag = u32::from_le_bytes([frame[0], frame[1], frame[2], 0]);
-        assert_eq!(tag >> 5, header.len() as u32);
-        assert!(assemble_frame(16, 16, &vec![0; 1 << 19], &[]).is_none());
+        let size = FIRST_PARTITION_LIMIT - 1;
+        let frame = Frame::new(16, 16, vec![0; size], Vec::new()).unwrap();
+        let [header, _, _] = frame.chunks();
+        let tag = u32::from_le_bytes([header[0], header[1], header[2], 0]);
+        assert_eq!(tag >> 5, size as u32);
+        assert!(Frame::new(16, 16, vec![0; size + 1], Vec::new()).is_none());
     }
 
     #[test]
@@ -357,12 +378,16 @@ mod tests {
                 let context = above * 10 + left;
                 for mode in 0..10 {
                     let mut writer = CostWriter::new();
-                    writer.write_tree_from(
-                        &BMODE_TREE,
-                        &crate::tables::KF_BMODE_PROBS[context * 9..context * 9 + 9],
-                        mode,
-                        0,
-                    );
+                    let mut branches = [false; 8];
+                    let len = tree_path(&BMODE_TREE, 0, mode, &mut branches).unwrap();
+                    let mut node = 0;
+                    for &branch in &branches[..len] {
+                        writer.write_bool(
+                            crate::tables::KF_BMODE_PROBS[context * 9 + node / 2],
+                            branch,
+                        );
+                        node = BMODE_TREE[node + usize::from(branch)] as usize;
+                    }
                     assert_eq!(
                         u64::from(BMODE_COSTS[context][usize::from(mode)]),
                         writer.bits(),

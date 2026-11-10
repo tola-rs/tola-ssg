@@ -12,7 +12,7 @@ use crate::cancellation::Cancellation;
 use crate::cli::args::InitArgs;
 use crate::cli::log::{LogFile, destination};
 use crate::cli::output::CommandOutput;
-use crate::terminal::{code, display_path_toward_home};
+use crate::terminal::display_path_toward_home;
 use crate::writes::FileWrites;
 use anyhow::{Result, ensure};
 use std::path::Path;
@@ -103,7 +103,7 @@ fn show_dry_run(root: &Path, writes: &FileWrites, output: &CommandOutput) -> Res
         display_path_toward_home(root),
         tree::render(writes),
     ))?;
-    output.write_stdout_styled(&code::styled(config::config_source(writes), "toml"))?;
+    output.write_stdout_code(config::config_source(writes), "toml")?;
     Ok(())
 }
 

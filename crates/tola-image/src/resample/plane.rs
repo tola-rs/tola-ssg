@@ -1,12 +1,12 @@
 //! The source sample rows one recipe resamples, and the coverage-weighted form it filters.
 
-use anyhow::{Context, Result};
 use image::metadata::Orientation;
 
 use crate::cancellation::Cancellation;
 use crate::recipe::Crop;
 use crate::rows::for_each_row;
 use crate::{HOLD_IN_MEMORY, pixel_bytes, rgba_buffer};
+use crate::{ImageError, ImageResult};
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(crate) enum AlphaRepresentation {
@@ -44,7 +44,10 @@ impl SourcePlane<'_> {
         }
     }
 
-    pub(super) fn mark_opaque_if_covered(&mut self, cancellation: &dyn Cancellation) -> Result<()> {
+    pub(super) fn mark_opaque_if_covered(
+        &mut self,
+        cancellation: &dyn Cancellation,
+    ) -> ImageResult<()> {
         if self.alpha() == AlphaRepresentation::Opaque {
             return Ok(());
         }
@@ -112,7 +115,7 @@ pub(super) fn source_plane<'a>(
     crop: Crop,
     alpha: AlphaRepresentation,
     cancellation: &dyn Cancellation,
-) -> Result<SourcePlane<'a>> {
+) -> ImageResult<SourcePlane<'a>> {
     if orientation == Orientation::NoTransforms {
         return Ok(SourcePlane::Window {
             pixels: rgba,
@@ -225,73 +228,64 @@ impl CoveredPlane<'_> {
             }
         }
     }
-
-    pub(super) fn prepare_row(&self, y: u32, destination: &mut [[u16; 4]]) {
-        match self {
-            Self::Straight(plane) => premultiply_row(plane.row(y), destination),
-            Self::Products { .. } => destination.copy_from_slice(self.row(y).unwrap()),
-        }
-    }
 }
 
-/// Sliding tap windows reuse rows without retaining an entire product plane.
+/// Premultiplied rows in a ring as consecutive output tap windows move forward.
 pub(super) struct PreparedRows {
-    rows: Vec<[u16; 4]>,
-    slots: usize,
+    samples: Vec<[u16; 4]>,
     width: u32,
-    row_indexes: Vec<usize>,
+    slots: u32,
+    first_slot: usize,
+    prepared_until: usize,
 }
 
 impl PreparedRows {
-    pub(super) fn new(width: u32) -> Self {
+    pub(super) fn new(width: u32, slots: u32) -> Self {
         Self {
-            rows: Vec::new(),
-            slots: 0,
+            samples: Vec::new(),
             width,
-            row_indexes: Vec::new(),
+            slots,
+            first_slot: 0,
+            prepared_until: 0,
         }
     }
 
     pub(super) fn prepare(
         &mut self,
-        plane: &CoveredPlane<'_>,
+        plane: &SourcePlane<'_>,
         first: usize,
-        len: usize,
+        count: usize,
         cancellation: &dyn Cancellation,
-    ) -> Result<()> {
-        if self.slots < len {
-            let height = u32::try_from(len).context("the image is too large to resize")?;
-            let samples = pixel_bytes(self.width, height, 8)? / 8;
-            self.rows
-                .try_reserve_exact(samples.saturating_sub(self.rows.len()))
-                .context(HOLD_IN_MEMORY)?;
-            self.row_indexes
-                .try_reserve_exact(len.saturating_sub(self.row_indexes.len()))
-                .context(HOLD_IN_MEMORY)?;
-            self.slots = len;
-            self.rows.resize(samples, [0; 4]);
-            self.row_indexes.resize(len, usize::MAX);
-            self.row_indexes.fill(usize::MAX);
+    ) -> ImageResult<()> {
+        if self.samples.is_empty() {
+            let sample_bytes = size_of::<[u16; 4]>();
+            let len = pixel_bytes(self.width, self.slots, sample_bytes)? / sample_bytes;
+            self.samples
+                .try_reserve_exact(len)
+                .map_err(|error| ImageError::codec(HOLD_IN_MEMORY, error))?;
+            self.samples.resize(len, [0; 4]);
         }
-        for index in first..first + len {
+        let slots = self.slots as usize;
+        let width = self.width as usize;
+        let end = first + count;
+        self.first_slot = first % slots;
+        // Starts and ends never move backwards within a task. The ring holds at least one
+        // complete tap window, so writing the new suffix cannot overwrite a reused row.
+        for y in first.max(self.prepared_until)..end {
             cancellation.ensure_active()?;
-            let slot = index % self.slots;
-            if self.row_indexes[slot] == index {
-                continue;
-            }
-            let start = slot * self.width as usize;
-            plane.prepare_row(
-                index as u32,
-                &mut self.rows[start..start + self.width as usize],
-            );
-            self.row_indexes[slot] = index;
+            let start = y % slots * width;
+            premultiply_row(plane.row(y as u32), &mut self.samples[start..][..width]);
         }
+        self.prepared_until = end;
         Ok(())
     }
 
-    pub(super) fn row(&self, index: usize) -> &[[u16; 4]] {
-        let start = index % self.slots * self.width as usize;
-        &self.rows[start..start + self.width as usize]
+    pub(super) fn row(&self, offset: usize) -> &[[u16; 4]] {
+        let slots = self.slots as usize;
+        let slot = self.first_slot + offset;
+        let slot = if slot >= slots { slot - slots } else { slot };
+        let width = self.width as usize;
+        &self.samples[slot * width..][..width]
     }
 }
 

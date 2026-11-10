@@ -141,15 +141,19 @@ impl Documentation {
             })
             .collect();
         let language = match kind {
-            CodeBlockKind::Fenced(language) => language.split_whitespace().next().unwrap_or(""),
+            CodeBlockKind::Fenced(language) => match language.split_whitespace().next() {
+                // Package examples tagged typc are compiled as complete Typst documents.
+                Some("typc") => "typ",
+                language => language.unwrap_or_default(),
+            },
             CodeBlockKind::Indented => "",
         };
-        // Colour off reads the source's own bytes and never tokenizes it.
-        let text = if self.color {
-            crate::terminal::code::styled(&source, language)
+        let theme = if self.color {
+            tola_highlight::ThemeChoice::Dark
         } else {
-            StyledText::plain(&source)
+            tola_highlight::ThemeChoice::Plain
         };
+        let text = tola_highlight::highlight(&source, language, theme);
         // Code is never reflowed: the parser's source bytes remain copyable after indentation.
         let mut rendered = String::new();
         let mut offset = 0;
@@ -157,7 +161,7 @@ impl Documentation {
             let end = offset + line.strip_suffix('\n').unwrap_or(line).len();
             rendered.push_str(indent);
             rendered.push_str("  ");
-            rendered.push_str(&text.paint(offset..end, self.color));
+            text.paint(offset..end, &mut rendered);
             if line.ends_with('\n') {
                 rendered.push('\n');
             }

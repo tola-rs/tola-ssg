@@ -2,12 +2,12 @@
 
 use std::borrow::Cow;
 
-use anyhow::{Context, Result, bail, ensure};
 use image::ColorType;
 use moxcms::{ColorProfile, DataColorSpace, Layout, RenderingIntent, TransformOptions};
 
 use crate::cancellation::Cancellation;
 use crate::rows::rewrite_rows_in_place;
+use crate::{ImageError, ImageResult};
 
 /// How an embedded profile that cannot govern the samples reads.
 const PROFILE_UNSUPPORTED: &str =
@@ -28,7 +28,7 @@ pub(in crate::codec) fn normalize_color(
     dimensions: (u32, u32),
     transform: Option<ColorTransform<'_>>,
     cancellation: &dyn Cancellation,
-) -> Result<Vec<u8>> {
+) -> ImageResult<Vec<u8>> {
     let (width, _) = dimensions;
     cancellation.ensure_active()?;
     if color == ColorType::Rgba8 && transform.is_none() {
@@ -43,24 +43,28 @@ pub(in crate::codec) fn normalize_color(
         ColorType::La16 => (Layout::GrayAlpha, 2),
         ColorType::Rgb16 => (Layout::Rgb, 2),
         ColorType::Rgba16 => (Layout::Rgba, 2),
-        _ => bail!(
-            "this image uses a color format Tola cannot resize; save it as 8-bit or 16-bit RGB"
-        ),
+        _ => {
+            return Err(ImageError::unreadable(
+                "this image uses a color format Tola cannot resize; save it as 8-bit or 16-bit RGB",
+            ));
+        }
     };
     let grayscale = matches!(layout, Layout::Gray | Layout::GrayAlpha);
     let profile = match transform {
         Some(ColorTransform::Icc(icc)) => {
-            let profile =
-                ColorProfile::new_from_slice(icc.as_ref()).context(super::PROFILE_DAMAGED)?;
-            ensure!(
-                profile.color_space
-                    == if grayscale {
-                        DataColorSpace::Gray
-                    } else {
-                        DataColorSpace::Rgb
-                    },
-                "the embedded color profile does not match the image's color space; convert the image to sRGB",
-            );
+            let profile = ColorProfile::new_from_slice(icc.as_ref())
+                .map_err(|error| ImageError::codec(super::PROFILE_DAMAGED, error))?;
+            if !(profile.color_space
+                == if grayscale {
+                    DataColorSpace::Gray
+                } else {
+                    DataColorSpace::Rgb
+                })
+            {
+                return Err(ImageError::unreadable(
+                    "the embedded color profile does not match the image's color space; convert the image to sRGB",
+                ));
+            }
             Some(profile)
         }
         Some(ColorTransform::Gamma(gamma)) => {
@@ -120,7 +124,7 @@ pub(in crate::codec) fn normalize_color(
     if sample_bytes == 2 {
         let transform = profile
             .create_transform_16bit(color_layout, srgb, Layout::Rgba, options)
-            .context(PROFILE_UNSUPPORTED)?;
+            .map_err(|error| ImageError::codec(PROFILE_UNSUPPORTED, error))?;
         cancellation.ensure_active()?;
         rewrite_plane(
             raw,
@@ -148,7 +152,7 @@ pub(in crate::codec) fn normalize_color(
                 }
                 transform
                     .transform(input_row, output_row)
-                    .context(PROFILE_UNSUPPORTED)?;
+                    .map_err(|error| ImageError::codec(PROFILE_UNSUPPORTED, error))?;
                 for (dst, src) in output.iter_mut().zip(output_row.iter()) {
                     *dst = ((u32::from(*src) + 128) / 257) as u8;
                 }
@@ -161,7 +165,7 @@ pub(in crate::codec) fn normalize_color(
     } else {
         let transform = profile
             .create_transform_8bit(color_layout, srgb, Layout::Rgba, options)
-            .context(PROFILE_UNSUPPORTED)?;
+            .map_err(|error| ImageError::codec(PROFILE_UNSUPPORTED, error))?;
         cancellation.ensure_active()?;
         rewrite_plane(
             raw,
@@ -191,7 +195,7 @@ pub(in crate::codec) fn normalize_color(
                 };
                 transform
                     .transform(color_input, output)
-                    .context(PROFILE_UNSUPPORTED)?;
+                    .map_err(|error| ImageError::codec(PROFILE_UNSUPPORTED, error))?;
                 if layout.has_alpha() {
                     restore_alpha(input, output, layout, 1);
                 }
@@ -236,18 +240,18 @@ fn rewrite_plane<S, I, F>(
     cancellation: &dyn Cancellation,
     initial: I,
     row_work: F,
-) -> Result<Vec<u8>>
+) -> ImageResult<Vec<u8>>
 where
     S: Send,
     I: Fn() -> S + Send + Sync,
-    F: Fn(&mut S, &[u8], &mut [u8]) -> Result<()> + Send + Sync,
+    F: Fn(&mut S, &[u8], &mut [u8]) -> ImageResult<()> + Send + Sync,
 {
     let (width, height) = dimensions;
     let destination_bytes = pixel_bytes(width, height, 4)?;
     let mut rgba = raw;
     if rgba.len() < destination_bytes {
         rgba.try_reserve_exact(destination_bytes - rgba.len())
-            .context(HOLD_IN_MEMORY)?;
+            .map_err(|error| ImageError::codec(HOLD_IN_MEMORY, error))?;
         rgba.resize(destination_bytes, 0);
     }
     rewrite_rows_in_place(

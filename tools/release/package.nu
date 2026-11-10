@@ -34,6 +34,7 @@ const LICENSE_FILES = [
     {name: 'PROVENANCE-TOLA-PRONUNCIATIONS.md', path: 'crates/tola-pronunciations/licenses/README.md'}
     {name: 'PROVENANCE-TOLA-TYPST.md', path: 'crates/tola-typst/licenses/README.md'}
     {name: 'THIRD-PARTY-LICENSES.txt', path: 'THIRD-PARTY-LICENSES.txt'}
+    {name: 'THIRD-PARTY-GRAMMARS.txt', path: 'crates/tola-highlight/THIRD-PARTY-GRAMMARS.txt'}
 ]
 
 const USAGE = 'usage: nu tools/release/package.nu build [TARGET] --output DIR

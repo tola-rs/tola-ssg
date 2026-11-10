@@ -1,0 +1,1603 @@
+%YAML 1.2
+---
+# https://www.sublimetext.com/docs/syntax.html
+#
+# `Scheme` Language Reference: http://www.r6rs.org/final/r6rs.pdf
+#
+
+name: Scheme
+version: 2
+# Tola: use these fence tags. The syntax rules are unchanged.
+file_extensions: [scheme, scm, ss, sld, r5rs, r6rs, r7rs, chez, chez-scheme, guile, chicken, chicken-scheme, gauche, gambit, chibi-scheme, mit-scheme]
+scope: source.scheme
+
+contexts:
+  main:
+    - include: invalid-close-paren
+    - include: invalid-close-brack
+    - include: expression
+
+  expression:
+    - match: (?=\S)
+      push: pop-on-expression
+
+  pop-on-expression:
+    - include: pop-before-wrapper
+    - include: push-after-wrapper
+    - include: macro-keywords
+    - include: aux-keywords
+    - include: primitive
+    - include: constants
+    - include: other-variable
+    - include: comments
+    - include: gensym-literal
+
+  pop-before-wrapper:
+    - match: (?=[\])])
+      pop: 1
+
+  push-after-wrapper:
+    - match: \(
+      scope: punctuation.paren.begin.scheme
+      push: [pop-2-on-close-paren, expressions, form-of-paren]
+
+    - match: \[
+      scope: punctuation.bracket.begin.scheme
+      push: [pop-2-on-close-brack, expressions, form-of-brack]
+
+  form-of-brack:
+    - include: special-forms
+    - include: pop-on-expression
+
+  form-of-paren:
+    - include: special-forms
+    - include: constants
+    - include: application
+    - include: pop-on-expression
+
+  expressions:
+    - match: (?=\S)
+      set: pop-1-before-wrapper-expression
+
+  pop-1-before-wrapper-expression:
+    - include: pop-before-wrapper
+    - include: expression
+
+  pop-2-before-wrapper-expression:
+    - match: (?=[\])])
+      pop: 2
+    - include: expression
+
+  special-forms:
+    - match: let(?={{delimiters}})
+      scope: keyword.control.scheme
+      push:
+        - meta_scope: meta.let.scheme
+        - include: let-form
+
+    - match: lambda(?={{delimiters}})
+      scope:
+        storage.type.function.inline.scheme
+        keyword.declaration.function.inline.scheme
+      push: lambda-form
+
+    - match: '{{definition_keywords}}(?={{delimiters}})'
+      scope: keyword.declaration.scheme
+      push: define-form
+
+    - match: set(?:!|-who!)(?={{delimiters}})
+      scope: keyword.assignment.scheme
+      push: set-form
+
+    - match: case(?={{delimiters}})
+      scope: keyword.control.scheme
+      push: case-form
+
+    - match: case-lambda(?={{delimiters}})
+      scope: keyword.control.scheme
+      push:
+        - meta_scope: meta.case-lambda.scheme
+        - include: case-clauses
+
+    - match: syntax-case(?={{delimiters}})
+      scope: keyword.control.syntax.scheme
+      push: syntax-case-form
+
+    - match: syntax-rules(?={{delimiters}})
+      scope: keyword.control.syntax.scheme
+      push: syntax-rules-form
+
+    - match: with-syntax(?={{delimiters}})
+      scope: keyword.control.scheme
+      push:
+        - meta_scope: meta.with-syntax.scheme
+        - include: let-form
+
+    - match: let\*(?={{delimiters}})
+      scope: keyword.control.scheme
+      push:
+        - meta_scope: meta.let*.scheme
+        - include: let-form
+
+    - match: letrec(?={{delimiters}})
+      scope: keyword.control.scheme
+      push:
+        - meta_scope: meta.letrec.scheme
+        - include: let-form
+
+    - match: let-values(?={{delimiters}})
+      scope: keyword.control.scheme
+      push:
+        - meta_scope: meta.let-values.scheme
+        - include: let-form
+
+    - match: do(?={{delimiters}})
+      scope: keyword.control.scheme
+      push:
+        - meta_scope: meta.do.scheme
+        - include: let-form
+
+    - match: fluid-let(?={{delimiters}})
+      scope: keyword.control.scheme
+      push:
+        - meta_scope: meta.fluid-let.scheme
+        - include: let-form
+
+    - match: letrec\*(?={{delimiters}})
+      scope: keyword.control.scheme
+      push:
+        - meta_scope: meta.letrec*.scheme
+        - include: let-form
+
+    - match: let-syntax(?={{delimiters}})
+      scope: keyword.control.scheme
+      push:
+        - meta_scope: meta.let-syntax.scheme
+        - include: let-form
+
+    - match: letrec-syntax(?={{delimiters}})
+      scope: keyword.control.scheme
+      push:
+        - meta_scope: meta.letrec-syntax.scheme
+        - include: let-form
+
+    - match: let\*-values(?={{delimiters}})
+      scope: keyword.control.scheme
+      push:
+        - meta_scope: meta.let*-values.scheme
+        - include: let-form
+
+    - match: fluid-let-syntax(?={{delimiters}})
+      scope: keyword.control.scheme
+      push:
+        - meta_scope: meta.fluid-let-syntax.scheme
+        - include: let-form
+
+    - match: '{{keywords}}(?={{delimiters}})'
+      scope: keyword.control.scheme
+      push: expressions
+
+  let-form:
+    - include: let-binding-list
+    - include: named-let-form
+    - include: expressions
+
+  named-let-form:
+    - match: '{{identifier}}'
+      scope: entity.name.function.scheme
+      set:
+        - meta_scope: meta.named-let.scheme
+        - include: let-binding-list
+        - include: expressions
+
+  let-binding-list:
+    - match: \(
+      scope: punctuation.paren.begin.scheme
+      push: [let-body, let-bindings]
+
+  let-body:
+    - match: (?=[\])])
+      pop: 4
+    - include: expression
+
+  let-bindings:
+    - match: \[
+      scope: punctuation.bracket.begin.scheme
+      push: [pop-1-on-close-brack, let-var-exp]
+    - match: \(
+      scope: punctuation.paren.begin.scheme
+      push: [pop-1-on-close-paren, let-var-exp]
+    - include: pop-1-on-close-paren
+    - include: expression
+
+  let-var-exp:
+    - match: '{{identifier}}'
+      scope: variable.parameter.scheme
+      set: expressions
+    - match: \(
+      scope: punctuation.paren.begin.scheme
+      set: [expressions, parameters-wrapped-by-paren]
+    - match: \[
+      scope: punctuation.bracket.begin.scheme
+      set: [expressions, parameters-wrapped-by-brack]
+    - match: (?=\S)
+      set: expressions
+
+  case-form:
+    - meta_scope: meta.case.scheme
+    - match: (?=\S)
+      set: [case-clauses, pop-on-expression]
+
+  case-clauses:
+    - meta_scope: meta.case.scheme
+    - match: \[
+      scope: punctuation.bracket.begin.scheme
+      push:
+        - include: pop-1-on-close-brack
+        - include: pattern-begin
+    - match: \(
+      scope: punctuation.paren.begin.scheme
+      push:
+        - include: pop-1-on-close-paren
+        - include: pattern-begin
+    - include: pop-1-before-wrapper-expression
+
+  pattern-begin:
+    - match: \(
+      scope: punctuation.paren.begin.scheme
+      push: [expressions, pattern-list-paren]
+    - match: \[
+      scope: punctuation.bracket.begin.scheme
+      push: [expressions, pattern-list-brack]
+    - match: else|_
+      scope: keyword.control.scheme
+      push: expressions
+    - match: '{{identifier}}'
+      scope: variable.parameter.scheme
+      push: expressions
+    - include: pop-1-before-wrapper-expression
+
+  pattern-list-paren:
+    - include: pop-1-on-close-paren
+    - match: (?=\S)
+      push: pattern-content
+
+  pattern-list-brack:
+    - include: pop-1-on-close-brack
+    - match: (?=\S)
+      push: pattern-content
+
+  pattern-content:
+    - include: constants
+    - include: aux-keywords
+    - match: '{{identifier}}'
+      scope: constant.symbol.literal.scheme
+      pop: 1
+    - include: pop-1-before-wrapper-expression
+
+  lambda-form:
+    - match: \(
+      scope: punctuation.paren.begin.scheme
+      set: [lambda-body, parameters-wrapped-by-paren]
+    - match: '{{identifier}}'
+      scope: variable.parameter.scheme
+      set: lambda-body
+    - include: expressions
+
+  lambda-body:
+    - meta_scope: meta.lambda.scheme
+    - include: pop-1-before-wrapper-expression
+
+  define-form:
+    - match: '{{identifier}}'
+      scope: entity.name.function.scheme
+      push: define-body
+    - match: \(
+      scope: punctuation.paren.begin.scheme
+      push:
+        - match: '{{identifier}}'
+          scope: entity.name.function.scheme
+          set: [define-body, parameters-wrapped-by-paren]
+        - match: (?=\S)
+          set: [define-body, parameters-wrapped-by-paren, pop-on-expression]
+    - include: expressions
+
+  define-body:
+    - include: pop-2-before-wrapper-expression
+
+  set-form:
+    - match: '{{identifier}}'
+      scope: entity.name.function.scheme
+      set: pop-1-before-wrapper-expression
+    - include: expressions
+
+  syntax-rules-form:
+    - meta_scope: meta.syntax-rules.scheme
+    - include: syntax-case-body
+
+  syntax-case-form:
+    - meta_scope: meta.syntax-case.scheme
+    - match: (?=\S)
+      set: [syntax-case-body, pop-on-expression]
+
+  syntax-case-body:
+    - meta_scope: meta.syntax-case.scheme
+    - match: \(
+      scope: punctuation.paren.begin.scheme
+      push: [syntax-case-clauses, syntax-case-literals]
+    - include: expressions
+
+  syntax-case-literals:
+    - match: \)
+      scope: punctuation.paren.end.scheme
+      pop: 1
+    - match: \.|\.{3}
+      scope: keyword.control.scheme
+    - match: '{{identifier}}'
+      scope: constant.symbol.literal.scheme
+    - include: comments
+
+  syntax-case-clauses:
+    - include: pop-2-before-wrapper-expression
+
+  parameters-wrapped-by-paren:
+    - match: \.|\.{3}
+      scope: keyword.control.scheme
+    - include: parameter
+    - include: pop-1-on-close-paren
+    - include: comments
+    - include: expression
+
+  parameters-wrapped-by-brack:
+    - match: \.|\.{3}
+      scope: keyword.control.scheme
+    - include: parameter
+    - include: pop-1-on-close-brack
+    - include: comments
+    - include: expression
+
+  parameter:
+    - match: '{{identifier}}'
+      scope: variable.parameter.scheme
+
+  application:
+    - match: '#[23]?%'
+      scope:
+        keyword.control.optimize-level.scheme
+        prefix.primitive.scheme
+      set:
+        - match: '{{primitives}}(?={{delimiters}})'
+          scope:
+            meta.function-call.scheme
+            support.function.scheme
+            primitive.function.scheme
+          set: expressions
+        - match: '{{identifier}}(?={{delimiters}})'
+          scope:
+            meta.function-call.scheme
+            primitive.function.scheme
+          set: expressions
+    - match: '{{primitives}}(?={{delimiters}})'
+      scope:
+        meta.function-call.scheme
+        support.function.scheme
+      set: expressions
+    - match: '{{identifier}}(?={{delimiters}})'
+      scope:
+        meta.function-call.scheme
+        variable.function.scheme
+      set: expressions
+
+  aux-keywords:
+    - match: (?:\.{3}|\.|_|=>)(?={{delimiters}})
+      scope: keyword.aux.scheme
+      pop: 1
+
+  other-variable:
+    - match: '{{identifier}}|[{}]'
+      scope: entity.other.scheme
+      pop: 1
+
+  primitive:
+    - match: '{{primitives}}(?={{delimiters}})'
+      scope: support.function.scheme
+      pop: 1
+    - match: '#(?:[23]?%)'
+      scope:
+        keyword.control.optimize-level.scheme
+        prefix.primitive.scheme
+      push:
+        - match: '{{primitives}}(?={{delimiters}})'
+          scope:
+            support.function.scheme
+            primitive.function.scheme
+          pop: 2
+        - match: '{{identifier}}(?={{delimiters}})'
+          scope: primitive.function.scheme
+          pop: 2
+
+  macro-keywords:
+    - match: "#'"
+      scope: keyword.syntax.scheme
+      push:
+        - meta_scope: meta.syntax.scheme
+        - match: (?=\S)
+          push: [always-pop-3, pop-on-expression]
+    - match: '#`'
+      scope: keyword.quasisyntax.scheme
+      push:
+        - meta_scope: meta.quasisyntax.scheme
+        - match: (?=\S)
+          push: [always-pop-3, pop-on-expression]
+    - match: '#,@'
+      scope: keyword.unsyntax-splicing.scheme
+      push:
+        - meta_scope: meta.unsyntax-splicing.scheme
+        - match: (?=\S)
+          push: [always-pop-3, pop-on-expression]
+    - match: '#,'
+      scope: keyword.unsyntax.scheme
+      push:
+        - meta_scope: meta.unsyntax.scheme
+        - match: (?=\S)
+          push: [always-pop-3, pop-on-expression]
+    - match: "'"
+      scope: keyword.quote.scheme
+      push:
+        - meta_scope: meta.quote.scheme
+        - match: (?=\S)
+          push: [always-pop-3, quote-constants]
+    - match: '`'
+      scope: keyword.quasiquote.scheme
+      push:
+        - meta_scope: meta.quasiquote.scheme
+        - match: (?=\S)
+          push: [always-pop-3, quote-constants]
+    - match: ',@'
+      scope: keyword.unquote-splicing.scheme
+      push:
+        - meta_scope: meta.unquote-splicing.scheme
+        - match: (?=\S)
+          push: [always-pop-3, pop-on-expression]
+    - match: ','
+      scope: keyword.unquote.scheme
+      push:
+        - meta_scope: meta.unquote.scheme
+        - match: (?=\S)
+          push: [always-pop-3, pop-on-expression]
+    - match: '#([0-9]*)vu8(?=\()'
+      scope: storage.modifier.bytevector.scheme
+      captures:
+        1: constant.numeric.scheme
+      set:
+        - meta_scope: meta.bytevector.scheme
+        - include: pop-on-expression
+    - match: '#([0-9]*)vfx(?=\()'
+      scope: storage.modifier.fxvector.scheme
+      captures:
+        1: constant.numeric.scheme
+      set:
+        - meta_scope: meta.fxvector.scheme
+        - include: pop-on-expression
+    - match: '#([0-9]*)(?=\()'
+      scope: storage.modifier.vector.scheme
+      captures:
+        1: constant.numeric.scheme
+      set:
+        - meta_scope: meta.vector.scheme
+        - include: pop-on-expression
+    - match: '#&'
+      scope: storage.modifier.boxes.scheme
+      set: pop-on-expression
+    - match: '#@'
+      scope: storage.modifier.fasl.scheme
+      set: pop-on-expression
+    - match: '#([0-9]+)='
+      scope: storage.modifier.pair.scheme
+      captures:
+        1: constant.numeric.scheme
+      set: pop-on-expression
+    - match: '#(?=\[)'
+      scope: storage.modifier.record-name.scheme
+      set: pop-on-expression
+
+  quote-constants:
+    - include: constants
+    - match: '{{identifier}}'
+      scope: symbol.quoted.scheme
+      pop: 1
+    - match: \(\)
+      scope: constant.language.scheme
+      pop: 1
+    - include: pop-on-expression
+
+  gensym-literal:
+    - match: (#\{)({{identifier}})\s+({{identifier}})(\})
+      captures:
+        1: storage.modifier.gensym.begin.scheme
+        2: string.gensym.pretty-name.scheme
+        3: string.gensym.unique-name.scheme
+        4: storage.modifier.gensym.end.scheme
+      pop: 1
+
+  constants:
+    - include: boolean
+    - include: numerical
+    - include: character
+    - include: string-literal
+    - match: '#!(?:r6rs|base-rtd|bwp|chezscheme|(no-)?fold-case)'
+      scope: constant.language.scheme
+      set: delimiter
+
+  boolean:
+    - match: '#(?:false|f|true|t)'
+      scope: constant.boolean.scheme
+      set: delimiter
+
+  numerical:
+    - match: |-
+        (?x)
+        (\#[dD](?:\#[eEiI])?|\#[eEiI](?:\#[dD])?)?
+        (?:[-\+]?(?:(?:[0-9]+(?:\.[0-9]*|/[0-9]+)?)|\.[0-9]+)
+          (?:[eE][-\+]?[0-9]+)?)
+        (?={{delimiters}})
+      scope: constant.numeric.decimal.scheme
+      captures:
+        1: storage.modifier.numeric.scheme
+      pop: 1
+    - match: |-
+        (?x)
+        (\#[bB](?:\#[eEiI])?|\#[eEiI]\#[bB])
+        (?:[+-]?(?:(?:[01]+(?:\.[01]*|/[01]+)?)|\.[01]+)
+          (?:[eE][-\+]?[01]+)?)
+      scope: constant.numeric.binary.scheme
+      captures:
+        1: storage.modifier.numeric.scheme
+      set: delimiter
+    - match: |-
+        (?x)
+        (\#[oO](?:\#[eEiI])?|\#[eEiI]\#[oO])
+        (?:[+-]?(?:(?:[0-7]+(?:\.[0-7]*|/[0-7]+)?)|\.[0-7]+)
+          (?:[eE][-\+]?[0-7]+)?)
+      scope: constant.numeric.octal.scheme
+      captures:
+        1: storage.modifier.numeric.scheme
+      set: delimiter
+    - match: |-
+        (?x)
+        (\#[xX](?:\#[eEiI])?|\#[eEiI]\#[xX])
+        (?:[-\+]?[0-9a-fA-F]+[\./]?[0-9a-fA-F]*)
+      scope: constant.numeric.hex.scheme
+      captures:
+        1: storage.modifier.numeric.scheme
+      set: delimiter
+    # #<2..36>r
+    - match: |-
+        (?x)
+        (\#(?:0?[2-9]|[1-3][0-6])[rR](?:\#[eEiI])?|\#[eEiI]\#
+          (?:0?[2-9]|[1-3][0-6])[rR])
+        (?:[-\+]?[0-9a-zA-Z]+\.?[0-9a-zA-Z]*)
+      scope: constant.numeric.various.scheme
+      captures:
+        1: storage.modifier.numeric.scheme
+      set: delimiter
+
+  character:
+    - match: (#\\x)([0-9a-fA-F]+)\b
+      captures:
+        1: storage.modifier.character.scheme
+        2: constant.character.numeric.hex.scheme
+      pop: 1
+    - match: (#\\0)([0-7]{2})\b
+      captures:
+        1: storage.modifier.character.scheme
+        2: constant.character.numeric.octal.scheme
+      pop: 1
+    - match: (#\\)([0-9]{2,})\b
+      captures:
+        1: storage.modifier.character.scheme
+        2: constant.character.numeric.decimal.scheme
+      pop: 1
+    - match: '#\\'
+      scope: storage.modifier.character.scheme
+      set:
+        - match: |-
+            (?x)
+            (?:alarm|backspace|delete|esc|linefeed|newline|page
+              |return|space|tab|bel|ls|nel|nul|rubout|vtab|vt|[ \S])
+          scope: constant.character.scheme
+          set: delimiter
+
+  string-literal:
+    - match: '"'
+      scope: punctuation.definition.string.begin.scheme
+      set:
+        - meta_scope: string.quoted.double.scheme
+        - match: '"'
+          scope: punctuation.definition.string.end.scheme
+          pop: 1
+        - include: string-escaped-char
+        - include: string-placeholder
+
+  string-escaped-char:
+    - match: '(\\)$\n'
+      captures:
+        1: punctuation.separator.continuation.scheme
+    - match: '{{valid_escaped_chars}}'
+      scope: constant.character.escape.scheme
+    - match: \\.
+      scope: invalid.illegal.unknown-escape.scheme
+
+  string-placeholder:
+    - match: |-
+        (?x)~
+        (?:[~nN%^&*;]
+          |@?[?]
+          |,?(?:\d+)?@?[eEfFgGtT]
+          |,?(?:@:|:@|@|:)?[bBoOdDxX$]
+          |(?:@:|:@|@|:)?[cC]
+          |(?:\d+)?(?:@:|:@|@|:)?[aArRsSwW]
+          |@:?\(
+          |\)
+          |:p)
+      scope: constant.other.placeholder.scheme
+
+  comments:
+    - include: comment-expression
+    - include: comment-line
+    - include: comment-block
+    - include: comment-eof
+
+  comment-expression:
+    - match: '#;'
+      scope: punctuation.definition.comment.expression.scheme
+      push:
+        - meta_scope: meta.comment.expression.scheme
+        - match: (?=\S)
+          push: [always-pop-2, pop-on-expression]
+
+  comment-line:
+    - match: (;+).*$\n?
+      scope: comment.line.scheme
+      captures:
+        1: punctuation.definition.comment.scheme
+    - match: '#!(?=\s*/)'
+      scope: comment.line.scheme
+      push:
+        - match: /([^/]+/)*(scheme|petite)\s+--script$
+          scope: comment.line.scheme
+          pop: 1
+        - match: \S+(?=\s*$)
+          scope: invalid.deprecated.scheme
+          pop: 1
+
+  comment-block:
+    - match: '#\|'
+      scope: punctuation.definition.comment.begin.scheme
+      push:
+        - meta_scope: comment.block.scheme
+        - include: comment-block
+        - match: '\|#'
+          scope: punctuation.definition.comment.end.scheme
+          pop: 1
+
+  comment-eof:
+    - match: ^\s*#!eof\b
+      scope: keyword.control.eof.scheme
+      push:
+        - meta_scope: meta.comment.eof.scheme
+        - include: pop-1-before-wrapper-expression
+    - match: ^\s*#!eof\S
+      scope: invalid.illegal.scheme
+
+  delimiter:
+    - match: (?={{delimiters}})
+      pop: 1
+    - match: \S+
+      scope: invalid.illegal.delimiter.scheme
+      pop: 1
+
+  always-pop-2:
+    - match: ''
+      pop: 2
+
+  always-pop-3:
+    - match: ''
+      pop: 3
+
+  pop-1-on-close-brack:
+    - match: \]
+      scope: punctuation.bracket.end.scheme
+      pop: 1
+    - include: invalid-close-paren
+
+  pop-1-on-close-paren:
+    - match: \)
+      scope: punctuation.paren.end.scheme
+      pop: 1
+    - include: invalid-close-brack
+
+  pop-2-on-close-brack:
+    - match: \]
+      scope: punctuation.bracket.end.scheme
+      pop: 2
+    - include: invalid-close-paren
+
+  pop-2-on-close-paren:
+    - match: \)
+      scope: punctuation.paren.end.scheme
+      pop: 2
+    - include: invalid-close-brack
+
+  invalid-close-brack:
+    - match: \]
+      scope: invalid.illegal.close-bracket.scheme
+
+  invalid-close-paren:
+    - match: \)
+      scope: invalid.illegal.close-paren.scheme
+
+
+variables:
+  valid_escaped_chars: |-
+    (?x)\\
+    (?:[\\abefnrtv\'"?]
+      |[0-3][0-9]{0,2}
+      |[4-7][0-9]?
+      |x[a-fA-F0-9]+
+      |u[a-fA-F0-9]{4}
+      |U[a-fA-F0-9]{8})
+
+  delimiters: (?:[{(\[\s"'`,;#\])}])
+  identifier: |-
+    (?x)
+    (?:[^({\[#"'`,;|\\\s\]})]
+      |\\[({\[#"'`,;|\\\s\]})]
+      |\\x[0-9a-fA-F]*;
+      |\|[^|]*\|)+
+  definition_keywords: |-
+    (?x)
+    (?:define(?:-(?:condition-type
+                   |enumeration
+                   |ftype
+                   |property
+                   |record(?:-type)?
+                   |s(?:tructure|yntax)
+                   |values))?
+      |trace-define(?:-syntax)?)
+  keywords: |-
+    (?x)
+    (?:\$(?:primitive|system)
+      |\&(?:assertion
+           |con(?:dition|tinuation)
+           |error
+           |format
+           |i(?:/o(?:-(?:decoding
+                        |encoding
+                        |file(?:-(?:already-exists
+                                   |does-not-exist
+                                   |is-read-only
+                                   |protection)
+                               |name)
+                        |invalid-position
+                        |port
+                        |read
+                        |write))?
+               |mplementation-restriction
+               |rritants)
+           |lexical
+           |message
+           |no(?:-(?:infinities|nans)|n-continuable)
+           |s(?:erious|ource|yntax)
+           |undefined
+           |violation
+           |w(?:arning|ho))
+      |\.\.\.
+      |=>
+      |_
+      |a(?:dd-prefix|lias|n(?:d|notation-options)|ssert)
+      |b(?:egin|uffer-mode)
+      |c(?:ase(?:-lambda)?|on(?:d|structor)|ritical-section)
+      |d(?:atum|elay|o|rop-prefix)
+      |e(?:lse
+          |ndianness
+          |ol-style
+          |rror-handling-mode
+          |val-when
+          |x(?:c(?:ept|lusive-cond)|p(?:ort|ression-editor)|tend-syntax))
+      |f(?:asl-strip-options
+          |i(?:elds|le-options)
+          |luid-let(?:-syntax)?
+          |oreign-(?:callable|procedure)
+          |type-(?:\&ref
+                  |guardian
+                  |init-lock!
+                  |lock(?:!|ed-(?:decr!|incr!))
+                  |pointer\?
+                  |ref
+                  |s(?:et!|izeof|pin-lock!)
+                  |unlock!))
+      |guard
+      |i(?:dentifier-syntax
+          |eee
+          |f
+          |m(?:mutable|p(?:licit-exports|ort(?:-only)?))
+          |n(?:clude|direct-export))
+      |l(?:ambda
+          |et(?:\*(?:-values)?|-(?:syntax|values)|rec(?:\*|-syntax)?)?
+          |ibrary(?:-requirements-options)?)
+      |m(?:ake-ftype-pointer|eta(?:-cond)?|odule|utable)
+      |nongenerative
+      |o(?:nly|paque|r)
+      |p(?:ar(?:ameterize|ent(?:-rtd)?|iah)
+          |r(?:e(?:dicate|fix)|o(?:file|tocol)))
+      |qu(?:asi(?:quote|syntax)|ote)
+      |r(?:5rs(?:-syntax)?
+          |6rs:(?:case|syntax-rules)
+          |e(?:c(?:ord-(?:c(?:ase|onstructor-descriptor)|type-descriptor))?
+              |name))
+      |s(?:cheme|e(?:aled|t!)|yntax(?:-(?:case|rules))?)
+      |t(?:ime
+          |op-level-program
+          |race(?:-(?:case-lambda|do|l(?:ambda|et)))?
+          |ype-descriptor)
+      |un(?:less|quote(?:-splicing)?|syntax(?:-splicing)?|trace)
+      |w(?:hen|ith-(?:i(?:mplicit|nterrupts-disabled)|mutex|syntax)))
+  primitives: |-
+    (?x)
+    (?:\*
+      |\+
+      |-(?:1\+)?
+      |/
+      |1(?:\+|-)
+      |<=?
+      |=
+      |>=?
+      |a(?:b(?:ort(?:-handler)?|s)
+          |cosh?
+          |dd(?:-duration!?|1)
+          |n(?:dmap
+              |gle
+              |notation(?:-(?:expression|option-set|s(?:ource|tripped))
+                         |\?))
+          |p(?:p(?:end!?|ly)|ropos(?:-list)?)
+          |s(?:h|inh?|s(?:ertion-violation(?:\?|f)?|oc|p|q|v))
+          |t(?:anh?|om\?))
+      |b(?:ase-exception-handler
+          |i(?:gnum\?
+              |nary-port(?:-(?:input-(?:buffer|count|index|size)
+                              |output-(?:buffer|count|index|size))
+                          |\?)
+              |twise-(?:a(?:nd|rithmetic-shift(?:-(?:left|right))?)
+                       |bit-(?:count|field|set\?)
+                       |copy-bit(?:-field)?
+                       |first-bit-set
+                       |i(?:f|or)
+                       |length
+                       |not
+                       |r(?:everse-bit-field|otate-bit-field)
+                       |xor))
+          |lock-(?:read|write)
+          |o(?:olean(?:=\?|\?)
+              |und-identifier=\?
+              |x(?:-(?:cas!|immutable)|\?)?)
+          |reak(?:-handler)?
+          |uffer-mode\?
+          |wp-object\?
+          |yte(?:s-(?:allocated|deallocated)
+                |vector(?:-(?:>(?:immutable-bytevector
+                                 |s(?:8-list|int-list|tring)
+                                 |u(?:8-list|int-list))
+                             |co(?:mpress|py!?)
+                             |fill!
+                             |ieee-(?:double-(?:native-(?:ref|set!)
+                                               |ref
+                                               |set!)
+                                     |single-(?:native-(?:ref|set!)
+                                               |ref
+                                               |set!))
+                             |length
+                             |s(?:16-(?:native-(?:ref|set!)|ref|set!)
+                                 |24-(?:ref|set!)
+                                 |32-(?:native-(?:ref|set!)|ref|set!)
+                                 |4(?:0-(?:ref|set!)|8-(?:ref|set!))
+                                 |56-(?:ref|set!)
+                                 |64-(?:native-(?:ref|set!)|ref|set!)
+                                 |8-(?:ref|set!)
+                                 |int-(?:ref|set!))
+                             |truncate!
+                             |u(?:16-(?:native-(?:ref|set!)|ref|set!)
+                                 |24-(?:ref|set!)
+                                 |32-(?:native-(?:ref|set!)|ref|set!)
+                                 |4(?:0-(?:ref|set!)|8-(?:ref|set!))
+                                 |56-(?:ref|set!)
+                                 |64-(?:native-(?:ref|set!)|ref|set!)
+                                 |8-(?:ref|set!)
+                                 |int-(?:ref|set!)
+                                 |ncompress))
+                         |=\?
+                         |\?)?))
+      |c(?:a(?:a(?:a(?:ar|dr|r)|d(?:ar|dr|r)|r)
+              |d(?:a(?:ar|dr|r)|d(?:ar|dr|r)|r)
+              |ll(?:-with-(?:bytevector-output-port
+                            |current-continuation
+                            |input-file
+                            |output-file
+                            |port
+                            |string-output-port
+                            |values)
+                   |/(?:1cc|cc))
+              |r
+              |se-sensitive)
+          |d(?:a(?:a(?:ar|dr|r)|d(?:ar|dr|r)|r)
+              |d(?:a(?:ar|dr|r)|d(?:ar|dr|r)|r)
+              |r)?
+          |eiling
+          |fl(?:\*
+               |\+
+               |-(?:conjugate|imag-part|magnitude-squared|real-part)?
+               |/
+               |=
+               |onum\?)
+          |h(?:ar(?:-(?:>integer
+                       |alphabetic\?
+                       |ci(?:<(?:=\?|\?)|=\?|>(?:=\?|\?))
+                       |downcase
+                       |foldcase
+                       |general-category
+                       |lower-case\?
+                       |n(?:ame|umeric\?)
+                       |ready\?
+                       |title(?:-case\?|case)
+                       |up(?:case|per-case\?)
+                       |whitespace\?)?
+                   |<(?:=\?|\?)
+                   |=\?
+                   |>(?:=\?|\?)
+                   |\?)
+              |mod)
+          |l(?:ear-(?:input-port|output-port)
+              |ose-(?:input-port|output-port|port))
+          |o(?:llect(?:-(?:generation-radix
+                          |maximum-generation
+                          |notify
+                          |re(?:ndezvous|quest-handler)
+                          |trip-bytes)
+                      |ions)?
+              |m(?:m(?:and-line(?:-arguments)?|onization-level)
+                  |p(?:ile(?:-(?:file(?:-message)?
+                                |i(?:mported-libraries|nterpret-simple)
+                                |library(?:-handler)?
+                                |p(?:ort|ro(?:file|gram(?:-handler)?))
+                                |script
+                                |t(?:ime-value(?:-value|\?)
+                                    |o-(?:file|port))
+                                |whole-(?:library|program)))?
+                      |lex\?
+                      |ress-(?:format|level)
+                      |ute-(?:composition|size)))
+              |n(?:catenate-object-files
+                  |dition(?:-(?:accessor
+                               |broadcast
+                               |continuation
+                               |irritants
+                               |message
+                               |name
+                               |predicate
+                               |signal
+                               |w(?:ait|ho))
+                           |\?)?
+                  |jugate
+                  |s(?:\*|ole-(?:error-port|input-port|output-port))?
+                  |tinuation-condition\?)
+              |py-(?:environment|time)
+              |s(?:h
+                  |t-center(?:-(?:allocation-count|instruction-count|time)
+                             |\?))?)
+          |p(?:0-(?:effort-limit|outer-unroll-limit|score-limit)|u-time)
+          |reate-exception-state
+          |sv7:record-(?:field-(?:access(?:ible\?|or)|muta(?:ble\?|tor))
+                        |type-(?:descriptor
+                                |field-(?:decls|names)
+                                |name
+                                |symbol))
+          |u(?:rrent-(?:d(?:ate|irectory)
+                       |e(?:rror-port|val|x(?:ception-state|pand))
+                       |input-port
+                       |locate-source-object-source
+                       |m(?:ake-source-object|emory-bytes)
+                       |output-port
+                       |t(?:ime|ranscoder))
+              |stom-port-buffer-size))
+      |d(?:at(?:e(?:-(?:>time-utc
+                       |and-time
+                       |d(?:ay|st\?)
+                       |hour
+                       |m(?:inute|onth)
+                       |nanosecond
+                       |second
+                       |week-day
+                       |year(?:-day)?
+                       |zone-(?:name|offset))
+                   |\?)
+               |um->syntax(?:-object)?)
+          |e(?:bug(?:-(?:condition|level|on-exception))?
+              |code-float
+              |f(?:ault-(?:exception-handler
+                          |library-search-handler
+                          |prompt-and-read
+                          |record-(?:equal-procedure|hash-procedure))
+                  |ine-top-level-(?:syntax|value))
+              |lete-(?:directory|file)
+              |nominator)
+          |i(?:rectory-(?:list|separator(?:\?)?)
+              |s(?:able-interrupts
+                  |play(?:-(?:condition|st(?:atistics|ring)))?)
+              |v(?:-and-mod|0(?:-and-mod0)?)?)
+          |ynamic-wind)
+      |e(?:n(?:able-(?:cross-library-optimization
+                      |interrupts
+                      |object-counts)
+              |gine-(?:block|return)
+              |um(?:-set(?:-(?:>list
+                              |co(?:mplement|nstructor)
+                              |difference
+                              |in(?:dexer|tersection)
+                              |member\?
+                              |projection
+                              |subset\?
+                              |uni(?:on|verse))
+                          |=\?
+                          |\?)
+                   |erate)
+              |vironment(?:-(?:mutable\?|symbols)|\?)?)
+          |of-object(?:\?)?
+          |phemeron-(?:cons|pair\?)
+          |q(?:-hashtable(?:-(?:c(?:ell|ontains\?)
+                               |delete!
+                               |ephemeron\?
+                               |ref
+                               |set!
+                               |update!
+                               |weak\?)
+                           |\?)
+              |\?
+              |ual(?:-hash|\?)
+              |v\?)
+          |rror(?:\?|f)?
+          |v(?:al(?:-syntax-expanders-when)?|en\?)
+          |x(?:act(?:-(?:>inexact|integer-sqrt)|\?)?
+              |i(?:sts|t(?:-handler)?)
+              |p(?:and(?:-output|/optimize(?:-output)?)?|t(?:-mod)?)?))
+      |f(?:asl-(?:compressed|file|read|write)
+          |i(?:l(?:e-(?:access-time
+                       |buffer-size
+                       |change-time
+                       |directory\?
+                       |exists\?
+                       |length
+                       |modification-time
+                       |po(?:rt\?|sition)
+                       |regular\?
+                       |symbolic-link\?)
+                  |ter)
+              |n(?:d|ite\?)
+              |xnum(?:-(?:>flonum|width)|\?))
+          |l(?:\*
+              |\+
+              |-(?:make-rectangular)?
+              |/
+              |<(?:=(?:\?)?|\?)?
+              |=(?:\?)?
+              |>(?:=(?:\?)?|\?)?
+              |a(?:bs|cos|sin|tan)
+              |c(?:eiling|os)
+              |d(?:enominator|iv(?:-and-mod|0(?:-and-mod0)?)?)
+              |e(?:ven\?|xpt?)
+              |f(?:inite\?|loor)
+              |in(?:finite\?|teger\?)
+              |l(?:og|p)
+              |m(?:ax|in|od0?)
+              |n(?:an\?|egative\?|on(?:negative\?|positive\?)|umerator)
+              |o(?:dd\?|num(?:->fixnum|\?)|or)
+              |positive\?
+              |round
+              |s(?:in|qrt)
+              |t(?:an|runcate)
+              |ush-output-port
+              |zero\?)
+          |o(?:ld-(?:left|right)
+              |r(?:-(?:all|each)
+                  |ce
+                  |eign-(?:a(?:ddress-name|lloc)
+                          |callable-(?:code-object|entry-point)
+                          |entry(?:\?)?
+                          |free
+                          |ref
+                          |s(?:et!|izeof))
+                  |k-thread
+                  |mat(?:-condition\?)?))
+          |printf
+          |re(?:e-identifier=\?|sh-line)
+          |type-pointer(?:-(?:>sexpr|address|ftype|null\?)|=\?)
+          |x(?:\*(?:/carry)?
+              |\+(?:/carry)?
+              |-(?:/carry)?
+              |/
+              |1(?:\+|-)
+              |<(?:=(?:\?)?|\?)?
+              |=(?:\?)?
+              |>(?:=(?:\?)?|\?)?
+              |a(?:bs|nd|rithmetic-shift(?:-(?:left|right))?)
+              |bit-(?:count|field|set\?)
+              |copy-bit(?:-field)?
+              |div(?:-and-mod|0(?:-and-mod0)?)?
+              |even\?
+              |first-bit-set
+              |i(?:f|or)
+              |l(?:ength|og(?:and|bit(?:0|1|\?)|ior|not|or|test|xor))
+              |m(?:ax|in|od(?:0|ulo)?)
+              |n(?:egative\?|o(?:n(?:negative\?|positive\?)|t))
+              |odd\?
+              |positive\?
+              |quotient
+              |r(?:e(?:mainder|verse-bit-field)|otate-bit-field)
+              |s(?:ll|r(?:a|l))
+              |vector(?:-(?:>(?:immutable-fxvector|list)
+                           |copy
+                           |fill!
+                           |length
+                           |ref
+                           |set!)
+                       |\?)?
+              |xor
+              |zero\?))
+      |g(?:cd
+          |e(?:n(?:erate-(?:allocation-counts
+                           |covin-files
+                           |in(?:s(?:pector-information|truction-counts)
+                                |terrupt-trap)
+                           |pro(?:cedure-source-information|file-forms)
+                           |temporaries
+                           |wpo-files)
+                  |sym(?:-(?:>unique-string|count|prefix)|\?)?)
+              |t(?:-(?:bytevector-(?:all|n!?|some!?)
+                      |char
+                      |datum(?:/annotations)?
+                      |hash-table
+                      |line
+                      |mode
+                      |output-string
+                      |process-id
+                      |registry
+                      |s(?:ource-table!|tring-(?:all|n!?|some!?))
+                      |thread-id
+                      |u8)
+                  |env
+                  |prop))
+          |reatest-fixnum
+          |uardian\?)
+      |h(?:ash(?:-table(?:-(?:for-each|map)|\?)
+                |table(?:-(?:c(?:ells?|lear!|o(?:ntains\?|py))
+                            |delete!
+                            |e(?:ntries|phemeron\?|quivalence-function)
+                            |hash-function
+                            |keys
+                            |mutable\?
+                            |ref
+                            |s(?:et!|ize)
+                            |update!
+                            |values
+                            |weak\?)
+                        |\?))
+          |eap-reserve-ratio)
+      |i(?:/o-(?:decoding-error\?
+                |e(?:ncoding-error(?:-char|\?)
+                    |rror(?:-(?:filename|po(?:rt|sition))|\?))
+                |file(?:-(?:already-exists-error\?
+                           |does-not-exist-error\?
+                           |is-read-only-error\?
+                           |protection-error\?)
+                       |name-error\?)
+                |invalid-position-error\?
+                |port-error\?
+                |read-error\?
+                |write-error\?)
+          |conv-codec
+          |dentifier\?
+          |eee-environment
+          |m(?:ag-part
+              |mutable-(?:b(?:ox\?|ytevector\?)
+                         |fxvector\?
+                         |string\?
+                         |vector\?)
+              |p(?:lementation-restriction-violation\?|ort-notify))
+          |n(?:exact(?:->exact|\?)?
+              |finite\?
+              |itial-bytes-allocated
+              |put-port(?:-ready\?|\?)
+              |spect(?:/object)?
+              |te(?:ger(?:-(?:>char|length|valued\?)|\?)
+                   |r(?:acti(?:on-environment|ve\?)
+                       |nal-defines-as-letrec\*
+                       |pret))
+              |voke-library)
+          |ota
+          |rritants-condition\?
+          |sqrt)
+      |keyboard-interrupt-handler
+      |l(?:a(?:st-pair|tin-1-codec)
+          |cm
+          |e(?:ast-fixnum|ngth|xical-violation\?)
+          |i(?:brary-(?:directories
+                       |ex(?:ports|tensions)
+                       |list
+                       |object-filename
+                       |requirements
+                       |search-handler
+                       |version)
+              |st(?:\*
+                   |-(?:>(?:fxvector|string|vector)
+                       |copy
+                       |head
+                       |ref
+                       |sort
+                       |tail)
+                   |\?)?
+              |teral-identifier=\?)
+          |o(?:ad(?:-(?:compiled-from-port|library|program|shared-object))?
+              |c(?:ate-source(?:-object-source)?|k(?:-object|ed-object\?))
+              |g(?:and|bit(?:0|1|\?)|ior|not|or|test|xor)?
+              |okahead-(?:char|u8)))
+      |m(?:a(?:chine-type
+              |gnitude(?:-squared)?
+              |ke-(?:a(?:nnotation|ssertion-violation)
+                    |b(?:oot-(?:file|header)|ytevector)
+                    |c(?:o(?:mpile-time-value
+                            |n(?:dition|tinuation-condition)
+                            |st-center)
+                        |ustom-(?:binary-(?:input(?:-port|/output-port)
+                                           |output-port)
+                                 |textual-(?:input(?:-port|/output-port)
+                                            |output-port)))
+                    |date
+                    |e(?:n(?:gine|umeration)
+                        |phemeron-eq(?:-hashtable|v-hashtable)
+                        |q(?:-hashtable|v-hashtable)
+                        |rror)
+                    |f(?:ormat-condition|xvector)
+                    |guardian
+                    |hash(?:-table|table)
+                    |i(?:/o-(?:decoding-error
+                              |e(?:ncoding-error|rror)
+                              |file(?:-(?:already-exists-error
+                                         |does-not-exist-error
+                                         |is-read-only-error
+                                         |protection-error)
+                                     |name-error)
+                              |invalid-position-error
+                              |port-error
+                              |read-error
+                              |write-error)
+                        |mplementation-restriction-violation
+                        |nput(?:-port|/output-port)
+                        |rritants-condition)
+                    |l(?:exical-violation|ist)
+                    |m(?:essage-condition|utex)
+                    |no(?:-(?:infinities-violation|nans-violation)
+                         |n-continuable-violation)
+                    |o(?:bject-finder|utput-port)
+                    |p(?:arameter|olar)
+                    |rec(?:ord-(?:constructor-descriptor
+                                 |type(?:-descriptor)?)
+                          |tangular)
+                    |s(?:erious-condition
+                        |ource-(?:condition|file-descriptor|object|table)
+                        |stats
+                        |tring
+                        |yntax-violation)
+                    |t(?:hread-parameter|ime|ranscoder)
+                    |undefined-violation
+                    |v(?:ariable-transformer|ector|iolation)
+                    |w(?:arning
+                        |eak-eq(?:-hashtable|v-hashtable)
+                        |ho-condition))
+              |p
+              |rk-port-closed!
+              |x(?:imum-memory-bytes)?
+              |ybe-compile-(?:file|library|program))
+          |e(?:m(?:ber|p|q|v)|rge!?|ssage-condition\?)
+          |in
+          |kdir
+          |o(?:d(?:0|ulo)?|st-(?:negative-fixnum|positive-fixnum))
+          |u(?:ltibyte->string
+              |t(?:able-(?:b(?:ox\?|ytevector\?)
+                          |fxvector\?
+                          |string\?
+                          |vector\?)
+                  |ex(?:-(?:acquire|name|release)|\?))))
+      |n(?:a(?:n\?|tive-(?:e(?:ndianness|ol-style)|transcoder))
+          |e(?:gative\?|w(?:-cafe|line))
+          |o(?:-(?:infinities-violation\?|nans-violation\?)
+              |n(?:-continuable-violation\?|negative\?|positive\?)
+              |t)
+          |u(?:ll(?:-environment|\?)|m(?:ber(?:->string|\?)|erator)))
+      |o(?:b(?:ject-counts|list)
+          |dd\?
+          |p(?:en-(?:bytevector-(?:input-port|output-port)
+                    |f(?:d-(?:input(?:-port|/output-port)|output-port)
+                        |ile-(?:input(?:-port|/output-port)|output-port))
+                    |input-(?:file|output-file|string)
+                    |output-(?:file|string)
+                    |process-ports
+                    |s(?:ource-file|tring-(?:input-port|output-port)))
+              |timize-level)
+          |rmap
+          |utput-port(?:-buffer-mode|\?))
+      |p(?:a(?:ir\?
+              |rtition
+              |th-(?:absolute\?|extension|first|last|parent|r(?:est|oot)))
+          |e(?:ek-char|tite\?)
+          |o(?:rt(?:-(?:bol\?
+                       |closed\?
+                       |eof\?
+                       |file-(?:compressed!|descriptor)
+                       |ha(?:ndler
+                            |s-(?:port-(?:length\?
+                                         |nonblocking\?\?
+                                         |position\?)
+                                 |set-port-(?:length!\?
+                                             |nonblocking!\?
+                                             |position!\?)))
+                       |input-(?:buffer|count|empty\?|index|size)
+                       |length
+                       |n(?:ame|onblocking\?)
+                       |output-(?:buffer|count|full\?|index|size)
+                       |position
+                       |transcoder)
+                   |\?)
+              |sitive\?)
+          |r(?:etty-(?:f(?:ile|ormat)
+                      |initial-indent
+                      |line-length
+                      |maximum-lines
+                      |one-line-limit
+                      |print
+                      |standard-indent)
+              |int(?:-(?:brackets
+                        |char-name
+                        |extended-identifiers
+                        |g(?:ensym|raph)
+                        |le(?:ngth|vel)
+                        |precision
+                        |r(?:adix|ecord)
+                        |unicode
+                        |vector-length)
+                    |f)
+              |o(?:ce(?:dure(?:-arity-mask|\?)|ss)
+                  |file-(?:clear(?:-database)?
+                          |dump(?:-(?:data|html|list))?
+                          |l(?:ine-number-color|oad-data)
+                          |palette
+                          |query-weight
+                          |release-counters)
+                  |perty-list))
+          |ut(?:-(?:bytevector(?:-some)?
+                   |char
+                   |datum
+                   |hash-table!
+                   |registry!
+                   |s(?:ource-table|tring(?:-some)?)
+                   |u8)
+               |env
+               |prop))
+      |quotient
+      |r(?:6rs:(?:<=?
+                 |=
+                 |>=?
+                 |c(?:all-with-(?:input-file|output-file)
+                     |har(?:-ci(?:<(?:=\?|\?)|=\?|>(?:=\?|\?))
+                           |<(?:=\?|\?)
+                           |=\?
+                           |>(?:=\?|\?))
+                     |ommand-line
+                     |urrent-(?:error-port|input-port|output-port))
+                 |d(?:elete-file|ynamic-wind)
+                 |e(?:val|xit)
+                 |f(?:ile-exists\?|lush-output-port|x(?:\*|\+|-))
+                 |hashtable-(?:entries|keys)
+                 |number->string
+                 |open-(?:input-file|output-file)
+                 |record(?:-constructor|\?)
+                 |st(?:andard-(?:error-port|input-port|output-port)
+                      |ring(?:-(?:>number
+                                 |ci(?:<(?:=\?|\?)|=\?|>(?:=\?|\?)))
+                             |<(?:=\?|\?)
+                             |=\?
+                             |>(?:=\?|\?)))
+                 |utf-16-codec
+                 |with-(?:input-from-file|output-to-file))
+          |a(?:ise(?:-continuable)?
+              |ndom(?:-seed)?
+              |t(?:ional(?:-valued\?|\?|ize)|num\?))
+          |e(?:a(?:d(?:-(?:char|token))?
+                  |l(?:-(?:>flonum|part|time|valued\?)|\?))
+              |cord(?:-(?:accessor
+                         |constructor(?:-descriptor\?)?
+                         |equal-procedure
+                         |field-mutable\?
+                         |hash-procedure
+                         |mutator
+                         |predicate
+                         |r(?:eader|td)
+                         |type-(?:descriptor\?
+                                 |equal-procedure
+                                 |field-names
+                                 |generative\?
+                                 |hash-procedure
+                                 |name
+                                 |opaque\?
+                                 |parent
+                                 |sealed\?
+                                 |uid)
+                         |writer)
+                     |\?)
+              |gister-signal-handler
+              |lease-minimum-generation
+              |m(?:ainder
+                  |ove(?:!|-(?:foreign-entry|hash-table!|registry!))?
+                  |p(?:rop)?
+                  |q!?
+                  |v!?)
+              |name-file
+              |quire-nongenerative-clause
+              |set(?:-(?:cost-center!|handler|maximum-memory-bytes!))?
+              |v(?:erse!?|isit(?:-compiled-from-port)?))
+          |ound
+          |un-cp0)
+      |s(?:8-list->bytevector
+          |c(?:-expand
+              |heme-(?:environment
+                      |program
+                      |report-environment
+                      |s(?:cript|tart)
+                      |version(?:-number)?))
+          |e(?:rious-condition\?
+              |t-(?:b(?:inary-port-(?:input-(?:buffer!|index!|size!)
+                                     |output-(?:buffer!|index!|size!))
+                       |ox!)
+                   |c(?:ar!|dr!)
+                   |port-(?:bol!
+                           |eof!
+                           |input-(?:buffer!|index!|size!)
+                           |length!
+                           |n(?:ame!|onblocking!)
+                           |output-(?:buffer!|index!|size!)
+                           |position!)
+                   |sstats-(?:bytes!
+                             |cpu!
+                             |gc-(?:bytes!|c(?:ount!|pu!)|real!)
+                             |real!)
+                   |t(?:extual-port-(?:input-(?:buffer!|index!|size!)
+                                      |output-(?:buffer!|index!|size!))
+                       |ime(?:-(?:nanosecond!|second!|type!)|r)
+                       |op-level-value!)
+                   |virtual-register!))
+          |i(?:mple-conditions|n(?:h|t-list->bytevector)?)
+          |leep
+          |o(?:rt!?
+              |urce-(?:condition(?:-form|\?)
+                      |directories
+                      |file-descriptor(?:-(?:checksum|path)|\?)?
+                      |object(?:-(?:bfp|column|efp|line|sfd)|\?)
+                      |table(?:-(?:c(?:ell|ontains\?)
+                                  |d(?:elete!|ump)
+                                  |ref
+                                  |s(?:et!|ize))
+                              |\?)))
+          |qrt
+          |stats(?:-(?:bytes
+                      |cpu
+                      |difference
+                      |gc-(?:bytes|c(?:ount|pu)|real)
+                      |print
+                      |real)
+                  |\?)
+          |t(?:a(?:ndard-(?:error-port|input-port|output-port)|tistics)
+              |ri(?:ng(?:-(?:>(?:bytevector
+                                |immutable-string
+                                |list
+                                |multibyte
+                                |number
+                                |symbol
+                                |utf(?:16|32|8))
+                            |append
+                            |c(?:i(?:-hash|<(?:=\?|\?)|=\?|>(?:=\?|\?))
+                                |opy!?)
+                            |downcase
+                            |f(?:ill!|o(?:ldcase|r-each))
+                            |hash
+                            |length
+                            |normalize-nf(?:c|d|k(?:c|d))
+                            |ref
+                            |set!
+                            |t(?:itlecase|runcate!)
+                            |upcase)
+                        |<(?:=\?|\?)
+                        |=\?
+                        |>(?:=\?|\?)
+                        |\?)?
+                   |p-fasl-file))
+          |u(?:b(?:1
+                  |s(?:et-mode|t(?:!|q!?|ring(?:-fill!)?|v!?)?)
+                  |tract-duration!?)
+              |ppress-greeting)
+          |y(?:mbol(?:-(?:>string
+                         |hash(?:table(?:-(?:c(?:ell|ontains\?)
+                                            |delete!
+                                            |ref
+                                            |set!
+                                            |update!)
+                                        |\?))?)
+                     |=\?
+                     |\?)
+              |ntax-(?:>(?:annotation|datum|list|vector)
+                      |error
+                      |object->datum
+                      |violation(?:-(?:form|subform)|\?)?)
+              |stem))
+      |t(?:anh?
+          |extual-port(?:-(?:input-(?:buffer|count|index|size)
+                            |output-(?:buffer|count|index|size))
+                        |\?)
+          |hread(?:-condition\?|\?|ed\?)
+          |ime(?:-(?:difference!?|nanosecond|second|type|utc->date)
+                |<(?:=\?|\?)
+                |=\?
+                |>(?:=\?|\?)
+                |\?
+                |r-interrupt-handler)
+          |op-level-(?:bound\?|mutable\?|syntax(?:\?)?|value)
+          |r(?:a(?:ce-(?:output-port|print)
+                  |nsc(?:ode(?:d-port
+                              |r(?:-(?:codec
+                                      |e(?:ol-style|rror-handling-mode))
+                                  |\?))
+                        |ript-(?:cafe|o(?:ff|n))))
+              |uncate(?:-(?:file|port))?))
+      |u(?:8-list->bytevector
+          |int-list->bytevector
+          |n(?:box
+              |defined-v(?:ariable-warnings|iolation\?)
+              |get-(?:char|u8)
+              |lock-object
+              |re(?:ad-char|gister-guardian))
+          |tf(?:-(?:16(?:-codec|be-codec|le-codec)|8-codec)
+               |16->string
+               |32->string
+               |8->string))
+      |v(?:alues
+          |e(?:ctor(?:-(?:>(?:immutable-vector|list)
+                         |c(?:as!|opy)
+                         |f(?:ill!|or-each)
+                         |length
+                         |map
+                         |ref
+                         |s(?:et(?:!|-fixnum!)|ort!?))
+                     |\?)?
+              |rify-loadability)
+          |i(?:olation\?
+              |rtual-register(?:-count)?
+              |sit(?:-compiled-from-port)?)
+          |oid)
+      |w(?:a(?:iter-(?:prompt-(?:and-read|string)|write)|rning(?:\?|f)?)
+          |eak-(?:cons|pair\?)
+          |ho-condition\?
+          |ith-(?:cost-center
+                 |exception-handler
+                 |input-from-(?:file|string)
+                 |output-to-(?:file|string)
+                 |profile-tracker
+                 |source-path)
+          |rite(?:-char)?)
+      |zero\?)

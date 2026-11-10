@@ -17,6 +17,7 @@ use typst::foundations::Str;
 mod assets;
 mod builtin;
 mod code_render;
+mod code_syntaxes;
 mod code_themes;
 mod datalog;
 pub mod date;

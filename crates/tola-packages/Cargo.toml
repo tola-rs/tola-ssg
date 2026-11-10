@@ -19,6 +19,7 @@ serde_json = { version = "1.0.151", features = ["preserve_order"] }
 thiserror = "2.0.20"
 tola-address.workspace = true
 tola-datalog.workspace = true
+tola-highlight.workspace = true
 tola-slugify.workspace = true
 tola-icons.workspace = true
 tola-image.workspace = true

@@ -35,3 +35,7 @@ before Typst highlights the block, and `dark-theme` adds the appearance for the 
 Every theme, its exact upstream revision, and a verbatim snapshot of its licence are recorded in
 [`licenses/README.md`](licenses/README.md), which ships beside release archives as
 `PROVENANCE-TOLA-PACKAGES.md`.
+
+`@tola/code` also exposes extra syntax definitions through `code-syntaxes`. Pass them to
+`raw.syntaxes` before writing a code block. For aliases of built-in syntaxes, use
+`code-language` when setting the language of a programmatically constructed raw block.

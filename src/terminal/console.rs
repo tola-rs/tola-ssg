@@ -224,12 +224,17 @@ impl Terminal {
         self.sink.write_stdout_line(bytes.as_ref())
     }
 
-    /// Write styled text to stdout under this invocation's stdout colour decision.
+    /// Write source text to stdout under this invocation's stdout colour decision.
     ///
     /// Paging stays with [`Terminal::write_documentation`]: text a command prints as part of its
     /// own output must not open a pager.
-    pub(crate) fn write_stdout_styled(&self, text: &text::StyledText) -> anyhow::Result<()> {
-        let rendered = text.paint_all(self.stdout_use_color);
+    pub(crate) fn write_stdout_code(&self, source: &str, language: &str) -> anyhow::Result<()> {
+        if !self.stdout_use_color {
+            return self.write_stdout(source);
+        }
+        let code = tola_highlight::highlight(source, language, tola_highlight::ThemeChoice::Dark);
+        let mut rendered = String::with_capacity(source.len());
+        code.paint(0..source.len(), &mut rendered);
         self.sink.write_stdout(rendered.as_bytes())
     }
 

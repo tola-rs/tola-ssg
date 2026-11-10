@@ -36,25 +36,26 @@ impl BoolWriter {
         if self.range >= 128 {
             return;
         }
-        // One shift covers the common 64..=127 range.
-        self.shift_one();
-        while self.range < 128 {
-            self.shift_one();
-        }
+        self.normalize();
     }
 
     #[inline]
-    fn shift_one(&mut self) {
-        self.range <<= 1;
-        if self.bottom & (1 << 31) != 0 {
-            self.propagate_carry();
+    fn normalize(&mut self) {
+        let shift = self.range.leading_zeros() - (u32::BITS - u8::BITS);
+        self.range <<= shift;
+        let before_byte = shift.min(self.bit_count as u32);
+        // Each bit shifted out before the next byte carries one into the emitted bytes.
+        let carries = self.bottom >> (u32::BITS - before_byte);
+        if carries != 0 {
+            self.propagate_carry(carries.count_ones() as u8);
         }
-        self.bottom <<= 1;
-        self.bit_count -= 1;
-        if self.bit_count == 0 {
+        self.bottom <<= before_byte;
+        self.bit_count -= shift as i32;
+        if self.bit_count <= 0 {
             self.output.push((self.bottom >> 24) as u8);
-            self.bottom &= (1 << 24) - 1;
-            self.bit_count = 8;
+            // At most six shifts remain, so the retained 24 bits cannot carry again.
+            self.bottom = (self.bottom & 0x00ff_ffff) << (shift - before_byte);
+            self.bit_count += 8;
         }
     }
 
@@ -65,29 +66,12 @@ impl BoolWriter {
         }
     }
 
-    /// Write one leaf of a VP8 tree, starting at `start` as the token coder does after a zero.
-    pub(crate) fn write_tree_from(
-        &mut self,
-        tree: &[i8],
-        probabilities: &[u8],
-        value: u8,
-        start: usize,
-    ) {
-        let mut path = [false; 8];
-        let len = path_to(tree, start, value, &mut path, 0).expect("the value must be a tree leaf");
-        let mut node = start;
-        for branch in path.into_iter().take(len) {
-            self.write_bool(probabilities[node >> 1], branch);
-            node = tree[node + usize::from(branch)] as usize;
-        }
-    }
-
     /// Flush the final interval and return the partition bytes.
     pub(crate) fn finish(mut self) -> Vec<u8> {
         let mut remaining = self.bit_count;
         let mut value = self.bottom;
         if remaining > 0 && value & (1_u32 << (32 - remaining)) != 0 {
-            self.propagate_carry();
+            self.propagate_carry(1);
         }
         value <<= (remaining & 7) as u32;
         remaining >>= 3;
@@ -104,14 +88,14 @@ impl BoolWriter {
 
     /// Propagate a carry into the bytes already written.
     #[cold]
-    fn propagate_carry(&mut self) {
+    fn propagate_carry(&mut self, mut carry: u8) {
         for byte in self.output.iter_mut().rev() {
-            if *byte == u8::MAX {
-                *byte = 0;
-            } else {
-                *byte += 1;
+            let (next, overflow) = byte.overflowing_add(carry);
+            *byte = next;
+            if !overflow {
                 return;
             }
+            carry = 1;
         }
         panic!("bool-writer carry escaped its partition");
     }
@@ -148,12 +132,13 @@ impl LengthWriter {
         } else {
             self.range = split;
         }
-        while self.range < 128 {
-            self.range <<= 1;
-            self.bit_count -= 1;
-            if self.bit_count == 0 {
+        if self.range < 128 {
+            let shift = self.range.leading_zeros() - (u32::BITS - u8::BITS);
+            self.range <<= shift;
+            self.bit_count -= shift as i32;
+            if self.bit_count <= 0 {
                 self.written += 1;
-                self.bit_count = 8;
+                self.bit_count += 8;
             }
         }
     }
@@ -165,6 +150,7 @@ impl LengthWriter {
 }
 
 /// Find the branches from `node` to the leaf carrying `value`.
+#[cfg(test)]
 pub(crate) fn tree_path(
     tree: &[i8],
     node: usize,
@@ -201,6 +187,7 @@ pub(crate) const fn tree_paths<const N: usize>(tree: &[i8], start: usize) -> [(u
     paths
 }
 
+#[cfg(test)]
 fn path_to(
     tree: &[i8],
     node: usize,
@@ -247,9 +234,11 @@ mod tests {
             for seed in 0..4 {
                 let mut state = (u64::from(probability) << 32) | seed;
                 let mut writer = BoolWriter::new();
+                let mut reference = BoolWriter::new();
                 let mut length = LengthWriter::new();
                 for step in 0..=512 {
                     let value = splitmix(&mut state) & 1 != 0;
+                    write_one_shift_at_a_time(&mut reference, probability, value);
                     assert_length_tracks(
                         &mut writer,
                         &mut length,
@@ -259,9 +248,15 @@ mod tests {
                         "random bits",
                     );
                 }
+                let bytes = writer.finish();
                 assert_eq!(
                     length.finish(),
-                    writer.finish().len(),
+                    bytes.len(),
+                    "probability {probability}, seed {seed}"
+                );
+                assert_eq!(
+                    reference.finish(),
+                    bytes,
                     "probability {probability}, seed {seed}"
                 );
             }
@@ -271,19 +266,25 @@ mod tests {
         for count in [1, 7, 8, 9, 23, 24, 25, 100, 1_000] {
             let mut state = count as u64;
             let mut writer = BoolWriter::new();
+            let mut reference = BoolWriter::new();
             let mut length = LengthWriter::new();
             for step in 0..count {
-                let value = splitmix(&mut state) & 1 != 0;
+                let bits = splitmix(&mut state);
+                let probability = (bits as u8).max(1);
+                let value = bits & 256 != 0;
+                write_one_shift_at_a_time(&mut reference, probability, value);
                 assert_length_tracks(
                     &mut writer,
                     &mut length,
-                    128,
+                    probability,
                     value,
                     step,
                     "finished stream",
                 );
             }
-            assert_eq!(length.finish(), writer.finish().len(), "count {count}");
+            let bytes = writer.finish();
+            assert_eq!(length.finish(), bytes.len(), "count {count}");
+            assert_eq!(reference.finish(), bytes, "count {count}");
         }
 
         // A literal, written as eight equiprobable bits.
@@ -298,6 +299,29 @@ mod tests {
             }
         }
         assert_eq!(length.finish(), writer.finish().len());
+    }
+
+    fn write_one_shift_at_a_time(writer: &mut BoolWriter, probability: u8, value: bool) {
+        let split = 1 + (((writer.range - 1) * u32::from(probability)) >> 8);
+        if value {
+            writer.bottom = writer.bottom.wrapping_add(split);
+            writer.range -= split;
+        } else {
+            writer.range = split;
+        }
+        while writer.range < 128 {
+            writer.range <<= 1;
+            if writer.bottom & (1 << 31) != 0 {
+                writer.propagate_carry(1);
+            }
+            writer.bottom <<= 1;
+            writer.bit_count -= 1;
+            if writer.bit_count == 0 {
+                writer.output.push((writer.bottom >> 24) as u8);
+                writer.bottom &= 0x00ff_ffff;
+                writer.bit_count = 8;
+            }
+        }
     }
 
     /// A pending-byte write still costs the four bytes the writer holds.

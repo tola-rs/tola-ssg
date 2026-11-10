@@ -1,104 +1,128 @@
 //! VP8 coefficient quantization minimizing transform distortion plus token rate.
 
 use std::cell::Cell;
+use std::sync::Arc;
 
 use crate::TrellisMode;
-use crate::quantize::Factors;
-use crate::token::{COEFF_BANDS, CoefficientPlane, TokenCosts, ZIGZAG};
+use crate::quantize::{Factors, RECIPROCAL_SHIFT, reciprocal};
+use crate::token::{
+    BANDS, BLOCK_COEFFICIENTS, COEFF_BANDS, CONTEXTS, CoefficientPlane, MAGNITUDES, TOKEN_END,
+    TOKENS, TokenCosts, ZIGZAG, token_for_magnitude,
+};
 
 const CACHED_COEFFICIENTS: usize = 128;
-const EDGE_CELLS: usize = 4 * 8 * CACHED_COEFFICIENTS;
+const EDGE_CELLS: usize = CoefficientPlane::ALL.len() * BANDS * CACHED_COEFFICIENTS;
 
-/// One plane's token rates at one scan position, scaled by the plane's lambda.
-#[derive(Clone, Copy)]
+const TOKEN_OF: [u8; MAGNITUDES + 1] = {
+    let mut tokens = [0; MAGNITUDES + 1];
+    let mut magnitude = 0;
+    while magnitude < tokens.len() {
+        tokens[magnitude] = token_for_magnitude(magnitude as u16);
+        magnitude += 1;
+    }
+    tokens
+};
+
+type MagnitudeRates = [u32; MAGNITUDES + 1];
+
+pub(crate) const fn restricted_scratch_bytes(strips: u64) -> u64 {
+    strips * size_of::<Quantizer>() as u64
+        + (size_of::<FrameRates>() + 2 * size_of::<MagnitudeRates>()) as u64
+}
+
+/// The cost of each branch path from one band and context, scaled by lambda.
+struct BandRates {
+    root: u32,
+    tokens: [u32; TOKENS],
+}
+
+/// Small levels and the EOB token are read directly by both searches.
+#[derive(Default)]
 struct PositionRates {
-    end: [u32; 3],
-    zero: [u32; 3],
-    one: [u32; 3],
+    end: [u32; CONTEXTS],
+    zero: [u32; CONTEXTS],
+    one: [u32; CONTEXTS],
+    omitted_root: u32,
     edge_base: usize,
 }
 
 struct PlaneRates {
-    positions: [PositionRates; 17],
-    omitted_root: [u32; 16],
-    token_rates: [[u32; 12]; 48],
-    root_rates: [u32; 48],
-    magnitude_rates: Box<[u32; 2049]>,
-    token_of: Box<[u8; 2049]>,
+    positions: [PositionRates; BLOCK_COEFFICIENTS + 1],
+    bands: [[BandRates; CONTEXTS]; BANDS],
+    dc: i32,
+    ac: i32,
+    dc_reciprocal: u32,
+    ac_reciprocal: u32,
+    lambda: u64,
 }
 
 impl PlaneRates {
-    fn new(plane: CoefficientPlane, lambda: u64, costs: &TokenCosts) -> Self {
+    fn new(
+        plane: CoefficientPlane,
+        dc: i32,
+        ac: i32,
+        lambda: u64,
+        sign_rate: u32,
+        costs: &TokenCosts,
+    ) -> Self {
+        let scale = |rate| (lambda * u64::from(rate)) as u32;
+        let bands = std::array::from_fn(|band| {
+            std::array::from_fn(|context| {
+                let (root, tokens) = costs.band(plane, band, context);
+                BandRates {
+                    root: scale(root),
+                    tokens: tokens.map(scale),
+                }
+            })
+        });
         let first = plane.first_position();
         let positions = std::array::from_fn(|position| {
-            if position == 16 {
-                return PositionRates {
-                    end: [0; 3],
-                    zero: [0; 3],
-                    one: [0; 3],
-                    edge_base: 0,
-                };
-            }
-            // Band zero is the DC position; every other band shares the plane's AC factor.
-            let mut rates = PositionRates {
-                end: [0; 3],
-                zero: [0; 3],
-                one: [0; 3],
-                edge_base: (plane.index() * 8 + COEFF_BANDS[position]) * CACHED_COEFFICIENTS,
+            let Some(&band) = COEFF_BANDS.get(position) else {
+                // Ending after the final coefficient emits no EOB token.
+                return PositionRates::default();
             };
-            for context in 0..3 {
-                let previous_was_zero = context == 0 && position != first;
-                rates.end[context] =
-                    (lambda * u64::from(costs.end(plane, position, context))) as u32;
-                rates.zero[context] = (lambda
-                    * u64::from(costs.coefficient(plane, position, context, previous_was_zero, 0)))
-                    as u32;
-                rates.one[context] = (lambda
-                    * u64::from(costs.coefficient(plane, position, context, previous_was_zero, 1)))
-                    as u32;
+            let omitted_root = if position == first {
+                0
+            } else {
+                bands[band][0].root
+            };
+            let mut rates = PositionRates {
+                omitted_root,
+                // Band zero is DC; every other band shares the plane's AC factor.
+                edge_base: (plane.index() * BANDS + band) * CACHED_COEFFICIENTS,
+                ..PositionRates::default()
+            };
+            for (context, band_rates) in bands[band].iter().enumerate() {
+                let root = if context == 0 { omitted_root } else { 0 };
+                rates.end[context] = band_rates.tokens[usize::from(TOKEN_END)];
+                rates.zero[context] = band_rates.tokens[0] - root;
+                rates.one[context] = band_rates.tokens[1] - root + sign_rate;
             }
             rates
         });
-        let omitted_root = std::array::from_fn(|position| {
-            if position == first {
-                0
-            } else {
-                (lambda
-                    * u64::from(
-                        costs.token(plane, position, 0, false, 2)
-                            - costs.token(plane, position, 0, true, 2),
-                    )) as u32
-            }
-        });
-        let mut token_rates = [[0u32; 12]; 48];
-        let mut root_rates = [0u32; 48];
-        for position in 0..16 {
-            for context in 0..3 {
-                let index = position * 3 + context;
-                for (token, rate) in token_rates[index].iter_mut().enumerate() {
-                    *rate = (lambda
-                        * u64::from(costs.token(plane, position, context, false, token as u8)))
-                        as u32;
-                }
-                root_rates[index] =
-                    (lambda * u64::from(costs.root(plane, position, context))) as u32;
-            }
-        }
-        let magnitude_rates = Box::new(std::array::from_fn(|magnitude| {
-            (lambda * u64::from(costs.magnitude_cost((magnitude as u16).min(2047)))) as u32
-        }));
-        let token_of = Box::new(std::array::from_fn(|level| {
-            crate::token::token_for_level(level as u16)
-        }));
         Self {
             positions,
-            omitted_root,
-            token_rates,
-            root_rates,
-            magnitude_rates,
-            token_of,
+            bands,
+            dc,
+            ac,
+            dc_reciprocal: reciprocal(dc) as u32,
+            ac_reciprocal: reciprocal(ac) as u32,
+            lambda,
         }
     }
+}
+
+struct FrameRates {
+    planes: [PlaneRates; CoefficientPlane::ALL.len()],
+    luma_magnitudes: Box<MagnitudeRates>,
+    chroma_magnitudes: Box<MagnitudeRates>,
+}
+
+fn magnitude_rates(costs: &TokenCosts, lambda: u64) -> Box<MagnitudeRates> {
+    Box::new(std::array::from_fn(|magnitude| {
+        let magnitude = magnitude.min(MAGNITUDES - 1) as u16;
+        (lambda * u64::from(costs.magnitude_cost(magnitude))) as u32
+    }))
 }
 
 #[derive(Clone, Copy)]
@@ -128,11 +152,7 @@ impl State {
 }
 
 pub(crate) struct Quantizer {
-    factors: Factors,
-    luma_lambda: u64,
-    chroma_lambda: u64,
-    costs: TokenCosts,
-    rates: [PlaneRates; 4],
+    rates: Arc<FrameRates>,
     edges: Box<[Cell<ContextTwoEdges>]>,
     mode: TrellisMode,
 }
@@ -145,26 +165,52 @@ impl Quantizer {
         costs: &TokenCosts,
         mode: TrellisMode,
     ) -> Self {
-        // One analysis frame owns at most 4096 32-byte cells (128 KiB); no cell crosses models.
-        let count = if luma_lambda == 0 && chroma_lambda == 0 {
-            0
-        } else {
+        // Exact strips share frame rates; each strip caches up to 128 KiB of edges.
+        let count = if mode == TrellisMode::Exact && (luma_lambda != 0 || chroma_lambda != 0) {
             EDGE_CELLS
+        } else {
+            0
         };
-        let rates = [
-            PlaneRates::new(CoefficientPlane::LumaAc, luma_lambda, costs),
-            PlaneRates::new(CoefficientPlane::LumaDc, luma_lambda, costs),
-            PlaneRates::new(CoefficientPlane::Chroma, chroma_lambda, costs),
-            PlaneRates::new(CoefficientPlane::Luma, luma_lambda, costs),
-        ];
+        let luma_magnitudes = magnitude_rates(costs, luma_lambda);
+        let chroma_magnitudes = magnitude_rates(costs, chroma_lambda);
+        let planes = CoefficientPlane::ALL.map(|plane| {
+            let (dc, ac, lambda, sign_rate) = match plane {
+                CoefficientPlane::LumaAc | CoefficientPlane::Luma => {
+                    (factors.y_dc, factors.y_ac, luma_lambda, luma_magnitudes[1])
+                }
+                CoefficientPlane::LumaDc => (
+                    factors.y2_dc,
+                    factors.y2_ac,
+                    luma_lambda,
+                    luma_magnitudes[1],
+                ),
+                CoefficientPlane::Chroma => (
+                    factors.chroma_dc,
+                    factors.chroma_ac,
+                    chroma_lambda,
+                    chroma_magnitudes[1],
+                ),
+            };
+            PlaneRates::new(plane, dc, ac, lambda, sign_rate, costs)
+        });
+        let rates = Arc::new(FrameRates {
+            planes,
+            luma_magnitudes,
+            chroma_magnitudes,
+        });
         Self {
-            factors,
-            luma_lambda,
-            chroma_lambda,
-            costs: costs.clone(),
             rates,
             edges: vec![Cell::new(ContextTwoEdges::EMPTY); count].into_boxed_slice(),
             mode,
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn fork(&self) -> Self {
+        Self {
+            rates: Arc::clone(&self.rates),
+            edges: vec![Cell::new(ContextTwoEdges::EMPTY); self.edges.len()].into_boxed_slice(),
+            mode: self.mode,
         }
     }
 
@@ -174,30 +220,15 @@ impl Quantizer {
         plane: CoefficientPlane,
         first_context: usize,
     ) -> [i16; 16] {
-        let (dc, ac, lambda) = match plane {
-            CoefficientPlane::LumaAc | CoefficientPlane::Luma => {
-                (self.factors.y_dc, self.factors.y_ac, self.luma_lambda)
-            }
-            CoefficientPlane::LumaDc => (self.factors.y2_dc, self.factors.y2_ac, self.luma_lambda),
-            CoefficientPlane::Chroma => (
-                self.factors.chroma_dc,
-                self.factors.chroma_ac,
-                self.chroma_lambda,
-            ),
-        };
-        let rates = match plane {
-            CoefficientPlane::LumaAc => &self.rates[0],
-            CoefficientPlane::LumaDc => &self.rates[1],
-            CoefficientPlane::Chroma => &self.rates[2],
-            CoefficientPlane::Luma => &self.rates[3],
+        let magnitudes = if matches!(plane, CoefficientPlane::Chroma) {
+            &self.rates.chroma_magnitudes
+        } else {
+            &self.rates.luma_magnitudes
         };
         BlockQuantizer {
-            dc,
-            ac,
             plane,
-            lambda,
-            costs: &self.costs,
-            rates,
+            rates: &self.rates.planes[plane.index()],
+            magnitudes,
             edges: &self.edges,
             mode: self.mode,
         }
@@ -206,12 +237,9 @@ impl Quantizer {
 }
 
 struct BlockQuantizer<'a> {
-    dc: i32,
-    ac: i32,
     plane: CoefficientPlane,
-    lambda: u64,
-    costs: &'a TokenCosts,
     rates: &'a PlaneRates,
+    magnitudes: &'a MagnitudeRates,
     edges: &'a [Cell<ContextTwoEdges>],
     mode: TrellisMode,
 }
@@ -219,16 +247,15 @@ struct BlockQuantizer<'a> {
 impl BlockQuantizer<'_> {
     fn quantize(&self, coefficients: &[i32; 16], first_context: usize) -> [i16; 16] {
         let first = self.plane.first_position();
-        if self.lambda == 0 {
-            let mut levels = crate::quantize::quantize_block(coefficients, self.dc, self.ac);
+        if self.rates.lambda == 0 {
+            let mut levels =
+                crate::quantize::quantize_block(coefficients, self.rates.dc, self.rates.ac);
             if first == 1 {
                 levels[0] = 0;
             }
             return levels;
         }
         let weight = self.plane.distortion_weight();
-        // Restricted mode has its own exact zero test in the forward DP scan; the
-        // zero-is-nearest maximum scan below only serves the exact DP.
         if matches!(self.mode, TrellisMode::Restricted) {
             return self.restricted(coefficients, first, first_context, weight);
         }
@@ -240,10 +267,10 @@ impl BlockQuantizer<'_> {
         if first == 0 {
             let coefficient = coefficients[ZIGZAG[0]].unsigned_abs();
             let twice = 2 * coefficient;
-            if twice > self.dc as u32 {
+            if twice > self.rates.dc as u32 {
                 zero_is_nearest = false;
             } else {
-                let factor = self.dc as u64;
+                let factor = self.rates.dc as u64;
                 minimum_nonzero_penalty = factor * (factor - u64::from(twice)) * weight;
             }
         }
@@ -252,17 +279,16 @@ impl BlockQuantizer<'_> {
             maximum = maximum.max(coefficients[ZIGZAG[position]].unsigned_abs());
         }
         let twice = 2 * maximum;
-        if twice > self.ac as u32 {
+        if twice > self.rates.ac as u32 {
             zero_is_nearest = false;
         } else {
-            let factor = self.ac as u64;
+            let factor = self.rates.ac as u64;
             minimum_nonzero_penalty =
                 minimum_nonzero_penalty.min(factor * (factor - u64::from(twice)) * weight);
         }
         // Any nonempty path adds at least this distortion, even if every token were free.
         if zero_is_nearest
-            && minimum_nonzero_penalty
-                >= self.lambda * u64::from(self.costs.end(self.plane, first, first_context))
+            && minimum_nonzero_penalty >= u64::from(self.rates.positions[first].end[first_context])
         {
             return [0; 16];
         }
@@ -276,54 +302,49 @@ impl BlockQuantizer<'_> {
         first_context: usize,
         weight: u64,
     ) -> [i16; 16] {
-        let mut choices = [[-1i16; 3]; 16];
-        let mut suffix = [u64::MAX, 0, 0];
-        let mut tail_error = 0u64;
+        let mut choices = [[-1i16; CONTEXTS]; BLOCK_COEFFICIENTS];
+        let mut tail_error;
+        let last = BLOCK_COEFFICIENTS - 1;
         // Position 15 has no suffix states yet; peel it so later positions can skip the
         // unreachable-state tests and the context-zero EOB test.
-        {
-            let position = 15;
+        let mut suffix = {
+            let position = last;
             let raster = ZIGZAG[position];
-            let factor = self.ac;
+            let factor = self.rates.ac;
             let coefficient = coefficients[raster].unsigned_abs();
             let rates = &self.rates.positions[position];
             let nonunit = self.context_two_edges(position, rates.edge_base, coefficient);
             let error = coefficient as i32;
-            let own_error = (error * error) as u64 * weight;
-            tail_error += own_error;
+            tail_error = (error * error) as u64 * weight;
             let error = error - factor;
             let one_error = (error * error) as u64 * weight;
-            let one_continuation = one_error;
-            let omitted_root = self.rates.omitted_root[position];
-            let mut prefix = [u64::MAX; 3];
-            for context in 0..3 {
-                if context != 0 || position == first {
+            let omitted_root = rates.omitted_root;
+            let mut prefix = [u64::MAX; CONTEXTS];
+            for context in 0..CONTEXTS {
+                if context != 0 {
                     prefix[context] = tail_error + u64::from(rates.end[context]);
                 }
-                if one_continuation != u64::MAX {
-                    let score = one_continuation + u64::from(rates.one[context]);
-                    if score < prefix[context] {
-                        prefix[context] = score;
-                        choices[position][context] = 1;
-                    }
+                let score = one_error + u64::from(rates.one[context]);
+                if score < prefix[context] {
+                    prefix[context] = score;
+                    choices[position][context] = 1;
                 }
                 let score = nonunit.scores[context]
                     - if context == 0 {
                         u64::from(omitted_root)
                     } else {
                         0
-                    }
-                    + suffix[2];
+                    };
                 if score < prefix[context] {
                     prefix[context] = score;
                     choices[position][context] = nonunit.levels[context] as i16;
                 }
             }
-            suffix = prefix;
-        }
-        for position in (first..15).rev() {
+            prefix
+        };
+        for position in (first..last).rev() {
             let raster = ZIGZAG[position];
-            let factor = if position == 0 { self.dc } else { self.ac };
+            let factor = self.factor(position);
             let coefficient = coefficients[raster].unsigned_abs();
             let rates = &self.rates.positions[position];
             let nonunit = self.context_two_edges(position, rates.edge_base, coefficient);
@@ -334,7 +355,7 @@ impl BlockQuantizer<'_> {
             let one_error = (error * error) as u64 * weight;
             let zero_continuation = own_error + suffix[0];
             let one_continuation = one_error + suffix[1];
-            let omitted_root = self.rates.omitted_root[position];
+            let omitted_root = rates.omitted_root;
             let mut prefix = [u64::MAX; 3];
             {
                 let zero = zero_continuation + u64::from(rates.zero[0]);
@@ -382,7 +403,7 @@ impl BlockQuantizer<'_> {
         }
         let mut levels = [0; 16];
         let mut magnitude = choices[first][first_context];
-        for position in first..16 {
+        for position in first..BLOCK_COEFFICIENTS {
             if magnitude < 0 {
                 break;
             }
@@ -392,7 +413,7 @@ impl BlockQuantizer<'_> {
             } else {
                 magnitude
             };
-            if position != 15 {
+            if position != last {
                 magnitude = choices[position + 1][usize::from((magnitude as u16).min(2))];
             }
         }
@@ -400,14 +421,26 @@ impl BlockQuantizer<'_> {
     }
 
     fn factor(&self, position: usize) -> i32 {
-        if position == 0 { self.dc } else { self.ac }
+        if position == 0 {
+            self.rates.dc
+        } else {
+            self.rates.ac
+        }
     }
 
     /// libwebp-style candidate set: the neutral level, plus one level above it only while
     /// that level is still within the half-biased nearest quantizer.
-    fn candidates(&self, magnitude: u32, factor: i32) -> ([u16; 2], usize) {
+    fn candidates(&self, magnitude: u32, factor: i32, position: usize) -> ([u16; 2], usize) {
         let factor = factor as u32;
-        let quotient = magnitude / factor;
+        let reciprocal = if position == 0 {
+            self.rates.dc_reciprocal
+        } else {
+            self.rates.ac_reciprocal
+        };
+        // As in the SIMD quantizer, a VP8 transform magnitude fits below the reciprocal scale.
+        // The estimate can be one below the exact quotient, so correct it from the remainder.
+        let estimate = (magnitude * reciprocal) >> RECIPROCAL_SHIFT;
+        let quotient = estimate + u32::from(magnitude - estimate * factor >= factor);
         let remainder = magnitude - quotient * factor;
         let neutral = quotient.min(2047) as u16;
         let nearest = if quotient > 2047 {
@@ -433,17 +466,11 @@ impl BlockQuantizer<'_> {
             0 => u64::from(self.rates.positions[position].zero[context]),
             1 => u64::from(self.rates.positions[position].one[context]),
             _ => {
-                let index = position * 3 + context;
-                let token = usize::from(self.rates.token_of[usize::from(magnitude)]);
-                u64::from(
-                    self.rates.token_rates[index][token]
-                        - if previous_was_zero {
-                            self.rates.root_rates[index]
-                        } else {
-                            0
-                        }
-                        + self.rates.magnitude_rates[usize::from(magnitude)],
-                )
+                let band = &self.rates.bands[COEFF_BANDS[position]][context];
+                let magnitude = usize::from(magnitude);
+                let token = usize::from(TOKEN_OF[magnitude]);
+                let root = if previous_was_zero { band.root } else { 0 };
+                u64::from(band.tokens[token] - root) + u64::from(self.magnitudes[magnitude])
             }
         }
     }
@@ -461,21 +488,20 @@ impl BlockQuantizer<'_> {
         first_context: usize,
         weight: u64,
     ) -> [i16; 16] {
-        // One reverse scan supplies the zero tail and the last position whose candidate
-        // set can be non-zero; a missing last is exactly the all-zero block.
-        let mut zero_tail = [0u64; 17];
-        let mut last = None;
-        for position in (first..16).rev() {
+        let Some(last) = (first..16).rev().find(|&position| {
             let magnitude = coefficients[ZIGZAG[position]].unsigned_abs();
-            let error = i64::from(magnitude);
-            zero_tail[position] = zero_tail[position + 1] + (error * error) as u64 * weight;
-            if last.is_none() && 2 * u64::from(magnitude) >= self.factor(position) as u64 {
-                last = Some(position);
-            }
-        }
-        let Some(last) = last else {
+            magnitude >= (self.factor(position) as u32).div_ceil(2)
+        }) else {
             return [0; 16];
         };
+        // All candidates quantize the positions after last to zero. Their distortion is
+        // common to every candidate, so the comparison starts with a zero tail there.
+        let mut zero_tail = [0u64; 17];
+        for position in (first..=last).rev() {
+            let coefficient = i64::from(coefficients[ZIGZAG[position]]);
+            zero_tail[position] =
+                zero_tail[position + 1] + (coefficient * coefficient) as u64 * weight;
+        }
         let mut back_prev = [[0u8; 2]; 16];
         let mut back_level = [[0u16; 2]; 16];
         let mut previous = [State::DEAD; 2];
@@ -488,7 +514,7 @@ impl BlockQuantizer<'_> {
             let raster = ZIGZAG[position];
             let magnitude = coefficients[raster].unsigned_abs();
             let factor = self.factor(position);
-            let (candidates, count) = self.candidates(magnitude, factor);
+            let (candidates, count) = self.candidates(magnitude, factor, position);
             for (index, &level) in candidates.iter().enumerate().take(count) {
                 let distortion = self.level_distortion(magnitude, level, factor, weight);
                 let context = usize::from(level.min(2));
@@ -561,30 +587,24 @@ impl BlockQuantizer<'_> {
     }
 
     fn uncached_context_two_edges(&self, position: usize, coefficient: u32) -> ContextTwoEdges {
-        let factor = if position == 0 { self.dc } else { self.ac };
+        let factor = self.factor(position);
         let weight = self.plane.distortion_weight();
         let nearest =
             ((2 * u64::from(coefficient) + factor as u64) / (2 * factor as u64)).min(2047) as u16;
         let mut edges = ContextTwoEdges::EMPTY;
+        let band = &self.rates.bands[COEFF_BANDS[position]];
         for (token, &(lower, upper)) in MAGNITUDE_RANGES.iter().enumerate().skip(2) {
             let closest = nearest.clamp(lower, upper);
             let error = i64::from(coefficient) - i64::from(closest) * i64::from(factor);
-            let bound = (error * error) as u64 * weight
-                + self.lambda * u64::from(self.costs.magnitude_cost(lower));
+            let bound =
+                (error * error) as u64 * weight + u64::from(self.magnitudes[usize::from(lower)]);
             if bound >= *edges.scores.iter().max().unwrap() {
                 continue;
             }
             let mut rates = [0; 3];
             let mut can_improve = false;
             for (context, rate) in rates.iter_mut().enumerate() {
-                *rate = self.lambda
-                    * u64::from(self.costs.token(
-                        self.plane,
-                        position,
-                        context,
-                        false,
-                        token as u8,
-                    ));
+                *rate = u64::from(band[context].tokens[token]);
                 can_improve |= bound + *rate < edges.scores[context];
             }
             if !can_improve {
@@ -597,8 +617,7 @@ impl BlockQuantizer<'_> {
                     coefficient,
                     factor,
                     weight,
-                    self.lambda,
-                    self.costs,
+                    self.magnitudes,
                     (lower, upper),
                     closest,
                 )
@@ -633,8 +652,7 @@ fn category_choice(
     coefficient: u32,
     factor: i32,
     weight: u64,
-    lambda: u64,
-    costs: &TokenCosts,
+    magnitudes: &MagnitudeRates,
     (lower, upper): (u16, u16),
     nearest: u16,
 ) -> (u16, u64) {
@@ -642,18 +660,16 @@ fn category_choice(
         let error = i64::from(coefficient) - i64::from(magnitude) * i64::from(factor);
         (error * error) as u64 * weight
     };
-    let mut best = (
-        nearest,
-        distortion(nearest) + lambda * u64::from(costs.magnitude_cost(nearest)),
-    );
+    let rate = |magnitude| u64::from(magnitudes[usize::from(magnitude)]);
+    let mut best = (nearest, distortion(nearest) + rate(nearest));
     // Every category extra-bit probability exceeds 128, so its all-zero offset is cheapest.
-    let minimum_rate = lambda * u64::from(costs.magnitude_cost(lower));
+    let minimum_rate = rate(lower);
     for magnitude in (lower..nearest).rev() {
         let error = distortion(magnitude);
         if error + minimum_rate >= best.1 {
             break;
         }
-        let score = error + lambda * u64::from(costs.magnitude_cost(magnitude));
+        let score = error + rate(magnitude);
         if score < best.1 {
             best = (magnitude, score);
         }
@@ -663,7 +679,7 @@ fn category_choice(
         if error + minimum_rate >= best.1 {
             break;
         }
-        let score = error + lambda * u64::from(costs.magnitude_cost(magnitude));
+        let score = error + rate(magnitude);
         if score < best.1 {
             best = (magnitude, score);
         }
@@ -684,14 +700,12 @@ mod tests {
         lambda: u64,
         costs: &TokenCosts,
     ) -> [i16; 16] {
-        let rates = PlaneRates::new(plane, lambda, costs);
+        let magnitudes = magnitude_rates(costs, lambda);
+        let rates = PlaneRates::new(plane, dc, ac, lambda, magnitudes[1], costs);
         BlockQuantizer {
-            dc,
-            ac,
             plane,
-            lambda,
-            costs,
             rates: &rates,
+            magnitudes: &magnitudes,
             edges: &[],
             mode: TrellisMode::Exact,
         }

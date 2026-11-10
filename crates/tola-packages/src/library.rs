@@ -166,6 +166,10 @@ pub(crate) fn native_scope() -> Scope {
         ("asset-url", super::assets::tola_asset_url::data()),
         ("render-code", super::code_render::tola_render_code::data()),
         (
+            "code-language",
+            super::code_syntaxes::tola_code_language::data(),
+        ),
+        (
             "code-stylesheet-url",
             super::assets::tola_code_stylesheet_url::data(),
         ),
@@ -175,6 +179,7 @@ pub(crate) fn native_scope() -> Scope {
     super::datalog::define(&mut host);
     // Theme keys spell the theme name; values are package-anchored paths to the theme files.
     host.define("code-themes", super::code_themes::themes_dict());
+    host.define("code-syntaxes", super::code_syntaxes::files());
     host.define("references", super::references::references_func());
     host
 }

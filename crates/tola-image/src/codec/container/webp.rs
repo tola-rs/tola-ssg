@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 
-use anyhow::{Context, Result, ensure};
+use crate::{ImageError, ImageResult};
 
 use super::super::{ContainerMetadata, SampleColor};
 use super::le32;
@@ -13,34 +13,40 @@ const DAMAGED: &str = "the WebP image is damaged or incomplete; re-export it";
 pub(in crate::codec) fn scan_webp<'a>(
     bytes: &'a [u8],
     cancellation: Option<&dyn Cancellation>,
-) -> Result<ContainerMetadata<'a>> {
-    ensure!(
-        bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP",
-        DAMAGED
-    );
-    ensure!(
-        u64::from(le32(&bytes[4..8])) + 8 == bytes.len() as u64,
-        DAMAGED
-    );
+) -> ImageResult<ContainerMetadata<'a>> {
+    if bytes.len() < 12 || &bytes[..4] != b"RIFF" || &bytes[8..12] != b"WEBP" {
+        return Err(ImageError::unreadable(DAMAGED));
+    }
+    if u64::from(le32(&bytes[4..8])) + 8 != bytes.len() as u64 {
+        return Err(ImageError::unreadable(DAMAGED));
+    }
     let mut metadata = ContainerMetadata::default();
     let mut profile = None;
     let mut profile_declared = false;
     let mut offset = 12usize;
     while offset < bytes.len() {
         ensure_active_if_present(cancellation)?;
-        let header = bytes.get(offset..offset + 8).context(DAMAGED)?;
+        let header = bytes
+            .get(offset..offset + 8)
+            .ok_or_else(|| ImageError::unreadable(DAMAGED))?;
         let length = le32(&header[4..8]) as usize;
         let end = offset
             .checked_add(8)
             .and_then(|start| start.checked_add(length))
-            .context(DAMAGED)?;
-        let padded_end = end.checked_add(length & 1).context(DAMAGED)?;
-        ensure!(padded_end <= bytes.len(), DAMAGED);
+            .ok_or_else(|| ImageError::unreadable(DAMAGED))?;
+        let padded_end = end
+            .checked_add(length & 1)
+            .ok_or_else(|| ImageError::unreadable(DAMAGED))?;
+        if padded_end > bytes.len() {
+            return Err(ImageError::unreadable(DAMAGED));
+        }
         let data = &bytes[offset + 8..end];
         match &header[..4] {
             b"VP8 " => metadata.is_lossy = true,
             b"VP8X" => {
-                ensure!(data.len() == 10, DAMAGED);
+                if data.len() != 10 {
+                    return Err(ImageError::unreadable(DAMAGED));
+                }
                 let width = 1 + u32::from_le_bytes([data[4], data[5], data[6], 0]);
                 let height = 1 + u32::from_le_bytes([data[7], data[8], data[9], 0]);
                 check_dimensions(width, height)?;
@@ -49,18 +55,20 @@ pub(in crate::codec) fn scan_webp<'a>(
             }
             b"ANIM" | b"ANMF" => metadata.is_animated = true,
             b"ICCP" => {
-                ensure!(
-                    profile.is_none(),
-                    "the WebP image has more than one color profile; re-export it with sRGB colors"
-                );
+                if profile.is_some() {
+                    return Err(ImageError::unreadable(
+                        "the WebP image has more than one color profile; re-export it with sRGB colors",
+                    ));
+                }
                 profile_declared = true;
                 profile = Some(data);
             }
             b"EXIF" => {
-                ensure!(
-                    metadata.exif.is_none(),
-                    "the WebP image has more than one EXIF block; re-export it"
-                );
+                if metadata.exif.is_some() {
+                    return Err(ImageError::unreadable(
+                        "the WebP image has more than one EXIF block; re-export it",
+                    ));
+                }
                 metadata.exif = Some(data);
             }
             _ => {}

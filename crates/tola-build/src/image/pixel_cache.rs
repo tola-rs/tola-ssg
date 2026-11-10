@@ -4,6 +4,7 @@
 //! outweighs hundreds of thumbnails, so a count would bound nothing. A plane larger than the
 //! limit is not retained at all, and the least recently used plane leaves first.
 
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use tola_image::{DecodedSource, PixelRecipe, ResampledPixels};
@@ -35,7 +36,7 @@ impl PixelCache {
         Self {
             retained: Mutex::new(Retained {
                 budget,
-                planes: Vec::new(),
+                planes: VecDeque::new(),
                 bytes: 0,
             }),
         }
@@ -46,7 +47,7 @@ struct Retained {
     /// The bytes this cache may hold.
     budget: usize,
     /// Least recently used first.
-    planes: Vec<RetainedPlane>,
+    planes: VecDeque<RetainedPlane>,
     bytes: usize,
 }
 
@@ -65,13 +66,11 @@ enum RetainedPlane {
 impl PixelCache {
     /// The retained decode of one source, when this process already decoded those bytes.
     pub(crate) fn decoded(&self, source: ContentDigest) -> Option<Arc<DecodedSource>> {
-        let mut retained = self.lock();
-        let index = retained.planes.iter().position(
-            |plane| matches!(plane, RetainedPlane::Decoded { source: key, .. } if *key == source),
-        )?;
-        retained.reuse(index, |plane| match plane {
-            RetainedPlane::Decoded { plane, .. } => Some(Arc::clone(plane)),
-            RetainedPlane::Resampled { .. } => None,
+        self.lock().reuse(|plane| match plane {
+            RetainedPlane::Decoded { source: key, plane } if *key == source => {
+                Some(Arc::clone(plane))
+            }
+            _ => None,
         })
     }
 
@@ -86,14 +85,13 @@ impl PixelCache {
         source: ContentDigest,
         pixels: PixelRecipe,
     ) -> Option<Arc<ResampledPixels>> {
-        let mut retained = self.lock();
-        let index = retained.planes.iter().position(|plane| {
-            matches!(plane, RetainedPlane::Resampled { source: key, pixels: held, .. }
-                if *key == source && *held == pixels)
-        })?;
-        retained.reuse(index, |plane| match plane {
-            RetainedPlane::Resampled { plane, .. } => Some(Arc::clone(plane)),
-            RetainedPlane::Decoded { .. } => None,
+        self.lock().reuse(|plane| match plane {
+            RetainedPlane::Resampled {
+                source: key,
+                pixels: held,
+                plane,
+            } if *key == source && *held == pixels => Some(Arc::clone(plane)),
+            _ => None,
         })
     }
 
@@ -113,25 +111,25 @@ impl PixelCache {
 
     fn retain(&self, plane: RetainedPlane) {
         let bytes = plane.bytes();
-        if bytes > LARGEST_RETAINED_BYTES {
+        let mut retained = self.lock();
+        if bytes > LARGEST_RETAINED_BYTES.min(retained.budget) {
             return;
         }
-        let mut retained = self.lock();
         let key = plane.identity();
         if let Some(index) = retained
             .planes
             .iter()
-            .position(|held| held.identity() == key)
+            .rposition(|held| held.identity() == key)
         {
-            let replaced = retained.planes.remove(index);
+            let replaced = retained.planes.remove(index).unwrap();
             retained.bytes -= replaced.bytes();
         }
-        retained.bytes += bytes;
-        retained.planes.push(plane);
-        while retained.bytes > retained.budget && retained.planes.len() > 1 {
-            let oldest = retained.planes.remove(0);
+        while retained.bytes > retained.budget - bytes {
+            let oldest = retained.planes.pop_front().unwrap();
             retained.bytes -= oldest.bytes();
         }
+        retained.bytes += bytes;
+        retained.planes.push_back(plane);
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Retained> {
@@ -142,12 +140,16 @@ impl PixelCache {
 }
 
 impl Retained {
-    /// Move the plane at `index` to the most recently used end and extract from it.
-    fn reuse<T>(&mut self, index: usize, extract: impl Fn(&RetainedPlane) -> T) -> T {
-        let plane = self.planes.remove(index);
-        let extracted = extract(&plane);
-        self.planes.push(plane);
-        extracted
+    fn reuse<T>(&mut self, extract: impl Fn(&RetainedPlane) -> Option<T>) -> Option<T> {
+        let (index, value) = self
+            .planes
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(index, plane)| extract(plane).map(|value| (index, value)))?;
+        let plane = self.planes.remove(index).unwrap();
+        self.planes.push_back(plane);
+        Some(value)
     }
 }
 
@@ -166,15 +168,10 @@ impl RetainedPlane {
         }
     }
 
-    /// What one plane costs the budget: the bytes it hands out, never the capacity its allocation
-    /// holds, so a plane with spare capacity is retained on the strength of what it publishes.
     fn bytes(&self) -> usize {
         match self {
-            Self::Decoded { plane, .. } => {
-                let metadata = plane.metadata();
-                metadata.width as usize * metadata.height as usize * 4
-            }
-            Self::Resampled { plane, .. } => plane.rgba().len(),
+            Self::Decoded { plane, .. } => plane.allocated_bytes(),
+            Self::Resampled { plane, .. } => plane.allocated_bytes(),
         }
     }
 }
@@ -253,6 +250,10 @@ mod tests {
     fn oversized_plane_is_not_retained() {
         let cache = PixelCache::default();
         cache.retain_decoded(source(1), decoded(4096, 4160));
+        assert!(cache.decoded(source(1)).is_none());
+
+        let cache = PixelCache::with_budget(plane_bytes(8, 8) - 1);
+        cache.retain_decoded(source(1), decoded(8, 8));
         assert!(cache.decoded(source(1)).is_none());
     }
 

@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail, ensure};
+use crate::{ImageError, ImageResult};
 
 use crate::{ImageFormat, ImageMetadata, check_dimensions};
 
@@ -7,23 +7,26 @@ pub(in crate::codec) fn looks_like_xml(bytes: &[u8]) -> bool {
     bytes.iter().find(|byte| !byte.is_ascii_whitespace()) == Some(&b'<')
 }
 
-pub(in crate::codec) fn inspect_svg(bytes: &[u8]) -> Result<ImageMetadata> {
-    let xml =
-        std::str::from_utf8(bytes).context("the SVG must be UTF-8 text; save the file as UTF-8")?;
-    let document =
-        roxmltree::Document::parse(xml).context("the SVG is not valid XML; fix the markup")?;
+pub(in crate::codec) fn inspect_svg(bytes: &[u8]) -> ImageResult<ImageMetadata> {
+    let xml = std::str::from_utf8(bytes).map_err(|error| {
+        ImageError::codec("the SVG must be UTF-8 text; save the file as UTF-8", error)
+    })?;
+    let document = roxmltree::Document::parse(xml)
+        .map_err(|error| ImageError::codec("the SVG is not valid XML; fix the markup", error))?;
     let root = document.root_element();
-    ensure!(
-        root.tag_name().name() == "svg"
-            && root
-                .tag_name()
-                .namespace()
-                .is_none_or(|namespace| namespace == "http://www.w3.org/2000/svg"),
-        "the file is XML but not an SVG image; add a root `<svg>` element"
-    );
+    if root.tag_name().name() != "svg"
+        || root
+            .tag_name()
+            .namespace()
+            .is_some_and(|namespace| namespace != "http://www.w3.org/2000/svg")
+    {
+        return Err(ImageError::unreadable(
+            "the file is XML but not an SVG image; add a root `<svg>` element",
+        ));
+    }
     let view_box = root
         .attribute("viewBox")
-        .map(|value| -> Result<(f64, f64)> {
+        .map(|value| -> ImageResult<(f64, f64)> {
             let mut numbers = value
                 .split(|character: char| character.is_ascii_whitespace() || character == ',')
                 .filter(|part| !part.is_empty());
@@ -31,17 +34,26 @@ pub(in crate::codec) fn inspect_svg(bytes: &[u8]) -> Result<ImageMetadata> {
             for value in &mut values {
                 *value = numbers
                     .next()
-                    .context("the `viewBox` attribute needs four numbers")?
+                    .ok_or_else(|| {
+                        ImageError::unreadable("the `viewBox` attribute needs four numbers")
+                    })?
                     .parse()
-                    .context("the `viewBox` attribute contains a value that is not a number")?;
+                    .map_err(|error| {
+                        ImageError::codec(
+                            "the `viewBox` attribute contains a value that is not a number",
+                            error,
+                        )
+                    })?;
             }
-            ensure!(
-                numbers.next().is_none()
-                    && values.iter().all(|value| value.is_finite())
-                    && values[2] > 0.0
-                    && values[3] > 0.0,
-                "the `viewBox` attribute needs four numbers with positive width and height"
-            );
+            if numbers.next().is_some()
+                || values.iter().any(|value| !value.is_finite())
+                || values[2] <= 0.0
+                || values[3] <= 0.0
+            {
+                return Err(ImageError::unreadable(
+                    "the `viewBox` attribute needs four numbers with positive width and height",
+                ));
+            }
             Ok((values[2], values[3]))
         })
         .transpose()?;
@@ -60,17 +72,23 @@ pub(in crate::codec) fn inspect_svg(bytes: &[u8]) -> Result<ImageMetadata> {
         (Some(width), None, Some((vw, vh))) => (width, width * vh / vw),
         (None, Some(height), Some((vw, vh))) => (height * vw / vh, height),
         (None, None, Some(size)) => size,
-        _ => bail!("the root `<svg>` element needs `width` and `height` or a `viewBox`"),
+        _ => {
+            return Err(ImageError::unreadable(
+                "the root `<svg>` element needs `width` and `height` or a `viewBox`",
+            ));
+        }
     };
-    ensure!(
-        width.is_finite()
-            && height.is_finite()
-            && width > 0.0
-            && height > 0.0
-            && width.ceil() <= f64::from(u32::MAX)
-            && height.ceil() <= f64::from(u32::MAX),
-        "the SVG `width` and `height` are too large; set smaller values"
-    );
+    if !width.is_finite()
+        || !height.is_finite()
+        || width <= 0.0
+        || height <= 0.0
+        || width.ceil() > f64::from(u32::MAX)
+        || height.ceil() > f64::from(u32::MAX)
+    {
+        return Err(ImageError::unreadable(
+            "the SVG `width` and `height` are too large; set smaller values",
+        ));
+    }
     let (width, height) = (width.ceil() as u32, height.ceil() as u32);
     check_dimensions(width, height)?;
     Ok(ImageMetadata {
@@ -82,7 +100,7 @@ pub(in crate::codec) fn inspect_svg(bytes: &[u8]) -> Result<ImageMetadata> {
     })
 }
 
-fn svg_length(value: &str) -> Result<Option<f64>> {
+fn svg_length(value: &str) -> ImageResult<Option<f64>> {
     let value = value.trim();
     if value.ends_with('%') || value == "auto" {
         return Ok(None);
@@ -100,14 +118,13 @@ fn svg_length(value: &str) -> Result<Option<f64>> {
         .iter()
         .find_map(|(unit, factor)| value.strip_suffix(unit).map(|number| (number, *factor)))
         .unwrap_or((value, 1.0));
-    let number: f64 = number.trim().parse().context(
-        "the SVG `width` and `height` must be numbers with units such as `px`, or use a `viewBox`",
-    )?;
+    let number: f64 = number.trim().parse().map_err(|error| ImageError::codec("the SVG `width` and `height` must be numbers with units such as `px`, or use a `viewBox`", error))?;
     let pixels = number * factor;
-    ensure!(
-        pixels.is_finite() && pixels > 0.0,
-        "the SVG `width` and `height` must be positive numbers"
-    );
+    if !pixels.is_finite() || pixels <= 0.0 {
+        return Err(ImageError::unreadable(
+            "the SVG `width` and `height` must be positive numbers",
+        ));
+    }
     Ok(Some(pixels))
 }
 

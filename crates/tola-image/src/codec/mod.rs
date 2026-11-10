@@ -4,7 +4,6 @@ use std::borrow::Cow;
 use std::io::Cursor;
 use std::sync::Arc;
 
-use anyhow::{Context, Result, bail, ensure};
 use image::codecs::bmp::BmpDecoder;
 use image::codecs::gif::GifDecoder;
 use image::codecs::png::PngDecoder;
@@ -23,10 +22,6 @@ use crate::{ImageError, ImageResult, ReexportProblem, SizeLimit, zeroed_plane};
 
 /// Report what one image's bytes say about themselves, without decoding its pixels.
 pub fn inspect(bytes: &[u8]) -> ImageResult<ImageMetadata> {
-    inspect_metadata(bytes).map_err(|error| ImageError::wrapping(error, None))
-}
-
-fn inspect_metadata(bytes: &[u8]) -> Result<ImageMetadata> {
     if looks_like_xml(bytes) {
         return inspect_svg(bytes);
     }
@@ -34,23 +29,17 @@ fn inspect_metadata(bytes: &[u8]) -> Result<ImageMetadata> {
 }
 
 /// Cancellation takes precedence even when an indivisible codec call also reports an error.
-/// Codec errors can wrap I/O errors; callers always receive the original typed `ImageCancelled`.
+/// Callers receive `ImageError::Cancelled` even if the codec reports a wrapped I/O error.
 pub fn render(
     bytes: &[u8],
     recipe: &ImageRecipe,
     cancellation: &dyn Cancellation,
-) -> Result<Arc<[u8]>> {
+) -> ImageResult<Arc<[u8]>> {
     cancellation.ensure_active()?;
-    let decoded = DecodedSource::open(bytes, cancellation).map_err(anyhow::Error::new)?;
+    let decoded = DecodedSource::open(bytes, cancellation)?;
     recipe.validate(decoded.metadata())?;
-    let pixels = decoded
-        .pixels(recipe.pixels(), cancellation)
-        .map_err(anyhow::Error::new)?;
-    // The decoder's plane is freed before encoding allocates the encoded bytes.
-    drop(decoded);
-    let result = pixels
-        .encode(recipe, cancellation)
-        .map_err(anyhow::Error::new);
+    let pixels = decoded.into_pixels(recipe.pixels(), cancellation)?;
+    let result = pixels.encode(recipe, cancellation);
     cancellation.ensure_active()?;
     result
 }
@@ -69,19 +58,15 @@ pub struct DecodedSource {
 impl DecodedSource {
     /// Decode an image into the sRGB RGBA8 pixels every recipe starts from.
     pub fn open(bytes: &[u8], cancellation: &dyn Cancellation) -> ImageResult<Self> {
-        Self::decode(bytes, cancellation).map_err(|error| ImageError::wrapping(error, None))
-    }
-
-    fn decode(bytes: &[u8], cancellation: &dyn Cancellation) -> Result<Self> {
         cancellation.ensure_active()?;
         let result = Self::open_active(bytes, cancellation);
         cancellation.ensure_active()?;
         result
     }
 
-    fn open_active(bytes: &[u8], cancellation: &dyn Cancellation) -> Result<Self> {
+    fn open_active(bytes: &[u8], cancellation: &dyn Cancellation) -> ImageResult<Self> {
         if looks_like_xml(bytes) {
-            return Err(ImageError::NeedsRaster.into());
+            return Err(ImageError::NeedsRaster);
         }
         let Source {
             mut decoder,
@@ -92,19 +77,22 @@ impl DecodedSource {
             metadata,
             container,
         } = Source::open(bytes, cancellation)?;
-        ensure!(
-            !container.is_animated,
-            "an animated image cannot be resized without dropping frames; use a still image"
-        );
+        if container.is_animated {
+            return Err(ImageError::unreadable(
+                "an animated image cannot be resized without dropping frames; use a still image",
+            ));
+        }
         // Only the declaration the container's own precedence selected is read: an ICC profile a
         // higher declaration supersedes is neither converted nor refused.
         let transform = match container.color {
             SampleColor::Srgb => None,
             SampleColor::Gamma(gamma) => Some(ColorTransform::Gamma(gamma)),
-            SampleColor::Unsupported(reason) => bail!("{reason}"),
+            SampleColor::Unsupported(reason) => return Err(ImageError::unreadable(reason)),
             SampleColor::StoredIcc(profile) => Some(ColorTransform::Icc(profile)),
             SampleColor::DecoderIcc => Some(ColorTransform::Icc(Cow::Owned(
-                decoder.icc_profile()?.context(PROFILE_DAMAGED)?,
+                decoder
+                    .icc_profile()?
+                    .ok_or_else(|| ImageError::unreadable(PROFILE_DAMAGED))?,
             ))),
         };
         // Normalization rewrites the plane in place after dropping the decoder; only raw pixels
@@ -118,8 +106,7 @@ impl DecodedSource {
                 limit: SizeLimit::Decode,
                 allowed: decode_allotment,
                 actual: required,
-            }
-            .into());
+            });
         }
         let mut limits = Limits::default();
         limits.max_alloc = Some(decode_allotment - raw_bytes);
@@ -142,6 +129,11 @@ impl DecodedSource {
         &self.metadata
     }
 
+    /// Bytes allocated for the decoded RGBA buffer, including spare capacity.
+    pub fn allocated_bytes(&self) -> usize {
+        self.rgba.capacity()
+    }
+
     /// Resample the pixels one recipe's output geometry asks for.
     ///
     /// Two recipes that share their pixels resample once: encode the result for each of them with
@@ -151,15 +143,6 @@ impl DecodedSource {
         pixels: PixelRecipe,
         cancellation: &dyn Cancellation,
     ) -> ImageResult<ResampledPixels> {
-        self.resample_pixels(pixels, cancellation)
-            .map_err(|error| ImageError::wrapping(error, None))
-    }
-
-    fn resample_pixels(
-        &self,
-        pixels: PixelRecipe,
-        cancellation: &dyn Cancellation,
-    ) -> Result<ResampledPixels> {
         cancellation.ensure_active()?;
         pixels.validate(&self.metadata)?;
         let result = resample(
@@ -175,19 +158,41 @@ impl DecodedSource {
         result
     }
 
+    /// Resample these pixels, reusing the decoded buffer for an unchanged full frame.
+    pub fn into_pixels(
+        self,
+        pixels: PixelRecipe,
+        cancellation: &dyn Cancellation,
+    ) -> ImageResult<ResampledPixels> {
+        let dimensions = (self.width, self.height);
+        if self.orientation != Orientation::NoTransforms
+            || (pixels.width(), pixels.height()) != dimensions
+            || !pixels.raster_crop().is_some_and(|crop| {
+                (crop.x, crop.y) == (0, 0) && (crop.width, crop.height) == dimensions
+            })
+        {
+            return self.pixels(pixels, cancellation);
+        }
+
+        cancellation.ensure_active()?;
+        pixels.validate(&self.metadata)?;
+        let result =
+            ResampledPixels::assembled(pixels, self.rgba, !self.metadata.has_alpha, cancellation);
+        cancellation.ensure_active()?;
+        result
+    }
+
     /// Resample and encode one recipe.
     pub fn render(
         &self,
         recipe: &ImageRecipe,
         cancellation: &dyn Cancellation,
-    ) -> Result<Arc<[u8]>> {
+    ) -> ImageResult<Arc<[u8]>> {
         cancellation.ensure_active()?;
         recipe.validate(&self.metadata)?;
         let result = self
-            .pixels(recipe.pixels(), cancellation)
-            .map_err(anyhow::Error::new)?
-            .encode(recipe, cancellation)
-            .map_err(anyhow::Error::new);
+            .pixels(recipe.pixels(), cancellation)?
+            .encode(recipe, cancellation);
         cancellation.ensure_active()?;
         result
     }
@@ -203,9 +208,11 @@ impl Decoder<'_> {
     ///
     /// Only a raster container declares [`SampleColor::DecoderIcc`]: a JPEG's profile is read
     /// from the header parse that chose its decode layout and arrives as stored bytes.
-    fn icc_profile(&mut self) -> Result<Option<Vec<u8>>> {
+    fn icc_profile(&mut self) -> ImageResult<Option<Vec<u8>>> {
         match self {
-            Self::Raster(decoder) => decoder.icc_profile().context(PROFILE_DAMAGED),
+            Self::Raster(decoder) => decoder
+                .icc_profile()
+                .map_err(|error| ImageError::codec(PROFILE_DAMAGED, error)),
             Self::Jpeg(_) => Ok(None),
         }
     }
@@ -216,17 +223,21 @@ impl Decoder<'_> {
         width: u32,
         height: u32,
         limits: Limits,
-    ) -> Result<Vec<u8>> {
+    ) -> ImageResult<Vec<u8>> {
         if let Self::Raster(decoder) = &mut self {
-            decoder.set_limits(limits).context(DECODE_TOO_LARGE)?;
+            decoder
+                .set_limits(limits)
+                .map_err(|error| ImageError::codec(DECODE_TOO_LARGE, error))?;
         }
         let length = pixel_bytes(width, height, usize::from(color.bytes_per_pixel()))?;
         let mut bytes = zeroed_plane(length)?;
         match self {
             Self::Jpeg(mut decoder) => decoder
                 .decode_into(&mut bytes)
-                .context(damaged_image("JPEG"))?,
-            Self::Raster(decoder) => decoder.read_image(&mut bytes).context(DAMAGED)?,
+                .map_err(|error| ImageError::codec(damaged_image("JPEG"), error))?,
+            Self::Raster(decoder) => decoder
+                .read_image(&mut bytes)
+                .map_err(|error| ImageError::codec(DAMAGED, error))?,
         }
         Ok(bytes)
     }
@@ -275,7 +286,7 @@ impl<'a> Source<'a> {
     ///
     /// A metadata read is a bounded header pass: it takes no cancellation token, and the color
     /// refusals a decode runs into on its way to pixels never reach it.
-    fn metadata(bytes: &'a [u8]) -> Result<ImageMetadata> {
+    fn metadata(bytes: &'a [u8]) -> ImageResult<ImageMetadata> {
         let format = image_format(bytes)?;
         if format == ImageFormat::Jpeg {
             let (_, header) = Self::jpeg_header(bytes)?;
@@ -284,7 +295,7 @@ impl<'a> Source<'a> {
         Ok(Self::raster(bytes, format, None)?.metadata)
     }
 
-    fn open(bytes: &'a [u8], cancellation: &dyn Cancellation) -> Result<Self> {
+    fn open(bytes: &'a [u8], cancellation: &dyn Cancellation) -> ImageResult<Self> {
         cancellation.ensure_active()?;
         let format = image_format(bytes)?;
         if format == ImageFormat::Jpeg {
@@ -301,7 +312,7 @@ impl<'a> Source<'a> {
         bytes: &'a [u8],
         format: ImageFormat,
         cancellation: Option<&dyn Cancellation>,
-    ) -> Result<Self> {
+    ) -> ImageResult<Self> {
         ensure_active_if_present(cancellation)?;
         let container = match format {
             ImageFormat::Png => scan_png(bytes, cancellation)?,
@@ -314,22 +325,25 @@ impl<'a> Source<'a> {
         let mut decoder: Box<dyn ImageDecoder + 'a> = match format {
             ImageFormat::Png => Box::new(
                 PngDecoder::with_limits(Cursor::new(bytes), Limits::default())
-                    .context(damaged_image("PNG"))?,
+                    .map_err(|error| ImageError::codec(damaged_image("PNG"), error))?,
             ),
-            ImageFormat::WebP => {
-                Box::new(WebPDecoder::new(Cursor::new(bytes)).context(damaged_image("WebP"))?)
-            }
-            ImageFormat::Gif => {
-                Box::new(GifDecoder::new(Cursor::new(bytes)).context(damaged_image("GIF"))?)
-            }
-            ImageFormat::Bmp => {
-                Box::new(BmpDecoder::new(Cursor::new(bytes)).context(damaged_image("BMP"))?)
-            }
+            ImageFormat::WebP => Box::new(
+                WebPDecoder::new(Cursor::new(bytes))
+                    .map_err(|error| ImageError::codec(damaged_image("WebP"), error))?,
+            ),
+            ImageFormat::Gif => Box::new(
+                GifDecoder::new(Cursor::new(bytes))
+                    .map_err(|error| ImageError::codec(damaged_image("GIF"), error))?,
+            ),
+            ImageFormat::Bmp => Box::new(
+                BmpDecoder::new(Cursor::new(bytes))
+                    .map_err(|error| ImageError::codec(damaged_image("BMP"), error))?,
+            ),
             ImageFormat::Jpeg | ImageFormat::Svg => return Err(unsupported_format()),
         };
         decoder
             .set_limits(Limits::default())
-            .context(DECODE_TOO_LARGE)?;
+            .map_err(|error| ImageError::codec(DECODE_TOO_LARGE, error))?;
         let (width, height) = decoder.dimensions();
         check_dimensions(width, height)?;
         let color = decoder.color_type();
@@ -355,14 +369,16 @@ impl<'a> Source<'a> {
         })
     }
 
-    fn jpeg(bytes: &'a [u8], cancellation: &dyn Cancellation) -> Result<Self> {
+    fn jpeg(bytes: &'a [u8], cancellation: &dyn Cancellation) -> ImageResult<Self> {
         let (parsed, header) = Self::jpeg_header(bytes)?;
         // The byte walk only reports a profile its own marker chain shows it; the profile zune
         // assembles from the same headers owns the layout and the conversion, so a walk that
         // mis-parses the chain may refuse a file but never drop color management.
         let declared = jpeg_has_icc(bytes, cancellation)?;
         let profile = parsed.icc_profile();
-        ensure!(!declared || profile.is_some(), PROFILE_DAMAGED);
+        if declared && profile.is_none() {
+            return Err(ImageError::unreadable(PROFILE_DAMAGED));
+        }
         let icc = profile.is_some();
         let container = ContainerMetadata {
             is_lossy: true,
@@ -407,25 +423,35 @@ impl<'a> Source<'a> {
     /// from it, while a metadata read takes only the facts they state.
     fn jpeg_header(
         bytes: &'a [u8],
-    ) -> Result<(zune_jpeg::JpegDecoder<ZCursor<&'a [u8]>>, JpegHeader)> {
+    ) -> ImageResult<(zune_jpeg::JpegDecoder<ZCursor<&'a [u8]>>, JpegHeader)> {
         // The image crate converts CMYK/YCCK silently and hides the original model. Use its
         // maintained JPEG backend directly so unsupported models cannot lose their color meaning.
         let mut decoder =
             zune_jpeg::JpegDecoder::new_with_options(ZCursor::new(bytes), jpeg_options());
-        decoder.decode_headers().context(damaged_image("JPEG"))?;
-        let (width, height) = decoder
-            .dimensions()
-            .context("the JPEG has no usable dimensions; re-export it")?;
+        decoder
+            .decode_headers()
+            .map_err(|error| ImageError::codec(damaged_image("JPEG"), error))?;
+        let (width, height) = decoder.dimensions().ok_or_else(|| {
+            ImageError::unreadable("the JPEG has no usable dimensions; re-export it")
+        })?;
         let (width, height) = (
-            u32::try_from(width)
-                .context("the JPEG dimensions are too large to resize; use a smaller image")?,
-            u32::try_from(height)
-                .context("the JPEG dimensions are too large to resize; use a smaller image")?,
+            u32::try_from(width).map_err(|error| {
+                ImageError::codec(
+                    "the JPEG dimensions are too large to resize; use a smaller image",
+                    error,
+                )
+            })?,
+            u32::try_from(height).map_err(|error| {
+                ImageError::codec(
+                    "the JPEG dimensions are too large to resize; use a smaller image",
+                    error,
+                )
+            })?,
         );
         check_dimensions(width, height)?;
-        let input_space = decoder
-            .input_colorspace()
-            .context("the JPEG has no usable color information; re-export it as RGB")?;
+        let input_space = decoder.input_colorspace().ok_or_else(|| {
+            ImageError::unreadable("the JPEG has no usable color information; re-export it as RGB")
+        })?;
         let color = match input_space {
             ColorSpace::Luma => ColorType::L8,
             ColorSpace::RGB | ColorSpace::YCbCr => ColorType::Rgb8,
@@ -433,8 +459,7 @@ impl<'a> Source<'a> {
                 return Err(ImageError::Reexport {
                     format: ImageFormat::Jpeg,
                     problem: ReexportProblem::ColorModel,
-                }
-                .into());
+                });
             }
         };
         let orientation = decoder
@@ -501,17 +526,20 @@ fn damaged_image(format: &str) -> String {
     format!("the {format} image is damaged or incomplete; re-export it")
 }
 
-fn unsupported_format() -> anyhow::Error {
-    anyhow::anyhow!(
-        "this image format is not supported; save the image as PNG, JPEG, WebP, GIF, or BMP"
+fn unsupported_format() -> ImageError {
+    ImageError::unreadable(
+        "this image format is not supported; save the image as PNG, JPEG, WebP, GIF, or BMP",
     )
 }
 
 /// The format one image's bytes declare, refused when Tola cannot read it.
-fn image_format(bytes: &[u8]) -> Result<ImageFormat> {
-    match image::guess_format(bytes)
-        .context("the file is not an image Tola can read; use PNG, JPEG, WebP, GIF, BMP, or SVG")?
-    {
+fn image_format(bytes: &[u8]) -> ImageResult<ImageFormat> {
+    match image::guess_format(bytes).map_err(|error| {
+        ImageError::codec(
+            "the file is not an image Tola can read; use PNG, JPEG, WebP, GIF, BMP, or SVG",
+            error,
+        )
+    })? {
         image::ImageFormat::Jpeg => Ok(ImageFormat::Jpeg),
         image::ImageFormat::Png => Ok(ImageFormat::Png),
         image::ImageFormat::WebP => Ok(ImageFormat::WebP),
@@ -550,7 +578,6 @@ pub(crate) mod tests {
     use super::*;
     use crate::NO_CANCELLATION;
     use crate::OutputFormat;
-    use crate::cancellation::ImageCancelled;
     use crate::codec::{inspect, render};
     use image::ExtendedColorType;
     use image::ImageEncoder;
@@ -973,15 +1000,13 @@ pub(crate) mod tests {
         let source = png(&[10, 20, 30], 1, 1, ExtendedColorType::Rgb8, None, None);
         let recipe = recipe(&source, 1, 1, OutputFormat::Png, None);
         let cancellation = || true;
-        assert!(
-            render(b"broken source", &recipe, &cancellation)
-                .unwrap_err()
-                .is::<ImageCancelled>()
-        );
-        assert!(
-            render(&source, &recipe, &cancellation)
-                .unwrap_err()
-                .is::<ImageCancelled>()
-        );
+        assert!(matches!(
+            render(b"broken source", &recipe, &cancellation),
+            Err(ImageError::Cancelled(_))
+        ));
+        assert!(matches!(
+            render(&source, &recipe, &cancellation),
+            Err(ImageError::Cancelled(_))
+        ));
     }
 }

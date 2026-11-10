@@ -9,11 +9,10 @@ mod plane;
 mod reduce;
 mod weights;
 
-use anyhow::{Result, bail, ensure};
 use image::metadata::Orientation;
 
 use crate::cancellation::Cancellation;
-use crate::recipe::{Background, PixelRecipe, ResizeFilter, VECTOR_RECIPE_IS_RENDERED};
+use crate::recipe::{Background, PixelRecipe, ResizeFilter};
 use crate::rows::{any_row, for_each_row};
 use crate::{ImageError, ImageMetadata, ImageResult, pixel_bytes, rgba_buffer};
 
@@ -25,8 +24,9 @@ impl PixelRecipe {
     /// Conservative pixel-plane peak for admission before decoding, in bytes.
     ///
     /// Includes the decoded source and assumes a materialized orientation crop. Alpha declarations
-    /// select the wider intermediate even when decoding later finds every sample opaque.
-    /// Codec scratch, encoded bytes, retained caches, and per-thread row scratch are excluded.
+    /// select the wider convolution scratch even when decoding later finds every sample opaque.
+    /// The calling thread's pool determines how many workers can hold convolution rows at once.
+    /// Weight tables, codec scratch, encoded bytes, and retained caches are excluded.
     pub fn estimated_working_bytes(self, source: &ImageMetadata) -> u64 {
         let area = |width: u32, height: u32| u64::from(width) * u64::from(height);
         let output = area(self.width(), self.height()).saturating_mul(4);
@@ -53,9 +53,7 @@ impl PixelRecipe {
             }
             None => (crop.width, crop.height, 0),
         };
-        let intermediate = area(self.width(), height)
-            .min(area(width, self.height()))
-            .saturating_mul(if source.has_alpha { 16 } else { 8 });
+        let intermediate = convolution::scratch_bytes(width, height, self, source.has_alpha);
         decoded
             .saturating_add(oriented)
             .saturating_add(reduced)
@@ -82,6 +80,11 @@ impl ResampledPixels {
         &self.rgba
     }
 
+    /// Bytes allocated for the RGBA pixel buffer, including spare capacity.
+    pub fn allocated_bytes(&self) -> usize {
+        self.rgba.capacity()
+    }
+
     /// The geometry, filter, and background shared by encodings of these pixels.
     /// Its dimensions describe the row layout returned by [`Self::rgba`].
     pub const fn pixels(&self) -> PixelRecipe {
@@ -97,30 +100,22 @@ impl ResampledPixels {
         rgba: Vec<u8>,
         cancellation: &dyn Cancellation,
     ) -> ImageResult<Self> {
-        Self::rendered(pixels, rgba, cancellation)
-            .map_err(|error| ImageError::wrapping(error, None))
-    }
-
-    fn rendered(
-        pixels: PixelRecipe,
-        rgba: Vec<u8>,
-        cancellation: &dyn Cancellation,
-    ) -> Result<Self> {
         cancellation.ensure_active()?;
-        ensure!(
-            rgba.len() == pixel_bytes(pixels.width(), pixels.height(), 4)?,
-            "the rendered pixels do not match their recipe"
-        );
+        if rgba.len() != pixel_bytes(pixels.width(), pixels.height(), 4)? {
+            return Err(ImageError::unreadable(
+                "the rendered pixels do not match their recipe",
+            ));
+        }
         Self::assembled(pixels, rgba, false, cancellation)
     }
 
     /// Finish one plane: composite its background, or record whether it stayed opaque.
-    fn assembled(
+    pub(crate) fn assembled(
         pixels: PixelRecipe,
         mut rgba: Vec<u8>,
         opaque: bool,
         cancellation: &dyn Cancellation,
-    ) -> Result<Self> {
+    ) -> ImageResult<Self> {
         if let Some(background) = pixels.background {
             flatten_onto(&mut rgba, pixels.width(), background, cancellation)?;
             return Ok(Self {
@@ -150,9 +145,9 @@ pub(crate) fn resample(
     opaque: bool,
     pixels: PixelRecipe,
     cancellation: &dyn Cancellation,
-) -> Result<ResampledPixels> {
+) -> ImageResult<ResampledPixels> {
     let Some(crop) = pixels.raster_crop() else {
-        bail!(VECTOR_RECIPE_IS_RENDERED);
+        return Err(crate::ImageRequestError::VectorRecipeNotResampled.into());
     };
     let alpha = if opaque {
         AlphaRepresentation::Opaque
@@ -179,7 +174,7 @@ fn resized_pixels(
     plane: &SourcePlane<'_>,
     pixels: PixelRecipe,
     cancellation: &dyn Cancellation,
-) -> Result<Vec<u8>> {
+) -> ImageResult<Vec<u8>> {
     let output_width = pixels.width();
     let output_height = pixels.height();
     if (output_width, output_height) == (plane.width(), plane.height()) {
@@ -205,7 +200,7 @@ fn flatten_onto(
     width: u32,
     background: Background,
     cancellation: &dyn Cancellation,
-) -> Result<()> {
+) -> ImageResult<()> {
     let backdrop = [
         i64::from(background.red),
         i64::from(background.green),
@@ -239,7 +234,6 @@ pub(crate) mod tests {
     use self::test_support::plane;
     use super::convolution::convolved_reduced;
     use super::*;
-    use crate::ImageCancelled;
     use crate::NO_CANCELLATION;
     use crate::recipe::{ImageRecipe, OutputFormat, ResizeOperation, ResizeOptions};
     use crate::{ImageFormat, ImageMetadata};
@@ -643,7 +637,7 @@ pub(crate) mod tests {
             &cancellation,
         );
         assert!(
-            matches!(&outcome, Err(error) if error.downcast_ref::<ImageCancelled>().is_some()),
+            matches!(&outcome, Err(ImageError::Cancelled(_))),
             "an interrupted resize reports the cancellation",
         );
     }

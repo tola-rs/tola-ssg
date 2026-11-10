@@ -123,10 +123,6 @@ pub(crate) enum Style {
     Heading4,
     Emphasis,
     Literal,
-    Keyword,
-    String,
-    Number,
-    Comment,
     Link,
     Lead,
 }
@@ -149,10 +145,6 @@ impl Style {
             Self::Heading4 => OwoStyle::new().green(),
             Self::Emphasis => OwoStyle::new().bold(),
             Self::Literal => OwoStyle::new().cyan(),
-            Self::Keyword => OwoStyle::new().magenta(),
-            Self::String => OwoStyle::new().green(),
-            Self::Number => OwoStyle::new().yellow(),
-            Self::Comment => OwoStyle::new().dimmed(),
             Self::Link => OwoStyle::new().underline().blue(),
             Self::Lead => OwoStyle::new().bold().yellow(),
         }
@@ -167,13 +159,6 @@ pub(crate) struct StyledText {
 }
 
 impl StyledText {
-    pub(crate) fn plain(text: &str) -> Self {
-        Self {
-            text: text.to_owned(),
-            spans: Vec::new(),
-        }
-    }
-
     pub(crate) fn push(&mut self, text: &str, style: Style) {
         let start = self.text.len();
         self.text.push_str(text);
@@ -224,10 +209,5 @@ impl StyledText {
         }
         rendered.push_str(&self.text[offset..range.end]);
         rendered
-    }
-
-    /// The whole text, its runs painted when `color`.
-    pub(crate) fn paint_all(&self, color: bool) -> String {
-        self.paint(0..self.text.len(), color)
     }
 }

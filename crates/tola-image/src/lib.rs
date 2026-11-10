@@ -47,7 +47,7 @@ pub use resample::ResampledPixels;
 /// a dependency, feature, or native compiler option that carries one. Every derivative name and
 /// every request descriptor carries this revision, so a derivative rendered under another revision
 /// is never reused as if it were this one.
-pub const IMAGE_PIPELINE_REVISION: u32 = 10;
+pub const IMAGE_PIPELINE_REVISION: u32 = 12;
 
 /// The container an image's own bytes are in.
 ///
@@ -113,8 +113,10 @@ pub struct ImageMetadata {
     pub is_lossy: bool,
 }
 
-fn check_dimensions(width: u32, height: u32) -> anyhow::Result<()> {
-    anyhow::ensure!(width > 0 && height > 0, "image dimensions must be positive");
+fn check_dimensions(width: u32, height: u32) -> Result<(), ImageRequestError> {
+    if width == 0 || height == 0 {
+        return Err(ImageRequestError::InvalidDimensions);
+    }
     Ok(())
 }
 
@@ -125,11 +127,7 @@ pub(crate) const HOLD_IN_MEMORY: &str =
 pub(crate) const RESIZE_TOO_LARGE: &str = "the image is too large to resize; use a smaller image";
 
 /// Byte length of one decoded plane, rejecting sizes that cannot be addressed.
-pub(crate) fn pixel_bytes(
-    width: u32,
-    height: u32,
-    bytes_per_pixel: usize,
-) -> anyhow::Result<usize> {
+pub(crate) fn pixel_bytes(width: u32, height: u32, bytes_per_pixel: usize) -> ImageResult<usize> {
     let allowed = isize::MAX as u64;
     let actual = u64::from(width)
         .saturating_mul(u64::from(height))
@@ -139,22 +137,21 @@ pub(crate) fn pixel_bytes(
             limit: SizeLimit::HoldInMemory,
             allowed,
             actual,
-        }
-        .into());
+        });
     }
     Ok(actual as usize)
 }
 
-pub(crate) fn rgba_buffer(width: u32, height: u32) -> anyhow::Result<Vec<u8>> {
+pub(crate) fn rgba_buffer(width: u32, height: u32) -> ImageResult<Vec<u8>> {
     zeroed_plane(pixel_bytes(width, height, 4)?)
 }
 
 /// A zeroed buffer of `bytes` bytes.
-pub(crate) fn zeroed_plane(bytes: usize) -> anyhow::Result<Vec<u8>> {
-    use anyhow::Context;
-
+pub(crate) fn zeroed_plane(bytes: usize) -> ImageResult<Vec<u8>> {
     let mut plane = Vec::new();
-    plane.try_reserve_exact(bytes).context(HOLD_IN_MEMORY)?;
+    plane
+        .try_reserve_exact(bytes)
+        .map_err(|error| ImageError::codec(HOLD_IN_MEMORY, error))?;
     plane.resize(bytes, 0);
     Ok(plane)
 }

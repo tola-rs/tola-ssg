@@ -16,6 +16,31 @@
 /// Related: render-code
 #import "@tola/host:0.0.0": code-themes
 
+/// Additional syntax definitions keyed by language.
+///
+/// Pass one definition to `raw.syntaxes`, or enable them all before your code blocks with
+/// `#set raw(syntaxes: code-syntaxes.values())`.
+#import "@tola/host:0.0.0": code-syntaxes
+
+/// Select a built-in Typst syntax for a source-code label.
+///
+/// Use this when constructing `raw(..., lang: ...)`. For example, `sbcl` and `ccl`
+/// select `lisp`, and `babashka` selects `clj`. Other labels pass through as written.
+/// In a literal fence, write the returned language name.
+///
+/// Example - use the Lisp syntax for SBCL source:
+///
+/// ```typst
+/// #import "@tola/code:0.0.0": code-language
+/// #document("index.html")[
+///   #raw("(defun twice (x) (* x 2))", lang: code-language("sbcl"))
+/// ]
+/// ```
+///
+/// - language (str): the source-code label to look up.
+/// -> str
+#import "@tola/host:0.0.0": code-language
+
 /// Render a raw element as code, keeping Typst's own highlighting.
 ///
 /// Apply it with a show rule: `#show raw: render-code`. Typst prepares the element's lines and

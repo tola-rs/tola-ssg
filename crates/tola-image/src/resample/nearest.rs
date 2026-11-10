@@ -1,11 +1,10 @@
 //! Point sampling: one source sample per output pixel, taken at the source area's center.
 
-use anyhow::{Context, Result};
-
 use crate::RESIZE_TOO_LARGE;
 use crate::cancellation::Cancellation;
 use crate::rgba_buffer;
 use crate::rows::for_each_row;
+use crate::{ImageError, ImageResult};
 
 use super::plane::SourcePlane;
 
@@ -20,11 +19,11 @@ pub(super) fn nearest_pixels(
     output_width: u32,
     output_height: u32,
     cancellation: &dyn Cancellation,
-) -> Result<Vec<u8>> {
+) -> ImageResult<Vec<u8>> {
     let mut columns = Vec::new();
     columns
         .try_reserve_exact(output_width as usize)
-        .context(RESIZE_TOO_LARGE)?;
+        .map_err(|error| ImageError::codec(RESIZE_TOO_LARGE, error))?;
     for x in 0..output_width {
         columns.push(sampled_center(x, plane.width(), output_width) as usize);
     }

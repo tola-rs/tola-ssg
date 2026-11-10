@@ -2,7 +2,7 @@
 
 use std::error::Error;
 
-use crate::{ImageCancelled, ImageFormat};
+use crate::{ImageCancelled, ImageFormat, ImageRequestError};
 
 /// The result of one image operation.
 pub type ImageResult<T> = std::result::Result<T, ImageError>;
@@ -37,6 +37,9 @@ pub enum ImageError {
     /// The operation works on raster images only.
     #[error("{}", needs_raster_sentence())]
     NeedsRaster,
+    /// The resize request cannot be applied to this source.
+    #[error("{0}")]
+    Request(#[from] ImageRequestError),
     /// Anything else: bytes Tola cannot read, a damaged container, a codec's own refusal.
     #[error("{reason}")]
     Decode {
@@ -77,6 +80,7 @@ impl ImageError {
             Self::NeedsRaster => needs_raster_note().to_owned(),
             Self::Decode { reason, .. } => reason.to_string(),
             Self::Cancelled(cancelled) => cancelled.to_string(),
+            Self::Request(error) => error.to_string(),
         }
     }
 
@@ -86,23 +90,40 @@ impl ImageError {
             Self::Reexport { problem, .. } => Some(reexport_help(problem)),
             Self::TooLarge { limit, allowed, .. } => Some(too_large_help(limit, allowed)),
             Self::NeedsRaster => Some(needs_raster_help().to_owned()),
-            Self::Decode { .. } | Self::Cancelled(_) => None,
+            Self::Decode { .. } | Self::Cancelled(_) | Self::Request(_) => None,
         }
     }
 
-    /// Wrap one failure: a classified failure keeps its variant, anything else is a decode reason.
-    pub(crate) fn wrapping(error: anyhow::Error, format: Option<ImageFormat>) -> Self {
-        if error.chain().any(|cause| cause.is::<ImageCancelled>()) {
-            return Self::Cancelled(ImageCancelled);
-        }
-        match error.downcast::<Self>() {
-            Ok(classified) => classified,
-            Err(error) => Self::Decode {
-                format,
-                reason: Box::from(error),
-            },
+    pub(crate) fn unreadable(message: impl Into<String>) -> Self {
+        Self::Decode {
+            format: None,
+            reason: Box::new(CodecFailure {
+                message: message.into(),
+                source: None,
+            }),
         }
     }
+
+    pub(crate) fn codec(
+        message: impl Into<String>,
+        source: impl Error + Send + Sync + 'static,
+    ) -> Self {
+        Self::Decode {
+            format: None,
+            reason: Box::new(CodecFailure {
+                message: message.into(),
+                source: Some(Box::new(source)),
+            }),
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("{message}")]
+struct CodecFailure {
+    message: String,
+    #[source]
+    source: Option<Box<dyn Error + Send + Sync>>,
 }
 
 /// The imperative a re-export failure shares, after the semicolon of its sentence.

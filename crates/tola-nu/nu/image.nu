@@ -1,5 +1,5 @@
 # Public image library and file command entry.
-export use ./image_core.nu [metadata metadata-file resize resize-file]
+export use ./image_core.nu [metadata resize]
 
 # Image byte and file operations. Import with `use tola image`.
 export def main [] {
@@ -8,16 +8,17 @@ export def main [] {
 
 # Print metadata for an image file as JSON.
 def "main metadata" [source: path] {
-  metadata-file $source | to json
+  metadata $source | to json
 }
 
-# Resize a raster file to an explicit destination and print its metadata as JSON.
+# Resize a raster file. With --output, write the file and print its metadata as JSON.
+# Without --op, keep the source size, fit one dimension, or fill both dimensions.
 def "main resize" [
   source: path
-  destination: path
+  --output(-o): path
   --width: int
   --height: int
-  --op: string = "fill"
+  --op: string
   --anchor: string = "center"
   --format: string = "auto"
   --quality: int
@@ -28,5 +29,9 @@ def "main resize" [
     width: $width, height: $height, op: $op, anchor: $anchor,
     format: $format, quality: $quality, filter: $filter, background: $background
   }
-  resize-file $source $destination ...$options | to json
+  if $output == null {
+    resize $source ...$options
+  } else {
+    resize $source --output $output ...$options | to json
+  }
 }

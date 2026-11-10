@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 
-use anyhow::{Context, Result, bail, ensure};
+use crate::{ImageError, ImageResult};
 
 use super::super::{ContainerMetadata, SampleColor};
 use super::le16;
@@ -15,15 +15,21 @@ fn gif_sub_blocks(
     offset: &mut usize,
     mut collect: Option<&mut Vec<u8>>,
     cancellation: Option<&dyn Cancellation>,
-) -> Result<()> {
+) -> ImageResult<()> {
     loop {
         ensure_active_if_present(cancellation)?;
-        let length = usize::from(*bytes.get(*offset).context(DAMAGED)?);
+        let length = usize::from(
+            *bytes
+                .get(*offset)
+                .ok_or_else(|| ImageError::unreadable(DAMAGED))?,
+        );
         *offset += 1;
         if length == 0 {
             return Ok(());
         }
-        let block = bytes.get(*offset..*offset + length).context(DAMAGED)?;
+        let block = bytes
+            .get(*offset..*offset + length)
+            .ok_or_else(|| ImageError::unreadable(DAMAGED))?;
         if let Some(output) = collect.as_deref_mut() {
             output.extend_from_slice(block);
         }
@@ -34,8 +40,10 @@ fn gif_sub_blocks(
 pub(in crate::codec) fn scan_gif<'a>(
     bytes: &'a [u8],
     cancellation: Option<&dyn Cancellation>,
-) -> Result<ContainerMetadata<'a>> {
-    ensure!(bytes.len() >= 13, DAMAGED);
+) -> ImageResult<ContainerMetadata<'a>> {
+    if bytes.len() < 13 {
+        return Err(ImageError::unreadable(DAMAGED));
+    }
     let canvas_width = u32::from(le16(&bytes[6..8]));
     let canvas_height = u32::from(le16(&bytes[8..10]));
     check_dimensions(canvas_width, canvas_height)?;
@@ -51,23 +59,29 @@ pub(in crate::codec) fn scan_gif<'a>(
     let mut profile = None;
     loop {
         ensure_active_if_present(cancellation)?;
-        let marker = *bytes.get(offset).context(DAMAGED)?;
+        let marker = *bytes
+            .get(offset)
+            .ok_or_else(|| ImageError::unreadable(DAMAGED))?;
         offset += 1;
         match marker {
             0x3b => {
-                ensure!(frames > 0 && offset == bytes.len(), DAMAGED);
+                if frames == 0 || offset != bytes.len() {
+                    return Err(ImageError::unreadable(DAMAGED));
+                }
                 break;
             }
             0x2c => {
-                let descriptor = bytes.get(offset..offset + 9).context(DAMAGED)?;
+                let descriptor = bytes
+                    .get(offset..offset + 9)
+                    .ok_or_else(|| ImageError::unreadable(DAMAGED))?;
                 let width = u32::from(le16(&descriptor[4..6]));
                 let height = u32::from(le16(&descriptor[6..8]));
                 check_dimensions(width, height)?;
-                ensure!(
-                    u32::from(le16(descriptor)) + width <= canvas_width
-                        && u32::from(le16(&descriptor[2..4])) + height <= canvas_height,
-                    DAMAGED
-                );
+                if u32::from(le16(descriptor)) + width > canvas_width
+                    || u32::from(le16(&descriptor[2..4])) + height > canvas_height
+                {
+                    return Err(ImageError::unreadable(DAMAGED));
+                }
                 // The decoder leaves uncovered canvas transparent, ignoring the palette background.
                 has_alpha |= width != canvas_width || height != canvas_height;
                 offset += 9 + if descriptor[8] & 128 != 0 {
@@ -75,30 +89,45 @@ pub(in crate::codec) fn scan_gif<'a>(
                 } else {
                     0
                 };
-                ensure!(bytes.get(offset).is_some(), DAMAGED);
+                if offset >= bytes.len() {
+                    return Err(ImageError::unreadable(DAMAGED));
+                }
                 offset += 1;
                 gif_sub_blocks(bytes, &mut offset, None, cancellation)?;
                 frames += 1;
                 metadata.is_animated |= frames > 1;
             }
             0x21 => {
-                let label = *bytes.get(offset).context(DAMAGED)?;
+                let label = *bytes
+                    .get(offset)
+                    .ok_or_else(|| ImageError::unreadable(DAMAGED))?;
                 offset += 1;
                 if label == 0xf9 {
-                    let control = bytes.get(offset..offset + 6).context(DAMAGED)?;
-                    ensure!(control[0] == 4 && control[5] == 0, DAMAGED);
+                    let control = bytes
+                        .get(offset..offset + 6)
+                        .ok_or_else(|| ImageError::unreadable(DAMAGED))?;
+                    if control[0] != 4 || control[5] != 0 {
+                        return Err(ImageError::unreadable(DAMAGED));
+                    }
                     has_alpha |= control[1] & 1 != 0;
                     offset += 6;
                 } else if label == 0xff {
-                    let size = usize::from(*bytes.get(offset).context(DAMAGED)?);
+                    let size = usize::from(
+                        *bytes
+                            .get(offset)
+                            .ok_or_else(|| ImageError::unreadable(DAMAGED))?,
+                    );
                     offset += 1;
-                    let application = bytes.get(offset..offset + size).context(DAMAGED)?;
+                    let application = bytes
+                        .get(offset..offset + size)
+                        .ok_or_else(|| ImageError::unreadable(DAMAGED))?;
                     offset += size;
                     if application == b"ICCRGBG1012" {
-                        ensure!(
-                            profile.is_none(),
-                            "the GIF image has more than one color profile; re-export it with sRGB colors"
-                        );
+                        if profile.is_some() {
+                            return Err(ImageError::unreadable(
+                                "the GIF image has more than one color profile; re-export it with sRGB colors",
+                            ));
+                        }
                         let mut collected = Vec::new();
                         gif_sub_blocks(bytes, &mut offset, Some(&mut collected), cancellation)?;
                         profile = Some(collected);
@@ -109,7 +138,7 @@ pub(in crate::codec) fn scan_gif<'a>(
                     gif_sub_blocks(bytes, &mut offset, None, cancellation)?;
                 }
             }
-            _ => bail!(DAMAGED),
+            _ => return Err(ImageError::unreadable(DAMAGED)),
         }
     }
     metadata.has_alpha = Some(has_alpha);

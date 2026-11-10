@@ -5,10 +5,10 @@
 //! row, so the split cannot change a byte of the result: the same code and the same values run,
 //! on one thread or many. The threshold keeps small images on the calling thread, where a
 //! hand-off costs more than the rows it divides.
-use anyhow::{Context, Result};
 use rayon::prelude::*;
 
 use crate::HOLD_IN_MEMORY;
+use crate::{ImageError, ImageResult};
 
 /// Bytes of the split buffer a call must cover before its rows are worth handing to threads.
 ///
@@ -71,14 +71,32 @@ pub(crate) fn for_each_row<T, S, I, F>(
     stride: usize,
     initial: I,
     row_work: F,
-) -> Result<()>
+) -> ImageResult<()>
 where
     T: Send,
     S: Send,
     I: Fn() -> S + Send + Sync,
-    F: Fn(&mut S, usize, &mut [T]) -> Result<()> + Send + Sync,
+    F: Fn(&mut S, usize, &mut [T]) -> ImageResult<()> + Send + Sync,
 {
-    if !splits_on_pool(size_of_val(rows), SPLIT_BYTES) {
+    let work_bytes = size_of_val(rows);
+    for_each_row_with_work(rows, stride, work_bytes, initial, row_work)
+}
+
+/// Use the first pass's work to decide whether to split when it exceeds the output size.
+pub(crate) fn for_each_row_with_work<T, S, I, F>(
+    rows: &mut [T],
+    stride: usize,
+    work_bytes: usize,
+    initial: I,
+    row_work: F,
+) -> ImageResult<()>
+where
+    T: Send,
+    S: Send,
+    I: Fn() -> S + Send + Sync,
+    F: Fn(&mut S, usize, &mut [T]) -> ImageResult<()> + Send + Sync,
+{
+    if row_workers(work_bytes.max(size_of_val(rows))) == 1 {
         let mut state = initial();
         for (index, row) in rows.chunks_mut(stride).enumerate() {
             row_work(&mut state, index, row)?;
@@ -92,44 +110,12 @@ where
         .try_for_each_init(initial, |state, (index, row)| row_work(state, index, row))
 }
 
-/// Run `row_work` for every output row together with the input row it reads.
-///
-/// The two slices must describe the same number of rows.
-pub(crate) fn for_each_row_pair<T, U, S, I, F>(
-    output: &mut [T],
-    output_stride: usize,
-    input: &[U],
-    input_stride: usize,
-    initial: I,
-    row_work: F,
-) -> Result<()>
-where
-    T: Send,
-    U: Sync,
-    S: Send,
-    I: Fn() -> S + Send + Sync,
-    F: Fn(&mut S, usize, &[U], &mut [T]) -> Result<()> + Send + Sync,
-{
-    if !splits_on_pool(size_of_val(output), SPLIT_BYTES) {
-        let mut state = initial();
-        for (index, (row, source)) in output
-            .chunks_mut(output_stride)
-            .zip(input.chunks(input_stride))
-            .enumerate()
-        {
-            row_work(&mut state, index, source, row)?;
-        }
-        return Ok(());
+pub(crate) fn row_workers(work_bytes: usize) -> usize {
+    if splits_on_pool(work_bytes, SPLIT_BYTES) {
+        rayon::current_num_threads()
+    } else {
+        1
     }
-    let per_task = rows_per_pool_task(output, output_stride);
-    output
-        .par_chunks_mut(output_stride)
-        .with_min_len(per_task)
-        .zip(input.par_chunks(input_stride))
-        .enumerate()
-        .try_for_each_init(initial, |state, (index, (row, source))| {
-            row_work(state, index, source, row)
-        })
 }
 
 /// Rewrite every row of one buffer in place, every row's source bytes staged aside first.
@@ -151,11 +137,11 @@ pub(crate) fn rewrite_rows_in_place<S, I, F>(
     destination_stride: usize,
     initial: I,
     row_work: F,
-) -> Result<()>
+) -> ImageResult<()>
 where
     S: Send,
     I: Fn() -> S + Send + Sync,
-    F: Fn(&mut S, &[u8], &mut [u8]) -> Result<()> + Send + Sync,
+    F: Fn(&mut S, &[u8], &mut [u8]) -> ImageResult<()> + Send + Sync,
 {
     let staging_bound = STAGED_CHUNK_BYTES.min(rows.saturating_mul(destination_stride));
     let chunk_rows = (staging_bound / source_stride).max(1).min(rows.max(1));
@@ -164,7 +150,7 @@ where
     let mut staging = Vec::new();
     staging
         .try_reserve_exact(chunk_bytes)
-        .context(HOLD_IN_MEMORY)?;
+        .map_err(|error| ImageError::codec(HOLD_IN_MEMORY, error))?;
     staging.resize(chunk_bytes, 0);
     let growing = destination_stride >= source_stride;
     for step in 0..chunks {
@@ -319,38 +305,6 @@ mod tests {
             let (y, x) = (offset / stride, offset % stride);
             assert_eq!(*sample, [y as i32, x as i32, (y + x) as i32, 255]);
         }
-    }
-
-    /// Every output row is written from the input row at its own index, and four threads sharing the
-    /// rows land the same bytes as one thread taking them all.
-    #[test]
-    fn parallel_row_pairs_land_the_same_bytes() {
-        let input: Vec<u8> = (0..SPLIT_BYTES)
-            .map(|offset| (offset % 251) as u8)
-            .collect();
-        let run = |threads| {
-            let mut buffer = vec![0u8; JOB];
-            pool(threads).install(|| {
-                for_each_row_pair(
-                    &mut buffer,
-                    ROW,
-                    &input,
-                    ROW,
-                    || (),
-                    |(), index, source, row| {
-                        for (offset, (byte, sample)) in row.iter_mut().zip(source).enumerate() {
-                            *byte = expected(index, offset, *sample);
-                        }
-                        Ok(())
-                    },
-                )
-                .unwrap()
-            });
-            buffer
-        };
-        assert_runs_agree(run, |offset| {
-            expected(offset / ROW, offset % ROW, input[offset])
-        });
     }
 
     /// One rewritten row: its own source bytes, offset by the byte's position in the row, so a

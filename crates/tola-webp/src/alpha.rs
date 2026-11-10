@@ -1,67 +1,190 @@
 //! Lossless alpha payloads for extended WebP images.
 
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
 use std::io::{self, Write};
 
-pub(crate) fn encode(rgba: &[u8], width: usize, height: usize) -> Option<Vec<u8>> {
-    if is_opaque(rgba) {
-        return None;
+use crate::Error;
+use crate::encoder::check_cancelled;
+
+const RAW_ALPHA: u8 = 0;
+const VP8L_ALPHA: u8 = 1;
+const VERTICAL_FILTER: u8 = 2 << 2;
+const PIXELS_PER_CHECK: usize = 16 * 1024;
+
+pub(crate) fn encode(
+    rgba: &[u8],
+    width: usize,
+    height: usize,
+    has_transparency: Option<bool>,
+    cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<Option<Vec<u8>>, Error> {
+    check_cancelled(cancelled)?;
+    if has_transparency == Some(false) {
+        return Ok(None);
     }
-    let pixels = rgba.as_chunks::<4>().0;
-    let mut alpha: Vec<_> = std::iter::once(0)
-        .chain(pixels.iter().map(|pixel| pixel[3]))
-        .collect();
-    filter_vertical(&mut alpha[1..], width);
-    Some(match compress(&alpha[1..], width, height) {
-        Some(compressed) => compressed,
-        _ => {
-            for (value, pixel) in alpha[1..].iter_mut().zip(pixels) {
-                *value = pixel[3];
-            }
-            alpha
+
+    let raw_len = width * height + 1;
+    let first = rgba[3];
+    if rgba.last() == Some(&first)
+        && (first != u8::MAX || has_transparency.is_none())
+        && uniform_alpha(rgba, first, cancelled)?
+    {
+        if first == u8::MAX {
+            return Ok(None);
         }
-    })
+        // The 1×1 frame has one Huffman symbol per channel and no per-pixel bits.
+        // ALPH supplies the actual dimensions and decodes that symbol for every pixel.
+        let alpha = compress(&[first], 1, 1, VP8L_ALPHA, raw_len).unwrap_or_else(|| {
+            let mut raw = vec![first; raw_len];
+            raw[0] = RAW_ALPHA;
+            raw
+        });
+        check_cancelled(cancelled)?;
+        return Ok(Some(alpha));
+    }
+
+    let pixels = rgba.as_chunks::<4>().0;
+    let mut rows = pixels.chunks_exact(width);
+    let first_row = rows.next().expect("the dimensions are nonzero");
+    let mut alpha = Vec::with_capacity(raw_len);
+    alpha.extend([RAW_ALPHA, first]);
+    // The first row predicts from the left; subsequent rows predict from above.
+    alpha.extend(
+        first_row
+            .windows(2)
+            .map(|pair| pair[1][3].wrapping_sub(pair[0][3])),
+    );
+    let mut above = first_row;
+    for row in rows {
+        check_cancelled(cancelled)?;
+        alpha.extend(
+            row.iter()
+                .zip(above)
+                .map(|(pixel, top)| pixel[3].wrapping_sub(top[3])),
+        );
+        above = row;
+    }
+
+    check_cancelled(cancelled)?;
+    let filtered = &alpha[1..];
+    if !cannot_beat_raw(filtered, cancelled)? {
+        let compressed = compress(
+            filtered,
+            width,
+            height,
+            VP8L_ALPHA | VERTICAL_FILTER,
+            raw_len,
+        );
+        check_cancelled(cancelled)?;
+        if let Some(compressed) = compressed {
+            return Ok(Some(compressed));
+        }
+    }
+
+    for (raw, pixels) in alpha[1..]
+        .chunks_mut(PIXELS_PER_CHECK)
+        .zip(pixels.chunks(PIXELS_PER_CHECK))
+    {
+        check_cancelled(cancelled)?;
+        for (value, pixel) in raw.iter_mut().zip(pixels) {
+            *value = pixel[3];
+        }
+    }
+    Ok(Some(alpha))
 }
 
-fn is_opaque(rgba: &[u8]) -> bool {
-    // The alpha byte is the top byte of each native-endian pixel word.
-    const ALPHA: u64 = u64::from_ne_bytes([0, 0, 0, 255, 0, 0, 0, 255]);
-    let (words, remainder) = rgba.as_chunks::<8>();
-    words
-        .iter()
-        .all(|word| u64::from_ne_bytes(*word) & ALPHA == ALPHA)
-        && remainder
-            .as_chunks::<4>()
-            .0
+fn cannot_beat_raw(samples: &[u8], cancelled: &(dyn Fn() -> bool + Sync)) -> Result<bool, Error> {
+    const BYTE_VALUES: usize = u8::MAX as usize + 1;
+
+    // A varied window makes the full count worthwhile. It never decides the encoding.
+    let start = samples.len().saturating_sub(BYTE_VALUES) / 2;
+    let Some(window) = samples.get(start..start + BYTE_VALUES) else {
+        return Ok(false);
+    };
+    let mut seen = [false; BYTE_VALUES];
+    for &value in window {
+        seen[usize::from(value)] = true;
+    }
+    if seen.into_iter().filter(|&seen| seen).count() < BYTE_VALUES / 2 {
+        return Ok(false);
+    }
+
+    // The pinned VP8L encoder emits a literal and, for a repeated run, at least one copy.
+    // Keep only those first symbols and merge all copies into one symbol. The actual tree's
+    // literal codes plus its shortest copy code would encode this histogram at no greater cost.
+    let mut counts = [0u32; BYTE_VALUES + 1];
+    let mut previous = samples[0];
+    let mut copied = false;
+    counts[usize::from(previous)] = 1;
+    for chunk in samples[1..].chunks(PIXELS_PER_CHECK) {
+        check_cancelled(cancelled)?;
+        for &value in chunk {
+            if value != previous {
+                counts[usize::from(value)] += 1;
+                previous = value;
+                copied = false;
+            } else if !copied {
+                counts[BYTE_VALUES] += 1;
+                copied = true;
+            }
+        }
+    }
+
+    // Unrestricted Huffman merges give the minimum symbol cost, ignoring headers and extra bits.
+    let mut weights: BinaryHeap<_> = counts
+        .into_iter()
+        .filter(|&count| count != 0)
+        .map(Reverse)
+        .collect();
+    let mut bits = 0u64;
+    while let Some(Reverse(left)) = weights.pop() {
+        let Some(mut right) = weights.peek_mut() else {
+            break;
+        };
+        right.0 += left;
+        bits += u64::from(right.0);
+    }
+    let minimum_len = 1 + bits.div_ceil(8);
+    Ok(minimum_len.next_multiple_of(2) >= (samples.len() as u64 + 1).next_multiple_of(2))
+}
+
+fn uniform_alpha(
+    rgba: &[u8],
+    value: u8,
+    cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<bool, Error> {
+    const MASK: u64 = u64::from_ne_bytes([0, 0, 0, 255, 0, 0, 0, 255]);
+    let alpha = u64::from_ne_bytes([0, 0, 0, value, 0, 0, 0, value]);
+    for pixels in rgba.chunks(4 * PIXELS_PER_CHECK) {
+        check_cancelled(cancelled)?;
+        let (pairs, tail) = pixels.as_chunks::<8>();
+        if pairs
             .iter()
-            .all(|pixel| pixel[3] == 255)
+            .any(|pair| u64::from_ne_bytes(*pair) & MASK != alpha)
+            || tail.get(3).is_some_and(|&last| last != value)
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
-fn filter_vertical(alpha: &mut [u8], width: usize) {
-    // Reverse traversal preserves the original top and left predictors.
-    for position in (width..alpha.len()).rev() {
-        alpha[position] = alpha[position].wrapping_sub(alpha[position - width]);
-    }
-    for position in (1..width).rev() {
-        alpha[position] = alpha[position].wrapping_sub(alpha[position - 1]);
-    }
-}
-
-/// Serialize `differences` as an ALPH method 1 payload in one pass.
-///
-/// The pinned `image-webp` encoder writes the RIFF header, its VP8L chunk header, and the
-/// five-byte VP8L image header before the frame body; method 1 replaces those five bytes with
-/// its method byte, so the body is copied straight into the payload instead of being moved
-/// afterwards. Returns `None` unless the payload is strictly smaller than the raw fallback.
-fn compress(differences: &[u8], width: usize, height: usize) -> Option<Vec<u8>> {
-    let mut sink = AlphaSink::new(differences.len());
+fn compress(
+    samples: &[u8],
+    width: usize,
+    height: usize,
+    method: u8,
+    raw_len: usize,
+) -> Option<Vec<u8>> {
+    let mut sink = AlphaSink::new(method, raw_len);
     let mut params = image_webp::EncoderParams::default();
-    // ALPH supplies the vertical prediction without a VP8L predictor-transform header.
     params.use_predictor_transform = false;
     let mut encoder = image_webp::WebPEncoder::new(&mut sink);
     encoder.set_params(params);
     encoder
         .encode(
-            differences,
+            samples,
             width as u32,
             height as u32,
             image_webp::ColorType::L8,
@@ -70,66 +193,83 @@ fn compress(differences: &[u8], width: usize, height: usize) -> Option<Vec<u8>> 
     sink.finish()
 }
 
-/// Collects the ALPH payload from the pinned `image-webp` container layout while it is written.
+const RIFF_HEADER_LEN: usize = 20;
+const VP8L_HEADER_LEN: usize = 5;
+const IMAGE_STREAM_START: usize = RIFF_HEADER_LEN + VP8L_HEADER_LEN;
+
+/// Strip the pinned encoder's RIFF and VP8L headers. ALPH replaces them with its method byte.
 struct AlphaSink {
-    header: [u8; 20],
+    header: [u8; RIFF_HEADER_LEN],
     written: usize,
+    frame_len: Option<usize>,
     payload: Vec<u8>,
+    method: u8,
     raw_len: usize,
 }
 
 impl AlphaSink {
-    /// `raw_len` is the raw fallback payload length, including its method byte.
-    fn new(raw_len: usize) -> Self {
+    fn new(method: u8, raw_len: usize) -> Self {
         Self {
-            header: [0; 20],
+            header: [0; RIFF_HEADER_LEN],
             written: 0,
-            payload: vec![9], // ALPH compression 1, vertical filter 2
+            frame_len: None,
+            payload: Vec::new(),
+            method,
             raw_len,
         }
     }
 
-    /// The ALPH payload if the stream is one unmodified `image-webp` VP8L container.
-    fn finish(mut self) -> Option<Vec<u8>> {
-        if self.written < 25
-            || &self.header[..4] != b"RIFF"
-            || &self.header[8..12] != b"WEBP"
-            || &self.header[12..16] != b"VP8L"
-        {
-            return None;
+    fn start_payload(&mut self) -> io::Result<()> {
+        if &self.header[..4] != b"RIFF" || &self.header[8..16] != b"WEBPVP8L" {
+            return Err(io::Error::other("unexpected VP8L container"));
         }
-        let length = u32::from_le_bytes(self.header[16..20].try_into().ok()?) as usize;
-        if length <= 5 || self.written != 20 + length + (length & 1) {
-            return None;
+        let frame_len = u32::from_le_bytes(self.header[16..20].try_into().unwrap()) as usize;
+        if frame_len <= VP8L_HEADER_LEN {
+            return Err(io::Error::other("missing VP8L image stream"));
         }
-        let body = length - 5;
-        if self.payload.len() != 1 + body + (length & 1) || 1 + body > self.raw_len {
-            return None;
+        let payload_len = frame_len - VP8L_HEADER_LEN + 1;
+        if payload_len.next_multiple_of(2) >= self.raw_len.next_multiple_of(2) {
+            return Err(io::Error::other(
+                "compressed alpha is no smaller than raw alpha",
+            ));
         }
-        self.payload.truncate(1 + body);
-        Some(self.payload)
+        let riff_len = u32::from_le_bytes(self.header[4..8].try_into().unwrap()) as usize;
+        if riff_len != RIFF_HEADER_LEN - 8 + frame_len.next_multiple_of(2) {
+            return Err(io::Error::other("unexpected VP8L container length"));
+        }
+        self.frame_len = Some(frame_len);
+        self.payload.reserve_exact(payload_len);
+        self.payload.push(self.method);
+        Ok(())
+    }
+
+    fn finish(self) -> Option<Vec<u8>> {
+        let frame_len = self.frame_len?;
+        (self.written == RIFF_HEADER_LEN + frame_len.next_multiple_of(2)
+            && self.payload.len() == frame_len - VP8L_HEADER_LEN + 1)
+            .then_some(self.payload)
     }
 }
 
 impl Write for AlphaSink {
     fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
         let start = self.written;
-        self.written += buffer.len();
-        if start < self.header.len() {
-            let copied = (self.header.len() - start).min(buffer.len());
-            self.header[start..start + copied].copy_from_slice(&buffer[..copied]);
-        }
-        if let Some(body) = buffer.get(25usize.saturating_sub(start)..) {
-            // Chunk padding is included here, so this check is conservative; `finish`
-            // makes the strict comparison against the raw payload.
-            if self.payload.len() - 1 + body.len() > self.raw_len {
-                return Err(io::Error::other(
-                    "alpha payload cannot beat the raw fallback",
-                ));
+        let end = start + buffer.len();
+        if start < RIFF_HEADER_LEN {
+            let header_end = end.min(RIFF_HEADER_LEN);
+            self.header[start..header_end].copy_from_slice(&buffer[..header_end - start]);
+            if header_end == RIFF_HEADER_LEN {
+                self.start_payload()?;
             }
-            self.payload.reserve(body.len() + 1);
-            self.payload.extend_from_slice(body);
         }
+        if let Some(frame_len) = self.frame_len
+            && let Some(body) = buffer.get(IMAGE_STREAM_START.saturating_sub(start)..)
+        {
+            let remaining = frame_len - VP8L_HEADER_LEN + 1 - self.payload.len();
+            self.payload
+                .extend_from_slice(&body[..remaining.min(body.len())]);
+        }
+        self.written = end;
         Ok(buffer.len())
     }
 
@@ -140,62 +280,45 @@ impl Write for AlphaSink {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{VP8L_ALPHA, cannot_beat_raw, compress};
 
-    /// The pre-optimization extraction: write the full container, then scan it for VP8L.
-    fn container_payload(differences: &[u8], width: usize, height: usize) -> Option<Vec<u8>> {
-        let mut file = Vec::new();
-        let mut params = image_webp::EncoderParams::default();
-        params.use_predictor_transform = false;
-        let mut encoder = image_webp::WebPEncoder::new(&mut file);
-        encoder.set_params(params);
-        encoder
-            .encode(
-                differences,
-                width as u32,
-                height as u32,
-                image_webp::ColorType::L8,
-            )
-            .ok()?;
-        let mut position = 12;
-        while position + 8 <= file.len() {
-            let fourcc = &file[position..position + 4];
-            let length =
-                u32::from_le_bytes(file[position + 4..position + 8].try_into().ok()?) as usize;
-            let end = position + 8 + length;
-            let payload = file.get(position + 8..end)?;
-            if fourcc == b"VP8L" {
-                if payload.len() <= 5 {
-                    return None;
-                }
-                file.copy_within(position + 13..end, 1);
-                file.truncate(length - 4);
-                file[0] = 9;
-                return Some(file);
-            }
-            position += 8 + length + (length & 1);
-        }
-        None
+    #[test]
+    fn raw_bound_accounts_for_samples_outside_the_probe() {
+        let mut samples: Vec<_> = (0..=u8::MAX).cycle().take(256 * 16).collect();
+        assert!(cannot_beat_raw(&samples, &|| false).unwrap());
+        assert!(compress(&samples, 256, 16, VP8L_ALPHA, samples.len() + 1).is_none());
+
+        let middle = (samples.len() - 256) / 2;
+        samples[..middle].fill(0);
+        samples[middle + 256..].fill(0);
+        assert!(!cannot_beat_raw(&samples, &|| false).unwrap());
+        assert!(compress(&samples, 256, 16, VP8L_ALPHA, samples.len() + 1).is_some());
     }
 
     #[test]
-    fn payload_matches_container_scan() {
+    fn alpha_round_trips() {
         for (width, height) in [(1, 1), (1, 7), (8, 3), (17, 19), (32, 33)] {
-            for pattern in 0..4u8 {
-                let differences: Vec<u8> = (0..width * height)
-                    .map(|index| match pattern {
-                        0 => 0,
-                        1 => 255,
-                        2 => (index % 17) as u8,
-                        _ => (index as u8).wrapping_mul(37),
+            for pattern in 0..4 {
+                let rgba: Vec<u8> = (0..width * height)
+                    .flat_map(|index| {
+                        let alpha = match pattern {
+                            0 => 0,
+                            1 => 170,
+                            2 => (index % 17) as u8,
+                            _ => (index as u8).wrapping_mul(37),
+                        };
+                        [37, 123, 211, alpha]
                     })
                     .collect();
-                let limit = differences.len() + 1;
-                let actual =
-                    compress(&differences, width, height).filter(|payload| payload.len() < limit);
-                let expected = container_payload(&differences, width, height)
-                    .filter(|payload| payload.len() < limit);
-                assert_eq!(actual, expected, "{width}x{height} pattern {pattern}");
+                let webp = crate::encode_rgba(&rgba, width, height, 75).unwrap();
+                let decoded = image::load_from_memory(&webp).unwrap().into_rgba8();
+                assert_eq!(decoded.dimensions(), (width, height));
+                for (actual, expected) in decoded.pixels().zip(rgba.as_chunks::<4>().0) {
+                    assert_eq!(
+                        actual[3], expected[3],
+                        "{width}x{height}, pattern {pattern}"
+                    );
+                }
             }
         }
     }

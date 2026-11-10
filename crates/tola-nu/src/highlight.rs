@@ -61,6 +61,9 @@ impl Command for Highlight {
             PipelineData::ByteStream(stream, _) => {
                 String::from_utf8_lossy(&stream.into_bytes()?).into_owned()
             }
+            PipelineData::Value(Value::Binary { val, .. }, _) => {
+                String::from_utf8_lossy(&val).into_owned()
+            }
             other => other.into_value(call.head)?.coerce_string()?,
         };
         engine.signals().check(&call.head)?;

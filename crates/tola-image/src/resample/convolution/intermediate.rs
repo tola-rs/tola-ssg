@@ -3,7 +3,7 @@
 use fearless_simd::prelude::*;
 use fearless_simd::{Level, Simd, dispatch, i32x4, i64x2};
 
-use crate::resample::weights::{quantize, quantize_coverage};
+use crate::resample::weights::{AxisWeights, quantize, quantize_coverage};
 
 mod simd;
 
@@ -88,16 +88,36 @@ pub(super) fn finish_tile(totals: [i32; 4]) -> [i16; 4] {
     result
 }
 
-pub(super) fn covered_windows<const ROWS: usize>(
-    windows: [&[[u16; 4]]; ROWS],
-    weights: &[i16],
+pub(super) fn write_covered_horizontal_rows(
+    sources: [&[[u16; 4]]; WINDOW_ROWS],
+    horizontal: &AxisWeights,
+    rows: &mut [[i32; 4]],
+    width: usize,
     level: Level,
-) -> [[i32; 4]; ROWS] {
-    dispatch!(level, simd => covered_windows_simd(simd, windows, weights))
+) {
+    dispatch!(level, simd => {
+        if rows.len() == width * WINDOW_ROWS {
+            for x in 0..width {
+                let (first, weights) = horizontal.at(x as u32);
+                let windows = sources.map(|row| &row[first as usize..][..weights.len()]);
+                for (row, value) in covered_windows(simd, windows, weights).into_iter().enumerate() {
+                    rows[row * width + x] = value;
+                }
+            }
+        } else {
+            for (row, source) in rows.chunks_exact_mut(width).zip(sources) {
+                for (x, value) in row.iter_mut().enumerate() {
+                    let (first, weights) = horizontal.at(x as u32);
+                    let window = &source[first as usize..][..weights.len()];
+                    *value = covered_windows(simd, [window], weights)[0];
+                }
+            }
+        }
+    });
 }
 
 #[inline(always)]
-fn covered_windows_simd<S: Simd, const ROWS: usize>(
+fn covered_windows<S: Simd, const ROWS: usize>(
     simd: S,
     windows: [&[[u16; 4]]; ROWS],
     weights: &[i16],
@@ -120,29 +140,32 @@ fn covered_windows_simd<S: Simd, const ROWS: usize>(
     })
 }
 
-pub(super) fn accumulate_covered_tile<'a>(
-    totals: &mut [[i64; 4]],
+pub(super) fn write_covered_vertical_row<'a>(
+    samples: &mut [[i32; 4]],
     tap: impl Fn(usize) -> &'a [[u16; 4]],
     weights: &[i16],
-    start: usize,
     level: Level,
 ) {
     dispatch!(level, simd => {
-        let mut sums = [[i64x2::splat(simd, 0); 2]; ACCUMULATE_PIXELS];
-        for (offset, weight) in weights.iter().enumerate() {
-            let weight = i32x4::splat(simd, i32::from(*weight));
-            let row = tap(offset);
-            for (x, sum) in sums.iter_mut().take(totals.len()).enumerate() {
-                let samples = i32x4::from_slice(simd, &row[start + x].map(i32::from));
-                let (lower, upper) = (samples * weight).widen();
-                sum[0] += lower;
-                sum[1] += upper;
+        for (tile, destination) in samples.chunks_mut(ACCUMULATE_PIXELS).enumerate() {
+            let first = tile * ACCUMULATE_PIXELS;
+            let mut sums = [[i64x2::splat(simd, 0); 2]; ACCUMULATE_PIXELS];
+            for (offset, weight) in weights.iter().enumerate() {
+                let weight = i32x4::splat(simd, i32::from(*weight));
+                let row = tap(offset);
+                for (x, sum) in sums.iter_mut().take(destination.len()).enumerate() {
+                    let samples = i32x4::from_slice(simd, &row[first + x].map(i32::from));
+                    let (lower, upper) = (samples * weight).widen();
+                    sum[0] += lower;
+                    sum[1] += upper;
+                }
             }
-        }
-        for (total, sum) in totals.iter_mut().zip(sums) {
-            let lower = sum[0].to_array();
-            let upper = sum[1].to_array();
-            *total = [lower[0], lower[1], upper[0], upper[1]];
+            for (sample, sum) in destination.iter_mut().zip(sums) {
+                let lower = sum[0].to_array();
+                let upper = sum[1].to_array();
+                *sample =
+                    [lower[0], lower[1], upper[0], upper[1]].map(|sum| quantize_coverage(sum) as i32);
+            }
         }
     });
 }
@@ -235,13 +258,15 @@ mod tests {
                 ) as i32
             });
             for level in levels {
-                assert_eq!(
-                    covered_windows([&source[..count]], &weights[..count], level)[0],
-                    expected
-                );
-                let shared =
-                    covered_windows([&source[..count]; WINDOW_ROWS], &weights[..count], level);
-                assert_eq!(shared, [expected; WINDOW_ROWS]);
+                dispatch!(level, simd => {
+                    assert_eq!(
+                        covered_windows(simd, [&source[..count]], &weights[..count])[0],
+                        expected
+                    );
+                    let shared =
+                        covered_windows(simd, [&source[..count]; WINDOW_ROWS], &weights[..count]);
+                    assert_eq!(shared, [expected; WINDOW_ROWS]);
+                });
             }
         }
     }

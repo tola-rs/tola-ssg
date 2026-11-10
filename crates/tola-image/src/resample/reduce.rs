@@ -1,12 +1,12 @@
 //! The box stage: whole-block averaging that runs before the kernel on a large shrink.
 
-use anyhow::{Context, Result};
 use fearless_simd::prelude::*;
 use fearless_simd::{Level, dispatch, u8x16, u16x8};
 
 use crate::cancellation::Cancellation;
 use crate::rows::for_each_row;
 use crate::{HOLD_IN_MEMORY, pixel_bytes, rgba_buffer};
+use crate::{ImageError, ImageResult};
 
 use super::plane::{AlphaRepresentation, CoveredPlane, SourcePlane, premultiply};
 
@@ -110,7 +110,7 @@ pub(super) fn box_averaged(
     plane: &SourcePlane<'_>,
     block: ReducedBlock,
     cancellation: &dyn Cancellation,
-) -> Result<SourcePlane<'static>> {
+) -> ImageResult<SourcePlane<'static>> {
     let (horizontal, vertical) = (block.horizontal, block.vertical);
     let (width, height) = block.dimensions(plane.width(), plane.height());
     let mut pixels = rgba_buffer(width, height)?;
@@ -183,12 +183,14 @@ pub(super) fn covered_box_averaged(
     plane: &SourcePlane<'_>,
     block: ReducedBlock,
     cancellation: &dyn Cancellation,
-) -> Result<CoveredPlane<'static>> {
+) -> ImageResult<CoveredPlane<'static>> {
     let (horizontal, vertical) = (block.horizontal, block.vertical);
     let (width, height) = block.dimensions(plane.width(), plane.height());
     let samples = pixel_bytes(width, height, 8)? / 8;
     let mut pixels = Vec::new();
-    pixels.try_reserve_exact(samples).context(HOLD_IN_MEMORY)?;
+    pixels
+        .try_reserve_exact(samples)
+        .map_err(|error| ImageError::codec(HOLD_IN_MEMORY, error))?;
     pixels.resize(samples, [0u16; 4]);
     let columns: Vec<u32> = (0..width)
         .map(|x| block_columns(x, plane.width(), horizontal))
@@ -203,7 +205,7 @@ pub(super) fn covered_box_averaged(
                 pixel_bytes(width, 1, 32)?;
                 totals
                     .try_reserve_exact(width as usize)
-                    .context(HOLD_IN_MEMORY)?;
+                    .map_err(|error| ImageError::codec(HOLD_IN_MEMORY, error))?;
                 totals.resize(width as usize, [0; 4]);
             }
             totals.fill([0; 4]);
@@ -267,7 +269,7 @@ mod tests {
         )
         .err()
         .expect("cancel before completing one reduced row");
-        assert!(error.is::<crate::ImageCancelled>());
+        assert!(matches!(error, ImageError::Cancelled(_)));
     }
 
     /// The box stage runs only where the references run it: past the gap a kernel alone stops

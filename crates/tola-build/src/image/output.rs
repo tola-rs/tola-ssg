@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use anyhow::{Result, ensure};
 use rayon::prelude::*;
-use tola_typst::svg::{SvgCrop, SvgSource, looks_like_svg};
+use tola_typst::svg::{SvgCrop, SvgError, SvgSource, looks_like_svg};
 use tola_typst::{AccessedDeps, ContentDigest, ReadEvidence, TypstWorld};
 use typst::comemo::Track;
 use typst::foundations::Bytes;
@@ -35,17 +35,16 @@ pub(crate) struct ImageOutputs {
     variants: BTreeMap<OutputPath, EncodedVariant>,
 }
 
-const MAX_IMAGE_WORKERS: usize = 4;
+const MAX_SOURCE_WORKERS: usize = 4;
 
-/// Batches sum each source's largest decode, resample, or encoding-plane peak. A larger source
-/// runs alone. Codec scratch, row buffers, encoded outputs, frozen inputs and separate pixel-cache
-/// retention are not covered, so this is not a process-memory limit.
+/// Batches sum each source's largest decode, resample, or encode estimate. A larger source runs
+/// alone. Previously encoded variants, frozen inputs and pixel-cache retention are separate.
 const SOURCE_BATCH_BYTES: u64 = 256 * 1024 * 1024;
 
-fn image_workers(cancellation: &BuildCancellation) -> Result<rayon::ThreadPool> {
+fn image_workers(threads: usize, cancellation: &BuildCancellation) -> Result<rayon::ThreadPool> {
     cancellation.ensure_active()?;
     let workers = rayon::ThreadPoolBuilder::new()
-        .num_threads(MAX_IMAGE_WORKERS.min(rayon::current_num_threads().max(1)))
+        .num_threads(threads)
         .thread_name(|index| format!("tola-image-{index}"))
         .build();
     cancellation.ensure_active()?;
@@ -108,7 +107,7 @@ struct SourceGroup {
 /// The bytes one pending render produced, or why it failed.
 struct RenderOutcome {
     index: usize,
-    bytes: Result<Arc<[u8]>>,
+    bytes: Result<Arc<[u8]>, ImageCause>,
 }
 
 /// One geometry of one source: the pixels every encoding of it shares.
@@ -121,6 +120,7 @@ struct RenderGeometry {
 /// A claimed variant whose bytes this attempt still has to render.
 struct PendingRender {
     output: OutputPath,
+    claim: usize,
     source: usize,
     source_id: FileId,
     /// The identity the stored bytes of this variant are kept under.
@@ -128,7 +128,13 @@ struct PendingRender {
 }
 
 impl SourceGroup {
-    fn admission_bytes(&self, source: &SourceImage) -> u64 {
+    fn admission_bytes(
+        &self,
+        source: &SourceImage,
+        pending: &[PendingRender],
+        claims: &[VariantClaim],
+        encoding_workers: usize,
+    ) -> u64 {
         let source_pixels = u64::from(source.metadata.width) * u64::from(source.metadata.height);
         let decoded = if source.svg.is_some() {
             0
@@ -141,9 +147,22 @@ impl SourceGroup {
             .map(|geometry| {
                 let output =
                     u64::from(geometry.pixels.width()) * u64::from(geometry.pixels.height());
-                // Opaque PNG encoding retains RGBA and an RGB plane; it never coexists with
-                // convolution intermediates. WebP's private codec allocations remain excluded.
-                let encoding = decoded.saturating_add(output.saturating_mul(7));
+                let scratch = geometry
+                    .renders
+                    .iter()
+                    .map(|&index| {
+                        claims[pending[index].claim]
+                            .recipe
+                            .estimated_encoding_scratch_bytes(
+                                encoding_workers,
+                                source.metadata.has_alpha,
+                            )
+                    })
+                    .max()
+                    .unwrap_or(0);
+                let encoding = decoded
+                    .saturating_add(output.saturating_mul(4))
+                    .saturating_add(scratch);
                 geometry
                     .pixels
                     .estimated_working_bytes(&source.metadata)
@@ -164,9 +183,10 @@ impl SourceGroup {
         &self,
         source: &SourceImage,
         pending: &[PendingRender],
-        claims: &BTreeMap<OutputPath, VariantClaim>,
+        claims: &[VariantClaim],
         cache: &PixelCache,
         cancellation: &BuildCancellation,
+        encoding_workers: usize,
     ) -> Vec<RenderOutcome> {
         let mut outcomes = Vec::with_capacity(
             self.geometries
@@ -177,23 +197,23 @@ impl SourceGroup {
         if let Some(svg) = &source.svg {
             for geometry in &self.geometries {
                 let pixels = geometry.pixels;
-                let rendered = (|| -> Result<ResampledPixels> {
-                    let vector = pixels
-                        .vector_geometry()
-                        .ok_or_else(|| anyhow::anyhow!("the raster geometry is not renderable"))?;
+                let rendered = (|| -> Result<ResampledPixels, ImageCause> {
+                    let vector = pixels.vector_geometry().ok_or(ImageCause::RasterGeometry)?;
                     let (x, y, width, height) = vector.crop();
-                    let rgba = svg.render(
-                        pixels.width(),
-                        pixels.height(),
-                        Some(SvgCrop {
-                            x,
-                            y,
-                            width,
-                            height,
-                        }),
-                    )?;
+                    let rgba = svg
+                        .render(
+                            pixels.width(),
+                            pixels.height(),
+                            Some(SvgCrop {
+                                x,
+                                y,
+                                width,
+                                height,
+                            }),
+                        )
+                        .map_err(ImageCause::Svg)?;
                     ResampledPixels::from_rendered(pixels, rgba, cancellation)
-                        .map_err(anyhow::Error::new)
+                        .map_err(ImageCause::Image)
                 })();
                 match rendered {
                     Ok(rendered) => {
@@ -202,6 +222,7 @@ impl SourceGroup {
                             pending,
                             claims,
                             cancellation,
+                            encoding_workers,
                             &mut outcomes,
                         );
                     }
@@ -219,7 +240,14 @@ impl SourceGroup {
         for geometry in &self.geometries {
             match cache.resampled(source.digest, geometry.pixels) {
                 Some(pixels) => {
-                    geometry.encode_into(&pixels, pending, claims, cancellation, &mut outcomes);
+                    geometry.encode_into(
+                        &pixels,
+                        pending,
+                        claims,
+                        cancellation,
+                        encoding_workers,
+                        &mut outcomes,
+                    );
                 }
                 None => missing_geometries.push(geometry),
             }
@@ -238,7 +266,7 @@ impl SourceGroup {
                 Err(error) => {
                     outcomes.push(RenderOutcome {
                         index: first_missing.renders[0],
-                        bytes: Err(anyhow::Error::new(error)),
+                        bytes: Err(ImageCause::Image(error)),
                     });
                     return outcomes;
                 }
@@ -249,11 +277,18 @@ impl SourceGroup {
                 Ok(pixels) => {
                     let pixels = Arc::new(pixels);
                     cache.retain_resampled(source.digest, geometry.pixels, Arc::clone(&pixels));
-                    geometry.encode_into(&pixels, pending, claims, cancellation, &mut outcomes);
+                    geometry.encode_into(
+                        &pixels,
+                        pending,
+                        claims,
+                        cancellation,
+                        encoding_workers,
+                        &mut outcomes,
+                    );
                 }
                 Err(error) => outcomes.push(RenderOutcome {
                     index: geometry.renders[0],
-                    bytes: Err(anyhow::Error::new(error)),
+                    bytes: Err(ImageCause::Image(error)),
                 }),
             }
         }
@@ -271,33 +306,86 @@ impl RenderGeometry {
         &self,
         pixels: &ResampledPixels,
         pending: &[PendingRender],
-        claims: &BTreeMap<OutputPath, VariantClaim>,
+        claims: &[VariantClaim],
         cancellation: &BuildCancellation,
+        encoding_workers: usize,
         outcomes: &mut Vec<RenderOutcome>,
     ) {
         outcomes.extend(self.renders.iter().map(|index| {
             RenderOutcome {
                 index: *index,
                 bytes: pixels
-                    .encode(&claims[&pending[*index].output].recipe, cancellation)
-                    .map_err(anyhow::Error::new),
+                    .encode_with_workers(
+                        &claims[pending[*index].claim].recipe,
+                        cancellation,
+                        encoding_workers,
+                    )
+                    .map_err(ImageCause::Image),
             }
         }));
     }
 }
 
-fn source_batch_len(groups: &[SourceGroup], sources: &[SourceImage], workers: usize) -> usize {
+struct SourceBatch {
+    count: usize,
+    extra_workers: usize,
+}
+
+impl SourceBatch {
+    fn encoding_workers(&self, index: usize) -> usize {
+        1 + self.extra_workers / self.count + usize::from(index < self.extra_workers % self.count)
+    }
+}
+
+fn source_batch(
+    groups: &[SourceGroup],
+    sources: &[SourceImage],
+    pending: &[PendingRender],
+    claims: &[VariantClaim],
+    source_workers: usize,
+    cpu_threads: usize,
+) -> SourceBatch {
+    let admission_bytes = |group: &SourceGroup, encoding_workers| {
+        group.admission_bytes(&sources[group.source], pending, claims, encoding_workers)
+    };
     let mut bytes = 0u64;
     let mut count = 0;
-    for group in groups.iter().take(workers) {
-        let admitted = bytes.saturating_add(group.admission_bytes(&sources[group.source]));
+    for group in groups.iter().take(source_workers) {
+        let admitted = bytes.saturating_add(admission_bytes(group, 1));
         if count > 0 && admitted > SOURCE_BATCH_BYTES {
             break;
         }
         bytes = admitted;
         count += 1;
     }
-    count
+
+    if count == 1 {
+        // Row work for this source has joined by the time its encoder starts.
+        return SourceBatch {
+            count,
+            extra_workers: cpu_threads - 1,
+        };
+    }
+
+    // Other sources can still be using the whole Rayon pool for rows. Each encoder already
+    // runs on one of its workers, so share only the CPU slots outside that pool.
+    let mut batch = SourceBatch {
+        count,
+        extra_workers: cpu_threads - source_workers,
+    };
+    if batch.extra_workers == 0 {
+        return batch;
+    }
+    let bytes = groups[..count]
+        .iter()
+        .enumerate()
+        .fold(0u64, |bytes, (index, group)| {
+            bytes.saturating_add(admission_bytes(group, batch.encoding_workers(index)))
+        });
+    if bytes > SOURCE_BATCH_BYTES {
+        batch.extra_workers = 0;
+    }
+    batch
 }
 
 fn file_failure_reason(error: &typst::diag::FileError) -> &'static str {
@@ -335,36 +423,33 @@ impl ImageOperation {
 }
 
 /// The failure behind one image operation, in the words its author reads.
+#[derive(Debug, thiserror::Error)]
 enum ImageCause {
     /// A source read the compiler attempted: missing, unreadable, a directory, ...
-    File(typst::diag::FileError),
-    /// A reason the failing producer states for itself.
-    Stated(anyhow::Error),
+    #[error("{0}")]
+    File(#[source] typst::diag::FileError),
+    #[error("{0}")]
+    Image(#[source] ImageError),
+    #[error("{0}")]
+    Svg(#[source] SvgError),
+    #[error("the raster geometry is not renderable")]
+    RasterGeometry,
 }
 
 impl ImageCause {
     fn note(&self) -> String {
         match self {
             Self::File(error) => file_failure_reason(error).to_owned(),
-            Self::Stated(error) => match error.downcast_ref::<ImageError>() {
-                Some(error) => error.note(),
-                // A decoder reason may span several lines; the rendered note stays one line.
-                None => collapse_whitespace(&error.to_string()),
-            },
+            Self::Image(error) => error.note(),
+            Self::Svg(error) => collapse_whitespace(&error.to_string()),
+            Self::RasterGeometry => self.to_string(),
         }
     }
 
     fn help(&self) -> Option<String> {
         match self {
-            Self::File(_) => None,
-            Self::Stated(error) => error.downcast_ref::<ImageError>()?.help(),
-        }
-    }
-
-    fn into_error(self) -> anyhow::Error {
-        match self {
-            Self::File(error) => anyhow::Error::new(error),
-            Self::Stated(error) => error,
+            Self::Image(error) => error.help(),
+            Self::File(_) | Self::Svg(_) | Self::RasterGeometry => None,
         }
     }
 }
@@ -381,15 +466,20 @@ fn image_failure(file: FileId, operation: ImageOperation, cause: ImageCause) -> 
     if let Some(help) = cause.help() {
         diagnostic = diagnostic.with_help(help);
     }
-    tola_diagnostic::DiagnosticError::attach(cause.into_error().context(message), vec![diagnostic])
-        .into()
+    let error = match cause {
+        ImageCause::File(error) => anyhow::Error::new(error),
+        ImageCause::Image(error) => anyhow::Error::new(error),
+        ImageCause::Svg(error) => anyhow::Error::new(error),
+        ImageCause::RasterGeometry => anyhow::Error::new(cause),
+    };
+    tola_diagnostic::DiagnosticError::attach(error.context(message), vec![diagnostic]).into()
 }
 
 /// Render and encode every claimed variant still pending, returning each one's bytes in
 /// `pending` order.
 fn render_pending_variants(
     pending: &[PendingRender],
-    claims: &BTreeMap<OutputPath, VariantClaim>,
+    claims: &[VariantClaim],
     sources: &[SourceImage],
     pixel_cache: &PixelCache,
     cancellation: &BuildCancellation,
@@ -400,7 +490,7 @@ fn render_pending_variants(
     let mut groups = Vec::<SourceGroup>::new();
     let mut source_groups = vec![None; sources.len()];
     for (index, job) in pending.iter().enumerate() {
-        let pixels = claims[&job.output].recipe.pixels();
+        let pixels = claims[job.claim].recipe.pixels();
         match group_indexes.get(&(job.source, pixels)).copied() {
             Some((group, geometry)) => {
                 groups[group].geometries[geometry].renders.push(index);
@@ -428,26 +518,39 @@ fn render_pending_variants(
         }
     }
     let mut rendered_bytes = vec![None; pending.len()];
-    let mut failure = None::<(usize, anyhow::Error)>;
+    let mut failure = None::<(usize, ImageCause)>;
     if !groups.is_empty() {
-        let workers = image_workers(cancellation)?;
+        let cpu_threads = std::thread::available_parallelism()
+            .map_or(1, |threads| threads.get())
+            .min(rayon::current_num_threads());
+        let source_workers = cpu_threads.min(MAX_SOURCE_WORKERS);
+        let workers = image_workers(source_workers, cancellation)?;
         workers.install(|| -> Result<()> {
             let mut remaining = groups.as_slice();
             while !remaining.is_empty() {
                 cancellation.ensure_active()?;
-                let count = source_batch_len(remaining, sources, workers.current_num_threads());
-                let (batch, next) = remaining.split_at(count);
+                let batch = source_batch(
+                    remaining,
+                    sources,
+                    pending,
+                    claims,
+                    source_workers,
+                    cpu_threads,
+                );
+                let (active, next) = remaining.split_at(batch.count);
                 // Only this batch enters Rayon. A suspended row task cannot start another
                 // batch, and each admitted source owns at most one active geometry/encoding.
-                let outcomes = batch
+                let outcomes = active
                     .par_iter()
-                    .map(|group| {
+                    .enumerate()
+                    .map(|(index, group)| {
                         group.render(
                             &sources[group.source],
                             pending,
                             claims,
                             pixel_cache,
                             cancellation,
+                            batch.encoding_workers(index),
                         )
                     })
                     .collect::<Vec<_>>();
@@ -477,11 +580,7 @@ fn render_pending_variants(
         } else {
             ImageOperation::Resize
         };
-        return Err(image_failure(
-            job.source_id,
-            operation,
-            ImageCause::Stated(error),
-        ));
+        return Err(image_failure(job.source_id, operation, error));
     }
     Ok(rendered_bytes
         .into_iter()
@@ -502,7 +601,8 @@ impl ImageOutputs {
         cancellation.ensure_active()?;
         let started = std::time::Instant::now();
         let mut variants = BTreeMap::<OutputPath, EncodedVariant>::new();
-        let mut claims = BTreeMap::<OutputPath, VariantClaim>::new();
+        let mut claims = Vec::<VariantClaim>::new();
+        let mut claims_by_output = BTreeMap::<OutputPath, usize>::new();
         let mut pending = Vec::<PendingRender>::new();
         let mut sources = Vec::<SourceImage>::new();
         let mut source_indexes = HashMap::<FileId, usize>::new();
@@ -558,7 +658,7 @@ impl ImageOutputs {
                                         image_failure(
                                             source_id,
                                             ImageOperation::RasterizeSvg,
-                                            ImageCause::Stated(anyhow::Error::new(error)),
+                                            ImageCause::Svg(error),
                                         )
                                     })?,
                                 )
@@ -577,7 +677,7 @@ impl ImageOutputs {
                                     image_failure(
                                         source_id,
                                         ImageOperation::Read,
-                                        ImageCause::Stated(error.into()),
+                                        ImageCause::Image(error),
                                     )
                                 })?,
                             };
@@ -610,7 +710,8 @@ impl ImageOutputs {
                 None => request.recipe().validate(&source.metadata)?,
             }
             let output = request.output_path();
-            if let Some(existing) = claims.get(&output) {
+            if let Some(&index) = claims_by_output.get(&output) {
+                let existing = &claims[index];
                 ensure!(
                     existing.source_digest == source.digest && existing.recipe == *request.recipe(),
                     "two image variants publish the same output `{output}`; change one recipe or output",
@@ -630,24 +731,29 @@ impl ImageOutputs {
             if let Some(bytes) = retained {
                 reused += 1;
                 variants.insert(output.clone(), claim.encoded(bytes));
-            } else if let Some(bytes) = variant_cache.read(request.key()) {
-                restored += 1;
-                variants.insert(output.clone(), claim.encoded(bytes));
             } else {
-                pending.push(PendingRender {
-                    output: output.clone(),
-                    source: source_index,
-                    source_id,
-                    key: request.key(),
-                });
+                let key = request.key();
+                if let Some(bytes) = variant_cache.read(key) {
+                    restored += 1;
+                    variants.insert(output.clone(), claim.encoded(bytes));
+                } else {
+                    pending.push(PendingRender {
+                        output: output.clone(),
+                        claim: claims.len(),
+                        source: source_index,
+                        source_id,
+                        key,
+                    });
+                }
             }
-            claims.insert(output, claim);
+            claims_by_output.insert(output, claims.len());
+            claims.push(claim);
         }
 
         let encoded =
             render_pending_variants(&pending, &claims, &sources, &pixel_cache, cancellation)?;
         for (job, bytes) in pending.iter().zip(encoded) {
-            let claim = &claims[&job.output];
+            let claim = &claims[job.claim];
             if let Err(error) = variant_cache.store(job.key, &bytes) {
                 unwritable += 1;
                 tracing::debug!(target: "tola::compile", %error, "image variant not stored");

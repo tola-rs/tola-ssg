@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, ensure};
+use crate::{ImageError, ImageResult};
 
 use crate::cancellation::Cancellation;
 
@@ -8,16 +8,20 @@ const DAMAGED: &str = "the JPEG image is damaged or incomplete; re-export it";
 pub(in crate::codec) fn jpeg_has_icc(
     bytes: &[u8],
     cancellation: &dyn Cancellation,
-) -> Result<bool> {
+) -> ImageResult<bool> {
     let mut offset = 2usize;
     let mut found = false;
     while offset < bytes.len() {
         cancellation.ensure_active()?;
-        ensure!(bytes[offset] == 0xff, DAMAGED);
+        if bytes[offset] != 0xff {
+            return Err(ImageError::unreadable(DAMAGED));
+        }
         while bytes.get(offset) == Some(&0xff) {
             offset += 1;
         }
-        let marker = *bytes.get(offset).context(DAMAGED)?;
+        let marker = *bytes
+            .get(offset)
+            .ok_or_else(|| ImageError::unreadable(DAMAGED))?;
         offset += 1;
         if marker == 0xda || marker == 0xd9 {
             break;
@@ -25,10 +29,16 @@ pub(in crate::codec) fn jpeg_has_icc(
         if marker == 0x01 || (0xd0..=0xd8).contains(&marker) {
             continue;
         }
-        let length_bytes = bytes.get(offset..offset + 2).context(DAMAGED)?;
+        let length_bytes = bytes
+            .get(offset..offset + 2)
+            .ok_or_else(|| ImageError::unreadable(DAMAGED))?;
         let length = u16::from_be_bytes([length_bytes[0], length_bytes[1]]) as usize;
-        ensure!(length >= 2, DAMAGED);
-        let segment = bytes.get(offset + 2..offset + length).context(DAMAGED)?;
+        if length < 2 {
+            return Err(ImageError::unreadable(DAMAGED));
+        }
+        let segment = bytes
+            .get(offset + 2..offset + length)
+            .ok_or_else(|| ImageError::unreadable(DAMAGED))?;
         if marker == 0xe2 && segment.starts_with(b"ICC_PROFILE\0") {
             found = true;
         }

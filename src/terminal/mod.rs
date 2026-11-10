@@ -2,7 +2,6 @@
 
 pub(crate) mod ansi;
 pub(crate) mod clipboard;
-pub(crate) mod code;
 pub(crate) mod color;
 mod console;
 pub(crate) mod development;
