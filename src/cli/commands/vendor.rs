@@ -466,6 +466,12 @@ impl VendorCopy<'_> {
                 .map_err(|error| self.failure(VendorStep::WritingCopy, destination, error))?;
         }
         self.cancellation.ensure_active()?;
+        if let Some(mode) = tola_fs::unix_mode(&metadata) {
+            tola_fs::set_unix_mode(destination, if mode & 0o111 == 0 { 0o644 } else { 0o755 })
+                .map_err(|error| {
+                    self.failure(VendorStep::WritingCopy, destination, error.into())
+                })?;
+        }
         Ok(())
     }
 
@@ -931,6 +937,10 @@ mod tests {
         let source = site.path().join("packages");
         fs::create_dir(&source).unwrap();
         fs::write(source.join("lib.typ"), b"package bytes").unwrap();
+        tola_fs::set_unix_mode(&source.join("lib.typ"), 0o755).unwrap();
+        fs::create_dir(source.join("original")).unwrap();
+        fs::write(source.join("original/data.txt"), b"shared directory").unwrap();
+        std::os::unix::fs::symlink("original", source.join("alias")).unwrap();
         std::os::unix::fs::symlink("lib.typ", source.join("linked.typ")).unwrap();
         let replacement = replacement(site.path());
         let destination = site.path().join("candidate");
@@ -950,6 +960,15 @@ mod tests {
         assert_eq!(
             fs::read(destination.join("linked.typ")).unwrap(),
             b"package bytes"
+        );
+        assert_eq!(
+            tola_fs::unix_mode(&fs::metadata(destination.join("lib.typ")).unwrap()).unwrap()
+                & 0o777,
+            0o755
+        );
+        assert_eq!(
+            tola_input::tree_sha256(&source).unwrap(),
+            tola_input::tree_sha256(&destination).unwrap()
         );
     }
 

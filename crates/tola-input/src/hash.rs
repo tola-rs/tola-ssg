@@ -107,6 +107,8 @@ pub fn file_sha256(path: &Path) -> Result<Sha256Digest, FileHashError> {
 /// The failure of hashing one directory tree.
 #[derive(Debug, thiserror::Error)]
 pub enum TreeHashError {
+    #[error("directory link cycle at `{path}`")]
+    Cycle { path: PathBuf },
     #[error("Tola could not resolve `{path}`")]
     Resolve {
         path: PathBuf,
@@ -167,8 +169,8 @@ impl TreeHashError {
 ///
 /// The digest covers regular files only. A file contributes its `/`-separated relative path and
 /// its contents, both length-prefixed, in byte order of the paths. Empty directories contribute
-/// nothing, so an unused directory cannot change an input's identity, and a symbolic link may not
-/// resolve outside `root`.
+/// nothing, so an unused directory cannot change an input's identity. Each logical path is
+/// counted, including directory aliases. Links must remain inside `root` and cannot form cycles.
 ///
 /// The digest covers materialized bytes, not a Git tree. A producer that materializes a remote
 /// module must pin EOL conversion and disable external filter drivers, or one commit can hash
@@ -207,7 +209,7 @@ fn collect(
     root: &Path,
     relative: &Path,
     files: &mut Vec<TreeFile>,
-    visited: &mut BTreeSet<PathBuf>,
+    ancestors: &mut BTreeSet<PathBuf>,
 ) -> Result<(), TreeHashError> {
     let directory = root.join(relative);
     let canonical = directory
@@ -216,8 +218,10 @@ fn collect(
     if !canonical.starts_with(root) {
         return Err(TreeHashError::escaped(&directory, root));
     }
-    if !visited.insert(canonical) {
-        return Ok(());
+    if !ancestors.insert(canonical.clone()) {
+        return Err(TreeHashError::Cycle {
+            path: relative.to_path_buf(),
+        });
     }
     let mut entries = std::fs::read_dir(&directory)
         .map_err(|source| TreeHashError::unreadable(&directory, source))?
@@ -243,7 +247,7 @@ fn collect(
             let target_metadata = std::fs::metadata(&target)
                 .map_err(|source| TreeHashError::uninspectable(&target, source))?;
             if target_metadata.is_dir() {
-                collect(root, &child, files, visited)?;
+                collect(root, &child, files, ancestors)?;
             } else if target_metadata.is_file() {
                 files.push(TreeFile {
                     relative: child,
@@ -253,7 +257,7 @@ fn collect(
                 return Err(TreeHashError::NotRegularFile { path });
             }
         } else if file_type.is_dir() {
-            collect(root, &child, files, visited)?;
+            collect(root, &child, files, ancestors)?;
         } else if file_type.is_file() {
             files.push(TreeFile {
                 relative: child,
@@ -263,6 +267,7 @@ fn collect(
             return Err(TreeHashError::NotRegularFile { path });
         }
     }
+    ancestors.remove(&canonical);
     Ok(())
 }
 
