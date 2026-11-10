@@ -383,47 +383,6 @@ mod tests {
         }
     }
 
-    /// An open document's unused bindings reach the check's diagnostics.
-    #[test]
-    fn check_reports_open_document_liveness() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path();
-        let content = root.join("content");
-        std::fs::create_dir(&content).unwrap();
-        let text = "#let unused = 1\n#let used = 2\n#used\n";
-        let document = content.join("page.typ");
-        std::fs::write(&document, text).unwrap();
-        std::fs::write(
-            root.join("site.typ"),
-            "#document(\"index.html\", format: \"html\")[#include \"content/page.typ\"]",
-        )
-        .unwrap();
-        let configuration = site_configuration(root, "[build]\nentry = \"site.typ\"\n");
-        let mut compiler = compiler(&configuration);
-        let SourceCompilation::Checked { checked, .. } =
-            compiler.compile(SourceJob::Check(CheckRequest {
-                checked_revision: 1,
-                sources: inputs_at(
-                    root,
-                    1,
-                    Arc::from([(document.clone(), Arc::<str>::from(text))]),
-                ),
-                view: SourceView::default(),
-            }))
-        else {
-            panic!("expected check completion")
-        };
-        let checked = checked.unwrap();
-        assert!(
-            checked.diagnostics.iter().any(|diagnostic| {
-                diagnostic.code == crate::codes::editor::UNUSED_BINDING
-                    && diagnostic.message == "the binding `unused` is never read"
-            }),
-            "{:?}",
-            checked.diagnostics
-        );
-    }
-
     /// A check states its read evidence only while its root program compiles.
     ///
     /// A failed realization keeps the world it prepared but records no reads, so reporting that

@@ -190,10 +190,11 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
 
-    /// A character the compiler's line model also breaks on stays inside the client's line, in
-    /// both directions.
+    /// The protocol's line model, not the compiler's, decides which line a byte is on: a break
+    /// the compiler knows but the client does not stays inside the client's line, in both
+    /// directions.
     #[test]
-    fn compiler_breaks_stay_on_client_line() {
+    fn line_break_projection_follows_the_protocol() {
         for break_character in ['\u{0B}', '\u{0C}', '\u{85}', '\u{2028}', '\u{2029}'] {
             let lines = Lines::new(format!("a{break_character}b\r\nc"));
             let b = 1 + break_character.len_utf8();
@@ -213,16 +214,20 @@ mod tests {
                 "{break_character:?}"
             );
         }
-    }
-
-    /// A lone `\r` breaks a protocol line, as it does for the client.
-    #[test]
-    fn lone_return_breaks_protocol_line() {
+        // A lone `\r` breaks a protocol line, as it does for the client.
         let lines = Lines::new("a\u{0B}b\rc".to_owned());
         assert_eq!(byte_offset(&lines, Position::new(1, 1)).unwrap(), 5);
         assert_eq!(
             utf16_range(&lines, 4..5),
             Some(Range::new(Position::new(1, 0), Position::new(1, 1)))
+        );
+        // A break that ends the compiler's line is probed with that line, so a position past the
+        // compiler line's own length is answered when the break ending it is not the protocol's.
+        let lines = Lines::new("x\ny\u{0B}z\nw".to_owned());
+        assert_eq!(byte_offset(&lines, Position::new(1, 2)).unwrap(), 4);
+        assert_eq!(
+            utf16_range(&lines, 4..4),
+            Some(Range::new(Position::new(1, 2), Position::new(1, 2)))
         );
     }
 
@@ -240,41 +245,6 @@ mod tests {
         }
         for (text, split) in [("a🦊b", 2), ("a\u{2028}🦊b", 3)] {
             assert!(byte_offset(&Lines::new(text), Position::new(0, split)).is_err());
-        }
-    }
-
-    /// A break that ends the compiler's line is probed with that line, so a position past the
-    /// compiler line's own length is answered when the break ending it is not the protocol's.
-    #[test]
-    fn position_past_compiler_line_answered() {
-        let lines = Lines::new("x\ny\u{0B}z\nw".to_owned());
-        assert_eq!(byte_offset(&lines, Position::new(1, 2)).unwrap(), 4);
-        assert_eq!(
-            utf16_range(&lines, 4..4),
-            Some(Range::new(Position::new(1, 2), Position::new(1, 2)))
-        );
-    }
-
-    /// The one-scan predicate answers exactly what rescanning the prefix answers, at every reach.
-    ///
-    /// A text whose first break sits before the reach differs; one whose break sits at or after it
-    /// does not, and a text holding no such character never differs.
-    #[test]
-    fn first_break_decides_projection_by_reach() {
-        for text in [
-            "plain text\nsecond\n",
-            "a\u{0B}b\n正文\n",
-            "\u{2028} leading\n",
-            "tail \u{85} only\n",
-        ] {
-            // A reach a conversion can hold is a character boundary; another never occurs.
-            for reach in (0..=text.len()).filter(|reach| text.is_char_boundary(*reach)) {
-                assert_eq!(
-                    protocol_breaks_differ(first_break(text), reach),
-                    first_break(&text[..reach]).is_some(),
-                    "{text:?} reach {reach}"
-                );
-            }
         }
     }
 

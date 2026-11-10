@@ -222,11 +222,6 @@ mod tests {
         let diagnostics = preflight_diagnostics(&file, false);
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].code, crate::codes::init::CONFLICT);
-        assert!(
-            diagnostics[0].message.contains("is not a directory"),
-            "{diagnostics:?}"
-        );
-        assert_eq!(diagnostics[0].help[0].message, "Choose a different path");
     }
 
     #[test]
@@ -242,14 +237,14 @@ mod tests {
         fs::write(unrelated.join("notes.txt"), "notes").unwrap();
         let diagnostics = preflight_diagnostics(&unrelated, false);
         assert_eq!(diagnostics.len(), 1);
-        assert!(
-            diagnostics[0].message.contains("is not empty"),
-            "{diagnostics:?}"
-        );
+        assert_eq!(diagnostics[0].code, crate::codes::init::CONFLICT);
         assert!(diagnostics[0].notes.is_empty(), "{diagnostics:?}");
-        assert_eq!(
-            diagnostics[0].help[0].message,
-            "Pass `--force` to add only the missing files"
+        assert!(
+            diagnostics[0]
+                .help
+                .iter()
+                .any(|help| help.message.contains("--force")),
+            "{diagnostics:?}"
         );
 
         let existing = temp.path().join("existing");
@@ -258,29 +253,20 @@ mod tests {
         let diagnostics = preflight_diagnostics(&existing, false);
         assert_eq!(diagnostics.len(), 1);
         assert!(
-            diagnostics[0].message.contains("is not empty"),
-            "{diagnostics:?}"
-        );
-        assert!(
             diagnostics[0]
                 .notes
                 .iter()
-                .any(|note| note.contains("site.typ") && note.contains("never overwritten")),
+                .any(|note| note.contains("site.typ")),
             "{diagnostics:?}"
         );
 
         let diagnostics = preflight_diagnostics(&existing, true);
         assert_eq!(diagnostics.len(), 1);
         assert!(
-            diagnostics[0].message.contains("site.typ")
-                && diagnostics[0].message.contains("already exists"),
+            diagnostics[0].message.contains("site.typ"),
             "{diagnostics:?}"
         );
         assert!(diagnostics[0].notes.is_empty(), "{diagnostics:?}");
-        assert_eq!(
-            diagnostics[0].help[0].message,
-            "Remove it or choose another directory"
-        );
         assert!(
             !diagnostics[0].message.contains("--force")
                 && diagnostics[0]

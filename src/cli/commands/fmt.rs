@@ -12,7 +12,7 @@ use crate::cli::output::CommandOutput;
 use crate::cli::run::REPORT_URL;
 use crate::cli::{ConfigFileArgs, TypstPackageArgs};
 use crate::terminal::plural_count;
-use tola_build::InputScope;
+use tola_input::InputScope;
 
 pub(in crate::cli) fn run(
     config_file: ConfigFileArgs,
@@ -57,7 +57,7 @@ pub(in crate::cli) fn run(
             diagnostics.push(
                 tola_diagnostic::unreadable_source(
                     crate::codes::fmt::UNREADABLE,
-                    &tola_build::filesystem::display_path(source, root),
+                    &tola_diagnostic::display_path(source, root),
                 )
                 .with_help("Save the file as UTF-8, then run `tola fmt` again"),
             );
@@ -79,7 +79,7 @@ pub(in crate::cli) fn run(
             Formatting::Unparsable { offset } => diagnostics.push(
                 tola_diagnostic::unparsable_source(
                     crate::codes::fmt::FAILED,
-                    &tola_build::filesystem::display_path(source, root),
+                    &tola_diagnostic::display_path(source, root),
                     text,
                     offset,
                 )
@@ -100,7 +100,7 @@ pub(in crate::cli) fn run(
 }
 
 fn unrenderable(path: &Path, root: &Path) -> Diagnostic {
-    let source = tola_build::filesystem::display_path(path, root);
+    let source = tola_diagnostic::display_path(path, root);
     Diagnostic::at_path(
         crate::codes::fmt::FAILED,
         Severity::Error,
@@ -112,7 +112,7 @@ fn unrenderable(path: &Path, root: &Path) -> Diagnostic {
 }
 
 fn unformatted(path: &Path, root: &Path, before: &str, after: &str) -> Diagnostic {
-    let source = tola_build::filesystem::display_path(path, root);
+    let source = tola_diagnostic::display_path(path, root);
     let diagnostic = Diagnostic::at_path(
         crate::codes::fmt::UNFORMATTED,
         Severity::Error,

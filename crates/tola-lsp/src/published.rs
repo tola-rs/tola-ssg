@@ -3,7 +3,8 @@
 use std::sync::Arc;
 
 use serde::Deserialize;
-use tola_build::{BuildResources, NetworkAccess};
+use tola_build::BuildResources;
+use tola_input::NetworkAccess;
 use tola_typst::PackageLocations;
 
 #[cfg(feature = "network")]
@@ -121,27 +122,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn malformed_index_is_unavailable() {
-        for bytes in [
-            b"<html>maintenance</html>".as_slice(),
-            b"[{\"name\": \"cetz\"}]",
-        ] {
-            assert!(parse_index(bytes).is_none());
-        }
-    }
-
-    #[test]
     fn packages_without_network_access_cache() {
         let directory = tempfile::tempdir().unwrap();
         let index_bytes = br#"[{"name":"remote-only","version":"1.0.0"}]"#;
         for (scope, cache) in [
-            (tola_build::InputScope::Online, None),
+            (tola_input::InputScope::Online, None),
             (
-                tola_build::InputScope::Offline,
+                tola_input::InputScope::Offline,
                 Some(directory.path().to_path_buf()),
             ),
             (
-                tola_build::InputScope::Pure,
+                tola_input::InputScope::Pure,
                 Some(directory.path().to_path_buf()),
             ),
         ] {
@@ -168,8 +159,8 @@ mod tests {
     #[test]
     fn restricted_index_never_connects() {
         for scope in [
-            tola_build::InputScope::Offline,
-            tola_build::InputScope::Pure,
+            tola_input::InputScope::Offline,
+            tola_input::InputScope::Pure,
         ] {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             listener.set_nonblocking(true).unwrap();

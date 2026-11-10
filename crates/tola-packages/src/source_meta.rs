@@ -377,7 +377,6 @@ mod tests {
         HostInputs {
             site: Dict::new(),
             modules: Dict::new(),
-            module_validation: None,
             asset_urls: Dict::new(),
             asset_origins: Dict::new(),
             source_records: Array::new(),
@@ -450,7 +449,6 @@ mod tests {
             br#"
 #import "@tola/module:0.0.0": get-module
 #let chosen = get-module()
-#assert.eq(get-module(auto).name, "notes")
 "#
             .to_vec(),
         );
@@ -470,10 +468,7 @@ mod tests {
                 "get-module()",
                 "must be called from a configured module package",
             ),
-            (
-                "get-module(auto)",
-                "must be called from a configured module package",
-            ),
+            ("get-module(auto)", "found auto"),
             (
                 "get-module(\"missing\")",
                 "module `missing` is not configured",

@@ -344,6 +344,7 @@ fn consume_revision(
         tola_build::hooks::run_after_publish_hooks_observed(
             site.config(),
             site.mode(),
+            site.scope(),
             files.root(),
             cancellation,
             |hook, outcome| {
@@ -392,7 +393,7 @@ fn after_publish_failure(error: &anyhow::Error) -> Diagnostic {
         })
         .unwrap_or_else(|| tola_diagnostic::fallback(crate::codes::hook::AFTER_PUBLISH, error))
         .with_help(
-            "Fix the failing command in `build.hooks.after-publish`, then change the site or one of its `rerun-on` paths to run it again",
+            "Fix the failing command in `hooks.after-publish`, then change the site or one of its `rerun-on` paths to run it again",
         )
 }
 

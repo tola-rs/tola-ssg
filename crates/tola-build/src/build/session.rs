@@ -1,7 +1,7 @@
 //! Repeated-build baseline: accepted caches advance only after a write or accepted revision.
 
 use crate::compiler::{
-    CompilationDependencies, CompilationReuse, RebuildDecision, SiteProgramCache, TypstHost,
+    CompilationDependencies, CompilationReuse, RebuildDecision, SiteHost, SiteProgramCache,
     analysis,
 };
 use crate::mode::BuildMode;
@@ -28,12 +28,12 @@ pub struct BuildSession {
     resources: crate::resources::BuildResources,
     // Attempts share immutable loaded resources even after failure. This lock is
     // held only while taking or replacing a handle, never during filesystem work.
-    host_cache: std::sync::Arc<std::sync::Mutex<Option<TypstHost>>>,
+    host_cache: std::sync::Arc<std::sync::Mutex<Option<SiteHost>>>,
     accepted: Option<std::sync::Arc<BuildCacheUpdate>>,
 }
 
 pub(crate) struct RetainedProducerCaches {
-    pub(crate) host: TypstHost,
+    pub(crate) host: SiteHost,
     pub(crate) dependencies: CompilationDependencies,
     pub(crate) source_analysis: analysis::SourceAnalysisCache,
     pub(crate) site_program: SiteProgramCache,
@@ -49,7 +49,7 @@ pub(crate) struct RetainedProducerCaches {
 
 /// The session and accepted generation one attempt's caches originated from.
 struct BuildCacheOrigin {
-    session: std::sync::Weak<std::sync::Mutex<Option<TypstHost>>>,
+    session: std::sync::Weak<std::sync::Mutex<Option<SiteHost>>>,
     accepted: Option<std::sync::Weak<BuildCacheUpdate>>,
 }
 
@@ -95,6 +95,7 @@ impl BuildCacheUpdate {
     pub(super) fn freshness(
         &self,
         config: &crate::config::ResolvedSiteConfig,
+        modules: &tola_module::prepared::PreparedModules,
         hook_outputs: &[crate::hooks::HookOutputEvidence],
         attempt_cancellation: &crate::cancellation::BuildCancellation,
         caller_cancellation: &crate::cancellation::BuildCancellation,
@@ -102,6 +103,7 @@ impl BuildCacheUpdate {
         attempt_cancellation.ensure_active()?;
         let freshness = super::input::input_freshness(
             config,
+            modules,
             &self.caches,
             &self.content_inventory,
             hook_outputs,
@@ -185,35 +187,37 @@ impl Default for BuildRequest {
 /// An owned build attempt suitable for a caller's blocking worker.
 pub struct BuildAttempt {
     config: std::sync::Arc<crate::config::ResolvedSiteConfig>,
+    /// Set when the attempt starts from an already prepared hook watch.
+    prepared: Option<crate::modules::PreparedSite>,
     baseline: BuildSession,
     request: BuildRequest,
-    prepared_modules: bool,
 }
 
 impl BuildAttempt {
     /// Prepare resources and run the build pipeline.
     pub fn run(mut self) -> Result<super::SiteBuild, super::BuildFailure> {
-        if !self.prepared_modules {
-            self.config = std::sync::Arc::new(
-                crate::modules::prepared::configure(
+        let mut site = match self.prepared.take() {
+            Some(site) => site,
+            None => {
+                let bundle = self.request.cancellation.bundle_cancellation();
+                crate::modules::prepared::prepare_site_with_bundle(
                     &self.config,
                     self.baseline.resources.input_mode(),
-                    &self.request.cancellation,
+                    &bundle,
                 )
-                .map_err(super::BuildFailure::before_attempt)?,
-            );
-        }
-        if !self
-            .config
-            .module_inputs
-            .manifests_are_fresh(&self.request.cancellation)
+                .map_err(super::BuildFailure::before_attempt)?
+            }
+        };
+        if !site
+            .prepared()
+            .manifests_are_fresh(&self.request.cancellation.bundle_cancellation())
             .map_err(super::BuildFailure::before_attempt)?
         {
             return Err(super::BuildFailure::before_attempt(anyhow::Error::new(
                 AttemptRefusal::ManifestsChangedBeforeBuild,
             )));
         }
-        if let Err(error) = super::diagnostic::refuse_incomplete_vendor(&self.config) {
+        if let Err(error) = super::diagnostic::refuse_incomplete_vendor(site.config()) {
             return Err(super::BuildFailure::before_attempt(error));
         }
         let mut producers = super::pipeline::BuildAttemptProducers {
@@ -234,23 +238,20 @@ impl BuildAttempt {
             ..super::pipeline::BuildAttemptProducers::default()
         };
         let built = (|| -> anyhow::Result<super::SiteBuild> {
-            let bootstrap = self.prepare_module_hooks(&mut producers)?;
-            if !self
-                .config
-                .module_inputs
-                .manifests_are_fresh(&producers.cancellation)?
+            super::bootstrap::install(&mut site, &producers.resources)?;
+            if !site
+                .prepared()
+                .manifests_are_fresh(&producers.cancellation.bundle_cancellation())?
             {
                 return Err(anyhow::Error::new(
                     AttemptRefusal::ManifestsChangedBeforeHooks,
                 ));
             }
             super::pipeline::build_site_inner(
-                &self.config,
+                &site,
                 &self.request,
                 &mut producers,
-                |producers, hooks_executed| {
-                    self.prepare_compiler(producers, hooks_executed, bootstrap.as_ref())
-                },
+                |producers, hooks_executed| self.prepare_compiler(producers, hooks_executed, &site),
             )
         })();
         match built {
@@ -275,60 +276,23 @@ impl BuildAttempt {
         }
     }
 
-    /// Install the hook stages modules declare before any generator runs.
-    fn prepare_module_hooks(
-        &mut self,
-        producers: &mut super::pipeline::BuildAttemptProducers,
-    ) -> anyhow::Result<Option<crate::modules::bootstrap::Bootstrap>> {
-        let declares_hooks = self
-            .config
-            .module_inputs
-            .configured
-            .values()
-            .any(|configured| !configured.module.hooks.is_empty());
-        if !declares_hooks {
-            return Ok(None);
-        }
-        let bootstrap = crate::modules::bootstrap::Bootstrap::prepare(
-            &self.config,
-            &producers.resources,
-            &producers.cancellation,
-        )
-        .map_err(|mut error| {
-            let carried = super::pipeline::record_module_preparation_failure(
-                &mut error,
-                &self.config,
-                producers.inputs_mut(),
-            );
-            match carried {
-                Some(mut diagnostics) => {
-                    diagnostics
-                        .extend(super::diagnostic::for_error(&error, self.config.get_root()));
-                    anyhow::Error::new(tola_diagnostic::DiagnosticError::attach(error, diagnostics))
-                }
-                None => error,
-            }
-        })?;
-        producers
-            .inputs_mut()
-            .record_accessed(&bootstrap.options.accessed);
-        bootstrap.install(std::sync::Arc::make_mut(&mut self.config))?;
-        bootstrap.ensure_current(&self.config, &producers.cancellation)?;
-        Ok(Some(bootstrap))
-    }
-
     /// Load the compiler host and the accepted-evidence reuse, after hooks wrote their inputs.
     fn prepare_compiler(
         &self,
         producers: &mut super::pipeline::BuildAttemptProducers,
         hooks_executed: bool,
-        bootstrap: Option<&crate::modules::bootstrap::Bootstrap>,
-    ) -> anyhow::Result<TypstHost> {
+        site: &crate::modules::PreparedSite,
+    ) -> anyhow::Result<SiteHost> {
         let cancellation = producers.cancellation.clone();
-        if let Some(bootstrap) = bootstrap {
-            bootstrap.ensure_current(&self.config, &cancellation)?;
-        }
-        let host = self.baseline.load_host(&self.config, &cancellation)?;
+        anyhow::ensure!(
+            site.prepared()
+                .manifests_are_fresh(&cancellation.bundle_cancellation())?,
+            "module manifests changed during before-build hooks; keep generated inputs separate from module declarations",
+        );
+        site.validate_module_entry()?;
+        let host = self
+            .baseline
+            .load_host(site.config(), site.prepared(), &cancellation)?;
         let accepted = self.baseline.accepted.as_deref();
         let host_inputs_match =
             accepted.is_some_and(|accepted| accepted.caches.host.has_same_inputs(&host));
@@ -349,7 +313,7 @@ impl BuildAttempt {
         };
         let changed_paths = self.request.trigger.paths().unwrap_or_default();
         let content_inventory = self.baseline.reusable_content_inventory(
-            &self.config,
+            site.config(),
             changed_paths,
             permissions.content_inventory,
         );
@@ -436,13 +400,13 @@ impl BuildSession {
     ) -> BuildAttempt {
         BuildAttempt {
             config,
+            prepared: None,
             baseline: Self {
                 resources: self.resources.clone(),
                 host_cache: std::sync::Arc::clone(&self.host_cache),
                 accepted: self.accepted.clone(),
             },
             request,
-            prepared_modules: false,
         }
     }
 
@@ -455,19 +419,20 @@ impl BuildSession {
         if watch.scope() != self.resources.input_scope() {
             return Err(anyhow::Error::new(AttemptRefusal::WatchScopeMismatch));
         }
-        let mut attempt = self.prepare(std::sync::Arc::clone(watch.config()), request);
-        attempt.prepared_modules = true;
+        let mut attempt = self.prepare(std::sync::Arc::new(watch.config().clone()), request);
+        attempt.prepared = Some(watch.site().clone());
         Ok(attempt)
     }
 
     fn load_host(
         &self,
         config: &crate::config::ResolvedSiteConfig,
+        prepared: &tola_module::prepared::PreparedModules,
         cancellation: &crate::cancellation::BuildCancellation,
-    ) -> anyhow::Result<TypstHost> {
+    ) -> anyhow::Result<SiteHost> {
         cancellation.ensure_active()?;
         // Host fonts cannot join a pure build; the setting is contradictory, not ignorable.
-        if self.resources.input_scope() == crate::InputScope::Pure && config.fonts().system {
+        if self.resources.input_scope() == tola_input::InputScope::Pure && config.fonts().system {
             return Err(anyhow::Error::new(AttemptRefusal::SystemFontsInPureBuild));
         }
         let cached = {
@@ -483,9 +448,14 @@ impl BuildSession {
             {
                 host
             }
-            _ => TypstHost::for_config_with_resources(config, &self.resources, cancellation)?,
+            _ => SiteHost::for_config(
+                config,
+                &self.resources,
+                std::sync::Arc::clone(&prepared.packages),
+                cancellation,
+            )?,
         };
-        let lock = crate::inputs::InputLock::read(config.get_root())?.unwrap_or_default();
+        let lock = tola_input::InputLock::read(config.get_root())?.unwrap_or_default();
         let host =
             match crate::package::verifier(&lock, self.resources.input_mode(), config.get_root()) {
                 Some(verifier) => host.with_package_verifier(verifier),
@@ -493,10 +463,10 @@ impl BuildSession {
             };
         cancellation.ensure_active()?;
         self.retain_host(&host);
-        Ok(host.with_local_packages(std::sync::Arc::clone(&config.module_inputs.packages)))
+        Ok(host.with_local_packages(std::sync::Arc::clone(&prepared.packages)))
     }
 
-    fn retain_host(&self, host: &TypstHost) {
+    fn retain_host(&self, host: &SiteHost) {
         let replaced = {
             self.host_cache
                 .lock()
@@ -553,10 +523,10 @@ impl BuildSession {
             return None;
         }
         let accepted = self.accepted.as_ref()?;
-        let current_root = crate::filesystem::normalize_existing_prefix(&config.build.content_dir);
+        let current_root = tola_input::normalize_existing_prefix(&config.build.content_dir);
         if current_root != accepted.content_root
-            || crate::filesystem::normalize_existing_prefix(&config.build.entry)
-                != crate::filesystem::normalize_existing_prefix(&accepted.caches.site_program.entry)
+            || tola_input::normalize_existing_prefix(&config.build.entry)
+                != tola_input::normalize_existing_prefix(&accepted.caches.site_program.entry)
         {
             return None;
         }
@@ -831,11 +801,18 @@ mod tests {
             &generated,
             AssetUrlPrefix::parse("/assets").unwrap(),
         )];
-        config.build.hooks.before_build.push(BeforeBuildHookConfig {
+        config.hooks.before_build.push(BeforeBuildHookConfig {
             name: "stylesheet".into(),
-            command: hook_child_command("build::session::tests::child_copies_stylesheet_trigger"),
+            argv: Some(hook_child_command(
+                "build::session::tests::child_copies_stylesheet_trigger",
+            )),
             dev: crate::config::section::build::DevParticipation::Run,
-            rerun_on: vec!["src/style.txt".into()],
+            rerun_on: tola_module::hooks::RerunOn {
+                include: vec![tola_module::hooks::RerunPath::Relative(
+                    "src/style.txt".into(),
+                )],
+                ..Default::default()
+            },
             generates: vec!["generated/site.css".into()],
             ..BeforeBuildHookConfig::default()
         });

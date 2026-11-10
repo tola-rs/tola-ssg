@@ -27,15 +27,7 @@ export def render []: list<record> -> nothing {
   $in | to json | ^$executable diagnostic render
 }
 
-# Submit a complete report to the host, including an empty list when there are no issues.
-# Example: `[(diagnostic issue "Check the title" --code title)] | diagnostic submit`
-export def submit [
-  --path: path # Override the host's TOLA_REPORT_PATH.
-]: list<record> -> nothing {
-  let issues = $in
-  let destination = ($path | default ($env.TOLA_REPORT_PATH?))
-  if $destination == null {
-    error make {msg: "TOLA_REPORT_PATH is not set; pass --path to write a report"}
-  }
-  {schemaVersion: 1, diagnostics: $issues} | to json | save --raw --force $destination
+# Submit diagnostics to the host.
+export def submit []: list<record> -> nothing {
+  $in | __tola_diagnostic_submit
 }

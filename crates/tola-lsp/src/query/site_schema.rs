@@ -162,7 +162,7 @@ pub(super) fn site_schemas(
 /// How an answer spells a declaring file: site-root relative, or the package spec supplying it.
 fn declaration_path(id: FileId, config: &ResolvedSiteConfig) -> String {
     match id.root() {
-        VirtualRoot::Project => tola_build::filesystem::display_path(
+        VirtualRoot::Project => tola_diagnostic::display_path(
             &config.get_root().join(id.vpath().get_without_slash()),
             config.get_root(),
         ),
@@ -365,12 +365,12 @@ mod tests {
         fs::create_dir(&module).unwrap();
         fs::write(
             root.join("tola.toml"),
-            "[modules.notes]\npath='../module'\n[theme]\nmodule='notes'\n",
+            "[modules.notes]\npath='../module'\n[build]\nentry={module='notes'}\n",
         )
         .unwrap();
         fs::write(
             module.join("tola-module.toml"),
-            "\nname='notes'\nversion='1.0.0'\n[typst]\nentry='lib.typ'\n[site]\nentry='site.typ'\n",
+            "\n[typst]\nentry='lib.typ'\n[build]\nentry='site.typ'\n",
         )
         .unwrap();
         fs::write(module.join("lib.typ"), "").unwrap();
@@ -400,7 +400,7 @@ mod tests {
         let cancellation = BuildCancellation::default();
         let mut session = SourceDiagnosticSession::with_resources(
             Arc::clone(&config),
-            tola_build::BuildResources::new().with_input_scope(tola_build::InputScope::Offline),
+            tola_build::BuildResources::new().with_input_scope(tola_input::InputScope::Offline),
         );
         let revision = session.inspect(Vec::new(), &cancellation).unwrap();
         assert!(revision.compiled(), "{:?}", revision.diagnostics());

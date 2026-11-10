@@ -114,7 +114,7 @@ export def check-version [root: string]: nothing -> record {
 
 # Third-party resolution, which a version bump must never change.
 export def lock-external [root: string]: nothing -> list<record> {
-  let lock = (open ($root | path join $LOCKFILE))
+  let lock = (open --raw ($root | path join $LOCKFILE) | from toml)
   $lock.package
   | where { |entry| ($entry | get --optional source | default '') != '' }
   | select name version source

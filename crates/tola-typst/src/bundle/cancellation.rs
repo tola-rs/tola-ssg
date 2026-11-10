@@ -36,6 +36,16 @@ impl BundleCancellation {
         self
     }
 
+    /// The interrupt flag gix polls while it fetches or checks out content.
+    pub fn flag(&self) -> &AtomicBool {
+        &self.cancelled
+    }
+
+    /// Share this operation's interrupt flag with an embedded script runtime.
+    pub fn signal_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.cancelled)
+    }
+
     /// Mark this operation as cancelled.
     pub fn cancel(&self) {
         // The flag publishes no other state, so relaxed ordering is sufficient.

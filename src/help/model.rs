@@ -429,8 +429,8 @@ mod tests {
         for (heading, slug) in [
             ("slugify - function", "slugify-function"),
             (
-                "[build.hooks] - configuration table",
-                "[build.hooks]-configuration-table",
+                "[hooks] - configuration table",
+                "[hooks]-configuration-table",
             ),
             ("Import in Typst", "import-in-typst"),
             ("名称 — 类型", "名称-类型"),

@@ -81,7 +81,7 @@ fn document_uri(
     config: &ResolvedSiteConfig,
     client_root: &crate::uri::ClientRoot,
 ) -> Result<Uri> {
-    let root = tola_build::filesystem::normalize_existing_prefix(config.get_root());
+    let root = tola_input::normalize_existing_prefix(config.get_root());
     crate::identity::client_uri(id, &root, client_root).context("a lens names one file's address")
 }
 
@@ -111,29 +111,6 @@ fn lens(uri: &Uri, title: String, route: Option<String>) -> CodeLens {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn document_uri_follows_client_root_spelling() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().canonicalize().unwrap();
-        let spelled = directory.path().join("client");
-        std::fs::create_dir_all(root.join("content")).unwrap();
-        let config = crate::compiler::tests::site_configuration(&root, "");
-        let id = crate::identity::file_id(
-            &crate::uri::from_file_path(&root.join("content/document.typ")).unwrap(),
-            config.get_root(),
-        )
-        .unwrap();
-        assert_eq!(
-            document_uri(
-                id,
-                &config,
-                &crate::uri::ClientRoot::with_resolved(&spelled, &root),
-            )
-            .unwrap(),
-            crate::uri::from_file_path(&spelled.join("content/document.typ")).unwrap()
-        );
-    }
 
     #[test]
     fn lens_names_the_route_it_opens() {

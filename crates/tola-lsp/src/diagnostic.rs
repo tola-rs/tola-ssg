@@ -113,7 +113,7 @@ pub(crate) mod tests {
                 std::fs::create_dir_all(path.parent().unwrap()).unwrap();
                 std::fs::write(path, text).unwrap();
             }
-            let physical = tola_build::filesystem::normalize_existing_prefix(root.path());
+            let physical = tola_input::normalize_existing_prefix(root.path());
             let open = OpenSources::new(&physical);
             Self {
                 client: ClientDiagnostics::new(physical.clone()),

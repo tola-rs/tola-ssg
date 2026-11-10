@@ -59,7 +59,7 @@ impl ClientDiagnostics {
     ) {
         self.selection = Some((
             revision,
-            tola_build::filesystem::normalize_existing_prefix(root),
+            tola_input::normalize_existing_prefix(root),
             selected,
         ));
     }
@@ -74,7 +74,7 @@ impl ClientDiagnostics {
         revision: u64,
         root: &Path,
     ) -> Option<Arc<names::SelectedInterfaces>> {
-        let root = tola_build::filesystem::normalize_existing_prefix(root);
+        let root = tola_input::normalize_existing_prefix(root);
         self.selection
             .as_ref()
             .filter(|(cached, cached_root, _)| *cached == revision && *cached_root == root)
@@ -119,6 +119,22 @@ impl ClientDiagnostics {
                 },
             },
         ))
+    }
+
+    /// Whether the report the client already holds says what this one would.
+    ///
+    /// The version is the one the client reads: one that never asked for report versions cannot
+    /// tell a new one apart, so for it the items alone decide.
+    pub(super) fn already_reports(
+        &self,
+        uri: &Uri,
+        version: Option<i32>,
+        diagnostics: &[EditorDiagnostic],
+    ) -> bool {
+        self.reports.get(uri.as_str()).is_some_and(|report| {
+            report.diagnostics.as_slice() == diagnostics
+                && (version.is_none() || report.version == version)
+        })
     }
 
     /// Versions restart on open, so an earlier session cannot vouch for the new buffer.
@@ -338,6 +354,30 @@ mod tests {
         let (id, _) = reported(checked.pull(None));
         checked.edited();
         assert_eq!(checked.pull(Some(&id)), Pulled::Stale);
+    }
+    /// A check that reports the same items again sends no frame and keeps the result id: the client
+    /// already holds the report, and the version it reads has not changed.
+    #[test]
+    fn unchanged_check_keeps_the_report() {
+        let mut checked = Checked::new();
+        checked.check(&["source error"]);
+        let sent = checked.bytes.len();
+        let (id, items) = reported(checked.pull(None));
+        assert_eq!(items, vec!["source error".to_owned()]);
+        assert!(sent > 0, "the first check reports the document");
+        checked.check(&["source error"]);
+        assert_eq!(
+            checked.bytes.len(),
+            sent,
+            "an unchanged report is not sent again"
+        );
+        assert_eq!(reported(checked.pull(None)).0, id, "the result id stands");
+        checked.check(&["another error"]);
+        assert_ne!(
+            reported(checked.pull(None)).0,
+            id,
+            "changed items take a new id"
+        );
     }
     #[test]
     #[cfg(unix)]

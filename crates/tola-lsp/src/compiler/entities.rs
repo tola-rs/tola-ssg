@@ -5,11 +5,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
+use tola_build::BuildResources;
 use tola_build::cancellation::BuildCancellation;
 use tola_build::config::ResolvedSiteConfig;
 use tola_build::modules::entities::EntityQueryResult;
-use tola_build::modules::{ResolvedModule, query};
-use tola_build::{BuildResources, InputScope};
+use tola_build::modules::query;
+use tola_input::InputScope;
+use tola_module::module_set::LoadedModule;
 
 #[derive(Default)]
 pub(crate) struct EntityQueries {
@@ -17,7 +19,7 @@ pub(crate) struct EntityQueries {
     revision: u64,
     scope: Option<InputScope>,
     overlays: Vec<(PathBuf, Arc<str>)>,
-    modules: BTreeMap<String, ResolvedModule>,
+    modules: BTreeMap<String, LoadedModule>,
     queries: Vec<(String, Arc<EntityQueryResult>)>,
     observed: BTreeSet<PathBuf>,
 }
@@ -29,7 +31,7 @@ impl EntityQueries {
         revision: u64,
         scope: InputScope,
         overlays: &[(PathBuf, Arc<str>)],
-        modules: &BTreeMap<String, ResolvedModule>,
+        modules: &BTreeMap<String, LoadedModule>,
     ) {
         if !self.matches(configuration, revision, overlays)
             || self.scope != Some(scope)
@@ -47,7 +49,7 @@ impl EntityQueries {
 
     pub(crate) fn get(
         &mut self,
-        module: &ResolvedModule,
+        module: &LoadedModule,
         query_name: &str,
         resources: BuildResources,
         cancellation: &BuildCancellation,
@@ -174,18 +176,18 @@ mod tests {
         let manifest = root.join("theme/tola-module.toml");
         std::fs::write(
             &manifest,
-            "\n[queries.nodes]\nentry='model.typ'\nlabel='nodes'\n\nformat='entities'\n",
+            "\n[queries.nodes]\nentry='model.typ'\nlabel='nodes'\n\nreturns='entities'\n",
         )
         .unwrap();
         let model = root.join("theme/model.typ");
         let first_model = "#metadata(((id: \"ONE\", label: \"One\"),))<nodes>";
         std::fs::write(&model, first_model).unwrap();
         let configuration = site_configuration(root, "[modules.notes]\npath='theme'\n");
-        let modules = tola_build::modules::resolve_modules(
+        let modules = tola_build::modules::load_modules(
             configuration.get_root(),
             configuration.vendor().path.as_deref(),
             configuration.modules(),
-            tola_build::inputs::InputMode::new(InputScope::Offline, true),
+            tola_input::InputMode::new(InputScope::Offline, true),
             &Default::default(),
         )
         .unwrap();
@@ -223,11 +225,11 @@ mod tests {
         let changed =
             std::fs::read_to_string(&manifest).unwrap() + "\n# manifest snapshot changed\n";
         std::fs::write(&manifest, changed).unwrap();
-        let updated = tola_build::modules::resolve_modules(
+        let updated = tola_build::modules::load_modules(
             configuration.get_root(),
             configuration.vendor().path.as_deref(),
             configuration.modules(),
-            tola_build::inputs::InputMode::new(InputScope::Offline, true),
+            tola_input::InputMode::new(InputScope::Offline, true),
             &Default::default(),
         )
         .unwrap();
@@ -274,7 +276,7 @@ mod tests {
         std::fs::create_dir(root.join("theme")).unwrap();
         std::fs::write(
             root.join("theme/tola-module.toml"),
-            "\n[queries.nodes]\nentry='model.typ'\nlabel='nodes'\n\nformat='entities'\n",
+            "\n[queries.nodes]\nentry='model.typ'\nlabel='nodes'\n\nreturns='entities'\n",
         )
         .unwrap();
         std::fs::write(
@@ -283,11 +285,11 @@ mod tests {
         )
         .unwrap();
         let configuration = site_configuration(root, "[modules.notes]\npath='theme'\n");
-        let modules = tola_build::modules::resolve_modules(
+        let modules = tola_build::modules::load_modules(
             configuration.get_root(),
             configuration.vendor().path.as_deref(),
             configuration.modules(),
-            tola_build::inputs::InputMode::new(InputScope::Offline, true),
+            tola_input::InputMode::new(InputScope::Offline, true),
             &Default::default(),
         )
         .unwrap();

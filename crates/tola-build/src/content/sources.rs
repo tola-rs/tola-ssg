@@ -12,8 +12,8 @@ use typst::syntax::{RootedPath, VirtualPath, VirtualRoot};
 use super::slug::route_segments;
 use super::{ContentId, ContentSourceLayout, ContentUnit};
 use crate::config::ResolvedSiteConfig;
-use crate::filesystem::normalize_path;
 use crate::metadata::SourceMetadata;
+use tola_input::normalize_path;
 
 /// One descriptor per discovered content file, independent of its inclusion count.
 #[derive(Debug, Clone)]
@@ -320,8 +320,8 @@ impl SourceSet {
                     path: VirtualPath::virtualize(&unit.root, &source).with_context(|| {
                         format!(
                             "`{}` is outside `build.content-dir` (`{}`)",
-                            crate::filesystem::display_path(&source, &site_root),
-                            crate::filesystem::display_path(&unit.root, &site_root),
+                            tola_diagnostic::display_path(&source, &site_root),
+                            tola_diagnostic::display_path(&unit.root, &site_root),
                         )
                     })?,
                     file: RootedPath::new(
@@ -329,7 +329,7 @@ impl SourceSet {
                         VirtualPath::virtualize(&site_root, &source).with_context(|| {
                             format!(
                                 "`{}` is outside the site root",
-                                crate::filesystem::display_path(&source, &site_root)
+                                tola_diagnostic::display_path(&source, &site_root)
                             )
                         })?,
                     ),

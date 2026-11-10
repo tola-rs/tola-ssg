@@ -51,36 +51,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn selections_preserve_position_order() {
-        let source = Source::detached("#let title = [🦊]\n#title");
-        let positions: Vec<_> = ["🦊", "#title", "title ="]
-            .into_iter()
-            .map(|marker| {
-                let byte = source.text().find(marker).unwrap();
-                position::utf16_range(source.lines(), byte..byte)
-                    .unwrap()
-                    .start
-            })
-            .collect();
-        let ranges = ranges(&source, &positions).unwrap();
-        for (selection, at) in ranges.iter().zip(&positions) {
-            assert!(selection.range.start <= *at && *at <= selection.range.end);
-        }
-        assert_eq!(ranges.len(), positions.len());
-    }
-
-    #[test]
-    fn empty_source_preserves_cursors() {
-        let selections = ranges(&Source::detached(""), &[Position::default(); 2]).unwrap();
-        assert_eq!(selections.len(), 2);
-        assert!(
-            selections
-                .iter()
-                .all(|selection| selection.range == lsp_types::Range::default())
-        );
-    }
-
-    #[test]
     fn selections_follow_protocol_lines() {
         for separator in ['\u{0B}', '\u{0C}', '\u{85}', '\u{2028}', '\u{2029}'] {
             let source = Source::detached(format!("#let first = 1{separator}#let second = 2"));

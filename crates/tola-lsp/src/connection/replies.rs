@@ -65,14 +65,15 @@ pub(super) fn failed_response(id: RequestId, error: anyhow::Error) -> Response {
     {
         return error_response(id, CANCELLED_ERROR);
     }
-    if let Some(error) = error.downcast_ref::<crate::analysis::NameQueryError>() {
-        let mut response =
-            Response::new_err(id, ErrorCode::InvalidParams as i32, error.to_string());
-        if let Err(reply) = &mut response.response_result {
-            reply.data =
-                Some(serde_json::json!({ "kind": error.kind(), "message": error.to_string() }));
-        }
-        return response;
+    if let Some(name_error) = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<crate::analysis::NameQueryError>())
+    {
+        let message = name_error.to_string();
+        return crate::protocol::with_data(
+            Response::new_err(id, ErrorCode::InvalidParams as i32, message.clone()),
+            serde_json::json!({ "kind": name_error.kind(), "message": message }),
+        );
     }
     tracing::error!(error = ?error, "a source request failed");
     error_response(id, REQUEST_FAILED_ERROR)
@@ -172,14 +173,17 @@ mod tests {
 
     #[test]
     fn conflicting_buffers_explain_recovery() {
-        let response = failed_response(
-            7.into(),
-            crate::analysis::NameQueryError::ConflictingSourceText.into(),
-        );
-        let error = response.response_result.unwrap_err();
-        assert_eq!(error.code, ErrorCode::InvalidParams as i32);
-        assert_eq!(error.data.unwrap()["kind"], "conflictingSourceText");
-        assert!(error.message.contains("save or close"));
+        for failure in [
+            anyhow::Error::new(crate::analysis::NameQueryError::ConflictingSourceText),
+            anyhow::Error::new(crate::analysis::NameQueryError::ConflictingSourceText)
+                .context("a source query failed"),
+        ] {
+            let response = failed_response(7.into(), failure);
+            let error = response.response_result.unwrap_err();
+            assert_eq!(error.code, ErrorCode::InvalidParams as i32);
+            assert_eq!(error.data.unwrap()["kind"], "conflictingSourceText");
+            assert!(error.message.contains("save or close"));
+        }
     }
 
     #[test]

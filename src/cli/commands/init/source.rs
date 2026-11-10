@@ -3,7 +3,7 @@
 use anyhow::{Context, Result, ensure};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
-use tola_build::InputScope;
+use tola_input::InputScope;
 use tola_subprocess::Command;
 
 use crate::cancellation::Cancellation;
@@ -15,13 +15,13 @@ pub(super) fn generate(
     args: &InitArgs,
     target: &Path,
     scope: InputScope,
-    output: &crate::cli::output::CommandOutput,
+    _output: &crate::cli::output::CommandOutput,
     cancellation: &Cancellation,
 ) -> Result<FileWrites> {
-    let initializer = tola_build::modules::resolve_initializer(
+    let initializer = tola_build::modules::find_initializer(
         source,
         args.alias.as_deref(),
-        tola_build::inputs::InputMode::new(scope, true),
+        tola_input::InputMode::new(scope, true),
     )?;
     crate::cli::commands::extensions::check_namespaces(&std::collections::BTreeMap::from([(
         initializer.name.clone(),
@@ -36,50 +36,91 @@ pub(super) fn generate(
     let workspace = temporary.path().canonicalize()?;
     let candidate = workspace.join("site");
     fs::create_dir(&candidate)?;
-    let executable = crate::cli::external::current_executable()?;
-    let expand = |word: &str| {
-        tola_build::modules::expand_argument(
-            word,
-            &[
-                ("{project}", target.as_os_str()),
-                ("{module}", initializer.root.as_os_str()),
-                ("{tola}", executable.as_os_str()),
-            ],
-        )
-    };
-    let command = Command::new(expand(&initializer.argv[0]))
-        .args(initializer.argv[1..].iter().map(|word| expand(word)))
-        .args(args.args.iter().cloned())
-        .cwd(&candidate)
-        .env("TOLA_INIT_OUTPUT_DIR", candidate.as_os_str())
-        .env("TOLA_INIT_TARGET_DIR", target.as_os_str())
-        .env(
-            "TOLA_INIT_INTERACTIVE",
-            if args.interactive { "true" } else { "false" },
-        )
-        .env("TOLA_MODULE_NAME", initializer.name.as_str())
-        .env("TOLA_MODULE_ROOT", initializer.root.as_os_str())
-        .env("TOLA_MODULE_MANIFEST", initializer.manifest.as_os_str())
-        .env("TOLA_EXECUTABLE", executable)
-        .env("TOLA_INPUT_SCOPE", scope.as_str())
-        .env_remove("TOLA_PROJECT_ROOT")
-        .env_remove("TOLA_CONFIG_PATH")
-        .env_remove("TOLA_CONTENT_ROOT")
-        .env_remove("TOLA_MODULE_OPTIONS")
-        .env_remove("TOLA_HOOK_STAGE")
-        .env_remove("TOLA_BUILD_MODE")
-        .env_remove("TOLA_HOOK_INPUT_DIR")
-        .env_remove("TOLA_HOOK_OUTPUT_DIR")
-        .env_remove("TOLA_HOOK_TEMP_DIR")
-        .env_remove("TOLA_HOOK_CACHE_DIR");
-    crate::cli::external::run(command, cancellation)?;
+    match &initializer.action {
+        tola_module::Action::Nu { path, args: prefix } => {
+            let path = tola_module::module_set::validate_module_path(
+                &initializer.root,
+                &initializer.name,
+                &initializer.root,
+                path,
+                false,
+            )?;
+            let mut arguments = prefix.clone();
+            arguments.extend(super::super::nu::utf8_arguments(&args.args)?);
+            let context = tola_nu::InvocationContext {
+                directory: candidate.clone(),
+                environment: super::super::nu::environment(scope),
+            };
+            let runtime = tola_nu::Runtime::for_invocation(Vec::new(), vec![initializer.manifest.clone()], context)?
+                .with_host(tola_nu::Host {
+                    init: Some(serde_json::json!({
+                        "target-dir": target, "output-dir": candidate, "interactive": args.interactive,
+                        "module": { "name": initializer.name, "root": initializer.root, "manifest": initializer.manifest },
+                    })),
+                    ..Default::default()
+                })?
+                .with_cancellation(cancellation.token().signal_flag());
+            let status = runtime.run_embedded(&path, &arguments)?;
+            cancellation.token().ensure_active()?;
+            ensure!(
+                status == 0,
+                "module initializer exited with status {status}"
+            );
+        }
+        tola_module::Action::Argv(argv) => {
+            ensure!(
+                !argv.iter().any(|word| word.contains("{project}")),
+                "initializer argv cannot use `{}` before a site exists; use TOLA_INIT_TARGET_DIR",
+                "{project}"
+            );
+            let executable = crate::cli::external::current_executable()?;
+            let expand = |word: &str| {
+                tola_module::expand_argument(
+                    word,
+                    &[
+                        ("{module}", initializer.root.as_os_str()),
+                        ("{tola}", executable.as_os_str()),
+                        ("{name}", std::ffi::OsStr::new(&initializer.name)),
+                    ],
+                )
+            };
+            let command = Command::new(expand(&argv[0]))
+                .args(argv[1..].iter().map(|word| expand(word)))
+                .args(args.args.iter().cloned())
+                .cwd(&candidate)
+                .env("TOLA_INIT_OUTPUT_DIR", candidate.as_os_str())
+                .env("TOLA_INIT_TARGET_DIR", target.as_os_str())
+                .env(
+                    "TOLA_INIT_INTERACTIVE",
+                    if args.interactive { "true" } else { "false" },
+                )
+                .env("TOLA_MODULE_NAME", initializer.name.as_str())
+                .env("TOLA_MODULE_ROOT", initializer.root.as_os_str())
+                .env("TOLA_MODULE_MANIFEST", initializer.manifest.as_os_str())
+                .env("TOLA_EXECUTABLE", executable)
+                .env("TOLA_INPUT_SCOPE", scope.as_str())
+                .env_remove("TOLA_PROJECT_ROOT")
+                .env_remove("TOLA_CONFIG_PATH")
+                .env_remove("TOLA_CONTENT_ROOT")
+                .env_remove("TOLA_MODULE_OPTIONS")
+                .env_remove("TOLA_HOOK_STAGE")
+                .env_remove("TOLA_HOOK_NAME")
+                .env_remove("TOLA_REPORT_PATH")
+                .env_remove("TOLA_BUILD_MODE")
+                .env_remove("TOLA_HOOK_INPUT_DIR")
+                .env_remove("TOLA_HOOK_OUTPUT_DIR")
+                .env_remove("TOLA_HOOK_TEMP_DIR")
+                .env_remove("TOLA_HOOK_CACHE_DIR");
+            crate::cli::external::run(command, cancellation)?;
+        }
+    }
     cancellation.token().ensure_active()?;
 
     let mut writes = FileWrites::new(target)?;
     collect(&candidate, &candidate, &mut writes, cancellation)?;
     let config = writes
         .file_contents(Path::new(super::config::CONFIG_PATH))
-        .context("the module initializer did not write `tola.toml` to `TOLA_INIT_OUTPUT_DIR`")?;
+        .context("the module initializer did not write `tola.toml` to its output directory")?;
     let text = std::str::from_utf8(config)
         .context("the initializer wrote a `tola.toml` that is not UTF-8")?;
     let schema = crate::config::validate_settings(&target.join("tola.toml"), text, scope)?;
@@ -117,7 +158,7 @@ pub(super) fn generate(
     let (parsed, _) = source.decode_with_host::<crate::config::ConfigSchema>()?;
     let mut module_paths = std::collections::BTreeMap::new();
     for (name, module) in &schema.modules {
-        let tola_build::modules::ModuleSource::Local { path } = &module.source else {
+        let tola_module::ModuleSource::Local { path } = &module.source else {
             anyhow::bail!(
                 "remote modules are not supported during `tola init`; add them after creating the site"
             )
@@ -137,8 +178,8 @@ pub(super) fn generate(
     let selected = schema
         .modules
         .get(&initializer.name)
-        .context("initializer must register its source module under TOLA_MODULE_NAME")?;
-    let tola_build::modules::ModuleSource::Local { path } = &selected.source else {
+        .context("initializer must register its source module under the selected alias")?;
+    let tola_module::ModuleSource::Local { path } = &selected.source else {
         anyhow::bail!("remote modules are not supported during `tola init`")
     };
     ensure!(
@@ -151,7 +192,7 @@ pub(super) fn generate(
                 .modules
                 .get_mut(&name)
                 .expect("parsed module exists")
-                .source = tola_build::modules::ModuleSource::Local { path };
+                .source = tola_module::ModuleSource::Local { path };
         }
         schema
     });
@@ -161,17 +202,11 @@ pub(super) fn generate(
         &Default::default(),
     )?
     .into_config();
-    let prepared = tola_build::modules::prepare(
+    tola_build::modules::prepare_site(
         &loaded,
-        tola_build::inputs::InputMode::new(scope, true),
+        tola_input::InputMode::new(scope, true),
         &cancellation.token(),
     )?;
-    let diagnostics = tola_build::modules::validate_options(
-        &prepared,
-        &crate::cli::config::build_resources(scope),
-        &cancellation.token(),
-    )?;
-    output.diagnostics(&diagnostics)?;
     Ok(writes)
 }
 
@@ -246,8 +281,7 @@ fn snapshot(
             let physical = path.canonicalize().unwrap_or_else(|_| original.clone());
             // Keep unresolved components intact: `file/../x` and `missing/../x`
             // must not become valid merely because this is a validation copy.
-            let internal =
-                tola_build::filesystem::lexical_path_identity(&physical).starts_with(source_root);
+            let internal = tola_input::lexical_path_identity(&physical).starts_with(source_root);
             let relocated = if internal {
                 physical
                     .strip_prefix(source_root)
@@ -256,13 +290,10 @@ fn snapshot(
             } else {
                 physical
             };
-            #[cfg(unix)]
-            std::os::unix::fs::symlink(relocated, output)?;
-            #[cfg(windows)]
             if path.is_dir() {
-                std::os::windows::fs::symlink_dir(relocated, output)?;
+                tola_fs::link_directory(&relocated, &output)?;
             } else {
-                std::os::windows::fs::symlink_file(relocated, output)?;
+                tola_fs::link_file(&relocated, &output)?;
             }
         } else {
             anyhow::bail!(

@@ -1,21 +1,10 @@
-//! Native handle opening for regular inputs and persistent lock files.
+//! Native handle opening for persistent lock files.
 
 use std::fs::File;
 use std::io;
 use std::path::Path;
 
-use super::sys::automatic_path_is_link_like;
-
-pub(crate) fn open_regular_file(path: &Path, follow_symlink: bool) -> io::Result<File> {
-    let file = super::sys::open_regular_file(path, follow_symlink)?;
-    if !file.metadata()?.is_file() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "this path is not a regular file",
-        ));
-    }
-    Ok(file)
-}
+use tola_fs::is_link_like;
 
 /// Why the persistent lock at one path could not be opened.
 #[derive(Debug, thiserror::Error)]
@@ -34,13 +23,13 @@ pub(super) enum OpenLockError {
 pub(super) fn open_lock_file(path: &Path) -> Result<File, OpenLockError> {
     reject_non_regular_lock_path(path)?;
     // The open stays authoritative: another process can replace the path in between.
-    let file = match super::sys::open_lock_file(path) {
+    let file = match tola_fs::open_lock_file(path) {
         Ok(file) => file,
         Err(_) if refused_for_path_kind(path) => return Err(OpenLockError::NotRegularFile),
         Err(error) => return Err(error.into()),
     };
     let metadata = file.metadata()?;
-    if !metadata.is_file() || automatic_path_is_link_like(path, &metadata.file_type())? {
+    if !metadata.is_file() || is_link_like(&metadata) {
         return Err(OpenLockError::NotRegularFile);
     }
     Ok(file)
@@ -62,7 +51,7 @@ fn refused_for_path_kind(path: &Path) -> bool {
 fn reject_non_regular_lock_path(path: &Path) -> Result<(), OpenLockError> {
     match std::fs::symlink_metadata(path) {
         Ok(metadata) => {
-            if metadata.is_file() && !automatic_path_is_link_like(path, &metadata.file_type())? {
+            if metadata.is_file() && !is_link_like(&metadata) {
                 Ok(())
             } else {
                 Err(OpenLockError::NotRegularFile)
@@ -70,5 +59,61 @@ fn reject_non_regular_lock_path(path: &Path) -> Result<(), OpenLockError> {
         }
         // A missing or unreadable path is the open's to report.
         Err(_) => Ok(()),
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use crate::cancellation::BuildCancellation;
+    use crate::filesystem::{
+        FileLock, FileLockError, TreeObservation, observe_tree_source_selected,
+    };
+    use tola_input::FilesystemSourceIdentity;
+
+    #[test]
+    fn directory_junctions_are_rejected() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("source");
+        let target = directory.path().join("outside");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(&target).unwrap();
+        std::fs::write(target.join("private.txt"), b"outside source").unwrap();
+        let link = root.join("linked");
+        // Directory junctions do not require the symlink privilege or Developer Mode.
+        let output = std::process::Command::new("cmd.exe")
+            .args(["/D", "/C", "mklink", "/J"])
+            .arg(&link)
+            .arg(&target)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+
+        let identity = FilesystemSourceIdentity::from_path(&root);
+        let cancellation = BuildCancellation::default();
+        assert!(
+            observe_tree_source_selected(
+                TreeObservation {
+                    source_identity: &identity,
+                    boundary: &tola_typst::SourceBoundary::default(),
+                    previous: None,
+                    changed_paths: &[],
+                    cancellation: &cancellation,
+                    display_root: &root,
+                    member_label: "source member",
+                    validate_member: &|_, _| Ok(()),
+                },
+                &|_, _| true,
+            )
+            .is_err()
+        );
+
+        let error = FileLock::acquire(&root, &link.join("lock"), &cancellation, || {
+            panic!("linked lock directory was accepted")
+        })
+        .unwrap_err();
+        assert!(
+            matches!(error, FileLockError::Io(error) if error.kind() == std::io::ErrorKind::InvalidInput)
+        );
+        assert!(!target.join("lock").exists());
     }
 }

@@ -4,8 +4,10 @@ overview = "读取项目中导入模块的配置"
 summary = ['''
 返回受管模块的配置记录。
 
-在导入的 `@tola-modules` 包源文件中，`get-module()` 或 `get-module(auto)` 读取当前模块；`get-module("notes")` 读取 `[modules.notes]` 所选模块，也可在站点代码中调用。无参调用位于受管模块之外或别名未知时会报错。记录包含 `name`（站点别名）、`package`（声明的包名）、`version`（声明的版本）、`options`（已验证的选项）、`slots`（带根的 Typst 路径）和 `asset-prefix`（未加部署前缀的站点根相对资源 URL），以及 `assets`：`enabled` 标志、以相对发布名映射到原生输入路径的 `files` 字典，和同键映射到浏览器 URL 的 `urls` 字典（已包含部署前缀及缓存标识）。这些字典只覆盖该模块选中的静态资源，不包括任意生成输出。即使两个别名使用同一目录，别名仍分别选择各自的模块实例。选项 schema 校验期间此函数不可用；schema 可以通过 `@tola/site` 读取站点配置。
+在 `@tola-modules` 包的源文件中，`get-module()` 读取调用表达式所属的模块实例。`get-module("notes")` 读取 `[modules.notes]` 所选的实例，也可在站点代码中调用。项目源码必须提供别名；未知别名会报错。多个别名指向同一目录时，各自有独立的实例。
+
+记录包含 `name`（站点别名）、`options`（有效选项）和 `assets`。`assets.files` 将已选名称映射到原生输入路径，替换项使用项目根。`assets.urls` 将同一组名称映射到最终浏览器 URL，已包含部署前缀与适用的缓存标识。这两张表描述静态发布的模块资源。
 ''', '']
 
 [exports.get-module.parameters]
-name = "站点中声明的模块别名，或用 auto 指代调用方所属模块。"
+name = "站点中声明的模块别名。省略参数时使用调用方所属的模块。"

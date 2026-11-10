@@ -72,6 +72,16 @@ pub(crate) struct AnalysisRequest {
     pub(crate) task: AnalysisTask,
 }
 
+impl AnalysisRequest {
+    /// The work this request carries, named for the analysis lane's dispatch and run records.
+    pub(crate) fn kind(&self) -> &'static str {
+        match &self.task {
+            AnalysisTask::Query { .. } => "analysis query",
+            AnalysisTask::Tokens(_) => "analysis tokens",
+        }
+    }
+}
+
 /// The request one source-only analysis hands to the compiler lane.
 ///
 /// An answer requiring evaluation keeps the same sources, view, id, serial, and cancellation,
@@ -116,6 +126,47 @@ impl SourceJob {
             Self::IncomingCalls(request) => request.sources.cancellation.is_cancelled(),
             Self::Selection(request) => request.cancellation.is_cancelled(),
             Self::ReleaseIdle => false,
+        }
+    }
+
+    /// The work this job carries, named for the lane's dispatch and run records.
+    pub(crate) fn kind(&self) -> &'static str {
+        match self {
+            Self::Check(_) => "check",
+            Self::Query(_) => "query",
+            Self::Route(_) => "route",
+            Self::Lenses(_) => "lenses",
+            Self::Rename(_) => "rename",
+            Self::Symbols(_) => "symbols",
+            Self::PackageSource(_) => "package source",
+            Self::IncomingCalls(_) => "incoming calls",
+            Self::RouteIndex(_) => "route index",
+            Self::Selection(_) => "selection",
+            Self::ReleaseIdle => "release",
+        }
+    }
+
+    /// The revision this check answers, which the lane's records name instead of a serial.
+    pub(crate) fn checked_revision(&self) -> Option<u64> {
+        match self {
+            Self::Check(request) => Some(request.checked_revision),
+            _ => None,
+        }
+    }
+
+    /// The serial the request this job answers was admitted under.
+    pub(crate) fn serial(&self) -> Option<u64> {
+        match self {
+            Self::Check(_) | Self::ReleaseIdle => None,
+            Self::Query(request) => Some(request.serial),
+            Self::Route(request) => Some(request.serial),
+            Self::Lenses(request) => Some(request.serial),
+            Self::Rename(request) => Some(request.serial),
+            Self::Symbols(request) => Some(request.serial),
+            Self::PackageSource(request) => Some(request.serial),
+            Self::IncomingCalls(request) => Some(request.serial),
+            Self::RouteIndex(request) => Some(request.serial),
+            Self::Selection(request) => Some(request.serial),
         }
     }
 }

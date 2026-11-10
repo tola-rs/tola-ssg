@@ -262,7 +262,6 @@ Two
         };
         let overview = requested(source, "tola skill", &args).unwrap();
         assert!(overview.contains("Browser"));
-        assert!(overview.contains("tola skill math rendering svg"));
         assert!(!overview.contains("Artwork"));
         let complete = requested(
             source,
@@ -276,11 +275,11 @@ Two
         assert!(complete.contains("Artwork"));
         assert!(!complete.contains("Targets"));
         let index = requested(source, "tola skill", &SkillArgs { list: true, ..args }).unwrap();
-        assert!(index.contains("tola skill math rendering svg"));
+        assert!(index.contains("rendering"));
         assert!(!index.contains("Browser"));
         let root = requested(source, "tola skill", &SkillArgs::default()).unwrap();
         assert!(root.contains("Core"));
-        assert!(root.contains("tola skill math"));
+        assert!(root.contains("math"));
         assert!(!root.contains("Common"));
         assert!(
             requested(

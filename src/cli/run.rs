@@ -3,6 +3,7 @@
 use std::process::ExitCode;
 
 use serde_json::json;
+use tola_diagnostic::{Diagnostic, Severity};
 
 use super::Cli;
 use super::log::{LogFile, LogOrigin};
@@ -26,8 +27,8 @@ fn session_log_path(cli: &Cli) -> Option<(std::path::PathBuf, LogOrigin)> {
         return Some((path.clone(), LogOrigin::Explicit));
     }
     match &cli.command {
-        super::Commands::Dev { config, .. } => {
-            default_session_log_path(config).map(|path| (path, LogOrigin::Automatic))
+        super::Commands::Dev { site, .. } => {
+            default_session_log_path(&site.config).map(|path| (path, LogOrigin::Automatic))
         }
         _ => None,
     }
@@ -36,23 +37,46 @@ fn session_log_path(cli: &Cli) -> Option<(std::path::PathBuf, LogOrigin)> {
 /// The next development session log below the site's reserved directory.
 fn default_session_log_path(config: &super::ConfigFileArgs) -> Option<std::path::PathBuf> {
     let root = super::config::source_root(config).ok()?;
-    let directory = tola_build::filesystem::layout::logs(&root);
+    let directory = tola_input::layout::logs(&root);
     Some(directory.join(format!("dev-{}.jsonl", super::log::session_stamp())))
 }
 
+fn hook_nested_build(cli: &Cli) -> Option<String> {
+    let stage = std::env::var("TOLA_HOOK_STAGE").ok()?;
+    let blocked = match &cli.command {
+        super::Commands::Build { .. }
+        | super::Commands::Dev { .. }
+        | super::Commands::Preview { .. } => true,
+        super::Commands::Check { no_build, .. } => !no_build,
+        _ => false,
+    };
+    blocked.then_some(stage)
+}
+
 pub(crate) fn run() -> ExitCode {
-    if let Some(code) = super::site_help::for_process() {
+    if let Some(code) = super::usage::for_process() {
         return code;
     }
     let cli = Cli::parse_for_process();
-    super::theme::install(cli.global.color);
+    super::color::install(cli.global.color);
+    if let Some(stage) = hook_nested_build(&cli) {
+        let diagnostic = Diagnostic::new(
+            crate::codes::hook::NESTED_BUILD,
+            Severity::Error,
+            format!("the `{stage}` hook cannot start another Tola build"),
+        )
+        .with_help(
+            "Run the build outside the hook; a nested build waits on the same site lock and can re-run this hook.",
+        );
+        let terminal = Terminal::new(cli.global.color, cli.global.quiet, None);
+        let _ = terminal.diagnostic(&diagnostic);
+        return ExitCode::FAILURE;
+    }
     if let super::Commands::Nu(args) = &cli.command {
-        let scope = if cli.global.pure {
-            Some("pure")
-        } else if cli.global.offline {
-            Some("offline")
-        } else {
-            None
+        let scope = match cli.input_scope() {
+            tola_input::InputScope::Pure => Some("pure"),
+            tola_input::InputScope::Offline => Some("offline"),
+            tola_input::InputScope::Online => None,
         };
         return super::commands::nu::run(args, scope);
     }
@@ -60,7 +84,8 @@ pub(crate) fn run() -> ExitCode {
         matches!(&cli.command, super::Commands::Dev { development, .. } if development.json),
     );
     let pages_documentation = matches!(&cli.command, super::Commands::Help(args) if args.format == super::args::HelpFormat::Text);
-    let pager = match if cli.global.no_pager || !pages_documentation {
+    let no_pager = matches!(&cli.command, super::Commands::Help(args) if args.no_pager);
+    let pager = match if no_pager || !pages_documentation {
         Ok(None)
     } else {
         PagerCommand::for_process()
@@ -86,18 +111,15 @@ pub(crate) fn run() -> ExitCode {
         }
     };
     terminal.sink().set_cancellation(cancellation.token());
+    let failure = super::dispatch::FailureReport::of(&cli);
     let (output, mut outcome) = match prepare_output(&cli, terminal.clone()) {
         Ok(output) => {
-            let outcome = super::dispatch::dispatch(cli, &output, &cancellation);
+            let outcome = super::dispatch::dispatch(cli, &output, &cancellation, failure);
             (output, outcome)
         }
         Err(error) => {
             let output = CommandOutput::new(terminal, None);
-            let outcome = super::dispatch::report_failure(
-                super::dispatch::FailureReport::of(&cli),
-                &output,
-                error,
-            );
+            let outcome = super::dispatch::report_failure(failure, &output, error);
             (output, outcome)
         }
     };
@@ -190,10 +212,21 @@ fn is_command_cancellation(error: &anyhow::Error) -> bool {
 }
 
 fn prepare_output(cli: &Cli, terminal: Terminal) -> anyhow::Result<CommandOutput> {
+    let log_target = session_log_path(cli);
+    if let Some((log_path, _)) = &log_target
+        && let Some(config) = cli.command.config_file()
+    {
+        let cwd = std::env::current_dir()?;
+        let config_path = config.path.clone().unwrap_or_else(|| {
+            tola_build::config::loading::find_default_config(&cwd)
+                .unwrap_or_else(|| cwd.join("tola.toml"))
+        });
+        super::log::destination::check_file(Some(log_path), &config_path)?;
+    }
     // An automatic log that cannot be prepared keeps its cause here until the subscriber that
     // shows verbose output is installed below.
     let mut unavailable = None;
-    let log = match session_log_path(cli) {
+    let log = match log_target {
         Some((path, origin)) => match prepare_log(&path, origin, &terminal) {
             Ok(log) => Some(log),
             // Tola named this path for a development session, so an unusable log is a warning

@@ -6,7 +6,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use tola_typst::BundleOptions;
 
-use crate::compiler::TypstHost;
+use crate::compiler::SiteHost;
 use crate::config::ResolvedSiteConfig;
 use crate::content::{ContentUnit, SourceSet};
 
@@ -61,7 +61,7 @@ pub(crate) struct CompiledSiteProgram {
 
 pub(crate) fn evaluate(
     config: &ResolvedSiteConfig,
-    host: &TypstHost,
+    host: &SiteHost,
     content: &[ContentUnit],
     package_bindings: crate::package::SiteBindings,
     cancellation: &tola_typst::BundleCancellation,
@@ -138,7 +138,7 @@ pub(crate) fn export(
 /// Compile the root Bundle without exporting files or collecting other producers.
 pub(crate) fn realize(
     config: &ResolvedSiteConfig,
-    host: &TypstHost,
+    host: &SiteHost,
     cancellation: &tola_typst::BundleCancellation,
     evaluated: &EvaluatedSiteProgram,
     inputs: &mut crate::compiler::BuildInputs,
@@ -183,7 +183,10 @@ pub(crate) fn realize(
             })
             .context("Tola could not align the inline frames the site renders")?;
         cancellation.ensure_active()?;
-        super::diagnostic::ensure_native_reports_succeed(config, compilation.diagnostics())?;
+        super::diagnostic::ensure_native_reports_succeed(
+            config.get_root(),
+            compilation.diagnostics(),
+        )?;
         Ok(RealizedBundle {
             compilation,
             world: Arc::clone(&world),
@@ -230,18 +233,8 @@ impl EvaluatedSiteProgram {
             .chain(std::iter::once_with(|| {
                 (
                     crate::compiler::TypstDependencyReader::SiteProgram,
-                    compilation
-                        .file_reads()
-                        .iter()
-                        .chain(self.package_bindings.module_reads())
-                        .cloned()
-                        .collect(),
-                    compilation
-                        .package_checks()
-                        .iter()
-                        .chain(self.package_bindings.module_package_checks())
-                        .cloned()
-                        .collect(),
+                    compilation.file_reads().to_vec(),
+                    compilation.package_checks().to_vec(),
                 )
             }))
     }
@@ -254,7 +247,6 @@ impl EvaluatedSiteProgram {
             .iter()
             .flat_map(|(_, _, checks)| checks)
             .chain(compilation.package_checks())
-            .chain(self.package_bindings.module_package_checks())
     }
 
     pub(crate) fn source_analysis(&self) -> &crate::compiler::analysis::SourceAnalysisCache {

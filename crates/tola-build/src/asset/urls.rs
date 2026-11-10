@@ -25,8 +25,9 @@ pub(super) fn browser_url(
 /// Every URL the site publishes, keyed by the site-root URL its author writes.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AssetUrls {
+    prepared: bool,
     /// Site-root URL -> mounted browser URL; a build appends `?h=<identity>` when busting.
-    urls: BTreeMap<String, (String, AssetOrigin)>,
+    urls: BTreeMap<String, (String, AssetOrigin, Option<ModuleAsset>)>,
 }
 
 /// The declaration that publishes one asset URL.
@@ -46,96 +47,100 @@ pub struct PublishedAsset<'a> {
     pub origin: Option<&'a AssetOrigin>,
 }
 
+/// Explicit ownership and input of one published module asset.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModuleAsset {
+    pub alias: String,
+    pub name: String,
+    pub input: ModuleAssetInput,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ModuleAssetInput {
+    Module(PathBuf),
+    Project(PathBuf),
+}
+
 impl AssetUrls {
-    /// Resolve every declaration to its mounted address, without rendering or minifying.
-    pub fn for_check(
+    /// Read the project declarations’ mounted URLs without rendering their bytes.
+    pub fn for_check_project(
         config: &ResolvedSiteConfig,
         cancellation: &crate::cancellation::BuildCancellation,
     ) -> Result<Self> {
-        super::inventory::validate_asset_output_ownership_for_check(config)?;
-        let mount = config.url_mount();
-        let mut published = Vec::new();
-        let mut outputs = Vec::new();
-        for declaration in &config.assets.files {
-            let url = declaration.url().url_path();
-            outputs.push(super::output::output_for_configured_file(
-                declaration.source(),
-                declaration.url().output_path(),
-            ));
-            published.push((
-                declaration.url().as_str().to_owned(),
-                browser_url(mount, url, None),
-                AssetOrigin::File {
-                    source: declaration.source().to_path_buf(),
-                },
-            ));
-        }
-        for declaration in &config.assets.trees {
-            let source = declaration.source();
-            let members =
-                super::inventory::enumerate_tree_members(config, declaration, cancellation)?;
-            for member in members {
-                let output = super::output::output_for_configured_tree_member(
-                    source,
-                    &member,
-                    declaration.url_prefix(),
-                    config.get_root(),
-                )?;
-                let url = tola_address::asset_url_from_output(&output.output);
-                outputs.push(output);
-                let browser = browser_url(mount, &url, None);
-                published.push((
-                    url.as_str().to_owned(),
-                    browser,
-                    AssetOrigin::TreeMember {
-                        source: source.to_path_buf(),
-                        member: member.to_path_buf(),
-                    },
-                ));
-            }
-        }
-        super::inventory::validate_asset_output_set(
-            outputs.iter(),
-            config.get_root(),
+        Self::for_check_with(
+            config,
+            crate::modules::prepared::AppliedAssets::project_only(config),
             cancellation,
-        )?;
-        Ok(Self::from_published(published))
+        )
     }
 
-    /// The published view one caller walked: URL, address, and publishing declaration.
+    pub(crate) fn for_check_with(
+        config: &ResolvedSiteConfig,
+        assets: crate::modules::prepared::AppliedAssets<'_>,
+        cancellation: &crate::cancellation::BuildCancellation,
+    ) -> Result<Self> {
+        super::inventory::check_asset_urls(config, assets, cancellation)
+    }
+
+    /// The selected module assets and the mounted URLs this build publishes.
+    pub fn module_assets(&self) -> impl Iterator<Item = (&ModuleAsset, &str)> {
+        self.urls
+            .values()
+            .filter(move |_| self.prepared)
+            .filter_map(|(address, _, asset)| asset.as_ref().map(|asset| (asset, address.as_str())))
+    }
+
+    /// Index published addresses and their declaration owners.
     pub(super) fn from_published(
-        published: impl IntoIterator<Item = (String, String, AssetOrigin)>,
+        published: impl IntoIterator<Item = (String, String, AssetOrigin, Option<ModuleAsset>)>,
     ) -> Self {
         Self {
+            prepared: true,
             urls: published
                 .into_iter()
-                .map(|(declared, address, origin)| (declared, (address, origin)))
+                .map(|(declared, address, origin, module)| (declared, (address, origin, module)))
                 .collect(),
         }
     }
 
+    /// Index unrendered addresses for editor previews.
+    pub(super) fn from_preview(
+        addresses: impl IntoIterator<Item = (String, String, AssetOrigin, Option<ModuleAsset>)>,
+    ) -> Self {
+        Self {
+            prepared: false,
+            ..Self::from_published(addresses)
+        }
+    }
+
+    pub(crate) fn is_prepared(&self) -> bool {
+        self.prepared
+    }
+
     /// The address a browser fetches for one declared asset URL, when this site publishes it.
     pub fn address(&self, declared: &str) -> Option<&str> {
-        self.urls.get(declared).map(|(address, _)| address.as_str())
+        self.urls
+            .get(declared)
+            .map(|(address, _, _)| address.as_str())
     }
 
     /// The declaration that publishes one declared asset URL, when this site publishes it.
     pub fn origin(&self, declared: &str) -> Option<&AssetOrigin> {
-        self.urls.get(declared).map(|(_, origin)| origin)
+        self.urls.get(declared).map(|(_, origin, _)| origin)
     }
 
     /// Declarations in declared-URL order.
     pub(crate) fn origins(&self) -> impl Iterator<Item = (&str, &AssetOrigin)> {
         self.urls
             .iter()
-            .map(|(declared, (_, origin))| (declared.as_str(), origin))
+            .map(|(declared, (_, origin, _))| (declared.as_str(), origin))
     }
 
     /// Every published asset URL with its address and publishing declaration.
     pub fn published(&self) -> impl Iterator<Item = PublishedAsset<'_>> {
         self.urls
             .iter()
-            .map(|(declared, (address, origin))| PublishedAsset {
+            .map(|(declared, (address, origin, _))| PublishedAsset {
                 declared,
                 address,
                 origin: Some(origin),
@@ -144,7 +149,7 @@ impl AssetUrls {
 
     /// Whether every declaration this dictionary resolved still resolves the same way.
     pub(crate) fn values_match(&self, next: &Self) -> bool {
-        self.urls.iter().all(|(declared, (browser, _))| {
+        self.urls.iter().all(|(declared, (browser, _, _))| {
             next.address(declared).is_none_or(|next| next == browser)
         })
     }
@@ -153,7 +158,9 @@ impl AssetUrls {
     pub(crate) fn to_typst_dict(&self) -> Dict {
         self.urls
             .iter()
-            .map(|(declared, (browser, _))| (declared.clone().into(), browser.clone().into_value()))
+            .map(|(declared, (browser, _, _))| {
+                (declared.clone().into(), browser.clone().into_value())
+            })
             .collect()
     }
 }
@@ -185,7 +192,12 @@ mod tests {
             file_declaration("assets/%E5%9B%BE.svg", "/%E5%9B%BE.svg"),
         ]);
 
-        let urls = AssetUrls::for_check(&config, &Default::default()).unwrap();
+        let urls = AssetUrls::for_check_with(
+            &config,
+            crate::modules::prepared::AppliedAssets::project_only(&config),
+            &Default::default(),
+        )
+        .unwrap();
 
         assert_eq!(
             published_url(&urls, "/app.js").as_deref(),
@@ -230,7 +242,12 @@ mod tests {
             crate::config::section::AssetUrlPrefix::parse("/assets").unwrap(),
         )];
 
-        let urls = AssetUrls::for_check(&config, &Default::default()).unwrap();
+        let urls = AssetUrls::for_check_with(
+            &config,
+            crate::modules::prepared::AppliedAssets::project_only(&config),
+            &Default::default(),
+        )
+        .unwrap();
 
         assert_eq!(
             published_url(&urls, "/assets/app.css").as_deref(),
@@ -258,7 +275,12 @@ mod tests {
             crate::config::section::AssetUrlPrefix::parse("/assets").unwrap(),
         )];
 
-        let urls = AssetUrls::for_check(&config, &Default::default()).unwrap();
+        let urls = AssetUrls::for_check_with(
+            &config,
+            crate::modules::prepared::AppliedAssets::project_only(&config),
+            &Default::default(),
+        )
+        .unwrap();
 
         assert_eq!(urls.address("/brand/logo.svg"), Some("/brand/logo.svg"));
         assert_eq!(
@@ -289,6 +311,7 @@ mod tests {
                     AssetOrigin::File {
                         source: PathBuf::from("assets/app.js"),
                     },
+                    None,
                 )
             }))
         };

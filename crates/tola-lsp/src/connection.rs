@@ -18,7 +18,7 @@ mod scheduling;
 mod source_jobs;
 mod status;
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
@@ -31,6 +31,7 @@ use lsp_types::{CodeActionOrCommand, NumberOrString, Uri};
 use tola_build::cancellation::{BuildCancellation, BuildCanceller};
 use tola_diagnostic::Diagnostic;
 
+use self::scheduling::JobQueue;
 use crate::capabilities::ClientFeatures;
 use crate::compiler::{AnalysisRequest, SourceInputs, SourceJob};
 use crate::diagnostic::ClientDiagnostics;
@@ -55,6 +56,8 @@ pub(crate) fn routes_as_hints(capabilities: &lsp_types::ClientCapabilities) -> b
 /// it reads, before the selection evidence is frozen with them.
 struct PendingCheck {
     checked_revision: u64,
+    /// When this revision's check was created, which its dispatch wait is measured from.
+    queued_at: Instant,
     /// A typing change sets the moment after the settle delay; every other change sets it now.
     due: Instant,
     sources: SourceInputs,
@@ -97,8 +100,10 @@ pub(super) struct Connection<W, D> {
     serial: u64,
     checking: BuildCanceller,
     requests: BTreeMap<RequestId, PendingRequest>,
-    queries: VecDeque<SourceJob>,
-    analyses: VecDeque<AnalysisRequest>,
+    /// Jobs waiting for the compiler lane, each holding the moment it was queued.
+    queries: JobQueue<SourceJob>,
+    /// Requests waiting for the analysis lane, each holding the moment it was queued.
+    analyses: JobQueue<AnalysisRequest>,
     check: Option<PendingCheck>,
     /// One build serves the revision's waiting corrections independently of check cancellation.
     selection_build: Option<SelectionBuild>,
@@ -198,8 +203,8 @@ impl<W, D> Connection<W, D> {
             serial: 0,
             checking: BuildCanceller::new(),
             requests: BTreeMap::new(),
-            queries: VecDeque::new(),
-            analyses: VecDeque::new(),
+            queries: JobQueue::new(),
+            analyses: JobQueue::new(),
             check: None,
             selection_build: None,
             running_check: None,
@@ -291,7 +296,7 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
                 Phase::Ready(workspace) | Phase::Initializing(workspace) => &workspace.root,
                 _ => unreachable!("source roots are selected during initialization"),
             });
-        tola_build::filesystem::normalize_existing_prefix(root)
+        tola_input::normalize_existing_prefix(root)
     }
 
     pub(super) fn receive(

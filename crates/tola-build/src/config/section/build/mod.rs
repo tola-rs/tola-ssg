@@ -40,8 +40,8 @@ use tola_config::Config;
 #[serde(default)]
 #[config(section = "build")]
 pub struct BuildSectionConfig {
-    /// Typst program that builds the site, relative to the site root.
-    pub entry: PathBuf,
+    /// Project Typst file relative to the site root, or a table with the selected module alias.
+    pub entry: BuildEntry,
 
     /// Directory the site's sources are written in, relative to the site root. Tola reads the
     /// `.typ` files below it.
@@ -61,9 +61,42 @@ pub struct BuildSectionConfig {
 
     #[config(sub)]
     pub references: ReferencesConfig,
+}
 
-    #[config(sub)]
-    pub hooks: HooksConfig,
+/// The source of the site's Typst entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged, deny_unknown_fields)]
+pub enum BuildEntry {
+    Project(PathBuf),
+    Module { module: String },
+}
+
+impl From<&str> for BuildEntry {
+    fn from(path: &str) -> Self {
+        Self::Project(path.into())
+    }
+}
+
+impl BuildEntry {
+    /// The site-relative file spelling for a project entry.
+    pub fn project_path(&self) -> Option<&std::path::Path> {
+        match self {
+            Self::Project(path) => Some(path),
+            Self::Module { .. } => None,
+        }
+    }
+}
+
+/// Build settings after path resolution.
+#[derive(Debug, Clone, Serialize)]
+pub struct ResolvedBuildConfig {
+    pub entry: PathBuf,
+    #[serde(rename = "content-dir")]
+    pub content_dir: PathBuf,
+    #[serde(rename = "publish-dir")]
+    pub publish_dir: PathBuf,
+    pub minify: MinifyConfig,
+    pub references: ReferencesConfig,
 }
 
 impl Default for BuildSectionConfig {
@@ -73,7 +106,6 @@ impl Default for BuildSectionConfig {
             content_dir: "content".into(),
             publish_dir: "public".into(),
             minify: MinifyConfig::default(),
-            hooks: HooksConfig::default(),
             references: ReferencesConfig::default(),
         }
     }
@@ -84,7 +116,8 @@ impl BuildSectionConfig {
     pub const HELP: &'static str = "\
 The site is one Typst Bundle, and `entry` is its starting program. Its imports — templates,
 helpers, and page programs — join the same compilation. The `tola init` scaffold sets `entry` to
-the site root's `site.typ`; `entry` is yours to configure, so it can name other files.
+the site root's `site.typ`. Set `entry` to a different project file, or use
+`entry = { module = \"notes\" }` to compile the configured module's `build.entry`.
 
 `content-dir` defines source identity: `content/guide/install.typ` arrives in `all-sources()` as
 a source whose `path` field is `guide/install.typ`. The file layout does not affect `permalink`;
@@ -130,22 +163,23 @@ file layout, keeping the URL unchanged when the source moves.
 `publish-dir` is the directory `tola build` replaces as a whole, removing stale outputs. Choose an
 empty directory or one Tola already owns for this site; a non-empty directory Tola did not write
 fails the build. Hand-maintained files belong in `[assets]` or in outputs declared under
-`[[build.hooks.generate-outputs]]`. Errors or cancellation before publication leave the previous
+`[[hooks.generate-outputs]]`. Errors or cancellation before publication leave the previous
 output intact. `check`, `dev`, and `preview` do not replace this directory.
 
-Three child tables tune the build: `[build.minify]` compacts supported output bytes;
-`[build.references]` chooses `error` or `warn` for broken references; `[build.hooks]` runs the
-site's own commands before compilation, during output generation, or after publication. All
-outputs meet in one complete set: conflicts and references are checked before the site is
-published, so one producer cannot silently replace another's file.";
+`[build.minify]` compacts supported output bytes, and `[build.references]` chooses `error`
+or `warn` for broken references. The top-level `[hooks]` table runs the site's commands before
+compilation, during output generation, or after publication. Conflicts and references are
+checked across all outputs before publication.";
 
     pub(crate) fn validate_paths(&self, diag: &mut ConfigDiagnostics) {
-        super::path::validate_site_relative_path(
-            &self.entry,
-            Self::FIELDS.entry.as_str(),
-            Self::FIELDS.entry,
-            diag,
-        );
+        if let Some(entry) = self.entry.project_path() {
+            super::path::validate_site_relative_path(
+                entry,
+                Self::FIELDS.entry.as_str(),
+                Self::FIELDS.entry,
+                diag,
+            );
+        }
         let usable = super::path::validate_site_relative_path(
             &self.content_dir,
             Self::FIELDS.content_dir.as_str(),
@@ -168,7 +202,7 @@ published, so one producer cannot silently replace another's file.";
 #[cfg(test)]
 mod tests {
     use super::BuildSectionConfig;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
 
     #[test]
     fn build_template_round_trips_through_toml() {
@@ -179,11 +213,14 @@ mod tests {
 
         let parsed: crate::config::SiteConfigSchema = toml::from_str(&source).unwrap();
 
-        assert_eq!(parsed.build.entry, PathBuf::from("site.typ"));
+        assert_eq!(
+            parsed.build.entry.project_path(),
+            Some(Path::new("site.typ"))
+        );
         assert!(parsed.assets.trees.is_empty());
         assert!(parsed.assets.files.is_empty());
         assert!(parsed.icons.collections.is_empty());
-        assert!(parsed.build.hooks.before_build.is_empty());
+        assert!(parsed.hooks.before_build.is_empty());
     }
 
     #[test]
@@ -257,7 +294,7 @@ mod tests {
         config.validate_paths(&mut diagnostics);
 
         assert!(diagnostics.into_result().is_ok());
-        assert_eq!(config.entry, Path::new("site.typ"));
+        assert_eq!(config.entry.project_path(), Some(Path::new("site.typ")));
         assert_eq!(config.content_dir, Path::new("content"));
     }
 }

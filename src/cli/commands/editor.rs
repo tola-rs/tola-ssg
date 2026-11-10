@@ -14,7 +14,7 @@ use crate::cli::output::CommandOutput;
 use crate::cli::{ConfigFileArgs, EditorCommand, TypstPackageArgs};
 use crate::config::LoadedConfig;
 use crate::editor::{Editor, EditorDirectory, EditorPackageInputs};
-use tola_build::InputScope;
+use tola_input::InputScope;
 
 pub(in crate::cli) fn run(
     command: EditorCommand,
@@ -31,14 +31,14 @@ pub(in crate::cli) fn run(
             Ok(())
         }
         EditorCommand::Setup {
-            config,
-            packages,
+            input: _,
+            site,
             editors,
             list,
             dry_run,
         } => {
             let (loaded, directory) =
-                load_editor_context(&config, &packages, scope, output, cancellation)?;
+                load_editor_context(&site.config, &site.packages, scope, output, cancellation)?;
             if list {
                 start_session_log(output, loaded.as_ref(), cancellation)?;
                 output.block(crate::editor::client_list(&directory))?;
@@ -52,7 +52,7 @@ pub(in crate::cli) fn run(
             let package_inputs = editor_package_inputs(
                 loaded.as_ref(),
                 &directory,
-                &packages,
+                &site.packages,
                 scope,
                 &cancellation.token(),
             )?;
@@ -84,13 +84,13 @@ pub(in crate::cli) fn run(
             output.status(crate::editor::startup_instructions(&editors))?;
             Ok(())
         }
-        EditorCommand::Packages { config, packages } => {
+        EditorCommand::Packages { input: _, site } => {
             let (loaded, directory) =
-                load_editor_context(&config, &packages, scope, output, cancellation)?;
+                load_editor_context(&site.config, &site.packages, scope, output, cancellation)?;
             let package_inputs = editor_package_inputs(
                 loaded.as_ref(),
                 &directory,
-                &packages,
+                &site.packages,
                 scope,
                 &cancellation.token(),
             )?;
@@ -145,7 +145,7 @@ fn editor_package_inputs(
     match loaded {
         Some(loaded) => crate::editor::prepare_package_inputs(
             loaded.config(),
-            &crate::cli::config::build_resources(scope),
+            &crate::cli::config::build_resources(tola_input::InputMode::new(scope, false)),
         ),
         None => crate::editor::initial_package_inputs(
             directory.root(),

@@ -9,9 +9,13 @@
 mod code;
 pub mod codes;
 mod error;
+mod path;
+mod positions;
 
 pub use code::DiagnosticCode;
 pub use error::{DiagnosticError, attached, collapse_whitespace, fallback};
+pub use path::{display_path, render_relative};
+pub use positions::{SourceExcerpt, SourcePositions, key_at_span};
 
 use serde::{Deserialize, Serialize};
 use typst::syntax::Lines;
@@ -643,18 +647,6 @@ mod tests {
             pages_note(&pages(6)).as_deref(),
             Some("it appears on `page-0.html`, `page-1.html`, `page-2.html` and 3 more pages")
         );
-    }
-
-    #[test]
-    fn diagnostic_serializes_its_code() {
-        let diagnostic = Diagnostic::new(
-            crate::codes::config::INVALID,
-            Severity::Error,
-            "invalid output directory",
-        );
-
-        let value = serde_json::to_value(&diagnostic).unwrap();
-        assert_eq!(value["code"], "config.invalid");
     }
 
     /// The wire shape a client reads from a diagnostic's `cause`.

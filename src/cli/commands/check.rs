@@ -13,13 +13,15 @@ pub(in crate::cli) fn run(
     request: super::SiteRequest<'_>,
     json: bool,
     no_hooks: bool,
+    pretty: bool,
 ) -> Result<()> {
-    let mut report = super::report::SiteReport::new("check", request.scope, "candidate", !no_hooks);
+    let mut report =
+        super::report::SiteReport::new("check", request.scope(), "candidate", !no_hooks);
     let output = request.output;
     let cancellation = request.cancellation;
     let completion = execute(request, json, no_hooks, &mut report)
         .and_then(|()| cancellation.token().ensure_active().map_err(Into::into));
-    report.finish(completion, output, json)
+    report.finish(completion, output, json, pretty)
 }
 
 fn execute(
@@ -42,7 +44,7 @@ fn execute(
     })?;
     if !no_hooks {
         output.hook_overview(
-            &config.build().hooks,
+            config.hooks(),
             tola_build::build::BuildMode::Production,
             crate::terminal::PRE_PUBLICATION_STAGES,
         )?;
@@ -81,8 +83,12 @@ fn execute(
 /// The walk is [`tola_build::filesystem::owned_files`], so this analysis reaches exactly the files
 /// `tola fmt` would rewrite. What a source *means* — values, routes, references, output — is the
 /// build's to establish, not this.
-pub(in crate::cli) fn sources(request: &super::SiteRequest<'_>, json: bool) -> Result<()> {
-    let mut report = super::report::SiteReport::new("check", request.scope, "source", false);
+pub(in crate::cli) fn sources(
+    request: &super::SiteRequest<'_>,
+    json: bool,
+    pretty: bool,
+) -> Result<()> {
+    let mut report = super::report::SiteReport::new("check", request.scope(), "source", false);
     let completion = (|| -> Result<()> {
         request.cancellation.token().ensure_active()?;
         let overrides = crate::cli::config::config_overrides(&request.build);
@@ -103,7 +109,7 @@ pub(in crate::cli) fn sources(request: &super::SiteRequest<'_>, json: bool) -> R
                 diagnostics.push(
                     tola_diagnostic::unreadable_source(
                         crate::codes::check::UNREADABLE,
-                        &tola_build::filesystem::display_path(source, root),
+                        &tola_diagnostic::display_path(source, root),
                     )
                     .with_help("Save the file as UTF-8, then run `tola check` again"),
                 );
@@ -113,7 +119,7 @@ pub(in crate::cli) fn sources(request: &super::SiteRequest<'_>, json: bool) -> R
             if let Some(range) = tola_typst_syntax::errors::first_error_range(text) {
                 diagnostics.push(tola_diagnostic::unparsable_source(
                     crate::codes::check::SYNTAX,
-                    &tola_build::filesystem::display_path(source, root),
+                    &tola_diagnostic::display_path(source, root),
                     text,
                     Some(range.start),
                 ));
@@ -136,7 +142,7 @@ pub(in crate::cli) fn sources(request: &super::SiteRequest<'_>, json: bool) -> R
             .ensure_active()
             .map_err(Into::into)
     });
-    report.finish(completion, request.output, json)
+    report.finish(completion, request.output, json, pretty)
 }
 
 #[cfg(test)]
@@ -145,22 +151,23 @@ mod tests {
     use super::*;
     use crate::cancellation::Cancellation;
     use crate::cli::output::CommandOutput;
-    use crate::cli::{BuildOverrideArgs, ConfigFileArgs, TypstPackageArgs};
-    use tola_build::InputScope;
+    use crate::cli::{ConfigFileArgs, TypstPackageArgs};
+    use tola_input::{InputMode, InputScope};
 
     fn analyse(config_file: ConfigFileArgs, output: &CommandOutput) -> Result<()> {
         let cancellation = Cancellation::default();
         let request = super::super::SiteRequest::new(
-            config_file,
-            TypstPackageArgs::default(),
-            InputScope::Online,
-            BuildOverrideArgs::default(),
-            crate::cli::CompilerFontArgs::default(),
+            crate::cli::SiteArgs {
+                config: config_file,
+                packages: TypstPackageArgs::default(),
+            },
+            crate::cli::BuildArgs::default(),
+            InputMode::new(InputScope::Online, false),
             output,
             &cancellation,
         )
         .unwrap();
-        sources(&request, false)
+        sources(&request, false, false)
     }
 
     #[test]

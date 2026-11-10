@@ -1495,13 +1495,11 @@ export async function run(): Promise<void> {
         const creating = vscode.commands.executeCommand('tola.initSite')
         await workbenchText({ button: 'Create Site' })
         await creating
-        const configuration = await fs.readFile(path.join(directory.fsPath, 'tola.toml'), 'utf8')
-        assert.match(configuration, /\[site\]/)
+        assert.ok((await fs.stat(path.join(directory.fsPath, 'tola.toml'))).isFile())
         assert.ok((await fs.stat(path.join(directory.fsPath, 'site.typ'))).isFile())
-        const settings = JSON.parse(
-          await fs.readFile(path.join(directory.fsPath, '.vscode/settings.json'), 'utf8'),
-        )
-        assert.ok(settings['tola.configPath'])
+        assert.ok((await fs.stat(path.join(directory.fsPath, '.gitignore'))).isFile())
+        assert.ok((await fs.stat(path.join(directory.fsPath, '.ignore'))).isFile())
+        assert.ok((await fs.stat(path.join(directory.fsPath, 'content'))).isDirectory())
       } finally {
         vscode.window.showOpenDialog = open
       }
@@ -1517,13 +1515,25 @@ export async function run(): Promise<void> {
       program: '#document("preview/index.html", format: "html")[#panic("The build refuses this page")]\n',
     }))
 
-  await check('Reveal Output without a build warns', () =>
+  await check('Reveal Output opens the selected directory', () =>
     withSite(async (site) => {
+      const directory = path.join(site.root, 'published')
+      await fs.mkdir(directory)
       await vscode.window.showTextDocument(site.source)
-      await vscode.commands.executeCommand('tola.revealOutput')
-      const message = await workbenchText({ contains: 'has not built this site yet', dismiss: true })
-      assert.match(message, /run Tola: Build Site/)
-    }))
+      const execute = vscode.commands.executeCommand
+      let revealed: vscode.Uri | undefined
+      vscode.commands.executeCommand = ((command: string, ...args: unknown[]) => {
+        if (command !== 'revealFileInOS') return execute(command, ...args)
+        revealed = args[0] as vscode.Uri
+        return Promise.resolve()
+      }) as typeof execute
+      try {
+        await vscode.commands.executeCommand('tola.revealOutput')
+        assert.equal(revealed?.fsPath, directory)
+      } finally {
+        vscode.commands.executeCommand = execute
+      }
+    }, { configuration: '[build]\npublish-dir = "published"\n' }))
 
   await check("Build task runs the site's own CLI", () =>
     withSite(async (site) => {

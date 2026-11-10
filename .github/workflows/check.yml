@@ -213,13 +213,34 @@ jobs:
           cache-on-failure: true
       - run: just windows::msvc
 
+  vscode-typecheck:
+    name: Type-check the VS Code extension
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: extractions/setup-just@f8a3cce218d9f83db3a2ecd90e41ac3de6cdfd9b # v3.1.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: extensions/vscode/package-lock.json
+      - name: Install the extension's dependencies
+        working-directory: extensions/vscode
+        run: npm ci
+      - name: Type-check the extension
+        run: just vscode::typecheck
+
   vscode:
     name: Check and package the VS Code extension
     runs-on: ubuntu-latest
     timeout-minutes: 45
     needs: [scope]
-    # VS Code's own download and the integration host are the slow part; the extension is
-    # still type-checked and packaged by every push through `just quality` and the release.
+    # VS Code's own download and the integration host are the slow part, so the suite waits
+    # for a complete run; `vscode-typecheck` type-checks the extension on every push.
     if: ${{ needs.scope.outputs.full == 'true' }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -243,8 +264,10 @@ jobs:
         with:
           packages: xvfb
           version: 1.0
-      - name: Run integration tests and create a type-checked VSIX without publishing
-        run: just vscode::check
+      - name: Type-check, package, and run the integration suite
+        run: |
+          just vscode::check
+          just vscode::test
       - name: Upload the packaged extension
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

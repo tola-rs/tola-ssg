@@ -6,32 +6,26 @@ use std::path::Path;
 
 use anyhow::Result;
 use clap::Args;
-use tola_build::InputScope;
-use tola_build::modules::{CommandAction, ModuleCommands};
+use tola_input::InputScope;
+use tola_module::{Action, CommandAction, ModuleCommands};
 
-use super::argv::expand;
-use crate::cli::args::{GlobalArgs, SkillArgs};
+use crate::cli::args::{ConfigFileArgs, InputArgs, ProcessArgs, SkillArgs};
 
 pub(super) fn is_help(arguments: &[OsString]) -> bool {
-    arguments.len() == 1 && (arguments[0] == "--help" || arguments[0] == "-h")
+    matches!(
+        arguments.first().and_then(|argument| argument.to_str()),
+        Some("--help" | "-h")
+    )
 }
 
 pub(super) fn namespace_command(
     module: &ModuleCommands,
-    signatures: &BTreeMap<String, tola_nu::Signature>,
+    signatures: &BTreeMap<String, Result<tola_nu::Signature>>,
 ) -> clap::Command {
-    let mut command = clap::Command::new(module.name.clone())
-        .bin_name(format!("tola {}", module.name))
-        .about(module.summary.clone())
+    let command = clap::Command::new(module.name.clone())
         .disable_help_subcommand(true)
-        .subcommand_required(true)
-        .arg(
-            clap::Arg::new("config")
-                .short('C')
-                .long("config")
-                .value_name("FILE")
-                .help("Use this site configuration"),
-        );
+        .subcommand_required(true);
+    let mut command = ConfigFileArgs::augment_args(command);
     if module.initializer.is_some() {
         command =
             command.subcommand(clap::Command::new("init").about("Create a site using this module"));
@@ -39,6 +33,7 @@ pub(super) fn namespace_command(
     for (name, declared) in &module.commands {
         let description = signatures
             .get(name)
+            .and_then(|signature| signature.as_ref().ok())
             .map(|signature| signature.description.as_str())
             .unwrap_or(&declared.help);
         command = command.subcommand(
@@ -46,12 +41,15 @@ pub(super) fn namespace_command(
                 .about(description.lines().next().unwrap_or("").to_owned()),
         );
     }
-    GlobalArgs::augment(command)
+    // An `Args` struct's doc comment becomes the command's about when augmented, so the
+    // namespace's own name and summary are applied after the last augmentation.
+    let command = InputArgs::augment_args(ProcessArgs::augment_args(command));
+    command.bin_name(format!("tola {}", module.name))
 }
 
 pub(super) fn namespace_help(
     module: &ModuleCommands,
-    signatures: &BTreeMap<String, tola_nu::Signature>,
+    signatures: &BTreeMap<String, Result<tola_nu::Signature>>,
     use_color: bool,
     long: bool,
 ) -> String {
@@ -64,12 +62,12 @@ pub(super) fn command_signatures<'a>(
     project: &Path,
     config: &Path,
     scope: InputScope,
-) -> Result<BTreeMap<String, tola_nu::Signature>> {
+) -> Result<BTreeMap<String, Result<tola_nu::Signature>>> {
     let commands = names.map(|name| (module, name));
-    module_command_signatures(commands, project, config, scope)?
+    Ok(module_command_signatures(commands, project, config, scope)?
         .into_iter()
-        .map(|((_, name), signature)| signature.map(|signature| (name, signature)))
-        .collect()
+        .map(|((_, name), signature)| (name, signature))
+        .collect())
 }
 
 /// One module command's argv spelling and its resolved signature.
@@ -84,34 +82,42 @@ pub(in crate::cli) fn module_command_signatures<'a>(
     let selected = commands
         .filter_map(|(module, name)| {
             let declared = module.commands.get(name)?;
-            let CommandAction::Argv { argv } = &declared.action else {
+            let CommandAction::Execute(Action::Nu { path, args }) = declared
+                .action()
+                .expect("module command actions are validated")
+            else {
                 return None;
             };
-            (argv.first().is_some_and(|arg| arg == "{tola}")
-                && argv.get(1).is_some_and(|arg| arg == "nu"))
-            .then_some((module, name, declared, argv))
+            let path = tola_module::module_set::validate_module_path(
+                project,
+                &module.name,
+                &module.root,
+                &path,
+                false,
+            );
+            Some((module, name, declared, (path, args)))
         })
         .collect::<Vec<_>>();
     if selected.is_empty() {
         return Ok(Vec::new());
     }
-    let executable = crate::cli::external::current_executable()?;
     let invocations = selected
         .iter()
-        .map(|(module, _, _, argv)| {
-            (
-                argv.iter()
-                    .map(|arg| expand(arg, project, &module.root, &executable))
-                    .collect(),
-                module.root.clone(),
-            )
+        .filter_map(|(_, _, _, (path, args))| {
+            path.as_ref().ok().map(|path| (path.clone(), args.clone()))
         })
         .collect::<Vec<_>>();
-    let signatures = super::super::nu::command_signatures(&invocations, project, config, scope);
+    let mut signatures =
+        super::super::nu::command_signatures(&invocations, project, config, scope).into_iter();
     Ok(selected
         .into_iter()
-        .zip(signatures)
-        .filter_map(|((module, name, declared, _), signature)| {
+        .filter_map(|(module, name, declared, (path, _))| {
+            let signature = match path {
+                Ok(_) => signatures
+                    .next()
+                    .expect("one signature per valid script path"),
+                Err(error) => Err(error.into()),
+            };
             let key = (module.name.clone(), name.to_owned());
             match signature {
                 Ok(None) => None,
@@ -157,7 +163,7 @@ pub(super) fn render_help(mut command: clap::Command, use_color: bool, long: boo
 pub(super) fn command_help(
     module: &ModuleCommands,
     name: &str,
-    declared: &tola_build::modules::Command,
+    declared: &tola_module::Command,
     use_color: bool,
     long: bool,
 ) -> String {
@@ -165,15 +171,18 @@ pub(super) fn command_help(
         .bin_name(format!("tola {} {name}", module.name))
         .about(declared.help.lines().next().unwrap_or("").to_owned())
         .long_about(declared.help.clone());
-    let command = match &declared.action {
+    let action = declared
+        .action()
+        .expect("module command actions are validated");
+    let command = match &action {
         CommandAction::Query { .. } => super::super::query::QueryOptions::augment_args(command),
-        CommandAction::Argv { .. } => command.arg(
+        CommandAction::Execute(_) => command.arg(
             clap::Arg::new("ARGS")
                 .num_args(0..)
                 .allow_hyphen_values(true)
                 .help("Arguments passed to the command"),
         ),
-        CommandAction::Skill => SkillArgs::augment_args(command),
+        CommandAction::Skill { .. } => SkillArgs::augment_args(command),
     };
     render_help(command, use_color, long)
 }

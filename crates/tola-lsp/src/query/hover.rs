@@ -346,7 +346,7 @@ impl Selection<'_> {
         let Some((typed, bytes)) = self.asset_url_argument(semantics)? else {
             return Ok(None);
         };
-        let urls = AssetUrls::for_check(config, cancellation)?;
+        let urls = AssetUrls::for_check_project(config, cancellation)?;
         let described = match crate::assets::written(&urls, &typed) {
             crate::assets::Written::Published(asset) => {
                 let declared = asset

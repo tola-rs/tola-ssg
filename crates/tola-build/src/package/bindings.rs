@@ -17,8 +17,6 @@ pub(crate) struct SiteBindings {
     asset_urls: crate::asset::AssetUrls,
     asset_origins: Dict,
     modules: Dict,
-    module_accessed: tola_typst::AccessedDeps,
-    module_diagnostics: tola_typst::Diagnostics,
 }
 
 impl SiteBindings {
@@ -31,8 +29,6 @@ impl SiteBindings {
             asset_origins: asset_origins(config, &asset_urls),
             asset_urls,
             modules: Dict::new(),
-            module_accessed: Default::default(),
-            module_diagnostics: tola_typst::Diagnostics::new(),
         }
     }
 
@@ -55,54 +51,15 @@ impl SiteBindings {
             source_records_by_file,
             source_origins,
             modules: self.modules.clone(),
-            module_validation: None,
         })
     }
 
     pub(crate) fn prepare_modules(
         mut self,
-        config: &ResolvedSiteConfig,
-        host: &crate::compiler::TypstHost,
-        cancellation: &crate::cancellation::BuildCancellation,
+        prepared: &tola_module::prepared::PreparedModules,
     ) -> anyhow::Result<Self> {
-        use typst::foundations::Value;
-        let evaluated = match &config.module_inputs.validated_options {
-            Some(evaluated) => Arc::clone(evaluated),
-            None => Arc::new(crate::modules::options::evaluate_all(
-                config,
-                host,
-                cancellation,
-            )?),
-        };
-        self.modules = config.module_inputs.contexts(config, &self.asset_urls)?;
-        for (alias, options) in &evaluated.values {
-            let mut record = match self.modules.get(alias) {
-                Ok(Value::Dict(record)) => record.clone(),
-                _ => anyhow::bail!("module `{alias}` has no configuration record"),
-            };
-            record.insert("options".into(), options.clone().into_value());
-            self.modules
-                .insert(alias.as_str().into(), record.into_value());
-        }
-        self.module_accessed = evaluated.accessed.clone();
-        self.module_diagnostics = evaluated.diagnostics.clone();
+        self.modules = crate::build::module_inputs::contexts(prepared, &self.asset_urls)?;
         Ok(self)
-    }
-
-    pub(crate) fn module_reads(&self) -> &[tola_typst::FileRead] {
-        &self.module_accessed.reads
-    }
-
-    pub(crate) fn module_package_checks(&self) -> &[tola_typst::PackageCheck] {
-        &self.module_accessed.package_checks
-    }
-
-    pub(crate) fn module_accessed(&self) -> &tola_typst::AccessedDeps {
-        &self.module_accessed
-    }
-
-    pub(crate) fn module_diagnostics(&self) -> &tola_typst::Diagnostics {
-        &self.module_diagnostics
     }
 }
 
@@ -115,13 +72,13 @@ fn asset_origins(config: &ResolvedSiteConfig, assets: &crate::asset::AssetUrls) 
             };
             Some((
                 declared.trim_start_matches('/').into(),
-                crate::filesystem::display_path(source, config.get_root()).into_value(),
+                tola_diagnostic::display_path(source, config.get_root()).into_value(),
             ))
         })
         .collect()
 }
 
-pub(crate) fn site_values(config: &ResolvedSiteConfig) -> Dict {
+fn site_values(config: &ResolvedSiteConfig) -> Dict {
     let site_config = &config.site;
     let mut site = Dict::new();
     site.insert("origin".into(), site_config.origin.as_deref().into_value());
@@ -161,6 +118,10 @@ pub(crate) fn site_values(config: &ResolvedSiteConfig) -> Dict {
             .map(|language| language_fields(&language).into_value())
             .collect::<Array>()
             .into_value(),
+    );
+    site.insert(
+        "options".into(),
+        tola_module::options::to_typst(config.options()),
     );
     site
 }

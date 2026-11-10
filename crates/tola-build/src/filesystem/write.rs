@@ -14,7 +14,7 @@ pub fn atomic_write(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     fs::create_dir_all(parent)?;
     let mut temporary = tempfile::Builder::new();
     temporary.prefix(".tola-").suffix(".tmp");
-    if let Some(permissions) = super::sys::ordinary_file_permissions() {
+    if let Some(permissions) = tola_fs::ordinary_file_permissions() {
         temporary.permissions(permissions);
     }
     let mut file = temporary.tempfile_in(parent)?;

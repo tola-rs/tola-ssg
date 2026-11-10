@@ -26,7 +26,7 @@ pub(super) fn imports(
     disk: &mut crate::analysis::DiskSources,
     cancellation: &BuildCancellation,
 ) -> Result<Option<WorkspaceEdit>> {
-    let root = tola_build::filesystem::normalize_existing_prefix(config.get_root());
+    let root = tola_input::normalize_existing_prefix(config.get_root());
     let sources = crate::analysis::site_sources(&root, view, boundary, disk, cancellation)?;
     let mut changes: HashMap<Uri, Vec<TextEdit>> = HashMap::new();
     for names in sources {
@@ -203,21 +203,57 @@ mod tests {
             .expect("the edit targets the importing document")
     }
 
+    /// A rename rewrites every relative path that reaches the moved file: the importer's own
+    /// link when it moves, and resource and import arguments when a folder holding the target
+    /// moves.
     #[test]
-    fn moved_importer_rewrites_its_link() {
-        let (_directory, root) = temp_site();
-        let config = site_config(
-            &root,
-            "#include \"head.typ\"\n",
-            &[("content/head.typ", "Head\n")],
-        );
-        let edit = rename(
-            &config,
-            &root,
-            &[(root.join("content/document.typ"), root.join("document.typ"))],
-        )
-        .expect("moving the importer changes its relative link");
-        assert_eq!(document_edits(edit, &root)[0].new_text, "content/head.typ");
+    fn rename_path_rewrite() {
+        for (document, files, moved, expected) in [
+            (
+                "#include \"head.typ\"\n",
+                &[("content/head.typ", "Head\n")][..],
+                ("content/document.typ", "document.typ"),
+                &["content/head.typ"][..],
+            ),
+            (
+                "#image(\"../assets/photo.png\")\n",
+                &[("assets/photo.png", "image bytes")][..],
+                ("assets", "images"),
+                &["../images/photo.png"][..],
+            ),
+            (
+                "#bibliography((\"../assets/refs.bib\", \"../assets/more.bib\"))\n",
+                &[("assets/refs.bib", ""), ("assets/more.bib", "")][..],
+                ("assets", "images"),
+                &["../images/refs.bib", "../images/more.bib"][..],
+            ),
+            (
+                "#import \"../templates/partials/head.typ\": head\nBody\n",
+                &[("templates/partials/head.typ", "Head\n")][..],
+                ("templates/partials/head.typ", "templates/head.typ"),
+                &["../templates/head.typ"][..],
+            ),
+            (
+                "#import \"../templates/partials/head.typ\": head\nBody\n",
+                &[("templates/partials/head.typ", "Head\n")][..],
+                ("templates", "layouts"),
+                &["../layouts/partials/head.typ"][..],
+            ),
+        ] {
+            let (_directory, root) = temp_site();
+            let config = site_config(&root, document, files);
+            let edit = rename(&config, &root, &[(root.join(moved.0), root.join(moved.1))])
+                .expect("the rename rewrites the reaching path");
+            let edits = document_edits(edit, &root);
+            assert_eq!(
+                edits
+                    .iter()
+                    .map(|edit| edit.new_text.as_str())
+                    .collect::<Vec<_>>(),
+                expected,
+                "{moved:?}"
+            );
+        }
     }
     #[test]
     fn rename_updates_unsaved_importer() {
@@ -320,65 +356,6 @@ mod tests {
                 crate::uri::from_file_path(&root.join(helper)).unwrap()
             );
             assert_eq!(changes[0].1[0].new_text, "../content/title.typ");
-        }
-    }
-
-    #[test]
-    fn folder_rename_updates_resource_paths() {
-        let cases = [
-            (
-                "#image(\"../assets/photo.png\")\n",
-                &[("assets/photo.png", "image bytes")][..],
-                &["../images/photo.png"][..],
-            ),
-            (
-                "#bibliography((\"../assets/refs.bib\", \"../assets/more.bib\"))\n",
-                &[("assets/refs.bib", ""), ("assets/more.bib", "")][..],
-                &["../images/refs.bib", "../images/more.bib"][..],
-            ),
-        ];
-        for (document, files, expected) in cases {
-            let (_directory, root) = temp_site();
-            let config = site_config(&root, document, files);
-            let edit = rename(
-                &config,
-                &root,
-                &[(root.join("assets"), root.join("images"))],
-            )
-            .unwrap();
-            let edits = document_edits(edit, &root);
-            assert_eq!(
-                edits
-                    .iter()
-                    .map(|edit| edit.new_text.as_str())
-                    .collect::<Vec<_>>(),
-                expected
-            );
-        }
-    }
-
-    #[test]
-    fn rename_rewrites_reaching_paths() {
-        for (moved, expected) in [
-            (
-                ("templates/partials/head.typ", "templates/head.typ"),
-                "../templates/head.typ",
-            ),
-            (("templates", "layouts"), "../layouts/partials/head.typ"),
-        ] {
-            let (_directory, root) = temp_site();
-            let config = site_config(
-                &root,
-                "#import \"../templates/partials/head.typ\": head\nBody\n",
-                &[("templates/partials/head.typ", "Head\n")],
-            );
-            let edit = rename(&config, &root, &[(root.join(moved.0), root.join(moved.1))])
-                .expect("one edit");
-            let mut files = edit.changes.expect("edits by file").into_values();
-            let edits = files.next().expect("the importing file");
-            assert!(files.next().is_none(), "only the importer is edited");
-            assert_eq!(edits.len(), 1);
-            assert_eq!(edits[0].new_text, expected, "{moved:?}");
         }
     }
 

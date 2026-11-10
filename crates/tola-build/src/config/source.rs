@@ -9,238 +9,8 @@ use serde::de::DeserializeOwned;
 
 use super::ConfigSourceRefusal;
 use super::{ConfigError, ConfigPresence};
-use crate::resources::InputScope;
-
-/// Where every key of one parsed configuration document is written, by dotted path.
-#[derive(Debug, Clone)]
-pub(crate) struct ConfigPositions {
-    source: Arc<str>,
-    keys: std::collections::BTreeMap<String, std::ops::Range<usize>>,
-}
-
-impl Default for ConfigPositions {
-    fn default() -> Self {
-        Self {
-            source: Arc::from(""),
-            keys: std::collections::BTreeMap::new(),
-        }
-    }
-}
-
-impl ConfigPositions {
-    /// Record every key of one parsed document against the exact source that produced it.
-    pub(crate) fn of(document: &toml_edit::Document<Arc<str>>, source: Arc<str>) -> Self {
-        let mut keys = std::collections::BTreeMap::new();
-        collect_table_keys(document.as_table(), "", &mut keys);
-        Self { source, keys }
-    }
-
-    /// The written key a dotted configuration path names, with its line and highlight.
-    pub(crate) fn excerpt(&self, path: &str) -> Option<SourceExcerpt> {
-        source_excerpt(&self.source, self.keys.get(path)?.clone())
-    }
-
-    /// The exact span the document writes one dotted configuration path in.
-    pub(crate) fn written(&self, path: &str) -> Option<tola_diagnostic::SourceRange> {
-        source_range(&self.source, self.keys.get(path)?.clone())
-    }
-}
-
-fn collect_table_keys(
-    table: &toml_edit::Table,
-    prefix: &str,
-    keys: &mut std::collections::BTreeMap<String, std::ops::Range<usize>>,
-) {
-    for (name, _) in table.iter() {
-        let Some((key, item)) = table.get_key_value(name) else {
-            continue;
-        };
-        let path = joined_path(prefix, name);
-        // A table header writes its key without a value line, so the table's own span is where
-        // that key is written.
-        let span = key.span().or_else(|| match item {
-            toml_edit::Item::Table(table) => table.span(),
-            _ => None,
-        });
-        if let Some(span) = span {
-            record_key_span(keys, &path, span);
-        }
-        collect_item_keys(item, &path, keys);
-    }
-}
-
-fn collect_item_keys(
-    item: &toml_edit::Item,
-    path: &str,
-    keys: &mut std::collections::BTreeMap<String, std::ops::Range<usize>>,
-) {
-    match item {
-        toml_edit::Item::Table(table) => collect_table_keys(table, path, keys),
-        toml_edit::Item::ArrayOfTables(elements) => {
-            for (index, table) in elements.iter().enumerate() {
-                let element = joined_path(path, &index.to_string());
-                // An element has no key of its own, so its header line is where it starts.
-                if let Some(span) = table.span() {
-                    record_key_span(keys, &element, span);
-                }
-                collect_table_keys(table, &element, keys);
-            }
-        }
-        toml_edit::Item::Value(toml_edit::Value::InlineTable(inline)) => {
-            for (name, _) in inline.iter() {
-                let Some((key, item)) = inline.get_key_value(name) else {
-                    continue;
-                };
-                let path = joined_path(path, name);
-                if let Some(span) = key.span() {
-                    record_key_span(keys, &path, span);
-                }
-                collect_item_keys(item, &path, keys);
-            }
-        }
-        toml_edit::Item::Value(_) | toml_edit::Item::None => {}
-    }
-}
-
-/// Keep the first key a path names, so a later duplicate cannot move an author elsewhere.
-fn record_key_span(
-    keys: &mut std::collections::BTreeMap<String, std::ops::Range<usize>>,
-    path: &str,
-    span: std::ops::Range<usize>,
-) {
-    keys.entry(path.to_owned()).or_insert(span);
-}
-
-fn joined_path(prefix: &str, name: &str) -> String {
-    if prefix.is_empty() {
-        name.to_owned()
-    } else {
-        format!("{prefix}.{name}")
-    }
-}
-
-pub(super) fn key_at_span(
-    document: &toml_edit::Document<Arc<str>>,
-    span: &std::ops::Range<usize>,
-) -> Option<String> {
-    table_key_at_span(document.as_table(), "", span)
-}
-
-fn table_key_at_span(
-    table: &toml_edit::Table,
-    prefix: &str,
-    span: &std::ops::Range<usize>,
-) -> Option<String> {
-    table
-        .iter()
-        .find_map(|(name, item)| item_key_at_span(item, &joined_path(prefix, name), span))
-}
-
-fn item_key_at_span(
-    item: &toml_edit::Item,
-    path: &str,
-    span: &std::ops::Range<usize>,
-) -> Option<String> {
-    match item {
-        toml_edit::Item::Table(table) => table_key_at_span(table, path, span).or_else(|| {
-            table
-                .span()
-                .filter(|table| table.start <= span.start && span.end <= table.end)
-                .map(|_| path.to_owned())
-        }),
-        toml_edit::Item::ArrayOfTables(tables) => {
-            tables.iter().enumerate().find_map(|(index, table)| {
-                table_key_at_span(table, &joined_path(path, &index.to_string()), span)
-            })
-        }
-        toml_edit::Item::Value(value @ toml_edit::Value::InlineTable(table)) => table
-            .iter()
-            .find_map(|(name, _)| {
-                let (_, value) = table.get_key_value(name)?;
-                item_key_at_span(value, &joined_path(path, name), span)
-            })
-            .or_else(|| {
-                value
-                    .span()
-                    .filter(|value| value.start <= span.start && span.end <= value.end)
-                    .map(|_| path.to_owned())
-            }),
-        toml_edit::Item::Value(value) => value
-            .span()
-            .filter(|value| value.start <= span.start && span.end <= value.end)
-            .map(|_| path.to_owned()),
-        toml_edit::Item::None => None,
-    }
-}
-
-/// The written line one span covers, with the highlight that points inside it.
-pub(crate) struct SourceExcerpt {
-    pub(crate) line: usize,
-    pub(crate) column: usize,
-    pub(crate) text: String,
-    pub(crate) highlight: (usize, usize),
-}
-
-/// The exact UTF-16 range one byte span covers, clamped to the text the document holds.
-pub(super) fn source_range(
-    content: &str,
-    span: std::ops::Range<usize>,
-) -> Option<tola_diagnostic::SourceRange> {
-    Some(tola_diagnostic::SourceRange {
-        start: source_position(content, span.start)?,
-        end: source_position(content, span.end)?,
-    })
-}
-
-/// The zero-based UTF-16 position one byte offset names.
-fn source_position(content: &str, offset: usize) -> Option<tola_diagnostic::SourcePosition> {
-    let offset = offset.min(content.len());
-    let offset = (0..=offset)
-        .rev()
-        .find(|candidate| content.is_char_boundary(*candidate))?;
-    let line_start = content[..offset]
-        .rfind('\n')
-        .map_or(0, |newline| newline + 1);
-    Some(tola_diagnostic::SourcePosition {
-        line: content[..line_start]
-            .bytes()
-            .filter(|byte| *byte == b'\n')
-            .count(),
-        character: content[line_start..offset]
-            .chars()
-            .map(char::len_utf16)
-            .sum(),
-    })
-}
-
-pub(super) fn source_excerpt(content: &str, span: std::ops::Range<usize>) -> Option<SourceExcerpt> {
-    let mut start = span.start.min(content.len());
-    start = (0..=start)
-        .rev()
-        .find(|offset| content.is_char_boundary(*offset))?;
-    if start == content.len() && content.ends_with('\n') {
-        start -= 1;
-    }
-    let line_start = content[..start].rfind('\n').map_or(0, |offset| offset + 1);
-    let line_end = content[start..]
-        .find('\n')
-        .map_or(content.len(), |offset| start + offset);
-    let mut highlight = (start - line_start, span.end.min(line_end) - line_start);
-    if highlight.1 <= highlight.0 {
-        highlight.0 = highlight.0.saturating_sub(1);
-        highlight.1 = highlight.0 + usize::from(line_end > line_start);
-    }
-    Some(SourceExcerpt {
-        line: content[..line_start]
-            .bytes()
-            .filter(|byte| *byte == b'\n')
-            .count()
-            + 1,
-        column: content[line_start..start].chars().count() + 1,
-        text: content[line_start..line_end].to_owned(),
-        highlight,
-    })
-}
+use tola_diagnostic::SourcePositions;
+use tola_input::InputScope;
 
 /// Exact TOML bytes, their parsed document, and the site root and input scope selected at loading.
 ///
@@ -252,7 +22,7 @@ pub struct ConfigSource {
     root: PathBuf,
     scope: InputScope,
     document: Arc<toml_edit::Document<Arc<str>>>,
-    positions: Arc<ConfigPositions>,
+    positions: Arc<SourcePositions>,
     presence: Arc<ConfigPresence>,
     core_presence: Arc<ConfigPresence>,
     hash: blake3::Hash,
@@ -275,7 +45,7 @@ impl ConfigSource {
             .map_err(|error| super::diagnostic::attach_load(error, None, None))?;
         // The root is normalized: containment compares physical paths, so a site reached through a
         // symlinked alias must still recognize its own configuration file.
-        let root = crate::filesystem::normalize_path(path.parent().unwrap_or(Path::new("")));
+        let root = tola_input::normalize_path(path.parent().unwrap_or(Path::new("")));
         if let Some(reason) = source_refusal(&root, &path, scope)? {
             return Err(super::diagnostic::attach_load(
                 ConfigError::Refused { path, reason }.into(),
@@ -294,7 +64,7 @@ impl ConfigSource {
     /// The schema's defaults apply at the workspace's own root, and the document reports the path
     /// where a site configuration for that root would live. Nothing is read.
     pub fn defaults(root: &Path, scope: InputScope) -> Result<Self> {
-        let root = crate::filesystem::normalize_path(root);
+        let root = tola_input::normalize_path(root);
         Self::parse_at_root(
             root.join(super::loading::CONFIG_FILE_NAME),
             root,
@@ -330,7 +100,7 @@ impl ConfigSource {
                 super::diagnostic::schema_error(&path, &document, error.message(), error.span());
             super::diagnostic::attach_source(error.into(), diagnostic)
         })?;
-        let positions = Arc::new(ConfigPositions::of(&document, Arc::clone(&source)));
+        let positions = Arc::new(SourcePositions::of(&document, Arc::clone(&source)));
         let presence = Arc::new(ConfigPresence::from_value(&value));
         // Select real top-level keys before presence flattens paths. A host key
         // containing dots must not impersonate a nested core configuration field.
@@ -429,7 +199,7 @@ impl ConfigSource {
     }
 
     /// Where this document writes each configuration key.
-    pub(super) fn positions(&self) -> &Arc<ConfigPositions> {
+    pub(super) fn positions(&self) -> &Arc<SourcePositions> {
         &self.positions
     }
 
@@ -484,8 +254,7 @@ fn source_refusal(
     path: &Path,
     scope: InputScope,
 ) -> Result<Option<ConfigSourceRefusal>> {
-    let boundary =
-        crate::resources::base_source_boundary(&crate::filesystem::normalize_path(root), scope);
+    let boundary = crate::resources::base_source_boundary(&tola_input::normalize_path(root), scope);
     let refusal = boundary.refusal(path)?;
     Ok(refusal.map(|refusal| match refusal {
         tola_typst::SourceRefusal::GeneratedState => ConfigSourceRefusal::GeneratedState,
@@ -554,7 +323,7 @@ mod tests {
     #[test]
     fn positions_answer_diagnostic_paths() {
         let directory = tempfile::tempdir().unwrap();
-        let text = "[site]\ntitle = \"Site\"\n\n[[site.seo.feeds]]\nformat = \"rss\"\n\n[[site.seo.feeds]]\nurl = \"/atom.xml\"\n\n[build.hooks]\nafter-publish = { command = \"echo\" }\n";
+        let text = "[site]\ntitle = \"Site\"\n\n[[site.seo.feeds]]\nformat = \"rss\"\n\n[[site.seo.feeds]]\nurl = \"/atom.xml\"\n\n[hooks]\nafter-publish = [{ argv = [\"echo\"] }]\n";
         let source = ConfigSource::parse(
             &directory.path().join("tola.toml"),
             text,
@@ -571,7 +340,7 @@ mod tests {
         assert_eq!(at("site.title"), Some((2, 1)));
         assert_eq!(at("site.seo.feeds.0.format"), Some((5, 1)));
         assert_eq!(at("site.seo.feeds.1.url"), Some((8, 1)));
-        assert_eq!(at("build.hooks.after-publish"), Some((11, 1)));
+        assert_eq!(at("hooks.after-publish"), Some((11, 1)));
         assert_eq!(at("site.seo.feeds.0.command"), None);
     }
 
@@ -631,7 +400,7 @@ mod tests {
         assert_eq!(changed.root(), source.root());
         assert_ne!(
             changed.root(),
-            crate::filesystem::normalize_existing_prefix(&alias)
+            tola_input::normalize_existing_prefix(&alias)
         );
         assert_eq!(
             changed.decode_site().unwrap().schema().site.title,
@@ -845,7 +614,7 @@ mod tests {
     fn pure_refuses_internal_state() {
         let directory = tempfile::tempdir().unwrap();
         let site = directory.path().join("site");
-        let internal = site.join(crate::filesystem::INTERNAL_DIR);
+        let internal = site.join(tola_input::INTERNAL_DIR);
         std::fs::create_dir_all(&internal).unwrap();
         std::fs::write(internal.join("tola.toml"), "[site]\ntitle = \"Cached\"\n").unwrap();
         // The supplied path's parent is the site root, so the `.tola` exclusion applies to the

@@ -25,6 +25,10 @@ pub struct SiteBuild {
     pub(crate) references: crate::site::references::References,
     pub(crate) source_hooks: crate::hooks::SourceHookOutputs,
     pub(super) report: Option<super::BuildReport>,
+    /// Modules this build prepared; freshness and observations re-read the same manifests.
+    pub(super) modules: tola_module::prepared::PreparedModules,
+    /// The invocation's input scope, for after-publish hook environments.
+    pub(super) scope: tola_input::InputScope,
 }
 
 /// An immutable revision that has not been checked against its inputs yet.
@@ -36,6 +40,7 @@ pub struct UncheckedRevision {
     cancellation: BuildCancellation,
     source_hooks: crate::hooks::SourceHookOutputs,
     cache_update: BuildCacheUpdate,
+    modules: tola_module::prepared::PreparedModules,
 }
 
 impl UncheckedRevision {
@@ -57,6 +62,7 @@ impl UncheckedRevision {
     ) -> Result<InputFreshness> {
         self.cache_update.freshness(
             self.site.config(),
+            &self.modules,
             self.source_hooks.outputs(),
             &self.cancellation,
             cancellation,
@@ -171,9 +177,7 @@ impl SiteBuild {
             self.source_hooks.outputs(),
             caches.host.font_read_paths(),
         );
-        self.config
-            .module_inputs
-            .observe_manifests(&mut observation);
+        crate::build::module_inputs::observe_manifests(&self.modules, &mut observation);
         observation.normalize_paths();
         observation
     }
@@ -184,6 +188,7 @@ impl SiteBuild {
     ) -> Result<InputFreshness> {
         self.cache_update.freshness(
             &self.config,
+            &self.modules,
             self.source_hooks.outputs(),
             &self.cancellation,
             cancellation,
@@ -221,18 +226,20 @@ impl SiteBuild {
         let mut diagnostics = crate::config::diagnostic::warning_diagnostics(&self.config);
         diagnostics.extend(self.diagnostics);
         UncheckedRevision {
-            site: crate::site::SiteRevision::new(
-                self.config,
+            site: crate::site::SiteRevision {
+                config: self.config,
                 outputs,
-                self.index,
-                self.references,
+                index: self.index,
+                references: self.references,
                 diagnostics,
-                self.mode,
+                mode: self.mode,
+                scope: self.scope,
                 input_observation,
-            ),
+            },
             cancellation: self.cancellation,
             source_hooks: self.source_hooks,
             cache_update: self.cache_update,
+            modules: self.modules,
         }
     }
 }
@@ -245,6 +252,7 @@ pub struct WriteOutcome {
     diagnostics: Vec<tola_diagnostic::Diagnostic>,
     config: std::sync::Arc<ResolvedSiteConfig>,
     mode: BuildMode,
+    scope: tola_input::InputScope,
     consumer_graph: Option<crate::output::graph::OutputGraph>,
 }
 
@@ -280,6 +288,7 @@ impl WriteOutcome {
             return hooks::run_after_publish_hooks(
                 &self.config,
                 self.mode,
+                self.scope,
                 files.root(),
                 cancellation,
             );
@@ -347,6 +356,7 @@ fn write_site_inner(build: &SiteBuild, lock: &super::SiteBuildLock) -> Result<Wr
         diagnostics: build.diagnostics.clone(),
         config: std::sync::Arc::clone(&build.config),
         mode,
+        scope: build.scope,
         consumer_graph: hooks::has_after_publish_hooks(config, mode).then(|| graph.clone()),
     })
 }
@@ -368,7 +378,7 @@ mod tests {
         let directory = TempDir::new().unwrap();
         let root = directory.path();
         fs::create_dir(root.join("content")).unwrap();
-        let source = "name=\"forest\"\nversion=\"1.0.0\"\n[site]\nentry=\"site.typ\"\n";
+        let source = "[build]\nentry=\"site.typ\"\n";
         for name in ["first", "second"] {
             fs::create_dir(root.join(name)).unwrap();
             fs::write(root.join(name).join("tola-module.toml"), source).unwrap();
@@ -381,7 +391,7 @@ mod tests {
         symlink("first", root.join("theme")).unwrap();
         let config = crate::config::tests::load_test_config(
             root,
-            "[modules.forest]\npath=\"theme\"\n[theme]\nmodule=\"forest\"\n",
+            "[modules.forest]\npath=\"theme\"\n[build]\nentry={module=\"forest\"}\n",
         );
         let candidate = build_site(&config, BuildMode::Production).unwrap();
         fs::remove_file(root.join("theme")).unwrap();

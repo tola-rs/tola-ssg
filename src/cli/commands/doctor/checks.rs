@@ -10,7 +10,7 @@ use tola_diagnostic::{Diagnostic, Severity};
 pub(super) fn diagnose(
     config_file: &crate::cli::ConfigFileArgs,
     packages: &crate::cli::TypstPackageArgs,
-    scope: tola_build::InputScope,
+    scope: tola_input::InputScope,
     output: &crate::cli::output::CommandOutput,
     cancellation: &Cancellation,
 ) -> anyhow::Result<Vec<Diagnostic>> {
@@ -37,14 +37,14 @@ pub(super) fn diagnose(
     match loaded {
         Ok(loaded) => {
             output.apply_diagnostic_limits(loaded.diagnostics());
-            let config = tola_build::modules::prepare(
+            let config = tola_build::modules::prepare_site(
                 loaded.config(),
-                tola_build::inputs::InputMode::new(scope, true),
+                tola_input::InputMode::new(scope, true),
                 &cancellation.token(),
             )?;
             destination::start_site(output, &config, &cancellation.token())?;
             let mut diagnostics = tola_build::config::diagnostic::warning_diagnostics(&config);
-            diagnostics.extend(diagnose_loaded(config));
+            diagnostics.extend(diagnose_loaded(&config));
             Ok(diagnostics)
         }
         Err(error) => {
@@ -57,7 +57,7 @@ pub(super) fn diagnose(
     }
 }
 
-fn diagnose_loaded(config: tola_build::config::ResolvedSiteConfig) -> Vec<Diagnostic> {
+fn diagnose_loaded(config: &tola_build::config::ResolvedSiteConfig) -> Vec<Diagnostic> {
     let root = config.get_root();
     let mut diagnostics = Vec::new();
     if !config.build().entry.is_file() {
@@ -87,7 +87,7 @@ fn diagnose_loaded(config: tola_build::config::ResolvedSiteConfig) -> Vec<Diagno
 
     diagnostics.extend(editor_package_diagnostics(root));
 
-    for arguments in config.build().hooks.enabled_commands() {
+    for arguments in config.hooks().enabled_commands() {
         if let Some(command) = arguments.first()
             && !command_exists(command, config.get_root())
         {
@@ -97,15 +97,15 @@ fn diagnose_loaded(config: tola_build::config::ResolvedSiteConfig) -> Vec<Diagno
                     Severity::Error,
                     format!("hook command `{command}` was not found"),
                 )
-                .with_help("Install the command on `PATH`, or correct its path in `build.hooks`"),
+                .with_help("Install the command on `PATH`, or correct its path in `hooks`"),
             );
         }
     }
 
     diagnostics.extend(environment_diagnostics(config.get_root()));
 
-    diagnostics.extend(vendor_diagnostics(&config));
-    diagnostics.extend(font_diagnostics(&config));
+    diagnostics.extend(vendor_diagnostics(config));
+    diagnostics.extend(font_diagnostics(config));
     diagnostics
 }
 
@@ -113,7 +113,7 @@ fn diagnose_loaded(config: tola_build::config::ResolvedSiteConfig) -> Vec<Diagno
 /// refuses, what differs from the sources this Tola ships, what is missing, and what another
 /// version left behind.
 fn editor_package_diagnostics(root: &Path) -> Vec<Diagnostic> {
-    let directory = tola_build::filesystem::layout::builtin_packages(root);
+    let directory = tola_input::layout::builtin_packages(root);
     let mut diagnostics = Vec::new();
     match crate::editor::generated_directory(root) {
         GeneratedDirectory::Missing => {
@@ -459,7 +459,7 @@ mod tests {
                 package_path: Some(directory.path().join("host-packages")),
                 ..crate::cli::TypstPackageArgs::default()
             },
-            tola_build::InputScope::Pure,
+            tola_input::InputScope::Pure,
         );
 
         assert!(
@@ -514,7 +514,7 @@ mod tests {
     fn diagnose_config(
         path: &Path,
         packages: &crate::cli::TypstPackageArgs,
-        scope: tola_build::InputScope,
+        scope: tola_input::InputScope,
     ) -> Vec<Diagnostic> {
         diagnose(
             &crate::cli::ConfigFileArgs {
@@ -532,7 +532,7 @@ mod tests {
     }
 
     fn diagnose_at(path: &Path) -> Vec<Diagnostic> {
-        diagnose_config(path, &Default::default(), tola_build::InputScope::Online)
+        diagnose_config(path, &Default::default(), tola_input::InputScope::Online)
     }
 
     #[test]

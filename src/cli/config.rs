@@ -3,23 +3,25 @@
 use crate::cancellation::Cancellation;
 use crate::cli::log::destination;
 use anyhow::{Result, ensure};
-use tola_build::InputScope;
+use tola_input::{InputMode, InputScope};
 
 use super::{BuildOverrideArgs, CompilerFontArgs, ConfigFileArgs, ServerArgs, TypstPackageArgs};
 use crate::cli::output::CommandOutput;
 use crate::config::{ConfigOverrides, ServerOverrides};
 use tola_build::config::loading::BuildOverrides;
 
-pub(super) fn build_resources(scope: InputScope) -> tola_build::BuildResources {
-    tola_build::BuildResources::new().with_input_scope(scope)
+pub(super) fn build_resources(mode: InputMode) -> tola_build::BuildResources {
+    tola_build::BuildResources::new()
+        .with_input_scope(mode.scope())
+        .with_locked(mode.locked())
 }
 
 /// Build resources with this invocation's compiler font inputs applied.
 pub(super) fn build_resources_with_fonts(
-    scope: InputScope,
+    mode: InputMode,
     fonts: &CompilerFontArgs,
 ) -> Result<tola_build::BuildResources> {
-    let mut resources = build_resources(scope);
+    let mut resources = build_resources(mode);
     if fonts.ignore_system {
         resources = resources.without_system_fonts();
     }
@@ -27,7 +29,7 @@ pub(super) fn build_resources_with_fonts(
         return Ok(resources);
     }
     ensure!(
-        scope != InputScope::Pure,
+        mode.scope() != InputScope::Pure,
         "`--pure` cannot use `--font-path`"
     );
     let directories = fonts
@@ -250,10 +252,18 @@ mod tests {
             paths: vec!["fonts".into()],
             ignore_system: true,
         };
-        assert!(build_resources_with_fonts(InputScope::Pure, &fonts).is_err());
+        assert!(
+            build_resources_with_fonts(InputMode::new(InputScope::Pure, false), &fonts).is_err()
+        );
 
-        let resources = build_resources_with_fonts(InputScope::Online, &fonts).unwrap();
+        let resources =
+            build_resources_with_fonts(InputMode::new(InputScope::Online, false), &fonts).unwrap();
         assert!(!resources.include_system_fonts());
+        assert!(
+            build_resources(InputMode::new(InputScope::Online, true))
+                .input_mode()
+                .locked()
+        );
         assert_eq!(resources.font_directories().len(), 1);
         assert!(resources.font_directories()[0].is_absolute());
     }

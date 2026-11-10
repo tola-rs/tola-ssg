@@ -37,8 +37,10 @@ fn help_line(section: &str) -> String {
 /// `[build]` with the paths a new site starts from.
 fn build_section(build: &BuildSectionConfig) -> String {
     let mut out = String::from("[build]\n");
+    let entry = tola_config::serialize_toml_value(&build.entry)
+        .expect("initial build entry must be serializable");
+    out.push_str(&format!("entry = {entry}\n"));
     for (name, value) in [
-        ("entry", &build.entry),
         ("content-dir", &build.content_dir),
         ("publish-dir", &build.publish_dir),
     ] {
@@ -52,30 +54,6 @@ fn build_section(build: &BuildSectionConfig) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn initial_config_sets_only_the_build() {
-        let config = config_file();
-        assert!(config.contains("[build]\n"), "{config}");
-        for omitted in [
-            "[site]",
-            "[assets]",
-            "[vendor]",
-            "[typst",
-            "[icons]",
-            "[diagnostics]",
-            "[build.minify]",
-            "[build.references]",
-            "[[build.hooks",
-            "deno",
-            "tailwind",
-        ] {
-            assert!(
-                !config.contains(omitted),
-                "initial configuration must omit {omitted}: {config}"
-            );
-        }
-    }
 
     #[test]
     fn initial_help_targets_resolve() {

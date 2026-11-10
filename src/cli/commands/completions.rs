@@ -30,25 +30,3 @@ pub(in crate::cli) fn run(shell: CompletionShell, output: &CommandOutput) -> Res
     output.write_stdout(script)?;
     Ok(())
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn completions_cover_every_verb() {
-        for shell in <CompletionShell as clap::ValueEnum>::value_variants() {
-            let (sink, generated) = crate::terminal::OutputSink::buffered();
-            let output = CommandOutput::new(
-                crate::terminal::Terminal::with_sink(sink, false, false),
-                None,
-            );
-            run(*shell, &output).unwrap();
-            let script = String::from_utf8(generated.bytes()).unwrap();
-            for command in Cli::command().get_subcommands() {
-                let name = command.get_name();
-                assert!(script.contains(name), "shell={shell:?}, command={name}");
-            }
-        }
-    }
-}

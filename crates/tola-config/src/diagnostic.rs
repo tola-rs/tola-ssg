@@ -177,8 +177,8 @@ impl ConfigDiagnostic {
 
     /// The written keys this diagnostic points at, narrowest first.
     ///
-    /// The field inside its own entry comes first (`build.hooks.before-build.1.command`), the
-    /// entry's key follows for a field its author left out (`build.hooks.before-build.1`), and the
+    /// The field inside its own entry comes first (`hooks.before-build.1.command`), the
+    /// entry's key follows for a field its author left out (`hooks.before-build.1`), and the
     /// declared field path is last: an array written in another spelling still answers, and the
     /// declared path names every entry, so it never speaks before an indexed key.
     ///

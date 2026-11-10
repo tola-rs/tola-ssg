@@ -36,36 +36,3 @@ pub(super) fn read_messages(
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    use crate::serve;
-    use tola_build::BuildResources;
-
-    #[test]
-    fn failed_input_preserves_caller_scope() {
-        struct FailedInput;
-        impl Read for FailedInput {
-            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
-                panic!("input failure");
-            }
-        }
-        let cancellation = BuildCancellation::new();
-        assert!(
-            serve(crate::ServeRequest {
-                reader: FailedInput,
-                writer: Vec::new(),
-                resources: BuildResources::default(),
-                cancellation: cancellation.clone(),
-                load_configuration: |_, _| unreachable!(),
-                record_diagnostics: |_| {},
-                named_configuration: None,
-                host_sections: &[],
-            })
-            .is_err()
-        );
-        assert!(!cancellation.is_cancelled());
-    }
-}

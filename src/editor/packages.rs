@@ -13,7 +13,7 @@ use crate::writes::FileWrites;
 
 use tola_build::cancellation::BuildCancellation;
 use tola_build::config::ResolvedSiteConfig;
-use tola_build::filesystem::{FilesystemSourceIdentity, layout};
+use tola_input::{FilesystemSourceIdentity, layout};
 use tola_typst::{PackageLocations, SourceBoundary};
 
 pub(crate) fn generated_package_files() -> Vec<(PathBuf, Cow<'static, str>)> {
@@ -496,8 +496,7 @@ pub(crate) fn initial_package_inputs(
     package_inputs(
         root,
         packages,
-        &SourceBoundary::new(root, false)
-            .excluding(root.join(tola_build::filesystem::INTERNAL_DIR)),
+        &SourceBoundary::new(root, false).excluding(root.join(tola_input::INTERNAL_DIR)),
         cancellation,
     )
 }
@@ -592,7 +591,7 @@ fn package_inputs(
 impl EditorPackageInputs {
     fn check(&self) -> Result<()> {
         // Never traverse a site-owned symlink while planning or installing inputs.
-        let internal = self.site_root.join(tola_build::filesystem::INTERNAL_DIR);
+        let internal = self.site_root.join(tola_input::INTERNAL_DIR);
         for (label, path) in [
             (
                 display_path_within(&internal, &self.site_root),
@@ -777,7 +776,7 @@ fn synchronize_directory(
                     ));
                 }
             }
-            crate::sys::link_directory(target, &path).with_context(|| {
+            tola_fs::link_directory(target, &path).with_context(|| {
                 format!(
                     "Tola could not link a local package into `{}`; check that the directory is writable, then run `tola editor packages`",
                     display_path_within(view, site_root)
@@ -793,7 +792,7 @@ fn synchronize_directory(
 fn remove_owned_path(path: &Path) -> Result<()> {
     let metadata = fs::symlink_metadata(path)
         .map_err(|error| mirror_failure("read the editor package directory", path, error))?;
-    if crate::sys::link_removes_as_directory(&metadata.file_type()) {
+    if tola_fs::link_removes_as_directory(&metadata.file_type()) {
         fs::remove_dir(path).map_err(|error| {
             mirror_failure("remove an obsolete editor package entry", path, error)
         })?;
@@ -814,7 +813,7 @@ fn remove_owned_path(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sys::link_directory;
+    use tola_fs::link_directory;
 
     #[cfg(unix)]
     /// The site configuration `path` selects under `packages`, with no overrides.
@@ -824,7 +823,7 @@ mod tests {
     ) -> crate::config::LoadedConfig {
         crate::config::load(
             Some(path),
-            tola_build::InputScope::Online,
+            tola_input::InputScope::Online,
             packages,
             &crate::config::ConfigOverrides::default(),
         )

@@ -47,6 +47,8 @@ pub struct ReportDiagnostic {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub location: Option<ReportLocation>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hints: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub related: Vec<ReportRelated>,
@@ -374,6 +376,9 @@ impl ReportBatch {
             {
                 return Err(invalid("code must not be empty"));
             }
+            if item.notes.iter().any(|note| note.trim().is_empty()) {
+                return Err(invalid("notes must not be empty"));
+            }
             if item.hints.iter().any(|hint| hint.trim().is_empty()) {
                 return Err(invalid("hints must not be empty"));
             }
@@ -399,6 +404,7 @@ impl ReportBatch {
                     location: None,
                 })
                 .collect();
+            diagnostic.notes = item.notes;
             for related in item.related {
                 if related.message.trim().is_empty() {
                     return Err(invalid("related messages must not be empty"));
@@ -802,6 +808,7 @@ mod tests {
         for issue in [
             json!({"severity":"warning","message":" "}),
             json!({"severity":"warning","message":"x","code":" "}),
+            json!({"severity":"warning","message":"x","notes":[""]}),
             json!({"severity":"warning","message":"x","hints":[""]}),
             json!({"severity":"warning","message":"x","related":[{"message":""}]}),
         ] {
@@ -811,6 +818,17 @@ mod tests {
                     .is_err()
             );
         }
+    }
+
+    #[test]
+    fn notes_reach_the_diagnostic() {
+        let report = batch(json!([
+            {"severity": "warning", "message": "x", "notes": ["first", "second"]}
+        ]));
+        let diagnostics = report
+            .validate("command:sample", &ReportSources::new())
+            .unwrap();
+        assert_eq!(diagnostics[0].notes, ["first", "second"]);
     }
 
     #[test]

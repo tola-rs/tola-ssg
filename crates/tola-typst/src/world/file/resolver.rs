@@ -93,6 +93,22 @@ impl FileResolver {
         }
     }
 
+    /// Layer a read-only provider above the current one.
+    ///
+    /// The overlay is consulted first; the base provider keeps its owned namespaces.
+    pub fn with_overlay<P>(self, overlay: P) -> Self
+    where
+        P: FileProvider + 'static,
+    {
+        Self {
+            provider: Arc::new(OverlayFiles {
+                overlay: Arc::new(overlay),
+                base: self.provider,
+            }),
+            ..self
+        }
+    }
+
     /// Install declared local packages without replacing the file provider.
     ///
     /// Provider targets and its exclusive namespaces retain precedence. Local
@@ -472,6 +488,22 @@ impl FileResolver {
             Ok(path) => Ok((path, package_checks)),
             Err(_) => Err((FileError::AccessDenied, package_checks)),
         }
+    }
+}
+
+/// A read-only provider layered above another.
+struct OverlayFiles {
+    overlay: Arc<dyn FileProvider>,
+    base: Arc<dyn FileProvider>,
+}
+
+impl FileProvider for OverlayFiles {
+    fn target(&self, id: FileId) -> Option<FileTarget> {
+        self.overlay.target(id).or_else(|| self.base.target(id))
+    }
+
+    fn owned_namespaces(&self) -> &'static [&'static str] {
+        self.base.owned_namespaces()
     }
 }
 

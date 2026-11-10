@@ -31,9 +31,9 @@ use std::path::{Component, Path, PathBuf};
 /// canonicalization may use Windows extended-length path syntax.
 ///
 /// This compiler identity differs deliberately from
-/// `tola_build::filesystem::lexical_path_identity`, which preserves relative
+/// `tola_input::lexical_path_identity`, which preserves relative
 /// leading parents and never touches the filesystem, and from
-/// `tola_build::filesystem::normalize_path` and `normalize_existing_prefix`,
+/// `tola_input::normalize_path` and `normalize_existing_prefix`,
 /// which canonicalize the original spelling before any fallback.
 #[inline]
 pub fn normalize_path(path: &Path) -> PathBuf {

@@ -39,4 +39,7 @@ pub mod editor {
     /// An import from a `@tola/…` package the site cannot resolve.
     pub const UNRESOLVED_PACKAGE_IMPORT: DiagnosticCode =
         DiagnosticCode::new("editor.unresolved_package_import");
+
+    /// More problems in one document than its report shows, counted by one summary note.
+    pub const TOO_MANY_PROBLEMS: DiagnosticCode = DiagnosticCode::new("editor.too_many_problems");
 }

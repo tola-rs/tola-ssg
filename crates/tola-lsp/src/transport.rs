@@ -151,25 +151,55 @@ pub(super) fn write_invalid(writer: &mut impl Write, invalid: InvalidMessage) ->
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lsp_server::{Notification, Request};
+    use lsp_server::Notification;
     use serde_json::json;
 
+    /// Every malformed envelope answers with the code JSON-RPC gives it and the id it could
+    /// read: an invalid id must not turn a request into a notification, a conflicting envelope
+    /// must not be mistaken for a response, and a body that does not parse is answered without
+    /// an id.
     #[test]
-    fn conflicting_envelopes_are_refused() {
-        let envelope = json!({"jsonrpc":"2.0","id":1,"result":null,"error":{"code":-32603,"message":"failed"}});
-        let invalid = decode_message(&serde_json::to_vec(&envelope).unwrap()).unwrap_err();
-        assert_eq!(invalid.error.code, ErrorCode::InvalidRequest as i32);
-    }
-
-    #[test]
-    fn oversized_frames_are_refused() {
-        let mut oversized = std::io::Cursor::new(vec![b'x'; MAX_HEADER_BYTES + 1]);
-        assert!(read_frame(&mut oversized).is_err());
-        assert_eq!(oversized.position(), (MAX_HEADER_BYTES + 1) as u64);
-        let header = format!("Content-Length: {}\r\n\r\n", MAX_BODY_BYTES + 1);
-        assert!(read_frame(&mut std::io::Cursor::new(header)).is_err());
-        let many_headers = "X: a\r\n".repeat(MAX_HEADER_BYTES / 6 + 1);
-        assert!(read_frame(&mut std::io::Cursor::new(many_headers)).is_err());
+    fn malformed_envelopes_answer_their_codes() {
+        for (body, code, id) in [
+            (
+                br#"{"jsonrpc":"2.0","id":1,"result":null,"error":{"code":-32603,"message":"failed"}}"#
+                    .as_slice(),
+                ErrorCode::InvalidRequest,
+                Some(RequestId::from(1)),
+            ),
+            (
+                br#"{"jsonrpc":"2.0","id":true,"method":"shutdown"}"#.as_slice(),
+                ErrorCode::InvalidRequest,
+                None,
+            ),
+            (
+                br#"{"jsonrpc":"2.0","id":9223372036854775807,"method":"shutdown"}"#.as_slice(),
+                ErrorCode::InvalidRequest,
+                None,
+            ),
+            (
+                br#"{"jsonrpc":"1.0","id":"known","method":"shutdown"}"#.as_slice(),
+                ErrorCode::InvalidRequest,
+                Some(RequestId::from("known".to_owned())),
+            ),
+            (b"{".as_slice(), ErrorCode::ParseError, None),
+        ] {
+            let invalid = decode_message(body).expect_err("a malformed envelope");
+            assert_eq!(invalid.error.code, code as i32, "{body:?}");
+            assert_eq!(invalid.id, id, "{body:?}");
+        }
+        let invalid = decode_message(b"{").expect_err("an unparseable body");
+        let mut bytes = Vec::new();
+        write_invalid(&mut bytes, invalid).unwrap();
+        let reply: Value = serde_json::from_slice(
+            &read_frame(&mut std::io::Cursor::new(bytes))
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(reply["jsonrpc"], "2.0");
+        assert!(reply["id"].is_null());
+        assert_eq!(reply["error"]["code"], ErrorCode::ParseError as i32);
     }
 
     #[test]
@@ -193,70 +223,49 @@ mod tests {
         assert!(read_frame(&mut reader).unwrap().is_none());
     }
 
+    /// A frame the server cannot read is refused with the reason it is refused, rather than read
+    /// as traffic; an oversized header consumes its bound, not the rest of the stream.
     #[test]
-    fn content_length_defects_are_refused() {
-        for frame in [
-            "Content-Length: 2\r\nContent-Length: 2\r\n\r\n{}",
-            "Content-Length: 3\r\n\r\n{}",
-            "Content-Length: -1\r\n\r\n",
+    fn frame_defects_are_refused() {
+        let mut many_headers = String::new();
+        for _ in 0..MAX_HEADER_BYTES / 6 + 1 {
+            many_headers.push_str("X: a\r\n");
+        }
+        let long_body = format!("Content-Length: {}\r\n\r\n", MAX_BODY_BYTES + 1);
+        for (bytes, expected, consumed) in [
+            (
+                vec![b'x'; MAX_HEADER_BYTES + 1],
+                ReadError::Oversized,
+                Some((MAX_HEADER_BYTES + 1) as u64),
+            ),
+            (long_body.into_bytes(), ReadError::Oversized, None),
+            (many_headers.into_bytes(), ReadError::Oversized, None),
+            (
+                b"Content-Length: 2\r\nContent-Length: 2\r\n\r\n{}".to_vec(),
+                ReadError::Unreadable,
+                None,
+            ),
+            (
+                b"Content-Length: 3\r\n\r\n{}".to_vec(),
+                ReadError::Truncated,
+                None,
+            ),
+            (
+                b"Content-Length: -1\r\n\r\n".to_vec(),
+                ReadError::Unreadable,
+                None,
+            ),
         ] {
-            assert!(read_frame(&mut std::io::Cursor::new(frame)).is_err());
+            let mut reader = std::io::Cursor::new(bytes);
+            let error = read_frame(&mut reader).expect_err("a defective frame");
+            assert_eq!(
+                std::mem::discriminant(&error),
+                std::mem::discriminant(&expected),
+                "{error}"
+            );
+            if let Some(consumed) = consumed {
+                assert_eq!(reader.position(), consumed);
+            }
         }
-    }
-
-    #[test]
-    fn invalid_ids_never_become_notifications() {
-        for id in [json!(true), json!(i64::MAX)] {
-            let bytes =
-                serde_json::to_vec(&json!({"jsonrpc":"2.0","id":id,"method":"shutdown"})).unwrap();
-            let invalid = decode_message(&bytes).unwrap_err();
-            assert_eq!(invalid.error.code, ErrorCode::InvalidRequest as i32);
-            assert!(invalid.id.is_none());
-        }
-    }
-
-    /// A malformed envelope still has the request id it parsed, so the client can
-    /// correlate the error answer.
-    #[test]
-    fn malformed_requests_keep_their_id() {
-        let invalid =
-            decode_message(br#"{"jsonrpc":"1.0","id":"known","method":"shutdown"}"#).unwrap_err();
-        assert_eq!(invalid.id, Some(RequestId::from("known".to_owned())));
-    }
-
-    /// A body the server cannot parse is answered without an id, which JSON-RPC requires.
-    #[test]
-    fn parse_errors_reply_without_id() {
-        let invalid = decode_message(b"{").unwrap_err();
-        assert_eq!(invalid.error.code, ErrorCode::ParseError as i32);
-        let mut bytes = Vec::new();
-        write_invalid(&mut bytes, invalid).unwrap();
-        let reply: Value = serde_json::from_slice(
-            &read_frame(&mut std::io::Cursor::new(bytes))
-                .unwrap()
-                .unwrap(),
-        )
-        .unwrap();
-        assert_eq!(reply["jsonrpc"], "2.0");
-        assert!(reply["id"].is_null());
-        assert_eq!(reply["error"]["code"], ErrorCode::ParseError as i32);
-    }
-
-    /// The validation around unreadable envelopes never rejects valid traffic.
-    #[test]
-    fn well_formed_requests_decode() {
-        let request = Request::new(2.into(), "shutdown".into(), ());
-        let mut bytes = Vec::new();
-        let request: Message = request.into();
-        request.write(&mut bytes).unwrap();
-        assert!(matches!(
-            decode_message(
-                &read_frame(&mut std::io::Cursor::new(bytes))
-                    .unwrap()
-                    .unwrap()
-            )
-            .unwrap(),
-            Message::Request(_)
-        ));
     }
 }

@@ -1,9 +1,11 @@
 //! Construction, validation, and safe writing of one complete site candidate,
 //! with the accepted caches and cross-process locks repeated builds need.
 
+mod bootstrap;
 mod diagnostic;
 mod input;
 mod lock;
+pub(crate) mod module_inputs;
 mod pipeline;
 mod report;
 mod revision;
@@ -98,7 +100,7 @@ pub(crate) mod tests {
         let root = std::env::current_dir().unwrap();
         let temporary = std::fs::canonicalize(temporary).unwrap();
         let expected_parent =
-            std::fs::canonicalize(crate::filesystem::layout::hook_scratch(&root)).unwrap();
+            std::fs::canonicalize(tola_input::layout::hook_scratch(&root)).unwrap();
         assert!(temporary.starts_with(expected_parent));
         let cache = std::env::var_os("TOLA_HOOK_CACHE_DIR")
             .expect("a hook child receives a cache directory");
@@ -185,23 +187,30 @@ pub(crate) mod tests {
 
     pub(super) fn build_site_with_host(
         config: &ResolvedSiteConfig,
-        host: &crate::compiler::TypstHost,
+        host: &crate::compiler::SiteHost,
         mode: BuildMode,
         producers: &mut BuildAttemptProducers,
     ) -> Result<SiteBuild> {
+        let bundle = producers.cancellation.bundle_cancellation();
+        let site = crate::modules::prepared::prepare_site_with_bundle(
+            config,
+            producers.resources.input_mode(),
+            &bundle,
+        )?;
         let request = BuildRequest {
             mode,
             ..Default::default()
         };
-        build_site_inner(config, &request, producers, |producers, _| {
-            if host.matches(config, &producers.resources)
+        build_site_inner(&site, &request, producers, |producers, _| {
+            if host.matches(site.config(), &producers.resources)
                 && host.font_inventory_is_fresh(&producers.cancellation)?
             {
                 Ok(host.clone())
             } else {
-                crate::compiler::TypstHost::for_config_with_resources(
-                    config,
+                crate::compiler::SiteHost::for_config(
+                    site.config(),
                     &producers.resources,
+                    std::sync::Arc::clone(site.local_packages()),
                     &producers.cancellation,
                 )
                 .map_err(anyhow::Error::new)

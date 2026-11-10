@@ -2,9 +2,9 @@
 
 use anyhow::Result;
 use serde::Serialize;
-use tola_build::InputScope;
 use tola_build::build::{BuildFailure, BuildReport, SiteBuild};
 use tola_diagnostic::Diagnostic;
+use tola_input::InputScope;
 
 use crate::cli::output::CommandOutput;
 
@@ -82,6 +82,7 @@ impl SiteReport {
         completion: Result<()>,
         output: &CommandOutput,
         json: bool,
+        pretty: bool,
     ) -> Result<()> {
         self.success = completion.is_ok();
         if let Err(error) = &completion {
@@ -95,7 +96,12 @@ impl SiteReport {
             }
         }
         let written = if json {
-            serde_json::to_string(&self)
+            let encoded = if pretty {
+                serde_json::to_string_pretty(&self)
+            } else {
+                serde_json::to_string(&self)
+            };
+            encoded
                 .map_err(anyhow::Error::from)
                 .and_then(|encoded| output.write_stdout_line(encoded))
         } else {

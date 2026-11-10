@@ -13,6 +13,7 @@
 
 - `dev/` serves immutable published revisions. A rebuild produces a new revision only after complete validation; the previous revision stays served until the new one is installed.
 - `dev/watch/` turns filesystem events into evidence; `dev/rebuild.rs` schedules attempts; `dev/session.rs` owns the live site and revision state.
+- Watch roots use fixed prefixes from input patterns. Ordinary events use compiled selectors; each exclusion applies to its own declaration. Structural changes can refresh the watch topology.
 - `dev/reload/` and `src/embed/dev/hotreload.js` deliver proven-safe browser updates; ambiguity or a revision gap forces navigation.
 - `dev/hooks.rs` owns before/after-publish hook execution for development; the environment contract belongs to `tola-build::hooks`.
 - `dev/events.rs` emits the optional versioned JSONL stream consumed by the editor clients.
@@ -21,7 +22,7 @@
 
 - `terminal/` renders diagnostics, progress, the development view, help documents, and pagers. Libraries never write to it directly.
 - `help/` composes `tola help` pages from configuration and package documentation without loading a site; `i18n/` holds the `zh-Hans` translations.
-- `terminal/path.rs` layers invocation-relative display over `tola_build::filesystem::display_path`, the one site-path renderer.
+- `terminal/path.rs` layers invocation-relative display over `tola_diagnostic::display_path`, the one site-path renderer.
 
 ## Configuration and writes
 

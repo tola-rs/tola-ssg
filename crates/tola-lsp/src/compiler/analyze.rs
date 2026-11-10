@@ -277,7 +277,7 @@ mod tests {
     #[test]
     fn dynamic_references_wait_for_compiler() {
         let directory = tempfile::tempdir().unwrap();
-        let root = tola_build::filesystem::normalize_existing_prefix(directory.path());
+        let root = tola_input::normalize_existing_prefix(directory.path());
         std::fs::write(root.join("lib.typ"), "#let greet = [hello]\n").unwrap();
         let (request, _) = references_analysis(
             &root,
@@ -301,7 +301,7 @@ mod tests {
     #[test]
     fn literal_references_answer_locally() {
         let directory = tempfile::tempdir().unwrap();
-        let root = tola_build::filesystem::normalize_existing_prefix(directory.path());
+        let root = tola_input::normalize_existing_prefix(directory.path());
         std::fs::write(root.join("lib.typ"), "#let greet = [hello]\n").unwrap();
         let (request, text) = references_analysis(&root, "#import \"lib.typ\": greet\n#gre|et\n");
         let SourceCompilation::Answered { response, .. } = analyze(

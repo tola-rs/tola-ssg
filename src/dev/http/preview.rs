@@ -187,8 +187,8 @@ fn file_path(uri: &str) -> Option<PathBuf> {
 }
 
 fn source_ids(path: &Path, site: &SiteRevision) -> Option<Vec<FileId>> {
-    let path = tola_build::filesystem::normalize_existing_prefix(path);
-    let root = tola_build::filesystem::normalize_existing_prefix(site.config().get_root());
+    let path = tola_input::normalize_existing_prefix(path);
+    let root = tola_input::normalize_existing_prefix(site.config().get_root());
     let mut sources = Vec::new();
     if let Some(id) = tola_typst::file_id_from_path(&path, &root) {
         sources.push(id);

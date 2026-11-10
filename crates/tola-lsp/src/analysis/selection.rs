@@ -62,7 +62,7 @@ pub(crate) fn site_sources(
 ) -> Result<Vec<Arc<SourceNames>>> {
     let boundary = view.site_boundary(boundary);
     let boundary = boundary.as_ref();
-    let root: &Path = &tola_build::filesystem::normalize_existing_prefix(root);
+    let root: &Path = &tola_input::normalize_existing_prefix(root);
     let mut sources: HashMap<FileId, Arc<SourceNames>> = view
         .iter()
         .filter(|parsed| source_within_boundary(parsed.source.id(), root, boundary))

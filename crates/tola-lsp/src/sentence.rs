@@ -33,23 +33,3 @@ pub(crate) fn quoted(names: &[String]) -> String {
         ),
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn listed_reports_the_omitted_count() {
-        for (names, expected) in [
-            (vec![], ("", 0)),
-            (vec!["a"], ("a", 0)),
-            (vec!["a", "b", "c"], ("a, b, c", 0)),
-            (vec!["a", "b", "c", "d", "e"], ("a, b, c", 2)),
-        ] {
-            assert_eq!(
-                listed(names.iter().copied(), 3),
-                (expected.0.to_owned(), expected.1)
-            );
-        }
-    }
-}

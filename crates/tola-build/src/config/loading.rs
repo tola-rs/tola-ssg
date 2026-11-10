@@ -6,7 +6,7 @@ use anyhow::Result;
 
 use super::diagnostic::config_error;
 use crate::config::section::AssetsConfig;
-use crate::config::section::build::{HooksConfig, MinifyConfig};
+use crate::config::section::build::{BuildEntry, HooksConfig, MinifyConfig, ResolvedBuildConfig};
 use crate::config::{
     ConfigDiagnostic, ConfigDiagnostics, ConfigError, ConfigPresence, ConfigSource, FieldPath,
     ParsedConfig, ResolvedSiteConfig, SiteConfigSchema,
@@ -57,7 +57,7 @@ pub(crate) fn validate_asset_source_boundaries(
         return;
     }
 
-    let internal_root = site_root.join(crate::filesystem::INTERNAL_DIR);
+    let internal_root = site_root.join(tola_input::INTERNAL_DIR);
     let protected_boundaries = [
         ("content root", content_root),
         ("output root", output_root),
@@ -67,11 +67,11 @@ pub(crate) fn validate_asset_source_boundaries(
         (
             owner,
             protected,
-            crate::filesystem::FilesystemSourceIdentity::from_path(protected),
+            tola_input::FilesystemSourceIdentity::from_path(protected),
         )
     });
     for (field, index, source) in declarations {
-        let source_identity = crate::filesystem::FilesystemSourceIdentity::from_path(source);
+        let source_identity = tola_input::FilesystemSourceIdentity::from_path(source);
         for (owner, protected, protected_identity) in &protected_boundaries {
             if source_identity.intersects(protected_identity) {
                 diagnostics.error(
@@ -79,8 +79,8 @@ pub(crate) fn validate_asset_source_boundaries(
                     format!(
                         "`{}[{index}]` source `{}` overlaps the {owner} `{}`",
                         field.as_str(),
-                        crate::filesystem::display_path(source, site_root),
-                        crate::filesystem::display_path(protected, site_root),
+                        tola_diagnostic::display_path(source, site_root),
+                        tola_diagnostic::display_path(protected, site_root),
                     ),
                 );
             }
@@ -93,6 +93,7 @@ pub(crate) fn validate_hook_output_boundaries(
     root: &Path,
     configuration: &Path,
     build_output: &Path,
+    vendor: Option<&Path>,
     vendor_workspace: Option<&Path>,
     diagnostics: &mut ConfigDiagnostics,
 ) {
@@ -100,6 +101,7 @@ pub(crate) fn validate_hook_output_boundaries(
         root,
         configuration,
         build_output,
+        vendor,
         vendor_workspace,
     );
     let outputs = crate::config::section::build::BeforeBuildHookConfig::FIELDS.generates;
@@ -107,7 +109,7 @@ pub(crate) fn validate_hook_output_boundaries(
     let mut granted = Vec::<(
         &crate::config::section::build::BeforeBuildHookConfig,
         PathBuf,
-        crate::filesystem::FilesystemSourceIdentity,
+        tola_input::FilesystemSourceIdentity,
     )>::new();
     for (entry, hook) in hooks.before_build.iter().enumerate() {
         // Disabled entries reserve nothing, and each entry keeps the index it was written at.
@@ -124,7 +126,7 @@ pub(crate) fn validate_hook_output_boundaries(
                     let resolved = boundaries.resolve(output);
                     let violation = boundaries
                         .violation(&resolved, granted.iter().map(|(_, _, identity)| identity));
-                    let shown = crate::filesystem::display_path(&root.join(output), root);
+                    let shown = tola_diagnostic::display_path(&root.join(output), root);
                     match violation {
                         None => {}
                         Some(crate::filesystem::DeclaredOutputViolation::OutsideSite) => {
@@ -139,7 +141,7 @@ pub(crate) fn validate_hook_output_boundaries(
                                 outputs,
                                 format!(
                                     "hook output `{shown}` intersects build.publish-dir `{}`",
-                                    crate::filesystem::display_path(build_output, root)
+                                    tola_diagnostic::display_path(build_output, root)
                                 ),
                             );
                         }
@@ -151,7 +153,7 @@ pub(crate) fn validate_hook_output_boundaries(
                                 outputs,
                                 format!(
                                     "hook output `{shown}` intersects {kind} `{}`",
-                                    crate::filesystem::display_path(&path, root)
+                                    tola_diagnostic::display_path(&path, root)
                                 ),
                             );
                         }
@@ -164,7 +166,7 @@ pub(crate) fn validate_hook_output_boundaries(
                                 format!(
                                     "hook output `{shown}` from `{}` conflicts with `{}` from `{}`",
                                     hook.name,
-                                    crate::filesystem::display_path(existing, root),
+                                    tola_diagnostic::display_path(existing, root),
                                     owner.name
                                 ),
                             );
@@ -187,6 +189,12 @@ impl SiteConfigWithSourceDigest {
         self.source_hash
     }
 
+    /// Install the application runner while keeping the digest of the loaded source.
+    pub fn with_hook_runner(mut self, runner: crate::hooks::HookRunner) -> Self {
+        self.config = self.config.with_hook_runner(runner);
+        self
+    }
+
     pub fn into_config(self) -> ResolvedSiteConfig {
         self.config
     }
@@ -201,7 +209,7 @@ pub fn load_site_config(
     build: &BuildOverrides,
 ) -> Result<SiteConfigWithSourceDigest> {
     resolve_parsed_site_config(
-        ConfigSource::load(explicit, crate::resources::InputScope::Online)?.decode_site()?,
+        ConfigSource::load(explicit, tola_input::InputScope::Online)?.decode_site()?,
         package_locations,
         build,
     )
@@ -215,8 +223,7 @@ pub fn resolve_site_config(
     build: &BuildOverrides,
 ) -> Result<SiteConfigWithSourceDigest> {
     resolve_parsed_site_config(
-        ConfigSource::parse(config_path, source, crate::resources::InputScope::Online)?
-            .decode_site()?,
+        ConfigSource::parse(config_path, source, tola_input::InputScope::Online)?.decode_site()?,
         package_locations,
         build,
     )
@@ -250,12 +257,13 @@ fn resolve_schema(
     mut config_path: PathBuf,
     root: PathBuf,
     presence: &ConfigPresence,
-    positions: std::sync::Arc<crate::config::source::ConfigPositions>,
+    positions: std::sync::Arc<tola_diagnostic::SourcePositions>,
     mut package_locations: tola_typst::PackageLocations,
     build: &BuildOverrides,
 ) -> Result<ResolvedSiteConfig> {
     schema.validate_source_paths()?;
-    schema.validate_theme(presence)?;
+    schema.validate_entry()?;
+    super::schema::validate_hook_options(&mut schema.hooks, &schema.options)?;
     normalize_site_paths(
         &mut schema,
         &mut config_path,
@@ -267,14 +275,13 @@ fn resolve_schema(
         package_locations = package_locations.with_declared_root(path)?;
     }
     apply_build_overrides(&mut schema, build);
-    let (module_roots, module_asset_sources) = module_input_paths(&schema, &root);
+    let module_roots = module_input_paths(&schema, &root);
     let boundary = resolve_output_boundary(
         &schema,
         &config_path,
         &root,
         &package_locations,
         &module_roots,
-        &module_asset_sources,
     )?;
     schema.build.publish_dir = boundary.output;
     let vendor_workspace = schema
@@ -299,9 +306,14 @@ fn resolve_schema(
         vendor,
         formatter,
         modules,
-        theme,
+        hooks,
+        options,
         ..
     } = schema;
+    let (entry, entry_module) = match build_config.entry {
+        BuildEntry::Project(path) => (path, None),
+        BuildEntry::Module { module } => (PathBuf::new(), Some(module)),
+    };
     Ok(ResolvedSiteConfig {
         package_locations,
         config_path,
@@ -311,53 +323,91 @@ fn resolve_schema(
         declares_font_paths: presence
             .contains(crate::config::section::FontsConfig::FIELDS.paths.as_str()),
         site: site.into_resolved(),
-        build: build_config,
+        build: ResolvedBuildConfig {
+            entry,
+            content_dir: build_config.content_dir,
+            publish_dir: build_config.publish_dir,
+            minify: build_config.minify,
+            references: build_config.references,
+        },
         assets,
         typst,
         icons,
         vendor,
         formatter,
         modules,
-        theme,
+        hooks,
+        options,
+        entry_module,
+        hook_runner: None,
         module_roots,
-        module_asset_sources,
-        module_inputs: Default::default(),
         entry_file: None,
-        entry_origin: super::resolved::EntryOrigin::Project,
         vendor_workspace,
         vendor_candidate: None,
     })
 }
 
-/// Every module directory and asset replacement the modules declare.
-fn module_input_paths(schema: &SiteConfigSchema, root: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
-    let module_roots = schema
+/// Module directories and archive files that publication must not replace.
+fn module_input_paths(schema: &SiteConfigSchema, root: &Path) -> Vec<PathBuf> {
+    schema
         .modules
         .iter()
         .flat_map(|(name, module)| {
-            let module_roots: Vec<PathBuf> = match &module.source {
-                crate::modules::ModuleSource::Local { path } => vec![root.join(path)],
-                crate::modules::ModuleSource::Remote { .. } => {
+            let mut paths = match &module.source {
+                tola_module::ModuleSource::Local { path } => vec![root.join(path)],
+                tola_module::ModuleSource::Git { .. }
+                | tola_module::ModuleSource::Tarball { .. } => {
                     let vendor = schema.vendor.path.as_deref().unwrap_or(Path::new("vendor"));
                     vec![
-                        crate::filesystem::layout::modules(root).join(name),
+                        tola_input::layout::modules(root),
                         root.join(vendor).join("modules").join(name),
                     ]
                 }
             };
-            module_roots
-                .into_iter()
-                .chain(module.overrides.values().map(|path| root.join(path)))
+            if let tola_module::ModuleSource::Tarball { tarball } = &module.source
+                && let tola_input::TarballLocation::File { path } = &tarball.location
+            {
+                paths.push(root.join(path));
+            }
+            paths
         })
-        .collect();
-    let module_asset_sources = schema
-        .modules
-        .values()
-        .filter_map(|module| module.assets.as_ref())
-        .filter(|assets| assets.enabled)
-        .flat_map(|assets| assets.replace.values().map(|path| root.join(path)))
-        .collect();
-    (module_roots, module_asset_sources)
+        .collect()
+}
+
+/// Identify a module root a before-build hook cannot write to.
+pub(crate) fn overlapping_module_root<'a>(
+    root: &Path,
+    modules: &std::collections::BTreeMap<String, tola_module::ModuleDeclaration>,
+    module_roots: &'a [PathBuf],
+    target: &tola_input::FilesystemSourceIdentity,
+    author_hook: bool,
+) -> Option<&'a Path> {
+    use tola_input::FilesystemSourceIdentity;
+    use tola_module::declaration::ModuleSource;
+
+    let site = FilesystemSourceIdentity::from_path(root);
+    module_roots.iter().find_map(|module| {
+        let identity = FilesystemSourceIdentity::from_path(module);
+        if !target.intersects(&identity) {
+            return None;
+        }
+        let writable = author_hook
+            && identity.is_within(&site)
+            && target.is_within(&identity)
+            && target.physical_path() != identity.physical_path()
+            && target.logical_path() != identity.logical_path()
+            && !target.intersects_path(&module.join("tola-module.toml"))
+            && modules
+                .values()
+                .any(|declaration| match &declaration.source {
+                    ModuleSource::Local { path } => {
+                        identity.logical_path()
+                            == tola_input::lexical_path_identity(&root.join(path))
+                    }
+                    ModuleSource::Git { .. } | ModuleSource::Tarball { .. } => false,
+                });
+        (!writable).then_some(module.as_path())
+    })
 }
 
 /// The output root and the protected inputs it must not contain.
@@ -367,14 +417,19 @@ fn resolve_output_boundary(
     root: &Path,
     package_locations: &tola_typst::PackageLocations,
     module_roots: &[PathBuf],
-    module_asset_sources: &[PathBuf],
 ) -> Result<crate::filesystem::OutputBoundary, crate::filesystem::OutputBoundaryError> {
     crate::filesystem::OutputBoundary::resolve(
         root,
         &schema.build.publish_dir,
         super::resolved::protected_input_paths(
             config_path,
-            &schema.build,
+            std::iter::once(("content-dir", schema.build.content_dir.as_path())).chain(
+                schema
+                    .build
+                    .entry
+                    .project_path()
+                    .map(|path| ("build entry", path)),
+            ),
             &schema.assets,
             &schema.typst.fonts,
             &schema.icons,
@@ -386,11 +441,6 @@ fn resolve_output_boundary(
             module_roots
                 .iter()
                 .map(|path| ("module root", path.as_path())),
-        )
-        .chain(
-            module_asset_sources
-                .iter()
-                .map(|path| ("module asset replacement", path.as_path())),
         ),
     )
 }
@@ -408,13 +458,15 @@ fn normalize_site_paths(
     let declared = std::mem::take(config_path);
     *config_path =
         std::path::absolute(&declared).map_err(|error| unresolved_config_path(&declared, error))?;
-    config.build.entry = root.join(&config.build.entry);
+    if let BuildEntry::Project(entry) = &mut config.build.entry {
+        *entry = root.join(&*entry);
+    }
     config.build.content_dir = root.join(&config.build.content_dir);
     config.assets.normalize(root);
     config.typst.fonts.normalize(root);
     // Do not follow output symlinks: safety validation must see them.
     config.build.publish_dir =
-        crate::filesystem::lexical_path_identity(&root.join(&config.build.publish_dir));
+        tola_input::lexical_path_identity(&root.join(&config.build.publish_dir));
     config.icons.normalize(root);
     config.vendor.normalize(root);
     Ok(())
@@ -448,15 +500,7 @@ fn validate_effective_config(
     module_roots: &[PathBuf],
     presence: &ConfigPresence,
 ) -> Result<Vec<ConfigDiagnostic>> {
-    let mut diagnostics = super::schema::settings_diagnostics(
-        &config.site,
-        &config.build,
-        &config.assets,
-        &config.icons,
-        &config.typst,
-        &config.vendor,
-        presence,
-    );
+    let mut diagnostics = super::schema::settings_diagnostics(config, presence);
     config
         .vendor
         .validate_internal_boundaries(root, &mut diagnostics);
@@ -465,18 +509,20 @@ fn validate_effective_config(
         .validate_internal_boundaries(root, &mut diagnostics);
     let boundary = crate::resources::source_boundary_with_exclusions(
         root,
-        crate::InputScope::Online,
+        tola_input::InputScope::Online,
         super::resolved::generated_exclusions(&config.build.publish_dir, vendor_workspace, None),
     );
     for (field, path) in [
-        (FieldPath::new("build.entry"), &config.build.entry),
+        ("build.entry", config.build.entry.project_path()),
         (
-            FieldPath::new("build.content-dir"),
-            &config.build.content_dir,
+            "build.content-dir",
+            Some(config.build.content_dir.as_path()),
         ),
     ] {
-        if let Err(error) = boundary.check(path) {
-            diagnostics.error(field, error.to_string());
+        if let Some(path) = path
+            && let Err(error) = boundary.check(path)
+        {
+            diagnostics.error(FieldPath::new(field), error.to_string());
         }
     }
     for (index, path) in config.typst.fonts.paths.iter().enumerate() {
@@ -487,53 +533,48 @@ fn validate_effective_config(
         });
     }
     if let Some(workspace) = vendor_workspace {
-        let workspace_identity = crate::filesystem::FilesystemSourceIdentity::from_path(workspace);
+        let workspace_identity = tola_input::FilesystemSourceIdentity::from_path(workspace);
         let output_identity =
-            crate::filesystem::FilesystemSourceIdentity::from_path(&config.build.publish_dir);
+            tola_input::FilesystemSourceIdentity::from_path(&config.build.publish_dir);
         if output_identity.intersects(&workspace_identity) {
             diagnostics.error(
                 FieldPath::new("build.publish-dir"),
                 format!(
                     "`build.publish-dir` `{}` overlaps the vendor working directory `{}`",
-                    crate::filesystem::display_path(&config.build.publish_dir, root),
-                    crate::filesystem::display_path(workspace, root),
+                    tola_diagnostic::display_path(&config.build.publish_dir, root),
+                    tola_diagnostic::display_path(workspace, root),
                 ),
             );
         }
     }
     validate_hook_output_boundaries(
-        &config.build.hooks,
+        &config.hooks,
         root,
         config_path,
         &config.build.publish_dir,
+        config.vendor.path.as_deref(),
         vendor_workspace,
         &mut diagnostics,
     );
-    for (index, hook) in config.build.hooks.before_build.iter().enumerate() {
+    for (index, hook) in config.hooks.before_build.iter().enumerate() {
         if !hook.enable {
             continue;
         }
         for output in &hook.generates {
-            let target = crate::filesystem::FilesystemSourceIdentity::from_path(&root.join(output));
-            for module in module_roots {
-                if target.intersects(&crate::filesystem::FilesystemSourceIdentity::from_path(
-                    module,
-                )) {
-                    diagnostics.with_array_element(
-                        "build.hooks.before-build",
-                        index,
-                        |diagnostics| {
-                            diagnostics.error(
-                                FieldPath::new("build.hooks.before-build.generates"),
-                                format!(
-                                    "hook output `{}` overlaps module root `{}`",
-                                    crate::filesystem::display_path(&root.join(output), root),
-                                    crate::filesystem::display_path(module, root)
-                                ),
-                            );
-                        },
+            let target = tola_input::FilesystemSourceIdentity::from_path(&root.join(output));
+            if let Some(module) =
+                overlapping_module_root(root, &config.modules, module_roots, &target, true)
+            {
+                diagnostics.with_array_element("hooks.before-build", index, |diagnostics| {
+                    diagnostics.error(
+                        FieldPath::new("hooks.before-build.generates"),
+                        format!(
+                            "hook output `{}` overlaps module root `{}`",
+                            tola_diagnostic::display_path(&root.join(output), root),
+                            tola_diagnostic::display_path(module, root)
+                        ),
                     );
-                }
+                });
             }
         }
     }
@@ -575,7 +616,7 @@ pub(super) fn resolve_config_location(path: &Path) -> Result<(PathBuf, PathBuf)>
         return Err(config_path_error(path));
     }
     let path = std::path::absolute(path).map_err(|error| unresolved_config_path(path, error))?;
-    let root = crate::filesystem::normalize_path(path.parent().unwrap_or(Path::new("")));
+    let root = tola_input::normalize_path(path.parent().unwrap_or(Path::new("")));
     Ok((path, root))
 }
 
@@ -635,9 +676,9 @@ const INVOCATION_HELP: &str = "Pass `--config` the full path of the site's `tola
 fn written_path(path: &Path) -> String {
     if path.as_os_str().is_empty() {
         let resolved = crate::filesystem::absolute_path(path);
-        return crate::filesystem::display_path(&resolved, Path::new(""));
+        return tola_diagnostic::display_path(&resolved, Path::new(""));
     }
-    crate::filesystem::display_path(path, Path::new(""))
+    tola_diagnostic::display_path(path, Path::new(""))
 }
 
 pub(super) fn resolve_config_path(explicit: Option<&Path>) -> Result<PathBuf> {
@@ -659,7 +700,7 @@ pub fn config_site_root(explicit: Option<&Path>) -> Result<PathBuf> {
             let root = find_default_config(&cwd)
                 .and_then(|path| path.parent().map(Path::to_path_buf))
                 .unwrap_or(cwd);
-            Ok(crate::filesystem::normalize_path(&root))
+            Ok(tola_input::normalize_path(&root))
         }
     }
 }
@@ -682,18 +723,24 @@ pub fn find_default_config(start: &Path) -> Option<PathBuf> {
 
 impl SiteConfigSchema {
     /// Decode an editable core schema without resolving filesystem paths.
-    pub fn parse(path: &Path, content: &str, scope: crate::resources::InputScope) -> Result<Self> {
+    pub fn parse(path: &Path, content: &str, scope: tola_input::InputScope) -> Result<Self> {
         Self::parse_at(path, content, scope).map(ParsedConfig::into_schema)
     }
 
     /// Resolve an explicitly constructed schema without a TOML round trip.
     /// All fields present in its serialized value count as explicit for status diagnostics.
     pub fn resolve(
-        self,
+        mut self,
         config_path: &Path,
         package_locations: tola_typst::PackageLocations,
         build: &BuildOverrides,
     ) -> Result<ResolvedSiteConfig> {
+        self.options = tola_module::options::deserialize_options(std::mem::take(&mut self.options))
+            .map_err(|error| {
+                let mut diagnostics = ConfigDiagnostics::new();
+                diagnostics.error(FieldPath::new("options"), error.to_string());
+                super::diagnostic::attach_load(config_error(diagnostics), Some(config_path), None)
+            })?;
         let value = toml::Value::try_from(&self)
             .map_err(anyhow::Error::from)
             .map_err(|error| {
@@ -707,7 +754,7 @@ impl SiteConfigSchema {
             path.clone(),
             root,
             &presence,
-            std::sync::Arc::new(crate::config::source::ConfigPositions::default()),
+            std::sync::Arc::new(tola_diagnostic::SourcePositions::default()),
             package_locations,
             build,
         )
@@ -920,8 +967,7 @@ publish-dir = "."
         std::os::unix::fs::symlink("missing.toml", &path).unwrap();
 
         assert_eq!(find_default_config(&nested), Some(path.clone()));
-        let error =
-            ConfigSource::load(Some(&path), crate::resources::InputScope::Online).unwrap_err();
+        let error = ConfigSource::load(Some(&path), tola_input::InputScope::Online).unwrap_err();
         assert!(!error.chain().any(|cause| cause.is::<ConfigNotFound>()));
         assert!(error.chain().any(|cause| {
             cause
@@ -1023,13 +1069,12 @@ publish-dir = "."
         std::os::unix::fs::symlink("tola.toml", root.join("alias.toml")).unwrap();
         std::os::unix::fs::symlink(".", root.join("linked")).unwrap();
         let mut schema = SiteConfigSchema::default();
-        schema.build.hooks.before_build =
-            vec![crate::config::section::build::BeforeBuildHookConfig {
-                name: "generator".into(),
-                command: vec!["generator".into()],
-                generates: vec!["tola.toml".into(), "alias.toml".into(), "linked".into()],
-                ..crate::config::section::build::BeforeBuildHookConfig::default()
-            }];
+        schema.hooks.before_build = vec![crate::config::section::build::BeforeBuildHookConfig {
+            name: "generator".into(),
+            argv: Some(vec!["generator".into()]),
+            generates: vec!["tola.toml".into(), "alias.toml".into(), "linked".into()],
+            ..crate::config::section::build::BeforeBuildHookConfig::default()
+        }];
 
         let error = schema
             .resolve(
@@ -1054,14 +1099,14 @@ publish-dir = "."
         let directory = tempfile::tempdir().unwrap();
         let config_path = write_config(
             directory.path(),
-            r#"[[build.hooks.before-build]]
+            r#"[[hooks.before-build]]
 name = "first"
-command = ["first.sh"]
+argv = ["first.sh"]
 generates = ["generated/first"]
 
-[[build.hooks.before-build]]
+[[hooks.before-build]]
 name = "second"
-command = ["second.sh"]
+argv = ["second.sh"]
 generates = [".tola/cache"]
 "#,
         );
@@ -1095,7 +1140,7 @@ generates = [".tola/cache"]
         let candidate = config.get_root().join(".vendor-swap/candidate");
         std::fs::create_dir_all(&candidate).unwrap();
         let config = config.with_vendor_root(Some(candidate.clone())).unwrap();
-        let pure = crate::BuildResources::new().with_input_scope(crate::InputScope::Pure);
+        let pure = crate::BuildResources::new().with_input_scope(tola_input::InputScope::Pure);
         let files = tola_typst::FileResolver::from_package_locations(
             pure.package_locations(&config),
             tola_typst::PackageFetchPolicy::LocalOnly,

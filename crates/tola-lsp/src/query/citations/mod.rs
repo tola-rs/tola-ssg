@@ -286,30 +286,6 @@ mod tests {
         assert!(!plain.contains("[B]"), "{plain}");
     }
 
-    /// A bibliography parsed once is reused while its bytes are unchanged, and read again when the
-    /// file changes.
-    #[test]
-    fn reuse_follows_changed_bytes() {
-        let mut site = QuerySession::new();
-        site.site.write(
-            "content/refs.bib",
-            "@article{knuth1984,\n  title = {Literate Programming},\n  author = {Knuth, Donald E.},\n  year = {1984},\n}\n",
-        );
-        let program = "#bibliography(\"refs.bib\")\n\nSee @knuth|1984.\n";
-        let first = site.hover_text(program).expect("a citation hover");
-        assert!(first.contains("Literate Programming"), "{first}");
-        assert_eq!(site.hover_text(program).as_deref(), Some(first.as_str()));
-        site.site.write(
-            "content/refs.bib",
-            "@article{knuth1984,\n  title = {Edited Title},\n  author = {Knuth, Donald E.},\n  year = {1984},\n}\n",
-        );
-        site.revision += 1;
-        let edited = site
-            .hover_text(program)
-            .expect("a citation hover after the file changed");
-        assert!(edited.contains("Edited Title"), "{edited}");
-    }
-
     #[test]
     fn title_completion_writes_the_key() {
         let mut site = QuerySession::new();

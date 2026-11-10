@@ -15,8 +15,8 @@ use lsp_types::{
 };
 use tola_build::cancellation::BuildCanceller;
 use tola_build::config::ResolvedSiteConfig;
-use tola_build::filesystem::normalize_existing_prefix;
 use tola_diagnostic::Diagnostic;
+use tola_input::normalize_existing_prefix;
 
 use crate::protocol::{CheckMode, CheckProgress};
 
@@ -129,6 +129,7 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
         };
         self.check = Some(PendingCheck {
             checked_revision: self.revision,
+            queued_at: now,
             due,
             sources: self.source_inputs(self.workspace().root.clone(), self.checking.token()),
         });

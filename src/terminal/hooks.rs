@@ -104,7 +104,7 @@ mod tests {
         for label in ["文档", "图片", "样式", "脚本", "图标"] {
             hooks.before_build.push(BeforeBuildHookConfig {
                 name: label.to_owned(),
-                command: vec!["tool".into()],
+                argv: Some(vec!["tool".into()]),
                 ..BeforeBuildHookConfig::default()
             });
         }
@@ -129,7 +129,7 @@ mod tests {
         for label in ["alpha", "bravo", "charlie", "delta", "echo"] {
             hooks.before_build.push(BeforeBuildHookConfig {
                 name: label.to_owned(),
-                command: vec!["tool".into()],
+                argv: Some(vec!["tool".into()]),
                 ..BeforeBuildHookConfig::default()
             });
         }

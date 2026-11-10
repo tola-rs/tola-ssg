@@ -35,7 +35,7 @@ impl ClientDiagnostics {
         source: &Source,
     ) -> Result<UnreadImports> {
         let requested = crate::uri::to_site_path(uri.as_str())?;
-        let requested = tola_build::filesystem::normalize_existing_prefix(&requested);
+        let requested = tola_input::normalize_existing_prefix(&requested);
         let mut texts = DiagnosticTexts::new(open);
         let unread = unread_documents(open, Some(source));
         let unproven = names::SelectedInterfaces {
@@ -56,7 +56,7 @@ impl ClientDiagnostics {
             let Some((path, diagnostic)) = projected else {
                 continue;
             };
-            if tola_build::filesystem::normalize_existing_prefix(&path) == requested {
+            if tola_input::normalize_existing_prefix(&path) == requested {
                 answered.push(diagnostic);
             }
         }

@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
-use tola_build::InputScope;
+use tola_input::InputScope;
 
 use crate::cli::output::CommandOutput;
 use crate::cli::{IconInspectArgs, InspectCommand, SourceInspectArgs};
@@ -23,7 +23,7 @@ pub(in crate::cli) fn run(request: super::SiteRequest<'_>, command: InspectComma
             let value = super::fonts::value(
                 &request.config_file,
                 &request.packages,
-                request.scope,
+                request.scope(),
                 &request.resources,
                 request.output,
                 request.cancellation,
@@ -32,7 +32,7 @@ pub(in crate::cli) fn run(request: super::SiteRequest<'_>, command: InspectComma
                 &value,
                 "fonts",
                 &display,
-                request.scope,
+                request.scope(),
                 request.output,
                 request.cancellation,
             )
@@ -43,7 +43,7 @@ pub(in crate::cli) fn run(request: super::SiteRequest<'_>, command: InspectComma
                 &value,
                 "config",
                 &args.display,
-                request.scope,
+                request.scope(),
                 request.output,
                 request.cancellation,
             )
@@ -56,7 +56,7 @@ pub(in crate::cli) fn run(request: super::SiteRequest<'_>, command: InspectComma
                     args,
                     config,
                     &request.resources,
-                    request.scope,
+                    request.scope(),
                     request.output,
                     request.cancellation,
                 ),
@@ -64,7 +64,7 @@ pub(in crate::cli) fn run(request: super::SiteRequest<'_>, command: InspectComma
                     args,
                     config,
                     &request.resources,
-                    request.scope,
+                    request.scope(),
                     request.output,
                     request.cancellation,
                 ),
@@ -135,7 +135,7 @@ fn sources(
         .iter()
         .map(|source| {
             json!({
-                "path": tola_build::filesystem::display_path(&source.source, config.get_root()),
+                "path": tola_diagnostic::display_path(&source.source, config.get_root()),
                 "contentPath": source.id.to_string(),
             })
         })
@@ -189,6 +189,3 @@ fn collect_source_paths(
         }
     }
 }
-
-#[cfg(test)]
-mod tests {}

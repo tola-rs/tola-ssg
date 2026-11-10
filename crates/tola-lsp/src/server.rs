@@ -249,7 +249,7 @@ pub(crate) mod tests {
                         reader: server_input,
                         writer: server_output,
                         resources: BuildResources::new()
-                            .with_network_access(tola_build::NetworkAccess::Denied)
+                            .with_network_access(tola_input::NetworkAccess::Denied)
                             .without_system_fonts(),
                         cancellation: server_cancellation,
                         load_configuration: load,

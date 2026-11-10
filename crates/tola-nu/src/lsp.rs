@@ -65,6 +65,9 @@ impl Worker {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
+        if let Some(config) = runtime.site_config() {
+            command.arg("--config").arg(config);
+        }
         for (name, value) in &context.environment {
             if let Some(value) = value {
                 command.env(name, value);

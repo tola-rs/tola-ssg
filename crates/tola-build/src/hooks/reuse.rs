@@ -1,7 +1,8 @@
 //! Development reuse of hook work: one `generate-outputs` hook's previous outputs, and the
 //! outcome of the latest after-publish run.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
@@ -16,16 +17,58 @@ use crate::output::graph::{OutputFile, OutputKind};
 use crate::output::manifest::RevisionId;
 use crate::output::owner::OutputRootOwnership;
 use tola_address::OutputPath;
+use tola_diagnostic::display_path;
+use tola_module::hooks::RerunOn;
 use tola_typst::ContentDigest;
 
 /// Everything Tola can observe about one `generate-outputs` command's inputs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct HookInputs {
-    command: Vec<String>,
+    action: tola_module::Action,
+    nu: Option<NuInputs>,
     origin: Option<ModuleHookOrigin>,
     outputs: Vec<CommandOutput>,
     upstream: Vec<UpstreamOutput>,
-    rerun_on: Vec<RerunOnPath>,
+    rerun_on: RerunOn,
+    paths: BTreeMap<PathBuf, ObservedPath>,
+}
+
+/// Values an embedded Nu hook can read without touching the filesystem.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct NuInputs {
+    values: ContentDigest,
+    assets: Option<std::sync::Arc<crate::asset::AssetUrls>>,
+}
+
+impl NuInputs {
+    fn observe(config: &ResolvedSiteConfig) -> Result<Self> {
+        let runner = config.hook_runner.as_ref();
+        let modules = runner.and_then(|runner| runner.modules()).map(|prepared| {
+            let instances = prepared
+                .modules
+                .iter()
+                .map(|(alias, module)| (alias, &module.root, &module.manifest, &module.options))
+                .collect::<Vec<_>>();
+            let asset_modules = prepared
+                .assets
+                .iter()
+                .map(|asset| &asset.alias)
+                .collect::<Vec<_>>();
+            (instances, asset_modules)
+        });
+        let bytes = serde_json::to_vec(&(
+            config.site(),
+            config.options(),
+            config.config_path(),
+            &config.build().content_dir,
+            modules,
+        ))
+        .context("read the configuration available to Nu hooks")?;
+        Ok(Self {
+            values: ContentDigest::of(&bytes),
+            assets: runner.and_then(|runner| runner.assets()),
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -36,16 +79,10 @@ struct UpstreamOutput {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct RerunOnPath {
-    path: PathBuf,
-    state: RerunOnObservation,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum RerunOnObservation {
+enum ObservedPath {
     Missing,
-    File(ContentDigest),
-    Directory(Vec<RerunOnPath>),
+    File(blake3::Hash),
+    Directory,
     Symlink(PathBuf),
     Other,
 }
@@ -80,7 +117,7 @@ impl ReusableHookOutputs {
 
 /// Observe the inputs a pure `generate-outputs` command may depend on.
 pub(crate) fn observe(
-    site_root: &Path,
+    config: &ResolvedSiteConfig,
     command: &OutputCommandConfig,
     upstream: &[OutputFile],
 ) -> Result<HookInputs> {
@@ -97,19 +134,26 @@ pub(crate) fn observe(
     let mut outputs = command.outputs.clone();
     outputs.sort_unstable_by(|left, right| left.path().cmp(right.path()));
 
-    let mut rerun_on: Vec<RerunOnPath> = command
-        .rerun_on
-        .iter()
-        .map(|path| observe_rerun_path(site_root, path))
-        .collect::<Result<_>>()?;
-    rerun_on.sort_unstable_by(|left, right| left.path.cmp(&right.path));
+    let action = command.action().map_err(anyhow::Error::msg)?;
+    let paths = observe_paths(
+        config.get_root(),
+        command.origin.as_ref(),
+        &command.rerun_on,
+        command.nu.as_deref(),
+    )?;
 
     Ok(HookInputs {
-        command: command.command.clone(),
+        nu: command
+            .nu
+            .as_ref()
+            .map(|_| NuInputs::observe(config))
+            .transpose()?,
+        action,
         origin: command.origin.clone(),
         outputs,
         upstream,
-        rerun_on,
+        rerun_on: command.rerun_on.clone(),
+        paths,
     })
 }
 
@@ -121,8 +165,9 @@ pub(crate) fn observe(
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AfterPublishDependencies {
     revision: RevisionId,
+    nu: Option<NuInputs>,
     hooks: Vec<AfterPublishHookConfig>,
-    rerun_on: Vec<RerunOnPath>,
+    paths: Vec<BTreeMap<PathBuf, ObservedPath>>,
 }
 
 pub(crate) fn observe_after_publish(
@@ -131,88 +176,115 @@ pub(crate) fn observe_after_publish(
     revision: &RevisionId,
 ) -> Result<AfterPublishDependencies> {
     let hooks: Vec<AfterPublishHookConfig> = config
-        .build
         .hooks
         .after_publish
         .iter()
         .filter(|hook| super::hook_participates(hook.enable, hook.dev, mode))
         .cloned()
         .collect();
-    let rerun_on = hooks
+    let paths = hooks
         .iter()
-        .flat_map(|hook| &hook.rerun_on)
-        .map(|path| observe_rerun_path(config.get_root(), path))
+        .map(|hook| {
+            observe_paths(
+                config.get_root(),
+                hook.origin.as_ref(),
+                &hook.rerun_on,
+                hook.nu.as_deref(),
+            )
+        })
         .collect::<Result<_>>()?;
+    let nu = hooks
+        .iter()
+        .any(|hook| hook.nu.is_some())
+        .then(|| NuInputs::observe(config))
+        .transpose()?;
     Ok(AfterPublishDependencies {
         revision: revision.clone(),
+        nu,
         hooks,
-        rerun_on,
+        paths,
     })
 }
 
-/// Observe one declared `rerun-on` path without following symlinks or ignore files.
-fn observe_rerun_path(site_root: &Path, relative: &Path) -> Result<RerunOnPath> {
-    let path = site_root.join(relative);
-    let metadata = match std::fs::symlink_metadata(&path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == ErrorKind::NotFound => {
-            return Ok(RerunOnPath {
-                path: relative.to_path_buf(),
-                state: RerunOnObservation::Missing,
-            });
+/// Record selected paths in path order, including missing literals and the Nu entry.
+fn observe_paths(
+    root: &Path,
+    origin: Option<&ModuleHookOrigin>,
+    rerun_on: &RerunOn,
+    nu: Option<&Path>,
+) -> Result<BTreeMap<PathBuf, ObservedPath>> {
+    let selection = rerun_on.compile(root, origin)?;
+    let nu = nu
+        .map(|path| super::command::nu_script(root, origin, path))
+        .transpose()?
+        .map(|path| tola_input::normalize_existing_prefix(&path));
+    let literals: BTreeSet<_> = selection.literal_includes().collect();
+    // Parents sort before children, so overlapping includes visit a path once.
+    let mut pending: BTreeSet<_> = selection
+        .scoped_roots()
+        .filter(|(scope, path)| {
+            !selection.excludes(path)
+                && (literals.contains(path) || !prefix_crosses_link(scope, path))
+        })
+        .map(|(_, path)| path)
+        .collect();
+    pending.extend(nu.iter().cloned());
+    let mut observed = BTreeMap::new();
+    while let Some(path) = pending.pop_first() {
+        let script = nu.as_deref() == Some(path.as_path());
+        let selected = selection.matches(&path);
+        let descend = selected || selection.could_match_below(&path);
+        if !descend && !script {
+            continue;
         }
-        Err(error) => {
-            return Err(error).with_context(|| {
-                format!(
-                    "Tola could not observe the `rerun-on` path `{}`",
-                    relative.display()
-                )
-            });
+        let unreadable = || {
+            let path = display_path(&path, root);
+            let key = if script { "nu" } else { "rerun-on" };
+            format!("Tola could not read the `{key}` path `{path}`")
+        };
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error)
+                if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) =>
+            {
+                if script || (selected && literals.contains(&path)) {
+                    observed.insert(path, ObservedPath::Missing);
+                }
+                continue;
+            }
+            Err(error) => return Err(error).with_context(unreadable),
+        };
+        if descend && metadata.is_dir() {
+            for entry in fs::read_dir(&path).with_context(unreadable)? {
+                pending.insert(entry.with_context(unreadable)?.path());
+            }
         }
-    };
+        if script || selected {
+            let state = if metadata.file_type().is_symlink() {
+                ObservedPath::Symlink(fs::read_link(&path).with_context(unreadable)?)
+            } else if metadata.is_dir() {
+                ObservedPath::Directory
+            } else if metadata.is_file() {
+                let digest =
+                    crate::filesystem::digest_file(&path, None).with_context(unreadable)?;
+                ObservedPath::File(digest)
+            } else {
+                ObservedPath::Other
+            };
+            observed.insert(path, state);
+        }
+    }
+    Ok(observed)
+}
 
-    let state = if metadata.file_type().is_symlink() {
-        let target = std::fs::read_link(&path).with_context(|| {
-            format!(
-                "Tola could not read the `rerun-on` symlink `{}`",
-                relative.display()
-            )
-        })?;
-        RerunOnObservation::Symlink(target)
-    } else if metadata.is_dir() {
-        let mut entries = std::fs::read_dir(&path)
-            .and_then(|entries| entries.collect::<std::io::Result<Vec<_>>>())
-            .with_context(|| {
-                format!(
-                    "Tola could not read the `rerun-on` directory `{}`",
-                    relative.display()
-                )
-            })?;
-        entries.sort_unstable_by_key(|entry| entry.file_name());
-        let mut children = Vec::with_capacity(entries.len());
-        for entry in entries {
-            children.push(observe_rerun_path(
-                site_root,
-                &relative.join(entry.file_name()),
-            )?);
-        }
-        RerunOnObservation::Directory(children)
-    } else if metadata.is_file() {
-        let bytes = std::fs::read(&path).with_context(|| {
-            format!(
-                "Tola could not read the `rerun-on` file `{}`",
-                relative.display()
-            )
-        })?;
-        RerunOnObservation::File(ContentDigest::of(&bytes))
-    } else {
-        RerunOnObservation::Other
-    };
-
-    Ok(RerunOnPath {
-        path: relative.to_path_buf(),
-        state,
-    })
+// A glob can start below its scope without walking its fixed prefix. Check that
+// prefix for links so the shortcut cannot enter a directory the walk would skip.
+fn prefix_crosses_link(scope: &Path, prefix: &Path) -> bool {
+    prefix
+        .ancestors()
+        .skip(1)
+        .take_while(|path| *path != scope && path.starts_with(scope))
+        .any(|path| fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_symlink()))
 }
 
 #[cfg(test)]
@@ -223,6 +295,7 @@ mod tests {
     fn option_changes_invalidate_outputs() {
         let root = tempfile::tempdir().unwrap();
         let mut hook = OutputCommandConfig {
+            argv: Some(vec!["program".into()]),
             origin: Some(ModuleHookOrigin {
                 name: "notes".into(),
                 root: root.path().join("module"),
@@ -231,9 +304,10 @@ mod tests {
             }),
             ..Default::default()
         };
-        let before = observe(root.path(), &hook, &[]).unwrap();
+        let config = crate::config::tests::load_test_config(root.path(), "");
+        let before = observe(&config, &hook, &[]).unwrap();
         hook.origin.as_mut().unwrap().options_json = br#"{"search":false}"#.to_vec();
-        let after = observe(root.path(), &hook, &[]).unwrap();
+        let after = observe(&config, &hook, &[]).unwrap();
         assert_ne!(before, after);
     }
 }

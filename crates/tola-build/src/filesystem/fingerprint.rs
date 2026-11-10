@@ -11,7 +11,8 @@ use std::path::{Path, PathBuf};
 use tola_typst::hash_length_prefixed;
 
 use super::identity::FilesystemSourceKind;
-use super::read::{FileReadError, read_chunks};
+use crate::filesystem::FileReadErrorExt;
+use tola_input::read_chunks;
 
 /// A BLAKE3 fingerprint of filesystem entries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -155,12 +156,12 @@ pub(crate) fn digest_file(
     let mut hasher = blake3::Hasher::new();
     match cancellation {
         Some(cancellation) => {
-            read_chunks(&mut file, cancellation, |chunk| {
+            read_chunks(&mut file, cancellation.flag(), |chunk| {
                 hasher.update(chunk);
                 ControlFlow::Continue(())
             })
             .map(|_| ())
-            .map_err(FileReadError::into_anyhow)?;
+            .map_err(FileReadErrorExt::into_anyhow)?;
         }
         None => {
             std::io::copy(&mut file, &mut hasher)?;

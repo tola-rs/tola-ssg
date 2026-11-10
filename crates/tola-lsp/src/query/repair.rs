@@ -81,10 +81,10 @@ pub(crate) fn pin_source(
     let Some(target) = editable_source_path(source, config, package_access) else {
         return Err(RepairError::NoEditablePath);
     };
-    let target = tola_build::filesystem::normalize_existing_prefix(&target);
+    let target = tola_input::normalize_existing_prefix(&target);
     let mut found = false;
     for (path, previous) in overrides.iter_mut() {
-        if tola_build::filesystem::normalize_existing_prefix(path) == target {
+        if tola_input::normalize_existing_prefix(path) == target {
             if previous.as_ref() != source.text() {
                 return Err(RepairError::ConflictingText);
             }

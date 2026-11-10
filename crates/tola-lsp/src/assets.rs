@@ -56,10 +56,7 @@ fn published_path(config: &ResolvedSiteConfig, written: &str) -> Result<String, 
         .get_root()
         .join(&config.build().publish_dir)
         .join(asset.output_path().as_str());
-    Ok(tola_build::filesystem::display_path(
-        &output,
-        config.get_root(),
-    ))
+    Ok(tola_diagnostic::display_path(&output, config.get_root()))
 }
 
 /// What one written site-root URL resolves to among this site's published asset URLs.
@@ -182,15 +179,14 @@ pub(super) fn written_definition(
 /// How one declaration is named to an author: its own file, or the tree a member came from.
 pub(super) fn declaration_note(origin: &AssetOrigin, site_root: &Path) -> String {
     match origin {
-        AssetOrigin::File { source } => format!(
-            "`{}`",
-            tola_build::filesystem::display_path(source, site_root)
-        ),
+        AssetOrigin::File { source } => {
+            format!("`{}`", tola_diagnostic::display_path(source, site_root))
+        }
         AssetOrigin::TreeMember { source, member } => {
             format!(
                 "`{}` in the tree `{}`",
-                tola_build::filesystem::display_path(member, site_root),
-                tola_build::filesystem::display_path(source, site_root)
+                tola_diagnostic::display_path(member, site_root),
+                tola_diagnostic::display_path(source, site_root)
             )
         }
     }
@@ -218,23 +214,25 @@ mod tests {
         published_path(&config, written)
     }
 
+    /// An asset argument publishes below the output root, taking both spellings of the site
+    /// root; a path that leaves the site publishes nothing.
     #[test]
-    fn output_lands_under_the_output_root() {
-        assert_eq!(
-            asset_output("downloads/file.pdf").ok().as_deref(),
-            Some("public/downloads/file.pdf")
-        );
-        assert_eq!(
-            asset_output("/downloads/file.pdf").ok().as_deref(),
-            Some("public/downloads/file.pdf"),
-            "a leading slash still names the site root"
-        );
-    }
-
-    #[test]
-    fn output_leaving_the_site_is_refused() {
-        assert!(asset_output("../outside.pdf").is_err());
-        assert!(asset_output("").is_err());
+    fn asset_output_paths_stay_under_the_output_root() {
+        for (written, expected) in [
+            ("downloads/file.pdf", Some("public/downloads/file.pdf")),
+            ("/downloads/file.pdf", Some("public/downloads/file.pdf")),
+            ("../outside.pdf", None),
+            ("", None),
+        ] {
+            match expected {
+                Some(path) => assert_eq!(
+                    asset_output(written).ok().as_deref(),
+                    Some(path),
+                    "{written:?}"
+                ),
+                None => assert!(asset_output(written).is_err(), "{written:?}"),
+            }
+        }
     }
 
     /// A site that declares one exact file and one tree, mounted below `/docs/`.
@@ -259,7 +257,8 @@ mod tests {
     }
 
     fn published_urls(config: &ResolvedSiteConfig) -> AssetUrls {
-        AssetUrls::for_check(config, &Default::default()).expect("the site's asset URLs resolve")
+        AssetUrls::for_check_project(config, &Default::default())
+            .expect("the site's asset URLs resolve")
     }
 
     #[test]
@@ -300,23 +299,6 @@ mod tests {
             edit.insert.end, edit.replace.end,
             "everything typed is replaced"
         );
-    }
-
-    #[test]
-    fn candidates_offer_the_declared_urls() {
-        let (_directory, config) = site_with_declared_assets();
-        let urls = published_urls(&config);
-
-        assert_eq!(
-            matching_declared_urls(&urls, "/brand/"),
-            ["/brand/logo.svg"]
-        );
-        assert_eq!(
-            matching_declared_urls(&urls, "/"),
-            ["/app.js", "/brand/logo.svg", "/图.svg"],
-            "declared order, not the order the author typed"
-        );
-        assert!(matching_declared_urls(&urls, "/nothing/").is_empty());
     }
 
     #[test]

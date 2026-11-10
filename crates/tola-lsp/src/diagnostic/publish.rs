@@ -7,7 +7,10 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use lsp_server::{Message, Notification};
 use lsp_types::notification::{Notification as LspNotification, PublishDiagnostics};
-use lsp_types::{Diagnostic as EditorDiagnostic, PublishDiagnosticsParams, Uri};
+use lsp_types::{
+    Diagnostic as EditorDiagnostic, DiagnosticSeverity, NumberOrString, PublishDiagnosticsParams,
+    Range, Uri,
+};
 use tola_diagnostic::{Diagnostic, Severity};
 use tola_typst_syntax::names;
 
@@ -16,6 +19,9 @@ use crate::sources::OpenSources;
 use super::projection::{DiagnosticTexts, editor_diagnostic};
 use super::store::{ClientDiagnostics, carries_cause};
 use super::unread::{unread_documents, unread_import_diagnostics};
+
+/// The most problems one document's report shows; a longer report ends in one summary note.
+const MAX_DOCUMENT_DIAGNOSTICS: usize = 100;
 
 /// One publish's client output, the site and document it addresses, and the check it reports.
 pub(crate) struct PublishInputs<'a, W: Write> {
@@ -80,6 +86,7 @@ impl ClientDiagnostics {
         }
         let mut current = BTreeSet::new();
         for (path, diagnostics) in documents {
+            let diagnostics = bounded(diagnostics);
             for (uri, version) in self.recipients(&path, open)? {
                 current.insert(uri.as_str().to_owned());
                 self.report(output, features, uri, version, diagnostics.clone())?;
@@ -109,7 +116,8 @@ impl ClientDiagnostics {
         Ok(())
     }
 
-    /// Send one document's report and keep it for the client's next pull.
+    /// Send one document's report unless the client already holds it, and keep it for the
+    /// client's next pull.
     fn report(
         &mut self,
         output: &mut impl Write,
@@ -127,8 +135,13 @@ impl ClientDiagnostics {
             .collect();
         let mut parameters = PublishDiagnosticsParams::new(uri.clone(), diagnostics, version);
         features.diagnostics(&mut parameters);
-        // The version is the server's own record of what it reported, not a wire field: a client
-        // that never asked for versions still has its reports compared against the text it synced.
+        // A report the client already holds is not sent again: a recheck of an untouched document
+        // would otherwise repeat every item.
+        let unchanged = self.already_reports(&uri, parameters.version, &parameters.diagnostics);
+        // The report still takes this check's version and causes: a pull answers about the version
+        // the client has synced, and its result id stands because the items did not change. The
+        // version is the server's own record, not a wire field, so a client that never asked for
+        // versions still has its reports compared against the text it synced.
         self.keep(
             &uri,
             version,
@@ -137,7 +150,7 @@ impl ClientDiagnostics {
         );
         // A client that pulls asks for what it shows, and its own collection is separate from the
         // pushed one, so pushing these items too would show them twice.
-        if features.pull_diagnostics {
+        if unchanged || features.pull_diagnostics {
             return Ok(());
         }
         let message: Message =
@@ -171,12 +184,46 @@ impl ClientDiagnostics {
     /// table does. A document of another root — a builtin package's own file — is not this site's
     /// to report on.
     fn held_documents(&self, root: &Path, open: &OpenSources) -> Vec<PathBuf> {
-        let root = tola_build::filesystem::normalize_existing_prefix(root);
+        let root = tola_input::normalize_existing_prefix(root);
         open.view()
             .iter()
             .map(|parsed| root.join(parsed.source.id().vpath().get_without_slash()))
             .collect()
     }
+}
+
+/// One document's projected diagnostics, cut to what its report shows.
+///
+/// The note that counts the hidden problems is appended after the cut, so it is never itself
+/// truncated.
+fn bounded(mut diagnostics: Vec<EditorDiagnostic>) -> Vec<EditorDiagnostic> {
+    if diagnostics.len() <= MAX_DOCUMENT_DIAGNOSTICS {
+        return diagnostics;
+    }
+    let hidden = diagnostics.len() - MAX_DOCUMENT_DIAGNOSTICS;
+    diagnostics.truncate(MAX_DOCUMENT_DIAGNOSTICS);
+    diagnostics.push(summary(hidden));
+    diagnostics
+}
+
+/// The one author-facing note a cut report ends with.
+fn summary(hidden: usize) -> EditorDiagnostic {
+    let message = match hidden {
+        1 => "1 more problem is not shown".to_owned(),
+        hidden => format!("{hidden} more problems are not shown"),
+    };
+    let code = Some(NumberOrString::String(
+        crate::codes::editor::TOO_MANY_PROBLEMS.to_string(),
+    ));
+    EditorDiagnostic::new(
+        Range::default(),
+        Some(DiagnosticSeverity::INFORMATION),
+        code,
+        Some("tola".into()),
+        message,
+        None,
+        None,
+    )
 }
 
 /// The log line one diagnostic no site document reaches reads as.
@@ -216,7 +263,7 @@ fn log_message(diagnostic: &Diagnostic) -> (String, lsp_types::MessageType) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::diagnostic::tests::{features, reports, selected_interfaces};
+    use crate::diagnostic::tests::{Site, features, reports, selected_interfaces};
     use tola_diagnostic::{Diagnostic, Severity};
 
     #[test]
@@ -326,5 +373,35 @@ mod tests {
                     .to_owned()
             ]
         );
+    }
+    /// A document with more problems than a report shows keeps the first ones and ends in one note
+    /// counting the rest, which the cut never reaches.
+    #[test]
+    fn oversized_report_is_cut_and_summarized() {
+        let mut site = Site::new(&[("content/page.typ", "Body\n")]);
+        site.publish(
+            (0..MAX_DOCUMENT_DIAGNOSTICS + 50)
+                .map(|index| {
+                    Diagnostic::at_path(
+                        tola_diagnostic::codes::typst::COMPILE,
+                        Severity::Error,
+                        "content/page.typ",
+                        format!("problem {index}"),
+                    )
+                })
+                .collect(),
+        );
+        let diagnostics = site.diagnostics();
+        assert_eq!(diagnostics.len(), MAX_DOCUMENT_DIAGNOSTICS + 1);
+        for (index, diagnostic) in diagnostics[..MAX_DOCUMENT_DIAGNOSTICS].iter().enumerate() {
+            assert_eq!(diagnostic.message, format!("problem {index}"));
+        }
+        let summary = &diagnostics[MAX_DOCUMENT_DIAGNOSTICS];
+        assert_eq!(
+            summary.code,
+            Some(NumberOrString::String("editor.too_many_problems".into()))
+        );
+        assert_eq!(summary.severity, Some(DiagnosticSeverity::INFORMATION));
+        assert_eq!(summary.message, "50 more problems are not shown");
     }
 }

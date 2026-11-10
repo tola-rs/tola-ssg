@@ -44,6 +44,16 @@ pub trait FileProvider: Send + Sync {
 #[derive(Debug, Default)]
 pub struct EmptyFiles;
 
+impl<T: FileProvider + ?Sized> FileProvider for Arc<T> {
+    fn target(&self, id: FileId) -> Option<FileTarget> {
+        (**self).target(id)
+    }
+
+    fn owned_namespaces(&self) -> &'static [&'static str] {
+        (**self).owned_namespaces()
+    }
+}
+
 impl FileProvider for EmptyFiles {
     fn target(&self, _id: FileId) -> Option<FileTarget> {
         None

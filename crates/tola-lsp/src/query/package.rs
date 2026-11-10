@@ -427,7 +427,7 @@ fn definition_uri(
         return crate::identity::client_uri(id, site_root, client_root)
             .context("a site file has a client address");
     };
-    let view = tola_build::filesystem::layout::builtin_packages(site_root);
+    let view = tola_input::layout::builtin_packages(site_root);
     match verified_package_view(id, &view) {
         Some(mirror) => Ok(client_root.address(&mirror)?),
         None => Ok(crate::identity::source_uri(id, site_root)?),
@@ -981,8 +981,12 @@ mod tests {
         })
         .expect("a completion query")
         .1;
-        let package_access =
-            PackageAccess::new(config, &tola_build::BuildResources::new(), published);
+        let package_access = PackageAccess::new(
+            config,
+            Arc::new(tola_typst::LocalPackages::new([], std::iter::empty::<String>()).unwrap()),
+            &tola_build::BuildResources::new(),
+            published,
+        );
         match respond(PackageQuery {
             config,
             package_access: &package_access,
@@ -1025,7 +1029,7 @@ mod tests {
         let package = builtin_package(&spec).expect("a builtin package");
         let id = entrypoint(&package, &manifest(&package).expect("a manifest")).expect("an entry");
         let embedded = crate::identity::embedded_source(id).expect("a builtin package source");
-        let view = tola_build::filesystem::layout::builtin_packages(&resolved);
+        let view = tola_input::layout::builtin_packages(&resolved);
         let mirror = crate::identity::package_view_path(id, &view).unwrap();
         std::fs::create_dir_all(mirror.parent().unwrap()).unwrap();
         std::fs::write(&mirror, embedded.as_bytes()).unwrap();
@@ -1049,7 +1053,12 @@ mod tests {
         })
         .expect("a definition query")
         .1;
-        let package_access = PackageAccess::new(&config, &tola_build::BuildResources::new(), &[]);
+        let package_access = PackageAccess::new(
+            &config,
+            Arc::new(tola_typst::LocalPackages::new([], std::iter::empty::<String>()).unwrap()),
+            &tola_build::BuildResources::new(),
+            &[],
+        );
         let reply = respond(PackageQuery {
             config: &config,
             package_access: &package_access,
@@ -1164,7 +1173,12 @@ mod tests {
             VirtualPath::new("lib.typ").unwrap(),
         )
         .unwrap();
-        let mut access = PackageAccess::new(&config, &tola_build::BuildResources::new(), &[]);
+        let mut access = PackageAccess::new(
+            &config,
+            Arc::new(tola_typst::LocalPackages::new([], std::iter::empty::<String>()).unwrap()),
+            &tola_build::BuildResources::new(),
+            &[],
+        );
         access.local_packages =
             Arc::new(tola_typst::LocalPackages::new([package], ["local"]).unwrap());
         let (source, cursor) = marked_source("#import \"@local/de|mo:0.1.0\"\n");

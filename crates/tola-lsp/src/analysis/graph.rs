@@ -152,7 +152,7 @@ pub(crate) fn graph(inputs: GraphInputs<'_>) -> Result<Arc<NameGraph>> {
     // so the dependents walk reaches the site's files under the identity their readers hold.
     let boundary = view.site_boundary(boundary);
     let boundary = boundary.as_ref();
-    let root: &Path = &tola_build::filesystem::normalize_existing_prefix(root);
+    let root: &Path = &tola_input::normalize_existing_prefix(root);
     if view.is_unnamed(source.id()) {
         let names = view
             .by_id(source.id())
@@ -453,9 +453,7 @@ fn collect_reached_source(
     }
     // The bytes belong to the physical buffer; the ID keeps this module's import base.
     let physical = matches!(target.root(), VirtualRoot::Project).then(|| {
-        tola_build::filesystem::normalize_existing_prefix(
-            &root.join(target.vpath().get_without_slash()),
-        )
+        tola_input::normalize_existing_prefix(&root.join(target.vpath().get_without_slash()))
     });
     let Some(text) = reached_text(target, root, boundary, physical.as_deref(), view, resolver)
     else {

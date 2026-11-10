@@ -7,6 +7,7 @@ help:
 
 # Check application dependencies and isolated no-default library APIs on Windows.
 check target:
+    cargo check --locked --target {{ quote(target) }} -p tola-fs --all-targets
     cargo check --locked --target {{ quote(target) }} -p tola-build --all-targets
     cargo check --locked --target {{ quote(target) }} -p tola-subprocess --all-targets
     cargo check --locked --target {{ quote(target) }} -p tola --all-targets
@@ -18,6 +19,7 @@ check target:
 # Run the native tests, keeping each library's feature resolution isolated.
 [env('RUSTFLAGS', '-D warnings')]
 test:
+    cargo test --locked -p tola-fs
     cargo test --locked -p tola-build
     cargo test --locked -p tola-subprocess
     cargo test --locked -p tola

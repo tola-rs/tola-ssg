@@ -4,6 +4,7 @@ members = [
     "crates/tola-address",
     "crates/tola-build",
     "crates/tola-lsp",
+    "crates/tola-module",
     "crates/tola-minify",
     "crates/tola-packages",
     "crates/tola-pronunciations",
@@ -13,6 +14,8 @@ members = [
     "crates/tola-highlight",
     "crates/tola-icons",
     "crates/tola-image",
+    "crates/tola-input",
+    "crates/tola-fs",
     "crates/tola-config",
     "crates/tola-datalog",
     "crates/tola-subprocess",
@@ -58,8 +61,11 @@ tola-diagnostic = { version = "0.8.2-pre.1", path = "crates/tola-diagnostic" }
 tola-highlight = { version = "0.8.2-pre.1", path = "crates/tola-highlight" }
 tola-icons = { version = "0.8.2-pre.1", path = "crates/tola-icons" }
 tola-image = { version = "0.8.2-pre.1", path = "crates/tola-image" }
+tola-input = { version = "0.8.2-pre.1", path = "crates/tola-input" }
+tola-fs = { version = "0.8.2-pre.1", path = "crates/tola-fs" }
 tola-lsp = { version = "0.8.2-pre.1", path = "crates/tola-lsp" }
 tola-minify = { version = "0.8.2-pre.1", path = "crates/tola-minify" }
+tola-module = { version = "0.8.2-pre.1", path = "crates/tola-module" }
 tola-packages = { version = "0.8.2-pre.1", path = "crates/tola-packages" }
 tola-pronunciations = { version = "0.8.2-pre.1", path = "crates/tola-pronunciations" }
 tola-slugify = { version = "0.8.2-pre.1", path = "crates/tola-slugify" }
@@ -107,6 +113,9 @@ arc-swap = "1.9.2"
 tola-address.workspace = true
 tola-diagnostic.workspace = true
 tola-highlight.workspace = true
+tola-input.workspace = true
+tola-fs.workspace = true
+tola-module.workspace = true
 tola-packages.workspace = true
 tola-build.workspace = true
 tola-subprocess.workspace = true
@@ -120,14 +129,13 @@ anyhow = "1.0.104"
 anstream = "1.0.0"
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 cap-std = "4.0.3"
-cap-fs-ext = "4.0.3"
 which = "8.0.6"
 clap = { version = "4.6.6", features = ["derive", "string", "wrap_help"] }
 clap_complete = "4.6.9"
 clap_complete_nushell = "4.6.2"
 clap_mangen = "0.3.3"
 codespan-reporting = "0.11.1"
-owo-colors = { version = "4.3.0", features = ["supports-colors"] }
+owo-colors = "4.3.0"
 parking_lot = "0.12.5"
 crossterm = { version = "0.29.0", default-features = false, features = ["events", "windows", "bracketed-paste"] }
 notify = "=9.0.0-rc.5"
@@ -182,7 +190,6 @@ fsevents-tests = []
 rustix = { version = "1.1.4", features = ["fs", "event"] }
 
 [target.'cfg(windows)'.dependencies]
-winapi-util = "0.1.11"
 windows-sys = { version = "0.61.2", features = ["Win32_Storage_FileSystem", "Win32_Foundation", "Win32_System_IO"] }
 
 [dev-dependencies]

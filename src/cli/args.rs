@@ -2,36 +2,60 @@
 
 use clap::{ColorChoice, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use std::ffi::OsString;
-use std::path::{Path, PathBuf};
-use tola_build::InputScope;
+use std::path::PathBuf;
+use tola_input::{InputMode, InputScope};
 
 use crate::editor::Editor;
 use crate::i18n::HelpLanguage;
 
+// Headings are set per argument: `next_help_heading` on a flattened struct is a command
+// setting, so it leaks into arguments the caller adds after the flatten (clap 4.0, #4222).
 #[derive(clap::Args, Debug, Clone)]
-pub struct GlobalArgs {
+pub struct ProcessArgs {
     /// Choose when to use colored output.
-    #[arg(long, global = true, default_value = "auto", display_order = 100)]
+    #[arg(
+        long,
+        global = true,
+        help_heading = "Global options",
+        default_value = "auto",
+        display_order = 100
+    )]
     pub color: ColorChoice,
 
     /// Show debug events; repeat for trace events.
-    #[arg(short = 'v', long, global = true, action = clap::ArgAction::Count, display_order = 101)]
+    #[arg(short = 'v', long, global = true, help_heading = "Global options", action = clap::ArgAction::Count, display_order = 101)]
     pub verbose: u8,
 
     /// Hide progress, but keep warnings and errors.
-    #[arg(short = 'q', long, global = true, display_order = 102)]
+    #[arg(
+        short = 'q',
+        long,
+        global = true,
+        help_heading = "Global options",
+        display_order = 102
+    )]
     pub quiet: bool,
 
     /// Append detailed logs to a file
-    #[arg(long, global = true, value_hint = clap::ValueHint::FilePath, display_order = 103)]
+    #[arg(long, global = true, help_heading = "Global options", value_hint = clap::ValueHint::FilePath, display_order = 103)]
     pub log_file: Option<PathBuf>,
 
     /// Do not record a detailed session log.
-    #[arg(long, global = true, conflicts_with = "log_file", display_order = 104)]
+    #[arg(
+        long,
+        global = true,
+        help_heading = "Global options",
+        conflicts_with = "log_file",
+        display_order = 104
+    )]
     pub no_log_file: bool,
+}
 
+/// The input scope and lock policy one command runs under.
+#[derive(clap::Args, Debug, Clone, Copy, Default)]
+pub struct InputArgs {
     /// Use no network; packages, icons, and fonts already on this machine still apply.
-    #[arg(long, global = true, display_order = 105)]
+    #[arg(long, help_heading = "Input options", display_order = 105)]
     pub offline: bool,
 
     /// Build only from the site's own sources and its `[vendor]` inputs.
@@ -39,92 +63,17 @@ pub struct GlobalArgs {
     /// Also refuses host package roots, host caches, system fonts, and source files outside the
     /// site. This is the check CI runs: freeze the site's external inputs with `tola vendor` on a
     /// machine with network access, commit them, then `tola build --pure` there.
-    #[arg(long, global = true, display_order = 106)]
+    #[arg(long, help_heading = "Input options", display_order = 106)]
     pub pure: bool,
 
     /// Refuse to write `tola.lock`; fail when a declaration no longer matches it.
     ///
     /// `--pure` implies this.
-    #[arg(long, global = true, display_order = 107)]
+    #[arg(long, help_heading = "Input options", display_order = 107)]
     pub locked: bool,
-
-    /// Write `tola help` documentation in `en` (default) or `zh`.
-    #[arg(long, global = true, value_name = "LANGUAGE", display_order = 107, value_parser = parse_help_language)]
-    pub lang: Option<HelpLanguage>,
-
-    /// Do not page `tola help` documentation.
-    #[arg(long, global = true, display_order = 108)]
-    pub no_pager: bool,
 }
 
-impl GlobalArgs {
-    /// Parse global flags that a module invocation carries before its command name.
-    pub fn adopt_prefix(&mut self, arguments: &mut Vec<OsString>) -> Result<(), String> {
-        while let Some(argument) = arguments
-            .first()
-            .and_then(|value| value.to_str())
-            .map(str::to_owned)
-        {
-            let mut consumed = 1;
-            match argument.as_str() {
-                "--" => break,
-                "--color" => {
-                    let value = arguments
-                        .get(1)
-                        .and_then(|value| value.to_str())
-                        .ok_or_else(|| "--color requires a value".to_owned())?;
-                    self.color = Self::parse_color(value)?;
-                    consumed = 2;
-                }
-                value if value.starts_with("--color=") => {
-                    self.color = Self::parse_color(&value["--color=".len()..])?;
-                }
-                "--log-file" => {
-                    let value = arguments
-                        .get(1)
-                        .ok_or_else(|| "--log-file requires a path".to_owned())?;
-                    self.log_file = Some(PathBuf::from(value));
-                    consumed = 2;
-                }
-                value if value.starts_with("--log-file=") => {
-                    self.log_file = Some(PathBuf::from(&value["--log-file=".len()..]));
-                }
-                "--lang" => {
-                    let value = arguments
-                        .get(1)
-                        .and_then(|value| value.to_str())
-                        .ok_or_else(|| "--lang requires a value".to_owned())?;
-                    self.lang = Some(parse_help_language(value)?);
-                    consumed = 2;
-                }
-                value if value.starts_with("--lang=") => {
-                    self.lang = Some(parse_help_language(&value["--lang=".len()..])?);
-                }
-                "--offline" => self.offline = true,
-                "--pure" => self.pure = true,
-                "--locked" => self.locked = true,
-                "--no-log-file" => self.no_log_file = true,
-                "--no-pager" => self.no_pager = true,
-                "-q" | "--quiet" => self.quiet = true,
-                "-v" | "--verbose" => self.verbose = self.verbose.saturating_add(1),
-                value if value.starts_with("-v") && value[1..].chars().all(|c| c == 'v') => {
-                    self.verbose = self.verbose.saturating_add((value.len() - 1) as u8);
-                }
-                _ => break,
-            }
-            if self.log_file.is_some() && self.no_log_file {
-                return Err("--log-file conflicts with --no-log-file".to_owned());
-            }
-            arguments.drain(0..consumed);
-        }
-        Ok(())
-    }
-
-    /// Build a clap command augmented with these options.
-    pub fn augment(command: clap::Command) -> clap::Command {
-        <Self as clap::Args>::augment_args(command)
-    }
-
+impl ProcessArgs {
     pub fn parse_color(value: &str) -> Result<ColorChoice, String> {
         match value {
             "auto" => Ok(ColorChoice::Auto),
@@ -137,21 +86,59 @@ impl GlobalArgs {
     }
 }
 
+/// The site a command reads: its configuration and the host package roots that override it.
+#[derive(clap::Args, Debug, Clone, Default)]
+pub struct SiteArgs {
+    #[command(flatten)]
+    pub config: ConfigFileArgs,
+
+    #[command(flatten)]
+    pub packages: TypstPackageArgs,
+}
+
+/// The build overrides and compiler font inputs a build accepts.
+#[derive(clap::Args, Debug, Clone, Default)]
+pub struct BuildArgs {
+    #[command(flatten)]
+    pub overrides: BuildOverrideArgs,
+
+    #[command(flatten)]
+    pub fonts: CompilerFontArgs,
+}
+
+impl BuildArgs {
+    pub(super) fn from_fonts(fonts: CompilerFontArgs) -> Self {
+        Self {
+            fonts,
+            ..Self::default()
+        }
+    }
+}
+
 #[derive(Parser, Debug, Clone)]
-#[command(version = version_text(), about, long_about = None, arg_required_else_help = true, disable_help_subcommand = true)]
+#[command(version = version_text(), about, long_about = None, disable_help_subcommand = true)]
 pub struct Cli {
     #[command(flatten)]
-    pub global: GlobalArgs,
+    pub global: ProcessArgs,
 
     #[command(subcommand)]
     pub command: Commands,
+
+    /// Input options adopted from an extension invocation's prefix.
+    #[arg(skip)]
+    pub extension_input: InputArgs,
 }
 
 impl Cli {
+    fn input(&self) -> &InputArgs {
+        self.command.input().unwrap_or(&self.extension_input)
+    }
+
     pub fn input_scope(&self) -> InputScope {
-        if self.global.pure {
+        let input = self.input();
+        if input.pure {
             InputScope::Pure
-        } else if self.global.offline {
+        } else if input.offline {
             InputScope::Offline
         } else {
             InputScope::Online
@@ -159,18 +146,19 @@ impl Cli {
     }
 
     /// What this invocation may write, fetch, and read for its inputs.
-    pub fn input_mode(&self) -> tola_build::inputs::InputMode {
-        tola_build::inputs::InputMode::new(self.input_scope(), self.global.locked)
+    pub fn input_mode(&self) -> InputMode {
+        InputMode::new(self.input_scope(), self.input().locked)
     }
 }
 
-/// The `--version` text: the Tola release that wrote this executable and the Typst release it
-/// compiles with.
+/// The `--version` text: the Tola release that wrote this executable, the Typst
+/// release it compiles with, and the embedded Nu release.
 fn version_text() -> String {
     format!(
-        "{}\ntypst {}",
+        "{}\ntypst {}\nnu {}",
         env!("CARGO_PKG_VERSION"),
-        typst::utils::version().raw()
+        typst::utils::version().raw(),
+        tola_nu::NU_VERSION
     )
 }
 
@@ -182,13 +170,33 @@ fn parse_help_language(value: &str) -> Result<HelpLanguage, String> {
 }
 
 #[derive(Subcommand, Debug, Clone)]
+pub enum ModuleCommand {
+    /// Check the manifest and declared files without running any code.
+    Check {
+        /// Module directory.
+        #[arg(default_value = ".", value_hint = clap::ValueHint::DirPath)]
+        directory: PathBuf,
+    },
+    /// Run hooks.before-pack and write a checked release directory.
+    Pack {
+        /// Source module directory.
+        #[arg(default_value = ".", value_hint = clap::ValueHint::DirPath)]
+        source: PathBuf,
+
+        /// Replace this directory with the complete release.
+        #[arg(long, value_name = "DIR", value_hint = clap::ValueHint::DirPath)]
+        output: PathBuf,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
 pub enum Commands {
     /// Refresh the inputs `tola.lock` records.
     Update {
         #[command(flatten)]
-        config: ConfigFileArgs,
+        input: InputArgs,
         #[command(flatten)]
-        packages: TypstPackageArgs,
+        site: SiteArgs,
         #[command(flatten)]
         update: UpdateArgs,
     },
@@ -196,31 +204,36 @@ pub enum Commands {
     /// Create a new Tola site.
     Init(InitArgs),
 
+    /// Check or package a standalone module directory.
+    Module {
+        #[command(subcommand)]
+        command: ModuleCommand,
+    },
+
     /// Build the site and write its output files.
     Build {
         #[command(flatten)]
-        config: ConfigFileArgs,
+        input: InputArgs,
         #[command(flatten)]
-        packages: TypstPackageArgs,
+        site: SiteArgs,
         #[command(flatten)]
-        build: BuildOverrideArgs,
-        #[command(flatten)]
-        fonts: CompilerFontArgs,
+        build: BuildArgs,
         /// Print this build's result and diagnostics as JSON.
         #[arg(long)]
         json: bool,
+        /// Indent the JSON result. Requires --json.
+        #[arg(long, requires = "json")]
+        pretty: bool,
     },
 
     /// Build and serve the site, rebuilding when files change.
     Dev {
         #[command(flatten)]
-        config: ConfigFileArgs,
+        input: InputArgs,
         #[command(flatten)]
-        packages: TypstPackageArgs,
+        site: SiteArgs,
         #[command(flatten)]
-        build: BuildOverrideArgs,
-        #[command(flatten)]
-        fonts: CompilerFontArgs,
+        build: BuildArgs,
         #[command(flatten)]
         development: DevelopmentArgs,
     },
@@ -230,30 +243,27 @@ pub enum Commands {
     /// Uses production build settings without running after-publish commands.
     Preview {
         #[command(flatten)]
-        config: ConfigFileArgs,
+        input: InputArgs,
         #[command(flatten)]
-        packages: TypstPackageArgs,
+        site: SiteArgs,
         #[command(flatten)]
-        build: BuildOverrideArgs,
-        #[command(flatten)]
-        fonts: CompilerFontArgs,
+        build: BuildArgs,
         #[command(flatten)]
         server: ServerArgs,
     },
 
     /// Build and check the complete site without committing output files.
     ///
-    /// Runs before-build and generate-outputs hooks. These trusted
+    /// Runs hooks.before-build and hooks.generate-outputs. These trusted
     /// hook scripts may generate source files. Does not run after-publish commands.
     Check {
         #[command(flatten)]
-        config: ConfigFileArgs,
+        input: InputArgs,
         #[command(flatten)]
-        packages: TypstPackageArgs,
+        site: SiteArgs,
         #[command(flatten)]
-        build: BuildOverrideArgs,
-        #[command(flatten)]
-        fonts: CompilerFontArgs,
+        build: BuildArgs,
+
         /// Analyze the site's own sources without building anything.
         ///
         /// Every `.typ` file the site owns is parsed, and the sources that do not parse are
@@ -267,14 +277,17 @@ pub enum Commands {
         /// Print this check's result and diagnostics as JSON.
         #[arg(long)]
         json: bool,
+        /// Indent the JSON result. Requires --json.
+        #[arg(long, requires = "json")]
+        pretty: bool,
     },
 
     /// Format the site's Typst sources.
     Fmt {
         #[command(flatten)]
-        config: ConfigFileArgs,
+        input: InputArgs,
         #[command(flatten)]
-        packages: TypstPackageArgs,
+        site: SiteArgs,
         /// Report the sources that are not formatted, without writing them.
         #[arg(long)]
         check: bool,
@@ -283,9 +296,9 @@ pub enum Commands {
     /// Inspect source files, resources, and resolved configuration.
     Inspect {
         #[command(flatten)]
-        config: ConfigFileArgs,
+        input: InputArgs,
         #[command(flatten)]
-        packages: TypstPackageArgs,
+        site: SiteArgs,
         #[command(flatten)]
         fonts: CompilerFontArgs,
         #[command(subcommand)]
@@ -295,9 +308,9 @@ pub enum Commands {
     /// Evaluate a model query declared by a module or an explicit Typst file.
     Query {
         #[command(flatten)]
-        config: ConfigFileArgs,
+        input: InputArgs,
         #[command(flatten)]
-        packages: TypstPackageArgs,
+        site: SiteArgs,
         #[command(flatten)]
         fonts: CompilerFontArgs,
         #[command(flatten)]
@@ -307,7 +320,9 @@ pub enum Commands {
     /// Read project text and check or apply changes with explicit input digests.
     Edit {
         #[command(flatten)]
-        config: ConfigFileArgs,
+        input: InputArgs,
+        #[command(flatten)]
+        site: SiteArgs,
         #[command(subcommand)]
         command: super::commands::edit::EditCommand,
     },
@@ -315,9 +330,9 @@ pub enum Commands {
     /// Freeze the packages this site's build used into its own vendor directory.
     Vendor {
         #[command(flatten)]
-        config: ConfigFileArgs,
+        input: InputArgs,
         #[command(flatten)]
-        packages: TypstPackageArgs,
+        site: SiteArgs,
         #[command(flatten)]
         vendor: VendorArgs,
         #[command(flatten)]
@@ -338,9 +353,9 @@ pub enum Commands {
     /// A workspace that holds no `tola.toml` is served as the documents it holds.
     Lsp {
         #[command(flatten)]
-        config: ConfigFileArgs,
+        input: InputArgs,
         #[command(flatten)]
-        packages: TypstPackageArgs,
+        site: SiteArgs,
         #[command(flatten)]
         fonts: CompilerFontArgs,
     },
@@ -357,12 +372,16 @@ pub enum Commands {
     /// Run the embedded Nushell runtime or its language server.
     #[command(
         override_usage = "tola nu [OPTIONS] <ENTRY> [ARGS]...\n       tola nu --lsp",
+        after_help = "`nu` runs the script directly: `-q`, `-v`, `--color`, `--log-file`, `--no-log-file`, `--lang` and `--no-pager` do not apply. `--pure` and `--offline` still set the script's input scope.",
         after_long_help = "Examples:\n  tola nu tools/build.nu\n  tola nu @tola-scripts/image metadata photo.png\n  tola nu @tola-scripts/image resize photo.png photo.webp --width 640 --op fit-width --format webp\n  tola nu @tola-modules/catalog --help\n\nIn Nu, `use tola` provides `tola query`; `use tola query` imports\nthe unqualified `query`. Import `use tola cli` for finite `cli capture`\nand `use tola image` for `image metadata-file` and `image resize-file`.\nUse `tola dev --json` as a native external command for continuous JSON lines.\nSite libraries use `use tola-modules catalog` and declare `[nu]` with\n`entry = \"tools/mod.nu\"` in tola-module.toml. Direct module invocations\nrun that entry's exported main command."
     )]
     Nu(NuArgs),
 
     /// Read configuration and package documentation.
     Help(HelpArgs),
+
+    /// Print the Tola, Typst, and embedded Nu versions.
+    Version(VersionArgs),
 
     /// Render a diagnostic JSON report through the build renderer.
     Diagnostic {
@@ -395,6 +414,9 @@ pub struct UpdateArgs {
 #[derive(clap::Args, Debug, Clone)]
 pub struct NuArgs {
     #[command(flatten)]
+    pub input: InputArgs,
+
+    #[command(flatten)]
     pub config: ConfigFileArgs,
 
     /// Serve the Nushell language server over standard input and output.
@@ -421,6 +443,9 @@ pub struct NuArgs {
 
 #[derive(clap::Args, Debug, Clone, Default)]
 pub struct HelpArgs {
+    #[command(flatten)]
+    pub input: InputArgs,
+
     /// `"[TABLE]"`, `"@tola-scripts/NAME" [EXPORT...]`, or a `tola-help://` address.
     #[arg(value_name = "TARGET", num_args = 0..)]
     pub targets: Vec<String>,
@@ -437,6 +462,24 @@ pub struct HelpArgs {
         conflicts_with = "interactive"
     )]
     pub format: HelpFormat,
+
+    /// Write `tola help` documentation in `en` (default) or `zh`.
+    #[arg(long, value_name = "LANGUAGE", value_parser = parse_help_language)]
+    pub lang: Option<HelpLanguage>,
+
+    /// Do not page `tola help` documentation.
+    #[arg(long)]
+    pub no_pager: bool,
+}
+
+#[derive(clap::Args, Debug, Clone, Default)]
+pub struct VersionArgs {
+    /// Print the versions as JSON.
+    #[arg(long)]
+    pub json: bool,
+    /// Indent the JSON output. Requires --json.
+    #[arg(long, requires = "json")]
+    pub pretty: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
@@ -496,6 +539,9 @@ pub struct SkillArgs {
 
 #[derive(clap::Args, Debug, Clone)]
 pub struct InitArgs {
+    #[command(flatten)]
+    pub input: InputArgs,
+
     /// Site directory; omit to initialize the current directory.
     #[arg(value_hint = clap::ValueHint::DirPath)]
     pub path: Option<PathBuf>,
@@ -512,7 +558,7 @@ pub struct InitArgs {
     #[arg(long, value_name = "MODULE", value_hint = clap::ValueHint::DirPath)]
     pub from: Option<PathBuf>,
 
-    /// Name the module in the new site; defaults to its manifest name.
+    /// Choose the module alias in the new site.
     #[arg(long, value_name = "NAME", requires = "from")]
     pub alias: Option<String>,
 
@@ -534,7 +580,7 @@ pub struct ConfigFileArgs {
     #[arg(
         short = 'C',
         long = "config",
-        global = true,
+        help_heading = "Site options",
         value_hint = clap::ValueHint::FilePath
     )]
     pub path: Option<PathBuf>,
@@ -546,30 +592,30 @@ pub struct TypstPackageArgs {
     ///
     /// It cannot replace what `{vendor}/typst-packages` already carries; `tola vendor --refresh`
     /// re-selects without reading that copy.
-    #[arg(long, global = true, value_hint = clap::ValueHint::DirPath)]
+    #[arg(long, help_heading = "Site options", value_hint = clap::ValueHint::DirPath)]
     pub package_path: Option<PathBuf>,
 
     /// Typst package cache directory on this host, searched after the local package directory.
-    #[arg(long, global = true, value_hint = clap::ValueHint::DirPath)]
+    #[arg(long, help_heading = "Site options", value_hint = clap::ValueHint::DirPath)]
     pub package_cache_path: Option<PathBuf>,
 }
 
 #[derive(clap::Args, Debug, Clone, Default)]
 pub struct BuildOverrideArgs {
     /// Override the configured published directory for this build.
-    #[arg(short = 'o', long, value_hint = clap::ValueHint::DirPath)]
+    #[arg(short = 'o', long, help_heading = "Build options", value_hint = clap::ValueHint::DirPath)]
     pub publish_dir: Option<PathBuf>,
 
     /// Enable or disable HTML, CSS, and JavaScript minification; omit the value for true.
-    #[arg(short, long, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true", require_equals = false)]
+    #[arg(short, long, help_heading = "Build options", num_args = 0..=1, default_missing_value = "true")]
     pub minify: Option<bool>,
 
     /// Override the site origin, such as <https://example.com> (no path).
-    #[arg(long, value_hint = clap::ValueHint::Url)]
+    #[arg(long, help_heading = "Build options", value_hint = clap::ValueHint::Url)]
     pub origin: Option<String>,
 
     /// Override the deployment URL path, such as /docs/.
-    #[arg(long = "base-path")]
+    #[arg(long = "base-path", help_heading = "Build options")]
     pub base_path: Option<String>,
 }
 
@@ -590,7 +636,7 @@ pub struct DevelopmentArgs {
     pub server: ServerArgs,
 
     /// Enable or disable automatic rebuilds; omit the value for true.
-    #[arg(short, long, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true", require_equals = false)]
+    #[arg(short, long, num_args = 0..=1, default_missing_value = "true")]
     pub watch: Option<bool>,
 
     /// Run every reusable generator on each rebuild; disable `dev = "reuse"` for this session.
@@ -612,7 +658,7 @@ pub enum InspectCommand {
     /// List configured icon collections or the names in one collection.
     Icons(IconInspectArgs),
     /// List the fonts available to the Typst compiler, independently of browser CSS fonts.
-    Fonts(JsonOutputArgs),
+    Fonts(OutputArgs),
     /// Show resolved configuration, module choices, and site paths.
     Config(InspectConfigArgs),
 }
@@ -630,15 +676,18 @@ pub struct QueryArgs {
 }
 
 #[derive(clap::Args, Debug, Clone, Default)]
-pub struct JsonOutputArgs {
-    /// Indent the JSON output.
+pub struct OutputArgs {
+    /// Write the machine-readable result as compact JSON.
     #[arg(long)]
+    pub json: bool,
+    /// Indent the JSON output. Requires --json.
+    #[arg(long, requires = "json")]
     pub pretty: bool,
-    /// Write the ordinary JSON result without opening an interactive browser.
-    #[arg(long, value_hint = clap::ValueHint::FilePath)]
+    /// Write the machine-readable result to this file. Requires --json.
+    #[arg(long, requires = "json", value_hint = clap::ValueHint::FilePath)]
     pub output: Option<PathBuf>,
     /// Browse the result in a terminal; Enter returns the selected value, q closes.
-    #[arg(short = 'i', long)]
+    #[arg(short = 'i', long, conflicts_with_all = ["json", "output"])]
     pub interactive: bool,
 }
 
@@ -647,7 +696,7 @@ pub struct InspectConfigArgs {
     #[command(flatten)]
     pub build: BuildOverrideArgs,
     #[command(flatten)]
-    pub display: JsonOutputArgs,
+    pub display: OutputArgs,
 }
 
 #[derive(clap::Args, Debug, Clone, Default)]
@@ -656,7 +705,7 @@ pub struct IconInspectArgs {
     #[arg(value_name = "NAMESPACE")]
     pub namespace: Option<String>,
     #[command(flatten)]
-    pub display: JsonOutputArgs,
+    pub display: OutputArgs,
 }
 
 #[derive(clap::Args, Debug, Clone, Default)]
@@ -665,20 +714,23 @@ pub struct SourceInspectArgs {
     #[arg(value_hint = clap::ValueHint::AnyPath)]
     pub paths: Vec<PathBuf>,
     #[command(flatten)]
-    pub display: JsonOutputArgs,
+    pub display: OutputArgs,
 }
 
 #[derive(clap::Args, Debug, Clone, Default)]
 pub struct DoctorArgs {
     #[command(flatten)]
-    pub config: ConfigFileArgs,
+    pub input: InputArgs,
 
     #[command(flatten)]
-    pub packages: TypstPackageArgs,
+    pub site: SiteArgs,
 
     /// Print environment and diagnostics as JSON for issue reports.
     #[arg(long)]
     pub json: bool,
+    /// Indent the JSON output. Requires --json.
+    #[arg(long, requires = "json")]
+    pub pretty: bool,
 }
 
 /// The compiler font inputs one invocation overrides.
@@ -691,14 +743,14 @@ pub struct CompilerFontArgs {
     #[arg(
         id = "font_paths",
         long = "font-path",
-        global = true,
+        help_heading = "Font options",
         value_name = "DIR",
         value_hint = clap::ValueHint::DirPath
     )]
     pub paths: Vec<PathBuf>,
 
     /// Do not use system fonts, even when `[typst.fonts] system` is on.
-    #[arg(long = "ignore-system-fonts", global = true)]
+    #[arg(long = "ignore-system-fonts", help_heading = "Font options")]
     pub ignore_system: bool,
 }
 
@@ -707,9 +759,10 @@ pub enum EditorCommand {
     /// Regenerate editor packages and merge workspace settings.
     Setup {
         #[command(flatten)]
-        config: ConfigFileArgs,
+        input: InputArgs,
         #[command(flatten)]
-        packages: TypstPackageArgs,
+        site: SiteArgs,
+
         /// Editors to configure; omit to choose interactively.
         #[arg(value_enum)]
         editors: Vec<Editor>,
@@ -723,9 +776,9 @@ pub enum EditorCommand {
     /// Regenerate editor packages without changing editor settings.
     Packages {
         #[command(flatten)]
-        config: ConfigFileArgs,
+        input: InputArgs,
         #[command(flatten)]
-        packages: TypstPackageArgs,
+        site: SiteArgs,
     },
     /// Print one editor's configuration and where it belongs, without writing files.
     Template {
@@ -753,7 +806,7 @@ pub struct VendorArgs {
 impl Cli {
     pub fn parse_for_process() -> Self {
         let arguments = std::env::args_os().collect::<Vec<_>>();
-        let color = requested_color(&arguments);
+        let color = super::argv::color_hint(&arguments);
         let stdout_color =
             if crate::terminal::color::enabled(color, crate::terminal::color::Stream::Stdout) {
                 ColorChoice::Always
@@ -780,7 +833,8 @@ impl Cli {
         let mut cli = Self::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
         if let Commands::Extension(arguments) = &mut cli.command {
             let namespace = arguments.remove(0);
-            let result = cli.global.adopt_prefix(arguments);
+            let result =
+                super::argv::adopt_prefix(&mut cli.global, &mut cli.extension_input, arguments);
             arguments.insert(0, namespace);
             if let Err(error) = result {
                 clap::Error::raw(clap::error::ErrorKind::InvalidValue, error).exit();
@@ -795,6 +849,7 @@ impl Commands {
         match self {
             Self::Update { .. } => "update",
             Self::Init(_) => "init",
+            Self::Module { .. } => "module",
             Self::Build { .. } => "build",
             Self::Dev { .. } => "dev",
             Self::Preview { .. } => "preview",
@@ -812,75 +867,72 @@ impl Commands {
             Self::Manpage(_) => "manpage",
             Self::Nu(_) => "nu",
             Self::Help(_) => "help",
+            Self::Version(_) => "version",
             Self::Diagnostic { .. } => "diagnostic",
             Self::Extension(_) => "extension",
         }
     }
 
+    /// Input options this command accepts, when it resolves inputs.
+    pub(crate) fn input(&self) -> Option<&InputArgs> {
+        match self {
+            Self::Update { input, .. }
+            | Self::Build { input, .. }
+            | Self::Dev { input, .. }
+            | Self::Preview { input, .. }
+            | Self::Check { input, .. }
+            | Self::Fmt { input, .. }
+            | Self::Inspect { input, .. }
+            | Self::Query { input, .. }
+            | Self::Edit { input, .. }
+            | Self::Vendor { input, .. }
+            | Self::Lsp { input, .. } => Some(input),
+            Self::Init(args) => Some(&args.input),
+            Self::Doctor(args) => Some(&args.input),
+            Self::Nu(args) => Some(&args.input),
+            Self::Help(args) => Some(&args.input),
+            Self::Editor { command } => match command {
+                EditorCommand::Setup { input, .. } | EditorCommand::Packages { input, .. } => {
+                    Some(input)
+                }
+                EditorCommand::Template { .. } => None,
+            },
+            Self::Module { .. }
+            | Self::Skill(_)
+            | Self::Version(_)
+            | Self::Completions(_)
+            | Self::Manpage(_)
+            | Self::Diagnostic { .. } => None,
+            Self::Extension(_) => None,
+        }
+    }
+
+    /// Site inputs this command reads, when it reads a site.
+    pub(crate) fn site(&self) -> Option<&SiteArgs> {
+        match self {
+            Self::Update { site, .. }
+            | Self::Build { site, .. }
+            | Self::Check { site, .. }
+            | Self::Fmt { site, .. }
+            | Self::Vendor { site, .. }
+            | Self::Dev { site, .. }
+            | Self::Preview { site, .. }
+            | Self::Inspect { site, .. }
+            | Self::Edit { site, .. }
+            | Self::Lsp { site, .. }
+            | Self::Query { site, .. }
+            | Self::Editor {
+                command: EditorCommand::Setup { site, .. } | EditorCommand::Packages { site, .. },
+            } => Some(site),
+            Self::Doctor(args) => Some(&args.site),
+            _ => None,
+        }
+    }
+
     /// Site configuration this command loads, when it loads one.
     pub(crate) fn config_file(&self) -> Option<&ConfigFileArgs> {
-        match self {
-            Self::Update { config, .. }
-            | Self::Build { config, .. }
-            | Self::Check { config, .. }
-            | Self::Fmt { config, .. }
-            | Self::Vendor { config, .. }
-            | Self::Dev { config, .. }
-            | Self::Preview { config, .. }
-            | Self::Inspect { config, .. }
-            | Self::Edit { config, .. }
-            | Self::Lsp { config, .. }
-            | Self::Query { config, .. }
-            | Self::Editor {
-                command: EditorCommand::Setup { config, .. },
-            } => Some(config),
-            Self::Doctor(args) => Some(&args.config),
-            _ => None,
-        }
+        self.site().map(|site| &site.config)
     }
-
-    /// File this command writes to a caller-chosen path, when it writes one.
-    pub(crate) fn written_output(&self) -> Option<&Path> {
-        match self {
-            Self::Manpage(args) => args.output.as_deref(),
-            Self::Skill(args) => args.output.as_deref(),
-            Self::Inspect { command, .. } => match command {
-                InspectCommand::Sources(args) => args.display.output.as_deref(),
-                InspectCommand::Icons(args) => args.display.output.as_deref(),
-                InspectCommand::Fonts(args) => args.output.as_deref(),
-                InspectCommand::Config(args) => args.display.output.as_deref(),
-            },
-            Self::Query { query, .. } => query.options.display.output.as_deref(),
-            _ => None,
-        }
-    }
-}
-
-fn requested_color(arguments: &[OsString]) -> ColorChoice {
-    let mut color = ColorChoice::Auto;
-    let mut index = 1;
-    while index < arguments.len() {
-        let argument = arguments[index].to_string_lossy();
-        if argument == "--" {
-            break;
-        }
-        let value = if argument == "--color" {
-            index += 1;
-            arguments.get(index).map(|value| value.to_string_lossy())
-        } else {
-            argument.strip_prefix("--color=").map(Into::into)
-        };
-        if let Some(value) = value {
-            color = match value.as_ref() {
-                "always" => ColorChoice::Always,
-                "never" => ColorChoice::Never,
-                "auto" => ColorChoice::Auto,
-                _ => color,
-            };
-        }
-        index += 1;
-    }
-    color
 }
 
 #[cfg(test)]
@@ -888,309 +940,92 @@ mod tests {
     use super::*;
 
     #[test]
-    fn source_selection_font_directories_independent() {
-        for arguments in [
-            &["tola", "inspect", "sources", "content/QHXS.typ"][..],
-            &[
-                "tola",
-                "inspect",
-                "--font-path",
-                "fonts",
-                "sources",
-                "content/QHXS.typ",
-            ][..],
-            &[
-                "tola",
-                "inspect",
-                "sources",
-                "content/QHXS.typ",
-                "--font-path",
-                "fonts",
-            ][..],
-        ] {
-            let cli = Cli::try_parse_from(arguments).unwrap();
-            let Commands::Inspect {
-                command: InspectCommand::Sources(sources),
-                fonts,
-                ..
-            } = cli.command
-            else {
-                panic!("expected source inspection");
-            };
-            assert_eq!(sources.paths, [PathBuf::from("content/QHXS.typ")]);
-            let expected_fonts = if arguments.contains(&"--font-path") {
-                vec![PathBuf::from("fonts")]
-            } else {
-                Vec::new()
-            };
-            assert_eq!(fonts.paths, expected_fonts);
-        }
+    fn font_options_never_become_source_paths() {
+        let cli = Cli::try_parse_from([
+            "tola",
+            "inspect",
+            "--font-path",
+            "fonts",
+            "sources",
+            "content/QHXS.typ",
+        ])
+        .unwrap();
+        let Commands::Inspect {
+            command: InspectCommand::Sources(sources),
+            fonts,
+            ..
+        } = cli.command
+        else {
+            panic!("expected source inspection");
+        };
+        assert_eq!(sources.paths, [PathBuf::from("content/QHXS.typ")]);
+        assert_eq!(fonts.paths, [PathBuf::from("fonts")]);
     }
 
-    fn path_text(path: &Option<PathBuf>) -> String {
-        path.as_deref()
-            .map(|path| path.display().to_string())
-            .unwrap_or_default()
-    }
-
-    /// The three states of a command-line flag as the invocation wrote it.
-    fn flag_state(value: Option<bool>) -> &'static str {
-        match value {
-            Some(true) => "true",
-            Some(false) => "false",
-            None => "unset",
-        }
+    fn build_override(argv: &[&str]) -> BuildOverrideArgs {
+        let cli = Cli::try_parse_from(argv.iter().copied()).unwrap();
+        let Commands::Build { build, .. } = cli.command else {
+            panic!("expected build");
+        };
+        build.overrides
     }
 
     #[test]
-    fn parsed_lines_reach_their_options() {
-        type Shown = fn(&Cli) -> String;
-        let cases: &[(&[&str], Shown, &str)] = &[
-            (
-                &[
-                    "tola",
-                    "build",
-                    "--config",
-                    "custom.toml",
-                    "--package-path",
-                    "typst-packages",
-                ],
-                |cli| match &cli.command {
-                    Commands::Build {
-                        config, packages, ..
-                    } => format!(
-                        "{}/{}",
-                        path_text(&config.path),
-                        path_text(&packages.package_path)
-                    ),
-                    _ => panic!("expected build command"),
-                },
-                "custom.toml/typst-packages",
-            ),
-            (
-                &["tola", "completions", "zsh"],
-                |cli| match &cli.command {
-                    Commands::Completions(args) => args
-                        .shell
-                        .to_possible_value()
-                        .expect("completion shells have a value name")
-                        .get_name()
-                        .to_owned(),
-                    _ => panic!("expected completions command"),
-                },
-                "zsh",
-            ),
-            (
-                &["tola", "build", "--minify=false"],
-                |cli| match &cli.command {
-                    Commands::Build { build, .. } => flag_state(build.minify).to_owned(),
-                    _ => panic!("expected build command"),
-                },
-                "false",
-            ),
-            (
-                &["tola", "build"],
-                |cli| match &cli.command {
-                    Commands::Build { build, .. } => flag_state(build.minify).to_owned(),
-                    _ => panic!("expected build command"),
-                },
-                "unset",
-            ),
-            (
-                &["tola", "dev", "--minify", "--watch"],
-                |cli| match &cli.command {
-                    Commands::Dev {
-                        build, development, ..
-                    } => format!(
-                        "{}/{}",
-                        flag_state(build.minify),
-                        flag_state(development.watch)
-                    ),
-                    _ => panic!("expected development command"),
-                },
-                "true/true",
-            ),
-            (
-                &["tola", "manpage", "--output", "tola.1"],
-                |cli| match &cli.command {
-                    Commands::Manpage(args) => path_text(&args.output),
-                    _ => panic!("expected manpage command"),
-                },
-                "tola.1",
-            ),
-            (
-                &[
-                    "tola",
-                    "preview",
-                    "--interface",
-                    "127.0.0.1",
-                    "--port",
-                    "8080",
-                ],
-                |cli| match &cli.command {
-                    Commands::Preview { server, .. } => format!(
-                        "{}/{}",
-                        server.interface.expect("preview interface"),
-                        server.port.expect("preview port")
-                    ),
-                    _ => panic!("expected preview command"),
-                },
-                "127.0.0.1/8080",
-            ),
-            (
-                &["tola", "dev", "--port", "8080", "--watch=false"],
-                |cli| match &cli.command {
-                    Commands::Dev { development, .. } => format!(
-                        "{}/{}",
-                        development.server.port.expect("development port"),
-                        flag_state(development.watch)
-                    ),
-                    _ => panic!("expected development command"),
-                },
-                "8080/false",
-            ),
-            (
-                &[
-                    "tola",
-                    "check",
-                    "--origin",
-                    "https://example.com",
-                    "--base-path",
-                    "/docs/",
-                ],
-                |cli| match &cli.command {
-                    Commands::Check { build, .. } => format!(
-                        "{}/{}",
-                        build.origin.as_deref().unwrap_or_default(),
-                        build.base_path.as_deref().unwrap_or_default()
-                    ),
-                    _ => panic!("expected check command"),
-                },
-                "https://example.com//docs/",
-            ),
-            (
-                &[
-                    "tola",
-                    "inspect",
-                    "config",
-                    "--publish-dir",
-                    "dist",
-                    "--minify=false",
-                ],
-                |cli| match &cli.command {
-                    Commands::Inspect {
-                        command: InspectCommand::Config(args),
-                        ..
-                    } => {
-                        let build = &args.build;
-                        format!(
-                            "{}/{}",
-                            path_text(&build.publish_dir),
-                            flag_state(build.minify)
-                        )
-                    }
-                    _ => panic!("expected config command"),
-                },
-                "dist/false",
-            ),
-            (
-                &[
-                    "tola",
-                    "editor",
-                    "setup",
-                    "--package-path",
-                    "typst-packages",
-                    "--package-cache-path",
-                    "downloaded-packages",
-                    "--dry-run",
-                    "vscode",
-                ],
-                |cli| match &cli.command {
-                    Commands::Editor {
-                        command:
-                            EditorCommand::Setup {
-                                packages, dry_run, ..
-                            },
-                    } => format!(
-                        "{}/{}/{}",
-                        path_text(&packages.package_path),
-                        path_text(&packages.package_cache_path),
-                        dry_run
-                    ),
-                    _ => panic!("expected editor setup"),
-                },
-                "typst-packages/downloaded-packages/true",
-            ),
-            (
-                &["tola", "editor", "template", "neovim"],
-                |cli| match &cli.command {
-                    Commands::Editor {
-                        command: EditorCommand::Template { editor },
-                    } => editor
-                        .to_possible_value()
-                        .expect("editors have a value name")
-                        .get_name()
-                        .to_owned(),
-                    _ => panic!("expected editor template"),
-                },
-                "neovim",
-            ),
-            (
-                &["tola", "-vv", "build"],
-                |cli| cli.global.verbose.to_string(),
-                "2",
-            ),
-            (
-                &["tola", "check", "--offline", "--pure"],
-                |cli| format!("{}/{}", cli.global.offline, cli.global.pure),
-                "true/true",
-            ),
-            (
-                &["tola", "dev", "--log-file", "session.jsonl"],
-                |cli| {
-                    format!(
-                        "{}/{}/{}",
-                        path_text(&cli.global.log_file),
-                        cli.global.verbose,
-                        cli.command.name()
-                    )
-                },
-                "session.jsonl/0/dev",
-            ),
-            (
-                &[
-                    "tola",
-                    "init",
-                    "author site",
-                    "--from",
-                    "theme",
-                    "--alias",
-                    "forest",
-                ],
-                |cli| match &cli.command {
-                    Commands::Init(args) => format!(
-                        "{}/{}/{}",
-                        path_text(&args.path),
-                        path_text(&args.from),
-                        args.alias.as_deref().unwrap_or("")
-                    ),
-                    _ => panic!("expected init command"),
-                },
-                "author site/theme/forest",
-            ),
-        ];
+    fn minify_reads_an_optional_value() {
+        assert_eq!(
+            build_override(&["tola", "build", "--minify=false"]).minify,
+            Some(false)
+        );
+        assert_eq!(build_override(&["tola", "build"]).minify, None);
+    }
 
-        for (arguments, shown, expected) in cases {
-            let cli = Cli::try_parse_from(arguments.iter().copied())
-                .unwrap_or_else(|error| panic!("{arguments:?} must parse: {error}"));
-            assert_eq!(shown(&cli), *expected, "{arguments:?}");
+    #[test]
+    fn verbosity_counts_repeated_flags() {
+        let cli = Cli::try_parse_from(["tola", "-vv", "build"]).unwrap();
+        assert_eq!(cli.global.verbose, 2);
+    }
+
+    #[test]
+    fn init_forwards_arguments_after_separator() {
+        let cli = Cli::try_parse_from(["tola", "init", "site", "--from", "theme", "--", "--force"])
+            .unwrap();
+        let Commands::Init(args) = cli.command else {
+            panic!("expected init");
+        };
+        assert_eq!(args.args, [OsString::from("--force")]);
+    }
+
+    #[test]
+    fn help_lists_only_the_options_a_command_runs() {
+        let command = Cli::command();
+        let completions = command.find_subcommand("completions").unwrap();
+        for long in ["pure", "lang", "no-pager"] {
+            assert!(
+                !completions
+                    .get_arguments()
+                    .any(|argument| argument.get_long() == Some(long)),
+                "completions: {long}"
+            );
         }
+        let help = command.find_subcommand("help").unwrap();
+        assert!(
+            help.get_arguments()
+                .any(|argument| argument.get_long() == Some("lang")),
+            "help carries --lang"
+        );
+    }
+
+    #[test]
+    fn input_options_live_on_their_command() {
+        let cli = Cli::try_parse_from(["tola", "build", "--locked"]).unwrap();
+        assert!(cli.input_mode().locked());
+        assert!(Cli::try_parse_from(["tola", "--pure", "build"]).is_err());
+        assert!(Cli::try_parse_from(["tola", "completions", "--pure", "zsh"]).is_err());
     }
 
     /// Site options reach the commands that declare them, and no other.
     ///
-    /// The commands whose decode the table above does not cover, plus the scope refusals: the
-    /// shared option structs are flattened per command, so a missing flatten (or a stray
+    /// The shared option structs are flattened per command, so a missing flatten (or a stray
     /// `global`) changes which command accepts which option.
     #[test]
     fn site_options_stay_scoped_commands() {
@@ -1199,21 +1034,14 @@ mod tests {
         }
         for argv in [
             &["tola", "fmt", "--config", "x.toml", "--check"][..],
-            &["tola", "query", "--package-path", "p", "site.index"][..],
-            &["tola", "edit", "--config", "x.toml", "read", "a.typ"][..],
-            &["tola", "vendor", "--refresh", "--font-path", "f"][..],
-            &["tola", "doctor", "--package-path", "p", "--json"][..],
-            &["tola", "lsp", "--config", "x.toml", "--font-path", "f"][..],
+            &["tola", "inspect", "-C", "x.toml", "sources"][..],
             &["tola", "editor", "setup", "--package-path", "p", "vscode"][..],
-            &["tola", "nu", "--config", "x.toml", "script.nu"][..],
         ] {
             assert!(parses(argv), "{argv:?} must parse");
         }
         for argv in [
-            &["tola", "preview", "--watch=false"][..],
             &["tola", "fmt", "--font-path", "f"][..],
-            &["tola", "lsp", "--watch=false"][..],
-            &["tola", "edit", "--package-path", "p"][..],
+            &["tola", "inspect", "sources", "-C", "x.toml"][..],
             &["tola", "build", "--interface", "127.0.0.1"][..],
         ] {
             assert!(!parses(argv), "{argv:?} must be refused");

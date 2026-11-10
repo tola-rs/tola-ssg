@@ -127,7 +127,7 @@ fn typst_leaves(
 /// The runs of a TOML fence: every table header's name, then the keys and values toml_edit can
 /// point at.
 ///
-/// A dotted header (`[[build.hooks.before-build]]`) is one run: its leading segments name no key
+/// A dotted header (`[[hooks.before-build]]`) is one run: its leading segments name no key
 /// of their own, so the key walk below never reaches them.
 fn toml_spans(source: &str) -> Vec<(Range<usize>, CodeKind)> {
     let Ok(document) = toml_edit::Document::parse(source) else {
@@ -742,7 +742,7 @@ mod tests {
 
     #[test]
     fn dotted_header_covers_every_segment() {
-        let source = "[[build.hooks.before-build]]\nenable = true\n";
+        let source = "[[hooks.before-build]]\nenable = true\n";
         let runs = spans(source, "toml");
 
         assert_eq!(
@@ -750,7 +750,7 @@ mod tests {
                 .map(|(span, kind)| (&source[span.clone()], *kind))
                 .collect::<Vec<_>>(),
             [
-                ("build.hooks.before-build", CodeKind::Literal),
+                ("hooks.before-build", CodeKind::Literal),
                 ("enable", CodeKind::Literal),
                 ("true", CodeKind::Keyword),
             ]

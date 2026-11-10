@@ -355,7 +355,6 @@ mod tests {
         let library = SiteLibrary::new(HostInputs {
             site: Dict::new(),
             modules: Dict::new(),
-            module_validation: None,
             asset_urls: Dict::new(),
             asset_origins: Dict::new(),
             source_records: Array::new(),

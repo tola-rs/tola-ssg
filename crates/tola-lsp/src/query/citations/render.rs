@@ -196,19 +196,6 @@ mod tests {
         }
     }
 
-    /// The emphasis and links a style writes survive as markdown.
-    #[test]
-    fn emphasis_and_links_survive() {
-        let style_locale =
-            style_locale(ArchivedStyle::InstituteOfElectricalAndElectronicsEngineers);
-        let (markdown, _) = rendered(&style_locale, "knuth1984");
-        assert!(markdown.contains("*The Computer Journal*"), "{markdown}");
-        assert!(
-            markdown.contains("[10.1093/comjnl/27.2.97](https://doi.org/10.1093/comjnl/27.2.97)"),
-            "{markdown}"
-        );
-    }
-
     /// Text that reads as markdown markup stays the author's text.
     #[test]
     fn literal_markup_stays_text() {

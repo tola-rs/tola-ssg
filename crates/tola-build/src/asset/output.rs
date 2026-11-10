@@ -14,6 +14,7 @@ pub(crate) struct AssetOutput {
     pub(crate) logical_source: PathBuf,
     /// Validated path relative to the output root.
     pub(crate) output: tola_address::OutputPath,
+    pub(crate) module: Option<super::urls::ModuleAsset>,
     /// Meaning and response media type declared from the logical source.
     declaration: crate::output::semantics::OutputDeclaration,
     /// Identity of the bytes published at `output`, when cache busting asked for one.
@@ -59,7 +60,7 @@ fn configured_tree_member(
         url_prefix
             .output_for(&member)
             .map_err(|cause| AssetOutputError::ReservedPath {
-                member: crate::filesystem::display_path(logical_source, display_root),
+                member: tola_diagnostic::display_path(logical_source, display_root),
                 prefix: url_prefix.to_string(),
                 cause,
             })?;
@@ -70,6 +71,7 @@ fn configured_tree_member(
             logical_source,
         ),
         identity: None,
+        module: None,
     })
 }
 
@@ -85,6 +87,7 @@ pub(crate) fn output_for_configured_file(
             logical_source,
         ),
         identity: None,
+        module: None,
     }
 }
 
@@ -184,7 +187,7 @@ fn filesystem_output_path(
     source: &Path,
     display_root: &Path,
 ) -> Result<OutputPath, AssetOutputError> {
-    let member = crate::filesystem::display_path(source, display_root);
+    let member = tola_diagnostic::display_path(source, display_root);
     let segments =
         member_path_segments(path).map_err(|violation| AssetOutputError::MemberPath {
             member: member.clone(),

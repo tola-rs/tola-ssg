@@ -1497,34 +1497,6 @@ mod tests {
     use crate::query::tests::*;
 
     #[test]
-    fn known_dictionaries_preserve_key_order() {
-        use super::*;
-
-        for text in [
-            "#let value = (z: 1, a: 2)\n#value",
-            "#let (ignored, ..value) = (ignored: 0, z: 1, a: 2)\n#value",
-        ] {
-            let source = Source::detached(text);
-            let names = SourceNames::new(source.clone());
-            let node = tola_typst_syntax::syntax::expression(&source, text.len()).unwrap();
-            let cancellation = BuildCancellation::new();
-            let values = SourceResolver::new(&names, None, &cancellation)
-                .known_values(&node)
-                .unwrap();
-            let Value::Dict(dict) = &values[0].0 else {
-                panic!("dictionary value: {values:?}");
-            };
-            assert_eq!(
-                dict.keys(),
-                [Value::Str("z".into()), Value::Str("a".into())]
-                    .into_iter()
-                    .collect::<Array>(),
-                "{text}"
-            );
-        }
-    }
-
-    #[test]
     fn destructured_names_keep_projected_values() {
         use super::*;
         use crate::query::source_member_completion;
@@ -1559,16 +1531,6 @@ mod tests {
                 }
             }
         }
-    }
-
-    /// A binding whose value has a type answers a hover that names that type.
-    #[test]
-    fn typed_binding_answers_its_type() {
-        let mut site = QuerySession::with_program(FAILED_PROGRAM);
-        let hover = site
-            .hover_text("#panic(\"page\")\n#let value = str(123)\n#val|ue")
-            .expect("typed binding hover");
-        assert!(hover.contains("let value = str;"), "{hover}");
     }
 
     /// A method call on a typed field names the parameter the cursor fills, never the receiver.

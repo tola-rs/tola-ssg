@@ -4,7 +4,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use super::DEV_SERVER_ADDRESS_VERSION;
-use super::layout;
+use tola_input::layout;
 
 /// The address one `tola dev` wrote for a site, withdrawn when that server stops.
 ///

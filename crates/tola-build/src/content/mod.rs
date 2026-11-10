@@ -11,7 +11,7 @@ use std::ffi::OsStr;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use crate::filesystem::normalize_path;
+use tola_input::normalize_path;
 
 /// Complete content-root-relative filename identity for a content source.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -28,7 +28,7 @@ impl ContentId {
 
 impl fmt::Display for ContentId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&crate::filesystem::render_relative(self.as_path()))
+        f.write_str(&tola_diagnostic::render_relative(self.as_path()))
     }
 }
 
@@ -86,7 +86,7 @@ pub(crate) fn discover_content_units_for_config_with_cancellation(
     config: &crate::config::ResolvedSiteConfig,
     cancellation: &crate::cancellation::BuildCancellation,
 ) -> Result<Vec<ContentUnit>, ContentDiscoveryError> {
-    crate::resources::source_boundary(config, crate::InputScope::Online)
+    crate::resources::source_boundary(config, tola_input::InputScope::Online)
         .check(&config.build.content_dir)?;
     discover_from_root(
         &config.build.content_dir,
@@ -105,13 +105,13 @@ pub(crate) fn inventory_may_change(
     if changed_paths.is_empty() {
         return false;
     }
-    let content_root = crate::filesystem::normalize_existing_prefix(&config.build.content_dir);
+    let content_root = tola_input::normalize_existing_prefix(&config.build.content_dir);
     let known_sources = inventory
         .iter()
         .map(|unit| unit.source.as_path())
         .collect::<std::collections::HashSet<_>>();
     changed_paths.iter().any(|changed| {
-        let changed = crate::filesystem::normalize_existing_prefix(changed);
+        let changed = tola_input::normalize_existing_prefix(changed);
         if !changed.starts_with(&content_root) && !content_root.starts_with(&changed) {
             return false;
         }
@@ -190,7 +190,7 @@ fn select_content_units_in_scope_for_root<'units>(
 
         if selected.len() == selected_before {
             return Err(ContentDiscoveryError::NoSourceMatches {
-                scope: crate::filesystem::display_path(scope, &site_root),
+                scope: tola_diagnostic::display_path(scope, &site_root),
             });
         }
     }
@@ -208,12 +208,12 @@ fn discover_from_root(
     cancellation.ensure_active()?;
     if !content_root.is_dir() {
         return Err(ContentDiscoveryError::MissingContentRoot {
-            path: crate::filesystem::display_path(content_root, display_root),
+            path: tola_diagnostic::display_path(content_root, display_root),
         });
     }
     // The walk resolves the root once and neither descends nor collects a symbolic link.
-    let root = crate::filesystem::normalize_existing_prefix(content_root);
-    let entry = crate::filesystem::normalize_existing_prefix(entry);
+    let root = tola_input::normalize_existing_prefix(content_root);
+    let entry = tola_input::normalize_existing_prefix(entry);
     let mut sources = Vec::new();
     collect_typ_sources(&root, display_root, cancellation, &mut sources)?;
     let mut units = Vec::with_capacity(sources.len());
@@ -263,7 +263,7 @@ fn collect_typ_sources(
             entry
                 .file_type()
                 .map_err(|error| ContentDiscoveryError::UnreadableEntry {
-                    path: crate::filesystem::display_path(directory, display_root),
+                    path: tola_diagnostic::display_path(directory, display_root),
                     reason: crate::filesystem::path_failure_reason(&error).to_owned(),
                 })?;
         let path = entry.path();
@@ -289,8 +289,8 @@ pub(crate) fn content_units_with_sources(
     opened: impl IntoIterator<Item = PathBuf>,
     cancellation: &crate::cancellation::BuildCancellation,
 ) -> Result<Vec<ContentUnit>, ContentDiscoveryError> {
-    let root = crate::filesystem::normalize_existing_prefix(&config.build.content_dir);
-    let entry = crate::filesystem::normalize_existing_prefix(&config.build.entry);
+    let root = tola_input::normalize_existing_prefix(&config.build.content_dir);
+    let entry = tola_input::normalize_existing_prefix(&config.build.entry);
     let mut units = inventory.to_vec();
     let mut known = units
         .iter()
@@ -312,7 +312,7 @@ pub(crate) fn content_units_with_sources(
 
 /// The unit a normalized source names, when membership admits it.
 fn eligible_unit(root: &Path, entry: &Path, source: &Path) -> Option<ContentUnit> {
-    let source = crate::filesystem::normalize_existing_prefix(source);
+    let source = tola_input::normalize_existing_prefix(source);
     if source == *entry || !source.starts_with(root) || !has_typ_extension(&source) {
         return None;
     }

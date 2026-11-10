@@ -1,0 +1,20 @@
+[package]
+name = "tola-input"
+version.workspace = true
+edition = "2024"
+rust-version.workspace = true
+description = "Tola input layer: checksums, lock entries, filesystem identities, and cancellable reads"
+license = "MIT"
+repository = "https://github.com/tola-rs/tola-ssg"
+
+[dependencies]
+url = "2.5.8"
+tola-fs.workspace = true
+globset = "0.4.20"
+serde = { version = "1.0.229", default-features = false, features = ["derive"] }
+sha2 = "0.10"
+hex = "0.4.3"
+thiserror = "2.0.20"
+toml = "1.1.4"
+tempfile = "3.27.0"
+tola-address.workspace = true

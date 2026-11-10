@@ -124,7 +124,7 @@ pub fn configured_input_observation(config: &ResolvedSiteConfig) -> InputObserva
         false,
     );
     let lock = config.get_root().join("tola.lock");
-    let identity = crate::filesystem::FilesystemSourceIdentity::from_path(&lock);
+    let identity = tola_input::FilesystemSourceIdentity::from_path(&lock);
     observation.path_pair(
         InputKind::ModuleManifests,
         crate::observation::InputPathScope::Exact,
@@ -133,9 +133,23 @@ pub fn configured_input_observation(config: &ResolvedSiteConfig) -> InputObserva
         identity.physical_path(),
     );
     for (name, declaration) in config.modules() {
+        if let tola_module::ModuleSource::Tarball { tarball } = &declaration.source
+            && let tola_input::TarballLocation::File { path } = &tarball.location
+        {
+            let identity =
+                tola_input::FilesystemSourceIdentity::from_path(&config.get_root().join(path));
+            observation.path_pair(
+                InputKind::ModuleManifests,
+                crate::observation::InputPathScope::Exact,
+                false,
+                identity.logical_path(),
+                identity.physical_path(),
+            );
+        }
         let root = match &declaration.source {
-            crate::modules::ModuleSource::Local { path } => config.get_root().join(path),
-            crate::modules::ModuleSource::Remote { .. } => {
+            tola_module::declaration::ModuleSource::Local { path } => config.get_root().join(path),
+            tola_module::declaration::ModuleSource::Git { .. }
+            | tola_module::declaration::ModuleSource::Tarball { .. } => {
                 match crate::inputs::declaration_root(
                     config.get_root(),
                     config.vendor().path.as_deref(),
@@ -148,7 +162,7 @@ pub fn configured_input_observation(config: &ResolvedSiteConfig) -> InputObserva
             }
         };
         for path in [root.clone(), root.join("tola-module.toml")] {
-            let identity = crate::filesystem::FilesystemSourceIdentity::from_path(&path);
+            let identity = tola_input::FilesystemSourceIdentity::from_path(&path);
             observation.path_pair(
                 InputKind::ModuleManifests,
                 crate::observation::InputPathScope::Exact,
@@ -177,7 +191,7 @@ pub(super) fn input_observation(
     };
     observation.exact_paths(InputKind::FontInventory, true, font_read_paths);
     if let Some(assets) = configured_assets {
-        observation.filesystem_sources(InputKind::ConfiguredAssets, &assets.watch_evidence(), true);
+        assets.record_watch_inputs(&mut observation);
     }
     if let Some(icons) = icons {
         observation.filesystem_sources(InputKind::Icons, &icons.watch_evidence(), true);
@@ -258,6 +272,7 @@ fn joined_inputs(names: &[&str]) -> String {
 /// Revalidate this candidate's evidence before either write policy commits it.
 pub(super) fn input_freshness(
     config: &ResolvedSiteConfig,
+    modules: &tola_module::prepared::PreparedModules,
     producer_caches: &crate::build::RetainedProducerCaches,
     content: &[crate::content::ContentUnit],
     hook_outputs: &[crate::hooks::HookOutputEvidence],
@@ -279,7 +294,7 @@ pub(super) fn input_freshness(
         }
     }
     let hooks_elapsed = started.elapsed();
-    let manifests_fresh = config.module_inputs.manifests_are_fresh(cancellation)?;
+    let manifests_fresh = modules.manifests_are_fresh(&cancellation.bundle_cancellation())?;
     let physical_reads_fresh = producer_caches
         .dependencies
         .physical_reads_are_fresh(producer_caches.host.source_boundary(), cancellation)?;
@@ -290,9 +305,13 @@ pub(super) fn input_freshness(
     let packages_elapsed = started.elapsed();
     let content_inventory_fresh = content_inventory_is_fresh(config, content, cancellation)?;
     let content_elapsed = started.elapsed();
-    let configured_assets_fresh = producer_caches
-        .configured_assets
-        .is_fresh_for(config, cancellation)?;
+    let configured_assets_fresh = producer_caches.configured_assets.is_fresh_for(
+        config,
+        crate::modules::prepared::AppliedAssets {
+            modules: &modules.assets,
+        },
+        cancellation,
+    )?;
     let assets_elapsed = started.elapsed();
     let font_inventory_fresh = producer_caches.host.font_inventory_is_fresh(cancellation)?;
     let total_elapsed = started.elapsed();

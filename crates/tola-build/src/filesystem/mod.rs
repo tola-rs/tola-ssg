@@ -1,27 +1,22 @@
-//! Filesystem path identities, source observations, temporary directories, writes, and
-//! whole-tree replacement.
+//! Filesystem source observations, temporary directories, writes, and whole-tree replacement.
 
 use std::path::Path;
+
+use tola_input::normalize_existing_prefix;
 
 mod dev_server;
 mod file_handle;
 mod identity;
-pub mod layout;
 mod lock;
 mod observation;
 mod output_boundary;
 mod overrides;
 mod owned;
 mod path;
-mod read;
 mod swap;
-mod sys;
 mod write;
 
-/// Disposable local work; formal site inputs must not depend on this directory.
-pub const INTERNAL_DIR: &str = ".tola";
-
-/// The shape the address file [`layout::dev_server_address`] names is written in.
+/// The shape the address file [`tola_input::layout::dev_server_address`] names is written in.
 pub const DEV_SERVER_ADDRESS_VERSION: u32 = 1;
 
 /// The package document a file below a package directory names, when the directory is one.
@@ -77,15 +72,26 @@ pub fn package_document_id(
 /// The pathname must remain in place while any process can hold the site lock.
 pub const SITE_BUILD_LOCK_FILE: &str = ".tola-build.lock";
 
+/// Turn one shared filesystem read error into the build's error type.
+pub(crate) trait FileReadErrorExt {
+    fn into_anyhow(self) -> anyhow::Error;
+}
+
+impl FileReadErrorExt for tola_input::FileReadError {
+    fn into_anyhow(self) -> anyhow::Error {
+        match self {
+            Self::Io(source) => anyhow::Error::new(source),
+            Self::Cancelled(_) => anyhow::Error::new(crate::cancellation::BuildCancelled),
+        }
+    }
+}
+
 pub use dev_server::DevServerAddress;
-pub(crate) use file_handle::open_regular_file;
-pub use identity::FilesystemSourceIdentity;
 pub(crate) use identity::{FilesystemSourceKind, FilesystemWatchEvidence};
 pub(crate) use lock::{FileLock, FileLockError};
 pub(crate) use observation::{
-    FilesystemSourceFile, FilesystemSourceObservation, SelectedTreeObservation, TreeObservation,
-    observe_file_source, observe_tree_source, observe_tree_source_selected, walk_tree_members,
-    walk_tree_members_selected,
+    FilesystemSourceObservation, TreeObservation, observe_file_source,
+    observe_tree_source_selected, walk_tree_members_selected,
 };
 pub use output_boundary::OutputBoundaryError;
 pub(crate) use output_boundary::{
@@ -93,15 +99,10 @@ pub(crate) use output_boundary::{
 };
 pub(crate) use overrides::SourceOverrides;
 pub use owned::owned_files;
-pub use path::SitePathError;
+pub use path::{SitePathError, path_is_within};
 pub(crate) use path::{absolute_path, path_failure_reason, root_relative};
-pub(crate) use path::{canonical_site_root, render_relative, site_relative_absolute};
-pub use path::{
-    display_path, lexical_path_identity, normalize_existing_prefix, normalize_path, path_is_within,
-};
-pub(crate) use read::{FileReadError, read_chunks, read_file_chunks};
+pub(crate) use path::{canonical_site_root, site_relative_absolute};
 pub use swap::{SwapError, SwapMember, TreeSwap, swap_workspace};
-pub(crate) use sys::{automatic_path_is_link_like, encode_path_identity};
 pub use write::atomic_write;
 
 mod fingerprint;

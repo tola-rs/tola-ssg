@@ -41,10 +41,11 @@ pub(super) fn load_source(
                 )
                 .context("unknown package source")?;
                 package_access.boundary.check(&path)?;
-                let physical = tola_build::filesystem::normalize_existing_prefix(&path);
-                match overrides.iter().find(|(open, _)| {
-                    tola_build::filesystem::normalize_existing_prefix(open) == physical
-                }) {
+                let physical = tola_input::normalize_existing_prefix(&path);
+                match overrides
+                    .iter()
+                    .find(|(open, _)| tola_input::normalize_existing_prefix(open) == physical)
+                {
                     Some((_, text)) => Some(text.to_string()),
                     None => read_source_text(&path)?,
                 }
@@ -521,25 +522,6 @@ mod tests {
             0..4,
         )
         .prop_map(String::from_iter)
-    }
-
-    /// The document's own index answers a query about that document, and a copy at other bytes —
-    /// an unsaved edit, a package file — gets its own.
-    #[test]
-    fn index_reuse_follows_text() {
-        let source = Source::detached("#let value = 1\n#value\n".to_owned());
-        let indexed = Arc::new(SourceNames::new(source.clone()));
-        let selection = Selection::new(
-            &source,
-            source.text().len(),
-            &completion_query(Position::new(0, 0)),
-            CheckProgress::NotChecked,
-            Some(Arc::clone(&indexed)),
-        );
-        assert!(Arc::ptr_eq(&selection.names_of(&source), &indexed));
-
-        let edited = Source::new(source.id(), "#let value = 2\n#value\n".to_owned());
-        assert!(!Arc::ptr_eq(&selection.names_of(&edited), &indexed));
     }
 
     /// The ranges of every call nested inside `node`.

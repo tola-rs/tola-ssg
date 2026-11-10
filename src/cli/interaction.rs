@@ -5,7 +5,7 @@ use std::io::{self, IsTerminal, Write};
 
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use tola_build::InputScope;
+use tola_input::InputScope;
 use tola_subprocess::Command;
 
 use crate::cancellation::Cancellation;
@@ -51,7 +51,7 @@ pub(super) fn run<T: DeserializeOwned>(
         .arg(input_path)
         .arg(&result_path)
         .env("TOLA_INPUT_SCOPE", scope.as_str());
-    for (name, value) in super::theme::child_environment() {
+    for (name, value) in super::color::child_environment() {
         command = command.env(name, value);
     }
     super::external::run(command, cancellation)?;

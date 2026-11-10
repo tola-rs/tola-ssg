@@ -30,11 +30,11 @@ pub(super) fn enters_internal_directory(path: &Path) -> bool {
 /// The written path and the path the filesystem resolves are both compared, because a linked
 /// directory reaches its target physically.
 pub(super) fn reaches_internal_directory(root: &Path, path: &Path) -> bool {
-    let reserved = root.join(crate::filesystem::INTERNAL_DIR);
+    let reserved = root.join(tola_input::INTERNAL_DIR);
     portable_path_is_below(path, &reserved)
         || portable_path_is_below(
-            &crate::filesystem::normalize_existing_prefix(path),
-            &crate::filesystem::normalize_existing_prefix(&reserved),
+            &tola_input::normalize_existing_prefix(path),
+            &tola_input::normalize_existing_prefix(&reserved),
         )
 }
 
@@ -42,7 +42,7 @@ pub(super) fn reaches_internal_directory(root: &Path, path: &Path) -> bool {
 fn is_internal_directory_name(name: &std::ffi::OsStr) -> bool {
     name.to_str().is_some_and(|name| {
         tola_address::portable_collision_key(name)
-            == tola_address::portable_collision_key(crate::filesystem::INTERNAL_DIR)
+            == tola_address::portable_collision_key(tola_input::INTERNAL_DIR)
     })
 }
 
@@ -109,5 +109,5 @@ pub(super) fn validate_site_relative_path(
 /// The declaration is unresolved, so `display_path` is asked for the path's own spelling: an
 /// empty root has no prefix to strip, and the renderer still gives `/` separators everywhere.
 pub(super) fn declared_path(path: &Path) -> String {
-    crate::filesystem::display_path(path, Path::new(""))
+    tola_diagnostic::display_path(path, Path::new(""))
 }

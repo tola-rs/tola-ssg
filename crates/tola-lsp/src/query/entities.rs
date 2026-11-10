@@ -3,7 +3,7 @@
 use std::ops::Range;
 
 use anyhow::Result;
-use tola_build::modules::semantics::{SemanticKind, SemanticParameter, SemanticRole};
+use tola_module::semantics::{SemanticKind, SemanticParameter, SemanticRole};
 use tola_typst::typst::foundations::{Arg, Args, Func, Str, Value};
 use tola_typst::typst::syntax::ast::AstNode;
 use tola_typst::typst::syntax::{LinkedNode, Side, Source, Span, Spanned, ast};

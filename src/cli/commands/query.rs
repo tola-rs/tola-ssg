@@ -1,8 +1,9 @@
 //! Model queries use the same evaluator for direct and module-declared commands.
 
 use std::ffi::{OsStr, OsString};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use tola_build::cancellation::BuildCancellation;
 
 use anyhow::{Context, Result, ensure};
 use clap::{Args, FromArgMatches};
@@ -10,20 +11,17 @@ use serde_json::Value;
 use tola_build::BuildResources;
 use tola_build::config::ResolvedSiteConfig;
 use tola_build::modules::query::QueryResult;
-use tola_build::modules::{Query, ResolvedModule};
 use tola_diagnostic::DiagnosticError;
+use tola_module::{LoadedModule, Query};
 
 use crate::cancellation::Cancellation;
-use crate::cli::args::{JsonOutputArgs, QueryArgs};
+use crate::cli::args::{OutputArgs, QueryArgs};
 use crate::cli::output::CommandOutput;
 
 #[derive(Args, Debug, Clone)]
 pub(crate) struct QueryOptions {
-    /// Include schema, diagnostics, and input evidence around the query value.
-    #[arg(long)]
-    pub report: bool,
     #[command(flatten)]
-    pub display: JsonOutputArgs,
+    pub display: OutputArgs,
 }
 
 pub(in crate::cli) fn run(
@@ -35,40 +33,58 @@ pub(in crate::cli) fn run(
 ) -> Result<()> {
     super::read::check_output(&args.options.display, output)?;
     let scope = resources.input_scope();
-    let target = &args.target;
+    let result = evaluate(
+        config,
+        &std::env::current_dir()?,
+        &args.target,
+        args.label.as_deref(),
+        resources,
+        Vec::new(),
+        &cancellation.token(),
+    )?;
+    complete(result, &args.options, &[], scope, output, cancellation)
+}
+
+pub(super) fn evaluate(
+    config: Arc<ResolvedSiteConfig>,
+    directory: &Path,
+    target: &str,
+    label: Option<&str>,
+    resources: BuildResources,
+    overlays: Vec<(PathBuf, Arc<str>)>,
+    cancellation: &BuildCancellation,
+) -> Result<QueryResult> {
     let file = Path::new(target).is_absolute()
         || target.starts_with("./")
         || target.starts_with("../")
         || target.starts_with(".\\")
         || target.starts_with("..\\");
-    let result = if file {
-        let label = args
-            .label
-            .as_deref()
-            .context("a query file requires `--label LABEL`")?;
+    if file {
+        let label = label.context("a query file requires `--label LABEL`")?;
         ensure!(!label.is_empty(), "a query label must not be empty");
         tola_build::modules::query::run_file(
             config,
-            &std::path::absolute(target)?,
+            &directory.join(target),
             label,
             resources,
-            Vec::new(),
-            &cancellation.token(),
-        )?
+            overlays,
+            cancellation,
+        )
+        .map_err(Into::into)
     } else {
         ensure!(
-            args.label.is_none(),
+            label.is_none(),
             "`--label` applies only to an explicit query file"
         );
         let (namespace, local) = target.split_once('.').context(
             "choose a module-qualified query such as `notes.nodes`, or an explicit `./query.typ` file",
         )?;
-        let modules = tola_build::modules::resolve_modules(
+        let modules = tola_build::modules::load_modules(
             config.get_root(),
             config.vendor().path.as_deref(),
             config.modules(),
             resources.input_mode(),
-            &cancellation.token(),
+            cancellation,
         )?;
         super::extensions::check_namespaces(&modules)?;
         let module = modules
@@ -84,17 +100,17 @@ pub(in crate::cli) fn run(
             query,
             target,
             resources,
-            Vec::new(),
-            &cancellation.token(),
-        )?
-    };
-    complete(result, &args.options, &[], scope, output, cancellation)
+            overlays,
+            cancellation,
+        )
+        .map_err(Into::into)
+    }
 }
 
 /// A module-declared query's inputs.
 pub(in crate::cli) struct DeclaredQuery<'a> {
     pub(in crate::cli) config: Arc<ResolvedSiteConfig>,
-    pub(in crate::cli) module: &'a ResolvedModule,
+    pub(in crate::cli) module: &'a LoadedModule,
     pub(in crate::cli) query: &'a Query,
     pub(in crate::cli) name: &'a str,
     pub(in crate::cli) usage: &'a str,
@@ -155,18 +171,14 @@ fn complete(
     mut result: QueryResult,
     options: &QueryOptions,
     projection: &[String],
-    scope: tola_build::InputScope,
+    scope: tola_input::InputScope,
     output: &CommandOutput,
     cancellation: &Cancellation,
 ) -> Result<()> {
     if !result.success {
-        if options.report {
-            super::read::write_json(
-                &serde_json::to_value(&result)?,
-                &options.display,
-                output,
-                cancellation,
-            )?;
+        if options.display.json {
+            let payload = serde_json::json!({ "diagnostics": &result.diagnostics });
+            super::read::write_json(&payload, &options.display, output, cancellation)?;
         }
         return Err(DiagnosticError::new(
             format!("model query `{}` failed", result.query),
@@ -185,17 +197,7 @@ fn complete(
         return Ok(());
     };
     project(&mut selected, projection)?;
-    let value = if options.report {
-        result.result_digest = Some(format!(
-            "blake3:{}",
-            blake3::hash(&serde_json::to_vec(&selected)?).to_hex()
-        ));
-        result.data = Some(selected);
-        serde_json::to_value(result)?
-    } else {
-        selected
-    };
-    super::read::write_json(&value, &options.display, output, cancellation)
+    super::read::write_value(&selected, &options.display, output, cancellation)
 }
 
 fn project(value: &mut Value, fields: &[String]) -> Result<()> {

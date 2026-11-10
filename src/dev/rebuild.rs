@@ -24,7 +24,7 @@ struct DevFailureWatches {
     latest_failed_packages: Vec<tola_typst::PackageCheck>,
     latest_failed_observed_paths: Vec<tola_build::build::ObservedInputPath>,
     typst_recovery_roots: Vec<PathBuf>,
-    module_hook_inputs: Option<tola_build::modules::HookWatchInputs>,
+    module_hook_inputs: Option<tola_module::HookWatchInputs>,
 }
 
 impl DevFailureWatches {
@@ -212,7 +212,7 @@ pub(super) struct RebuildLoop {
     reload: Option<ReloadTransport>,
     shutdown: Cancellation,
     build_session: tola_build::build::BuildSession,
-    input_scope: tola_build::InputScope,
+    input_mode: tola_input::InputMode,
     failure_watches: DevFailureWatches,
     /// The diagnostics the installed revision has, plus any an unpublished attempt added.
     ///
@@ -255,7 +255,7 @@ impl RebuildLoop {
             input.output.log().map(crate::cli::log::LogFile::path),
         )
         .await?;
-        let input_scope = input.resources.input_scope();
+        let input_mode = input.resources.input_mode();
         let build_session = tola_build::build::BuildSession::with_resources(input.resources);
         let (publication_sender, publication_requests) = tokio::sync::mpsc::channel(8);
         Ok(Self {
@@ -269,7 +269,7 @@ impl RebuildLoop {
             reload: input.reload,
             shutdown: input.shutdown,
             build_session,
-            input_scope,
+            input_mode,
             failure_watches: DevFailureWatches::default(),
             reported_diagnostics: Vec::new(),
             round: 0,
@@ -654,7 +654,7 @@ impl RebuildLoop {
         } else {
             match tola_build::modules::prepare_hook_watch(
                 &config,
-                tola_build::inputs::InputMode::new(self.input_scope, false),
+                self.input_mode,
                 &Default::default(),
             ) {
                 Ok(watch) => Some(watch),
@@ -669,7 +669,7 @@ impl RebuildLoop {
         };
         let watch_config = hook_watch
             .as_ref()
-            .map_or_else(|| Arc::clone(&config), |watch| Arc::clone(watch.config()));
+            .map_or_else(|| Arc::clone(&config), |watch| watch.config_arc().clone());
         let hook_inputs = hook_watch
             .as_ref()
             .map(|watch| watch.inputs().clone())
@@ -1347,11 +1347,11 @@ mod tests {
                 std::fs::write(&generated, "first").unwrap();
                 let config_path = root.join("tola.toml");
                 std::fs::write(&config_path,
-                    "[[build.hooks.before-build]]\nname = \"unused\"\ncommand = [\"unused-before-config-rejection\"]\ngenerates = [\"generated\"]\n",
+                    "[[hooks.before-build]]\nname = \"unused\"\nargv = [\"unused-before-config-rejection\"]\ngenerates = [\"generated\"]\n",
                 ).unwrap();
                 let loaded = crate::config::load(
                     Some(&config_path),
-                    tola_build::InputScope::Pure,
+                    tola_input::InputScope::Pure,
                     tola_typst::PackageLocations::from_absolute_roots(None, None).unwrap(),
                     &crate::config::ConfigOverrides::default(),
                 )
@@ -1377,7 +1377,7 @@ mod tests {
                         disable_hook_reuse: false,
                         config_loader,
                         resources: tola_build::BuildResources::new()
-                            .with_input_scope(tola_build::InputScope::Pure),
+                            .with_input_scope(tola_input::InputScope::Pure),
                         sites: crate::dev::site::CurrentSite::new(),
                         reload: None,
                         shutdown: cancellation,

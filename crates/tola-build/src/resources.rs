@@ -5,49 +5,9 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
 use crate::cancellation::{BuildCancellation, BuildCancelled};
-use crate::filesystem::{INTERNAL_DIR, layout};
 use crate::image::PixelCache;
-
-/// Which original inputs a reusable build may consume. Hooks remain trusted host code.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum InputScope {
-    #[default]
-    Online,
-    Offline,
-    Pure,
-}
-
-impl InputScope {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Online => "online",
-            Self::Offline => "offline",
-            Self::Pure => "pure",
-        }
-    }
-
-    /// The scope `online`, `offline`, or `pure` names, and nothing else.
-    pub fn parse(name: &str) -> Option<Self> {
-        match name {
-            "online" => Some(Self::Online),
-            "offline" => Some(Self::Offline),
-            "pure" => Some(Self::Pure),
-            _ => None,
-        }
-    }
-}
-
-/// Network access for built-in package and remote-icon fetching.
-///
-/// Does not constrain the external scripts selected by a host.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum NetworkAccess {
-    /// Missing resources may be downloaded.
-    #[default]
-    Allowed,
-    /// Only resources already available locally may be used.
-    Denied,
-}
+use tola_input::{INTERNAL_DIR, layout};
+use tola_input::{InputScope, NetworkAccess};
 
 /// Shared native I/O resources, independent of a session's accepted build results.
 ///
@@ -88,15 +48,15 @@ impl BuildResources {
     }
 
     /// Refuse to write `tola.lock`; `--pure` implies this through
-    /// [`InputMode::new`](crate::inputs::InputMode::new).
+    /// [`InputMode::new`](tola_input::InputMode::new).
     pub fn with_locked(mut self, locked: bool) -> Self {
         self.locked = locked;
         self
     }
 
     /// What this attempt may write, fetch, and read for its inputs.
-    pub fn input_mode(&self) -> crate::inputs::InputMode {
-        crate::inputs::InputMode::new(self.scope, self.locked)
+    pub fn input_mode(&self) -> tola_input::InputMode {
+        tola_input::InputMode::new(self.scope, self.locked)
     }
 
     /// Effective package tiers. A pure build reads only the roots the site declares — its
@@ -427,15 +387,6 @@ fn request_error(error: reqwest::Error) -> HttpDownloadError {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The name a scope writes is the name it reads back.
-    #[test]
-    fn scope_names_round_trip() {
-        for scope in [InputScope::Online, InputScope::Offline, InputScope::Pure] {
-            assert_eq!(InputScope::parse(scope.as_str()), Some(scope));
-        }
-        assert_eq!(InputScope::parse("Online"), None);
-    }
 
     /// A pure build reads no state below Tola's internal directory: the package view, the module
     /// cache, and inspection state all stay refused.

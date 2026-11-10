@@ -11,7 +11,9 @@ documentation = "https://docs.rs/tola-diagnostic"
 [dependencies]
 anyhow = "1.0.104"
 serde = { version = "1.0.229", default-features = false, features = ["derive"] }
+tola-input.workspace = true
 tola-typst.workspace = true
+toml_edit = "0.25.13"
 typst.workspace = true
 schemars = { version = "1.2.2", optional = true }
 

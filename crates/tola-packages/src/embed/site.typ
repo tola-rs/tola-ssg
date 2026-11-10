@@ -4,6 +4,7 @@
 ///
 /// `site` carries one entry for each `[site]` setting, plus the derived `url`: `origin`,
 /// `base-path`, `url`, `title`, `authors`, `description`, `language`, and `languages`.
+/// `site.options` is the dictionary from the top-level `[options]` table. It defaults to `(:)`.
 ///
 /// `base-path` is the deployment path below the host root, `/` by default. `url` joins
 /// `origin` and `base-path` into the site's canonical address. A site that declares no

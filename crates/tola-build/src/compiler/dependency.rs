@@ -185,7 +185,7 @@ enum DependencyReadEvidence {
 impl DependencyReadEvidence {
     fn freeze(
         read: FileRead,
-        host: &crate::compiler::TypstHost,
+        host: &crate::compiler::SiteHost,
     ) -> Result<Self, ReuseProtocolError> {
         let (evidence, origin) = read.into_evidence_and_origin();
         match origin {
@@ -301,10 +301,10 @@ impl CompilationDependencies {
             ),
         >,
         package_checks: impl IntoIterator<Item = tola_typst::PackageCheck>,
-        host: &crate::compiler::TypstHost,
+        host: &crate::compiler::SiteHost,
         reused: Option<ReusedDependencyReaders<'_>>,
     ) -> anyhow::Result<Self> {
-        let root = crate::filesystem::normalize_path(root);
+        let root = tola_input::normalize_path(root);
         let reused_readers = reused
             .as_ref()
             .map_or(&[][..], |reused| reused.readers)
@@ -351,11 +351,11 @@ impl CompilationDependencies {
         Ok(Self(Arc::new(DependencyReads {
             content_sources: content_sources
                 .into_iter()
-                .map(|path| crate::filesystem::normalize_path(&path))
+                .map(|path| tola_input::normalize_path(&path))
                 .collect(),
             bundle_entries: bundle_entries
                 .into_iter()
-                .map(|path| crate::filesystem::normalize_path(&path))
+                .map(|path| tola_input::normalize_path(&path))
                 .collect(),
             reader_evidence: frozen_readers,
             package_checks: frozen_package_checks,
@@ -369,7 +369,7 @@ impl CompilationDependencies {
         root: &Path,
         reads: impl IntoIterator<Item = FileRead>,
         package_checks: impl IntoIterator<Item = tola_typst::PackageCheck>,
-        host: &crate::compiler::TypstHost,
+        host: &crate::compiler::SiteHost,
     ) -> anyhow::Result<Self> {
         let previous = self
             .reader_evidence
@@ -742,16 +742,16 @@ mod tests {
         bundle_entries: impl IntoIterator<Item = PathBuf>,
         reader_evidence: BTreeMap<TypstDependencyReader, DependencyReaderEvidence>,
     ) -> CompilationDependencies {
-        let root = crate::filesystem::normalize_path(root);
+        let root = tola_input::normalize_path(root);
         CompilationDependencies(Arc::new(DependencyReads {
             path_index: DependencyPathIndex::build(&root, &reader_evidence, &[]),
             content_sources: content_sources
                 .into_iter()
-                .map(|path| crate::filesystem::normalize_path(&path))
+                .map(|path| tola_input::normalize_path(&path))
                 .collect(),
             bundle_entries: bundle_entries
                 .into_iter()
-                .map(|path| crate::filesystem::normalize_path(&path))
+                .map(|path| tola_input::normalize_path(&path))
                 .collect(),
             reader_evidence,
             package_checks: Vec::new(),
@@ -811,7 +811,7 @@ mod tests {
         site_program: &Path,
         reader_evidence: impl IntoIterator<Item = (TypstDependencyReader, Vec<ReadEvidence>)>,
     ) -> CompilationDependencies {
-        let root = crate::filesystem::normalize_path(root);
+        let root = tola_input::normalize_path(root);
         let reader_evidence = reader_evidence
             .into_iter()
             .map(|(reader, reads)| {
@@ -838,7 +838,7 @@ mod tests {
     /// A reader's path as the decision reports it: a reader carries what the filesystem resolves
     /// its read to, which gains the current drive on Windows.
     fn reader_path(path: &str) -> PathBuf {
-        crate::filesystem::normalize_path(Path::new(path))
+        tola_input::normalize_path(Path::new(path))
     }
 
     fn captured_dependencies(
@@ -1032,7 +1032,7 @@ mod tests {
         );
         // A read is watched at both its logical path and the target it resolves to.
         let watched = evidence.physical_read_paths();
-        assert!(watched.contains(&crate::filesystem::normalize_path(root).join("template.typ")));
+        assert!(watched.contains(&tola_input::normalize_path(root).join("template.typ")));
         assert!(watched.contains(&std::fs::canonicalize(&first).unwrap()));
 
         std::fs::remove_file(&logical).unwrap();
@@ -1094,7 +1094,7 @@ mod tests {
         );
         assert_eq!(
             shared.physical_read_paths(),
-            vec![crate::filesystem::normalize_path(&template)]
+            vec![tola_input::normalize_path(&template)]
         );
         assert!(
             shared
@@ -1354,7 +1354,7 @@ mod tests {
             vec![read],
         );
         let cancellation = BuildCancellation::default();
-        let matches = |host: &crate::compiler::TypstHost| {
+        let matches = |host: &crate::compiler::SiteHost| {
             dependencies
                 .virtual_reads_match(
                     |evidence| host.virtual_read_matches(evidence),

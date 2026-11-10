@@ -18,7 +18,7 @@ defaults:
 
 jobs:
   accept:
-    name: Fetch private module (${{ matrix.os }})
+    name: Check private module (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     env:
@@ -63,8 +63,11 @@ jobs:
         with:
           pattern: digest-*
           path: digests
-      - name: Require one digest
+      - name: Compare each selector across platforms
         run: |
           set -euo pipefail
-          cat digests/digest-*/digest.txt
-          test "$(cat digests/digest-*/digest.txt | sort -u | wc -l)" -eq 1
+          first=""
+          for result in digests/digest-*/digest.txt; do
+            if [ -z "$first" ]; then first="$result"; else diff -u "$first" "$result"; fi
+          done
+          cat "$first"

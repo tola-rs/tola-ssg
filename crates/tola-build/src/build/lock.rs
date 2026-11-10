@@ -82,10 +82,10 @@ impl SiteBuildLock {
                 SiteBuildLockError::Cancelled(cancelled)
             }
             crate::filesystem::FileLockError::NotRegularFile => SiteBuildLockError::LockPath {
-                lock: crate::filesystem::display_path(&path, &site_root),
+                lock: tola_diagnostic::display_path(&path, &site_root),
             },
             crate::filesystem::FileLockError::Io(error) => SiteBuildLockError::LockAccess {
-                lock: crate::filesystem::display_path(&path, &site_root),
+                lock: tola_diagnostic::display_path(&path, &site_root),
                 reason: crate::filesystem::path_failure_reason(&error),
                 source: error,
             },

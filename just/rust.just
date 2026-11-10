@@ -33,5 +33,5 @@ build-library:
 # Build the public Rust documentation and fail on broken links.
 [env('RUSTDOCFLAGS', '-D warnings')]
 docs:
-    cargo doc --locked -p tola-address -p tola-datalog -p tola-build -p tola-config -p tola-config-macros -p tola-diagnostic -p tola-subprocess -p tola-nu -p tola-highlight -p tola-icons -p tola-image -p tola-webp -p tola-minify -p tola-packages -p tola-pronunciations -p tola-slugify --no-deps
+    cargo doc --locked -p tola-fs -p tola-input -p tola-module -p tola-address -p tola-datalog -p tola-build -p tola-config -p tola-config-macros -p tola-diagnostic -p tola-subprocess -p tola-nu -p tola-highlight -p tola-icons -p tola-image -p tola-webp -p tola-minify -p tola-packages -p tola-pronunciations -p tola-slugify --no-deps
     for package in tola-typst-syntax tola-typst tola-lsp; do cargo doc --locked -p "$package" --no-deps --no-default-features && cargo doc --locked -p "$package" --no-deps --all-features || exit; done

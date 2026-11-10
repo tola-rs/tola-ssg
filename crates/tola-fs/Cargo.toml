@@ -1,0 +1,23 @@
+[package]
+name = "tola-fs"
+version.workspace = true
+edition = "2024"
+rust-version.workspace = true
+description = "Native filesystem operations"
+license = "MIT"
+repository = "https://github.com/tola-rs/tola-ssg"
+
+[dependencies]
+cap-std = "4.0.3"
+cap-fs-ext = "4.0.3"
+hex = "0.4.3"
+tempfile = "3.27.0"
+thiserror = "2.0.20"
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1.4", features = ["fs"] }
+
+[target.'cfg(windows)'.dependencies]
+renamore = "0.3.2"
+winapi-util = "0.1.11"
+windows-sys = { version = "0.61.2", features = ["Win32_Storage_FileSystem"] }

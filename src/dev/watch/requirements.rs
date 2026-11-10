@@ -32,12 +32,16 @@ pub(crate) fn append_observed_paths<'a>(
             InputKind::FontInventory => ProducerKind::Fonts,
             InputKind::BeforeBuildHookOutputs => ProducerKind::Hooks,
         };
-        requirements.observe_paths(
-            producer,
-            path.scope(),
-            path.required(),
-            [path.path().to_path_buf()],
-        );
+        if let Some((source_prefix, selection)) = path.asset_selection() {
+            requirements.observe_asset_tree(path.path(), path.required(), source_prefix, selection);
+        } else {
+            requirements.observe_paths(
+                producer,
+                path.scope(),
+                path.required(),
+                [path.path().to_path_buf()],
+            );
+        }
     }
 }
 

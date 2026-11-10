@@ -97,7 +97,7 @@ fn run_server(launch: ServerLaunch, purpose: ServerPurpose) -> Result<()> {
         ServerPurpose::Development { .. } => (crate::terminal::EVERY_STAGE, "Building site…"),
         ServerPurpose::Preview => (crate::terminal::PRE_PUBLICATION_STAGES, "Building preview…"),
     };
-    output.hook_overview(&config.build().hooks, purpose.build_mode(), stages)?;
+    output.hook_overview(config.hooks(), purpose.build_mode(), stages)?;
     output.activity(activity)?;
     let command = purpose.command();
     // Response assembly is this runtime's only CPU work: one worker per core up to four keeps a

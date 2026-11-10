@@ -17,14 +17,16 @@ mod cli;
 mod error;
 mod execution;
 mod highlight;
+mod host;
 mod image;
 mod lsp;
 mod modules;
+mod palette;
 mod resources;
 mod signatures;
-mod theme;
 
 pub use error::NuError;
+pub use host::{Diagnostic, Host, Query};
 pub use lsp::serve_lsp;
 pub use modules::{ConfiguredModule, Dependency, ModuleEntry, Origin, SourceOrigin, SourceOverlay};
 pub use nu_protocol::{Flag, PositionalArg, Signature};
@@ -33,7 +35,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, OnceLock,
         atomic::{AtomicBool, Ordering},
     },
 };
@@ -46,6 +48,9 @@ use nu_protocol::{
     engine::{EngineState, Stack, StateWorkingSet},
     record, report_shell_error,
 };
+
+/// The embedded Nushell release every nu-* dependency is pinned to.
+pub const NU_VERSION: &str = "0.116.1";
 
 /// Built-in Nu modules and their short descriptions for command discovery.
 pub const BUILTIN_MODULES: &[(&str, &str)] = &[
@@ -72,6 +77,8 @@ pub struct Runtime {
     overlays: Vec<SourceOverlay>,
     missing_sources: Vec<PathBuf>,
     source_paths: Vec<PathBuf>,
+    host: Arc<OnceLock<Host>>,
+    embedded_signals: bool,
 }
 
 /// The directory and environment one evaluation runs in, chosen by the caller instead of the
@@ -139,8 +146,9 @@ impl Runtime {
             sources.insert(overlay.path.clone(), overlay);
         }
         let overlay_paths = sources.keys().cloned().collect();
-        let builtins = std::iter::once("tola")
-            .chain(BUILTIN_MODULES.iter().map(|&(name, _)| name))
+        let builtins = BUILTIN_MODULES
+            .iter()
+            .map(|&(name, _)| name)
             .map(modules::Library::builtin)
             .collect::<Vec<_>>();
         let binding_paths: Vec<_> = modules
@@ -177,6 +185,7 @@ impl Runtime {
         let mut directories = BTreeSet::new();
         let mut observed_sources = BTreeSet::new();
         let mut attempts = 0;
+        let host = Arc::new(OnceLock::new());
         let entries = loop {
             attempts += 1;
             let count = directories.len();
@@ -188,6 +197,7 @@ impl Runtime {
                 &supplied,
                 &mut directories,
                 &mut observed_sources,
+                &host,
             );
             if !supplied.is_empty() && directories.len() > count {
                 if attempts > observed_sources.len() + 1 {
@@ -300,9 +310,49 @@ impl Runtime {
                 .collect(),
             missing_sources,
             source_paths: used_sources.keys().cloned().collect(),
+            host,
+            embedded_signals: false,
         };
         runtime.ensure_fresh()?;
         Ok(runtime)
+    }
+
+    /// Bind the objects and operations this invocation can access.
+    pub fn with_host(self, host: Host) -> Result<Self> {
+        self.host.set(host).map_err(|_| NuError::Engine)?;
+        Ok(self)
+    }
+
+    /// Use the host's cancellation flag for embedded evaluation.
+    pub fn with_cancellation(mut self, flag: Arc<AtomicBool>) -> Self {
+        self.engine.set_signals(Signals::new(flag));
+        self.embedded_signals = true;
+        self
+    }
+
+    /// Run a script using the signal already installed by the host.
+    pub fn run_embedded(&self, path: &Path, args: &[String]) -> Result<i32> {
+        self.ensure_fresh()?;
+        let mut engine = self.engine.clone();
+        let mut stack = self.stack.clone();
+        Ok(evaluate_file(
+            path,
+            args,
+            false,
+            None,
+            &mut engine,
+            &mut stack,
+        ))
+    }
+
+    fn site_config(&self) -> Option<&Path> {
+        self.host
+            .get()?
+            .site
+            .as_ref()?
+            .get("config-path")?
+            .as_str()
+            .map(Path::new)
     }
 
     /// Resolve only the two explicit module namespaces. There is no filesystem fallback.
@@ -404,7 +454,7 @@ impl Runtime {
         }
         let mut engine = self.engine.clone();
         let mut stack = self.stack.clone();
-        if install_ctrlc_handler(&mut engine).is_err() {
+        if !self.embedded_signals && install_ctrlc_handler(&mut engine).is_err() {
             return 1;
         }
         evaluate_file(path, args, read_stdin, input_scope, &mut engine, &mut stack)
@@ -482,6 +532,8 @@ fn initialize_engine(
     is_lsp: bool,
     context: &InvocationContext,
 ) -> std::result::Result<(EngineState, Stack), ()> {
+    // Nu's environment merges (including display hooks) must keep PWD engine-local.
+    nu_protocol::engine::UPDATE_CWD.store(false, Ordering::Relaxed);
     let engine = nu_cmd_lang::add_default_context(EngineState::new());
     let engine = nu_command::add_shell_command_context(engine);
     let engine = nu_cmd_extra::add_extra_command_context(engine);
@@ -595,7 +647,7 @@ fn initialize_environment(
         report_shell_error(None, engine, &error);
         return Err(());
     }
-    theme::apply(engine);
+    palette::apply(engine);
     let lib_dirs = Value::list(Vec::new(), Span::unknown());
     engine.add_env_var("NU_LIB_DIRS".into(), lib_dirs.clone());
     let mut working_set = StateWorkingSet::new(engine);
@@ -612,7 +664,7 @@ fn initialize_environment(
     }
     engine.add_env_var(
         "NU_VERSION".into(),
-        Value::string("0.116.1", Span::unknown()),
+        Value::string(NU_VERSION, Span::unknown()),
     );
     if let Err(error) = nu_std::load_standard_library(engine) {
         eprintln!("{error:?}");

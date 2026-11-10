@@ -9,6 +9,8 @@ Read the closest `CONTEXT.md` to the code you touch, then walk up. This file is 
 | [`src/CONTEXT.md`](../src/CONTEXT.md) | the `tola` application: commands, development, presentation |
 | [`crates/CONTEXT.md`](../crates/CONTEXT.md) | workspace crates and their ownership |
 | [`crates/tola-build/CONTEXT.md`](../crates/tola-build/CONTEXT.md) | site construction and publication |
+| [`crates/tola-module/CONTEXT.md`](../crates/tola-module/CONTEXT.md) | site modules: declarations, acquisition, preparation, queries, hooks |
+| [`crates/tola-input/README.md`](../crates/tola-input/README.md) | input identity, lock entries, and access limits |
 | [`crates/tola-typst/CONTEXT.md`](../crates/tola-typst/CONTEXT.md) | Typst world, compilation, export, diagnostics transport |
 | [`crates/tola-lsp/CONTEXT.md`](../crates/tola-lsp/CONTEXT.md) | the language service |
 | [`crates/tola-nu/CONTEXT.md`](../crates/tola-nu/CONTEXT.md) | the embedded Nu runtime |

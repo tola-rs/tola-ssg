@@ -8,12 +8,12 @@ use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use tola_typst::{Diagnostics, FileRead, PackageCheck};
 use typst::World;
 
-use crate::compiler::TypstHost;
+use crate::compiler::SiteHost;
 use crate::config::ResolvedSiteConfig;
 use crate::content::{
     ContentSource, ContentUnit, SourceFileInput, SourceRecords, SourceSet, SourcesInput,
 };
-use crate::filesystem::normalize_path;
+use tola_input::normalize_path;
 
 // Compact the source-entry overlay after roughly one eighth of the sources change.
 const SOURCE_ENTRY_OVERLAY_DIVISOR: usize = 8;
@@ -321,10 +321,6 @@ impl SourceAnalysisCache {
         self.sources.root() == root
             && self.sources_identity == *sources.inputs()
             && self.package_bindings.matches(package_bindings)
-            // Whole-Bundle reuse retains its dependency evidence, whose inputs may differ.
-            && self.package_bindings.module_reads() == package_bindings.module_reads()
-            && self.package_bindings.module_package_checks()
-                == package_bindings.module_package_checks()
             && self.matches_content_identity(content)
     }
 
@@ -487,7 +483,7 @@ impl SourceAnalysisErrors {
 
 pub(crate) fn analyze(
     config: &ResolvedSiteConfig,
-    host: &TypstHost,
+    host: &SiteHost,
     content: &[ContentUnit],
     package_bindings: crate::package::SiteBindings,
     reuse: SourceAnalysisReuse<'_>,
@@ -515,7 +511,7 @@ pub(crate) fn analyze(
 
 fn scan(
     config: &ResolvedSiteConfig,
-    host: &TypstHost,
+    host: &SiteHost,
     content: &[ContentUnit],
     package_bindings: crate::package::SiteBindings,
     reuse: SourceAnalysisReuse<'_>,
@@ -645,14 +641,14 @@ fn settle_metadata_rounds(
         else {
             continue;
         };
-        super::diagnostic::ensure_native_reports_succeed(round.config, &diagnostics)?;
+        super::diagnostic::ensure_native_reports_succeed(round.config.get_root(), &diagnostics)?;
         return Ok((diagnostics, dependency_reads));
     }
 }
 
 fn source_analysis_world(
     config: &ResolvedSiteConfig,
-    host: &TypstHost,
+    host: &SiteHost,
     package_bindings: &crate::package::SiteBindings,
     sources: &SourcesInput,
     candidate_files: &Arc<tola_typst::FileView>,
@@ -670,7 +666,7 @@ fn changed_metadata_listing(previous: &SourceSet, next: &SourceSet, root: &Path)
         .iter()
         .zip(next.sources())
         .filter(|(previous, next)| previous.metadata() != next.metadata())
-        .map(|(_, source)| crate::filesystem::display_path(source.source(), root))
+        .map(|(_, source)| tola_diagnostic::display_path(source.source(), root))
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -683,7 +679,7 @@ fn declaration_warnings(
     let sources = entries
         .entries()
         .filter(|entry| entry.declaration.is_none() && entry.declares_with_label)
-        .map(|entry| crate::filesystem::display_path(&entry.source, root))
+        .map(|entry| tola_diagnostic::display_path(&entry.source, root))
         .collect::<Vec<_>>();
     if sources.is_empty() {
         return Arc::default();
@@ -839,7 +835,7 @@ impl Settlement {
 
 struct AnalysisRound<'a> {
     config: &'a ResolvedSiteConfig,
-    host: &'a TypstHost,
+    host: &'a SiteHost,
     reuse: Option<&'a SourceAnalysisCache>,
     candidate_files: &'a Arc<tola_typst::FileView>,
     package_bindings: &'a crate::package::SiteBindings,
@@ -1213,7 +1209,7 @@ mod tests {
 
     fn scan_default(
         config: &ResolvedSiteConfig,
-        host: &TypstHost,
+        host: &SiteHost,
         content: &[ContentUnit],
         reuse: Option<&SourceAnalysisCache>,
     ) -> anyhow::Result<SourceScan> {
@@ -1518,7 +1514,7 @@ mod tests {
         let reads_for = |source: &Path| {
             scan.dependency_reads()
                 .into_iter()
-                .find(|(path, _, _)| path == &crate::filesystem::normalize_path(source))
+                .find(|(path, _, _)| path == &tola_input::normalize_path(source))
                 .map(|(_, reads, _)| reads)
                 .unwrap()
         };

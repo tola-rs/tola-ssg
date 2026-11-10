@@ -369,7 +369,7 @@ fn ensure_error_diagnostic(
 pub(crate) fn site_relative(path: &Path, root: &Path) -> Option<String> {
     let relative = root_relative(path, root);
     (!relative.as_os_str().is_empty() && relative != path)
-        .then(|| crate::filesystem::display_path(path, root))
+        .then(|| tola_diagnostic::display_path(path, root))
 }
 
 /// Typst's wording when the world provides no clock; a wording change drops the guidance.
@@ -517,16 +517,13 @@ fn resolved_report(
 }
 
 /// Retained compiler reports in the site diagnostic model, coalesced per producer.
-fn resolved_reports(
-    config: &crate::config::ResolvedSiteConfig,
-    diagnostics: &Diagnostics,
-) -> Vec<tola_diagnostic::Diagnostic> {
+fn resolved_reports(root: &Path, diagnostics: &Diagnostics) -> Vec<tola_diagnostic::Diagnostic> {
     let mut resolved = diagnostics
         .iter()
         .map(|diagnostic| {
             resolved_diagnostic(
                 diagnostic.clone(),
-                config.get_root(),
+                root,
                 tola_diagnostic::codes::typst::COMPILE,
             )
         })
@@ -537,10 +534,10 @@ fn resolved_reports(
 
 /// Restore report levels before a successful compiler phase can expose its result.
 pub(crate) fn ensure_native_reports_succeed(
-    config: &crate::config::ResolvedSiteConfig,
+    root: &Path,
     diagnostics: &Diagnostics,
 ) -> anyhow::Result<()> {
-    tola_diagnostic::ensure_reports_succeed(&resolved_reports(config, diagnostics))
+    tola_diagnostic::ensure_reports_succeed(&resolved_reports(root, diagnostics))
 }
 
 /// The unbound name a Typst "unknown variable" wording leaves, read from the highlight.
@@ -761,7 +758,7 @@ fn imported_by_note(files: &[String]) -> Option<String> {
 fn relativize_diagnostic(diagnostic: &mut tola_typst::Diagnostic, root: &Path) {
     fn relativize(location: &mut tola_typst::SourceLocation, root: &Path) {
         if let Some(path) = &location.path {
-            location.path = Some(crate::filesystem::display_path(Path::new(path), root));
+            location.path = Some(tola_diagnostic::display_path(Path::new(path), root));
         }
     }
 
@@ -840,7 +837,7 @@ pub(crate) fn warning_diagnostics(
 ) -> Vec<tola_diagnostic::Diagnostic> {
     let retained = std::mem::take(warnings);
     let warnings = without_export_warnings(&retained);
-    resolved_reports(config, &warnings)
+    resolved_reports(config.get_root(), &warnings)
 }
 
 #[cfg(test)]

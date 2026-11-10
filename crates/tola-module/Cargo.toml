@@ -1,0 +1,30 @@
+[package]
+name = "tola-module"
+version.workspace = true
+edition = "2024"
+rust-version.workspace = true
+description = "Tola site modules"
+license = "MIT"
+repository = "https://github.com/tola-rs/tola-ssg"
+
+[dependencies]
+tola-fs.workspace = true
+anyhow = "1.0.104"
+blake3 = "1.8.7"
+flate2 = "1.1.10"
+gix = { version = "=0.90.0", default-features = false, features = ["blocking-http-transport-reqwest-rust-tls", "worktree-mutation", "sha1"] }
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls", "system-proxy"] }
+ruzstd = "0.9.1"
+serde = { version = "1.0.229", default-features = false, features = ["derive"] }
+serde_json = { version = "1.0.151", features = ["preserve_order"] }
+thiserror = "2.0.20"
+tempfile = "3.27.0"
+tar = "0.4.46"
+toml = "1.1.4"
+tola-address.workspace = true
+tola-diagnostic.workspace = true
+tola-input.workspace = true
+tola-packages.workspace = true
+tola-typst.workspace = true
+typst.workspace = true
+zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2"] }

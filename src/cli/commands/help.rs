@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use anyhow::Result;
 use serde::Serialize;
-use tola_build::InputScope;
+use tola_input::InputScope;
 
 use crate::cancellation::Cancellation;
 use crate::cli::HelpArgs;

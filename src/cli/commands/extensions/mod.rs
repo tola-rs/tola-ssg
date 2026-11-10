@@ -2,13 +2,12 @@
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
-use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail, ensure};
 use clap::{CommandFactory, FromArgMatches};
-use tola_build::InputScope;
-use tola_build::modules::CommandAction;
 use tola_build::report::{REPORT_PATH_ENV, ReportChannel, ReportSources};
+use tola_input::InputMode;
+use tola_module::{Action, CommandAction};
 
 use crate::cancellation::Cancellation;
 use crate::cli::output::CommandOutput;
@@ -39,30 +38,9 @@ impl Invocation {
             .remove(0)
             .into_string()
             .map_err(|_| anyhow::anyhow!("module namespaces must be UTF-8"))?;
-        let mut config = ConfigFileArgs::default();
-        loop {
-            let path = if arguments
-                .first()
-                .is_some_and(|value| value == "--config" || value == "-C")
-            {
-                arguments.remove(0);
-                ensure!(!arguments.is_empty(), "--config requires a path");
-                PathBuf::from(arguments.remove(0))
-            } else if let Some(path) = arguments
-                .first()
-                .and_then(|value| value.to_str())
-                .and_then(|value| value.strip_prefix("--config="))
-            {
-                let path = PathBuf::from(path);
-                arguments.remove(0);
-                path
-            } else {
-                break;
-            };
-            ensure!(!path.as_os_str().is_empty(), "--config requires a path");
-            ensure!(config.path.is_none(), "--config may be supplied only once");
-            config.path = Some(path);
-        }
+        let config = ConfigFileArgs {
+            path: crate::cli::argv::take_config(&mut arguments).map_err(anyhow::Error::msg)?,
+        };
         Ok(Self {
             namespace,
             config,
@@ -73,27 +51,33 @@ impl Invocation {
 
 pub(in crate::cli) fn run(
     arguments: Vec<OsString>,
-    scope: InputScope,
+    mode: InputMode,
     output: &CommandOutput,
     cancellation: &Cancellation,
 ) -> Result<()> {
     let invocation = Invocation::parse(arguments)?;
-    let request = super::SiteRequest::new(
-        invocation.config,
-        TypstPackageArgs::default(),
-        scope,
-        crate::cli::BuildOverrideArgs::default(),
-        crate::cli::CompilerFontArgs::default(),
+    let resources = crate::cli::config::build_resources_with_fonts(
+        mode,
+        &crate::cli::CompilerFontArgs::default(),
+    )?;
+    let loaded = match crate::cli::config::load_optional_config(
+        &invocation.config,
+        &TypstPackageArgs::default(),
+        mode.scope(),
+        &crate::config::ConfigOverrides::default(),
         output,
         cancellation,
-    )?;
-    let loaded = request.load_config(&crate::config::ConfigOverrides::default())?;
+    ) {
+        Ok(Some(loaded)) => loaded,
+        Ok(None) => return Err(unrecognized_subcommand(&invocation.namespace)),
+        Err(error) => return Err(error),
+    };
     let config = std::sync::Arc::new(loaded.into_config());
-    let modules = tola_build::modules::resolve_command_modules(
+    let modules = tola_build::modules::select_command_modules(
         config.get_root(),
         config.vendor().path.as_deref(),
         config.modules(),
-        tola_build::inputs::InputMode::new(scope, false),
+        mode,
         &cancellation.token(),
     )?;
     check_namespaces(&modules)?;
@@ -106,7 +90,7 @@ pub(in crate::cli) fn run(
             module.commands.keys().map(String::as_str),
             config.get_root(),
             config.config_path(),
-            scope,
+            mode.scope(),
         )?;
         return output.write_stdout(namespace_help(
             module,
@@ -124,16 +108,14 @@ pub(in crate::cli) fn run(
     let tail = &invocation.arguments[1..];
     if name == "init" && module.initializer.is_some() {
         if !is_help(tail)
-            && matches!(
+            && !matches!(
                 config.modules()[&invocation.namespace].source,
-                tola_build::modules::ModuleSource::Remote { .. }
+                tola_module::ModuleSource::Local { .. }
             )
         {
-            bail!(
-                "initialization from a remote module is not supported; use a local module with `tola init --from`"
-            );
+            bail!("initialization requires a local module directory; use `tola init --from`");
         }
-        return run_initializer(module, tail, scope, output, cancellation);
+        return run_initializer(module, tail, mode.scope(), output, cancellation);
     }
     let Some(declared) = module.commands.get(name) else {
         let command =
@@ -147,57 +129,79 @@ pub(in crate::cli) fn run(
             .expect_err("an undeclared module command is rejected");
         return Err(error.into());
     };
+    let action = declared.action()?;
     if is_help(tail) {
-        let signatures = command_signatures(
-            module,
-            std::iter::once(name),
-            config.get_root(),
-            config.config_path(),
-            scope,
-        )?;
-        if let Some(signature) = signatures.get(name) {
-            return output.write_stdout(render_help(
-                signature_command(module, name, signature.clone()),
-                output.terminal().stdout_uses_color(),
-                tail[0] == "--help",
-            ));
+        let color = output.terminal().stdout_uses_color();
+        let long = tail[0] == "--help";
+        if matches!(&action, CommandAction::Execute(Action::Nu { .. })) {
+            let mut signatures = command_signatures(
+                module,
+                std::iter::once(name),
+                config.get_root(),
+                config.config_path(),
+                mode.scope(),
+            )?;
+            if let Some(signature) = signatures.remove(name).transpose()? {
+                return output.write_stdout(render_help(
+                    signature_command(module, name, signature),
+                    color,
+                    long,
+                ));
+            }
         }
-        return output.write_stdout(command_help(
-            module,
-            name,
-            declared,
-            output.terminal().stdout_uses_color(),
-            tail[0] == "--help",
-        ));
+        return output.write_stdout(command_help(module, name, declared, color, long));
     }
-    match &declared.action {
-        CommandAction::Argv { argv } => {
+    match &action {
+        CommandAction::Execute(Action::Nu { path, args }) => {
+            let path = tola_module::module_set::validate_module_path(
+                config.get_root(),
+                &module.name,
+                &module.root,
+                path,
+                false,
+            )?;
+            let mut arguments = args.clone();
+            arguments.extend(super::nu::utf8_arguments(tail)?);
+            let diagnostics = super::nu::run_action(
+                &path,
+                &arguments,
+                &module.name,
+                name,
+                config,
+                resources,
+                cancellation,
+            )?;
+            output.diagnostics(&diagnostics)?;
+            Ok(())
+        }
+        CommandAction::Execute(Action::Argv(argv)) => {
             // This command receives live disk context, not a host-provided text snapshot.
             // Do not turn report source IDs into paths or claim editor locations for it.
             let reports = ReportChannel::new(
                 format!("command:{}.{name}", module.name),
                 ReportSources::new(),
             )?;
-            let command = process_command(
+            let (command, _options) = process_command(
                 argv,
                 tail,
                 config.get_root(),
                 config.config_path(),
                 module,
-                scope,
-            )?
-            .env("TOLA_CONTENT_ROOT", config.build().content_dir.as_os_str())
-            .env(REPORT_PATH_ENV, reports.path());
+                mode.scope(),
+            )?;
+            let command = command
+                .env("TOLA_CONTENT_ROOT", config.build().content_dir.as_os_str())
+                .env(REPORT_PATH_ENV, reports.path());
             let completion = crate::cli::external::run(command, cancellation);
             cancellation.token().ensure_active()?;
             complete_report(completion, reports, output)
         }
         CommandAction::Query { query, projection } => {
-            let modules = tola_build::modules::resolve_modules(
+            let modules = tola_build::modules::load_modules(
                 config.get_root(),
                 config.vendor().path.as_deref(),
                 config.modules(),
-                tola_build::inputs::InputMode::new(scope, false),
+                mode,
                 &cancellation.token(),
             )?;
             let module = modules
@@ -219,22 +223,19 @@ pub(in crate::cli) fn run(
                 usage: &format!("tola {} {name}", module.name),
                 projection: (!projection.is_empty()).then_some(projection.as_slice()),
                 tail,
-                resources: request.resources,
+                resources,
                 output,
                 cancellation,
             })
         }
-        CommandAction::Skill => {
+        CommandAction::Skill { path } => {
             let matches = help::skill_command(module, name)
                 .try_get_matches_from(
                     std::iter::once(OsString::from(name)).chain(tail.iter().cloned()),
                 )
                 .map_err(|error| anyhow::anyhow!("{error}"))?;
             let args = crate::cli::args::SkillArgs::from_arg_matches(&matches)?;
-            let path = module
-                .skill
-                .as_deref()
-                .context("module skill changed; run the command again")?;
+            let path = module.root.join(path);
             let canonical = path.canonicalize().with_context(|| {
                 format!("Tola could not read the module skill at {}", path.display())
             })?;
@@ -258,6 +259,16 @@ pub(in crate::cli) fn run(
             )
         }
     }
+}
+
+fn unrecognized_subcommand(namespace: &str) -> anyhow::Error {
+    let mut command = Cli::command();
+    command
+        .error(
+            clap::error::ErrorKind::InvalidSubcommand,
+            format!("unrecognized subcommand `{namespace}`"),
+        )
+        .into()
 }
 
 pub(super) fn check_namespaces<T>(modules: &BTreeMap<String, T>) -> Result<()> {

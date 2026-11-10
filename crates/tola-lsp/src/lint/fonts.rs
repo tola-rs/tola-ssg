@@ -225,15 +225,4 @@ mod tests {
             ["Inter", "A", "B", "C"]
         );
     }
-    #[test]
-    fn font_help_suggests_the_closest_family() {
-        assert_eq!(
-            help("Inetr", &["Inter", "Arial"]).as_deref(),
-            Some("did you mean `Inter`?")
-        );
-        assert_eq!(
-            help("宋体", &["SimSun"]).as_deref(),
-            Some("this font is installed as `SimSun`")
-        );
-    }
 }

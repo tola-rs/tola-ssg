@@ -42,7 +42,7 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
             Some(config) => self.resources.source_boundary(config),
             None => crate::sources::base_source_boundary(
                 &self.source_root(),
-                self.resources.input_scope() == tola_build::InputScope::Pure,
+                self.resources.input_scope() == tola_input::InputScope::Pure,
             ),
         }
     }
@@ -98,11 +98,22 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
         id: RequestId,
         parameters: DocumentRangeFormattingParams,
     ) -> Result<()> {
+        let range = parameters.range;
+        if (range.start.line, range.start.character) > (range.end.line, range.end.character) {
+            tracing::debug!(
+                ?range,
+                "formatting received a range that ends before it starts"
+            );
+            return self.reply(protocol::invalid_params_response(
+                id,
+                "the formatting range ends before it starts",
+            ));
+        }
         let style = self.formatter_style();
         let edits = self.text_request(&parameters.text_document.uri, |source| {
             let lines = source.lines();
-            let bytes = crate::position::byte_offset(lines, parameters.range.start).ok()?
-                ..crate::position::byte_offset(lines, parameters.range.end).ok()?;
+            let bytes = crate::position::byte_offset(lines, range.start).ok()?
+                ..crate::position::byte_offset(lines, range.end).ok()?;
             crate::formatting::range_edits(source.text(), bytes, &style)
         });
         self.reply(Response::new_ok(id, edits))
@@ -140,11 +151,10 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
         };
         match crate::selection::ranges(&source, &parameters.positions) {
             Some(ranges) => self.reply(Response::new_ok(id, ranges)),
-            None => self.reject(
+            None => self.reply(protocol::invalid_params_response(
                 id,
-                ErrorCode::InvalidParams,
                 "selection position is outside the source",
-            ),
+            )),
         }
     }
 
@@ -258,7 +268,7 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
                 || root.join(tola_build::config::loading::CONFIG_FILE_NAME),
                 Path::to_path_buf,
             );
-        tola_build::filesystem::normalize_existing_prefix(&path)
+        tola_input::normalize_existing_prefix(&path)
     }
 
     /// The text the editor holds for one document: the buffer it opened, or the file on disk.
@@ -270,7 +280,7 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
         if self.open.is_generated_path(path) {
             return None;
         }
-        let normalized = tola_build::filesystem::normalize_existing_prefix(path);
+        let normalized = tola_input::normalize_existing_prefix(path);
         match self
             .open
             .overrides()
@@ -606,6 +616,31 @@ mod tests {
             response(&mut connection).response_result.unwrap_err().code,
             ErrorCode::InvalidParams as i32
         );
+    }
+
+    /// A range that ends before it starts names no text, so it is refused before it reaches the
+    /// formatter rather than reaching it as an inverted slice.
+    #[test]
+    fn reversed_formatting_range_is_rejected() {
+        let mut connection = ready(Vec::new());
+        let uri = open_draft(&mut connection, "#let count = 1\n#count");
+        connection
+            .request(Request::new(
+                1.into(),
+                request::RangeFormatting::METHOD.into(),
+                json!({
+                    "textDocument": {"uri": uri.as_str()},
+                    "range": {
+                        "start": {"line": 1, "character": 0},
+                        "end": {"line": 0, "character": 3},
+                    },
+                    "options": {"tabSize": 2, "insertSpaces": true},
+                }),
+            ))
+            .unwrap();
+        let error = response(&mut connection).response_result.unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidParams as i32);
+        assert_eq!(error.data.unwrap()["kind"], "invalidParams");
     }
 
     /// Both call-hierarchy requests answer over the protocol, and the items they hold address

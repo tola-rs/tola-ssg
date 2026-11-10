@@ -350,6 +350,8 @@ mod tests {
         let imports =
             "#import \"@tola/site:0.0.0\" as site\n#import \"path.typ\": renamed as other\n";
         let code = "#let factor = 2\n#let twice(x) = x * factor\n#let (done, _) = (1, 2)\n#twice(3)\n// note\n#\"text\"\n";
+        let wildcard = "#import math: *\n#let text = 1\n#text\n#sin\n#calc.pi";
+        let math = "$figure$\n$table$\n$math.eq$\n$sin x$\n$image$\n$std$\n#figure([x])\n";
         for (text, needle, expected) in [
             (markup, "= ", "heading"),
             (markup, "- item", "marker"),
@@ -369,10 +371,21 @@ mod tests {
             (code, "// note", "comment"),
             (code, "_", "pol"),
             (code, "\"text\"", "string"),
+            (wildcard, "sin", "function"),
+            (wildcard, "calc", "namespace"),
+            (wildcard, "text\n", "pol"),
+            (math, "figure$", "pol"),
+            (math, "table$", "pol"),
+            (math, "math.eq", "pol"),
+            (math, "sin", "function"),
+            (math, "image", "pol"),
+            (math, "std", "namespace"),
+            (math, "figure([x])", "function"),
         ] {
             assert_eq!(token_at(text, needle).token_type, expected, "{needle}");
         }
         assert_eq!(token_at(term, "term").modifiers, Modifiers::STRONG.bits());
+        assert_eq!(token_at(math, "sin").modifiers, Modifiers::MATH.bits());
     }
     #[test]
     fn token_columns_count_utf16_code_units() {
@@ -382,29 +395,5 @@ mod tests {
             heading[0].length, 4,
             "the marker, a space, and two ideographs"
         );
-    }
-    #[test]
-    fn wildcard_import_classifies_its_names() {
-        let text = "#import math: *\n#let text = 1\n#text\n#sin\n#calc.pi";
-        assert_eq!(token_at(text, "sin").token_type, "function");
-        assert_eq!(token_at(text, "calc").token_type, "namespace");
-        assert_eq!(token_at(text, "text\n").token_type, "pol");
-    }
-
-    #[test]
-    fn math_scope_excludes_the_standard_library() {
-        let text = "$figure$\n$table$\n$math.eq$\n$sin x$\n$image$\n$std$\n#figure([x])\n";
-        for (needle, token_type) in [
-            ("figure$", "pol"),
-            ("table$", "pol"),
-            ("math.eq", "pol"),
-            ("sin", "function"),
-            ("image", "pol"),
-            ("std", "namespace"),
-            ("figure([x])", "function"),
-        ] {
-            assert_eq!(token_at(text, needle).token_type, token_type, "{needle}");
-        }
-        assert_eq!(token_at(text, "sin").modifiers, Modifiers::MATH.bits());
     }
 }

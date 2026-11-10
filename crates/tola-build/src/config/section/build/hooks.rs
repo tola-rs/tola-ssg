@@ -1,19 +1,24 @@
 //! Finite commands around candidate construction and publication.
 //!
 //! The environment a hook command receives, and what a superseded build cancels, is written
-//! for the site author in the section's and each stage's `HELP`, which `tola help "[build.hooks]"`
+//! for the site author in the section's and each stage's `HELP`, which `tola help "[hooks]"`
 //! and its stage pages render.
 
 use crate::config::{ConfigDiagnostics, FieldPath};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tola_config::Config;
+use tola_module::Action;
+use tola_module::hooks::RerunSelection;
+pub use tola_module::hooks::{
+    CommandOutput, DevParticipation, HookStage, ModuleHookOrigin, RerunOn,
+};
 
 /// External commands Tola runs around a build, grouped by stage. Each stage waits for its
 /// commands to exit before it continues.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, Config)]
 #[serde(default, deny_unknown_fields)]
-#[config(section = "build.hooks")]
+#[config(section = "hooks")]
 pub struct HooksConfig {
     #[serde(rename = "before-build")]
     #[config(sub, collection = array_table)]
@@ -26,24 +31,17 @@ pub struct HooksConfig {
     pub after_publish: Vec<AfterPublishHookConfig>,
 }
 
-/// The module whose manifest supplied a hook, retained by the execution plan.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ModuleHookOrigin {
-    pub name: String,
-    pub root: PathBuf,
-    pub manifest: PathBuf,
-    pub options_json: Vec<u8>,
-}
-
 impl HooksConfig {
-    /// What `tola help "[build.hooks]"` adds under its child tables.
+    /// What `tola help "[hooks]"` adds under its child tables.
     pub const HELP: &'static str = "\
 Choose the stage by what the command produces: `before-build` writes site inputs before source
 discovery; `generate-outputs` adds final files after the Bundle compiles; `after-publish` consumes
 the committed site. Bundle, configured assets, and generated outputs pass the same conflict and
 reference checks before publication.
 
-The commands differ in which stages they run. Every entry below also requires `enable = true`:
+The commands differ in which stages they run. Hooks are enabled by default. Set `enable = false` to disable one, or use `enabled-by`
+to select a boolean site option. Declare a `nu` script with optional `args`, or an
+`argv` array with an external executable and its arguments.
 
 | Command | Build mode | before-build | generate-outputs | after-publish |
 | --- | --- | --- | --- | --- |
@@ -78,7 +76,7 @@ outputs. A command that reads time, network, environment state, or files outside
 
 Commands run from the site root as finite argv arrays, without an implicit shell. Within a stage,
 entries run in configuration order; failure stops the remaining entries. Put dependent steps or
-conditions in the site's own runner, for example `command = [\"just\", \"css\"]`. Tola does not
+conditions in the site's own runner, for example `argv = [\"just\", \"css\"]`. Tola does not
 require `just`. Output generators each read the same upstream snapshot and write to a private
 directory: a later generator cannot read an earlier generator's new outputs.
 
@@ -110,9 +108,11 @@ never reuses what it holds. The temporary and output directories are new on ever
 `TMP`, and `TEMP` name `TOLA_HOOK_TEMP_DIR`. A variable a stage does not define is absent, never
 inherited from the caller.
 
-`rerun-on` adds literal site-relative paths, not globs; directories are watched recursively.
-Their edits trigger a whole development build, not just one command. Add paths a tool reads but
-Tola does not otherwise observe, such as its input directory, runner, manifest, or lockfile.
+`rerun-on` adds extra inputs, for example
+`rerun-on = { include = [\"styles/**/*.css\", \"package.json\"], exclude = [\"styles/vendor\"] }`.
+Each pattern is relative to the site. A matched directory includes or excludes its descendants.
+Changes to selected inputs trigger a whole development build. Add inputs a tool reads that Tola
+does not otherwise observe, such as its stylesheet sources, runner, manifest, or lockfile.
 The stage pages show a stylesheet producer, a search index, and a publication consumer.
 
 Hooks are trusted scripts with the caller's permissions. `--offline` and `--pure` restrict Tola's
@@ -146,32 +146,99 @@ impl HooksConfig {
         hook_stages!(
             self,
             keep | hook | hook.enable,
-            map | hook | hook.command.as_slice()
+            map | hook | hook.argv.as_deref()
         )
+        .flatten()
     }
 
-    /// Additional literal paths whose edits rerun the commands the development session runs.
-    pub fn development_rerun_paths(&self) -> impl Iterator<Item = &Path> {
+    /// Additional input selections of the hooks that participate in development.
+    pub fn development_rerun_selections(&self, root: &Path) -> anyhow::Result<Vec<RerunSelection>> {
+        hook_stages!(
+            self,
+            keep | hook | hook.enable
+                && hook.dev.participates_in_development()
+                && !hook.rerun_on.include.is_empty(),
+            map | hook | hook.rerun_on.compile(root, hook.origin.as_ref())
+        )
+        .collect()
+    }
+
+    /// Absolute Nu script paths of the hooks that participate in development.
+    pub fn development_hook_scripts<'a>(
+        &'a self,
+        root: &'a Path,
+    ) -> impl Iterator<Item = PathBuf> + 'a {
         hook_stages!(
             self,
             keep | hook | hook.enable && hook.dev.participates_in_development(),
-            map | hook | hook.rerun_on.iter()
+            map move | hook | hook.nu.as_ref().map(|path| {
+                hook.origin
+                    .as_ref()
+                    .map_or(root, |origin| origin.root.as_path())
+                    .join(path)
+            })
         )
         .flatten()
-        .map(PathBuf::as_path)
+    }
+
+    /// Select site hooks using the declaring site's boolean options.
+    pub(crate) fn apply_site_options(&mut self, options: &toml::Table) -> anyhow::Result<()> {
+        fn select(
+            enable: &mut bool,
+            key: Option<&str>,
+            options: &toml::Table,
+            stage: HookStage,
+            name: &str,
+        ) -> anyhow::Result<()> {
+            if let (true, Some(key)) = (*enable, key) {
+                let identity = hook_identity(stage, name);
+                *enable = match options.get(key) {
+                    Some(toml::Value::Boolean(value)) => *value,
+                    Some(_) => anyhow::bail!("{identity}: option `{key}` must be a boolean"),
+                    None => anyhow::bail!("{identity} is enabled by unset option `{key}`"),
+                };
+            }
+            Ok(())
+        }
+        for hook in &mut self.before_build {
+            select(
+                &mut hook.enable,
+                hook.enabled_by.as_deref(),
+                options,
+                HookStage::BeforeBuild,
+                &hook.name,
+            )?;
+        }
+        for hook in &mut self.generate_outputs {
+            select(
+                &mut hook.enable,
+                hook.enabled_by.as_deref(),
+                options,
+                HookStage::GenerateOutputs,
+                &hook.name,
+            )?;
+        }
+        for hook in &mut self.after_publish {
+            select(
+                &mut hook.enable,
+                hook.enabled_by.as_deref(),
+                options,
+                HookStage::AfterPublish,
+                &hook.name,
+            )?;
+        }
+        Ok(())
     }
 
     pub fn validate(&self, diag: &mut ConfigDiagnostics) {
         let mut named = Vec::new();
         for (index, hook) in self.before_build.iter().enumerate() {
-            if !hook.enable {
-                continue;
-            }
             let fields = HookEntryFields::BEFORE_BUILD;
             diag.with_array_element(Self::FIELDS.before_build.as_str(), index, |diag| {
                 validate_command(
                     &hook.name,
-                    &hook.command,
+                    hook.action(),
+                    hook.enabled_by.as_deref(),
                     &hook.rerun_on,
                     index,
                     fields,
@@ -194,14 +261,12 @@ impl HooksConfig {
         let outputs = OutputCommandConfig::FIELDS.outputs;
         let mut named = Vec::new();
         for (index, command) in self.generate_outputs.iter().enumerate() {
-            if !command.enable {
-                continue;
-            }
             let fields = HookEntryFields::GENERATE_OUTPUTS;
             diag.with_array_element(Self::FIELDS.generate_outputs.as_str(), index, |diag| {
                 validate_command(
                     &command.name,
-                    &command.command,
+                    command.action(),
+                    command.enabled_by.as_deref(),
                     &command.rerun_on,
                     index,
                     fields,
@@ -238,14 +303,12 @@ impl HooksConfig {
 
         let mut named = Vec::new();
         for (index, hook) in self.after_publish.iter().enumerate() {
-            if !hook.enable {
-                continue;
-            }
             let fields = HookEntryFields::AFTER_PUBLISH;
             diag.with_array_element(Self::FIELDS.after_publish.as_str(), index, |diag| {
                 validate_command(
                     &hook.name,
-                    &hook.command,
+                    hook.action(),
+                    hook.enabled_by.as_deref(),
                     &hook.rerun_on,
                     index,
                     fields,
@@ -265,7 +328,8 @@ impl HooksConfig {
 #[derive(Clone, Copy)]
 struct HookEntryFields {
     name: FieldPath,
-    command: FieldPath,
+    argv: FieldPath,
+    enabled_by: FieldPath,
     dev: FieldPath,
     rerun_on: FieldPath,
 }
@@ -273,27 +337,30 @@ struct HookEntryFields {
 impl HookEntryFields {
     const BEFORE_BUILD: Self = Self {
         name: BeforeBuildHookConfig::FIELDS.name,
-        command: BeforeBuildHookConfig::FIELDS.command,
+        argv: BeforeBuildHookConfig::FIELDS.argv,
+        enabled_by: BeforeBuildHookConfig::FIELDS.enabled_by,
         dev: BeforeBuildHookConfig::FIELDS.dev,
         rerun_on: BeforeBuildHookConfig::FIELDS.rerun_on,
     };
 
     const GENERATE_OUTPUTS: Self = Self {
         name: OutputCommandConfig::FIELDS.name,
-        command: OutputCommandConfig::FIELDS.command,
+        argv: OutputCommandConfig::FIELDS.argv,
+        enabled_by: OutputCommandConfig::FIELDS.enabled_by,
         dev: OutputCommandConfig::FIELDS.dev,
         rerun_on: OutputCommandConfig::FIELDS.rerun_on,
     };
 
     const AFTER_PUBLISH: Self = Self {
         name: AfterPublishHookConfig::FIELDS.name,
-        command: AfterPublishHookConfig::FIELDS.command,
+        argv: AfterPublishHookConfig::FIELDS.argv,
+        enabled_by: AfterPublishHookConfig::FIELDS.enabled_by,
         dev: AfterPublishHookConfig::FIELDS.dev,
         rerun_on: AfterPublishHookConfig::FIELDS.rerun_on,
     };
 }
 
-/// The key one entry's field writes, as messages spell it: `build.hooks.before-build[1].command`.
+/// The key one entry's field writes, as messages spell it: `hooks.before-build[1].argv`.
 ///
 /// A declared field path names the field after the array's own path, so the entry's index joins
 /// them where the document writes it.
@@ -308,7 +375,7 @@ fn message_key(field: FieldPath, index: usize) -> String {
 /// files `[assets]` declares.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Config)]
 #[serde(default, deny_unknown_fields)]
-#[config(section = "build.hooks.before-build", collection = array_table)]
+#[config(section = "hooks.before-build", collection = array_table)]
 pub struct BeforeBuildHookConfig {
     #[serde(skip)]
     #[config(skip)]
@@ -322,15 +389,24 @@ pub struct BeforeBuildHookConfig {
     /// no `TOLA_HOOK_INPUT_DIR` or `TOLA_HOOK_OUTPUT_DIR` (`generate-outputs` does): the command
     /// writes the site inputs itself, with no build directory to read.
     #[config(collection = inline)]
-    pub command: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub argv: Option<Vec<String>>,
+    /// Embedded Nu entry relative to the site root.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nu: Option<PathBuf>,
+    /// Literal arguments to the Nu entry.
+    #[config(collection = inline)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub args: Option<Vec<String>>,
+    /// Boolean key in the site's options.
+    #[serde(rename = "enabled-by", skip_serializing_if = "Option::is_none")]
+    pub enabled_by: Option<String>,
     /// Whether `tola dev` runs this entry: `"run"` (the default) or `"skip"`.
     #[config(values = DevParticipation::VALUES)]
     pub dev: DevParticipation,
-    /// Paths this hook watches, relative to the site root, whose edits trigger a `tola dev` build,
-    /// not only the hook's own command.
+    /// Extra site-relative inputs selected by `include` and `exclude` patterns.
     #[serde(rename = "rerun-on")]
-    #[config(collection = inline)]
-    pub rerun_on: Vec<PathBuf>,
+    pub rerun_on: RerunOn,
     /// Files or directories the hook's command generates, relative to the site root; they must not
     /// be inside `build.publish-dir` or `.tola`. After the hook's command, Tola checks that each
     /// declared path exists: the hook declares what it wrote, and Tola does not infer it. Declaring
@@ -341,7 +417,7 @@ pub struct BeforeBuildHookConfig {
 }
 
 impl BeforeBuildHookConfig {
-    /// What `tola help "[build.hooks.before-build]"` adds under its table.
+    /// What `tola help "[hooks.before-build]"` adds under its table.
     pub const HELP: &'static str = "\
 This stage writes the files Typst and `[assets]` read.
 
@@ -376,11 +452,11 @@ css:
 `tola.toml`:
 
 ```toml
-[[build.hooks.before-build]]
+[[hooks.before-build]]
 name = \"tailwind\"
-command = [\"just\", \"css\"]
+argv = [\"just\", \"css\"]
 generates = [\"static/web-assets/tailwind-output/site.css\"]
-rerun-on = [\"static/tailwind-sources\", \"deno.json\", \"deno.lock\", \"justfile\"]
+rerun-on = { include = [\"static/tailwind-sources\", \"deno.json\", \"deno.lock\", \"justfile\"] }
 ```
 
 Files reach browsers only once they are published: the `[assets]` below maps the whole
@@ -435,7 +511,7 @@ files directly.";
 /// reference checks validate those links.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Config)]
 #[serde(default, deny_unknown_fields)]
-#[config(section = "build.hooks.generate-outputs", collection = array_table)]
+#[config(section = "hooks.generate-outputs", collection = array_table)]
 pub struct OutputCommandConfig {
     #[serde(skip)]
     #[config(skip)]
@@ -449,19 +525,27 @@ pub struct OutputCommandConfig {
     /// upstream snapshot below `TOLA_HOOK_INPUT_DIR` and writes declared outputs below
     /// `TOLA_HOOK_OUTPUT_DIR`; written paths are relative to the final site output.
     #[config(collection = inline)]
-    pub command: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub argv: Option<Vec<String>>,
+    /// Embedded Nu entry relative to the site root.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nu: Option<PathBuf>,
+    /// Literal arguments to the Nu entry.
+    #[config(collection = inline)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub args: Option<Vec<String>>,
+    /// Boolean key in the site's options.
+    #[serde(rename = "enabled-by", skip_serializing_if = "Option::is_none")]
+    pub enabled_by: Option<String>,
     /// Whether `tola dev` runs this hook: `"run"` (the default), `"reuse"`, or `"skip"`.
     /// `reuse` skips the command when its inputs are unchanged from the previous successful
     /// development revision and reuses that revision's outputs.
     #[config(values = DevParticipation::REUSE_VALUES)]
     pub dev: DevParticipation,
-    /// Paths this hook watches, relative to the site root, whose edits trigger a `tola dev` build,
-    /// not only the hook's own command. For `dev = "reuse"`, they are also part of the hook's
-    /// input fingerprint: list every site file the command reads, or reuse may serve stale
-    /// output.
+    /// Extra site-relative inputs selected by `include` and `exclude` patterns. For
+    /// `dev = "reuse"`, the selected inputs are also part of the hook's fingerprint.
     #[serde(rename = "rerun-on")]
-    #[config(collection = inline)]
-    pub rerun_on: Vec<PathBuf>,
+    pub rerun_on: RerunOn,
     /// Final site output paths this hook adds to the candidate, written relative to
     /// `build.publish-dir` (default `public`), as `{ file = "manifest.json" }` or
     /// `{ tree = "assets/thumbnails" }`. Required: the written files must match these
@@ -472,7 +556,7 @@ pub struct OutputCommandConfig {
 }
 
 impl OutputCommandConfig {
-    /// What `tola help "[build.hooks.generate-outputs]"` adds under its table.
+    /// What `tola help "[hooks.generate-outputs]"` adds under its table.
     pub const HELP: &'static str = "\
 This stage generates final files from the compiled site.
 
@@ -500,11 +584,11 @@ search:
 `tola.toml`:
 
 ```toml
-[[build.hooks.generate-outputs]]
+[[hooks.generate-outputs]]
 name = \"search\"
-command = [\"just\", \"search\"]
+argv = [\"just\", \"search\"]
 outputs = [{ tree = \"assets/pagefind-search\" }]
-rerun-on = [\"deno.json\", \"deno.lock\", \"justfile\"]
+rerun-on = { include = [\"deno.json\", \"deno.lock\", \"justfile\"] }
 ```
 
 Every generator reads the same compiled site. Put transformations that depend on one another in the
@@ -556,7 +640,7 @@ The command environment for this stage:
 /// outputs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Config)]
 #[serde(default, deny_unknown_fields)]
-#[config(section = "build.hooks.after-publish", collection = array_table)]
+#[config(section = "hooks.after-publish", collection = array_table)]
 pub struct AfterPublishHookConfig {
     #[serde(skip)]
     #[config(skip)]
@@ -570,19 +654,28 @@ pub struct AfterPublishHookConfig {
     /// `TOLA_HOOK_INPUT_DIR` is a read-only view of the published site, so a failure here cannot
     /// undo publication.
     #[config(collection = inline)]
-    pub command: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub argv: Option<Vec<String>>,
+    /// Embedded Nu entry relative to the site root.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nu: Option<PathBuf>,
+    /// Literal arguments to the Nu entry.
+    #[config(collection = inline)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub args: Option<Vec<String>>,
+    /// Boolean key in the site's options.
+    #[serde(rename = "enabled-by", skip_serializing_if = "Option::is_none")]
+    pub enabled_by: Option<String>,
     /// Whether `tola dev` runs this hook: `"skip"` (the default) or `"run"`.
     #[config(values = DevParticipation::VALUES)]
     pub dev: DevParticipation,
-    /// Paths this hook watches, relative to the site root, whose edits trigger a `tola dev` build,
-    /// not only the hook's own command.
+    /// Extra site-relative inputs selected by `include` and `exclude` patterns.
     #[serde(rename = "rerun-on")]
-    #[config(collection = inline)]
-    pub rerun_on: Vec<PathBuf>,
+    pub rerun_on: RerunOn,
 }
 
 impl AfterPublishHookConfig {
-    /// What `tola help "[build.hooks.after-publish]"` adds under its table.
+    /// What `tola help "[hooks.after-publish]"` adds under its table.
     pub const HELP: &'static str = "\
 This stage consumes a successfully committed site, for example to sync it to a host:
 
@@ -596,9 +689,9 @@ rsync:
 `tola.toml`:
 
 ```toml
-[[build.hooks.after-publish]]
+[[hooks.after-publish]]
 name = \"rsync\"
-command = [\"just\", \"rsync\"]
+argv = [\"just\", \"rsync\"]
 ```
 
 The recipe syncs the site just published to a host. after-publish runs after publication:
@@ -635,34 +728,18 @@ The command environment for this stage:
 There is no `TOLA_HOOK_OUTPUT_DIR`: this stage adds no output.";
 }
 
-/// One declared generated file or exclusive generated directory tree.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum CommandOutput {
-    /// One exact output file.
-    File(tola_address::OutputPath),
-    /// An exclusively owned directory whose files may vary between invocations.
-    Tree(tola_address::OutputPath),
-}
-
-impl CommandOutput {
-    /// Logical path of the declared file or directory.
-    pub fn path(&self) -> &tola_address::OutputPath {
-        match self {
-            Self::File(path) | Self::Tree(path) => path,
-        }
-    }
-}
-
 impl Default for BeforeBuildHookConfig {
     fn default() -> Self {
         Self {
             origin: None,
             enable: true,
             name: String::new(),
-            command: Vec::new(),
+            argv: None,
+            nu: None,
+            args: None,
+            enabled_by: None,
             dev: DevParticipation::Run,
-            rerun_on: Vec::new(),
+            rerun_on: RerunOn::default(),
             generates: Vec::new(),
         }
     }
@@ -674,9 +751,12 @@ impl Default for OutputCommandConfig {
             origin: None,
             enable: true,
             name: String::new(),
-            command: Vec::new(),
+            argv: None,
+            nu: None,
+            args: None,
+            enabled_by: None,
             dev: DevParticipation::Run,
-            rerun_on: Vec::new(),
+            rerun_on: RerunOn::default(),
             outputs: Vec::new(),
         }
     }
@@ -688,43 +768,89 @@ impl Default for AfterPublishHookConfig {
             origin: None,
             enable: true,
             name: String::new(),
-            command: Vec::new(),
+            argv: None,
+            nu: None,
+            args: None,
+            enabled_by: None,
             dev: DevParticipation::Skip,
-            rerun_on: Vec::new(),
+            rerun_on: RerunOn::default(),
         }
     }
 }
 
+macro_rules! hook_actions {
+    ($($entry:ty),+ $(,)?) => {
+        $(impl $entry {
+            /// Validate and return this hook's executable action.
+            pub fn action(&self) -> Result<Action, String> {
+                Action::from_fields(self.nu.clone(), self.argv.clone(), self.args.clone())
+            }
+
+            /// Set the already validated module action on a build hook.
+            pub(crate) fn set_action(&mut self, action: Action) {
+                match action {
+                    Action::Nu { path, args } => {
+                        self.argv = None;
+                        self.nu = Some(path);
+                        self.args = Some(args);
+                    }
+                    Action::Argv(argv) => {
+                        self.argv = Some(argv);
+                        self.nu = None;
+                        self.args = None;
+                    }
+                }
+            }
+        })+
+    };
+}
+
+hook_actions!(
+    BeforeBuildHookConfig,
+    OutputCommandConfig,
+    AfterPublishHookConfig
+);
+
 fn validate_command(
     name: &str,
-    command: &[String],
-    rerun_on: &[PathBuf],
+    action: Result<Action, String>,
+    enabled_by: Option<&str>,
+    rerun_on: &RerunOn,
     index: usize,
     fields: HookEntryFields,
     diag: &mut ConfigDiagnostics,
 ) {
-    let key = message_key(fields.command, index);
-    if command.is_empty() {
+    if let Err(reason) = action {
+        let key = message_key(fields.argv, index);
         diag.error_with_help(
-            fields.command,
-            format!("`{key}` is empty"),
-            "name the executable first, then its arguments",
+            fields.argv,
+            format!("`{key}`: {reason}"),
+            "provide a `nu` script or an `argv` array",
         );
-    } else if command[0].trim().is_empty() {
+    }
+    if enabled_by.is_some_and(|key| key.trim().is_empty()) {
+        let field = fields.enabled_by;
+        let key = message_key(field, index);
         diag.error_with_help(
-            fields.command,
-            format!("`{key}[0]` is blank"),
-            "name the executable first, then its arguments",
+            field,
+            format!("`{key}` is blank"),
+            "name a boolean site option",
         );
     }
     validate_name(name, index, fields.name, diag);
-    for (entry_index, path) in rerun_on.iter().enumerate() {
-        validate_site_relative(path, index, entry_index, fields.rerun_on, diag);
+    for (list, entry, error) in rerun_on.validate(false) {
+        let field = fields.rerun_on;
+        let key = message_key(field, index);
+        diag.error_with_help(
+            field,
+            format!("`{key}.{list}[{entry}]`: {error}"),
+            "write a path or glob relative to the site root",
+        );
     }
 }
 
 pub(crate) fn hook_identity(stage: HookStage, name: &str) -> String {
-    format!("the `{name}` hook in `build.hooks.{}`", stage.as_str())
+    format!("the `{name}` hook in `hooks.{}`", stage.as_str())
 }
 
 fn validate_dev(
@@ -757,6 +883,12 @@ fn validate_name(name: &str, index: usize, field: FieldPath, diag: &mut ConfigDi
             field,
             format!("`{key}` is not one word"),
             "Remove the whitespace, as in `css-build`",
+        );
+    } else if name.starts_with("@module/") {
+        diag.error_with_help(
+            field,
+            format!("`{key}` starts with reserved `@module/`"),
+            "choose a name for the site hook",
         );
     }
 }
@@ -806,58 +938,6 @@ fn validate_site_relative(
     crate::config::section::path::validate_site_relative_path(path, &key, field, diag);
 }
 
-/// Point in the build lifecycle at which a hook executes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HookStage {
-    BeforeBuild,
-    GenerateOutputs,
-    AfterPublish,
-}
-
-impl HookStage {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::BeforeBuild => "before-build",
-            Self::GenerateOutputs => "generate-outputs",
-            Self::AfterPublish => "after-publish",
-        }
-    }
-}
-
-/// Whether an enabled finite command also runs in development.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum DevParticipation {
-    /// Run the command on every build that reaches its stage.
-    #[default]
-    Run,
-    /// Leave the command out of the development session.
-    ///
-    /// Production builds still run it.
-    Skip,
-    /// Reuse the previous development revision's outputs when the hook's inputs are unchanged.
-    ///
-    /// Only `generate-outputs` accepts this value. The command must be a pure function of
-    /// its built-site input, its `rerun-on` paths, its command, and its declared outputs;
-    /// a command that reads time, network, or other external state must use [`Self::Run`].
-    Reuse,
-}
-
-impl DevParticipation {
-    const VALUES: &'static [&'static str] = &["\"run\"", "\"skip\""];
-    const REUSE_VALUES: &'static [&'static str] = &["\"run\"", "\"skip\"", "\"reuse\""];
-
-    /// Whether a development session runs or reuses this command at all.
-    pub const fn participates_in_development(self) -> bool {
-        !matches!(self, Self::Skip)
-    }
-
-    /// Whether this entry may reuse a previous development revision's outputs.
-    pub const fn reuses_outputs(self) -> bool {
-        matches!(self, Self::Reuse)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -867,32 +947,31 @@ mod tests {
     fn hook_template_preserves_stage_entries() {
         let config: crate::config::SiteConfigSchema = toml::from_str(
             r#"
-[[build.hooks.before-build]]
+[[hooks.before-build]]
 name = "icons"
-command = ["./scripts/icons.sh", "generated/icons"]
-rerun-on = ["src/icons"]
+argv = ["./scripts/icons.sh", "generated/icons"]
+rerun-on = { include = ["src/icons"] }
 generates = ["generated/icons"]
 
-[[build.hooks.generate-outputs]]
+[[hooks.generate-outputs]]
 name = "search"
-command = ["node", "scripts/search.mjs"]
+argv = ["node", "scripts/search.mjs"]
 dev = "skip"
-rerun-on = ["scripts/search.mjs"]
+rerun-on = { include = ["scripts/search.mjs"] }
 outputs = [{ file = "index.json" }, { tree = "search" }]
 
-[[build.hooks.after-publish]]
+[[hooks.after-publish]]
 name = "deploy"
-command = ["./scripts/deploy.sh"]
+argv = ["./scripts/deploy.sh"]
 dev = "run"
-rerun-on = ["scripts/deploy.sh"]
+rerun-on = { include = ["scripts/deploy.sh"] }
 "#,
         )
         .unwrap();
-        let template =
-            super::super::BuildSectionConfig::try_template_with_header_from(&config.build).unwrap();
+        let template = HooksConfig::try_template_with_header_from(&config.hooks).unwrap();
         let decoded: crate::config::SiteConfigSchema = toml::from_str(&template).unwrap();
 
-        assert_eq!(decoded.build.hooks, config.build.hooks);
+        assert_eq!(decoded.hooks, config.hooks);
     }
 
     #[test]
@@ -901,7 +980,7 @@ rerun-on = ["scripts/deploy.sh"]
             r#"
 [[generate-outputs]]
 name = "search"
-command = ["search"]
+argv = ["search"]
 dev = "reuse"
 outputs = [{ file = "search.json" }]
 "#,
@@ -916,13 +995,13 @@ outputs = [{ file = "search.json" }]
             r#"
 [[before-build]]
 name = "prepare"
-command = ["prepare"]
+argv = ["prepare"]
 dev = "reuse"
 "#,
             r#"
 [[after-publish]]
 name = "deploy"
-command = ["deploy"]
+argv = ["deploy"]
 dev = "reuse"
 "#,
         ] {
@@ -945,76 +1024,83 @@ dev = "reuse"
             r#"
 [[before-build]]
 name = "prepare"
-command = ["prepare"]
-rerun-on = [" before "]
+argv = ["prepare"]
+rerun-on = { include = [" before "] }
 
 [[before-build]]
 name = "production-prepare"
-command = ["production-prepare"]
+argv = ["production-prepare"]
 dev = "skip"
-rerun-on = ["production-input"]
+rerun-on = { include = ["production-input"] }
 
 [[before-build]]
 name = "disabled-prepare"
-command = ["disabled-prepare"]
+argv = ["disabled-prepare"]
 enable = false
-rerun-on = ["disabled-input"]
+rerun-on = { include = ["disabled-input"] }
 
 [[generate-outputs]]
 name = "generate"
-command = ["generate"]
-rerun-on = ["generated/*.json"]
+argv = ["generate"]
+rerun-on = { include = ["generated/*.json"] }
 outputs = [{ file = "search.json" }]
 
 [[generate-outputs]]
 name = "disabled-generate"
-command = ["disabled-generate"]
+argv = ["disabled-generate"]
 enable = false
-rerun-on = ["disabled-generated"]
+rerun-on = { include = ["disabled-generated"] }
 
 [[after-publish]]
 name = "production-consumer"
-command = ["production-consumer"]
-rerun-on = ["production-consumer-input"]
+argv = ["production-consumer"]
+rerun-on = { include = ["production-consumer-input"] }
 
 [[after-publish]]
 name = "development-consumer"
-command = ["development-consumer"]
+argv = ["development-consumer"]
 dev = "run"
-rerun-on = ["consumer"]
+rerun-on = { include = ["consumer"] }
 
 [[after-publish]]
 name = "disabled-consumer"
-command = ["disabled-consumer"]
+argv = ["disabled-consumer"]
 enable = false
 dev = "run"
-rerun-on = ["disabled-consumer-input"]
+rerun-on = { include = ["disabled-consumer-input"] }
 "#,
         )
         .unwrap();
+        let root = std::path::absolute("test-site").unwrap();
+        let selections = config.development_rerun_selections(&root).unwrap();
         assert_eq!(
-            config.development_rerun_paths().collect::<Vec<_>>(),
-            [" before ", "generated/*.json", "consumer"].map(Path::new)
+            selections
+                .iter()
+                .flat_map(RerunSelection::roots)
+                .collect::<Vec<_>>(),
+            [" before ", "generated", "consumer"].map(|path| root.join(path))
         );
+        assert!(selections[1].matches(&root.join("generated/search.json")));
+        assert!(!selections[1].matches(&root.join("generated/search.txt")));
     }
 
     #[test]
-    fn disabled_commands_are_not_validated() {
-        let mut config: HooksConfig = toml::from_str(
+    fn disabled_hook_declarations_are_validated() {
+        let config: HooksConfig = toml::from_str(
             r#"
 [[before-build]]
 enable = false
-command = [" "]
+argv = [" "]
 generates = ["../source"]
 
 [[generate-outputs]]
 enable = false
 name = " "
-rerun-on = ["/outside"]
+rerun-on = { include = ["/outside"] }
 
 [[after-publish]]
 enable = false
-rerun-on = ["../committed"]
+rerun-on = { include = ["../committed"] }
 "#,
         )
         .unwrap();
@@ -1026,17 +1112,11 @@ rerun-on = ["../committed"]
             Path::new("/site/tola.toml"),
             Path::new("/site/public"),
             None,
+            None,
             &mut diagnostics,
         );
-        assert!(diagnostics.into_result().is_ok());
-
-        config.before_build[0].enable = true;
-        config.generate_outputs[0].enable = true;
-        config.after_publish[0].enable = true;
-        let mut diagnostics = ConfigDiagnostics::new();
-        config.validate(&mut diagnostics);
         for field in [
-            BeforeBuildHookConfig::FIELDS.command,
+            BeforeBuildHookConfig::FIELDS.argv,
             BeforeBuildHookConfig::FIELDS.generates,
             OutputCommandConfig::FIELDS.name,
             OutputCommandConfig::FIELDS.rerun_on,
@@ -1054,7 +1134,7 @@ rerun-on = ["../committed"]
     fn input_generator(name: &str, output: &str) -> BeforeBuildHookConfig {
         BeforeBuildHookConfig {
             name: name.into(),
-            command: vec!["generator".into()],
+            argv: Some(vec!["generator".into()]),
             generates: vec![output.into()],
             ..BeforeBuildHookConfig::default()
         }
@@ -1077,8 +1157,8 @@ rerun-on = ["../committed"]
             r#"
 [[before-build]]
 name = "echo-bad"
-command = ["echo", "bad"]
-rerun-on = ["/src", "../templates"]
+argv = ["echo", "bad"]
+rerun-on = { include = ["/src"], exclude = [{ project = "../templates" }] }
 "#,
         )
         .unwrap();
@@ -1102,7 +1182,7 @@ rerun-on = ["/src", "../templates"]
             let hooks = HooksConfig {
                 before_build: vec![BeforeBuildHookConfig {
                     name: "generator".into(),
-                    command,
+                    argv: Some(command),
                     ..BeforeBuildHookConfig::default()
                 }],
                 ..HooksConfig::default()
@@ -1114,7 +1194,7 @@ rerun-on = ["/src", "../templates"]
             assert_eq!(diagnostics.errors().len(), 1);
             assert_eq!(
                 diagnostics.errors()[0].field,
-                BeforeBuildHookConfig::FIELDS.command
+                BeforeBuildHookConfig::FIELDS.argv
             );
         }
     }
@@ -1124,13 +1204,13 @@ rerun-on = ["/src", "../templates"]
         HooksConfig {
             before_build: vec![BeforeBuildHookConfig {
                 name: name.into(),
-                command: vec![command.into()],
+                argv: Some(vec![command.into()]),
                 generates: vec!["generated".into()],
                 ..BeforeBuildHookConfig::default()
             }],
             generate_outputs: vec![OutputCommandConfig {
                 name: name.into(),
-                command: vec![command.into()],
+                argv: Some(vec![command.into()]),
                 outputs: vec![CommandOutput::File(
                     tola_address::OutputPath::parse("search.json").unwrap(),
                 )],
@@ -1138,7 +1218,7 @@ rerun-on = ["/src", "../templates"]
             }],
             after_publish: vec![AfterPublishHookConfig {
                 name: name.into(),
-                command: vec![command.into()],
+                argv: Some(vec![command.into()]),
                 ..AfterPublishHookConfig::default()
             }],
         }
@@ -1201,7 +1281,7 @@ rerun-on = ["/src", "../templates"]
     fn assert_hook_output_refused(root: &Path, declared: &str) {
         let mut schema = crate::config::SiteConfigSchema::default();
         schema.vendor.path = Some("vendor".into());
-        schema.build.hooks.before_build = vec![input_generator("generator", declared)];
+        schema.hooks.before_build = vec![input_generator("generator", declared)];
 
         let error = schema
             .resolve(
@@ -1261,6 +1341,7 @@ rerun-on = ["/src", "../templates"]
             root,
             &root.join("tola.toml"),
             &root.join("public"),
+            None,
             None,
             &mut diag,
         );

@@ -8,10 +8,9 @@ use crate::cancellation::{BuildCancellation, BuildCancelled, OptionalCancellatio
 use crate::config::ResolvedSiteConfig;
 use crate::config::section::build::BeforeBuildHookConfig;
 use crate::config::section::build::hooks::HookStage;
-use crate::filesystem::{
-    DeclaredOutputViolation, FilesystemSourceIdentity, FilesystemSourceKind, PathFingerprint,
-    display_path, lexical_path_identity,
-};
+use crate::filesystem::{DeclaredOutputViolation, FilesystemSourceKind, PathFingerprint};
+use tola_diagnostic::display_path;
+use tola_input::{FilesystemSourceIdentity, lexical_path_identity};
 
 /// Type- and content-sensitive evidence for one declared hook output.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -117,6 +116,7 @@ pub(super) fn validate_declared_output_boundaries(
         root,
         &config.config_path,
         published_root,
+        config.vendor.path.as_deref(),
         config.vendor_workspace.as_deref(),
     );
     let mut identities = Vec::with_capacity(hook.generates.len());
@@ -127,14 +127,14 @@ pub(super) fn validate_declared_output_boundaries(
             let (message, help) = match violation {
                 DeclaredOutputViolation::OutsideSite => (
                     format!(
-                        "{named_hook} declares `outputs` path `{}` outside the site root",
+                        "{named_hook} declares `generates` path `{}` outside the site root",
                         declared.display()
                     ),
                     "declare a path inside the site",
                 ),
                 DeclaredOutputViolation::InsideReserved { kind, path } => (
                     format!(
-                        "{named_hook} declares `outputs` path `{}` that intersects {kind} `{}`",
+                        "{named_hook} declares `generates` path `{}` that intersects {kind} `{}`",
                         declared.display(),
                         display_path(&path, root),
                     ),
@@ -142,7 +142,7 @@ pub(super) fn validate_declared_output_boundaries(
                 ),
                 DeclaredOutputViolation::InsidePublished => (
                     format!(
-                        "{named_hook} declares `outputs` path `{}` that intersects `build.publish-dir` `{}`",
+                        "{named_hook} declares `generates` path `{}` that intersects `build.publish-dir` `{}`",
                         declared.display(),
                         display_path(published_root, root),
                     ),
@@ -150,7 +150,7 @@ pub(super) fn validate_declared_output_boundaries(
                 ),
                 DeclaredOutputViolation::OwnedElsewhere(_) => (
                     format!(
-                        "{named_hook} declares `outputs` path `{}` that overlaps another entry",
+                        "{named_hook} declares `generates` path `{}` that overlaps another entry",
                         declared.display()
                     ),
                     "keep one of the two",
@@ -158,23 +158,25 @@ pub(super) fn validate_declared_output_boundaries(
             };
             return Err(super::hook_contract_error(message, help));
         }
-        for module in &config.module_roots {
-            let module_identity = FilesystemSourceIdentity::from_path(module);
-            if identity.intersects(&module_identity) {
-                return Err(super::hook_contract_error(
-                    format!(
-                        "{named_hook} declares `outputs` path `{}` that intersects module root `{}`",
-                        declared.display(),
-                        display_path(module, root)
-                    ),
-                    "declare a path elsewhere in the site",
-                ));
-            }
+        if let Some(module) = crate::config::loading::overlapping_module_root(
+            root,
+            config.modules(),
+            &config.module_roots,
+            &identity,
+            hook.origin.is_none(),
+        ) {
+            return Err(super::hook_contract_error(
+                format!(
+                    "{named_hook} declares `generates` path `{}` that intersects module root `{}`",
+                    declared.display(),
+                    display_path(module, root)
+                ),
+                "declare a path elsewhere in the site",
+            ));
         }
         identities.push(identity);
     }
     for other in config
-        .build
         .hooks
         .before_build
         .iter()
@@ -192,7 +194,7 @@ pub(super) fn validate_declared_output_boundaries(
                         declared.display(),
                         super::hook_identity(HookStage::BeforeBuild, &other.name)
                     ),
-                    "keep one of the two `outputs` entries",
+                    "keep one of the two `generates` entries",
                 ));
             }
         }
@@ -407,9 +409,9 @@ mod tests {
         symlink("original", site.path().join("theme")).unwrap();
         let config = crate::config::tests::load_test_config(
             site.path(),
-            "[modules.forest]\npath = \"theme\"\n[[build.hooks.before-build]]\nenable = true\nname = \"generator\"\ncommand = [\"tool\"]\ngenerates = [\"generated\"]\n",
+            "[modules.forest]\npath = \"theme\"\n[[hooks.before-build]]\nenable = true\nname = \"generator\"\nargv = [\"tool\"]\ngenerates = [\"generated\"]\n",
         );
-        let hook = &config.build.hooks.before_build[0];
+        let hook = &config.hooks.before_build[0];
         assert!(
             validate_declared_output_boundaries(hook, &config, &config.build.publish_dir).is_ok()
         );

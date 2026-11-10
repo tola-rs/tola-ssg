@@ -234,7 +234,7 @@ pub(super) fn initialize_result(
                 }),
             ),
             workspace: Some(WorkspaceServerCapabilities {
-                file_operations: features.will_rename_files.then(rename_files_capability),
+                file_operations: Some(file_operations_capability(features.will_rename_files)),
                 workspace_folders: Some(WorkspaceFoldersServerCapabilities {
                     supported: Some(false),
                     change_notifications: Some(OneOf::Left(false)),
@@ -243,12 +243,20 @@ pub(super) fn initialize_result(
             // A client that pulls asks for the site's diagnostics itself; one that only takes what
             // is pushed has no use for the provider, so it is offered only to the former.
             diagnostic_provider: features.pull_diagnostics.then(diagnostics_capability),
-            // The server's own requests have no standard field, so the ones a client may call are
-            // named here, each with the method it answers to and what its reply has.
+            // The server's own requests have no standard field, so this dialect's version and the
+            // ones a client may call are named here, each with the method it answers to and what
+            // its reply has.
             experimental: Some(serde_json::json!({
+                "tolaProtocol": 1,
                 "requests": {
                     (crate::routes::RouteIndexRequest::METHOD):
                         "every page the checked site realizes, with the source writing it and the address it answers at",
+                    (RouteRequest::METHOD):
+                        "the pages one source is realized at, with the address each answers at",
+                    (PackageSourceRequest::METHOD):
+                        "the text of one embedded package source named by a `tola-package:` URI",
+                    (EnterRequest::METHOD):
+                        "the edits a client applies in place of Enter's own behaviour",
                 },
             })),
             ..Default::default()
@@ -257,27 +265,36 @@ pub(super) fn initialize_result(
             name: "tola-lsp".into(),
             version: Some(env!("CARGO_PKG_VERSION").into()),
         }),
-        ..Default::default()
+        ..InitializeResult::default()
     }
 }
 
-/// What a client that renames files may ask Tola, which rewrites the imports the rename breaks.
-fn rename_files_capability() -> WorkspaceFileOperationsServerCapabilities {
+/// The file operations this connection reads: the notifications that recheck the site, and a
+/// rename request only a client that declared it can send.
+fn file_operations_capability(will_rename: bool) -> WorkspaceFileOperationsServerCapabilities {
     WorkspaceFileOperationsServerCapabilities {
-        will_rename: Some(FileOperationRegistrationOptions {
-            // A folder rename moves every site file below it, and any site file may be a link
-            // target, so the whole workspace is what the request asks about; the site's own file
-            // list decides which renames matter.
-            filters: vec![FileOperationFilter {
-                scheme: Some("file".to_owned()),
-                pattern: FileOperationPattern {
-                    glob: "**/*".to_owned(),
-                    matches: None,
-                    options: None,
-                },
-            }],
-        }),
+        did_create: Some(file_operation_options()),
+        did_rename: Some(file_operation_options()),
+        did_delete: Some(file_operation_options()),
+        will_rename: will_rename.then(file_operation_options),
         ..WorkspaceFileOperationsServerCapabilities::default()
+    }
+}
+
+/// The files one file operation asks about.
+fn file_operation_options() -> FileOperationRegistrationOptions {
+    // A folder operation changes every site file below it, and any site file may be a link
+    // target, so the whole workspace is what the operation asks about; the site's own file list
+    // decides which paths matter.
+    FileOperationRegistrationOptions {
+        filters: vec![FileOperationFilter {
+            scheme: Some("file".to_owned()),
+            pattern: FileOperationPattern {
+                glob: "**/*".to_owned(),
+                matches: None,
+                options: None,
+            },
+        }],
     }
 }
 
@@ -701,15 +718,39 @@ pub(super) enum SourceReply {
 }
 
 /// Decode one request's typed parameters, keeping its id for the `InvalidParams` answer.
+///
+/// A body that does not decode is the client's own defect, so the client reads one fixed sentence
+/// and the decoder's account — Rust type names among it — stays in the server log.
 fn extract<R: LspRequest>(request: Request) -> Result<(RequestId, R::Params), Box<Response>> {
     let id = request.id.clone();
     request.extract(R::METHOD).map_err(|error| {
-        Box::new(Response::new_err(
+        tracing::debug!(
+            method = R::METHOD,
+            %error,
+            "a request's parameters could not be decoded"
+        );
+        Box::new(invalid_params_response(
             id,
-            ErrorCode::InvalidParams as i32,
-            error.to_string(),
+            "the request parameters are not valid",
         ))
     })
+}
+
+/// The reply for a request whose parameters cannot be decoded or do not describe what the method
+/// reads: one author-facing sentence, and the class a client answers without retrying.
+pub(crate) fn invalid_params_response(id: RequestId, message: &str) -> Response {
+    with_data(
+        Response::new_err(id, ErrorCode::InvalidParams as i32, message.to_owned()),
+        serde_json::json!({ "kind": "invalidParams" }),
+    )
+}
+
+/// Attach the structured class a client reads to a rejection.
+pub(crate) fn with_data(mut response: Response, data: serde_json::Value) -> Response {
+    if let Err(error) = &mut response.response_result {
+        error.data = Some(data);
+    }
+    response
 }
 
 /// The action that creates the file a source names, which the author confirms.
@@ -771,10 +812,10 @@ mod tests {
         ))
         .unwrap_err();
         assert_eq!(invalid.id, RequestId::from(1));
-        assert_eq!(
-            invalid.response_result.unwrap_err().code,
-            ErrorCode::InvalidParams as i32
-        );
+        let error = invalid.response_result.unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidParams as i32);
+        assert_eq!(error.data.unwrap()["kind"], "invalidParams");
+        assert!(!error.message.contains("TextDocumentPositionParams"));
 
         let unknown = SourceQuery::decode(Request::new(
             "request".to_owned().into(),

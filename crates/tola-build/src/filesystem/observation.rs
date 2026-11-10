@@ -6,9 +6,11 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
-use super::identity::{FilesystemSourceIdentity, paths_intersect};
-use super::path::{absolute_path, display_path, path_failure_reason};
-use super::sys::automatic_path_is_link_like;
+use super::path::{absolute_path, path_failure_reason};
+use tola_diagnostic::display_path;
+use tola_fs::{entry_is_link_like, is_link_like};
+use tola_input::FilesystemSourceIdentity;
+use tola_input::paths_intersect;
 
 /// Reader noun for a source file inside an observation.
 const SOURCE_NOUN: &str = "source";
@@ -48,23 +50,12 @@ impl FilesystemSourceFile {
     }
 }
 
-/// Entry kinds observed by a selectively traversed asset tree.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum SelectedMemberKind {
-    File,
-    Directory,
-    Link,
-    Other,
-}
-
 /// Sorted membership, canonical targets, digests, and immutable bytes for one source.
 #[derive(Clone, Debug)]
 pub(crate) struct FilesystemSourceObservation {
     canonical_root: Option<PathBuf>,
     files: Arc<[FilesystemSourceFile]>,
     file_indices: Arc<HashMap<PathBuf, usize>>,
-    // Membership recorded during a selective walk, including skipped entries.
-    members: Option<Arc<[(PathBuf, SelectedMemberKind)]>>,
 }
 
 impl FilesystemSourceObservation {
@@ -78,33 +69,12 @@ impl FilesystemSourceObservation {
 
     pub(crate) fn same_evidence_as(&self, other: &Self) -> bool {
         self.canonical_root == other.canonical_root
-            && self.members == other.members
             && self.files.len() == other.files.len()
             && self
                 .files
                 .iter()
                 .zip(other.files.iter())
                 .all(|(left, right)| left.same_evidence_as(right))
-    }
-
-    /// The same observation restricted to the files `keep` accepts.
-    ///
-    /// A caller that learns after observation which files of a source another
-    /// declaration owns publishes exactly the retained membership.
-    pub(crate) fn retaining(&self, keep: impl Fn(&FilesystemSourceFile) -> bool) -> Self {
-        let Some(first_removed) = self.files.iter().position(|file| !keep(file)) else {
-            return self.clone();
-        };
-        let mut files = self.files[..first_removed].to_vec();
-        files.extend(
-            self.files[first_removed + 1..]
-                .iter()
-                .filter(|file| keep(file))
-                .cloned(),
-        );
-        let mut retained = observation_from_files(self.canonical_root.clone(), files);
-        retained.members = self.members.clone();
-        retained
     }
 }
 
@@ -120,13 +90,14 @@ pub(crate) struct TreeObservation<'a> {
     pub(crate) validate_member: &'a dyn Fn(&Path, &Path) -> Result<()>,
 }
 
-/// Observe one already-resolved recursive tree.
+/// Observe selected files from an already-resolved tree while retaining their root identity.
 ///
 /// The caller must resolve the canonical root immediately before this call and
 /// apply its root-symlink policy. Members that are symlinks or reparse points
 /// are rejected. `display_root` is the site root that reported paths are relative to.
-pub(crate) fn observe_tree_source(
+pub(crate) fn observe_tree_source_selected(
     observation: TreeObservation<'_>,
+    selected: &dyn Fn(&Path, bool) -> bool,
 ) -> Result<FilesystemSourceObservation> {
     let TreeObservation {
         source_identity,
@@ -158,11 +129,12 @@ pub(crate) fn observe_tree_source(
     }
 
     let mut files = Vec::new();
-    walk_tree_members(
+    walk_tree_members_selected(
         source_identity,
         cancellation,
         display_root,
         member_label,
+        selected,
         validate_member,
         &mut |path, relative| {
             files.push(read_source_file(
@@ -182,62 +154,7 @@ pub(crate) fn observe_tree_source(
     ))
 }
 
-/// The source identity, boundary, previous state, and selection policy of one selected tree observation.
-pub(crate) struct SelectedTreeObservation<'a> {
-    pub(crate) source_identity: &'a FilesystemSourceIdentity,
-    pub(crate) boundary: &'a tola_typst::SourceBoundary,
-    pub(crate) previous: Option<&'a FilesystemSourceObservation>,
-    pub(crate) cancellation: &'a crate::cancellation::BuildCancellation,
-    pub(crate) display_root: &'a Path,
-    pub(crate) member_label: &'a str,
-    pub(crate) selected: &'a dyn Fn(&Path, bool) -> bool,
-    pub(crate) validate_member: &'a dyn Fn(&Path, &Path) -> Result<()>,
-}
-
-/// Observe selected members while retaining the visited directory membership and root watch.
-pub(crate) fn observe_tree_source_selected(
-    observation: SelectedTreeObservation<'_>,
-) -> Result<FilesystemSourceObservation> {
-    let SelectedTreeObservation {
-        source_identity,
-        boundary,
-        previous,
-        cancellation,
-        display_root,
-        member_label,
-        selected,
-        validate_member,
-    } = observation;
-    cancellation.ensure_active()?;
-    boundary.check(source_identity.logical_path())?;
-    let canonical_root = canonical_source_path(source_identity, display_root)?;
-    let mut files = Vec::new();
-    let members = walk_tree_members_selected(
-        source_identity,
-        cancellation,
-        display_root,
-        member_label,
-        selected,
-        validate_member,
-        &mut |path, relative| {
-            files.push(read_source_file(
-                path,
-                relative.to_path_buf(),
-                previous,
-                display_root,
-                boundary,
-            )?);
-            Ok(())
-        },
-    )?;
-    files.sort_unstable_by(|a, b| a.relative.cmp(&b.relative));
-    let mut observation = observation_from_files(Some(canonical_root.to_path_buf()), files);
-    observation.members = Some(members.into());
-    Ok(observation)
-}
-
-/// Walk the selected union without opening excluded members. Skipped directory roots are
-/// observed, but not traversed; a later policy change triggers a new walk from the root.
+/// Walk the selected union without opening excluded directories or reading unselected files.
 pub(crate) fn walk_tree_members_selected(
     source_identity: &FilesystemSourceIdentity,
     cancellation: &crate::cancellation::BuildCancellation,
@@ -246,24 +163,23 @@ pub(crate) fn walk_tree_members_selected(
     selected: &dyn Fn(&Path, bool) -> bool,
     validate_member: &dyn Fn(&Path, &Path) -> Result<()>,
     visitor: &mut dyn FnMut(&Path, &Path) -> Result<()>,
-) -> Result<Vec<(PathBuf, SelectedMemberKind)>> {
-    let mut members = Vec::new();
-    scan_tree_directory(
-        source_identity.logical_path(),
-        source_identity.logical_path(),
-        cancellation,
-        &TreeMemberWalk {
-            display_root,
-            member_label,
-            validate_member,
-        },
-        selected,
-        Some(&mut members),
-        visitor,
-    )?;
-    ensure_root_target_unchanged(source_identity, display_root)?;
-    members.sort_unstable();
-    Ok(members)
+) -> Result<()> {
+    cancellation.ensure_active()?;
+    if selected(Path::new(""), true) {
+        scan_tree_directory(
+            source_identity.logical_path(),
+            source_identity.logical_path(),
+            cancellation,
+            &TreeMemberWalk {
+                display_root,
+                member_label,
+                validate_member,
+            },
+            selected,
+            visitor,
+        )?;
+    }
+    ensure_root_target_unchanged(source_identity, display_root)
 }
 
 /// Observe one already-resolved exact regular file.
@@ -338,9 +254,7 @@ fn refresh_tree_files(
                 );
             }
         };
-        if !metadata.is_file()
-            || automatic_path_is_link_like(&logical_source, &metadata.file_type())?
-        {
+        if !metadata.is_file() || is_link_like(&metadata) {
             return Ok(None);
         }
         validate_member(&expected.relative, &logical_source)?;
@@ -375,7 +289,6 @@ fn refresh_tree_files(
         canonical_root: previous.canonical_root.clone(),
         files: files.into(),
         file_indices: Arc::clone(&previous.file_indices),
-        members: previous.members.clone(),
     }))
 }
 
@@ -386,48 +299,15 @@ struct TreeMemberWalk<'a> {
     validate_member: &'a dyn Fn(&Path, &Path) -> Result<()>,
 }
 
-/// Walk every member of an already-resolved recursive tree without reading bytes.
-///
-/// `visit` receives each member's path and its path relative to the tree root in a deterministic
-/// order, and `validate_member` applies the caller's own publication rules. The caller must
-/// resolve the canonical root immediately before this call and apply its root-symlink policy.
-pub(crate) fn walk_tree_members(
-    source_identity: &FilesystemSourceIdentity,
-    cancellation: &crate::cancellation::BuildCancellation,
-    display_root: &Path,
-    member_label: &str,
-    validate_member: &dyn Fn(&Path, &Path) -> Result<()>,
-    visit: &mut dyn FnMut(&Path, &Path) -> Result<()>,
-) -> Result<()> {
-    cancellation.ensure_active()?;
-    let walk = TreeMemberWalk {
-        display_root,
-        member_label,
-        validate_member,
-    };
-    scan_tree_directory(
-        source_identity.logical_path(),
-        source_identity.logical_path(),
-        cancellation,
-        &walk,
-        &|_, _| true,
-        None,
-        visit,
-    )?;
-    ensure_root_target_unchanged(source_identity, walk.display_root)
-}
-
 /// One recursive walk over the membership rules every caller shares: a member that is a symbolic
-/// link, a reparse point, or not a regular file is an error. `selected` decides which entries are
-/// opened, and `members`, when present, records every entry the walk passes with the kind a later
-/// observation compares. Only an opened regular file reaches `visit`.
+/// link, a reparse point, or not a regular file is an error when selected. Only a regular file
+/// reaches `visit`.
 fn scan_tree_directory(
     root: &Path,
     directory: &Path,
     cancellation: &crate::cancellation::BuildCancellation,
     walk: &TreeMemberWalk<'_>,
     selected: &dyn Fn(&Path, bool) -> bool,
-    members: Option<&mut Vec<(PathBuf, SelectedMemberKind)>>,
     visit: &mut dyn FnMut(&Path, &Path) -> Result<()>,
 ) -> Result<()> {
     cancellation.ensure_active()?;
@@ -437,7 +317,6 @@ fn scan_tree_directory(
         walk.display_root,
         "source",
     )?;
-    let mut members = members;
     for entry in entries {
         cancellation.ensure_active()?;
         let file_type = entry.file_type().map_err(|error| {
@@ -451,10 +330,7 @@ fn scan_tree_directory(
         let relative = path
             .strip_prefix(root)
             .expect("walked source remains below its root");
-        let is_link = automatic_path_is_link_like(&path, &file_type)?;
-        if let Some(members) = members.as_deref_mut() {
-            members.push((relative.to_path_buf(), member_kind(&file_type, is_link)));
-        }
+        let is_link = entry_is_link_like(&entry, &file_type)?;
         if !selected(relative, file_type.is_dir() || is_link) {
             continue;
         }
@@ -467,15 +343,7 @@ fn scan_tree_directory(
         }
         (walk.validate_member)(relative, &path)?;
         if file_type.is_dir() {
-            scan_tree_directory(
-                root,
-                &path,
-                cancellation,
-                walk,
-                selected,
-                members.as_deref_mut(),
-                visit,
-            )?;
+            scan_tree_directory(root, &path, cancellation, walk, selected, visit)?;
         } else if file_type.is_file() {
             visit(&path, relative)?;
         } else {
@@ -487,19 +355,6 @@ fn scan_tree_directory(
         }
     }
     Ok(())
-}
-
-/// The kind one walked entry records for a later change comparison.
-fn member_kind(file_type: &std::fs::FileType, is_link: bool) -> SelectedMemberKind {
-    if is_link {
-        SelectedMemberKind::Link
-    } else if file_type.is_dir() {
-        SelectedMemberKind::Directory
-    } else if file_type.is_file() {
-        SelectedMemberKind::File
-    } else {
-        SelectedMemberKind::Other
-    }
 }
 
 fn read_source_file(
@@ -563,7 +418,6 @@ fn observation_from_files(
         canonical_root,
         files,
         file_indices: Arc::new(file_indices),
-        members: None,
     }
 }
 
@@ -627,6 +481,12 @@ fn canonical_source_path<'a>(
 mod tests {
     use super::*;
 
+    fn observe_tree_source(
+        observation: TreeObservation<'_>,
+    ) -> Result<FilesystemSourceObservation> {
+        observe_tree_source_selected(observation, &|_, _| true)
+    }
+
     fn observe(
         root: &Path,
         previous: Option<&FilesystemSourceObservation>,
@@ -671,28 +531,6 @@ mod tests {
         std::fs::write(&changed, "restored").unwrap();
         let restored = observe(&root, Some(&removed), &[changed]);
         assert!(restored.same_evidence_as(&observe(&root, None, &[])));
-    }
-
-    #[test]
-    fn unchanged_reuses_files_reindexes_removals() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path();
-        for name in ["a.txt", "b.txt", "c.txt"] {
-            std::fs::write(root.join(name), name).unwrap();
-        }
-        let before = observe(root, None, &[]);
-        let unchanged = before.retaining(|_| true);
-        assert!(Arc::ptr_eq(&before.files, &unchanged.files));
-        assert!(Arc::ptr_eq(&before.file_indices, &unchanged.file_indices));
-        let filtered = before.retaining(|file| file.relative_path() != Path::new("b.txt"));
-        assert_eq!(filtered.files.len(), 2);
-        assert!(!filtered.file_indices.contains_key(Path::new("b.txt")));
-        assert_eq!(filtered.file_indices[Path::new("c.txt")], 1);
-        assert!(Arc::ptr_eq(
-            &before.files[2].bytes,
-            &filtered.files[1].bytes
-        ));
-        assert!(before.retaining(|_| false).files.is_empty());
     }
 
     #[cfg(unix)]

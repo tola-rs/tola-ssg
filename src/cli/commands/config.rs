@@ -16,10 +16,8 @@ use crate::cli::BuildOverrideArgs;
 struct ModuleDocument<'a> {
     root: &'a Path,
     manifest: &'a Path,
-    package: Option<&'a str>,
-    version: Option<String>,
     library: Option<PathBuf>,
-    site_entry: Option<PathBuf>,
+    build_entry: Option<PathBuf>,
 }
 
 #[derive(Serialize)]
@@ -60,7 +58,7 @@ struct ConfigDocument<'a> {
     root: &'a Path,
     content: &'a Path,
     entry: &'a Path,
-    theme: Option<&'a str>,
+    entry_module: Option<&'a str>,
     modules: BTreeMap<String, ModuleDocument<'a>>,
     output: &'a Path,
     minify: MinifyDocument,
@@ -81,9 +79,9 @@ pub(super) fn value(
 ) -> Result<serde_json::Value> {
     let overrides = crate::cli::config::config_overrides(build);
     let loaded = request.load_config(&overrides)?;
-    let prepared = tola_build::modules::prepare(
+    let prepared = tola_build::modules::prepare_site(
         loaded.config(),
-        tola_build::inputs::InputMode::new(request.scope, true),
+        tola_input::InputMode::new(request.scope(), true),
         &request.cancellation.token(),
     )?;
     let config = &prepared;
@@ -95,14 +93,12 @@ pub(super) fn value(
                 ModuleDocument {
                     root: module.root.as_path(),
                     manifest: module.manifest.as_path(),
-                    package: module.package_name.as_deref(),
-                    version: module.version.map(|version| version.to_string()),
                     library: module
                         .typst
                         .as_ref()
                         .map(|entry| module.root.join(&entry.entry)),
-                    site_entry: module
-                        .site
+                    build_entry: module
+                        .build
                         .as_ref()
                         .map(|entry| module.root.join(&entry.entry)),
                 },
@@ -114,7 +110,7 @@ pub(super) fn value(
         root: config.get_root(),
         content: config.build().content_dir.as_path(),
         entry: config.build().entry.as_path(),
-        theme: config.theme().module.as_deref(),
+        entry_module: config.module_entry(),
         modules,
         output: config.build().publish_dir.as_path(),
         minify: MinifyDocument {
@@ -158,7 +154,7 @@ mod tests {
     use super::*;
     use crate::cancellation::Cancellation;
     use crate::cli::{ConfigFileArgs, TypstPackageArgs};
-    use tola_build::InputScope;
+    use tola_input::InputScope;
 
     #[test]
     fn theme_resolved_without_executing_driver() {
@@ -169,33 +165,34 @@ mod tests {
         std::fs::create_dir(&theme).unwrap();
         std::fs::write(theme.join("lib.typ"), "").unwrap();
         std::fs::write(theme.join("site.typ"), "#panic(\"must not run\")").unwrap();
-        std::fs::write(theme.join("tola-module.toml"),
-            "\nname='notebook'\nversion='1.2.3'\n[typst]\nentry='lib.typ'\n[site]\nentry='site.typ'\n"
-        ).unwrap();
+        std::fs::write(
+            theme.join("tola-module.toml"),
+            "\n[typst]\nentry='lib.typ'\n[build]\nentry='site.typ'\n",
+        )
+        .unwrap();
         std::fs::write(
             project.join("tola.toml"),
-            "[modules.notes]\npath='../theme'\n[theme]\nmodule='notes'\n",
+            "[modules.notes]\npath='../theme'\n[build]\nentry={module='notes'}\n",
         )
         .unwrap();
         let output = super::super::testing::buffered_output();
         let cancellation = Cancellation::default();
         let request = super::super::SiteRequest::new(
-            ConfigFileArgs {
-                path: Some(project.join("tola.toml")),
+            crate::cli::SiteArgs {
+                config: ConfigFileArgs {
+                    path: Some(project.join("tola.toml")),
+                },
+                packages: TypstPackageArgs::default(),
             },
-            TypstPackageArgs::default(),
-            InputScope::Offline,
-            BuildOverrideArgs::default(),
-            crate::cli::CompilerFontArgs::default(),
+            crate::cli::BuildArgs::default(),
+            tola_input::InputMode::new(InputScope::Offline, false),
             &output,
             &cancellation,
         )
         .unwrap();
         let shown = value(&request, &BuildOverrideArgs::default()).unwrap();
         let module = &shown["modules"]["notes"];
-        assert_eq!(shown["theme"], "notes");
-        assert_eq!(module["package"], "notebook");
-        assert_eq!(module["version"], "1.2.3");
+        assert_eq!(shown["entry_module"], "notes");
         assert_eq!(
             shown["entry"],
             serde_json::json!(theme.canonicalize().unwrap().join("site.typ"))
@@ -204,6 +201,7 @@ mod tests {
             module["library"],
             serde_json::json!(theme.canonicalize().unwrap().join("lib.typ"))
         );
+        assert_eq!(module["build_entry"], shown["entry"]);
         assert_eq!(
             shown["content"],
             serde_json::json!(project.canonicalize().unwrap().join("content"))

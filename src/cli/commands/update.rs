@@ -3,10 +3,9 @@
 use std::collections::BTreeMap;
 
 use anyhow::{Result, ensure};
-use tola_build::inputs::{
-    InputLock, InputMode, LockedModule, LockedRevision, refresh_module_roots,
-};
-use tola_build::modules::{ModuleDeclaration, ModuleSource, RemoteRevision};
+use tola_build::inputs::refresh_module_roots;
+use tola_input::{InputLock, InputMode, LockedModule, LockedRevision};
+use tola_module::{ModuleDeclaration, ModuleSource, RemoteRevision};
 
 use crate::cancellation::Cancellation;
 use crate::cli::output::CommandOutput;
@@ -23,7 +22,7 @@ pub(in crate::cli) fn run(
 ) -> Result<()> {
     ensure!(
         mode.may_write_lock(),
-        "`tola update` writes `tola.lock`; run it without `--locked`, `--offline`, or `--pure`"
+        "`tola update` writes `tola.lock`; run it without `--locked` or `--pure`"
     );
     let loaded = crate::cli::config::load_site(
         &config_file,
@@ -66,7 +65,7 @@ pub(in crate::cli) fn run(
     }
     lock.write_atomic(site_root)?;
     output.status("`tola.lock` records the refreshed inputs")?;
-    output.status("run `tola vendor` to update the frozen copies")?;
+    output.status("run `tola vendor --refresh` to update the frozen copies")?;
     Ok(())
 }
 
@@ -86,17 +85,14 @@ fn refreshable(
                 names.is_empty(),
                 "module `{alias}` is a local directory; it is site source and is never refreshed"
             ),
-            ModuleSource::Remote {
-                revision: Some(RemoteRevision::Rev(_)),
-                ..
-            } => {
+            ModuleSource::Git { git } if matches!(git.revision, Some(RemoteRevision::Rev(_))) => {
                 if !names.is_empty() {
                     output.status(format!(
-                        "module `{alias}` is pinned to a revision; change it to `tag` or `branch` to refresh it"
+                        "module `{alias}` is pinned to a revision; use `git.tag` or `git.branch` to refresh it"
                     ))?;
                 }
             }
-            ModuleSource::Remote { .. } => {
+            ModuleSource::Git { .. } | ModuleSource::Tarball { .. } => {
                 selected.insert(alias.clone(), declaration.clone());
             }
         }
@@ -113,7 +109,7 @@ fn refreshable(
 /// One sentence naming what a module entry now records.
 fn describe(module: Option<&LockedModule>) -> String {
     match module {
-        Some(LockedModule::Remote {
+        Some(LockedModule::Git {
             commit, revision, ..
         }) => {
             let selector = match revision {
@@ -123,6 +119,9 @@ fn describe(module: Option<&LockedModule>) -> String {
                 None => "the default branch".to_owned(),
             };
             format!("{selector} now resolves to `{commit}`")
+        }
+        Some(LockedModule::Tarball { tarball_sha256, .. }) => {
+            format!("tarball SHA-256 {tarball_sha256}")
         }
         Some(LockedModule::Local { .. }) => "recorded as a local directory".to_owned(),
         None => "no longer records a fact".to_owned(),

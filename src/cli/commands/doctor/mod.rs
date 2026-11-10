@@ -12,20 +12,26 @@ use tola_diagnostic::{Diagnostic, DiagnosticError};
 
 use crate::cli::output::CommandOutput;
 use crate::cli::{ConfigFileArgs, TypstPackageArgs};
-use tola_build::InputScope;
+use tola_input::InputScope;
 
 pub(in crate::cli) fn run(
     config: ConfigFileArgs,
     packages: TypstPackageArgs,
     scope: InputScope,
     json: bool,
+    pretty: bool,
     output: &CommandOutput,
     cancellation: &Cancellation,
 ) -> Result<()> {
     let report = Report::collect(&config, &packages, scope, output, cancellation)?;
     cancellation.token().ensure_active()?;
     if json {
-        output.write_stdout_line(serde_json::to_vec_pretty(&report)?)?;
+        let encoded = if pretty {
+            serde_json::to_vec_pretty(&report)?
+        } else {
+            serde_json::to_vec(&report)?
+        };
+        output.write_stdout_line(encoded)?;
     } else {
         let environment = &report.environment;
         output.status(format!(
@@ -107,6 +113,7 @@ mod tests {
             ConfigFileArgs { path: Some(config) },
             TypstPackageArgs::default(),
             InputScope::default(),
+            false,
             false,
             &output,
             &Cancellation::default(),

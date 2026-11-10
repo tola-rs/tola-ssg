@@ -8,7 +8,9 @@ use super::RebuildScope;
 use super::event::{accepted_root_invalidation_kind, is_structural};
 use tola_build::build::InputPathScope;
 use tola_build::config::ResolvedSiteConfig;
-use tola_build::filesystem::{lexical_path_identity, normalize_existing_prefix, path_is_within};
+use tola_build::filesystem::path_is_within;
+use tola_input::{FileSelection, lexical_path_identity, normalize_existing_prefix};
+use tola_module::hooks::RerunSelection;
 
 /// Declare every build producer once, so its bit index, iteration order, and count cannot drift
 /// between the enum, `PRODUCER_KINDS`, and `PRODUCER_COUNT`.
@@ -90,7 +92,7 @@ impl std::ops::BitOr for ProducerSet {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct WatchRequirements {
     requirements: Vec<WatchRequirement>,
-    hook_outputs: Vec<tola_build::filesystem::FilesystemSourceIdentity>,
+    hook_outputs: Vec<tola_input::FilesystemSourceIdentity>,
     declared_hook_requirements: Vec<WatchRequirement>,
 }
 
@@ -118,13 +120,19 @@ impl WatchRequirements {
     }
 
     /// Conservatively observe paths of hooks whose conditions are not evaluated yet.
-    pub(crate) fn add_module_hook_inputs(&mut self, inputs: &tola_build::modules::HookWatchInputs) {
+    pub(crate) fn add_module_hook_inputs(&mut self, inputs: &tola_module::HookWatchInputs) {
         let start = self.requirements.len();
+        self.requirements.extend(
+            inputs
+                .rerun_selections()
+                .iter()
+                .flat_map(hook_rerun_requirements),
+        );
         self.observe_paths(
             ProducerKind::Hooks,
-            InputPathScope::Recursive,
+            InputPathScope::Exact,
             false,
-            inputs.rerun_paths().iter().cloned(),
+            inputs.hook_scripts().iter().cloned(),
         );
         self.observe_paths(
             ProducerKind::Hooks,
@@ -136,6 +144,58 @@ impl WatchRequirements {
             .extend_from_slice(&self.requirements[start..]);
         self.hook_outputs
             .extend(super::generated_source_identities(inputs));
+    }
+
+    pub(crate) fn observe_asset_tree(
+        &mut self,
+        root: &Path,
+        required: bool,
+        source_prefix: &Path,
+        selection: &FileSelection,
+    ) {
+        let root = lexical_path_identity(root);
+        let prefixes = selection
+            .roots()
+            .into_iter()
+            .filter_map(|prefix| {
+                let (member, prefix) = if let Ok(member) = prefix.strip_prefix(source_prefix) {
+                    (member.to_path_buf(), prefix)
+                } else if source_prefix.starts_with(&prefix) {
+                    (PathBuf::new(), source_prefix.to_path_buf())
+                } else {
+                    return None;
+                };
+                (selection.matches(&prefix) || selection.could_match_below(&prefix))
+                    .then_some((member, prefix))
+            })
+            .collect::<BTreeSet<_>>();
+        let producers = ProducerSet::one(ProducerKind::ConfiguredAssets);
+        if !prefixes
+            .iter()
+            .any(|(member, _)| member.as_os_str().is_empty())
+        {
+            let requirement = WatchRequirement::exact_for(root.clone(), producers);
+            self.requirements.push(if required {
+                requirement
+            } else {
+                requirement.optional()
+            });
+        }
+        let selection = Arc::new(selection.clone());
+        self.requirements
+            .extend(prefixes.into_iter().map(|(member, prefix)| {
+                let mut requirement =
+                    WatchRequirement::recursive_for(root.join(&member), producers);
+                if !required || !member.as_os_str().is_empty() {
+                    requirement = requirement.optional();
+                }
+                requirement.admission = ChangeAdmission::AssetTree {
+                    selection: Arc::clone(&selection),
+                    prefix,
+                    member_depth: member.components().count(),
+                };
+                requirement
+            }));
     }
 
     pub(crate) fn observe_paths(
@@ -330,7 +390,7 @@ pub(super) struct EventBoundary {
     directories: Arc<[PathBuf]>,
     symlink_entries: Arc<[PathBuf]>,
     /// Declared development hook outputs whose current content may account for file events.
-    hook_outputs: Arc<[tola_build::filesystem::FilesystemSourceIdentity]>,
+    hook_outputs: Arc<[tola_input::FilesystemSourceIdentity]>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -380,7 +440,7 @@ impl ClassifiedPath {
 }
 
 impl EventBoundary {
-    pub(super) fn hook_outputs(&self) -> Arc<[tola_build::filesystem::FilesystemSourceIdentity]> {
+    pub(super) fn hook_outputs(&self) -> Arc<[tola_input::FilesystemSourceIdentity]> {
         Arc::clone(&self.hook_outputs)
     }
 
@@ -390,12 +450,8 @@ impl EventBoundary {
 
     /// Classify one path of an event whose kind is known.
     ///
-    /// A path at or above a subscription's root keeps that subscription: it reports the tree that
-    /// holds the input. So does a structural event for a path inside the scope, because a removed
-    /// or renamed directory has no file name and its subtree can hide changes no event
-    /// reports. A plain content change inside the scope reaches only the subscriptions whose
-    /// admission test accepts the path, so a name no producer reads stops waking the session
-    /// while every read path keeps its own subscription.
+    /// Directory changes can report a whole subtree without naming its files. Ordinary file
+    /// changes reach only the subscriptions that read the named path.
     pub(super) fn classify_change(&self, path: &Path, kind: notify::EventKind) -> ClassifiedPath {
         let structural = is_structural(kind);
         let path = lexical_path_identity(path);
@@ -403,10 +459,7 @@ impl EventBoundary {
         self.intersecting_requirements(&path).fold(
             ClassifiedPath::new(ProducerSet::default(), RebuildScope::Paths),
             |mut classified, requirement| {
-                if path_is_within(&requirement.path, &path)
-                    || (requirement.matches(&path)
-                        && (structural || requirement.admits_change(&path)))
-                {
+                if requirement.admits_event(&path, structural) {
                     classified.merge(requirement, hook_output);
                 }
                 classified
@@ -455,15 +508,20 @@ impl EventBoundary {
     /// Whether `path`, whose name resembles an editor artifact, is nevertheless an input.
     ///
     /// A name alone cannot tell an artifact from an input, so the subscriptions reaching `path`
-    /// decide: one that selects members by name reads only the names that rule matches, while one
-    /// that names the file itself or admits every member of its scope keeps it. A path at or above
-    /// a subscription's root reports the tree that holds the input, so it stays reachable.
-    pub(super) fn admits_editor_artifact(&self, path: &Path) -> bool {
+    /// decide. A selector can also observe a directory event where a matching file could appear.
+    pub(super) fn admits_editor_artifact(&self, path: &Path, structural: bool) -> bool {
         let path = lexical_path_identity(path);
-        self.intersecting_requirements(&path).any(|requirement| {
-            path_is_within(&requirement.path, &path)
-                || (requirement.matches(&path) && !requirement.selects_members_by_name())
-        })
+        self.intersecting_requirements(&path)
+            .any(|requirement| match &requirement.admission {
+                ChangeAdmission::AssetTree { .. } | ChangeAdmission::HookRerun { .. } => {
+                    requirement.admits_event(&path, structural)
+                }
+                ChangeAdmission::Scope | ChangeAdmission::ContentExtension => {
+                    path_is_within(&requirement.path, &path)
+                        || (requirement.matches(&path)
+                            && requirement.admission == ChangeAdmission::Scope)
+                }
+            })
     }
 
     /// A replaced directory invalidates physical coverage even after its last logical
@@ -526,7 +584,7 @@ pub(super) struct RootSet {
 impl RootSet {
     fn with_hook_outputs(
         desired: Vec<WatchRequirement>,
-        hook_outputs: Arc<[tola_build::filesystem::FilesystemSourceIdentity]>,
+        hook_outputs: Arc<[tola_input::FilesystemSourceIdentity]>,
     ) -> Self {
         Self {
             selection: selection_for_observed(desired, &mut BTreeMap::new(), hook_outputs),
@@ -535,11 +593,14 @@ impl RootSet {
         }
     }
 
-    pub(super) fn from_config(config: &ResolvedSiteConfig, dynamic: &WatchRequirements) -> Self {
-        Self::with_hook_outputs(
-            collect_roots(config, dynamic),
+    pub(super) fn from_config(
+        config: &ResolvedSiteConfig,
+        dynamic: &WatchRequirements,
+    ) -> anyhow::Result<Self> {
+        Ok(Self::with_hook_outputs(
+            collect_roots(config, dynamic)?,
             combined_hook_outputs([config], dynamic),
-        )
+        ))
     }
 
     pub(super) fn initial_selection(&self) -> WatchSelection {
@@ -551,26 +612,28 @@ impl RootSet {
         &self,
         configs: impl IntoIterator<Item = &'a ResolvedSiteConfig>,
         dynamic: &WatchRequirements,
-    ) -> (WatchSelection, bool) {
+    ) -> anyhow::Result<(WatchSelection, bool)> {
         let configs: Vec<&ResolvedSiteConfig> = configs.into_iter().collect();
         let mut observed = BTreeMap::new();
         let outputs = combined_hook_outputs(configs.iter().copied(), dynamic);
-        let mut configured_roots =
-            requirements_for_configs(configs.iter().copied(), &WatchRequirements::default());
+        let mut configured_roots = Vec::new();
+        for config in &configs {
+            configured_roots.extend(collect_roots(config, &WatchRequirements::default())?);
+        }
         configured_roots.extend(dynamic.declared_hook_requirements.iter().cloned());
         let mut candidate = configured_roots.clone();
         candidate.extend(dynamic.iter().cloned());
         let selection = selection_for_observed(candidate, &mut observed, Arc::clone(&outputs));
         let configured = selection_for_observed(configured_roots, &mut observed, outputs);
-        (selection, self.extends_observation(&configured))
+        Ok((selection, self.extends_observation(&configured)))
     }
 
     pub(super) fn staged_selection(
         &self,
         config: &ResolvedSiteConfig,
         dynamic: &WatchRequirements,
-    ) -> (WatchSelection, WatchSelection, bool) {
-        let mut configured_roots = collect_roots(config, &WatchRequirements::default());
+    ) -> anyhow::Result<(WatchSelection, WatchSelection, bool)> {
+        let mut configured_roots = collect_roots(config, &WatchRequirements::default())?;
         configured_roots.extend(dynamic.declared_hook_requirements.iter().cloned());
         let mut candidate = configured_roots.clone();
         candidate.extend(dynamic.iter().cloned());
@@ -584,11 +647,11 @@ impl RootSet {
             selection_for_observed(candidate, &mut observed, Arc::clone(&hook_outputs));
         let configured = selection_for_observed(configured_roots, &mut observed, hook_outputs);
         // Only declared coverage retains refresh: discovered reads are reverified at handoff.
-        (
+        Ok((
             observing,
             subscriptions,
             self.extends_observation(&configured),
-        )
+        ))
     }
 
     pub(super) fn current_selection(&self) -> WatchSelection {
@@ -797,26 +860,25 @@ pub(crate) enum ExistencePolicy {
     Optional,
 }
 
-/// Which plain content changes one subscription admits.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// Which names within one subscription can change its producer.
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum ChangeAdmission {
     /// Every path the subscription's scope matches.
     Scope,
     /// Only a name with the content source extension; discovery still decides eligibility.
     ContentExtension,
+    AssetTree {
+        selection: Arc<FileSelection>,
+        prefix: PathBuf,
+        member_depth: usize,
+    },
+    HookRerun {
+        selection: Arc<RerunSelection>,
+        logical_root: PathBuf,
+    },
 }
 
-impl ChangeAdmission {
-    /// The admission that still admits every change either subscription admitted.
-    fn widest(self, other: Self) -> Self {
-        match (self, other) {
-            (Self::Scope, _) | (_, Self::Scope) => Self::Scope,
-            (Self::ContentExtension, Self::ContentExtension) => Self::ContentExtension,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WatchRequirement {
     path: PathBuf,
     scope: WatchScope,
@@ -860,22 +922,42 @@ impl WatchRequirement {
         self
     }
 
-    /// Whether a plain content change to `path` can affect this subscription.
-    fn admits_change(&self, path: &Path) -> bool {
-        match self.admission {
-            ChangeAdmission::Scope => true,
-            ChangeAdmission::ContentExtension => tola_build::has_typ_extension(path),
+    fn admits_event(&self, path: &Path, structural: bool) -> bool {
+        if self.path.starts_with(path) && path != self.path {
+            return structural
+                || matches!(
+                    self.admission,
+                    ChangeAdmission::Scope | ChangeAdmission::ContentExtension
+                );
         }
-    }
-
-    /// Whether this subscription reads only the member names a discovery rule selects.
-    ///
-    /// Discovery selects content members by the source extension, so a name its rule does not
-    /// match is never an input there. A subscription that names the file itself, or that admits
-    /// every member of its scope — a configured asset tree, a configured font directory — reads
-    /// what the scope holds whatever a member is called.
-    fn selects_members_by_name(&self) -> bool {
-        self.admission == ChangeAdmission::ContentExtension
+        if !self.matches(path) {
+            return false;
+        }
+        match &self.admission {
+            ChangeAdmission::Scope => true,
+            ChangeAdmission::ContentExtension => {
+                structural || self.path == path || tola_build::has_typ_extension(path)
+            }
+            ChangeAdmission::AssetTree {
+                selection, prefix, ..
+            } => path.strip_prefix(&self.path).is_ok_and(|relative| {
+                let member;
+                let path = if relative.as_os_str().is_empty() {
+                    prefix.as_path()
+                } else {
+                    member = prefix.join(relative);
+                    member.as_path()
+                };
+                selection.matches(path) || (structural && selection.could_match_below(path))
+            }),
+            ChangeAdmission::HookRerun {
+                selection,
+                logical_root,
+            } => path.strip_prefix(&self.path).is_ok_and(|relative| {
+                let path = logical_root.join(relative);
+                selection.matches(&path) || (structural && selection.could_match_below(&path))
+            }),
+        }
     }
 
     fn with_rebuild_scope(mut self, rebuild_scope: RebuildScope) -> Self {
@@ -892,7 +974,7 @@ impl WatchRequirement {
     }
 
     fn covers(&self, required: &Self) -> bool {
-        match self.scope {
+        let scope_covers = match self.scope {
             WatchScope::Recursive => required.path.starts_with(&self.path),
             WatchScope::Children => {
                 (self.path == required.path && required.scope != WatchScope::Recursive)
@@ -900,23 +982,19 @@ impl WatchRequirement {
                         && required.path.parent() == Some(&self.path))
             }
             WatchScope::Exact => self.path == required.path && required.scope == WatchScope::Exact,
-        }
+        };
+        scope_covers
+            && (self.admission == ChangeAdmission::Scope
+                || (self.admission == required.admission
+                    && (self.admission == ChangeAdmission::ContentExtension
+                        || self.path == required.path))
+                || (required.scope == WatchScope::Exact
+                    && self.admits_event(&required.path, false)))
     }
-}
-
-fn requirements_for_configs<'a>(
-    configs: impl IntoIterator<Item = &'a ResolvedSiteConfig>,
-    dynamic: &WatchRequirements,
-) -> Vec<WatchRequirement> {
-    let mut desired = Vec::new();
-    for config in configs {
-        desired.extend(collect_roots(config, dynamic));
-    }
-    desired
 }
 
 struct WatchPathObservation {
-    physical: PathBuf,
+    physical: Option<PathBuf>,
     entries: Vec<(PathBuf, Option<PathBuf>)>,
     parent: Option<PathBuf>,
     is_directory: Result<bool, std::io::ErrorKind>,
@@ -924,9 +1002,8 @@ struct WatchPathObservation {
 }
 
 impl WatchPathObservation {
-    fn capture(path: &Path) -> Self {
-        let resolved = resolve_symlinks(path);
-        let physical = normalize_existing_prefix(&resolved.physical);
+    fn capture(path: &Path, tree_prefix_depth: usize) -> Self {
+        let resolved = resolve_symlinks(path, tree_prefix_depth);
         let entries = resolved
             .entries
             .into_iter()
@@ -940,12 +1017,22 @@ impl WatchPathObservation {
                 (entry, parent)
             })
             .collect();
+        if resolved.symlinked_member {
+            return Self {
+                physical: None,
+                entries,
+                parent: None,
+                is_directory: Ok(false),
+                unreadable: false,
+            };
+        }
+        let physical = normalize_existing_prefix(&resolved.physical);
         let parent = physical.parent().and_then(nearest_existing_directory);
         let is_directory = std::fs::metadata(&physical)
             .map(|metadata| metadata.is_dir())
             .map_err(|error| error.kind());
         Self {
-            physical,
+            physical: Some(physical),
             entries,
             parent,
             is_directory,
@@ -956,11 +1043,11 @@ impl WatchPathObservation {
 
 fn selection_for_observed(
     mut desired: Vec<WatchRequirement>,
-    observed: &mut BTreeMap<PathBuf, WatchPathObservation>,
-    hook_outputs: Arc<[tola_build::filesystem::FilesystemSourceIdentity]>,
+    observed: &mut BTreeMap<(PathBuf, usize), WatchPathObservation>,
+    hook_outputs: Arc<[tola_input::FilesystemSourceIdentity]>,
 ) -> WatchSelection {
     dedupe_requirements(&mut desired);
-    let mut matched = desired.clone();
+    let mut matched = Vec::new();
     let mut directories = Vec::new();
     let mut directory_producers = BTreeMap::<PathBuf, ProducerSet>::new();
     let mut symlink_entries = Vec::new();
@@ -981,15 +1068,16 @@ fn selection_for_observed(
                          reason: CoverageUncertainty| {
             record_uncertainty(uncertainties, requirement.producers, reason);
         };
+        let tree_prefix_depth = match &requirement.admission {
+            ChangeAdmission::AssetTree { member_depth, .. } => *member_depth,
+            _ => 0,
+        };
         let resolved = observed
-            .entry(requirement.path.clone())
-            .or_insert_with(|| WatchPathObservation::capture(&requirement.path));
+            .entry((requirement.path.clone(), tree_prefix_depth))
+            .or_insert_with(|| WatchPathObservation::capture(&requirement.path, tree_prefix_depth));
         if resolved.unreadable {
             uncertain(&mut uncertainties, CoverageUncertainty::Unreadable);
         }
-        let mut physical = requirement.clone();
-        physical.path = resolved.physical.clone();
-        matched.push(physical.clone());
         for (entry, parent) in &resolved.entries {
             symlink_entries.push(entry.clone());
             matched.push(
@@ -1002,6 +1090,15 @@ fn selection_for_observed(
                 None => uncertain(&mut uncertainties, CoverageUncertainty::CoverageGap),
             }
         }
+        let Some(physical_path) = &resolved.physical else {
+            continue;
+        };
+        matched.push(requirement.clone());
+        if *physical_path != requirement.path {
+            let mut physical = requirement.clone();
+            physical.path = physical_path.clone();
+            matched.push(physical);
+        }
         match resolved.is_directory {
             Ok(true) if requirement.scope != WatchScope::Exact => {
                 let mode = if requirement.scope == WatchScope::Recursive {
@@ -1012,7 +1109,7 @@ fn selection_for_observed(
                 add_directory(
                     &mut directories,
                     &mut directory_producers,
-                    physical.path.clone(),
+                    physical_path.clone(),
                     mode,
                     requirement.producers,
                 );
@@ -1144,11 +1241,12 @@ struct ResolvedWatchPath {
     physical: PathBuf,
     entries: Vec<PathBuf>,
     unreadable: bool,
+    symlinked_member: bool,
 }
 
 /// Keep link entries for retargeting and resolved paths for target creation, even when an
 /// external target is missing.
-fn resolve_symlinks(path: &Path) -> ResolvedWatchPath {
+fn resolve_symlinks(path: &Path, tree_prefix_depth: usize) -> ResolvedWatchPath {
     let mut physical = lexical_path_identity(path);
     let mut entries = BTreeSet::new();
     loop {
@@ -1159,11 +1257,22 @@ fn resolve_symlinks(path: &Path) -> ResolvedWatchPath {
             prefix.push(component.as_os_str());
             match std::fs::symlink_metadata(&prefix) {
                 Ok(metadata) if metadata.file_type().is_symlink() => {
+                    // A tree can have a symlinked root, but its walk skips symlinked members.
+                    if index >= components.len() - tree_prefix_depth {
+                        entries.insert(prefix);
+                        return ResolvedWatchPath {
+                            physical,
+                            entries: entries.into_iter().collect(),
+                            unreadable: false,
+                            symlinked_member: true,
+                        };
+                    }
                     if !entries.insert(prefix.clone()) {
                         return ResolvedWatchPath {
                             physical,
                             entries: entries.into_iter().collect(),
                             unreadable: true,
+                            symlinked_member: false,
                         };
                     }
                     let Ok(target) = std::fs::read_link(&prefix) else {
@@ -1171,6 +1280,7 @@ fn resolve_symlinks(path: &Path) -> ResolvedWatchPath {
                             physical,
                             entries: entries.into_iter().collect(),
                             unreadable: true,
+                            symlinked_member: false,
                         };
                     };
                     let mut rewritten = if target.is_absolute() {
@@ -1194,6 +1304,7 @@ fn resolve_symlinks(path: &Path) -> ResolvedWatchPath {
                         physical,
                         entries: entries.into_iter().collect(),
                         unreadable,
+                        symlinked_member: false,
                     };
                 }
             }
@@ -1205,6 +1316,7 @@ fn resolve_symlinks(path: &Path) -> ResolvedWatchPath {
                 physical,
                 entries: entries.into_iter().collect(),
                 unreadable: false,
+                symlinked_member: false,
             };
         }
     }
@@ -1222,19 +1334,19 @@ fn nearest_existing_directory(path: &Path) -> Option<PathBuf> {
 fn collect_roots(
     config: &ResolvedSiteConfig,
     dynamic: &WatchRequirements,
-) -> Vec<WatchRequirement> {
+) -> anyhow::Result<Vec<WatchRequirement>> {
     let content_producers =
         ProducerSet::one(ProducerKind::Content) | ProducerSet::one(ProducerKind::TypstReads);
-    let mut roots = vec![
-        WatchRequirement::recursive_for(
-            lexical_path_identity(&config.build().content_dir),
-            content_producers,
-        ),
-        WatchRequirement::exact_for(
-            lexical_path_identity(&config.build().entry),
+    let mut roots = vec![WatchRequirement::recursive_for(
+        lexical_path_identity(&config.build().content_dir),
+        content_producers,
+    )];
+    if let Some(entry) = config.project_entry_path() {
+        roots.push(WatchRequirement::exact_for(
+            lexical_path_identity(&entry),
             ProducerSet::one(ProducerKind::TypstReads),
-        ),
-    ];
+        ));
+    }
     // A configured font directory retains every accepted member with its bytes, so a member edit
     // reaches the build whatever the member is called.
     roots.extend(config.fonts().paths.iter().map(|path| {
@@ -1245,14 +1357,15 @@ fn collect_roots(
         .optional()
     }));
 
-    roots.extend(config.assets().tree_sources().map(|source| {
-        WatchRequirement::recursive_for(
-            lexical_path_identity(source),
-            ProducerSet::one(ProducerKind::ConfiguredAssets),
-        )
-        .optional()
-    }));
-
+    let mut configured_requirements = WatchRequirements::default();
+    for tree in &config.assets().trees {
+        configured_requirements.observe_asset_tree(
+            tree.source(),
+            false,
+            &config.root_relative(tree.source()),
+            tree.selection(),
+        );
+    }
     for source in config.assets().file_sources() {
         let source = lexical_path_identity(source);
         roots.push(
@@ -1262,14 +1375,13 @@ fn collect_roots(
     }
 
     let configured = tola_build::build::configured_input_observation(config);
-    let mut configured_requirements = WatchRequirements::default();
     crate::dev::watch::requirements::append_observed_paths(
         &mut configured_requirements,
         configured.paths(),
     );
     roots.extend(configured_requirements.iter().cloned());
 
-    collect_hook_rerun_paths(config, &mut roots);
+    collect_hook_requirements(config, &mut roots)?;
 
     roots.extend(dynamic.iter().cloned());
 
@@ -1281,7 +1393,7 @@ fn collect_roots(
     }
 
     dedupe_requirements(&mut roots);
-    roots
+    Ok(roots)
 }
 
 /// A configuration-declared path (hook declarations) resolves against the site root.
@@ -1298,8 +1410,7 @@ pub(super) fn development_before_build_hooks(
     config: &ResolvedSiteConfig,
 ) -> impl Iterator<Item = &tola_build::config::section::build::BeforeBuildHookConfig> {
     config
-        .build()
-        .hooks
+        .hooks()
         .before_build
         .iter()
         .filter(|hook| hook.enable && hook.dev.participates_in_development())
@@ -1308,11 +1419,11 @@ pub(super) fn development_before_build_hooks(
 /// Every output a development before-build hook declares, as a filesystem identity.
 fn declared_hook_outputs(
     config: &ResolvedSiteConfig,
-) -> impl Iterator<Item = tola_build::filesystem::FilesystemSourceIdentity> + '_ {
+) -> impl Iterator<Item = tola_input::FilesystemSourceIdentity> + '_ {
     development_before_build_hooks(config)
         .flat_map(|hook| hook.generates.iter())
         .map(move |output| {
-            tola_build::filesystem::FilesystemSourceIdentity::from_path(&site_relative_path(
+            tola_input::FilesystemSourceIdentity::from_path(&site_relative_path(
                 config.get_root(),
                 output,
             ))
@@ -1323,7 +1434,7 @@ fn declared_hook_outputs(
 fn combined_hook_outputs<'a>(
     configs: impl IntoIterator<Item = &'a ResolvedSiteConfig>,
     dynamic: &WatchRequirements,
-) -> Arc<[tola_build::filesystem::FilesystemSourceIdentity]> {
+) -> Arc<[tola_input::FilesystemSourceIdentity]> {
     let configs: Vec<_> = configs.into_iter().collect();
     let mut outputs = declared_hook_outputs_for(&configs);
     outputs.extend(dynamic.hook_outputs.iter().cloned());
@@ -1335,7 +1446,7 @@ fn combined_hook_outputs<'a>(
 /// Declared hook outputs of several observed configurations, deduplicated.
 fn declared_hook_outputs_for(
     configs: &[&ResolvedSiteConfig],
-) -> Vec<tola_build::filesystem::FilesystemSourceIdentity> {
+) -> Vec<tola_input::FilesystemSourceIdentity> {
     let mut outputs: Vec<_> = configs
         .iter()
         .flat_map(|config| declared_hook_outputs(config))
@@ -1345,11 +1456,14 @@ fn declared_hook_outputs_for(
     outputs
 }
 
-fn collect_hook_rerun_paths(config: &ResolvedSiteConfig, roots: &mut Vec<WatchRequirement>) {
+fn collect_hook_requirements(
+    config: &ResolvedSiteConfig,
+    roots: &mut Vec<WatchRequirement>,
+) -> anyhow::Result<()> {
     for hook in development_before_build_hooks(config) {
         for output in &hook.generates {
             let logical = site_relative_path(config.get_root(), output);
-            let identity = tola_build::filesystem::FilesystemSourceIdentity::from_path(&logical);
+            let identity = tola_input::FilesystemSourceIdentity::from_path(&logical);
             let paths = [
                 identity.logical_path().to_path_buf(),
                 identity.physical_path().to_path_buf(),
@@ -1367,30 +1481,60 @@ fn collect_hook_rerun_paths(config: &ResolvedSiteConfig, roots: &mut Vec<WatchRe
             roots.extend(requirement);
         }
     }
-    for path in config.build().hooks.development_rerun_paths() {
-        roots.push(
-            WatchRequirement::recursive_for(
-                site_relative_path(config.get_root(), path),
-                ProducerSet::one(ProducerKind::Hooks),
-            )
-            .optional(),
-        );
-    }
+    let selections = config
+        .hooks()
+        .development_rerun_selections(config.get_root())?;
+    roots.extend(selections.iter().flat_map(hook_rerun_requirements));
+    roots.extend(
+        config
+            .hooks()
+            .development_hook_scripts(config.get_root())
+            .map(|path| {
+                WatchRequirement::exact_for(
+                    lexical_path_identity(&path),
+                    ProducerSet::one(ProducerKind::Hooks),
+                )
+                .optional()
+            }),
+    );
+    Ok(())
+}
+
+fn hook_rerun_requirements(selection: &RerunSelection) -> impl Iterator<Item = WatchRequirement> {
+    let roots = selection.roots();
+    let selection = Arc::new(selection.clone());
+    roots.into_iter().filter_map(move |path| {
+        let path = lexical_path_identity(&path);
+        if !selection.matches(&path) && !selection.could_match_below(&path) {
+            return None;
+        }
+        let mut requirement =
+            WatchRequirement::recursive_for(path.clone(), ProducerSet::one(ProducerKind::Hooks))
+                .optional();
+        requirement.admission = ChangeAdmission::HookRerun {
+            selection: Arc::clone(&selection),
+            logical_root: path,
+        };
+        Some(requirement)
+    })
 }
 
 fn dedupe_requirements(requirements: &mut Vec<WatchRequirement>) {
     sort_requirements(requirements);
     let mut kept: Vec<WatchRequirement> = Vec::with_capacity(requirements.len());
     for requirement in requirements.drain(..) {
-        if let Some(existing) = kept.last_mut().filter(|existing| {
-            existing.path == requirement.path
-                && existing.scope == requirement.scope
-                && existing.existence == requirement.existence
-        }) {
+        let existing = kept
+            .iter_mut()
+            .rev()
+            .take_while(|existing| {
+                existing.path == requirement.path
+                    && existing.scope == requirement.scope
+                    && existing.existence == requirement.existence
+            })
+            .find(|existing| existing.admission == requirement.admission);
+        if let Some(existing) = existing {
             existing.producers.insert(requirement.producers);
             existing.rebuild_scope = existing.rebuild_scope.max(requirement.rebuild_scope);
-            // One merged subscription must still admit every change either of them admitted.
-            existing.admission = existing.admission.widest(requirement.admission);
         } else {
             kept.push(requirement);
         }
@@ -1486,7 +1630,9 @@ mod tests {
                     for requirement in boundary.desired.iter() {
                         if requirement.path.starts_with(path)
                             || (requirement.matches(path)
-                                && (super::is_structural(kind) || requirement.admits_change(path)))
+                                && (super::is_structural(kind)
+                                    || requirement.admission == super::ChangeAdmission::Scope
+                                    || tola_build::has_typ_extension(path)))
                         {
                             expected.merge(requirement, false);
                         }
@@ -1498,9 +1644,13 @@ mod tests {
                     );
                     let expected_artifact = boundary.desired.iter().any(|requirement| {
                         requirement.path.starts_with(path)
-                            || (requirement.matches(path) && !requirement.selects_members_by_name())
+                            || (requirement.matches(path)
+                                && requirement.admission == super::ChangeAdmission::Scope)
                     });
-                    assert_eq!(boundary.admits_editor_artifact(path), expected_artifact);
+                    assert_eq!(
+                        boundary.admits_editor_artifact(path, false),
+                        expected_artifact
+                    );
                 }
             }
         }
@@ -1510,7 +1660,7 @@ mod tests {
         let schema = tola_build::config::SiteConfigSchema::parse(
             &root.join("tola.toml"),
             source,
-            tola_build::InputScope::Online,
+            tola_input::InputScope::Online,
         )
         .unwrap();
         resolve_schema(root, schema, local_packages())
@@ -1639,7 +1789,7 @@ mod tests {
         let (_directory, root, config) = default_site();
         let output = root.join("public");
 
-        let roots = collect_roots(&config, &WatchRequirements::default());
+        let roots = collect_roots(&config, &WatchRequirements::default()).unwrap();
 
         assert!(!output.exists());
         assert!(!roots.iter().any(|watch| watch.path == output));
@@ -1651,7 +1801,7 @@ mod tests {
         let entry = root.join("site.typ");
         std::fs::write(&entry, "#document(\"index.html\")[Hello]").unwrap();
 
-        let roots = collect_roots(&config, &WatchRequirements::default());
+        let roots = collect_roots(&config, &WatchRequirements::default()).unwrap();
 
         assert!(has_requirement(
             &roots,
@@ -1671,7 +1821,7 @@ mod tests {
         std::fs::create_dir_all(&content).unwrap();
         let config = configured_site(root, "[typst.fonts]\npaths = [\"fonts\"]\n");
 
-        let roots = collect_roots(&config, &WatchRequirements::default());
+        let roots = collect_roots(&config, &WatchRequirements::default()).unwrap();
         let selection = selection_for(roots);
         let boundary = selection.boundary();
 
@@ -1704,7 +1854,7 @@ mod tests {
         let mut dynamic = WatchRequirements::default();
         dynamic.package_checks(prepared.checks().iter().cloned());
 
-        let selection = selection_for(collect_roots(&config, &dynamic));
+        let selection = selection_for(collect_roots(&config, &dynamic).unwrap());
         let boundary = selection.boundary();
 
         assert!(has_requirement(
@@ -1746,7 +1896,7 @@ mod tests {
             true,
             [template.clone()],
         );
-        let roots = collect_roots(&config, &dynamic);
+        let roots = collect_roots(&config, &dynamic).unwrap();
 
         assert!(has_requirement(
             &roots,
@@ -1764,18 +1914,18 @@ mod tests {
 
     #[test]
     fn changes_reach_subscriptions_kind_name() {
-        use notify::event::{CreateKind, DataChange, ModifyKind};
+        use notify::event::{CreateKind, DataChange, ModifyKind, RemoveKind, RenameMode};
 
         let temp = TempDir::new().unwrap();
         let root = &temp.path().canonicalize().unwrap();
         let config = configured_site(
             root,
-            "[assets]\ntrees = [{ source = \"static\", url-prefix = \"/assets\" }]\n\
-             [[build.hooks.before-build]]\nname = \"prepare\"\ncommand = [\"true\"]\n\
-             rerun-on = [\"scripts\"]\n",
+            "[assets]\ntrees = [{ source = \"static\", url-prefix = \"/assets\", include = [\"static/web/**/*.css\", \"unrelated/**/*.css\"], exclude = [\"static/web/private\"] }]\n\
+             [[hooks.before-build]]\nname = \"prepare\"\nargv = [\"true\"]\n\
+             rerun-on = { include = [\"scripts/**/*.mjs\", \"static/web/**/*.mjs\", \"future/tools/*.mjs\"], exclude = [\"scripts/private\"] }\n",
         );
         let content = root.join("content");
-        let static_tree = root.join("static");
+        let static_tree = root.join("static/web");
         let scripts = root.join("scripts");
         let read = root.join("inputs/data.json");
         let content_read = content.join("data.json");
@@ -1790,7 +1940,30 @@ mod tests {
             true,
             [read.clone(), content_read.clone()],
         );
-        let boundary = selection_for(collect_roots(&config, &dynamic)).boundary();
+        let selection = selection_for(collect_roots(&config, &dynamic).unwrap());
+        let boundary = selection.boundary();
+        let future = root.join("future/tools");
+        assert!(!future.exists());
+        assert!(has_requirement(
+            &selection.desired,
+            &future,
+            WatchScope::Recursive,
+            ProducerKind::Hooks,
+            ExistencePolicy::Optional,
+        ));
+        assert!(has_requirement(
+            &selection.desired,
+            &static_tree,
+            WatchScope::Recursive,
+            ProducerKind::ConfiguredAssets,
+            ExistencePolicy::Optional,
+        ));
+        assert!(!selection.desired.iter().any(|requirement| {
+            requirement
+                .producers
+                .contains(ProducerKind::ConfiguredAssets)
+                && requirement.path.starts_with(root.join("unrelated"))
+        }));
 
         let content_root =
             ProducerSet::one(ProducerKind::Content) | ProducerSet::one(ProducerKind::TypstReads);
@@ -1824,7 +1997,7 @@ mod tests {
             ),
             // A file the build reads keeps its own narrower subscription.
             (read.clone(), data_change(), reads),
-            // Each configured producer owns its own subtree.
+            // Each configured producer admits only its own names, even under a shared root.
             (
                 scripts.join("search.mjs"),
                 data_change(),
@@ -1834,6 +2007,51 @@ mod tests {
                 static_tree.join("app.css"),
                 data_change(),
                 ProducerSet::one(ProducerKind::ConfiguredAssets),
+            ),
+            (
+                static_tree.join("build.mjs"),
+                notify::EventKind::Create(CreateKind::File),
+                ProducerSet::one(ProducerKind::Hooks),
+            ),
+            (
+                static_tree.join("notes.txt"),
+                notify::EventKind::Create(CreateKind::File),
+                ProducerSet::default(),
+            ),
+            (
+                root.join("unrelated/site.css"),
+                data_change(),
+                ProducerSet::default(),
+            ),
+            (
+                static_tree.join("private/local.css"),
+                data_change(),
+                ProducerSet::default(),
+            ),
+            (
+                scripts.join("private"),
+                notify::EventKind::Create(CreateKind::Folder),
+                ProducerSet::default(),
+            ),
+            (
+                scripts.join("new"),
+                notify::EventKind::Create(CreateKind::Folder),
+                ProducerSet::one(ProducerKind::Hooks),
+            ),
+            (
+                scripts.join("renamed"),
+                notify::EventKind::Modify(ModifyKind::Name(RenameMode::From)),
+                ProducerSet::one(ProducerKind::Hooks),
+            ),
+            (
+                future.parent().unwrap().to_path_buf(),
+                notify::EventKind::Remove(RemoveKind::Folder),
+                ProducerSet::one(ProducerKind::Hooks),
+            ),
+            (
+                future.join("new.mjs"),
+                notify::EventKind::Create(CreateKind::File),
+                ProducerSet::one(ProducerKind::Hooks),
             ),
         ];
         for (path, kind, expected) in cases {
@@ -2066,10 +2284,10 @@ mod tests {
         let schema = tola_build::config::SiteConfigSchema::parse(
             &site.join("tola.toml"),
             r#"[assets]
-trees = [{ source = "tree-link", url-prefix = "/assets" }]
+trees = [{ source = "tree-link", url-prefix = "/assets", include = ["tree-link/*.bin"] }]
 files = [{ source = "file-link.bin", url = "/download.bin" }]
 "#,
-            tola_build::InputScope::Online,
+            tola_input::InputScope::Online,
         )
         .unwrap();
         let config = resolve_schema(&site, schema, local_packages());
@@ -2082,7 +2300,7 @@ files = [{ source = "file-link.bin", url = "/download.bin" }]
         let dynamic = crate::dev::watch::requirements::watch_requirements_from_observation(
             &first.input_observation(),
         );
-        let selection = selection_for(collect_roots(&config, &dynamic));
+        let selection = selection_for(collect_roots(&config, &dynamic).unwrap());
 
         assert!(has_assets_requirement(
             &selection.desired,
@@ -2109,6 +2327,15 @@ files = [{ source = "file-link.bin", url = "/download.bin" }]
             &first_tree_physical.join("member.bin"),
             ProducerKind::ConfiguredAssets
         ));
+        let unrelated = selection.boundary().classify_change(
+            &first_tree_physical.join("notes.txt"),
+            notify::EventKind::Create(notify::event::CreateKind::File),
+        );
+        assert!(
+            !unrelated
+                .producers()
+                .contains(ProducerKind::ConfiguredAssets)
+        );
         assert!(classifies(
             &selection,
             &first_file_physical,
@@ -2131,7 +2358,7 @@ files = [{ source = "file-link.bin", url = "/download.bin" }]
                 .contains(ProducerKind::ConfiguredAssets),
             "deletion of a published physical tree root must invalidate configured assets"
         );
-        let missing_selection = selection_for(collect_roots(&config, &dynamic));
+        let missing_selection = selection_for(collect_roots(&config, &dynamic).unwrap());
         assert!(has_assets_requirement(
             &missing_selection.desired,
             &first_tree_physical,
@@ -2149,7 +2376,8 @@ files = [{ source = "file-link.bin", url = "/download.bin" }]
             crate::dev::watch::requirements::watch_requirements_from_observation(
                 &retargeted.input_observation(),
             );
-        let retargeted_selection = selection_for(collect_roots(&config, &retargeted_dynamic));
+        let retargeted_selection =
+            selection_for(collect_roots(&config, &retargeted_dynamic).unwrap());
         assert!(has_assets_requirement(
             &retargeted_selection.desired,
             &std::fs::canonicalize(&second_tree).unwrap(),
@@ -2182,7 +2410,7 @@ files = [{ source = "file-link.bin", url = "/download.bin" }]
         std::fs::create_dir_all(&assets).unwrap();
         let target = assets.join("CNAME");
 
-        let roots = collect_roots(&config, &WatchRequirements::default());
+        let roots = collect_roots(&config, &WatchRequirements::default()).unwrap();
         let selection = selection_for(roots);
         assert!(has_requirement(
             &selection.desired,
@@ -2204,8 +2432,6 @@ files = [{ source = "file-link.bin", url = "/download.bin" }]
 
     #[test]
     fn hook_rerun_literals_are_watched() {
-        use tola_build::config::section::build::hooks::{CommandOutput, OutputCommandConfig};
-
         let temp = TempDir::new().unwrap();
         let root = &temp.path().canonicalize().unwrap();
         let content = root.join("content");
@@ -2217,25 +2443,18 @@ files = [{ source = "file-link.bin", url = "/download.bin" }]
         std::fs::create_dir_all(&src).unwrap();
         std::fs::write(&input, "# search index generator").unwrap();
 
-        let mut schema = tola_build::config::SiteConfigSchema::default();
-        schema
-            .build
-            .hooks
-            .generate_outputs
-            .push(OutputCommandConfig {
-                name: "search".into(),
-                command: vec!["python3".into(), " scripts/search.py".into()],
-                rerun_on: vec![" scripts/search.py".into()],
-                outputs: vec![CommandOutput::File(
-                    tola_address::OutputPath::parse("search.json").unwrap(),
-                )],
-                ..OutputCommandConfig::default()
-            });
-
-        let config = resolve_schema(root, schema, local_packages());
+        let config = configured_site(
+            root,
+            r#"[[hooks.generate-outputs]]
+name = "search"
+argv = ["python3", " scripts/search.py"]
+rerun-on = { include = [" scripts/search.py"] }
+outputs = [{ file = "search.json" }]
+"#,
+        );
         let expected = input;
         let mut logical = Vec::new();
-        super::collect_hook_rerun_paths(&config, &mut logical);
+        super::collect_hook_requirements(&config, &mut logical).unwrap();
         assert!(has_requirement(
             &logical,
             &expected,
@@ -2244,7 +2463,7 @@ files = [{ source = "file-link.bin", url = "/download.bin" }]
             ExistencePolicy::Optional,
         ));
 
-        let roots = collect_roots(&config, &WatchRequirements::default());
+        let roots = collect_roots(&config, &WatchRequirements::default()).unwrap();
         let selected = selection_for(roots);
         assert!(classifies(&selected, &expected, ProducerKind::Hooks));
         assert!(selected.directories.iter().any(|directory| {
@@ -2267,13 +2486,14 @@ files = [{ source = "file-link.bin", url = "/download.bin" }]
         let attempted_content = root.join("candidate/content");
         let attempted_entry = root.join("candidate/site.typ");
         attempted_schema.build.content_dir = PathBuf::from("candidate/content");
-        attempted_schema.build.entry = PathBuf::from("candidate/site.typ");
+        attempted_schema.build.entry = "candidate/site.typ".into();
         let attempted = resolve_schema(&root, attempted_schema, local_packages());
-        let mut roots = RootSet::from_config(&published, &WatchRequirements::default());
+        let mut roots = RootSet::from_config(&published, &WatchRequirements::default()).unwrap();
         let initial = roots.initial_selection();
         install(&mut roots, initial, 1);
-        let (recovery, _) =
-            roots.configs_selection([&published, &attempted], &WatchRequirements::default());
+        let (recovery, _) = roots
+            .configs_selection([&published, &attempted], &WatchRequirements::default())
+            .unwrap();
         assert!(watches(&recovery, &root, RecursiveMode::NonRecursive));
         assert!(classifies(
             &recovery,

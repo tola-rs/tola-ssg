@@ -8,7 +8,9 @@ use ignore::WalkBuilder;
 use crate::cancellation::BuildCancellation;
 use crate::config::ResolvedSiteConfig;
 
-use super::{INTERNAL_DIR, display_path, path_failure_reason};
+use super::path_failure_reason;
+use tola_diagnostic::display_path;
+use tola_input::INTERNAL_DIR;
 
 /// Every file below the site root that the site owns, absolute and sorted.
 ///

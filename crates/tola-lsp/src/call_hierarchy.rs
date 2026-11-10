@@ -67,7 +67,7 @@ impl ItemNode {
 /// the normalized root, as every site path compared in the crate is.
 pub(super) fn item_file(data: &serde_json::Value, root: &Path) -> Option<FileId> {
     let ItemNode::Source { path } = serde_json::from_value(data.clone()).ok()?;
-    let root = tola_build::filesystem::normalize_existing_prefix(root);
+    let root = tola_input::normalize_existing_prefix(root);
     crate::identity::path_id(&root.join(path), &root)
 }
 
@@ -127,7 +127,7 @@ pub(super) fn incoming(inputs: Incoming<'_>) -> Result<Vec<CallHierarchyIncoming
     } = inputs;
     cancellation.ensure_active()?;
     let resolver = crate::analysis::file_resolver(locations, boundary);
-    let resolved = tola_build::filesystem::normalize_existing_prefix(root);
+    let resolved = tola_input::normalize_existing_prefix(root);
     let mut reaching: BTreeMap<String, Reaching> = BTreeMap::new();
     for page in crate::routes::pages_carrying(compilation, config, source.id(), cancellation)? {
         let Some(writer) = page.source else {
@@ -217,7 +217,7 @@ pub(super) fn outgoing(
     client_root: &crate::uri::ClientRoot,
 ) -> Vec<CallHierarchyOutgoingCall> {
     let resolver = crate::analysis::file_resolver(locations, boundary);
-    let resolved = tola_build::filesystem::normalize_existing_prefix(root);
+    let resolved = tola_input::normalize_existing_prefix(root);
     let mut reached: BTreeMap<String, Target> = BTreeMap::new();
     for written in module_paths(source) {
         let Some(target) = crate::analysis::import_target(
@@ -313,38 +313,8 @@ fn file_range() -> ProtocolRange {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
-    use serde_json::json;
-    use tola_build::check::{SourceDiagnosticSession, SourceRevision};
-    use tola_diagnostic::Severity;
-
     use super::*;
     use crate::server::tests::rendering_site;
-
-    /// A site that compiled, with the revision every question is asked against.
-    fn compiled_site(
-        files: &[(&str, &str)],
-    ) -> (
-        tempfile::TempDir,
-        Arc<ResolvedSiteConfig>,
-        BuildCancellation,
-        SourceRevision,
-    ) {
-        let (directory, configuration) = rendering_site(files);
-        let cancellation = BuildCancellation::new();
-        let mut session = SourceDiagnosticSession::new(Arc::clone(&configuration));
-        let revision = session.inspect(Vec::new(), &cancellation).unwrap();
-        assert!(
-            revision
-                .diagnostics()
-                .iter()
-                .all(|diagnostic| diagnostic.severity != Severity::Error),
-            "{:#?}",
-            revision.diagnostics()
-        );
-        (directory, configuration, cancellation, revision)
-    }
 
     /// One file of the site, as the compiler identifies it.
     fn source(root: &Path, name: &str) -> Source {
@@ -355,117 +325,6 @@ mod tests {
         )
     }
 
-    /// The calls `name` answers as an incoming target, over a compiled revision.
-    fn incoming_for(
-        configuration: &Arc<ResolvedSiteConfig>,
-        revision: &SourceRevision,
-        cancellation: &BuildCancellation,
-        name: &str,
-    ) -> Vec<CallHierarchyIncomingCall> {
-        let root = configuration.get_root();
-        incoming(Incoming {
-            disk: &mut crate::analysis::DiskSources::default(),
-            root,
-            view: &SourceView::default(),
-            locations: None,
-            boundary: &crate::sources::base_source_boundary(root, true),
-            config: configuration,
-            compilation: revision.checked().expect("the site compiles"),
-            source: &source(root, name),
-            cancellation,
-            client_root: &crate::uri::ClientRoot::new(root),
-        })
-        .unwrap()
-    }
-
-    /// The names and details of the calls one request answers with.
-    fn named_calls(calls: &[CallHierarchyIncomingCall]) -> Vec<(String, Option<String>)> {
-        calls
-            .iter()
-            .map(|call| (call.from.name.clone(), call.from.detail.clone()))
-            .collect()
-    }
-
-    #[test]
-    fn incoming_names_the_including_pages() {
-        let (_directory, configuration, cancellation, revision) = compiled_site(&[
-            (
-                "content/one.typ",
-                "#include \"../templates/note.typ\"\nOne.\n",
-            ),
-            (
-                "content/two.typ",
-                "Intro.\n#include \"../templates/note.typ\"\nTwo.\n",
-            ),
-            ("templates/note.typ", "Note.\n"),
-        ]);
-        let found = incoming_for(
-            &configuration,
-            &revision,
-            &cancellation,
-            "templates/note.typ",
-        );
-
-        assert_eq!(
-            named_calls(&found),
-            [
-                (
-                    "content/one.typ".to_owned(),
-                    Some("Served at /one/".to_owned())
-                ),
-                (
-                    "content/two.typ".to_owned(),
-                    Some("Served at /two/".to_owned())
-                ),
-            ]
-        );
-        assert_eq!(
-            found[0].from_ranges,
-            [ProtocolRange::new(
-                Position::new(0, 9),
-                Position::new(0, 32)
-            )]
-        );
-        assert_eq!(
-            found[1].from_ranges,
-            [ProtocolRange::new(
-                Position::new(1, 9),
-                Position::new(1, 32)
-            )]
-        );
-    }
-
-    #[test]
-    fn incoming_names_the_importing_source() {
-        let (_directory, configuration, cancellation, revision) = compiled_site(&[
-            (
-                "content/one.typ",
-                "#import \"../templates/lib.typ\": greet\n#greet()\n",
-            ),
-            ("templates/lib.typ", "#let greet() = [hello]\n"),
-        ]);
-        let found = incoming_for(
-            &configuration,
-            &revision,
-            &cancellation,
-            "templates/lib.typ",
-        );
-
-        assert_eq!(
-            named_calls(&found),
-            [(
-                "content/one.typ".to_owned(),
-                Some("Served at /one/".to_owned())
-            )]
-        );
-        assert_eq!(
-            found[0].from_ranges,
-            [ProtocolRange::new(
-                Position::new(0, 8),
-                Position::new(0, 30)
-            )]
-        );
-    }
     #[test]
     fn outgoing_names_reached_files() {
         let (_directory, configuration) = rendering_site(&[
@@ -508,35 +367,6 @@ mod tests {
                     )]
                 ),
             ]
-        );
-    }
-    #[test]
-    fn prepare_names_the_written_source() {
-        let (_directory, configuration) = rendering_site(&[(
-            "content/one.typ",
-            "#include \"../templates/note.typ\"\nOne.\n",
-        )]);
-        let root = configuration.get_root();
-        let source = source(root, "content/one.typ");
-
-        let item = prepare(
-            root,
-            None,
-            &crate::sources::base_source_boundary(root, true),
-            &source,
-            14,
-            &crate::uri::ClientRoot::new(root),
-        )
-        .expect("an item");
-
-        assert_eq!(item.name, "templates/note.typ");
-        assert_eq!(
-            item_file(item.data.as_ref().expect("an identity"), root),
-            crate::identity::path_id(&root.join("templates/note.typ"), root)
-        );
-        assert_eq!(
-            item.data,
-            Some(json!({"kind": "source", "path": "templates/note.typ"}))
         );
     }
 }

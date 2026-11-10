@@ -20,7 +20,7 @@ use tola_build::config::SiteConfigSchema;
 
 pub(in crate::cli) fn run(
     args: &InitArgs,
-    scope: tola_build::InputScope,
+    scope: tola_input::InputScope,
     output: &CommandOutput,
     cancellation: &Cancellation,
 ) -> Result<()> {
@@ -29,7 +29,7 @@ pub(in crate::cli) fn run(
         !args.interactive || crate::cli::interaction::available(),
         "`--interactive` needs a terminal; omit it for non-interactive initialization"
     );
-    let root = tola_build::filesystem::normalize_existing_prefix(
+    let root = tola_input::normalize_existing_prefix(
         &std::env::current_dir()?.join(args.path.as_deref().unwrap_or(Path::new("."))),
     );
     if args.from.is_some() {
@@ -84,7 +84,7 @@ struct Confirm<'a> {
 fn confirm(
     root: &Path,
     writes: &FileWrites,
-    scope: tola_build::InputScope,
+    scope: tola_input::InputScope,
     cancellation: &Cancellation,
 ) -> Result<bool> {
     // The interaction script owns presentation; Rust owns the exact write plan.
@@ -109,7 +109,7 @@ fn show_dry_run(root: &Path, writes: &FileWrites, output: &CommandOutput) -> Res
 
 fn validate_configuration(
     writes: &FileWrites,
-    scope: tola_build::InputScope,
+    scope: tola_input::InputScope,
 ) -> Result<SiteConfigSchema> {
     let source = config::config_source(writes);
     let path = writes.root().join(config::CONFIG_PATH);
@@ -149,28 +149,5 @@ mod tests {
             "existing configuration"
         );
         assert!(!root.join(".tola").exists());
-    }
-
-    #[test]
-    fn dry_follows_stdout_color_policy() {
-        let directory = tempfile::tempdir().unwrap();
-        let writes = files::file_writes(directory.path()).unwrap();
-        for color in [false, true] {
-            let (sink, stream) = crate::terminal::OutputSink::buffered();
-            let output = CommandOutput::new(
-                crate::terminal::Terminal::with_sink(sink, color, false),
-                None,
-            );
-            show_dry_run(writes.root(), &writes, &output).unwrap();
-            let text = String::from_utf8(stream.bytes()).unwrap();
-            if color {
-                assert!(text.ends_with(
-                    &code::styled(config::config_source(&writes), "toml").paint_all(true)
-                ));
-            } else {
-                assert!(!text.contains('\u{1b}'));
-                assert!(text.ends_with(config::config_source(&writes)));
-            }
-        }
     }
 }

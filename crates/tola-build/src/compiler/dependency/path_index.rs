@@ -99,10 +99,10 @@ impl DependencyPathIndex {
 }
 
 pub(super) fn path_aliases(path: &Path) -> impl Iterator<Item = PathBuf> {
-    let lexical = crate::filesystem::lexical_path_identity(path);
-    let normalized = crate::filesystem::normalize_path(path);
+    let lexical = tola_input::lexical_path_identity(path);
+    let normalized = tola_input::normalize_path(path);
     // A deleted descendant's parent still reveals the identity behind an alias.
-    let physical = crate::filesystem::normalize_existing_prefix(path);
+    let physical = tola_input::normalize_existing_prefix(path);
     let mut aliases = vec![lexical, normalized, physical];
     aliases.sort_unstable();
     aliases.dedup();
@@ -110,7 +110,7 @@ pub(super) fn path_aliases(path: &Path) -> impl Iterator<Item = PathBuf> {
 }
 
 fn absolute_lexical_path(path: &Path) -> PathBuf {
-    let lexical = crate::filesystem::lexical_path_identity(path);
+    let lexical = tola_input::lexical_path_identity(path);
     if lexical.is_absolute() {
         lexical
     } else {

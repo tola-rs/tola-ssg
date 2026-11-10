@@ -3,21 +3,22 @@
 use std::ffi::OsString;
 use std::path::Path;
 
-use anyhow::{Result, bail, ensure};
-use tola_build::InputScope;
-use tola_build::modules::ModuleCommands;
+use anyhow::{Context, Result, bail, ensure};
 use tola_build::report::ReportChannel;
 use tola_diagnostic::{Diagnostic, DiagnosticError, Severity};
+use tola_input::InputScope;
+use tola_module::ModuleCommands;
 use tola_subprocess::Command;
 
 use crate::cli::output::CommandOutput;
 
-pub(super) fn expand(argument: &str, project: &Path, module: &Path, executable: &Path) -> OsString {
-    tola_build::modules::expand_argument(
+fn expand(argument: &str, project: &Path, module: &ModuleCommands, executable: &Path) -> OsString {
+    tola_module::expand_argument(
         argument,
         &[
             ("{project}", project.as_os_str()),
-            ("{module}", module.as_os_str()),
+            ("{module}", module.root.as_os_str()),
+            ("{name}", std::ffi::OsStr::new(&module.name)),
             ("{tola}", executable.as_os_str()),
         ],
     )
@@ -30,33 +31,55 @@ pub(super) fn process_command(
     config: &Path,
     module: &ModuleCommands,
     scope: InputScope,
-) -> Result<Command> {
+) -> Result<(Command, tempfile::NamedTempFile)> {
     let Some(program) = argv.first() else {
         bail!("declared command has no executable");
     };
     let executable = crate::cli::external::current_executable()?;
-    let program = expand(program, project, &module.root, &executable);
+    let program = expand(program, project, module, &executable);
     ensure!(
         !program.is_empty(),
         "declared command has an empty executable"
     );
+    let mut options =
+        tempfile::NamedTempFile::new().context("Tola could not create module options")?;
+    serde_json::to_writer(options.as_file_mut(), &module.options)
+        .context("Tola could not write module options")?;
+    options
+        .as_file_mut()
+        .sync_all()
+        .context("Tola could not flush module options")?;
+    let options_path = options
+        .path()
+        .to_str()
+        .context("the module options path must be valid UTF-8")?;
     let command = Command::new(program)
         .args(
             argv[1..]
                 .iter()
-                .map(|arg| expand(arg, project, &module.root, &executable)),
+                .map(|arg| expand(arg, project, module, &executable)),
         )
         .args(tail.iter().cloned())
         .cwd(project)
+        .env_remove("TOLA_HOOK_NAME")
+        .env_remove("TOLA_HOOK_STAGE")
+        .env_remove("TOLA_BUILD_MODE")
+        .env_remove("TOLA_HOOK_INPUT_DIR")
+        .env_remove("TOLA_HOOK_OUTPUT_DIR")
+        .env_remove("TOLA_HOOK_CACHE_DIR")
+        .env_remove("TOLA_HOOK_TEMP_DIR")
+        .env_remove("TOLA_INIT_TARGET_DIR")
+        .env_remove("TOLA_INIT_OUTPUT_DIR")
+        .env_remove("TOLA_INIT_INTERACTIVE")
         .env("TOLA_PROJECT_ROOT", project.as_os_str())
         .env("TOLA_MODULE_ROOT", module.root.as_os_str())
         .env("TOLA_MODULE_NAME", module.name.as_str())
         .env("TOLA_MODULE_MANIFEST", module.manifest.as_os_str())
-        .env_remove("TOLA_MODULE_OPTIONS")
+        .env("TOLA_MODULE_OPTIONS", options_path)
         .env("TOLA_CONFIG_PATH", config.as_os_str())
         .env("TOLA_INPUT_SCOPE", scope.as_str())
         .env("TOLA_EXECUTABLE", executable);
-    Ok(command)
+    Ok((command, options))
 }
 
 pub(super) fn complete_report(

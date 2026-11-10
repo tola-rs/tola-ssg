@@ -8,11 +8,12 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use super::path::display_path;
 use super::{
-    FilesystemSourceIdentity, INTERNAL_DIR, SITE_BUILD_LOCK_FILE, TreeSwap, canonical_site_root,
-    path_failure_reason, site_relative_absolute, swap_workspace,
+    SITE_BUILD_LOCK_FILE, TreeSwap, canonical_site_root, path_failure_reason,
+    site_relative_absolute, swap_workspace,
 };
+use tola_diagnostic::display_path;
+use tola_input::{FilesystemSourceIdentity, INTERNAL_DIR};
 
 /// One site input the output root must not contain.
 #[derive(Debug)]
@@ -101,13 +102,7 @@ impl OutputBoundary {
         for component in relative.components() {
             current.push(component.as_os_str());
             match fs::symlink_metadata(&current) {
-                Ok(metadata)
-                    if super::automatic_path_is_link_like(&current, &metadata.file_type())
-                        .map_err(|source| OutputBoundaryError::Io {
-                            operation: "could not inspect the publication path",
-                            source,
-                        })? =>
-                {
+                Ok(metadata) if tola_fs::is_link_like(&metadata) => {
                     return Err(OutputBoundaryError::Symlink {
                         site_root: self.site_root.clone(),
                         path: current,
@@ -214,15 +209,15 @@ fn protected_location(site_root: &Path, protected: &Path) -> String {
 /// and each stage renders its own failure from the same verdict.
 pub(crate) struct DeclaredOutputBoundaries {
     site_root: PathBuf,
-    site_identity: crate::filesystem::FilesystemSourceIdentity,
-    reserved: [Option<ReservedPath>; 5],
-    published: crate::filesystem::FilesystemSourceIdentity,
+    site_identity: tola_input::FilesystemSourceIdentity,
+    reserved: [Option<ReservedPath>; 6],
+    published: tola_input::FilesystemSourceIdentity,
 }
 
 /// One path a site keeps for itself, with the noun a failure names it by.
 struct ReservedPath {
     kind: &'static str,
-    identity: crate::filesystem::FilesystemSourceIdentity,
+    identity: tola_input::FilesystemSourceIdentity,
 }
 
 /// Why a declared output is not a path this site can grant.
@@ -242,12 +237,13 @@ pub(crate) enum DeclaredOutputViolation {
 impl DeclaredOutputBoundaries {
     /// Resolve the site boundaries one stage's declarations are checked against.
     ///
-    /// `configuration` is the site's configuration document. `vendor_workspace` is the recovery
-    /// directory beside `vendor.path`, absent when the site declares no vendor path.
+    /// Protect the site's configuration and vendor directory, including the vendor recovery
+    /// workspace when one is declared.
     pub(crate) fn for_site(
         site_root: &Path,
         configuration: &Path,
         published_root: &Path,
+        vendor: Option<&Path>,
         vendor_workspace: Option<&Path>,
     ) -> Self {
         // A hook may not rewrite the document that declares it: the run reads that exact
@@ -260,19 +256,20 @@ impl DeclaredOutputBoundaries {
             Some(("the `.tola` directory", site_root.join(INTERNAL_DIR))),
             Some(("the site build lock", site_root.join(SITE_BUILD_LOCK_FILE))),
             swap_workspace(published_root).map(|path| ("the publication workspace", path)),
+            vendor.map(|path| ("the vendor directory", path.to_path_buf())),
             vendor_workspace.map(|path| ("the vendor workspace", path.to_path_buf())),
         ]
         .map(|entry| {
             entry.map(|(kind, path)| ReservedPath {
                 kind,
-                identity: crate::filesystem::FilesystemSourceIdentity::from_path(&path),
+                identity: tola_input::FilesystemSourceIdentity::from_path(&path),
             })
         });
         Self {
             site_root: site_root.to_path_buf(),
-            site_identity: crate::filesystem::FilesystemSourceIdentity::from_path(site_root),
+            site_identity: tola_input::FilesystemSourceIdentity::from_path(site_root),
             reserved,
-            published: crate::filesystem::FilesystemSourceIdentity::from_path(published_root),
+            published: tola_input::FilesystemSourceIdentity::from_path(published_root),
         }
     }
 
@@ -282,8 +279,8 @@ impl DeclaredOutputBoundaries {
     /// author wrote them, so a shared path is reported against the entry that claimed it first.
     pub(crate) fn violation<'a>(
         &self,
-        declared: &crate::filesystem::FilesystemSourceIdentity,
-        granted: impl IntoIterator<Item = &'a crate::filesystem::FilesystemSourceIdentity>,
+        declared: &tola_input::FilesystemSourceIdentity,
+        granted: impl IntoIterator<Item = &'a tola_input::FilesystemSourceIdentity>,
     ) -> Option<DeclaredOutputViolation> {
         if !declared.is_within(&self.site_identity) {
             return Some(DeclaredOutputViolation::OutsideSite);
@@ -310,7 +307,7 @@ impl DeclaredOutputBoundaries {
     }
 
     /// Resolve one declared root-relative path against this site.
-    pub(crate) fn resolve(&self, declared: &Path) -> crate::filesystem::FilesystemSourceIdentity {
-        crate::filesystem::FilesystemSourceIdentity::from_path(&self.site_root.join(declared))
+    pub(crate) fn resolve(&self, declared: &Path) -> tola_input::FilesystemSourceIdentity {
+        tola_input::FilesystemSourceIdentity::from_path(&self.site_root.join(declared))
     }
 }

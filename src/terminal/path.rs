@@ -3,7 +3,7 @@
 //! One rule serves every message a site author reads outside the build library: show a path
 //! relative to its site root when it lies inside, then relative to the current directory, and
 //! only then as it was given.
-//! [`tola_build::filesystem::display_path`] owns the site-level rendering; this module
+//! [`tola_diagnostic::display_path`] owns the site-level rendering; this module
 //! adds the invocation-relative fallback that only the application knows about, plus
 //! [`display_path_toward_home`] for a path under the reader's home directory.
 
@@ -13,9 +13,7 @@ use std::path::Path;
 /// otherwise unchanged, and always with forward slashes.
 pub(crate) fn display_path(path: &Path) -> String {
     match std::env::current_dir() {
-        Ok(current) if path.starts_with(&current) => {
-            tola_build::filesystem::display_path(path, &current)
-        }
+        Ok(current) if path.starts_with(&current) => tola_diagnostic::display_path(path, &current),
         _ => display_path_as_given(path),
     }
 }
@@ -24,7 +22,7 @@ pub(crate) fn display_path(path: &Path) -> String {
 /// like [`display_path`]. `root` itself renders as `.`.
 pub(crate) fn display_path_within(path: &Path, root: &Path) -> String {
     if path.starts_with(root) {
-        tola_build::filesystem::display_path(path, root)
+        tola_diagnostic::display_path(path, root)
     } else {
         display_path(path)
     }
@@ -54,9 +52,9 @@ pub(crate) fn display_path_toward_home(path: &Path) -> String {
 
 /// Render `path` with `home`, the directory a reader knows as `~`, when one is known.
 fn display_path_with_home(path: &Path, home: Option<&Path>) -> String {
-    let normalized = tola_build::filesystem::normalize_path(path);
+    let normalized = tola_input::normalize_path(path);
     if let Some(home) = home {
-        let home = tola_build::filesystem::normalize_path(home);
+        let home = tola_input::normalize_path(home);
         if let Ok(rest) = normalized.strip_prefix(&home) {
             if rest.as_os_str().is_empty() {
                 return "~".into();
@@ -135,9 +133,7 @@ mod tests {
             Path::new("/srv/site/index.typ"),
             Path::new("/home/reader2/site"),
         ] {
-            let fallback = tola_build::filesystem::normalize_path(outside)
-                .display()
-                .to_string();
+            let fallback = tola_input::normalize_path(outside).display().to_string();
             assert_eq!(display_path_with_home(outside, Some(home)), fallback);
             assert_eq!(display_path_with_home(outside, None), fallback);
         }

@@ -1,161 +1,138 @@
 //! Dispatch from parsed arguments to command-specific adapters.
 
 use crate::cancellation::Cancellation;
-use crate::cli::log::LogFile;
 use crate::cli::log::destination;
 use anyhow::Result;
 
 use super::{Cli, Commands, commands};
-use crate::cli::BuildOverrideArgs;
+use crate::cli::BuildArgs;
 use crate::cli::output::CommandOutput;
-use tola_build::InputScope;
+use tola_input::InputScope;
 
 pub(crate) fn dispatch(
     cli: Cli,
     output: &CommandOutput,
     cancellation: &Cancellation,
+    failure: Option<FailureReport>,
 ) -> Result<()> {
-    let failure = FailureReport::of(&cli);
     if let Err(error) = cancellation.token().ensure_active() {
         return report_failure(failure, output, error.into());
     }
-    if let Err(error) = validate_log_outputs(&cli.command, output) {
-        return report_failure(failure, output, error);
-    }
-    let scope = cli.input_scope();
     let mode = cli.input_mode();
+    let scope = mode.scope();
     match cli.command {
         Commands::Nu(_) => unreachable!("script runs before cancellation is installed"),
         Commands::Extension(arguments) => {
-            commands::extensions::run(arguments, scope, output, cancellation)
+            commands::extensions::run(arguments, mode, output, cancellation)
         }
         Commands::Update {
-            config,
-            packages,
+            input: _,
+            site,
             update,
-        } => commands::update::run(config, packages, mode, update, output, cancellation),
+        } => commands::update::run(
+            site.config,
+            site.packages,
+            mode,
+            update,
+            output,
+            cancellation,
+        ),
+        Commands::Module { command } => commands::module::run(command, output, cancellation),
         Commands::Init(args) => commands::init::run(&args, scope, output, cancellation),
-        Commands::Edit { config, command } => {
-            commands::edit::run(config, command, output, cancellation)
-        }
+        Commands::Edit {
+            input: _,
+            site,
+            command,
+        } => commands::edit::run(site.config, command, output, cancellation),
         Commands::Build {
-            config,
-            packages,
+            input: _,
+            site,
             build,
-            fonts,
             json,
+            pretty,
         } => {
-            let request = match commands::SiteRequest::new(
-                config,
-                packages,
-                scope,
-                build,
-                fonts,
-                output,
-                cancellation,
-            ) {
+            let request = match commands::SiteRequest::new(site, build, mode, output, cancellation)
+            {
                 Ok(request) => request,
                 Err(error) => return report_failure(failure, output, error),
             };
-            commands::build::run(request, json)
+            commands::build::run(request, json, pretty)
         }
         Commands::Dev {
-            config,
-            packages,
+            input: _,
+            site,
             build,
-            fonts,
             development,
         } => commands::dev::run(
-            commands::SiteRequest::new(
-                config,
-                packages,
-                scope,
-                build,
-                fonts,
-                output,
-                cancellation,
-            )?,
+            commands::SiteRequest::new(site, build, mode, output, cancellation)?,
             development,
         ),
         Commands::Preview {
-            config,
-            packages,
+            input: _,
+            site,
             build,
-            fonts,
             server,
         } => commands::preview::run(
-            commands::SiteRequest::new(
-                config,
-                packages,
-                scope,
-                build,
-                fonts,
-                output,
-                cancellation,
-            )?,
+            commands::SiteRequest::new(site, build, mode, output, cancellation)?,
             server,
         ),
         Commands::Check {
-            config,
-            packages,
+            input: _,
+            site,
             build,
-            fonts,
             no_build,
             no_hooks,
             json,
+            pretty,
         } => {
-            let request = match commands::SiteRequest::new(
-                config,
-                packages,
-                scope,
-                build,
-                fonts,
-                output,
-                cancellation,
-            ) {
+            let request = match commands::SiteRequest::new(site, build, mode, output, cancellation)
+            {
                 Ok(request) => request,
                 Err(error) => return report_failure(failure, output, error),
             };
             if no_build {
-                commands::check::sources(&request, json)
+                commands::check::sources(&request, json, pretty)
             } else {
-                commands::check::run(request, json, no_hooks)
+                commands::check::run(request, json, no_hooks, pretty)
             }
         }
         Commands::Fmt {
-            config,
-            packages,
+            input: _,
+            site,
             check,
-        } => commands::fmt::run(config, packages, scope, check, output, cancellation),
+        } => commands::fmt::run(
+            site.config,
+            site.packages,
+            scope,
+            check,
+            output,
+            cancellation,
+        ),
         Commands::Inspect {
-            config,
-            packages,
+            input: _,
+            site,
             command,
             fonts,
         } => commands::inspect::run(
             commands::SiteRequest::new(
-                config,
-                packages,
-                scope,
-                BuildOverrideArgs::default(),
-                fonts,
+                site,
+                BuildArgs::from_fonts(fonts),
+                mode,
                 output,
                 cancellation,
             )?,
             command,
         ),
         Commands::Query {
-            config,
-            packages,
+            input: _,
+            site,
             fonts,
             query,
         } => {
             let request = commands::SiteRequest::new(
-                config,
-                packages,
-                scope,
-                BuildOverrideArgs::default(),
-                fonts,
+                site,
+                BuildArgs::from_fonts(fonts),
+                mode,
                 output,
                 cancellation,
             )?;
@@ -169,37 +146,46 @@ pub(crate) fn dispatch(
             )
         }
         Commands::Vendor {
-            config,
-            packages,
+            input: _,
+            site,
             vendor,
             fonts,
         } => commands::vendor::run(
-            config,
-            packages,
+            site.config,
+            site.packages,
             scope,
             vendor,
-            crate::cli::config::build_resources_with_fonts(scope, &fonts)?,
+            crate::cli::config::build_resources_with_fonts(mode, &fonts)?,
             output,
             cancellation,
         ),
         Commands::Doctor(args) => commands::doctor::run(
-            args.config,
-            args.packages,
+            args.site.config,
+            args.site.packages,
             scope,
             args.json,
+            args.pretty,
             output,
             cancellation,
         ),
         Commands::Editor { command } => commands::editor::run(command, scope, output, cancellation),
         Commands::Lsp {
-            config,
-            packages,
+            input: _,
+            site,
             fonts,
-        } => commands::lsp::run(config, packages, fonts, scope, cancellation, output),
+        } => commands::lsp::run(
+            site.config,
+            site.packages,
+            fonts,
+            mode,
+            cancellation,
+            output,
+        ),
         Commands::Skill(args) => commands::skill::run_builtin(&args, output, cancellation),
+        Commands::Version(args) => commands::version::run(&args, output),
         Commands::Help(args) => commands::help::run(
             &args,
-            cli.global.lang.unwrap_or_default(),
+            args.lang.unwrap_or_default(),
             scope,
             output,
             cancellation,
@@ -225,19 +211,24 @@ pub(super) struct FailureReport {
     scope: InputScope,
     stage: &'static str,
     hooks: bool,
+    pretty: bool,
 }
 
 impl FailureReport {
     pub(super) fn of(cli: &Cli) -> Option<Self> {
         match &cli.command {
-            Commands::Build { json: true, .. } => Some(Self {
+            Commands::Build {
+                json: true, pretty, ..
+            } => Some(Self {
                 command: "build",
                 scope: cli.input_scope(),
                 stage: "candidate",
                 hooks: true,
+                pretty: *pretty,
             }),
             Commands::Check {
                 json: true,
+                pretty,
                 no_build,
                 no_hooks,
                 ..
@@ -246,6 +237,7 @@ impl FailureReport {
                 scope: cli.input_scope(),
                 stage: if *no_build { "source" } else { "candidate" },
                 hooks: !*no_build && !*no_hooks,
+                pretty: *pretty,
             }),
             _ => None,
         }
@@ -261,23 +253,5 @@ pub(super) fn report_failure(
         return Err(error);
     };
     commands::report::SiteReport::new(failure.command, failure.scope, failure.stage, failure.hooks)
-        .finish(Err(error), output, true)
-}
-
-fn validate_log_outputs(command: &Commands, output: &CommandOutput) -> Result<()> {
-    let Some(log_path) = output.log().map(LogFile::path) else {
-        return Ok(());
-    };
-    if let Some(config) = command.config_file() {
-        let cwd = std::env::current_dir()?;
-        let path = config.path.clone().unwrap_or_else(|| {
-            tola_build::config::loading::find_default_config(&cwd)
-                .unwrap_or_else(|| cwd.join("tola.toml"))
-        });
-        destination::check_file(Some(log_path), &path)?;
-    }
-    if let Some(path) = command.written_output() {
-        destination::check_file(Some(log_path), path)?;
-    }
-    Ok(())
+        .finish(Err(error), output, true, failure.pretty)
 }

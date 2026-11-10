@@ -4,9 +4,11 @@ use std::borrow::Cow;
 use std::ops::Range;
 use std::path::Path;
 
-use crate::config::source::{ConfigPositions, SourceExcerpt, source_excerpt};
 use crate::config::{ConfigDiagnostic, ConfigDiagnosticTag, ConfigDiagnostics, ConfigError};
-use tola_diagnostic::{Diagnostic, DiagnosticCause, DiagnosticError, Severity, UnknownField};
+use tola_diagnostic::{
+    Diagnostic, DiagnosticCause, DiagnosticError, Severity, SourceExcerpt, SourcePositions,
+    UnknownField, key_at_span,
+};
 
 /// The site root of a configuration file is the directory that contains it, so its
 /// site-relative spelling is the file name.
@@ -16,7 +18,7 @@ fn configuration_root(path: &Path) -> &Path {
 
 /// The site-root-relative spelling of a configuration file path.
 fn config_display_path(path: &Path) -> String {
-    crate::filesystem::display_path(path, configuration_root(path))
+    tola_diagnostic::display_path(path, configuration_root(path))
 }
 
 /// Help for an unknown configuration key, which is either a misspelling or a key a newer Tola
@@ -44,9 +46,7 @@ pub(crate) fn schema_error(
     span: Option<Range<usize>>,
 ) -> Diagnostic {
     let SchemaMessage { message, help } = schema_message(message);
-    let key = span
-        .as_ref()
-        .and_then(|span| crate::config::source::key_at_span(document, span));
+    let key = span.as_ref().and_then(|span| key_at_span(document, span));
     let message = match key {
         Some(key)
             if message
@@ -79,7 +79,7 @@ fn document_error(
         message,
     );
     if let Some(span) = span
-        && let Some(excerpt) = source_excerpt(input, span)
+        && let Some(excerpt) = SourceExcerpt::of(input, span)
     {
         diagnostic = diagnostic.with_source_excerpt(
             excerpt.line,
@@ -243,7 +243,7 @@ pub(crate) fn attach_source(error: anyhow::Error, diagnostic: Diagnostic) -> any
 pub(crate) fn attach_load(
     error: anyhow::Error,
     path: Option<&Path>,
-    positions: Option<&ConfigPositions>,
+    positions: Option<&SourcePositions>,
 ) -> anyhow::Error {
     attach(error, tola_diagnostic::codes::config::LOAD, path, positions)
 }
@@ -251,7 +251,7 @@ pub(crate) fn attach_load(
 pub(crate) fn attach_reload(
     error: anyhow::Error,
     path: &Path,
-    positions: Option<&ConfigPositions>,
+    positions: Option<&SourcePositions>,
 ) -> anyhow::Error {
     attach(
         error,
@@ -270,7 +270,7 @@ fn attach(
     error: anyhow::Error,
     fallback_code: tola_diagnostic::DiagnosticCode,
     path: Option<&Path>,
-    positions: Option<&ConfigPositions>,
+    positions: Option<&SourcePositions>,
 ) -> anyhow::Error {
     if tola_diagnostic::attached(&error).is_some() {
         return error;
@@ -303,7 +303,7 @@ fn attach(
 
 /// Convert retained configuration warnings into the shared diagnostic protocol.
 pub fn warning_diagnostics(config: &crate::config::ResolvedSiteConfig) -> Vec<Diagnostic> {
-    let display = crate::filesystem::display_path(config.config_path(), config.get_root());
+    let display = tola_diagnostic::display_path(config.config_path(), config.get_root());
     let positions = config.positions();
     let (experimental, other): (Vec<_>, Vec<_>) = config
         .warnings()
@@ -367,7 +367,7 @@ fn configuration_error(display: Option<&str>, message: &str) -> Diagnostic {
 fn error_diagnostics(
     error: &ConfigError,
     display: Option<&str>,
-    positions: Option<&ConfigPositions>,
+    positions: Option<&SourcePositions>,
 ) -> Vec<Diagnostic> {
     match error {
         ConfigError::Diagnostics(diagnostics) => diagnostics
@@ -460,7 +460,7 @@ fn error_diagnostics(
 fn validation_diagnostic(
     config_diagnostic: &ConfigDiagnostic,
     display: Option<&str>,
-    positions: Option<&ConfigPositions>,
+    positions: Option<&SourcePositions>,
 ) -> Diagnostic {
     let mut diagnostic = attach_excerpt(
         configuration_error(display, &config_diagnostic.message),
@@ -491,7 +491,7 @@ fn attach_excerpt(diagnostic: Diagnostic, excerpt: Option<SourceExcerpt>) -> Dia
 /// the entry's own key next, so a field its author left out still points at the entry to edit
 /// rather than at the first entry of the array.
 fn written_excerpt(
-    positions: &ConfigPositions,
+    positions: &SourcePositions,
     config_diagnostic: &ConfigDiagnostic,
 ) -> Option<SourceExcerpt> {
     config_diagnostic
@@ -525,7 +525,7 @@ mod tests {
     fn excerpt_locates_one_written_line() {
         let content = "[build]\nentry = [\n";
         let start = content.find("entry = [").unwrap() + "entry = ".len();
-        let excerpt = source_excerpt(content, start..start + 1).unwrap();
+        let excerpt = SourceExcerpt::of(content, start..start + 1).unwrap();
         assert_eq!(excerpt.line, 2);
         assert_eq!(excerpt.column, 9);
         assert_eq!(excerpt.text, "entry = [");

@@ -221,17 +221,6 @@ mod tests {
         let definition = site.definition("#let author = (name: \"A\")\n#author.na|me\n");
         assert!(definition.is_none(), "{definition:?}");
     }
-    /// A binding inside parentheses answers like one beside its use: parentheses open no scope.
-    #[test]
-    fn grouped_bindings_answer_definitions() {
-        for marked in ["#((((let y = 1))));\n#(y|);\n", "#(let (x) = 2);\n#(x|);\n"] {
-            let mut site = QuerySession::new();
-            let Some(GotoDefinitionResponse::Scalar(location)) = site.definition(marked) else {
-                panic!("no definition for {marked:?}");
-            };
-            assert_eq!(location.range.start.line, 0);
-        }
-    }
 
     /// A member of an imported module answers the definition inside that module.
     #[test]

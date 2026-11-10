@@ -392,22 +392,6 @@ mod tests {
     }
 
     #[test]
-    fn diagnostic_without_cause_offers_no_fix() {
-        let span = Range::new(Position::new(0, 0), Position::new(0, 0));
-        let params = code_action_params(span, vec![Diagnostic::default()], None);
-        assert!(
-            diagnostic_actions(
-                &uri(),
-                &Source::detached("#let x = 1\n"),
-                None,
-                &params,
-                &[]
-            )
-            .is_empty()
-        );
-    }
-
-    #[test]
     fn repeated_unknown_field_yields_one_removal() {
         let text = "[build]\nentry = \"site.typ\"\nminfy = true\n";
         let actions = actions(

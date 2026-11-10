@@ -3,7 +3,7 @@
 use crate::tree::{EntryKind, Tree};
 use crate::writes::FileWrites;
 
-use tola_build::filesystem::layout;
+use tola_input::layout;
 
 pub(super) fn render(writes: &FileWrites) -> String {
     let mut tree = Tree::default();

@@ -10,5 +10,7 @@ pub use output::{
     portable_key_is_reserved, route_for_output,
 };
 pub use portable::PortablePathError;
-pub use portable::{portable_collision_key, portable_key_is_below, portable_keys_overlap};
+pub use portable::{
+    portable_collision_key, portable_key_is_below, portable_keys_overlap, validate_portable_segment,
+};
 pub use url::{SiteReference, UrlPath, UrlPathError, browser_location};

@@ -1,94 +1,16 @@
-//! Read module manifests and validate their declarations without loading module inputs.
+//! Build-side manifest wrappers: read module manifests for commands and configuration.
 
-use super::{
-    Assets, Command, CommandAction, Entry, Initializer, ManifestEvidence, ModuleDeclaration,
-    OptionsSchema, Query, Skill, hooks, is_relative_path, semantics, valid_name,
-};
-use crate::InputScope;
-use crate::inputs::InputMode;
-use serde::Deserialize;
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "kebab-case")]
-pub(super) struct Manifest {
-    #[serde(default)]
-    pub(super) name: Option<String>,
-    #[serde(default)]
-    pub(super) version: Option<tola_typst::PackageVersion>,
-    #[serde(default)]
-    pub(super) typst: Option<Entry>,
-    #[serde(default)]
-    pub(super) nu: Option<Entry>,
-    #[serde(default)]
-    pub(super) site: Option<Entry>,
-    #[serde(default)]
-    pub(super) options: Option<OptionsSchema>,
-    #[serde(default)]
-    pub(super) assets: Option<Assets>,
-    #[serde(default)]
-    pub(super) slots: BTreeMap<String, PathBuf>,
-    #[serde(default)]
-    pub(super) summary: String,
-    #[serde(default)]
-    pub(super) queries: BTreeMap<String, Query>,
-    #[serde(default)]
-    pub(super) semantics: Vec<semantics::SemanticRole>,
-    #[serde(default)]
-    pub(super) commands: BTreeMap<String, Command>,
-    #[serde(default)]
-    pub(super) init: Option<Initializer>,
-    #[serde(default)]
-    pub(super) skill: Option<Skill>,
-    #[serde(default)]
-    pub(super) hooks: Vec<hooks::ModuleHook>,
-}
+use tola_input::InputMode;
+use tola_module::declaration::ModuleDeclaration;
+use tola_module::manifest::{
+    InitializerSource, ManifestError, ModuleDeclarations, NuModule, read_one, read_selected,
+};
 
-/// Statically declared commands, queries, and Nu entry for help discovery.
-#[derive(Debug)]
-pub struct ModuleDeclarations {
-    pub summary: String,
-    pub commands: BTreeMap<String, String>,
-    pub queries: Vec<String>,
-    pub nu_entry: Option<PathBuf>,
-}
-
-/// A configured module's Nu entry, without preparing its Typst or build inputs.
-#[derive(Debug)]
-pub struct NuModule {
-    pub name: String,
-    pub root: PathBuf,
-    pub manifest: PathBuf,
-    pub entry: Option<PathBuf>,
-}
-
-pub(super) fn read_selected(
-    site_root: &Path,
-    declarations: &BTreeMap<String, ModuleDeclaration>,
-    roots: &BTreeMap<String, PathBuf>,
-    mode: InputMode,
-) -> std::result::Result<BTreeMap<String, ReadManifest>, ManifestError> {
-    let site = site_root
-        .canonicalize()
-        .map_err(|source| ManifestError::SiteRoot { source })?;
-    declarations
-        .keys()
-        .map(|name| {
-            let root = roots
-                .get(name)
-                .cloned()
-                .ok_or_else(|| ManifestError::Source {
-                    message: format!(
-                        "module @@{name}@@ was not resolved; run @@tola update {name}@@"
-                    ),
-                })?;
-            Ok((name.clone(), read_one(&site, name, root, mode)?))
-        })
-        .collect()
-}
-
-pub fn resolve_nu_modules(
+/// Read the Nu entry of every declared module.
+pub fn read_nu_modules(
     site_root: &Path,
     vendor: Option<&Path>,
     declarations: &BTreeMap<String, ModuleDeclaration>,
@@ -99,34 +21,39 @@ pub fn resolve_nu_modules(
     read_selected(site_root, declarations, &roots, mode)?
         .into_iter()
         .map(|(name, loaded)| {
+            let assets_enabled = loaded.manifest.assets.is_some()
+                && declarations[&name]
+                    .assets
+                    .as_ref()
+                    .is_none_or(|assets| assets.enable);
             let entry = loaded.manifest.nu.map(|nu| nu.entry);
             if let Some(entry) = &entry {
-                super::validate_module_path(site_root, &name, &loaded.root, entry, false)?;
+                tola_module::module_set::validate_module_path(
+                    site_root,
+                    &name,
+                    &loaded.root,
+                    entry,
+                    false,
+                )?;
             }
             let root = loaded.root;
             Ok((
                 name.clone(),
                 NuModule {
                     name,
-                    manifest: root.join("tola-module.toml"),
+                    manifest: loaded.path,
                     root,
                     entry,
+                    assets_enabled,
+                    options: loaded.options,
                 },
             ))
         })
         .collect()
 }
 
-/// An initializer selected before a destination site exists.
-#[derive(Debug)]
-pub struct InitializerSource {
-    pub name: String,
-    pub root: PathBuf,
-    pub manifest: PathBuf,
-    pub argv: Vec<String>,
-}
-
-pub fn resolve_initializer(
+/// Read an initializer declaration before a destination site exists.
+pub fn find_initializer(
     source: &Path,
     alias: Option<&str>,
     mode: InputMode,
@@ -134,25 +61,18 @@ pub fn resolve_initializer(
     let root = source
         .canonicalize()
         .map_err(|source| ManifestError::InitializerRoot { source })?;
-    let loaded = read_one(&root, alias.unwrap_or("init"), root.clone(), mode)?;
-    let name = alias
-        .map(str::to_owned)
-        .or(loaded.manifest.name)
-        .ok_or(ManifestError::InitializerName)?;
-    let initializer = loaded.manifest.init.ok_or(ManifestError::InitializerArgv)?;
+    let alias = alias.ok_or(ManifestError::InitializerName)?;
+    let loaded = read_one(&root, alias, root.clone(), mode)?;
+    let initializer = loaded
+        .manifest
+        .init
+        .ok_or(ManifestError::InitializerMissing)?;
     Ok(InitializerSource {
-        name,
+        name: alias.to_owned(),
         root: loaded.root,
         manifest: loaded.path,
-        argv: initializer.argv,
+        action: initializer.action,
     })
-}
-
-pub(super) struct ReadManifest {
-    pub root: PathBuf,
-    pub path: PathBuf,
-    pub evidence: ManifestEvidence,
-    pub manifest: Manifest,
 }
 
 /// Read only configuration-selected module manifests, without loading their referenced inputs.
@@ -164,431 +84,35 @@ pub fn read_declarations(
     cancellation: &crate::cancellation::BuildCancellation,
 ) -> std::result::Result<BTreeMap<String, ModuleDeclarations>, ManifestError> {
     let roots = crate::inputs::module_roots(site_root, mode, vendor, declarations, cancellation)?;
-    read_selected(site_root, declarations, &roots, mode)?
-        .into_iter()
-        .map(|(name, loaded)| {
-            let manifest = loaded.manifest;
-            let mut commands: BTreeMap<_, _> = manifest
-                .commands
-                .into_iter()
-                .map(|(name, command)| (name, command.help))
-                .collect();
-            if manifest.init.is_some() {
-                commands.insert("init".into(), "Create a site using this module.".into());
-            }
-            Ok((
-                name.clone(),
-                ModuleDeclarations {
-                    summary: manifest.summary,
-                    commands,
-                    queries: manifest.queries.into_keys().collect(),
-                    nu_entry: manifest.nu.map(|nu| nu.entry),
-                },
-            ))
-        })
-        .collect()
-}
-
-/// A module manifest Tola could not read, or a declaration it does not accept.
-///
-/// Every path it names is the site-relative spelling the author wrote it under.
-#[derive(Debug, thiserror::Error)]
-pub enum ManifestError {
-    #[error("Tola could not read the site directory")]
-    SiteRoot {
-        #[source]
-        source: std::io::Error,
-    },
-    #[error(transparent)]
-    Roots(#[from] crate::inputs::ModuleRootError),
-    #[error("`{name}` is not a usable module name")]
-    Namespace { name: String },
-    #[error("{message}")]
-    Source { message: String },
-    #[error("Tola could not read the module directory `{path}`")]
-    RootPath {
-        path: String,
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("`{path}` is not a directory")]
-    RootNotDirectory { path: String },
-    #[error("the module directory `{path}` changed while Tola was reading it")]
-    RootChanged { path: String },
-    #[error("module `{module}` is outside the site, which `--pure` does not allow")]
-    OutsideSiteInPureMode { module: String },
-    #[error("Tola could not read `{path}`")]
-    ManifestPath {
-        path: String,
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("`{path}` changed while Tola was reading it")]
-    ManifestChanged { path: String },
-    #[error("the manifest `{path}` points outside module `{module}`")]
-    ManifestEscapesRoot { module: String, path: String },
-    #[error("Tola could not read `{path}`")]
-    ManifestRead {
-        path: String,
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("`{path}` changed while Tola was reading it")]
-    ManifestMoved { path: String },
-    #[error("`{path}` is not UTF-8 text")]
-    ManifestEncoding {
-        path: String,
-        #[source]
-        source: std::str::Utf8Error,
-    },
-    #[error("`{path}` is not valid TOML")]
-    ManifestParse {
-        path: String,
-        #[source]
-        source: toml::de::Error,
-    },
-    #[error("module `{module}` declares an invalid hook: {source}")]
-    Hooks {
-        module: String,
-        #[source]
-        source: hooks::HookDeclarationError,
-    },
-    #[error("`{path}` declares `{field}`, which no longer exists; delete the key")]
-    RemovedField { path: String, field: String },
-    #[error("`{name}` is not a usable package name for module `{module}`")]
-    PackageName { module: String, name: String },
-    #[error("module `{module}` must declare `name` and `version` together")]
-    NameVersionTogether { module: String },
-    #[error("module `{module}` needs `name` and `version` to export a Typst, Nu, or site entry")]
-    NameVersionForEntry { module: String },
-    #[error("`{label}` must be a relative path inside the module")]
-    EntryPath { label: String },
-    #[error("module `{module}` declares no `options.export`")]
-    OptionsExport { module: String },
-    #[error("`{slot}` is not a usable slot name in module `{module}`")]
-    SlotName { module: String, slot: String },
-    #[error("`{query}` is not a usable query name in module `{module}`")]
-    QueryName { module: String, query: String },
-    #[error("query `{query}` needs a `label`")]
-    QueryLabel { query: String },
-    #[error("module `{module}` declares invalid semantics: {source}")]
-    Semantics {
-        module: String,
-        #[source]
-        source: semantics::SemanticsError,
-    },
-    #[error("the initializer in module `{module}` needs a command")]
-    InitializerExecutable { module: String },
-    #[error("module `{module}` declares both `[init]` and `[commands.init]`")]
-    InitializerDeclaredTwice { module: String },
-    #[error("`{command}` is not a usable command name in module `{module}`")]
-    CommandName { module: String, command: String },
-    #[error("command `{command}` names no command line")]
-    CommandExecutable { command: String },
-    #[error("command `{command}` names `{query}`, which the module does not declare")]
-    CommandUnknownQuery { command: String, query: String },
-    #[error("command `{command}` has an empty projection field")]
-    CommandProjection { command: String },
-    #[error("command `{command}` needs a `[skill]` table")]
-    CommandMissingSkill { command: String },
-    #[error("Tola could not read the initializer's module directory")]
-    InitializerRoot {
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("choose the initializer with `--alias`, or declare its `name`")]
-    InitializerName,
-    #[error("the initializer declares no `argv`")]
-    InitializerArgv,
-    #[error(transparent)]
-    ModulePath(#[from] super::ModulePathError),
-}
-
-/// Reject a key the input model removed, naming the repair instead of "`unknown field`".
-fn reject_removed_fields(content: &str, path: &str) -> std::result::Result<(), ManifestError> {
-    let Ok(value) = toml::from_str::<toml::Value>(content) else {
-        // The typed parse below reports a real syntax error with its own location.
-        return Ok(());
-    };
-    for field in ["schema-version", "minimal-tola-version"] {
-        if value.get(field).is_some() {
-            return Err(ManifestError::RemovedField {
-                path: path.to_owned(),
-                field: field.to_owned(),
-            });
+    let mut result = BTreeMap::new();
+    for (name, loaded) in read_selected(site_root, declarations, &roots, mode)? {
+        let manifest = loaded.manifest;
+        let mut commands: BTreeMap<_, _> = manifest
+            .commands
+            .into_iter()
+            .map(|(name, command)| (name, command.help))
+            .collect();
+        if manifest.init.is_some() {
+            commands.insert("init".into(), "Create a site using this module.".into());
         }
+        result.insert(
+            name.clone(),
+            ModuleDeclarations {
+                commands,
+                queries: manifest.queries.into_keys().collect(),
+                nu_entry: manifest.nu.map(|nu| nu.entry),
+            },
+        );
     }
-    if let Some(queries) = value.get("queries").and_then(toml::Value::as_table) {
-        for query in queries.values() {
-            if query
-                .as_table()
-                .is_some_and(|query| query.contains_key("schema-version"))
-            {
-                return Err(ManifestError::RemovedField {
-                    path: path.to_owned(),
-                    field: "queries.*.schema-version".to_owned(),
-                });
-            }
-        }
-    }
-    Ok(())
-}
-
-pub(super) fn read_one(
-    site: &Path,
-    name: &str,
-    declared_root: PathBuf,
-    mode: InputMode,
-) -> std::result::Result<ReadManifest, ManifestError> {
-    if !valid_name(name) {
-        return Err(ManifestError::Namespace {
-            name: name.to_owned(),
-        });
-    }
-
-    // Every path this error names reads the way the author wrote it under the site root.
-    let shown = |path: &Path| crate::filesystem::display_path(path, site);
-    let root_identity = crate::filesystem::FilesystemSourceIdentity::from_path(&declared_root);
-    let root = declared_root
-        .canonicalize()
-        .map_err(|source| ManifestError::RootPath {
-            path: shown(&declared_root),
-            source,
-        })?;
-    if !root.is_dir() {
-        return Err(ManifestError::RootNotDirectory {
-            path: shown(&declared_root),
-        });
-    }
-    if root_identity.canonical_path() != Some(root.as_path()) {
-        return Err(ManifestError::RootChanged {
-            path: shown(&declared_root),
-        });
-    }
-    if mode.scope() == InputScope::Pure && !root.starts_with(site) {
-        return Err(ManifestError::OutsideSiteInPureMode {
-            module: name.to_owned(),
-        });
-    }
-    let manifest_path = declared_root.join("tola-module.toml");
-    let manifest_identity = crate::filesystem::FilesystemSourceIdentity::from_path(&manifest_path);
-    let canonical_manifest =
-        manifest_path
-            .canonicalize()
-            .map_err(|source| ManifestError::ManifestPath {
-                path: shown(&manifest_path),
-                source,
-            })?;
-    if manifest_identity.canonical_path() != Some(canonical_manifest.as_path()) {
-        return Err(ManifestError::ManifestChanged {
-            path: shown(&manifest_path),
-        });
-    }
-    if !canonical_manifest.starts_with(&root) {
-        return Err(ManifestError::ManifestEscapesRoot {
-            module: name.to_owned(),
-            path: shown(&manifest_path),
-        });
-    }
-    let bytes = std::fs::read(&manifest_path).map_err(|source| ManifestError::ManifestRead {
-        path: shown(&manifest_path),
-        source,
-    })?;
-    if root_identity != crate::filesystem::FilesystemSourceIdentity::from_path(&declared_root)
-        || manifest_identity
-            != crate::filesystem::FilesystemSourceIdentity::from_path(&manifest_path)
-    {
-        return Err(ManifestError::ManifestMoved {
-            path: shown(&manifest_path),
-        });
-    }
-    let digest = blake3::hash(&bytes);
-    let content =
-        std::str::from_utf8(&bytes).map_err(|source| ManifestError::ManifestEncoding {
-            path: shown(&manifest_path),
-            source,
-        })?;
-    reject_removed_fields(content, &shown(&manifest_path))?;
-    let manifest: Manifest =
-        toml::from_str(content).map_err(|source| ManifestError::ManifestParse {
-            path: shown(&manifest_path),
-            source,
-        })?;
-    hooks::validate_declarations(&manifest.hooks).map_err(|source| ManifestError::Hooks {
-        module: name.to_owned(),
-        source,
-    })?;
-    if let Some(package_name) = &manifest.name
-        && !valid_name(package_name)
-    {
-        return Err(ManifestError::PackageName {
-            module: name.to_owned(),
-            name: package_name.clone(),
-        });
-    }
-    if manifest.name.is_some() != manifest.version.is_some() {
-        return Err(ManifestError::NameVersionTogether {
-            module: name.to_owned(),
-        });
-    }
-    if (manifest.typst.is_some() || manifest.nu.is_some() || manifest.site.is_some())
-        && manifest.name.is_none()
-    {
-        return Err(ManifestError::NameVersionForEntry {
-            module: name.to_owned(),
-        });
-    }
-    let relative = |path: &Path, label: String| -> std::result::Result<(), ManifestError> {
-        if is_relative_path(path) {
-            Ok(())
-        } else {
-            Err(ManifestError::EntryPath { label })
-        }
-    };
-    for (key, entry) in [
-        ("typst.entry", manifest.typst.as_ref().map(|v| &v.entry)),
-        ("nu.entry", manifest.nu.as_ref().map(|v| &v.entry)),
-        ("site.entry", manifest.site.as_ref().map(|v| &v.entry)),
-        (
-            "options.schema",
-            manifest.options.as_ref().map(|v| &v.schema),
-        ),
-        (
-            "assets.directory",
-            manifest.assets.as_ref().map(|v| &v.directory),
-        ),
-    ] {
-        if let Some(entry) = entry {
-            relative(entry, key.to_owned())?;
-        }
-    }
-    if manifest
-        .options
-        .as_ref()
-        .is_some_and(|options| options.export.trim().is_empty())
-    {
-        return Err(ManifestError::OptionsExport {
-            module: name.to_owned(),
-        });
-    }
-    for (slot, path) in &manifest.slots {
-        if !valid_name(slot) {
-            return Err(ManifestError::SlotName {
-                module: name.to_owned(),
-                slot: slot.clone(),
-            });
-        }
-        relative(path, format!("slots.{slot}"))?;
-    }
-    for (query_name, query) in &manifest.queries {
-        if !valid_name(query_name) {
-            return Err(ManifestError::QueryName {
-                module: name.to_owned(),
-                query: query_name.clone(),
-            });
-        }
-        let query_label = format!("{name}.{query_name}");
-        if query.label.is_empty() {
-            return Err(ManifestError::QueryLabel { query: query_label });
-        }
-        relative(&query.entry, format!("query {query_label} entry"))?;
-    }
-    if let Some(skill) = &manifest.skill {
-        relative(&skill.path, "skill.path".to_owned())?;
-        super::validate_module_path(site, name, &root, &skill.path, false)?;
-    }
-    semantics::validate(
-        &manifest.semantics,
-        manifest.typst.is_some(),
-        &manifest.queries,
-    )
-    .map_err(|source| ManifestError::Semantics {
-        module: name.to_owned(),
-        source,
-    })?;
-    if let Some(initializer) = &manifest.init {
-        if !initializer
-            .argv
-            .first()
-            .is_some_and(|program| !program.is_empty())
-        {
-            return Err(ManifestError::InitializerExecutable {
-                module: name.to_owned(),
-            });
-        }
-        if manifest.commands.contains_key("init") {
-            return Err(ManifestError::InitializerDeclaredTwice {
-                module: name.to_owned(),
-            });
-        }
-    }
-    for (command_name, command) in &manifest.commands {
-        if !valid_name(command_name) {
-            return Err(ManifestError::CommandName {
-                module: name.to_owned(),
-                command: command_name.clone(),
-            });
-        }
-        let command_label = format!("{name}.{command_name}");
-        match &command.action {
-            CommandAction::Argv { argv } => {
-                if argv.is_empty() || argv[0].is_empty() {
-                    return Err(ManifestError::CommandExecutable {
-                        command: command_label,
-                    });
-                }
-            }
-            CommandAction::Query { query, projection } => {
-                if !manifest.queries.contains_key(query) {
-                    return Err(ManifestError::CommandUnknownQuery {
-                        command: command_label,
-                        query: query.clone(),
-                    });
-                }
-                if !projection.iter().all(|field| !field.is_empty()) {
-                    return Err(ManifestError::CommandProjection {
-                        command: command_label,
-                    });
-                }
-            }
-            CommandAction::Skill => {
-                if manifest.skill.is_none() {
-                    return Err(ManifestError::CommandMissingSkill {
-                        command: command_label,
-                    });
-                }
-            }
-        }
-    }
-    Ok(ReadManifest {
-        root,
-        path: canonical_manifest,
-        evidence: ManifestEvidence {
-            root: root_identity,
-            manifest: manifest_identity,
-            digest,
-        },
-        manifest,
-    })
+    Ok(result)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::modules::ModuleSource;
-
-    fn resolved_modules(
-        site: &std::path::Path,
-        declarations: &std::collections::BTreeMap<String, crate::modules::ModuleDeclaration>,
-        mode: crate::inputs::InputMode,
-    ) -> std::result::Result<
-        std::collections::BTreeMap<String, crate::modules::ResolvedModule>,
-        crate::modules::ModuleResolutionError,
-    > {
-        let roots =
-            crate::inputs::module_roots(site, mode, None, declarations, &Default::default())?;
-        crate::modules::resolve_modules_with_roots(site, declarations, &roots, mode)
-    }
+    use std::path::PathBuf;
+    use tola_input::InputScope;
+    use tola_module::declaration::ModuleSource;
 
     #[test]
     fn nu_selection_prepares_no_site_inputs() {
@@ -601,14 +125,12 @@ mod tests {
         std::fs::write(
             directory.path().join("tola-module.toml"),
             r#"
-name = "tools"
-version = "1.0.0"
 [nu]
 entry = "tools.nu"
 [typst]
 entry = "not-generated.typ"
 [assets]
-directory = "not-generated-assets"
+trees = [{ source = "not-generated-assets", url-prefix = "/" }]
 "#,
         )
         .unwrap();
@@ -619,7 +141,7 @@ directory = "not-generated-assets"
                 ..Default::default()
             },
         )]);
-        let loaded = resolve_nu_modules(
+        let loaded = read_nu_modules(
             directory.path(),
             None,
             &declared,
@@ -631,18 +153,10 @@ directory = "not-generated-assets"
             loaded["local"].entry.as_deref(),
             Some(Path::new("tools.nu"))
         );
-        assert!(
-            resolved_modules(
-                directory.path(),
-                &declared,
-                crate::inputs::InputMode::new(InputScope::Pure, false),
-            )
-            .is_err()
-        );
     }
 
     #[test]
-    fn nu_must_within_selected_module() {
+    fn nu_must_stay_within_selected_module() {
         let directory = tempfile::tempdir().unwrap();
         let module = directory.path().join("module");
         std::fs::create_dir(&module).unwrap();
@@ -663,11 +177,11 @@ directory = "not-generated-assets"
         for entry in ["", "../outside.nu"] {
             std::fs::write(
                 module.join("tola-module.toml"),
-                format!("name='tools'\nversion='1.0.0'\n[nu]\nentry={entry:?}\n"),
+                format!("[nu]\nentry={entry:?}\n"),
             )
             .unwrap();
             assert!(
-                resolve_nu_modules(
+                read_nu_modules(
                     directory.path(),
                     None,
                     &declared,
@@ -680,13 +194,9 @@ directory = "not-generated-assets"
         #[cfg(unix)]
         {
             std::os::unix::fs::symlink("../outside.nu", module.join("linked.nu")).unwrap();
-            std::fs::write(
-                module.join("tola-module.toml"),
-                "name='tools'\nversion='1.0.0'\n[nu]\nentry='linked.nu'\n",
-            )
-            .unwrap();
+            std::fs::write(module.join("tola-module.toml"), "[nu]\nentry='linked.nu'\n").unwrap();
             assert!(
-                resolve_nu_modules(
+                read_nu_modules(
                     directory.path(),
                     None,
                     &declared,
@@ -704,30 +214,32 @@ directory = "not-generated-assets"
         std::fs::write(
             directory.path().join("tola-module.toml"),
             r#"
-name = "notebook"
-version = "1.0.0"
-[site]
+[build]
 entry = "not-created-yet.typ"
 [init]
 argv = ["not-installed", "{module}/init.nu"]
 "#,
         )
         .unwrap();
-        let initializer = resolve_initializer(
-            directory.path(),
-            None,
-            InputMode::new(InputScope::Pure, false),
-        )
-        .unwrap();
-        assert_eq!(initializer.name, "notebook");
-        assert_eq!(initializer.argv, ["not-installed", "{module}/init.nu"]);
-        let initializer = resolve_initializer(
+        assert!(matches!(
+            find_initializer(
+                directory.path(),
+                None,
+                InputMode::new(InputScope::Pure, false),
+            ),
+            Err(ManifestError::InitializerName),
+        ));
+        let initializer = find_initializer(
             directory.path(),
             Some("notes"),
             InputMode::new(InputScope::Pure, false),
         )
         .unwrap();
         assert_eq!(initializer.name, "notes");
+        assert_eq!(
+            initializer.action,
+            tola_module::Action::Argv(vec!["not-installed".into(), "{module}/init.nu".into()]),
+        );
         let declarations = BTreeMap::from([(
             "notes".into(),
             ModuleDeclaration {
@@ -746,13 +258,5 @@ argv = ["not-installed", "{module}/init.nu"]
         )
         .unwrap();
         assert!(help["notes"].commands.contains_key("init"));
-        assert!(
-            resolved_modules(
-                directory.path(),
-                &declarations,
-                crate::inputs::InputMode::new(InputScope::Pure, false),
-            )
-            .is_err()
-        );
     }
 }

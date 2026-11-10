@@ -610,15 +610,6 @@ mod tests {
         );
     }
 
-    /// A declared path answers a hover, with documentation its declaration wrote.
-    #[test]
-    fn declared_path_answers_its_documentation() {
-        let answer = hover("[build]\nentr|y = \"content\"\n").expect("a hover");
-        let (path, documentation) = documented_path(&answer);
-        assert_eq!(path, "build.entry");
-        assert!(!documentation.is_empty(), "{answer}");
-    }
-
     /// A host-declared key completes inside its own section.
     #[test]
     fn host_declared_keys_complete() {
@@ -701,7 +692,7 @@ mod tests {
 
     #[test]
     fn nested_sections_complete_own_keys() {
-        let offered = labels("[build.hooks]\n|");
+        let offered = labels("[hooks]\n|");
         assert!(offered.contains(&"before-build".to_owned()), "{offered:?}");
         assert!(!offered.contains(&"entry".to_owned()), "{offered:?}");
 
@@ -747,7 +738,7 @@ mod tests {
     fn hover_answers_declared_path() {
         let cases: [(&str, &str); 11] = [
             ("[build]\nentr|y = \"content\"\n", "build.entry"),
-            ("[build.hoo|ks]\n", "build.hooks"),
+            ("[hoo|ks]\n", "hooks"),
             ("[site]\nti|tle = \"Title\"\n", "site.title"),
             ("[build]\nminify = { ht|ml = true }\n", "build.minify.html"),
             ("[build]\nminify = { html = tr|ue }\n", "build.minify.html"),
@@ -757,18 +748,15 @@ mod tests {
                 "build.references.navigation",
             ),
             (
-                "[[build.hooks.before-build]]\nna|me = \"icons\"\n",
-                "build.hooks.before-build.name",
+                "[[hooks.before-build]]\nna|me = \"icons\"\n",
+                "hooks.before-build.name",
             ),
             ("[si|te]\n", "site"),
+            ("[[hooks.before-|build]]\n", "hooks.before-build"),
             (
-                "[[build.hooks.before-|build]]\n",
-                "build.hooks.before-build",
-            ),
-            (
-                "[[build.hooks.before-build]]\nname = \"icons\"\n\
-                 command = [\n  \"node\",\n  \"|scripts/icons.mjs\",\n]\n",
-                "build.hooks.before-build.command",
+                "[[hooks.before-build]]\nname = \"icons\"\n\
+                 argv = [\n  \"node\",\n  \"|scripts/icons.mjs\",\n]\n",
+                "hooks.before-build.argv",
             ),
         ];
         for (source, path) in cases {
@@ -783,11 +771,10 @@ mod tests {
     fn array_element_answers_its_field() {
         assert_eq!(
             documented_path(
-                &hover("[[build.hooks.before-build]]\ncommand = [\n  [\"s|ite\"],\n]\n")
-                    .expect("a hover")
+                &hover("[[hooks.before-build]]\nargv = [\n  [\"s|ite\"],\n]\n").expect("a hover")
             )
             .0,
-            "build.hooks.before-build.command"
+            "hooks.before-build.argv"
         );
     }
 
@@ -825,7 +812,7 @@ mod tests {
             ("before-build", "generates", "outputs"),
             ("generate-outputs", "outputs", "generates"),
         ] {
-            let offered = labels(&format!("[[build.hooks.{stage}]]\n|"));
+            let offered = labels(&format!("[[hooks.{stage}]]\n|"));
             assert!(offered.contains(&own.to_owned()), "{stage}: {offered:?}");
             assert!(
                 !offered.contains(&foreign.to_owned()),
@@ -842,22 +829,22 @@ mod tests {
             (
                 r#"[build]
 entry = "site.typ"
-[[build.hooks.before-build]]
+[[hooks.before-build]]
 name = "icons"
 [site]
 title = "Example"
-[[build.hooks.after-publish]]
+[[hooks.after-publish]]
 name = "deploy"
-[[build.hooks.before-build]]
+[[hooks.before-build]]
 gen|
 "#,
                 ["generates"],
             ),
             (
-                r#"[[build.hooks.before-build]]
+                r#"[[hooks.before-build]]
 name = "icons"
-command = ["icons"]
-[[build.hooks.before-build]]
+argv = ["icons"]
+[[hooks.before-build]]
 na|
 "#,
                 ["name"],
@@ -874,10 +861,7 @@ na|
             ("generate-outputs", vec!["\"run\"", "\"skip\"", "\"reuse\""]),
             ("after-publish", vec!["\"run\"", "\"skip\""]),
         ] {
-            assert_eq!(
-                labels(&format!("[[build.hooks.{stage}]]\ndev = |")),
-                expected,
-            );
+            assert_eq!(labels(&format!("[[hooks.{stage}]]\ndev = |")), expected,);
         }
     }
 }

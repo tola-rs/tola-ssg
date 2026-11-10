@@ -3,19 +3,18 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use serde::Serialize;
-use serde_json::{Map, Number, Value as Json};
-use typst::World;
-use typst::foundations::Value;
+use serde_json::Value as Json;
 
 use crate::BuildResources;
 use crate::cancellation::BuildCancellation;
 use crate::check::{SourceDiagnosticSession, SourceRevision};
 use crate::config::ResolvedSiteConfig;
-use crate::filesystem::display_path;
-use crate::modules::{Query, QueryFormat, ResolvedModule};
+use tola_diagnostic::display_path;
 use tola_diagnostic::{Diagnostic, Severity};
+use tola_module::declaration::{Query, QueryReturns};
+use tola_module::module_set::LoadedModule;
 
 /// A declared generator input; this query did not run or verify its producer.
 #[derive(Debug, Serialize)]
@@ -119,13 +118,23 @@ impl Input {
 pub struct QueryResult {
     pub format_version: u32,
     pub query: String,
-    pub format: crate::modules::QueryFormat,
+    pub returns: QueryReturns,
     pub module_manifest: Option<String>,
     pub input: Input,
     pub success: bool,
     pub result_digest: Option<String>,
     pub data: Option<Json>,
     pub diagnostics: Vec<Diagnostic>,
+}
+
+impl QueryResult {
+    fn failure(&mut self, message: String) {
+        self.diagnostics.push(Diagnostic::new(
+            tola_diagnostic::codes::query::RESULT,
+            Severity::Error,
+            message,
+        ));
+    }
 }
 
 /// Why one module query could not evaluate.
@@ -152,7 +161,7 @@ impl From<anyhow::Error> for QueryError {
 /// No hooks, output export or publication runs. Overlays use absolute source paths.
 pub fn run(
     config: Arc<ResolvedSiteConfig>,
-    module: &ResolvedModule,
+    module: &LoadedModule,
     declaration: &Query,
     name: &str,
     resources: BuildResources,
@@ -198,7 +207,7 @@ pub fn run_file(
 /// The typed result leaves the JSON data and digest unmaterialized; use `run` for CLI output.
 pub fn run_entities(
     config: Arc<ResolvedSiteConfig>,
-    module: &ResolvedModule,
+    module: &LoadedModule,
     declaration: &Query,
     name: &str,
     resources: BuildResources,
@@ -206,7 +215,7 @@ pub fn run_entities(
     cancellation: &BuildCancellation,
 ) -> Result<super::entities::EntityQueryResult> {
     ensure!(
-        declaration.format == QueryFormat::Entities,
+        declaration.returns == QueryReturns::Entities,
         "query `{name}` does not return entities"
     );
     evaluate(
@@ -225,7 +234,7 @@ pub fn run_entities(
 
 enum ModelQuery<'a> {
     Module {
-        module: &'a ResolvedModule,
+        module: &'a LoadedModule,
         declaration: &'a Query,
         name: &'a str,
     },
@@ -244,8 +253,9 @@ fn evaluate(
     materialize: bool,
 ) -> Result<super::entities::EntityQueryResult> {
     cancellation.ensure_active()?;
-    let configured = super::prepared::configure(&config, resources.input_mode(), cancellation)?;
-    let (name, label, format, module_manifest, query_config) = match query {
+    let mut configured =
+        crate::modules::prepared::prepare_site(&config, resources.input_mode(), cancellation)?;
+    let (name, label, returns, module_manifest, query_config) = match query {
         ModelQuery::Module {
             module,
             declaration,
@@ -259,17 +269,16 @@ fn evaluate(
                         module.name
                     )
                 })?;
-            let selected_module = &configured
-                .module_inputs
-                .configured
+            let selected_module = configured
+                .prepared()
+                .modules
                 .get(&module.name)
                 .with_context(|| {
                     format!(
                         "Tola could not find the configuration of module `{}`",
                         module.name
                     )
-                })?
-                .module;
+                })?;
             let selected_query = selected_module.queries.get(local_name).with_context(|| {
                 format!(
                     "module `{}` no longer declares the query `{local_name}`; run the query again",
@@ -289,13 +298,17 @@ fn evaluate(
                 entry.starts_with(&selected_module.root),
                 "the `entry` of query `{name}` points outside its module"
             );
+            ensure!(
+                entry.is_file(),
+                "the `entry` of query `{name}` is not a file"
+            );
             resources.source_boundary(&config).check(&entry)?;
             (
                 name.to_owned(),
                 selected_query.label.clone(),
-                selected_query.format,
+                selected_query.returns,
                 Some(display_path(&selected_module.manifest, config.get_root())),
-                super::prepared::select_query(&configured, selected_module, selected_query)?,
+                tola_module::prepared::select_query(selected_module, selected_query),
             )
         }
         ModelQuery::File { entry, label } => {
@@ -313,22 +326,22 @@ fn evaluate(
             (
                 format!("{}#{label}", display_path(&entry, config.get_root())),
                 label.to_owned(),
-                QueryFormat::Json,
+                QueryReturns::Json,
                 None,
-                super::prepared::select_query_file(&configured, &entry)?,
+                tola_module::prepared::select_query_file(&entry),
             )
         }
     };
-    let query_config = Arc::new(query_config);
+    configured.select_entry(query_config)?;
+    let query_config = Arc::new(configured);
     ensure!(
         query_config
-            .module_inputs
-            .manifests_are_fresh(cancellation)?,
+            .prepared()
+            .manifests_are_fresh(&cancellation.bundle_cancellation())?,
         "the module changed while Tola was preparing the query `{name}`; run the query again"
     );
     let mut generated = config
-        .build()
-        .hooks
+        .hooks()
         .before_build
         .iter()
         .filter(|hook| hook.enable)
@@ -339,8 +352,8 @@ fn evaluate(
             })
         })
         .collect::<Vec<_>>();
-    for module in configured.module_inputs.configured.values() {
-        generated.extend(super::hooks::declared_generated_inputs(&module.module).map(
+    for module in query_config.prepared().modules.values() {
+        generated.extend(tola_module::hooks::declared_generated_inputs(module).map(
             |(producer, path)| GeneratedInput {
                 producer,
                 path: display_path(&path, config.get_root()),
@@ -380,14 +393,14 @@ fn evaluate(
         };
     ensure!(
         query_config
-            .module_inputs
-            .manifests_are_fresh(cancellation)?,
+            .prepared()
+            .manifests_are_fresh(&cancellation.bundle_cancellation())?,
         "the module changed while Tola was evaluating the query `{name}`; run the query again"
     );
     let mut result = QueryResult {
         format_version: 1,
         query: name.clone(),
-        format,
+        returns,
         module_manifest,
         input,
         success: false,
@@ -400,144 +413,52 @@ fn evaluate(
         .iter()
         .any(|d| d.severity == Severity::Error)
     {
+        result.failure("The model entry did not compile".into());
         return Ok(no_entities(result, revision));
     }
     let Some(bundle) = revision.checked().and_then(|checked| checked.bundle()) else {
         result.failure("The model entry did not compile".into());
         return Ok(no_entities(result, revision));
     };
-    let declarations = bundle.metadata_declarations(&label);
-    if declarations.len() != 1 {
-        result.failure(format!(
-            "query {name} requires one <{}> metadata declaration, found {}",
-            label,
-            declarations.len(),
-        ));
-        return Ok(no_entities(result, revision));
-    }
-    let mut entities = Vec::new();
-    let mut source_reads = Vec::new();
-    let mut source_accessed = tola_typst::AccessedDeps::default();
-    let query_value = match format {
-        QueryFormat::Json => json_value(declarations[0].value(), "data"),
-        QueryFormat::Entities => {
-            super::entities::parse(declarations[0].value()).and_then(|parsed| {
-                let world = revision.checked().expect("a bundle has a world").world();
-                (source_reads, source_accessed) =
-                    read_entity_sources(&parsed, world, cancellation)?;
-                let entities_json = if materialize {
-                    super::entities::json(&parsed)?
-                } else {
-                    Json::Null
-                };
-                entities = parsed;
-                Ok(entities_json)
-            })
-        }
-    };
+    let world = revision.checked().expect("a bundle has a world").world();
+    let outcome = tola_module::query::run_query(tola_module::query::QueryRequest {
+        name: &name,
+        label: &label,
+        returns,
+        materialize,
+        world,
+        bundle,
+        cancellation: &cancellation.bundle_cancellation(),
+    })?;
     result.input.record(
-        &source_accessed.reads,
-        source_accessed
+        &outcome.accessed.reads,
+        outcome
+            .accessed
             .disk_reads
             .iter()
             .map(|read| read.as_path().to_path_buf()),
     );
-    match query_value {
-        Ok(query_json) => {
-            if materialize {
-                let bytes = serde_json::to_vec(&query_json)?;
-                result.result_digest = Some(format!("blake3:{}", blake3::hash(&bytes).to_hex()));
-                result.data = Some(query_json);
-            }
-            result.success = true;
-        }
-        Err(error) => result.failure(format!("query {name}: {error}")),
+    if let Some(failure) = outcome.failure {
+        result.failure(failure);
+        return Ok(no_entities(result, revision));
     }
+    if materialize {
+        let data = outcome
+            .data
+            .as_ref()
+            .expect("a materialized query has a value");
+        let bytes = serde_json::to_vec(data)?;
+        result.result_digest = Some(format!("blake3:{}", blake3::hash(&bytes).to_hex()));
+    }
+    result.data = outcome.data;
+    result.success = true;
     cancellation.ensure_active()?;
     Ok(super::entities::EntityQueryResult {
         result,
-        entities,
+        entities: outcome.entities,
         revision: Some(revision),
-        source_reads,
-        source_accessed,
-    })
-}
-
-/// Read each entity's declared source in this query's world and keep that evidence.
-///
-/// An entity names a source the model compiled, so the bytes read here must be the ones that
-/// compile saw; a mismatch means the source changed while the query ran.
-fn read_entity_sources(
-    entities: &[super::entities::Entity],
-    world: &tola_typst::TypstWorld,
-    cancellation: &BuildCancellation,
-) -> Result<(Vec<typst::syntax::Source>, tola_typst::AccessedDeps)> {
-    let mut reads = Vec::new();
-    let mut accessed = tola_typst::AccessedDeps::default();
-    for entity in entities {
-        cancellation.ensure_active()?;
-        let Some(source) = entity.source else {
-            continue;
-        };
-        let (bytes, mut read_accessed) = world.read_file_with_evidence(source);
-        accessed.reads.append(&mut read_accessed.reads);
-        accessed.disk_reads.append(&mut read_accessed.disk_reads);
-        accessed
-            .package_checks
-            .append(&mut read_accessed.package_checks);
-        let id = &entity.id;
-        let unreadable = || format!("Tola could not read the source named by entity `{id}`");
-        let bytes = bytes.map_err(|error| anyhow::Error::new(error).context(unreadable()))?;
-        let read = world
-            .source(source)
-            .map_err(|error| anyhow::Error::new(error).context(unreadable()))?;
-        ensure!(
-            bytes.as_slice() == read.text().as_bytes(),
-            "the source named by entity `{id}` changed while the query ran"
-        );
-        reads.push(read);
-    }
-    Ok((reads, accessed))
-}
-
-impl QueryResult {
-    fn failure(&mut self, message: String) {
-        self.diagnostics.push(Diagnostic::new(
-            tola_diagnostic::codes::query::RESULT,
-            Severity::Error,
-            message,
-        ));
-    }
-}
-
-pub(super) fn json_value(value: &Value, at: &str) -> Result<Json> {
-    Ok(match value {
-        Value::None => Json::Null,
-        Value::Bool(value) => Json::Bool(*value),
-        Value::Int(value) => Json::Number((*value).into()),
-        Value::Float(value) => Json::Number(
-            Number::from_f64(*value)
-                .with_context(|| format!("{at} must contain a finite number"))?,
-        ),
-        Value::Str(value) => Json::String(value.to_string()),
-        Value::Array(values) => Json::Array(
-            values
-                .iter()
-                .enumerate()
-                .map(|(index, value)| json_value(value, &format!("{at}[{index}]")))
-                .collect::<Result<_>>()?,
-        ),
-        Value::Dict(values) => {
-            let mut object = Map::new();
-            for (key, value) in values {
-                object.insert(key.to_string(), json_value(value, &format!("{at}.{key}"))?);
-            }
-            Json::Object(object)
-        }
-        other => bail!(
-            "{at} contains {}; project it to a JSON value explicitly",
-            other.ty()
-        ),
+        source_reads: outcome.source_reads,
+        source_accessed: outcome.accessed,
     })
 }
 
@@ -545,27 +466,28 @@ pub(super) fn json_value(value: &Value, at: &str) -> Result<Json> {
 mod tests {
     use super::*;
     use crate::config::SiteConfigSchema;
-    use crate::{InputScope, modules};
+    use crate::modules;
     use std::collections::BTreeMap;
     use std::fs;
+    use tola_input::InputScope;
+    use tola_module::module_set::LoadedModule;
+    use typst::foundations::Value;
 
-    fn resolved_modules(
+    fn loaded_modules(
         site: &std::path::Path,
-        declarations: &BTreeMap<String, modules::ModuleDeclaration>,
-        mode: crate::inputs::InputMode,
-    ) -> std::result::Result<
-        BTreeMap<String, modules::ResolvedModule>,
-        modules::ModuleResolutionError,
-    > {
+        declarations: &BTreeMap<String, tola_module::ModuleDeclaration>,
+        mode: tola_input::InputMode,
+    ) -> std::result::Result<BTreeMap<String, modules::LoadedModule>, tola_module::ModuleLoadError>
+    {
         let roots =
             crate::inputs::module_roots(site, mode, None, declarations, &Default::default())?;
-        modules::resolve_modules_with_roots(site, declarations, &roots, mode)
+        modules::load_modules_with_roots(site, declarations, &roots, mode)
     }
 
     struct Site {
         directory: tempfile::TempDir,
         config: Arc<ResolvedSiteConfig>,
-        module: ResolvedModule,
+        module: LoadedModule,
     }
 
     impl Site {
@@ -587,8 +509,8 @@ mod tests {
             .unwrap();
             let declarations = BTreeMap::from([(
                 namespace.into(),
-                modules::ModuleDeclaration {
-                    source: modules::ModuleSource::Local {
+                tola_module::ModuleDeclaration {
+                    source: tola_module::ModuleSource::Local {
                         path: "theme".into(),
                     },
                     ..Default::default()
@@ -606,10 +528,10 @@ mod tests {
                 )
                 .unwrap(),
             );
-            let module = resolved_modules(
+            let module = loaded_modules(
                 root,
                 &declarations,
-                crate::inputs::InputMode::new(InputScope::Offline, false),
+                tola_input::InputMode::new(InputScope::Offline, false),
             )
             .unwrap()
             .remove(namespace)
@@ -759,13 +681,13 @@ mod tests {
         fs::write(root.join("content/a.typ"), "saved").unwrap();
         fs::write(
             root.join("theme/tola-module.toml"),
-            "[queries.nodes]\nentry='model.typ'\nlabel='nodes'\nformat='entities'\n",
+            "[queries.nodes]\nentry='model.typ'\nlabel='nodes'\nreturns='entities'\n",
         )
         .unwrap();
-        site.module = resolved_modules(
+        site.module = loaded_modules(
             root,
             site.config.modules(),
-            crate::inputs::InputMode::new(InputScope::Offline, false),
+            tola_input::InputMode::new(InputScope::Offline, false),
         )
         .unwrap()
         .remove("forest")
@@ -825,10 +747,10 @@ mod tests {
         let first = fs::read_to_string(&manifest).unwrap();
         fs::write(&manifest, &first).unwrap();
         let resolve = || {
-            resolved_modules(
+            loaded_modules(
                 root,
                 site.config.modules(),
-                crate::inputs::InputMode::new(InputScope::Offline, false),
+                tola_input::InputMode::new(InputScope::Offline, false),
             )
             .unwrap()
             .remove("forest")
@@ -878,16 +800,16 @@ mod tests {
         let site = Site::new("#metadata(())<nodes>");
         let root = site.directory.path();
         fs::write(root.join("site.typ"),
-            "#import \"@tola/module:0.0.0\": get-module\n#metadata(get-module(\"forest\").version)<current-version>").unwrap();
+            "#import \"@tola/module:0.0.0\": get-module\n#metadata(get-module(\"forest\").options.marker)<current-marker>").unwrap();
         let manifest = root.join("theme/tola-module.toml");
         let source = fs::read_to_string(&manifest).unwrap();
-        let versioned = |version: &str| format!("name='forester'\nversion='{version}'\n{source}");
+        let marked = |marker: &str| format!("{source}\n[options]\nmarker={marker:?}\n");
         let mut session = SourceDiagnosticSession::with_resources(
             Arc::clone(&site.config),
             BuildResources::new().with_input_scope(InputScope::Offline),
         );
-        for version in ["1.0.0", "2.0.0"] {
-            fs::write(&manifest, versioned(version)).unwrap();
+        for marker in ["first", "second"] {
+            fs::write(&manifest, marked(marker)).unwrap();
             let revision = session
                 .inspect(Vec::new(), &BuildCancellation::default())
                 .unwrap();
@@ -895,12 +817,12 @@ mod tests {
                 .checked()
                 .and_then(|checked| checked.bundle())
                 .unwrap_or_else(|| panic!("{:?}", revision.diagnostics()));
-            let declarations = bundle.metadata_declarations("current-version");
+            let declarations = bundle.metadata_declarations("current-marker");
             assert_eq!(declarations.len(), 1);
             let Value::Str(current) = declarations[0].value() else {
-                panic!("the module version must remain a string");
+                panic!("the module option must remain a string");
             };
-            assert_eq!(current.as_str(), version);
+            assert_eq!(current.as_str(), marker);
         }
     }
 }

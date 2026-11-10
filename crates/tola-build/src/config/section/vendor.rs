@@ -144,8 +144,8 @@ build elsewhere, pin each hook's toolchain or commit the files it generates.";
         let Some(path) = &self.path else {
             return;
         };
-        let physical_root = crate::filesystem::normalize_existing_prefix(root);
-        let physical_path = crate::filesystem::normalize_existing_prefix(path);
+        let physical_root = tola_input::normalize_existing_prefix(root);
+        let physical_path = tola_input::normalize_existing_prefix(path);
         if physical_path == physical_root || !physical_path.starts_with(&physical_root) {
             diagnostics.error(
                 Self::FIELDS.path,
@@ -157,7 +157,7 @@ build elsewhere, pin each hook's toolchain or commit the files it generates.";
                 Self::FIELDS.path,
                 format!(
                     "`vendor.path` `{}` is inside Tola's `.tola` directory",
-                    crate::filesystem::display_path(path, root)
+                    tola_diagnostic::display_path(path, root)
                 ),
             );
         }

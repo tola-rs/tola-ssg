@@ -367,7 +367,7 @@ mod tests {
         let configuration = site_configuration(root, "[build]\nentry = \"site.typ\"\n");
         let mut compiler = compiler(&configuration);
         // The client may name the site through a symlinked root; identity is the resolved spelling.
-        let resolved = tola_build::filesystem::normalize_existing_prefix(root);
+        let resolved = tola_input::normalize_existing_prefix(root);
         let id = crate::identity::path_id(&resolved.join("content/lib.typ"), &resolved)
             .expect("a site source");
         let source = Source::new(id, std::fs::read_to_string(&library).unwrap());

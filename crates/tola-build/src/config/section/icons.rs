@@ -306,7 +306,7 @@ not been resolved yet. `tola vendor` freezes a site's remote collections into it
                 IconCollectionSource::RemoteJson { .. } => continue,
             };
             if super::path::reaches_internal_directory(root, path) {
-                diagnostics.error(Self::FIELDS.collections, format!("icon collection `{namespace}`: `path` `{}` is inside Tola's `.tola` directory", crate::filesystem::display_path(path, root)));
+                diagnostics.error(Self::FIELDS.collections, format!("icon collection `{namespace}`: `path` `{}` is inside Tola's `.tola` directory", tola_diagnostic::display_path(path, root)));
             }
         }
     }

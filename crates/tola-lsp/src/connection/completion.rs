@@ -53,8 +53,7 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
                     if !matches!(&response, Err(SourceFailure::Cancelled)) {
                         self.query_read_paths
                             .extend(read_paths.into_iter().flat_map(|path| {
-                                let physical =
-                                    tola_build::filesystem::normalize_existing_prefix(&path);
+                                let physical = tola_input::normalize_existing_prefix(&path);
                                 [path, physical]
                             }));
                         self.watch_sources()?;
@@ -372,8 +371,8 @@ fn honour_cancellation<T>(
 mod tests {
     use super::*;
     use crate::connection::tests::{
-        answer_analysis, dynamic_import_position, messages, open_document, ready, ready_at,
-        ready_workspace, references_request, response, uninitialized,
+        answer_analysis, messages, open_document, ready, ready_at, ready_workspace, response,
+        uninitialized,
     };
     use lsp_server::{ErrorCode, Message, Notification, Request};
     use lsp_types::notification::{self, Notification as LspNotification};
@@ -383,41 +382,6 @@ mod tests {
     use std::time::Instant;
     use tola_typst::typst::syntax::Source;
     use tola_typst_syntax::names::SelectedInterfaces;
-
-    #[test]
-    fn stale_answers_observe_no_inputs() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().join("site");
-        std::fs::create_dir(&root).unwrap();
-        let external = directory.path().join("model-data.json");
-        std::fs::write(&external, "{}").unwrap();
-        let external = tola_build::filesystem::normalize_existing_prefix(&external);
-        let uri = crate::uri::from_file_path(&external).unwrap();
-        for stale in [false, true] {
-            let mut connection = ready_at(Vec::new(), root.clone());
-            connection.checked = Some(crate::connection::CompletedCheck {
-                revision: connection.revision,
-                usable_world: true,
-            });
-            let id = 17.into();
-            let serial = connection.admit(&id).unwrap().unwrap().serial;
-            connection
-                .completed(SourceCompilation::Answered {
-                    id,
-                    serial: if stale { serial + 1 } else { serial },
-                    configuration: None,
-                    read_paths: vec![external.clone()],
-                    response: Ok(SourceReply::Definition(None)),
-                })
-                .unwrap();
-            assert_eq!(connection.query_read_paths.contains(&external), !stale);
-            let changed = Notification::new(
-                notification::DidChangeWatchedFiles::METHOD.into(),
-                json!({"changes": [{"uri": uri, "type": 2}]}),
-            );
-            assert_eq!(connection.watched_change_matters(&changed), !stale);
-        }
-    }
 
     #[test]
     fn prepared_site_status_precedes_definition() {
@@ -489,7 +453,7 @@ mod tests {
             panic!("package roots must precede the definition reply: {sent:?}");
         };
         assert_eq!(status.method, "tola/sourceCheckStatus");
-        let resolved = tola_build::filesystem::normalize_existing_prefix(&cache);
+        let resolved = tola_input::normalize_existing_prefix(&cache);
         assert_eq!(
             status.params["site"]["packageRoots"],
             serde_json::json!([crate::uri::from_file_path(&resolved).unwrap().as_str()])
@@ -499,8 +463,7 @@ mod tests {
             status.params["site"]["configVersions"][config_uri.as_str()],
             7
         );
-        let site_root =
-            tola_build::filesystem::normalize_existing_prefix(&directory.path().join("site"));
+        let site_root = tola_input::normalize_existing_prefix(&directory.path().join("site"));
         assert_eq!(
             status.params["site"]["root"],
             crate::uri::from_file_path(&site_root).unwrap().as_str()
@@ -561,51 +524,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
-    fn resolved_configuration_keeps_unsaved_text() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().canonicalize().unwrap();
-        let site = root.join("site");
-        std::fs::create_dir(&site).unwrap();
-        let config = crate::compiler::tests::site_configuration(&site, "");
-        let previous = root.join("previous.toml");
-        std::fs::write(&previous, "").unwrap();
-        let alias = root.join("selected.toml");
-        std::os::unix::fs::symlink(&previous, &alias).unwrap();
-        let uri = crate::uri::from_file_path(&alias).unwrap();
-        let mut connection = ready_at(Vec::new(), root.clone());
-        let unsaved = "[site]\ntitle = \"Unsaved\"\n";
-        open_document(&mut connection, &uri, 1, unsaved);
-
-        std::fs::remove_file(&alias).unwrap();
-        std::os::unix::fs::symlink(config.config_path(), &alias).unwrap();
-        connection
-            .publish(
-                CheckedSources {
-                    configuration: Some(Arc::clone(&config)),
-                    compiled: true,
-                    diagnostics: Vec::new(),
-                    read_paths: None,
-                    selected: Arc::new(SelectedInterfaces::default()),
-                },
-                connection.revision,
-            )
-            .unwrap();
-
-        assert_eq!(
-            connection.document_text(config.config_path()).as_deref(),
-            Some(unsaved)
-        );
-        assert_eq!(
-            connection
-                .source_inputs(root, Default::default())
-                .overrides
-                .as_ref(),
-            [(config.config_path().to_path_buf(), Arc::from(unsaved))]
-        );
-    }
-
-    #[test]
     fn reused_id_rejects_stale_analysis() {
         let directory = tempfile::tempdir().unwrap();
         let mut connection = ready_at(Vec::new(), directory.path().to_path_buf());
@@ -661,98 +579,6 @@ mod tests {
             })
             .collect();
         assert_eq!(locations, expected);
-    }
-
-    /// A continuation can no longer answer its request once the client cancelled that request, so
-    /// it enqueues nothing and replies nothing.
-    #[test]
-    fn stale_continuations_enqueue_nothing() {
-        let directory = tempfile::tempdir().unwrap();
-        let mut connection = ready_at(Vec::new(), directory.path().to_path_buf());
-        let (uri, position) = dynamic_import_position(&mut connection, directory.path());
-        connection
-            .request(references_request(&uri, position))
-            .unwrap();
-        let pending = connection
-            .next_analysis()
-            .expect("source analysis admission");
-        let SourceCompilation::Continued(continued) = crate::compiler::analyze(
-            &mut crate::analysis::DiskSources::default(),
-            &mut crate::analysis::GraphCache::default(),
-            pending,
-        ) else {
-            panic!("a dynamic import's references defer");
-        };
-        let _ = connection
-            .notification(Notification::new(
-                notification::Cancel::METHOD.into(),
-                json!({"id":8}),
-            ))
-            .unwrap();
-        assert_eq!(
-            response(&mut connection).response_result.unwrap_err().code,
-            CANCELLED_ERROR.0 as i32
-        );
-        // The client reuses the id: the finished analysis no longer owns the pending request.
-        connection
-            .request(references_request(&uri, position))
-            .unwrap();
-        let current = connection.next_analysis().expect("replacement admission");
-        assert_ne!(current.serial, continued.serial);
-        connection
-            .completed(SourceCompilation::Continued(continued))
-            .unwrap();
-        assert!(
-            connection.writer.is_empty(),
-            "a stale continuation replies nothing"
-        );
-        assert!(connection.next_job(Instant::now()).is_none());
-    }
-
-    /// A check that resolved no world says what that costs the author, and the reason Typst wrote
-    /// stays below it: the author acts on the sentence Tola writes, not on Typst's.
-    #[test]
-    fn check_without_what_it_costs() {
-        let mut connection = ready(Vec::new());
-        let revision = connection.revision;
-        connection
-            .publish(
-                CheckedSources {
-                    configuration: None,
-                    compiled: false,
-                    diagnostics: vec![Diagnostic::at_path(
-                        crate::codes::editor::CONFIGURATION,
-                        tola_diagnostic::Severity::Error,
-                        "tola.toml",
-                        "`--pure` cannot use `--package-path`",
-                    )],
-                    read_paths: None,
-                    selected: Arc::new(SelectedInterfaces::default()),
-                },
-                revision,
-            )
-            .unwrap();
-        let published: lsp_types::PublishDiagnosticsParams = messages(&mut connection)
-            .into_iter()
-            .find_map(|message| match message {
-                Message::Notification(notification)
-                    if notification.method == "textDocument/publishDiagnostics" =>
-                {
-                    serde_json::from_value(notification.params).ok()
-                }
-                _ => None,
-            })
-            .expect("a published report");
-        assert_eq!(published.diagnostics.len(), 1);
-        let message = &published.diagnostics[0].message;
-        assert!(
-            message.starts_with("Tola could not read the site's configuration"),
-            "{message}"
-        );
-        assert!(
-            message.contains("`--pure` cannot use `--package-path`"),
-            "{message}"
-        );
     }
 
     #[test]

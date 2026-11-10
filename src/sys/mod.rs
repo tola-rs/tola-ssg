@@ -1,5 +1,4 @@
-//! The operating system's own behavior for the command's files, directories, and streams,
-//! behind one interface.
+//! The command's clipboard, child process, and terminal operations.
 //!
 //! Each operation below has one implementation per platform family, and a caller names the
 //! operation rather than the platform: no `cfg` reaches the code that uses it.

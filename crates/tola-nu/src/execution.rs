@@ -57,14 +57,33 @@ pub(super) fn check_errors(working: &StateWorkingSet) -> Result<()> {
     Ok(())
 }
 
-/// The Nu command line that calls a script's `main` with `args`.
-pub(super) fn main_invocation(args: &[String]) -> String {
-    let args = args
-        .iter()
-        .map(|arg| crate::escape_argument(arg))
-        .collect::<Vec<_>>()
-        .join(" ");
-    format!("main {args}")
+/// Parse one command with argv boundaries fixed before the Nu parser sees it.
+pub(super) fn parse_main(working: &mut StateWorkingSet, args: &[String]) -> Block {
+    use nu_parser::{Token, TokenContents};
+
+    let mut spelling = String::from("main");
+    let mut ranges = Vec::with_capacity(args.len() + 1);
+    ranges.push(0..spelling.len());
+    for arg in args {
+        spelling.push(' ');
+        let start = spelling.len();
+        spelling.push_str(&crate::escape_argument(arg));
+        ranges.push(start..spelling.len());
+    }
+    // The backing text supplies spans and the spelling of multiword command names.
+    // Each range is already a token, so argument bytes cannot create a pipeline or redirection.
+    let file = working.add_file("<commandline>", spelling.as_bytes());
+    let span = working.get_span_for_file(file);
+    let tokens = ranges
+        .into_iter()
+        .map(|range| {
+            Token::new(
+                TokenContents::Item,
+                Span::new(span.start + range.start, span.start + range.end),
+            )
+        })
+        .collect::<Vec<_>>();
+    nu_parser::parse_block(working, &tokens, span, false, false, None)
 }
 
 pub(super) fn evaluate(
@@ -160,18 +179,23 @@ fn evaluate_source(
         check_pipeline(evaluated.exit)?;
         return Ok(0);
     }
+    let mut working = StateWorkingSet::new(engine);
+    let mut invocation = parse_main(&mut working, args);
+    check_errors(&working)?;
+    match nu_engine::compile(&working, &invocation) {
+        Ok(ir) => invocation.ir_block = Some(ir),
+        Err(error) => working.compile_errors.push(error),
+    }
+    check_errors(&working)?;
+    engine.merge_delta(working.render())?;
     let initialized =
         nu_engine::eval_block::<WithoutDebug>(engine, stack, &block, PipelineData::empty())?;
     if initialized.early_return {
         return Ok(0);
     }
     print_output(engine, stack, initialized.body, true)?;
-    let command = main_invocation(args);
-    let mut working = StateWorkingSet::new(engine);
-    let block = parse(&mut working, "<commandline>", command.as_bytes())?;
-    engine.merge_delta(working.render())?;
     let invoked =
-        nu_engine::eval_block_with_early_return::<WithoutDebug>(engine, stack, &block, input)?;
+        nu_engine::eval_block_with_early_return::<WithoutDebug>(engine, stack, &invocation, input)?;
     let no_newline = matches!(&invoked.body, PipelineData::ByteStream(..));
     print_output(engine, stack, invoked.body, no_newline)?;
     check_pipeline(invoked.exit)?;

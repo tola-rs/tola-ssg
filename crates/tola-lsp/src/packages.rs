@@ -22,32 +22,24 @@ pub(super) struct PackageAccess<'a> {
 impl<'a> PackageAccess<'a> {
     pub(super) fn new(
         config: &ResolvedSiteConfig,
+        local_packages: Arc<tola_typst::LocalPackages>,
         resources: &tola_build::BuildResources,
         published: &'a [PublishedPackage],
     ) -> Self {
         Self {
             locations: resources.package_locations(config),
             boundary: resources.source_boundary(config),
-            published: if resources.network_access() == tola_build::NetworkAccess::Allowed {
+            published: if resources.network_access() == tola_input::NetworkAccess::Allowed {
                 published
             } else {
                 &[]
             },
-            local_packages: Arc::clone(config.local_packages()),
-            project_content: tola_build::filesystem::normalize_existing_prefix(
-                &config.build().content_dir,
-            ),
+            local_packages,
+            project_content: tola_input::normalize_existing_prefix(&config.build().content_dir),
             project_files: config
                 .project_entry_path()
                 .into_iter()
-                .chain(
-                    config
-                        .modules()
-                        .values()
-                        .flat_map(|module| module.overrides.values())
-                        .map(|path| config.get_root().join(path)),
-                )
-                .map(|path| tola_build::filesystem::normalize_existing_prefix(&path))
+                .map(|path| tola_input::normalize_existing_prefix(&path))
                 .collect(),
         }
     }
@@ -58,12 +50,17 @@ impl<'a> PackageAccess<'a> {
         resources: &tola_build::BuildResources,
         published: &'a [PublishedPackage],
     ) -> anyhow::Result<Self> {
-        let prepared = tola_build::modules::prepare(
+        let prepared = tola_build::modules::prepare_site(
             config,
-            tola_build::inputs::InputMode::new(resources.input_scope(), true),
+            tola_input::InputMode::new(resources.input_scope(), true),
             &Default::default(),
         )?;
-        Ok(Self::new(&prepared, resources, published))
+        Ok(Self::new(
+            &prepared,
+            Arc::clone(prepared.local_packages()),
+            resources,
+            published,
+        ))
     }
 }
 

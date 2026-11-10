@@ -60,5 +60,5 @@ pub(super) fn normalized_event_paths(event: &notify::Event) -> impl Iterator<Ite
     event
         .paths
         .iter()
-        .map(|path| tola_build::filesystem::lexical_path_identity(path))
+        .map(|path| tola_input::lexical_path_identity(path))
 }

@@ -4,8 +4,9 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 use crate::config::ResolvedSiteConfig;
-use crate::filesystem::{normalize_path, root_relative};
+use crate::filesystem::root_relative;
 use anyhow::Result;
+use tola_input::normalize_path;
 
 use super::InspectedSource;
 
@@ -13,7 +14,8 @@ pub(super) fn inspect(
     files: &[PathBuf],
     units: &[crate::content::ContentUnit],
     config: &ResolvedSiteConfig,
-    host: &crate::compiler::TypstHost,
+    prepared: &tola_module::prepared::PreparedModules,
+    host: &crate::compiler::SiteHost,
     resources: &crate::resources::BuildResources,
     cancellation: &crate::cancellation::BuildCancellation,
 ) -> Result<(Vec<InspectedSource>, Vec<tola_diagnostic::Diagnostic>)> {
@@ -29,18 +31,15 @@ pub(super) fn inspect(
     let mut warnings = tola_typst::Diagnostics::new();
     let bindings = crate::package::SiteBindings::from_config(
         config,
-        crate::asset::AssetUrls::for_check(config, cancellation)?,
+        crate::asset::AssetUrls::for_check_with(
+            config,
+            crate::modules::prepared::AppliedAssets {
+                modules: &prepared.assets,
+            },
+            cancellation,
+        )?,
     )
-    .prepare_modules(config, &host, cancellation)
-    .map_err(|error| {
-        if let Some(failure) = error.downcast_ref::<crate::modules::options::OptionsFailure>()
-            && let Some(diagnostics) = &failure.diagnostics
-        {
-            warnings.extend_distinct(diagnostics);
-        }
-        with_prior_diagnostics(error, config, &mut warnings)
-    })?;
-    warnings.extend_distinct(bindings.module_diagnostics());
+    .prepare_modules(prepared)?;
     let scan = crate::compiler::analysis::analyze(
         config,
         &host,

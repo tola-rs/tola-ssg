@@ -46,8 +46,14 @@ impl BuildCancellation {
         self.cancelled.load(Ordering::Relaxed)
     }
 
+    /// The flag `tola_input` readers poll, so one read stops with this attempt's cancellation.
     pub(crate) fn flag(&self) -> &AtomicBool {
         &self.cancelled
+    }
+
+    /// Share this attempt's interrupt flag with an embedded script runtime.
+    pub fn signal_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.cancelled)
     }
 
     pub fn ensure_active(&self) -> Result<(), BuildCancelled> {

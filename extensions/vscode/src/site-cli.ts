@@ -83,7 +83,7 @@ export class SiteCli {
   }
 
   private async outputDirectory(selection: Selection): Promise<string> {
-    const args = ['inspect', 'config', ...selection.args.slice(1)]
+    const args = [...siteArguments(selection, 'inspect'), 'config', '--json']
     let printed = ''
     const child = this.start(selection.command, args, selection.folder.uri.fsPath, (chunk) => {
       printed += chunk.toString()
@@ -156,7 +156,7 @@ export class SiteCli {
     ) return
     await this.run(
       command,
-      ['init', directory.fsPath, '--editor', 'vscode'],
+      ['init', directory.fsPath],
       directory.fsPath,
       'Create Site',
     )

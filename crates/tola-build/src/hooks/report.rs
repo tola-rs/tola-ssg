@@ -304,6 +304,9 @@ pub(super) fn hook_command_error(
     identity: &str,
     error: anyhow::Error,
 ) -> anyhow::Error {
+    if is_cancelled(&error) {
+        return error;
+    }
     let failure = error
         .chain()
         .find_map(|cause| cause.downcast_ref::<CommandFailure>());
@@ -379,16 +382,16 @@ fn failure_notes(failure: Option<&CommandFailure>) -> Vec<String> {
 }
 
 fn failure_help(stage: HookStage, failure: Option<&CommandFailure>) -> String {
-    let key = format!("build.hooks.{}", stage.as_str());
+    let key = format!("hooks.{}", stage.as_str());
     match failure {
         Some(CommandFailure::NotStarted {
             program,
             reason: StartFailure::NotFound,
-        }) => format!("Install `{program}`, or correct `command` in `{key}`"),
+        }) => format!("Install `{program}`, or correct `argv` in `{key}`"),
         Some(CommandFailure::NotStarted {
             program,
             reason: StartFailure::NotExecutable,
-        }) => format!("Make `{program}` executable, or correct `command` in `{key}`"),
+        }) => format!("Make `{program}` executable, or correct `argv` in `{key}`"),
         Some(CommandFailure::Interrupted { .. }) => "Run the command outside Tola".to_owned(),
         _ => format!("Fix the command, or remove the hook from `{key}`"),
     }
@@ -452,7 +455,7 @@ mod tests {
                     root: site_root,
                     config: site_root,
                     content: site_root,
-                    scope: crate::InputScope::Online,
+                    scope: tola_input::InputScope::Online,
                 },
                 name: "styles",
                 origin: None,
@@ -549,7 +552,7 @@ mod tests {
                         root: directory.path(),
                         config: directory.path(),
                         content: directory.path(),
-                        scope: crate::InputScope::Online,
+                        scope: tola_input::InputScope::Online,
                     },
                     name: "assets",
                     origin: None,

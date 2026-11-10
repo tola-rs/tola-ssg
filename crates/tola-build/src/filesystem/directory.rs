@@ -31,7 +31,7 @@ pub(crate) fn read_sorted_entries(
 ) -> Result<Vec<fs::DirEntry>> {
     let failed = |error: std::io::Error| DirectoryError::Read {
         label: label.to_owned(),
-        path: super::display_path(directory, display_root),
+        path: tola_diagnostic::display_path(directory, display_root),
         reason: super::path_failure_reason(&error),
     };
     cancellation.ensure_active()?;
@@ -98,7 +98,7 @@ fn set_tree_readonly(
     }
     let set_permissions = || {
         let mut permissions = metadata.permissions();
-        super::sys::set_write_permission(&mut permissions, !readonly, metadata.is_dir());
+        tola_fs::set_write_permission(&mut permissions, !readonly, metadata.is_dir());
         fs::set_permissions(path, permissions)
     };
     if !readonly {

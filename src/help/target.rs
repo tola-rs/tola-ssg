@@ -229,9 +229,9 @@ mod tests {
             (vec!["config"], PageId::Index(HelpCategory::Config)),
             (vec!["package"], PageId::Index(HelpCategory::Packages)),
             (
-                vec!["[build.hooks]"],
+                vec!["[hooks]"],
                 PageId::Config {
-                    section: "build.hooks".into(),
+                    section: "hooks".into(),
                 },
             ),
             (
@@ -261,7 +261,7 @@ mod tests {
             PageId::Index(HelpCategory::Config),
             PageId::Index(HelpCategory::Packages),
             PageId::Config {
-                section: "build.hooks".into(),
+                section: "hooks".into(),
             },
             PageId::Package {
                 name: "document".into(),

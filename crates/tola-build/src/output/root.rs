@@ -7,10 +7,8 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 use crate::cancellation::{BuildCancellation, BuildCancelled};
-use crate::filesystem::{
-    SwapError, SwapMember, directory_is_empty, display_path, encode_path_identity,
-    path_failure_reason,
-};
+use crate::filesystem::{SwapError, SwapMember, directory_is_empty, path_failure_reason};
+use tola_diagnostic::display_path;
 
 const PUBLICATION_MARKER_HEADER: &str = "tola-publication\n";
 const PUBLICATION_MARKER_FILE: &str = "publication";
@@ -190,7 +188,7 @@ impl OwnedOutputRoot {
         let marker = publication_marker_path(tree);
         self.boundary
             .validate_path_chain(marker.parent().unwrap())?;
-        let mut stored = crate::filesystem::open_regular_file(&marker, false)
+        let mut stored = tola_fs::open_regular_file(&marker, false)
             .map_err(|source| io_error("could not read Tola's output ownership record", source))?;
         let mut contents = Vec::new();
         stored
@@ -237,7 +235,7 @@ impl OwnedOutputRoot {
             .expect("the output boundary keeps the output below the site root");
         format!(
             "{PUBLICATION_MARKER_HEADER}output={}\n",
-            encode_path_identity(output)
+            tola_fs::encode_path_identity(output)
         )
         .into_bytes()
     }
@@ -424,7 +422,7 @@ mod tests {
             let mut config = output_test_config(dir.path());
             config.build.publish_dir = config.get_root().join(relative);
             if let Some(author_file) = author_file {
-                let internal = config.get_root().join(crate::filesystem::INTERNAL_DIR);
+                let internal = config.get_root().join(tola_input::INTERNAL_DIR);
                 fs::create_dir_all(&internal).unwrap();
                 fs::write(&config.build.publish_dir, author_file).unwrap();
             }
@@ -459,7 +457,7 @@ mod tests {
     fn output_rejects_case_aliased_internal() {
         let dir = TempDir::new().unwrap();
         let mut config = output_test_config(dir.path());
-        fs::create_dir(config.get_root().join(crate::filesystem::INTERNAL_DIR)).unwrap();
+        fs::create_dir(config.get_root().join(tola_input::INTERNAL_DIR)).unwrap();
         config.build.publish_dir = config.get_root().join(".TOLA/output");
 
         let error = resolve_configured_output(&config).unwrap_err();

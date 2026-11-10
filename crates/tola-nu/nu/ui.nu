@@ -1,9 +1,9 @@
 # Highlight source text for a preview. `language` is a fence tag or file extension.
 export def highlight [
     language: string
-    --theme: string # dark, light, or plain; defaults to $env.TOLA_THEME.
+    --theme: string # dark, light, or plain; defaults to dark.
 ]: string -> string {
-    let theme = if $theme == null { $env.TOLA_THEME? | default 'dark' } else { $theme }
+    let theme = if $theme == null { 'dark' } else { $theme }
     $in | __tola_highlight $language --theme $theme
 }
 

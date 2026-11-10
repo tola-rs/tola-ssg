@@ -1,15 +1,19 @@
 //! Configured assets: resolving declared sources, observing and rendering their bytes.
 
+#![expect(
+    clippy::mutable_key_type,
+    reason = "FileSelection compares immutable patterns, never the matcher's internal cache"
+)]
+
 use anyhow::Result;
 
 use crate::config::ResolvedSiteConfig;
-use crate::filesystem::{
-    FilesystemSourceFile, FilesystemSourceIdentity, FilesystemSourceKind,
-    FilesystemSourceObservation, FilesystemWatchEvidence, absolute_path,
-};
+use crate::filesystem::{FilesystemSourceKind, FilesystemSourceObservation, absolute_path};
+use crate::observation::{InputKind, InputObservation, InputPathScope};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use tola_input::{FileSelection, FilesystemSourceIdentity};
 
 use rayon::prelude::*;
 use tola_minify::MinifiedLanguages;
@@ -37,15 +41,15 @@ enum AssetSourceError {
         reason: &'static str,
     },
     /// A declared source has the wrong kind for its declaration.
-    #[error("`{key}` source `{path}` is not a {expected}; fix the declaration in `tola.toml`")]
+    #[error("`{key}` source `{path}` is not a {expected}; fix the declaration")]
     SourceKind {
         key: &'static str,
         path: String,
         expected: &'static str,
     },
-    /// A module asset replacement points outside the site root.
-    #[error("module asset replacement `{path}` escapes the site root")]
-    ModuleReplacementEscapes { path: String },
+    /// A module asset source points outside its input root.
+    #[error("asset source `{path}` escapes the {owner} root")]
+    SourceEscapes { path: String, owner: &'static str },
     /// A declared source overlaps a directory Tola owns.
     #[error("asset source `{path}` overlaps the {owner}; choose a source outside it")]
     OverlapsProtected { path: String, owner: &'static str },
@@ -71,12 +75,6 @@ enum AssetSourceError {
         right: String,
         right_key: &'static str,
     },
-    /// One asset-url names a file declaration that published several files.
-    #[error(
-        "asset `{path}` declared in `assets.files` did not publish exactly one file, so its \
-         URL cannot be resolved"
-    )]
-    UnresolvableFileUrl { path: String },
     /// Two published paths overlap.
     #[error(
         "asset `{left}` at `{left_at}` conflicts with asset `{right}` at `{right_at}`; rename one \
@@ -147,7 +145,7 @@ impl ConfiguredAssetGeneration {
                 .insert(&asset.declaration.source_id, &asset.source_identity);
             reusable.observations.insert(
                 AssetObservationKey::for_source(
-                    asset.declaration.source_id.kind,
+                    &asset.declaration.source_id,
                     &asset.source_identity,
                 ),
                 &asset.observation,
@@ -157,16 +155,25 @@ impl ConfiguredAssetGeneration {
     }
 
     /// Seed the next render with published bytes so a source is minified once.
-    fn seed_minification(&self, minification: &mut AssetMinification) {
+    fn seed_minification(&self, config: &ResolvedSiteConfig, minification: &mut AssetMinification) {
         for asset in &self.assets {
-            for (source, (_, bytes)) in asset.published.files().iter().zip(asset.outputs.iter()) {
+            for (source, (_, bytes)) in asset.observation.files().iter().zip(asset.outputs.iter()) {
                 let source_path = asset
                     .declaration
                     .source_id
                     .logical_source
                     .join(source.relative_path());
+                if asset.minify_warnings.iter().any(|warning| {
+                    warning.path() == tola_diagnostic::display_path(&source_path, config.get_root())
+                }) {
+                    continue;
+                }
                 minification.seed(
-                    AssetMinifyKey::for_source(&source_path, source.digest(), self.minify),
+                    AssetMinifyKey::for_source(
+                        &source_path,
+                        source.digest(),
+                        asset.declaration.minified_languages(self.minify),
+                    ),
                     Arc::clone(bytes),
                 );
             }
@@ -179,8 +186,6 @@ struct RenderedAsset {
     declaration: AssetDeclaration,
     source_identity: FilesystemSourceIdentity,
     observation: Arc<FilesystemSourceObservation>,
-    /// The published subset; the complete observation still drives watches and freshness.
-    published: Arc<FilesystemSourceObservation>,
     /// One rendered output per published file, in observation order.
     outputs: Arc<[(AssetOutput, Arc<[u8]>)]>,
     /// What this source's minification could not do, kept with the bytes it published.
@@ -199,13 +204,39 @@ struct ReusableAssets<'a> {
 struct ConfiguredSourceId {
     kind: FilesystemSourceKind,
     logical_source: PathBuf,
+    owner: Option<String>,
+    within: Option<PathBuf>,
+    exact_files: DeclaredFileSources,
+    selection: Option<(PathBuf, Arc<FileSelection>)>,
+}
+
+impl ConfiguredSourceId {
+    fn selects_tree_member(
+        &self,
+        source: &FilesystemSourceIdentity,
+        relative: &Path,
+        directory: bool,
+    ) -> bool {
+        let (source_prefix, selection) = self.selection.as_ref().expect("trees have a selection");
+        if relative.as_os_str().is_empty() {
+            return selection.could_match_below(source_prefix);
+        }
+        let path = source_prefix.join(relative);
+        if directory {
+            selection.could_match_below(&path)
+        } else {
+            selection.matches(&path) && self.exact_files.publishes(source, relative)
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct AssetDeclaration {
     source_id: ConfiguredSourceId,
     output: ConfiguredAssetOutput,
-    selection: Option<crate::config::section::assets::AssetSelection>,
+    mount: Option<tola_address::OutputPath>,
+    module_input: Option<super::urls::ModuleAssetInput>,
+    minify: bool,
 }
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -240,51 +271,342 @@ impl ConfiguredAssetOutput {
     }
 }
 
-fn asset_declarations(config: &ResolvedSiteConfig) -> Vec<AssetDeclaration> {
-    let mut declarations = config
-        .assets
-        .trees
-        .iter()
-        .map(|declaration| AssetDeclaration {
-            source_id: ConfiguredSourceId {
-                kind: FilesystemSourceKind::Tree,
-                logical_source: absolute_path(declaration.source()),
-            },
-            output: ConfiguredAssetOutput::TreePrefix(declaration.url_prefix().clone()),
-            selection: config.module_inputs.asset_selection(declaration).cloned(),
-        })
-        .chain(
-            config
-                .assets
-                .files
-                .iter()
-                .map(|declaration| AssetDeclaration {
-                    source_id: ConfiguredSourceId {
-                        kind: FilesystemSourceKind::File,
-                        logical_source: absolute_path(declaration.source()),
-                    },
-                    output: ConfiguredAssetOutput::File {
-                        output: declaration.url().output_path().clone(),
-                        declared_url: declaration.url().as_str().to_owned(),
-                    },
-                    selection: None,
-                }),
+impl AssetDeclaration {
+    fn minified_languages(&self, languages: MinifiedLanguages) -> MinifiedLanguages {
+        if self.minify {
+            languages
+        } else {
+            MinifiedLanguages::new(false, false)
+        }
+    }
+
+    fn portable_key(&self) -> Vec<String> {
+        let mut key = self
+            .mount
+            .as_ref()
+            .map_or_else(Vec::new, |path| path.portable_key());
+        key.extend(self.output.portable_key());
+        key
+    }
+
+    fn display_coordinate(&self) -> String {
+        match &self.mount {
+            Some(mount) => format!("/{mount}{}", self.output.display_coordinate()),
+            None => self.output.display_coordinate(),
+        }
+    }
+
+    fn output(
+        &self,
+        relative: &Path,
+        logical_source: &Path,
+        display_root: &Path,
+        identity: Option<Arc<str>>,
+    ) -> Result<AssetOutput> {
+        use super::urls::{ModuleAsset, ModuleAssetInput};
+        let mut mapped = match &self.output {
+            ConfiguredAssetOutput::TreePrefix(url_prefix) => {
+                super::output::output_for_configured_tree_member(
+                    logical_source,
+                    relative,
+                    url_prefix,
+                    display_root,
+                )?
+            }
+            ConfiguredAssetOutput::File { output, .. } => {
+                super::output::output_for_configured_file(logical_source, output)
+            }
+        };
+        if let (Some(alias), Some(mount), Some(input)) =
+            (&self.source_id.owner, &self.mount, &self.module_input)
+        {
+            let input = match input {
+                ModuleAssetInput::Module(path) if !relative.as_os_str().is_empty() => {
+                    ModuleAssetInput::Module(path.join(relative))
+                }
+                input => input.clone(),
+            };
+            mapped.module = Some(ModuleAsset {
+                alias: alias.clone(),
+                name: mapped.output.as_str().to_owned(),
+                input,
+            });
+            mapped.output = mount.join(&mapped.output);
+        }
+        Ok(mapped.with_identity(identity))
+    }
+
+    fn published(
+        &self,
+        config: &ResolvedSiteConfig,
+        output: &AssetOutput,
+        relative: &Path,
+    ) -> (
+        String,
+        String,
+        super::AssetOrigin,
+        Option<super::urls::ModuleAsset>,
+    ) {
+        let url = tola_address::asset_url_from_output(&output.output);
+        let (declared, origin) = match &self.output {
+            ConfiguredAssetOutput::TreePrefix(_) => (
+                url.as_str().to_owned(),
+                super::AssetOrigin::TreeMember {
+                    source: self.source_id.logical_source.clone(),
+                    member: relative.to_path_buf(),
+                },
+            ),
+            ConfiguredAssetOutput::File { declared_url, .. } => (
+                if self.mount.is_some() {
+                    url.as_str().to_owned()
+                } else {
+                    declared_url.clone()
+                },
+                super::AssetOrigin::File {
+                    source: self.source_id.logical_source.clone(),
+                },
+            ),
+        };
+        (
+            declared,
+            super::urls::browser_url(config.url_mount(), &url, output.identity()),
+            origin,
+            output.module.clone(),
         )
-        .collect::<Vec<_>>();
+    }
+}
+
+fn asset_declarations(
+    config: &ResolvedSiteConfig,
+    assets: crate::modules::prepared::AppliedAssets<'_>,
+) -> Result<Vec<AssetDeclaration>> {
+    let mut declarations = Vec::new();
+    append_declarations(
+        &mut declarations,
+        config.get_root(),
+        config.get_root(),
+        &config.assets.trees,
+        &config.assets.files,
+        &config.options,
+        None,
+    )?;
+    for module in assets.modules {
+        append_declarations(
+            &mut declarations,
+            &module.root,
+            config.get_root(),
+            &module.declarations.trees,
+            &module.declarations.files,
+            &module.options,
+            Some(module),
+        )?;
+    }
     declarations.sort_unstable();
-    declarations
+    Ok(declarations)
+}
+
+fn append_declarations(
+    declarations: &mut Vec<AssetDeclaration>,
+    root: &Path,
+    site_root: &Path,
+    trees: &[tola_module::assets::AssetTreeDeclaration],
+    files: &[tola_module::assets::AssetFileDeclaration],
+    options: &toml::Table,
+    module: Option<&tola_module::prepared::AssetContribution>,
+) -> Result<()> {
+    use super::urls::ModuleAssetInput;
+    use tola_module::assets::is_enabled;
+
+    let owner = module.map(|module| module.alias.clone());
+    let label = owner
+        .as_ref()
+        .map_or_else(|| "site".to_owned(), |alias| format!("module `{alias}`"));
+    let mount = owner
+        .as_ref()
+        .map(|alias| tola_address::OutputPath::parse(&format!("_tola-modules/{alias}")))
+        .transpose()?;
+    let within = module.map(|_| root.to_path_buf());
+    let mut exact_files = DeclaredFileSources::default();
+    for file in files {
+        exact_files.insert(root.join(file.source()));
+    }
+
+    let trees = trees
+        .iter()
+        .map(|tree| {
+            let source_prefix = tola_input::lexical_path_identity(
+                tree.source().strip_prefix(root).unwrap_or(tree.source()),
+            );
+            let active = is_enabled(
+                tree.enable,
+                tree.enabled_by.as_deref(),
+                options,
+                &label,
+                &source_prefix,
+            )?;
+            Ok((tree, source_prefix, active))
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    let file_declaration =
+        |source: PathBuf, output, declared_url, minify, replacement: Option<&Path>| {
+            let module_input = module.map(|_| match replacement {
+                Some(path) => ModuleAssetInput::Project(path.to_path_buf()),
+                None => ModuleAssetInput::Module(source.clone()),
+            });
+            let (logical_source, within) = match replacement {
+                Some(path) => (site_root.join(path), Some(site_root.to_path_buf())),
+                None => (root.join(&source), within.clone()),
+            };
+            AssetDeclaration {
+                source_id: ConfiguredSourceId {
+                    kind: FilesystemSourceKind::File,
+                    logical_source: absolute_path(&logical_source),
+                    owner: owner.clone(),
+                    within,
+                    exact_files: DeclaredFileSources::default(),
+                    selection: None,
+                },
+                output: ConfiguredAssetOutput::File {
+                    output,
+                    declared_url,
+                },
+                mount: mount.clone(),
+                module_input,
+                minify,
+            }
+        };
+
+    let mut exact_names = BTreeSet::new();
+    let mut active_exact_names = BTreeSet::new();
+    for file in files {
+        let output = file.url().output_path();
+        exact_names.insert(output.as_str());
+        if is_enabled(
+            file.enable,
+            file.enabled_by.as_deref(),
+            options,
+            &label,
+            file.source().strip_prefix(root).unwrap_or(file.source()),
+        )? {
+            active_exact_names.insert(output.as_str());
+            let replacement = module.and_then(|module| module.replace.get(output.as_str()));
+            declarations.push(file_declaration(
+                file.source().to_path_buf(),
+                output.clone(),
+                file.url().as_str().to_owned(),
+                file.minify,
+                replacement.map(PathBuf::as_path),
+            ));
+        }
+    }
+
+    let mut replaced_members = vec![Vec::new(); trees.len()];
+    if let Some(module) = module {
+        for (name, replacement) in &module.replace {
+            if active_exact_names.contains(name.as_str()) {
+                continue;
+            }
+            let mut matched = exact_names.contains(name.as_str());
+            for (index, (tree, source_prefix, active)) in trees.iter().enumerate() {
+                let Some(member) = tree.url_prefix().member_for(name) else {
+                    continue;
+                };
+                if member.is_empty() {
+                    continue;
+                }
+                // A tree member must have a publishable spelling and retain ownership.
+                let relative = Path::new(member);
+                if !tree.selection().matches(&source_prefix.join(relative))
+                    || super::output::member_path_segments(relative).is_err()
+                {
+                    continue;
+                }
+                if !active {
+                    matched = true;
+                    continue;
+                }
+                let source = tree.source().join(relative);
+                let logical = root.join(&source);
+                let identity = FilesystemSourceIdentity::from_path(&logical);
+                if exact_files.owns(identity.logical_path(), identity.canonical_path())
+                    || !is_tree_file(&root.join(tree.source()), relative)
+                {
+                    continue;
+                }
+                replaced_members[index].push(logical);
+                matched = true;
+                declarations.push(file_declaration(
+                    source,
+                    tola_address::OutputPath::parse(name)?,
+                    format!("/{name}"),
+                    tree.minify,
+                    Some(replacement),
+                ));
+            }
+            anyhow::ensure!(matched, "{label} has no asset `{name}` to replace");
+        }
+    }
+    for ((tree, source_prefix, active), replaced) in trees.into_iter().zip(replaced_members) {
+        if active {
+            let mut exact_files = exact_files.clone();
+            for source in replaced {
+                exact_files.insert(source);
+            }
+            declarations.push(AssetDeclaration {
+                source_id: ConfiguredSourceId {
+                    kind: FilesystemSourceKind::Tree,
+                    logical_source: absolute_path(&root.join(tree.source())),
+                    owner: owner.clone(),
+                    within: within.clone(),
+                    exact_files,
+                    selection: Some((source_prefix, Arc::new(tree.selection().clone()))),
+                },
+                output: ConfiguredAssetOutput::TreePrefix(tree.url_prefix().clone()),
+                mount: mount.clone(),
+                module_input: module.map(|_| ModuleAssetInput::Module(tree.source().to_path_buf())),
+                minify: tree.minify,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// The tree walker refuses symlinked members, including intermediate directories.
+fn is_tree_file(root: &Path, member: &Path) -> bool {
+    let mut path = root.to_path_buf();
+    let mut components = member.components().peekable();
+    while let Some(component) = components.next() {
+        path.push(component);
+        let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+            return false;
+        };
+        if components.peek().is_none() {
+            return metadata.is_file();
+        }
+        if !metadata.is_dir() {
+            return false;
+        }
+    }
+    false
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct AssetObservationKey {
     kind: FilesystemSourceKind,
+    owner: Option<String>,
+    exact_files: DeclaredFileSources,
+    selection: Option<(PathBuf, Arc<FileSelection>)>,
     canonical: PathBuf,
 }
 
 impl AssetObservationKey {
-    fn for_source(kind: FilesystemSourceKind, source: &FilesystemSourceIdentity) -> Self {
+    fn for_source(id: &ConfiguredSourceId, source: &FilesystemSourceIdentity) -> Self {
         Self {
-            kind,
+            kind: id.kind,
+            owner: id.owner.clone(),
+            exact_files: id.exact_files.clone(),
+            selection: id.selection.clone(),
             canonical: source
                 .canonical_path()
                 .expect("resolved configured sources have canonical targets")
@@ -301,7 +623,7 @@ struct ResolvedAssetSource {
 
 impl ResolvedAssetSource {
     fn observation_key(&self) -> AssetObservationKey {
-        AssetObservationKey::for_source(self.id.kind, &self.source_identity)
+        AssetObservationKey::for_source(&self.id, &self.source_identity)
     }
 }
 
@@ -315,74 +637,70 @@ impl ConfiguredAssetInventory {
 
     /// URL values come from this generation's declarations and rendered bytes.
     pub(crate) fn asset_urls(&self, config: &ResolvedSiteConfig) -> Result<super::AssetUrls> {
-        let mount = config.url_mount();
-        let mut pairs = Vec::with_capacity(self.generation.assets.len());
-        for asset in self.generation.assets.iter() {
-            let ConfiguredAssetOutput::File { declared_url, .. } = &asset.declaration.output else {
-                let members = asset.published.files().iter().zip(asset.outputs.iter());
-                for (source, (entry, _)) in members {
-                    let url = tola_address::asset_url_from_output(&entry.output);
-                    pairs.push((
-                        url.as_str().to_owned(),
-                        super::urls::browser_url(mount, &url, entry.identity()),
-                        super::AssetOrigin::TreeMember {
-                            source: asset.declaration.source_id.logical_source.clone(),
-                            member: source.relative_path().to_path_buf(),
-                        },
-                    ));
-                }
-                continue;
-            };
-            let [(entry, _)] = asset.outputs.as_ref() else {
-                return Err(AssetSourceError::UnresolvableFileUrl {
-                    path: crate::filesystem::display_path(
-                        asset.declaration.source_id.logical_source.as_path(),
-                        config.get_root(),
-                    ),
-                }
-                .into());
-            };
-            pairs.push((
-                declared_url.clone(),
-                super::urls::browser_url(
-                    mount,
-                    &tola_address::asset_url_from_output(&entry.output),
-                    entry.identity(),
-                ),
-                super::AssetOrigin::File {
-                    source: asset.declaration.source_id.logical_source.clone(),
-                },
-            ));
-        }
-        Ok(super::AssetUrls::from_published(pairs))
+        let published = self.generation.assets.iter().flat_map(|asset| {
+            asset
+                .observation
+                .files()
+                .iter()
+                .zip(asset.outputs.iter())
+                .map(|(source, (output, _))| {
+                    asset
+                        .declaration
+                        .published(config, output, source.relative_path())
+                })
+        });
+        Ok(super::AssetUrls::from_published(published))
     }
 
     /// The same inventory, when every source it retains still passes a fresh render's boundary.
     fn revalidated(&self, config: &ResolvedSiteConfig) -> Result<Self> {
         for asset in self.generation.assets.iter() {
-            validate_asset_source_boundary(config, &asset.source_identity)?;
+            validate_asset_source_boundary(
+                config,
+                &asset.declaration.source_id,
+                &asset.source_identity,
+            )?;
         }
         Ok(self.clone())
     }
 
-    pub(crate) fn watch_evidence(&self) -> FilesystemWatchEvidence {
-        FilesystemWatchEvidence::from_sources(self.generation.assets.iter().map(|asset| {
-            (
-                asset.declaration.source_id.kind,
-                asset.source_identity.clone(),
-            )
-        }))
+    pub(crate) fn record_watch_inputs(&self, observation: &mut InputObservation) {
+        for asset in &self.generation.assets {
+            let source = &asset.source_identity;
+            if let Some((source_prefix, selection)) = &asset.declaration.source_id.selection {
+                observation.selected_tree_paths(
+                    InputKind::ConfiguredAssets,
+                    true,
+                    source.logical_path(),
+                    source.physical_path(),
+                    source_prefix,
+                    selection,
+                );
+            } else {
+                observation.path_pair(
+                    InputKind::ConfiguredAssets,
+                    InputPathScope::Exact,
+                    true,
+                    source.logical_path(),
+                    source.physical_path(),
+                );
+            }
+        }
     }
 
     /// Recheck the exact raw input evidence without rendering asset bytes again.
     pub(crate) fn is_fresh_for(
         &self,
         config: &ResolvedSiteConfig,
+        assets: crate::modules::prepared::AppliedAssets<'_>,
         cancellation: &crate::cancellation::BuildCancellation,
     ) -> Result<bool> {
         cancellation.ensure_active()?;
         let observed = (|| -> Result<bool> {
-            if !self.generation.serves(config, &asset_declarations(config)) {
+            if !self
+                .generation
+                .serves(config, &asset_declarations(config, assets)?)
+            {
                 return Ok(false);
             }
             let mut verified = BTreeSet::new();
@@ -428,134 +746,93 @@ fn declaration_key(kind: FilesystemSourceKind) -> &'static str {
 /// Reader noun for one member of a configured asset tree.
 const TREE_MEMBER_LABEL: &str = "`assets.trees` member";
 
-/// The sources exact `assets.files` declarations publish; a tree skips their members.
-#[derive(Debug, Default)]
+/// Source identities taken over by exact declarations in the same owner.
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord)]
 struct DeclaredFileSources {
-    logical: std::collections::BTreeSet<PathBuf>,
-    canonical: std::collections::BTreeSet<PathBuf>,
+    logical: BTreeSet<PathBuf>,
+    canonical: BTreeSet<PathBuf>,
 }
 
 impl DeclaredFileSources {
-    fn for_config(config: &ResolvedSiteConfig) -> Self {
-        let mut sources = Self::default();
-        let project_count = config
-            .module_inputs
-            .project_asset_files_len(config.assets.files.len());
-        for declaration in config.assets.files.iter().take(project_count) {
-            let logical = crate::filesystem::lexical_path_identity(declaration.source());
-            if let Some(canonical) = FilesystemSourceIdentity::from_path(&logical).canonical_path()
-            {
-                sources.canonical.insert(canonical.to_path_buf());
-            }
-            sources.logical.insert(logical);
+    fn insert(&mut self, source: PathBuf) {
+        let logical = tola_input::lexical_path_identity(&source);
+        if let Some(canonical) = FilesystemSourceIdentity::from_path(&logical).canonical_path() {
+            self.canonical.insert(canonical.to_path_buf());
         }
-        sources
+        self.logical.insert(logical);
     }
 
-    /// Whether one exact declaration publishes the source at these identities.
     fn owns(&self, logical: &Path, canonical: Option<&Path>) -> bool {
         self.logical.contains(logical)
             || canonical.is_some_and(|canonical| self.canonical.contains(canonical))
     }
-}
 
-/// Which members one tree source publishes, and which of its directories to skip.
-struct TreePublication<'a> {
-    declared: DeclaredFileSources,
-    logical_root: &'a Path,
-    canonical_root: Option<&'a Path>,
-    /// Every alias' selection, or `None` when one alias publishes its whole source.
-    selections: Option<Vec<&'a crate::config::section::assets::AssetSelection>>,
-}
-
-impl TreePublication<'_> {
-    fn publishes(&self, relative: &Path) -> bool {
-        let logical = self.logical_root.join(relative);
-        let canonical = self.canonical_root.map(|root| root.join(relative));
-        !self.declared.owns(&logical, canonical.as_deref())
-            && self.selections.as_ref().is_none_or(|selections| {
-                selections
-                    .iter()
-                    .any(|selection| selection.publishes(relative))
-            })
-    }
-
-    fn may_descend(&self, relative: &Path) -> bool {
-        self.selections.as_ref().is_none_or(|selections| {
-            selections
-                .iter()
-                .any(|selection| selection.may_descend(relative))
-        })
-    }
-
-    fn has_exact_owners(&self) -> bool {
-        !self.declared.logical.is_empty()
+    fn publishes(&self, root: &FilesystemSourceIdentity, relative: &Path) -> bool {
+        let logical = root.logical_path().join(relative);
+        let canonical = root.canonical_path().map(|root| root.join(relative));
+        !self.owns(&logical, canonical.as_deref())
     }
 }
 
-/// The members one tree declaration publishes, enumerated without reading them.
-pub(super) fn enumerate_tree_members(
+/// Check declaration addresses without reading or minifying bytes.
+pub(super) fn check_asset_urls(
     config: &ResolvedSiteConfig,
-    declaration: &crate::config::section::AssetTreeDeclaration,
+    assets: crate::modules::prepared::AppliedAssets<'_>,
     cancellation: &crate::cancellation::BuildCancellation,
-) -> Result<Vec<PathBuf>> {
-    let id = ConfiguredSourceId {
-        kind: FilesystemSourceKind::Tree,
-        logical_source: absolute_path(declaration.source()),
-    };
-    let resolved = resolve_asset_source(config, &id, cancellation)?;
-    let display_root = config.get_root();
-    let selection = config.module_inputs.asset_selection(declaration);
-    let publication = TreePublication {
-        declared: DeclaredFileSources::for_config(config),
-        logical_root: resolved.source_identity.logical_path(),
-        canonical_root: resolved.source_identity.canonical_path(),
-        selections: selection.map(|selection| vec![selection]),
-    };
-    let mut members = Vec::new();
-    if publication.selections.is_some() {
-        crate::filesystem::walk_tree_members_selected(
-            &resolved.source_identity,
-            cancellation,
-            display_root,
-            TREE_MEMBER_LABEL,
-            &|relative, directory| {
-                if directory {
-                    publication.may_descend(relative)
-                } else {
-                    publication.publishes(relative)
-                }
-            },
-            &|relative, logical_source| {
-                validate_tree_member_output_path(relative, logical_source, display_root)
-            },
-            &mut |_, relative| {
-                members.push(relative.to_path_buf());
-                Ok(())
-            },
-        )?;
-    } else {
-        crate::filesystem::walk_tree_members(
-            &resolved.source_identity,
-            cancellation,
-            display_root,
-            TREE_MEMBER_LABEL,
-            &|relative, logical_source| {
-                if publication.publishes(relative) {
-                    validate_tree_member_output_path(relative, logical_source, display_root)
-                } else {
-                    Ok(())
-                }
-            },
-            &mut |_, relative| {
-                if publication.publishes(relative) {
-                    members.push(relative.to_path_buf());
-                }
-                Ok(())
-            },
-        )?;
+) -> Result<super::AssetUrls> {
+    let declarations = asset_declarations(config, assets)?;
+    validate_asset_output_ownership(&declarations)?;
+    let mut published = Vec::new();
+    let mut outputs = Vec::new();
+    let mut trees = Vec::new();
+    for declaration in &declarations {
+        cancellation.ensure_active()?;
+        let id = &declaration.source_id;
+        let mut record = |logical: &Path, relative: &Path| -> Result<()> {
+            let output = declaration.output(relative, logical, config.get_root(), None)?;
+            published.push(declaration.published(config, &output, relative));
+            outputs.push(output);
+            Ok(())
+        };
+        match id.kind {
+            FilesystemSourceKind::File => {
+                let identity = FilesystemSourceIdentity::from_path(&id.logical_source);
+                validate_asset_source_boundary(config, id, &identity)?;
+                record(&id.logical_source, Path::new(""))?;
+            }
+            FilesystemSourceKind::Tree => {
+                let source = match resolve_asset_source(config, id, cancellation) {
+                    Ok(source) => source,
+                    Err(error)
+                        if matches!(
+                            error.downcast_ref::<AssetSourceError>(),
+                            Some(AssetSourceError::SourceMissing { .. })
+                        ) =>
+                    {
+                        let identity = FilesystemSourceIdentity::from_path(&id.logical_source);
+                        validate_asset_source_boundary(config, id, &identity)?;
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                };
+                crate::filesystem::walk_tree_members_selected(
+                    &source.source_identity,
+                    cancellation,
+                    config.get_root(),
+                    TREE_MEMBER_LABEL,
+                    &|relative, directory| {
+                        id.selects_tree_member(&source.source_identity, relative, directory)
+                    },
+                    &|_, _| Ok(()),
+                    &mut record,
+                )?;
+                trees.push(source);
+            }
+        }
     }
-    Ok(members)
+    validate_source_ownership(config, &trees)?;
+    validate_asset_output_set(outputs.iter(), config.get_root(), cancellation)?;
+    Ok(super::AssetUrls::from_preview(published))
 }
 
 fn resolve_asset_source(
@@ -564,7 +841,7 @@ fn resolve_asset_source(
     cancellation: &crate::cancellation::BuildCancellation,
 ) -> Result<ResolvedAssetSource> {
     cancellation.ensure_active()?;
-    let source = crate::filesystem::display_path(&id.logical_source, config.get_root());
+    let source = tola_diagnostic::display_path(&id.logical_source, config.get_root());
     let key = declaration_key(id.kind);
     let display_source = source.clone();
     let unreadable = move |error: &std::io::Error| AssetSourceError::SourceUnreadable {
@@ -592,10 +869,10 @@ fn resolve_asset_source(
         .into());
     }
     let source_identity = FilesystemSourceIdentity::canonical(
-        crate::filesystem::lexical_path_identity(&id.logical_source),
+        tola_input::lexical_path_identity(&id.logical_source),
         std::fs::canonicalize(&id.logical_source).map_err(|error| unreadable(&error))?,
     );
-    validate_asset_source_boundary(config, &source_identity)?;
+    validate_asset_source_boundary(config, id, &source_identity)?;
     Ok(ResolvedAssetSource {
         id: id.clone(),
         source_identity,
@@ -604,25 +881,32 @@ fn resolve_asset_source(
 
 fn validate_asset_source_boundary(
     config: &ResolvedSiteConfig,
+    id: &ConfiguredSourceId,
     source: &FilesystemSourceIdentity,
 ) -> Result<()> {
-    // Replacement sources are project-rooted even when the site permits external modules.
-    if config
-        .module_asset_sources
-        .iter()
-        .any(|path| crate::filesystem::lexical_path_identity(path) == source.logical_path())
+    if let Some(root) = &id.within
         && !source
             .physical_path()
-            .starts_with(crate::filesystem::normalize_existing_prefix(
-                config.get_root(),
-            ))
+            .starts_with(tola_input::normalize_existing_prefix(root))
     {
-        return Err(AssetSourceError::ModuleReplacementEscapes {
-            path: crate::filesystem::display_path(source.logical_path(), config.get_root()),
+        return Err(AssetSourceError::SourceEscapes {
+            path: tola_diagnostic::display_path(source.logical_path(), config.get_root()),
+            owner: if root == config.get_root() {
+                "site"
+            } else {
+                "module"
+            },
         }
         .into());
     }
-    let internal = config.get_root().join(crate::filesystem::INTERNAL_DIR);
+    let internal = config.get_root().join(tola_input::INTERNAL_DIR);
+    let module_cache = tola_input::layout::modules(config.get_root());
+    let from_acquired_module = id.owner.is_some()
+        && id
+            .within
+            .as_ref()
+            .is_some_and(|root| root.starts_with(&module_cache))
+        && source.logical_path().starts_with(&module_cache);
     for (owner, protected) in [
         (
             "content directory (`build.content-dir`)",
@@ -634,19 +918,22 @@ fn validate_asset_source_boundary(
         ),
         ("site's private `.tola` directory", internal.as_path()),
     ] {
+        if protected == internal && from_acquired_module {
+            continue;
+        }
         let protected = FilesystemSourceIdentity::canonical(
-            crate::filesystem::lexical_path_identity(protected),
-            crate::filesystem::normalize_existing_prefix(protected),
+            tola_input::lexical_path_identity(protected),
+            tola_input::normalize_existing_prefix(protected),
         );
         if source.intersects(&protected) {
             return Err(AssetSourceError::OverlapsProtected {
-                path: crate::filesystem::display_path(source.logical_path(), config.get_root()),
+                path: tola_diagnostic::display_path(source.logical_path(), config.get_root()),
                 owner,
             }
             .into());
         }
     }
-    crate::resources::source_boundary(config, crate::InputScope::Online)
+    crate::resources::source_boundary(config, tola_input::InputScope::Online)
         .check(source.logical_path())?;
     Ok(())
 }
@@ -654,13 +941,14 @@ fn validate_asset_source_boundary(
 /// Update configured assets without enumerating unaffected sources.
 pub(crate) fn render_configured_asset_inventory(
     config: &ResolvedSiteConfig,
+    assets: crate::modules::prepared::AppliedAssets<'_>,
     boundary: &tola_typst::SourceBoundary,
     cancellation: &crate::cancellation::BuildCancellation,
     previous: Option<&ConfiguredAssetInventory>,
     changed_paths: &[PathBuf],
 ) -> Result<ConfiguredAssetInventory> {
     cancellation.ensure_active()?;
-    let declarations = asset_declarations(config);
+    let declarations = asset_declarations(config, assets)?;
     validate_declared_sources(config, boundary, &declarations)?;
     let previous = previous.filter(|previous| &previous.generation.boundary == boundary);
     let config_unchanged =
@@ -680,7 +968,9 @@ pub(crate) fn render_configured_asset_inventory(
     let mut minification = AssetMinification::default();
     let reusable = match previous {
         Some(previous) => {
-            previous.generation.seed_minification(&mut minification);
+            previous
+                .generation
+                .seed_minification(config, &mut minification);
             previous.generation.reusable()
         }
         None => ReusableAssets::default(),
@@ -722,15 +1012,6 @@ pub(crate) fn render_configured_asset_inventory(
                 .expect("every resolved source has one observation"),
         );
         let previous_asset = reusable.rendered.get(&declaration).copied();
-        let published = if let Some(previous_asset) = previous_asset
-            && Arc::ptr_eq(&previous_asset.observation, &observation)
-        {
-            Arc::clone(&previous_asset.published)
-        } else if let Some(selection) = &declaration.selection {
-            Arc::new(observation.retaining(|file| selection.publishes(file.relative_path())))
-        } else {
-            Arc::clone(&observation)
-        };
         let (outputs, minify_warnings) = if let Some(previous_asset) = previous_asset
             && rendering_unchanged
             && previous_asset.source_identity == source.source_identity
@@ -744,8 +1025,8 @@ pub(crate) fn render_configured_asset_inventory(
             let outputs = render_asset_outputs(
                 config,
                 &declaration,
-                &published,
-                minify,
+                &observation,
+                declaration.minified_languages(minify),
                 config.assets.cache_busting,
                 &mut minification,
                 cancellation,
@@ -756,11 +1037,17 @@ pub(crate) fn render_configured_asset_inventory(
             declaration,
             source_identity: source.source_identity.clone(),
             observation,
-            published,
             outputs,
             minify_warnings,
         });
     }
+    validate_asset_output_set(
+        assets
+            .iter()
+            .flat_map(|asset| asset.outputs.iter().map(|(output, _)| output)),
+        config.get_root(),
+        cancellation,
+    )?;
     Ok(ConfiguredAssetInventory {
         generation: Arc::new(ConfiguredAssetGeneration {
             minify,
@@ -778,7 +1065,7 @@ fn validate_declared_sources(
 ) -> Result<()> {
     for asset in declarations {
         let identity = FilesystemSourceIdentity::from_path(&asset.source_id.logical_source);
-        validate_asset_source_boundary(config, &identity)?;
+        validate_asset_source_boundary(config, &asset.source_id, &identity)?;
         boundary.check(&asset.source_id.logical_source)?;
     }
     Ok(())
@@ -805,7 +1092,7 @@ fn resolve_declared_sources(
             if let Some(&source_identity) = reusable.sources.get(id)
                 && !source_identity.changed_paths_intersect(changed_paths)
             {
-                validate_asset_source_boundary(config, source_identity)?;
+                validate_asset_source_boundary(config, id, source_identity)?;
                 return Ok(ResolvedAssetSource {
                     id: (*id).clone(),
                     source_identity: source_identity.clone(),
@@ -882,55 +1169,11 @@ fn observe_source(
     let display_root = config.get_root();
     match id.kind {
         FilesystemSourceKind::Tree => {
-            let logical_root = source_identity.logical_path();
-            let canonical_root = source_identity.canonical_path();
-            let selections = config
-                .assets
-                .trees
-                .iter()
-                .filter_map(|tree| {
-                    let candidate = FilesystemSourceIdentity::from_path(tree.source());
-                    let same_source = candidate.logical_path() == source_identity.logical_path()
-                        || candidate
-                            .canonical_path()
-                            .is_some_and(|path| Some(path) == canonical_root);
-                    same_source.then(|| config.module_inputs.asset_selection(tree))
-                })
-                .collect::<Vec<_>>();
-            let publication = TreePublication {
-                declared: DeclaredFileSources::for_config(config),
-                logical_root,
-                canonical_root,
-                selections: selections
-                    .iter()
-                    .all(Option::is_some)
-                    .then(|| selections.iter().flatten().copied().collect()),
-            };
             let validate = |relative: &Path, logical_source: &Path| {
                 validate_tree_member_output_path(relative, logical_source, display_root)
             };
-            // Observe the union once; each alias selects its own published subset later.
-            let observation = if publication.selections.is_some() {
-                crate::filesystem::observe_tree_source_selected(
-                    crate::filesystem::SelectedTreeObservation {
-                        source_identity,
-                        boundary,
-                        previous,
-                        cancellation,
-                        display_root,
-                        member_label: TREE_MEMBER_LABEL,
-                        selected: &|relative, directory| {
-                            if directory {
-                                publication.may_descend(relative)
-                            } else {
-                                publication.publishes(relative)
-                            }
-                        },
-                        validate_member: &validate,
-                    },
-                )?
-            } else {
-                crate::filesystem::observe_tree_source(crate::filesystem::TreeObservation {
+            crate::filesystem::observe_tree_source_selected(
+                crate::filesystem::TreeObservation {
                     source_identity,
                     boundary,
                     previous,
@@ -938,19 +1181,10 @@ fn observe_source(
                     cancellation,
                     display_root,
                     member_label: TREE_MEMBER_LABEL,
-                    validate_member: &|relative, logical_source| {
-                        if publication.publishes(relative) {
-                            validate(relative, logical_source)
-                        } else {
-                            Ok(())
-                        }
-                    },
-                })?
-            };
-            if !publication.has_exact_owners() {
-                return Ok(observation);
-            }
-            Ok(observation.retaining(|file| publication.publishes(file.relative_path())))
+                    validate_member: &validate,
+                },
+                &|relative, directory| id.selects_tree_member(source_identity, relative, directory),
+            )
         }
         FilesystemSourceKind::File => crate::filesystem::observe_file_source(
             source_identity,
@@ -967,7 +1201,7 @@ fn validate_tree_member_output_path(
     logical_source: &Path,
     display_root: &Path,
 ) -> Result<()> {
-    let member = crate::filesystem::display_path(logical_source, display_root);
+    let member = tola_diagnostic::display_path(logical_source, display_root);
     super::output::member_path_segments(relative)
         .map(|_| ())
         .map_err(|violation| {
@@ -989,7 +1223,7 @@ fn render_asset_outputs(
     for source in observation.files() {
         cancellation.ensure_active()?;
         let source_path = asset.source_id.logical_source.join(source.relative_path());
-        let display_source = crate::filesystem::display_path(&source_path, display_root);
+        let display_source = tola_diagnostic::display_path(&source_path, display_root);
         let bytes = minification.rendered_bytes(
             &source_path,
             &display_source,
@@ -1000,38 +1234,10 @@ fn render_asset_outputs(
         // The identity names published bytes, not raw input a minifier may rewrite.
         let identity =
             cache_busting.then(|| Arc::<str>::from(tola_typst::ContentDigest::of(&bytes).to_hex()));
-        let output = output_for_asset_source(asset, source, &source_path, display_root, identity)?;
+        let output = asset.output(source.relative_path(), &source_path, display_root, identity)?;
         outputs.push((output, bytes));
     }
-    validate_asset_output_set(
-        outputs.iter().map(|(output, _)| output),
-        display_root,
-        cancellation,
-    )?;
     Ok(outputs)
-}
-
-fn output_for_asset_source(
-    asset: &AssetDeclaration,
-    source: &FilesystemSourceFile,
-    logical_source: &Path,
-    display_root: &Path,
-    identity: Option<Arc<str>>,
-) -> Result<AssetOutput> {
-    let mapped = match &asset.output {
-        ConfiguredAssetOutput::TreePrefix(url_prefix) => {
-            super::output::output_for_configured_tree_member(
-                logical_source,
-                source.relative_path(),
-                url_prefix,
-                display_root,
-            )?
-        }
-        ConfiguredAssetOutput::File { output, .. } => {
-            super::output::output_for_configured_file(&asset.source_id.logical_source, output)
-        }
-    };
-    Ok(mapped.with_identity(identity))
 }
 
 fn validate_source_ownership(
@@ -1040,6 +1246,9 @@ fn validate_source_ownership(
 ) -> Result<()> {
     for (index, left) in sources.iter().enumerate() {
         for right in sources.iter().skip(index + 1) {
+            if left.id.owner != right.id.owner {
+                continue;
+            }
             let same_observation = left.id.kind == right.id.kind
                 && (left.source_identity.logical_path() == right.source_identity.logical_path()
                     || left.source_identity.canonical_path()
@@ -1053,12 +1262,12 @@ fn validate_source_ownership(
                 && left.source_identity.intersects(&right.source_identity);
             if overlaps {
                 return Err(AssetSourceError::TreeSourcesOverlap {
-                    left: crate::filesystem::display_path(
+                    left: tola_diagnostic::display_path(
                         left.id.logical_source.as_path(),
                         config.get_root(),
                     ),
                     left_key: declaration_key(left.id.kind),
-                    right: crate::filesystem::display_path(
+                    right: tola_diagnostic::display_path(
                         right.id.logical_source.as_path(),
                         config.get_root(),
                     ),
@@ -1071,24 +1280,19 @@ fn validate_source_ownership(
     Ok(())
 }
 
-/// Refuse one published path with two owners, before any source is enumerated.
-pub(super) fn validate_asset_output_ownership_for_check(config: &ResolvedSiteConfig) -> Result<()> {
-    for path in &config.module_asset_sources {
-        validate_asset_source_boundary(config, &FilesystemSourceIdentity::from_path(path))?;
-    }
-    validate_asset_output_ownership(&asset_declarations(config))
-}
-
 fn validate_asset_output_ownership(declarations: &[AssetDeclaration]) -> Result<()> {
     let assets = declarations
         .iter()
         .map(|asset| {
-            let key = asset.output.portable_key();
+            let key = asset.portable_key();
             (asset, key)
         })
         .collect::<Vec<_>>();
     for (index, (left, left_key)) in assets.iter().enumerate() {
         for (right, right_key) in assets.iter().skip(index + 1) {
+            if left.source_id.owner != right.source_id.owner {
+                continue;
+            }
             let conflicts = match (&left.output, &right.output) {
                 (ConfiguredAssetOutput::TreePrefix(_), ConfiguredAssetOutput::TreePrefix(_))
                 | (ConfiguredAssetOutput::File { .. }, ConfiguredAssetOutput::File { .. }) => {
@@ -1103,9 +1307,9 @@ fn validate_asset_output_ownership(declarations: &[AssetDeclaration]) -> Result<
             };
             if conflicts {
                 return Err(AssetSourceError::OutputsOverlap {
-                    left: left.output.display_coordinate(),
+                    left: left.display_coordinate(),
                     left_key: declaration_key(left.source_id.kind),
-                    right: right.output.display_coordinate(),
+                    right: right.display_coordinate(),
                     right_key: declaration_key(right.source_id.kind),
                 }
                 .into());
@@ -1136,9 +1340,9 @@ pub(super) fn validate_asset_output_set<'output>(
         };
         if key_is_prefix(output_key, conflict_key) || key_is_prefix(conflict_key, output_key) {
             return Err(AssetSourceError::PublishedPathsConflict {
-                left: crate::filesystem::display_path(&output.logical_source, display_root),
+                left: tola_diagnostic::display_path(&output.logical_source, display_root),
                 left_at: output.output.to_string(),
-                right: crate::filesystem::display_path(&conflict.logical_source, display_root),
+                right: tola_diagnostic::display_path(&conflict.logical_source, display_root),
                 right_at: conflict.output.to_string(),
             }
             .into());
@@ -1158,8 +1362,9 @@ mod tests {
     use crate::config::section::assets::{AssetTreeDeclaration, AssetUrlPrefix};
 
     fn check_urls(config: &ResolvedSiteConfig) -> super::super::AssetUrls {
-        super::super::AssetUrls::for_check(
+        super::super::AssetUrls::for_check_with(
             config,
+            crate::modules::prepared::AppliedAssets::project_only(config),
             &crate::cancellation::BuildCancellation::default(),
         )
         .expect("configured declarations resolve without rendering")
@@ -1179,7 +1384,8 @@ mod tests {
     ) -> anyhow::Result<ConfiguredAssetInventory> {
         render_configured_asset_inventory(
             config,
-            &crate::resources::source_boundary(config, crate::InputScope::Online),
+            crate::modules::prepared::AppliedAssets::project_only(config),
+            &crate::resources::source_boundary(config, tola_input::InputScope::Online),
             &crate::cancellation::BuildCancellation::default(),
             previous,
             changed,
@@ -1220,10 +1426,17 @@ mod tests {
         let (_, bytes) = entries.next().expect("one published asset");
         assert_eq!(entries.count(), 0, "one published asset");
         assert_eq!(bytes.as_ref(), b"body { color: red; }");
-        let pure = crate::resources::source_boundary(&config, crate::InputScope::Pure);
+        let pure = crate::resources::source_boundary(&config, tola_input::InputScope::Pure);
         assert!(
-            render_configured_asset_inventory(&config, &pure, &cancellation, Some(&previous), &[])
-                .is_err()
+            render_configured_asset_inventory(
+                &config,
+                crate::modules::prepared::AppliedAssets::project_only(&config),
+                &pure,
+                &cancellation,
+                Some(&previous),
+                &[],
+            )
+            .is_err()
         );
     }
 
@@ -1255,7 +1468,7 @@ mod tests {
     fn exclusive_site_roots(directory: &TempDir) -> [(PathBuf, &'static str); 3] {
         let content = directory.path().join("content");
         let output = directory.path().join("public");
-        let internal = directory.path().join(crate::filesystem::INTERNAL_DIR);
+        let internal = directory.path().join(tola_input::INTERNAL_DIR);
         fs::create_dir_all(&content).unwrap();
         fs::create_dir_all(&output).unwrap();
         fs::create_dir_all(&internal).unwrap();
@@ -1372,8 +1585,9 @@ mod tests {
             assert!(message.contains(reason), "{label}: {message}");
             if label.ends_with(".txt") {
                 // The read-only check refuses the same member before rendering any bytes.
-                let checked = super::super::AssetUrls::for_check(
+                let checked = super::super::AssetUrls::for_check_with(
                     &config,
+                    crate::modules::prepared::AppliedAssets::project_only(&config),
                     &crate::cancellation::BuildCancellation::default(),
                 )
                 .unwrap_err()
@@ -1404,7 +1618,8 @@ mod tests {
 
         let error = render_configured_asset_inventory(
             &config,
-            &crate::resources::source_boundary(&config, crate::InputScope::Online),
+            crate::modules::prepared::AppliedAssets::project_only(&config),
+            &crate::resources::source_boundary(&config, tola_input::InputScope::Online),
             &cancellation,
             None,
             &[],
@@ -1461,13 +1676,19 @@ mod tests {
         fs::create_dir_all(&assets).unwrap();
         fs::write(assets.join("app.css"), b".a { color: red; }").unwrap();
 
-        let mut config = crate::config::tests::load_test_config(directory.path(), "");
-        config.build.publish_dir = directory.path().join("public");
+        let mut config = crate::config::tests::load_test_config(
+            directory.path(),
+            r#"
+[assets]
+trees = [
+  { source = "assets", url-prefix = "/first" },
+  { source = "assets", url-prefix = "/second", include = ["asset?"] },
+  { source = "assets", url-prefix = "/excluded", exclude = ["assets/*.css"] },
+  { source = "assets", url-prefix = "/empty", include = [] },
+]
+"#,
+        );
         config.build.minify.css = true;
-        config.assets.trees = vec![
-            tree_declaration(&assets, "/first"),
-            tree_declaration(&assets, "/second"),
-        ];
 
         let inventory = rendered(&config);
 
@@ -1482,7 +1703,7 @@ mod tests {
         );
         let urls = inventory.asset_urls(&config).unwrap();
         let origin = crate::asset::AssetOrigin::TreeMember {
-            source: assets,
+            source: config.get_root().join("assets"),
             member: PathBuf::from("app.css"),
         };
         for declared in ["/first/app.css", "/second/app.css"] {
@@ -1606,7 +1827,9 @@ mod tests {
             published_url(&checked, "/assets/theme.css").as_deref(),
             Some("/blog/assets/theme.css")
         );
-        assert_eq!(urls, checked);
+        assert!(urls.published().eq(checked.published()));
+        assert!(urls.is_prepared());
+        assert!(!checked.is_prepared());
     }
 
     #[test]

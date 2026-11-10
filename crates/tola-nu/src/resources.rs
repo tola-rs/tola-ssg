@@ -3,7 +3,6 @@
 use nu_protocol::engine::{StateWorkingSet, VirtualPath};
 
 pub(super) const FILES: &[(&str, &[u8])] = &[
-    ("tola/tola/tola.nu", include_bytes!("../nu/tola.nu")),
     ("tola/cli/cli.nu", include_bytes!("../nu/cli.nu")),
     ("tola/image/image.nu", include_bytes!("../nu/image.nu")),
     (

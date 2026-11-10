@@ -251,9 +251,7 @@ pub(super) fn settings_text(settings: &serde_json::Value) -> String {
 
 /// The package mirror as an editor's settings name it.
 pub(super) fn package_source_directory() -> String {
-    crate::terminal::display_path_as_given(
-        &tola_build::filesystem::layout::builtin_packages_relative(),
-    )
+    crate::terminal::display_path_as_given(&tola_input::layout::builtin_packages_relative())
 }
 
 pub(super) fn unique(editors: &[Editor]) -> impl Iterator<Item = Editor> + '_ {
@@ -277,7 +275,7 @@ mod tests {
     pub(super) fn loaded_config(path: Option<&Path>) -> crate::config::LoadedConfig {
         crate::config::load(
             path,
-            tola_build::InputScope::Online,
+            tola_input::InputScope::Online,
             tola_typst::PackageLocations::default(),
             &crate::config::ConfigOverrides::default(),
         )
@@ -350,10 +348,10 @@ mod tests {
             }
             for command in [&helix_command, &neovim_command] {
                 let cli = crate::cli::Cli::try_parse_from(command).unwrap();
-                let crate::cli::Commands::Lsp { config, .. } = cli.command else {
+                let crate::cli::Commands::Lsp { site, .. } = cli.command else {
                     panic!("editor command must start the language server");
                 };
-                let loaded = loaded_config(config.path.as_deref());
+                let loaded = loaded_config(site.config.path.as_deref());
                 assert_eq!(loaded.config().site().title, "Selected");
             }
         }

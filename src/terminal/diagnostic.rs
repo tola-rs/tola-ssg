@@ -366,7 +366,7 @@ mod tests {
         let diagnostic = Diagnostic::new(
             COMMAND,
             Severity::Error,
-            "the `styles` hook in `build.hooks.before-build` failed: the command exited with status 3",
+            "the `styles` hook in `hooks.before-build` failed: the command exited with status 3",
         )
         .with_note(
             "stderr:\nplain-err fail\n\u{1b}[32mansi-err\u{1b}[0m\ncr-err cccc\rdddd\neeee\n\u{1b}[2J",

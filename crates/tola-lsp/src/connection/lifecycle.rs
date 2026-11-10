@@ -52,9 +52,9 @@ enum WorkspaceError {
     SeveralFolders,
     #[error("the workspace root must be a local file URI")]
     RootNotLocal(#[source] crate::uri::UriError),
-    #[error("resolve workspace directory")]
+    #[error("the workspace directory could not be read")]
     UnresolvableDirectory(#[source] std::io::Error),
-    #[error("{0}")]
+    #[error("the initialization options Tola reads are not valid")]
     Options(#[from] serde_json::Error),
 }
 
@@ -130,7 +130,10 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
                     OpenSources::new(&self.source_root()).with_package_sources(package_sources);
                 self.reply(Response::new_ok(id, reply))
             }
-            Err(error) => self.reject(id, ErrorCode::InvalidParams, &error.to_string()),
+            Err(error) => {
+                tracing::error!(error = ?error, "the workspace could not be initialized");
+                self.reject(id, ErrorCode::InvalidParams, &error.to_string())
+            }
         }
     }
 

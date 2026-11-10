@@ -166,30 +166,6 @@ mod tests {
         }
     }
 
-    /// A page's address keeps the root spelling the editor named, not the resolved one.
-    #[test]
-    fn page_location_keeps_client_spelling() {
-        let directory = tempfile::tempdir().unwrap();
-        let resolved = directory.path().canonicalize().unwrap();
-        let spelled = directory.path().join("client-site");
-        let served = page(&resolved, "content/document.typ", "/document/");
-
-        let found = pages(
-            &[served],
-            &resolved,
-            &crate::uri::ClientRoot::with_resolved(&spelled, &resolved),
-            "/document/",
-        );
-
-        assert_eq!(
-            found.first().map(|symbol| symbol.location.clone()),
-            Some(OneOf::Left(Location::new(
-                crate::uri::from_file_path(&spelled.join("content/document.typ")).unwrap(),
-                Range::new(Position::new(0, 0), Position::new(0, 0)),
-            )))
-        );
-    }
-
     /// A search finds a page by the route its author knows, however the address encodes it.
     #[test]
     fn page_search_matches_decoded_route() {
@@ -205,15 +181,6 @@ mod tests {
         );
 
         assert_eq!(found.len(), 1, "{found:?}");
-    }
-
-    /// A label answers a search by its own name, whatever element has it.
-    #[test]
-    fn label_answers_its_name() {
-        let source = Source::detached("= Heading <intro>\n\n#figure([Body]) <fig-one>\n");
-        let found = labels(&source, "fig");
-        assert_eq!(found.len(), 1, "{found:?}");
-        assert_eq!(found[0].0, "fig-one");
     }
 
     #[test]

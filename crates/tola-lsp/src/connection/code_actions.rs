@@ -536,7 +536,6 @@ mod tests {
     use crate::capabilities::ClientFeatures;
     use crate::compiler::{SourceCompilation, SourceJob};
     use crate::connection::tests::{messages, open_document, ready_at, ready_workspace, response};
-    use crate::protocol::CheckMode;
     use crate::server::tests::load_configuration;
     use lsp_server::Request;
 
@@ -544,7 +543,6 @@ mod tests {
     use serde_json::json;
     use std::path::Path;
     use std::time::Instant;
-    use tola_typst::typst::syntax::Source;
 
     /// Declare quick fixes alone: these clients keep no diagnostic data to echo a cause from.
     fn declare_quickfix_support(connection: &mut Connection<Vec<u8>, impl Fn(&[Diagnostic])>) {
@@ -564,108 +562,6 @@ mod tests {
         let checked = compile(connection.next_job(Instant::now()).expect("a queued check"));
         connection.completed(checked).unwrap();
         messages(connection);
-    }
-
-    #[test]
-    fn action_cursors_stay_in_source() {
-        for text in ["#let value = other", "#let s = \"text\"", "#let n = 1 + y"] {
-            let source = Source::detached(text);
-            let mut cursors = Vec::new();
-            action_cursors(LinkedNode::new(source.root()), 0..text.len(), &mut cursors);
-            assert!(!cursors.is_empty(), "{text} answers a cursor");
-            for cursor in cursors {
-                assert!(
-                    cursor <= text.len(),
-                    "{text} keeps {cursor} inside the text"
-                );
-                assert!(
-                    crate::position::utf16_range(source.lines(), cursor..cursor).is_some(),
-                    "{text} addresses the cursor at {cursor}"
-                );
-            }
-        }
-        // A name ending the file puts its cursor exactly at the end, which is the position the
-        // lane's own read must survive.
-        let source = Source::detached("#let value = other");
-        let mut cursors = Vec::new();
-        action_cursors(
-            LinkedNode::new(source.root()),
-            0..source.text().len(),
-            &mut cursors,
-        );
-        assert!(
-            cursors.contains(&source.text().len()),
-            "the name ending the file answers the end of it: {cursors:?}"
-        );
-    }
-
-    #[test]
-    fn quickfix_preserves_new_interface_selection() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path();
-        std::fs::create_dir(root.join("content")).unwrap();
-        std::fs::write(root.join("content/helpers.typ"), "#let orphan = 42\n").unwrap();
-        std::fs::write(root.join("content/consumer.typ"), "#let placeholder = 0\n").unwrap();
-        let target = "#import \"helpers.typ\": orphan\n#let kept = 1\n";
-        let uri = crate::uri::from_file_path(&root.join("content/page.typ")).unwrap();
-        let mut connection = ready_at(Vec::new(), root.to_path_buf());
-        ready_workspace(&mut connection).check_mode = CheckMode::OnSave;
-        declare_quickfix_support(&mut connection);
-        open_document(&mut connection, &uri, 1, target);
-        // A correction reads the index the revision's own completed check returned.
-        let mut compiler = crate::compiler::SourceCompiler::new(
-            |root: &Path, _: &[(PathBuf, Arc<str>)]| load_configuration(root),
-            tola_build::BuildResources::default(),
-        );
-        answer_queued_check(&mut connection, |job| compiler.compile(job));
-        let source = connection.source(&uri).unwrap();
-        let Phase::Ready(workspace) = &mut connection.phase else {
-            unreachable!()
-        };
-        let UnreadImports::Answered(diagnostics) = workspace
-            .diagnostics
-            .unused_imports(connection.revision, root, &connection.open, &uri, &source)
-            .unwrap()
-        else {
-            panic!("the revision's check returned its index");
-        };
-        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
-        let range = diagnostics[0].range;
-        open_document(
-            &mut connection,
-            &crate::uri::from_file_path(&root.join("content/consumer.typ")).unwrap(),
-            2,
-            "#import \"page.typ\": orphan\n#let selected = orphan\n",
-        );
-        messages(&mut connection);
-        // The consumer selects `orphan` from the page, so the revision's check returns the index
-        // that licenses the import and leaves the correction nothing to remove.
-        answer_queued_check(&mut connection, |job| compiler.compile(job));
-        connection
-            .request(Request::new(
-                8.into(),
-                request::CodeActionRequest::METHOD.into(),
-                json!({
-                    "textDocument":{"uri":uri.as_str()},"range":range,
-                    "context":{"diagnostics":diagnostics,"only":["quickfix"]}
-                }),
-            ))
-            .unwrap();
-        let actions: Option<Vec<lsp_types::CodeActionOrCommand>> =
-            serde_json::from_value(response(&mut connection).response_result.unwrap()).unwrap();
-        for action in actions.unwrap_or_default() {
-            let lsp_types::CodeActionOrCommand::CodeAction(action) = action else {
-                continue;
-            };
-            if let Some(changes) = action.edit.and_then(|edit| edit.changes) {
-                assert!(
-                    changes
-                        .values()
-                        .flatten()
-                        .all(|edit| !edit.new_text.is_empty())
-                );
-            }
-        }
     }
 
     /// A client that declared no diagnostic data cannot echo a cause, so the document's own

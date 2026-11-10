@@ -269,7 +269,7 @@ fn references_reply(
     params: &lsp_types::ReferenceParams,
 ) -> Result<SourceReply> {
     let graph = located.graph;
-    let root = tola_build::filesystem::normalize_existing_prefix(located.source_root);
+    let root = tola_input::normalize_existing_prefix(located.source_root);
     let declaration = graph.definition(binding);
     let mut references = Vec::new();
     for binding in declaration_bindings(located, disk, &root, binding, declaration)? {
@@ -320,7 +320,7 @@ fn rename_reply(
     new_name: &str,
 ) -> Result<SourceReply> {
     let graph = located.graph;
-    let root = tola_build::filesystem::normalize_existing_prefix(located.source_root);
+    let root = tola_input::normalize_existing_prefix(located.source_root);
     let declared = graph.binding(binding);
     let declaration = declared.declaration.map(|declaration| {
         let source = graph

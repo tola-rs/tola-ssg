@@ -20,6 +20,7 @@ pub(super) mod init;
 pub(super) mod inspect;
 pub(super) mod lsp;
 pub(super) mod manpage;
+pub(super) mod module;
 pub(super) mod nu;
 pub(super) mod preview;
 pub(super) mod query;
@@ -28,6 +29,7 @@ pub(super) mod report;
 pub(super) mod skill;
 pub(super) mod update;
 pub(super) mod vendor;
+pub(super) mod version;
 
 use crate::cancellation::Cancellation;
 use crate::cli::output::CommandOutput;
@@ -44,7 +46,7 @@ pub(super) fn holds_error(diagnostics: &[tola_diagnostic::Diagnostic]) -> bool {
 pub(in crate::cli) struct SiteRequest<'a> {
     pub config_file: crate::cli::ConfigFileArgs,
     pub packages: crate::cli::TypstPackageArgs,
-    pub scope: tola_build::InputScope,
+    pub mode: tola_input::InputMode,
     pub build: crate::cli::BuildOverrideArgs,
     pub resources: tola_build::BuildResources,
     pub output: &'a CommandOutput,
@@ -53,23 +55,26 @@ pub(in crate::cli) struct SiteRequest<'a> {
 
 impl<'a> SiteRequest<'a> {
     pub(super) fn new(
-        config_file: crate::cli::ConfigFileArgs,
-        packages: crate::cli::TypstPackageArgs,
-        scope: tola_build::InputScope,
-        build: crate::cli::BuildOverrideArgs,
-        fonts: crate::cli::CompilerFontArgs,
+        site: crate::cli::SiteArgs,
+        build: crate::cli::BuildArgs,
+        mode: tola_input::InputMode,
         output: &'a CommandOutput,
         cancellation: &'a Cancellation,
     ) -> anyhow::Result<Self> {
+        let crate::cli::BuildArgs { overrides, fonts } = build;
         Ok(Self {
-            config_file,
-            packages,
-            scope,
-            build,
-            resources: crate::cli::config::build_resources_with_fonts(scope, &fonts)?,
+            config_file: site.config,
+            packages: site.packages,
+            mode,
+            build: overrides,
+            resources: crate::cli::config::build_resources_with_fonts(mode, &fonts)?,
             output,
             cancellation,
         })
+    }
+
+    pub(super) fn scope(&self) -> tola_input::InputScope {
+        self.mode.scope()
     }
 
     pub(super) fn load_config(
@@ -79,7 +84,7 @@ impl<'a> SiteRequest<'a> {
         crate::cli::config::load_site(
             &self.config_file,
             &self.packages,
-            self.scope,
+            self.scope(),
             overrides,
             self.output,
             self.cancellation,

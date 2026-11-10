@@ -1,6 +1,6 @@
 //! Runs trusted hook commands at their configured build stages.
 
-use super::command::{HookCall, HookDirectories, HookInvocation};
+use super::command::{HookCall, HookDirectories, run_action};
 use super::evidence::{
     FailedHookOutputs, HookOutputEvidence, SourceHookOutputs, declared_output_files,
     validate_declared_output_boundaries,
@@ -98,6 +98,7 @@ fn run_before_build_hook(
     hook: &BeforeBuildHookConfig,
     config: &ResolvedSiteConfig,
     mode: BuildMode,
+    scope: tola_input::InputScope,
     cancellation: Option<&BuildCancellation>,
     executed_outputs: &mut BTreeSet<PathBuf>,
     diagnostics: &mut Vec<tola_diagnostic::Diagnostic>,
@@ -111,31 +112,30 @@ fn run_before_build_hook(
                 .iter()
                 .map(|identity| identity.logical_path().to_path_buf()),
         );
-        let invocation = HookInvocation::new(
-            &hook.command,
+        run_action(
+            config,
+            hook.action(),
             HookCall {
-                site: config.into(),
+                site: super::command::HookSitePaths::new(config, scope),
                 name: &hook.name,
                 origin: hook.origin.as_ref(),
                 mode,
                 directories: HookDirectories::BeforeBuild,
             },
-        )?;
-        let completion = invocation.run(cancellation);
-        cancellation.ensure_active_if_present()?;
-        invocation
-            .finish(completion, cancellation, diagnostics)
-            .map_err(|error| hook_command_error(HookStage::BeforeBuild, &identity, error))?;
+            cancellation,
+            diagnostics,
+        )
+        .map_err(|error| hook_command_error(HookStage::BeforeBuild, &identity, error))?;
         let after = declared_output_files(hook, config, cancellation)?;
         for files in &after {
             if files.entries.is_empty() {
-                let declared = crate::filesystem::display_path(
+                let declared = tola_diagnostic::display_path(
                     files.source_identity.logical_path(),
                     config.get_root(),
                 );
                 return Err(super::hook_contract_error(
                     format!("{identity} declares `{declared}`, but the hook wrote nothing"),
-                    "write it, or remove it from `outputs`",
+                    "write it, or remove it from `generates`",
                 ));
             }
         }
@@ -149,6 +149,7 @@ fn run_before_build_hook(
 pub(crate) fn run_before_build_hooks_with_cancellation(
     config: &ResolvedSiteConfig,
     mode: BuildMode,
+    scope: tola_input::InputScope,
     hook_execution: crate::hooks::HookExecution,
     cancellation: Option<&BuildCancellation>,
     diagnostics: &mut Vec<tola_diagnostic::Diagnostic>,
@@ -166,7 +167,7 @@ pub(crate) fn run_before_build_hooks_with_cancellation(
             None,
         ));
     }
-    for hook in config.build.hooks.before_build.iter() {
+    for hook in config.hooks.before_build.iter() {
         if !super::hook_participates(hook.enable, hook.dev, mode) {
             continue;
         }
@@ -175,6 +176,7 @@ pub(crate) fn run_before_build_hooks_with_cancellation(
             hook,
             config,
             mode,
+            scope,
             cancellation,
             &mut started_outputs,
             diagnostics,
@@ -209,7 +211,6 @@ pub(crate) fn run_before_build_hooks_with_cancellation(
 
 pub fn has_after_publish_hooks(config: &ResolvedSiteConfig, mode: BuildMode) -> bool {
     config
-        .build
         .hooks
         .after_publish
         .iter()
@@ -220,43 +221,51 @@ pub fn has_after_publish_hooks(config: &ResolvedSiteConfig, mode: BuildMode) -> 
 pub fn run_after_publish_hooks(
     config: &ResolvedSiteConfig,
     mode: BuildMode,
+    scope: tola_input::InputScope,
     output_root: &Path,
     cancellation: &BuildCancellation,
 ) -> Result<Vec<tola_diagnostic::Diagnostic>> {
-    run_after_publish_hooks_observed(config, mode, output_root, cancellation, |_, _| Ok(()))
+    run_after_publish_hooks_observed(
+        config,
+        mode,
+        scope,
+        output_root,
+        cancellation,
+        |_, _| Ok(()),
+    )
 }
 
 /// Run after-publish hooks and return the diagnostics from successful reports.
 pub fn run_after_publish_hooks_observed(
     config: &ResolvedSiteConfig,
     mode: BuildMode,
+    scope: tola_input::InputScope,
     output_root: &Path,
     cancellation: &BuildCancellation,
     mut completed: impl FnMut(&str, &Result<Vec<tola_diagnostic::Diagnostic>>) -> Result<()>,
 ) -> Result<Vec<tola_diagnostic::Diagnostic>> {
     let mut diagnostics = Vec::new();
-    for hook in config.build.hooks.after_publish.iter() {
+    for hook in config.hooks.after_publish.iter() {
         cancellation.ensure_active()?;
         if super::hook_participates(hook.enable, hook.dev, mode) {
             let identity = super::hook_identity(HookStage::AfterPublish, &hook.name);
             let fail = |error| hook_command_error(HookStage::AfterPublish, &identity, error);
             let outcome = run_hook_entry(HookStage::AfterPublish, &hook.name, || {
-                let invocation = HookInvocation::new(
-                    &hook.command,
+                let mut reported = Vec::new();
+                run_action(
+                    config,
+                    hook.action(),
                     HookCall {
-                        site: config.into(),
+                        site: super::command::HookSitePaths::new(config, scope),
                         name: &hook.name,
                         origin: hook.origin.as_ref(),
                         mode,
                         directories: HookDirectories::AfterPublish { input: output_root },
                     },
+                    Some(cancellation),
+                    &mut reported,
                 )
                 .map_err(fail)?;
-                let completion = invocation.run(Some(cancellation));
-                let mut reported = Vec::new();
-                invocation
-                    .finish(completion, Some(cancellation), &mut reported)
-                    .map_err(fail)?;
                 Ok(reported)
             });
             completed(&hook.name, &outcome)?;
@@ -305,7 +314,7 @@ mod tests {
     fn hook_named(name: &str, child: &str) -> BeforeBuildHookConfig {
         BeforeBuildHookConfig {
             name: name.into(),
-            command: hook_child_command(child),
+            argv: Some(hook_child_command(child)),
             ..BeforeBuildHookConfig::default()
         }
     }
@@ -376,7 +385,7 @@ mod tests {
         }
         let cases = [
             Case {
-                source: "[vendor]\npath = \"vendor\"\n\n[[build.hooks.before-build]]\nname = \"generator\"\ncommand = [\"generator\"]\ngenerates = [\"alias/marker.txt\"]\n",
+                source: "[vendor]\npath = \"vendor\"\n\n[[hooks.before-build]]\nname = \"generator\"\nargv = [\"generator\"]\ngenerates = [\"alias/marker.txt\"]\n",
                 child: "child_writes_declared_output",
                 prepare: |root| fs::create_dir(root.join("alias")).unwrap(),
                 retarget: |root| {
@@ -390,7 +399,7 @@ mod tests {
                 assert_preserved: |root, _| assert!(!root.join("generated/site.css").exists()),
             },
             Case {
-                source: "[[build.hooks.before-build]]\nname = \"generator\"\ncommand = [\"generator\"]\ngenerates = [\"alias.toml\"]\n",
+                source: "[[hooks.before-build]]\nname = \"generator\"\nargv = [\"generator\"]\ngenerates = [\"alias.toml\"]\n",
                 child: "child_rewrites_the_configuration",
                 prepare: |root| fs::write(root.join("alias.toml"), "generated").unwrap(),
                 retarget: |root| {
@@ -412,13 +421,16 @@ mod tests {
             let mut config = crate::config::tests::load_test_config(root, case.source);
             fs::create_dir_all(&config.build.publish_dir).unwrap();
             // The declaration stays as loaded; the child command only makes execution observable.
-            config.build.hooks.before_build[0].command =
-                hook_child_command(&format!("hooks::runner::tests::{}", case.child));
+            config.hooks.before_build[0].argv = Some(hook_child_command(&format!(
+                "hooks::runner::tests::{}",
+                case.child
+            )));
             (case.retarget)(root);
 
             let error = run_before_build_hooks_with_cancellation(
                 &config,
                 BuildMode::Production,
+                tola_input::InputScope::Online,
                 HookExecution::Run,
                 None,
                 &mut Vec::new(),
@@ -471,7 +483,6 @@ mod tests {
         fs::write(root.join("site.typ"), "#document(\"index.html\")[Body]").unwrap();
         let mut config = config(&directory);
         config
-            .build
             .hooks
             .before_build
             .push(hook("child_records_before_build_start"));
@@ -504,12 +515,13 @@ mod tests {
         let mut production_only = hook("child_writes_declared_output");
         production_only.dev = crate::config::section::build::DevParticipation::Skip;
         production_only.generates = vec!["generated/site.css".into()];
-        config.build.hooks.before_build = vec![counter, disabled, production_only];
+        config.hooks.before_build = vec![counter, disabled, production_only];
 
         for expected in ["1", "2"] {
             let execution = run_before_build_hooks_with_cancellation(
                 &config,
                 BuildMode::Development,
+                tola_input::InputScope::Online,
                 HookExecution::Run,
                 None,
                 &mut Vec::new(),
@@ -526,6 +538,7 @@ mod tests {
         run_before_build_hooks_with_cancellation(
             &config,
             BuildMode::Production,
+            tola_input::InputScope::Online,
             HookExecution::Run,
             None,
             &mut Vec::new(),
@@ -551,12 +564,13 @@ mod tests {
         middle.generates = vec!["generated/middle.txt".into()];
         let mut last = hook("child_writes_final_chain_output");
         last.generates = vec!["generated/final.txt".into()];
-        config.build.hooks.before_build = vec![first, middle, last];
+        config.hooks.before_build = vec![first, middle, last];
         let root = config.get_root();
 
         run_before_build_hooks_with_cancellation(
             &config,
             BuildMode::Development,
+            tola_input::InputScope::Online,
             HookExecution::Run,
             None,
             &mut Vec::new(),
@@ -570,6 +584,7 @@ mod tests {
         let failed = run_before_build_hooks_with_cancellation(
             &config,
             BuildMode::Development,
+            tola_input::InputScope::Online,
             HookExecution::Run,
             None,
             &mut Vec::new(),
@@ -601,6 +616,7 @@ mod tests {
         let recovered = run_before_build_hooks_with_cancellation(
             &config,
             BuildMode::Development,
+            tola_input::InputScope::Online,
             HookExecution::Run,
             None,
             &mut Vec::new(),
@@ -642,18 +658,21 @@ mod tests {
         let directory = TempDir::new().unwrap();
         let root = directory.path().to_path_buf();
         let mut config = config(&directory);
-        config.build.hooks.before_build.push(hook_named(
+        config.hooks.before_build.push(hook_named(
             "record",
             "build::tests::child_records_hook_environment",
         ));
-        config.build.hooks.after_publish.push(
-            crate::config::section::build::AfterPublishHookConfig {
+        config
+            .hooks
+            .after_publish
+            .push(crate::config::section::build::AfterPublishHookConfig {
                 name: "record".into(),
-                command: hook_child_command("build::tests::child_records_hook_environment"),
+                argv: Some(hook_child_command(
+                    "build::tests::child_records_hook_environment",
+                )),
                 dev: crate::config::section::build::DevParticipation::Run,
                 ..Default::default()
-            },
-        );
+            });
 
         for (mode, expected) in [
             (BuildMode::Development, "dev"),
@@ -662,6 +681,7 @@ mod tests {
             run_before_build_hooks_with_cancellation(
                 &config,
                 mode,
+                tola_input::InputScope::Online,
                 HookExecution::Run,
                 None,
                 &mut Vec::new(),
@@ -675,6 +695,7 @@ mod tests {
             run_after_publish_hooks(
                 &config,
                 mode,
+                tola_input::InputScope::Online,
                 &config.build.publish_dir,
                 &BuildCancellation::new(),
             )
@@ -700,13 +721,14 @@ mod tests {
             let directory = TempDir::new().unwrap();
             let root = directory.path().to_path_buf();
             let mut config = config(&directory);
-            config.build.hooks.before_build = vec![hook_named(
+            config.hooks.before_build = vec![hook_named(
                 "images",
                 "build::tests::child_records_hook_environment",
             )];
             run_before_build_hooks_with_cancellation(
                 &config,
                 BuildMode::Production,
+                tola_input::InputScope::Online,
                 HookExecution::Run,
                 None,
                 &mut Vec::new(),
@@ -718,13 +740,14 @@ mod tests {
 
             match ending {
                 Ending::Failed => {
-                    config.build.hooks.before_build = vec![hook_named(
+                    config.hooks.before_build = vec![hook_named(
                         "images",
                         "hooks::runner::tests::child_writes_partial_then_fails",
                     )];
                     let error = run_before_build_hooks_with_cancellation(
                         &config,
                         BuildMode::Production,
+                        tola_input::InputScope::Online,
                         HookExecution::Run,
                         None,
                         &mut Vec::new(),
@@ -736,7 +759,7 @@ mod tests {
                     );
                 }
                 Ending::Cancelled => {
-                    config.build.hooks.before_build = vec![hook_named(
+                    config.hooks.before_build = vec![hook_named(
                         "images",
                         "hooks::runner::tests::child_waits_for_cancellation",
                     )];
@@ -747,6 +770,7 @@ mod tests {
                             run_before_build_hooks_with_cancellation(
                                 &config,
                                 BuildMode::Development,
+                                tola_input::InputScope::Online,
                                 HookExecution::Run,
                                 Some(&cancellation),
                                 &mut Vec::new(),

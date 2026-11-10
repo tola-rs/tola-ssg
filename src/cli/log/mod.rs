@@ -166,9 +166,9 @@ impl LogFile {
         // Normalizing resolves a symlinked prefix to its target; the declared path is kept for the
         // messages about a log Tola named itself, which should read as the site-relative path.
         let declared_path = path.to_owned();
-        let path = tola_build::filesystem::normalize_existing_prefix(path);
+        let path = tola_input::normalize_existing_prefix(path);
         if path.try_exists().with_context(|| unusable_log(&path))? {
-            let mut file = crate::sys::open_log_for_read(&path).with_context(|| {
+            let mut file = tola_fs::open_log_for_read(&path).with_context(|| {
                 format!(
                     "cannot read log `{}`; choose a new file",
                     display_path(&path)
@@ -282,7 +282,7 @@ impl LogFile {
         }
         let mut options = OpenOptions::new();
         options.read(true).append(true);
-        crate::sys::open_log_for_append(&mut options);
+        tola_fs::open_log_for_append(&mut options);
         let exists = self
             .path()
             .try_exists()
@@ -456,7 +456,7 @@ fn require_regular_file(path: &Path) -> Result<()> {
 fn require_path_names_file(path: &Path, file: &File, handle: &same_file::Handle) -> Result<()> {
     // The named handle is built with this module's hardened open: a path swapped for a FIFO or a
     // link must be refused, not waited on or followed.
-    let named = crate::sys::open_log_for_read(path)
+    let named = tola_fs::open_log_for_read(path)
         .and_then(same_file::Handle::from_file)
         .with_context(|| unusable_log(path))?;
     anyhow::ensure!(
@@ -468,7 +468,7 @@ fn require_path_names_file(path: &Path, file: &File, handle: &same_file::Handle)
 }
 
 fn require_single_link(path: &Path, file: &File) -> Result<()> {
-    let links = crate::sys::link_count(file).with_context(|| unusable_log(path))?;
+    let links = tola_fs::link_count(file).with_context(|| unusable_log(path))?;
     anyhow::ensure!(
         links == 1,
         "log `{}` is linked from more than one path; choose a new file",

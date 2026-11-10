@@ -6,7 +6,7 @@ use tola_diagnostic::{Diagnostic, DiagnosticError};
 
 /// Warning emitted when the completed output graph contains no HTML pages.
 pub fn no_pages_diagnostic(config: &crate::config::ResolvedSiteConfig) -> Diagnostic {
-    let entry = crate::filesystem::display_path(&config.build.entry, config.get_root());
+    let entry = tola_diagnostic::display_path(&config.build.entry, config.get_root());
     Diagnostic::new(
         tola_diagnostic::codes::site::NO_PAGES,
         tola_diagnostic::Severity::Warning,
@@ -21,7 +21,7 @@ pub fn no_pages_diagnostic(config: &crate::config::ResolvedSiteConfig) -> Diagno
 pub(super) fn not_found_missing_diagnostic(
     config: &crate::config::ResolvedSiteConfig,
 ) -> Diagnostic {
-    let entry = crate::filesystem::display_path(&config.build.entry, config.get_root());
+    let entry = tola_diagnostic::display_path(&config.build.entry, config.get_root());
     Diagnostic::new(
         tola_diagnostic::codes::site::NOT_FOUND_MISSING,
         tola_diagnostic::Severity::Warning,
@@ -50,7 +50,7 @@ pub(super) fn refuse_incomplete_vendor(
     if !crate::filesystem::TreeSwap::beside(config.get_root(), vendor_path)?.is_claimed()? {
         return Ok(());
     }
-    let vendor = crate::filesystem::display_path(vendor_path, config.get_root());
+    let vendor = tola_diagnostic::display_path(vendor_path, config.get_root());
     let diagnostic = Diagnostic::new(
         tola_diagnostic::codes::vendor::INCOMPLETE,
         tola_diagnostic::Severity::Error,

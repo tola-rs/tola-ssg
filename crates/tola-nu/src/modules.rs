@@ -149,6 +149,7 @@ pub(super) fn register(
     overlays: &[SourceOverlay],
     directories: &mut BTreeSet<PathBuf>,
     observed_sources: &mut BTreeSet<PathBuf>,
+    host: &std::sync::Arc<std::sync::OnceLock<crate::Host>>,
 ) -> Result<BTreeMap<String, ModuleEntry>> {
     let mut entries = BTreeMap::new();
     let mut working = StateWorkingSet::new(engine);
@@ -172,13 +173,24 @@ pub(super) fn register(
         working.add_decl(declaration);
     }
     working.add_decl(Box::new(crate::cli::Capture));
+    use crate::host::{HostCommand, Operation};
+    use nu_protocol::engine::Command;
+    working.add_decl(Box::new(HostCommand(Operation::Submit, host.clone())));
     let mut root = Module::new(b"tola".to_vec());
+    for operation in [
+        Operation::Site,
+        Operation::Module,
+        Operation::Hook,
+        Operation::Init,
+        Operation::Query,
+    ] {
+        let command = HostCommand(operation, host.clone());
+        let name = command.name().as_bytes().to_vec();
+        let declaration = working.add_decl(Box::new(command));
+        root.add_decl(name, declaration);
+    }
     for builtin in builtins {
         let id = parse(&mut working, builtin)?;
-        if builtin.alias == "tola" {
-            root = working.get_module(id).clone();
-            continue;
-        }
         let main = module_has_main(&working, id);
         root.add_submodule(builtin.alias.as_bytes().to_vec(), id);
         entries.insert(

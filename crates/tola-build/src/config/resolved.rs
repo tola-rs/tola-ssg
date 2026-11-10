@@ -3,17 +3,9 @@
 use std::path::{Path, PathBuf};
 
 use super::section::site::ResolvedSiteSection;
-use super::{BuildSectionConfig, ConfigDiagnostic};
+use super::{ConfigDiagnostic, ResolvedBuildConfig};
 use crate::resources::BuildResources;
 use tola_address::{SiteOrigin, SiteUrlMount, UrlPath, browser_url};
-
-/// What selected the current compilation entry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum EntryOrigin {
-    Project,
-    Theme,
-    Query,
-}
 
 /// Why a vendor root cannot be selected.
 #[derive(Debug, thiserror::Error)]
@@ -48,13 +40,13 @@ pub struct ResolvedSiteConfig {
     pub(super) warnings: Vec<ConfigDiagnostic>,
 
     /// Where the configuration source writes each key, so a warning can name its line.
-    pub(super) positions: std::sync::Arc<crate::config::source::ConfigPositions>,
+    pub(super) positions: std::sync::Arc<tola_diagnostic::SourcePositions>,
     /// Whether the configuration source declares `typst.fonts.paths` itself.
     pub(crate) declares_font_paths: bool,
 
     pub(crate) site: ResolvedSiteSection,
 
-    pub(crate) build: BuildSectionConfig,
+    pub(crate) build: ResolvedBuildConfig,
 
     pub(crate) assets: crate::config::section::AssetsConfig,
 
@@ -66,14 +58,14 @@ pub struct ResolvedSiteConfig {
 
     pub(crate) formatter: crate::config::section::FormatterConfig,
 
-    pub(crate) modules: std::collections::BTreeMap<String, crate::modules::ModuleDeclaration>,
-    pub(crate) theme: crate::modules::ThemeConfig,
-    pub(crate) module_inputs: std::sync::Arc<crate::modules::prepared::ModuleInputs>,
+    pub(crate) modules: std::collections::BTreeMap<String, tola_module::ModuleDeclaration>,
+    pub(crate) hooks: super::section::build::HooksConfig,
+    pub(crate) options: toml::Table,
+    pub(crate) entry_module: Option<String>,
+    pub(crate) hook_runner: Option<crate::hooks::HookRunner>,
     pub(crate) entry_file: Option<typst::syntax::FileId>,
-    pub(crate) entry_origin: EntryOrigin,
     // Logical paths are kept so later boundary checks can detect symlink retargets.
     pub(crate) module_roots: Vec<PathBuf>,
-    pub(crate) module_asset_sources: Vec<PathBuf>,
 
     // Refresh and candidate configs retain the declared workspace, not a path derived from their selection.
     pub(crate) vendor_workspace: Option<PathBuf>,
@@ -92,7 +84,7 @@ pub struct GeneratedExclusion {
 
 impl ResolvedSiteConfig {
     /// Where the configuration source writes each key.
-    pub(crate) fn positions(&self) -> Option<&crate::config::source::ConfigPositions> {
+    pub(crate) fn positions(&self) -> Option<&tola_diagnostic::SourcePositions> {
         Some(&self.positions)
     }
 
@@ -103,7 +95,10 @@ impl ResolvedSiteConfig {
     pub(crate) fn protected_input_paths(&self) -> Vec<(&'static str, &std::path::Path)> {
         protected_input_paths(
             &self.config_path,
-            &self.build,
+            std::iter::once(("content-dir", self.build.content_dir.as_path())).chain(
+                self.project_entry_path_ref()
+                    .map(|path| ("build entry", path)),
+            ),
             &self.assets,
             &self.typst.fonts,
             &self.icons,
@@ -115,11 +110,6 @@ impl ResolvedSiteConfig {
             self.module_roots
                 .iter()
                 .map(|path| ("module root", path.as_path())),
-        )
-        .chain(
-            self.module_asset_sources
-                .iter()
-                .map(|path| ("module asset replacement", path.as_path())),
         )
         .collect()
     }
@@ -141,8 +131,12 @@ impl ResolvedSiteConfig {
                 Some(self.root.join(id.vpath().get_without_slash()))
             }
             Some(_) => None,
-            None => Some(self.build.entry.clone()),
+            None => self.project_entry_path_ref().map(Path::to_path_buf),
         }
+    }
+
+    fn project_entry_path_ref(&self) -> Option<&Path> {
+        self.entry_module.is_none().then_some(&self.build.entry)
     }
 
     /// Validated site identity and template values.
@@ -151,7 +145,7 @@ impl ResolvedSiteConfig {
     }
 
     /// Build settings whose filesystem paths have been resolved against the site root.
-    pub fn build(&self) -> &BuildSectionConfig {
+    pub fn build(&self) -> &ResolvedBuildConfig {
         &self.build
     }
 
@@ -201,28 +195,26 @@ impl ResolvedSiteConfig {
     }
 
     /// Declared local modules; manifests are loaded separately under the caller’s input scope.
-    pub fn modules(
-        &self,
-    ) -> &std::collections::BTreeMap<String, crate::modules::ModuleDeclaration> {
+    pub fn modules(&self) -> &std::collections::BTreeMap<String, tola_module::ModuleDeclaration> {
         &self.modules
     }
 
-    /// Module manifests captured by `modules::prepare`, empty before preparation.
-    pub fn loaded_modules(&self) -> impl Iterator<Item = (&str, &crate::modules::ResolvedModule)> {
-        self.module_inputs
-            .configured
-            .iter()
-            .map(|(alias, configured)| (alias.as_str(), &configured.module))
+    /// Alias selected by `build.entry`, if the entry comes from a module.
+    pub fn module_entry(&self) -> Option<&str> {
+        self.entry_module.as_deref()
     }
 
-    /// Native package bindings captured by `modules::prepare`, empty before preparation.
-    pub fn local_packages(&self) -> &std::sync::Arc<tola_typst::LocalPackages> {
-        &self.module_inputs.packages
+    pub fn hooks(&self) -> &super::section::build::HooksConfig {
+        &self.hooks
     }
 
-    /// The selected theme module, if any.
-    pub fn theme(&self) -> &crate::modules::ThemeConfig {
-        &self.theme
+    pub fn options(&self) -> &toml::Table {
+        &self.options
+    }
+
+    pub fn with_hook_runner(mut self, runner: crate::hooks::HookRunner) -> Self {
+        self.hook_runner = Some(runner);
+        self
     }
 
     /// Site root directory.
@@ -232,7 +224,7 @@ impl ResolvedSiteConfig {
 
     /// Strip the site root, or return the path unchanged when it is outside the root.
     ///
-    /// [`crate::filesystem::display_path`] is the rendering boundary; this accessor only borrows
+    /// [`tola_diagnostic::display_path`] is the rendering boundary; this accessor only borrows
     /// the relative path for callers that need path operations rather than text.
     pub fn root_relative(&self, path: impl AsRef<Path>) -> PathBuf {
         crate::filesystem::root_relative(path.as_ref(), &self.root).to_path_buf()
@@ -253,7 +245,7 @@ impl ResolvedSiteConfig {
             if !path.is_absolute() {
                 return Err(VendorRootError::NotAbsolute);
             }
-            crate::resources::source_boundary(&config, crate::InputScope::Pure).check(path)?;
+            crate::resources::source_boundary(&config, tola_input::InputScope::Pure).check(path)?;
         }
         let mut roots = self
             .package_locations
@@ -329,17 +321,14 @@ impl ResolvedSiteConfig {
 
 pub(super) fn protected_input_paths<'a>(
     config_path: &'a Path,
-    build: &'a BuildSectionConfig,
+    build_paths: impl IntoIterator<Item = (&'static str, &'a Path)>,
     assets: &'a super::section::AssetsConfig,
     fonts: &'a super::section::FontsConfig,
     icons: &'a super::section::IconsConfig,
     vendor: &'a super::section::VendorConfig,
     packages: &'a tola_typst::PackageLocations,
 ) -> Vec<(&'static str, &'a Path)> {
-    let mut protected = vec![
-        ("content-dir", build.content_dir.as_path()),
-        ("build entry", build.entry.as_path()),
-    ];
+    let mut protected: Vec<_> = build_paths.into_iter().collect();
     if !config_path.as_os_str().is_empty() {
         protected.push(("config", config_path));
     }

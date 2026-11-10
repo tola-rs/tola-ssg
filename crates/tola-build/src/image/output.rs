@@ -15,7 +15,6 @@ use typst::syntax::FileId;
 
 use crate::cancellation::BuildCancellation;
 use crate::compiler::BuildInputs;
-use crate::filesystem::layout;
 use crate::output::graph::OutputGraphBuilder;
 use crate::output::semantics::{OutputDeclaration, ResponseMediaType};
 use tola_address::OutputPath;
@@ -24,6 +23,7 @@ use tola_image::{
     DecodedSource, ImageError, ImageFormat, ImageMetadata, ImageRecipe, PixelRecipe,
     ResampledPixels, inspect,
 };
+use tola_input::layout;
 use tola_packages::ImageRequest;
 
 use crate::image::{PixelCache, VariantCache};

@@ -102,6 +102,11 @@ pub mod fmt {
 /// Hook execution around publication.
 pub mod hook {
     pub use tola_diagnostic::codes::hook::AFTER_PUBLISH;
+
+    use tola_diagnostic::DiagnosticCode;
+
+    /// A hook tried to start a build that would wait on its own site lock.
+    pub const NESTED_BUILD: DiagnosticCode = DiagnosticCode::new("hook.nested_build");
 }
 
 /// Site scaffolding.

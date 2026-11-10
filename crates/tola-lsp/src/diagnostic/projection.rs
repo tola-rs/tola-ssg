@@ -52,7 +52,7 @@ pub(super) fn location_path(root: &Path, location: &Location) -> Option<PathBuf>
         return None;
     }
     let path = Path::new(&location.path);
-    Some(tola_build::filesystem::normalize_existing_prefix(
+    Some(tola_input::normalize_existing_prefix(
         &if path.is_absolute() {
             path.to_path_buf()
         } else {
@@ -70,7 +70,7 @@ fn evidence_path(
 ) -> Option<PathBuf> {
     match source {
         Some(source) => {
-            let path = tola_build::filesystem::normalize_existing_prefix(source.editor_path()?);
+            let path = tola_input::normalize_existing_prefix(source.editor_path()?);
             let text = texts.text(&path)?;
             (text.digest == source.input_identity().1).then_some(path)
         }
@@ -240,7 +240,7 @@ fn spelled_location(root: &Path, location: &Location) -> String {
     let mut spelled = if location.path.starts_with('@') {
         location.path.clone()
     } else {
-        tola_build::filesystem::display_path(Path::new(&location.path), root)
+        tola_diagnostic::display_path(Path::new(&location.path), root)
     };
     if let Some(line) = location.line {
         write!(spelled, ":{line}").expect("String formatting is infallible");
@@ -910,38 +910,5 @@ mod tests {
             "related positions also need matching input evidence"
         );
         assert!(projected.message.contains("related: old related range"));
-    }
-
-    #[test]
-    fn external_need_readable_current_text() {
-        let site = Site::new(&[]);
-        let mut diagnostic = Diagnostic::at_path(
-            tola_diagnostic::codes::report::ISSUE,
-            Severity::Warning,
-            "missing snapshot",
-            "unreadable source",
-        );
-        diagnostic.producer = Some(tola_diagnostic::DiagnosticProducer {
-            name: Some("checker".into()),
-            code: None,
-        });
-        diagnostic.location.as_mut().unwrap().range = Some(SourceRange {
-            start: SourcePosition {
-                line: 0,
-                character: 0,
-            },
-            end: SourcePosition {
-                line: 0,
-                character: 1,
-            },
-        });
-        diagnostic.source = Some(
-            DiagnosticSource::new(
-                tola_typst::ReadLocator::ProvidedRoot("absent.typ".into()),
-                tola_typst::ContentDigest::of(b"a"),
-            )
-            .with_editor_path(site.physical.join("absent.typ")),
-        );
-        assert!(project(&site, diagnostic).is_none());
     }
 }

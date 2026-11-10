@@ -108,8 +108,8 @@ async function publicationGate(hold: (html: string) => boolean) {
       )
       await fs.appendFile(
         site.configuration.fsPath,
-        '\n[[build.hooks.generate-outputs]]\nname = "publication-gate"\n' +
-          `command = ${JSON.stringify([process.env.TOLA_TEST_NODE, script])}\n` +
+        '\n[[hooks.generate-outputs]]\nname = "publication-gate"\n' +
+          `argv = ${JSON.stringify([process.env.TOLA_TEST_NODE, script])}\n` +
           'outputs = [{ file = "observed.txt" }]\n',
       )
     },

@@ -1,48 +1,35 @@
-//! Read-only watch inputs for potentially enabled module hooks.
-
-use std::path::PathBuf;
-use std::sync::Arc;
+//! Build-side prepared hook watch.
 
 use anyhow::Result;
 
-use crate::inputs::InputMode;
-use crate::{InputScope, config::ResolvedSiteConfig};
+use tola_module::watch::HookWatchInputs;
 
-/// Conservative paths declared by hooks that may run in development.
-/// No options are evaluated and no command is run to construct this value.
-#[derive(Debug, Clone, Default)]
-pub struct HookWatchInputs {
-    rerun_paths: Vec<PathBuf>,
-    generated_paths: Vec<PathBuf>,
-}
-
-impl HookWatchInputs {
-    /// Input paths whose changes can rerun a module hook.
-    pub fn rerun_paths(&self) -> &[PathBuf] {
-        &self.rerun_paths
-    }
-    /// Before-build output paths that may need event quarantine.
-    pub fn generated_paths(&self) -> &[PathBuf] {
-        &self.generated_paths
-    }
-}
+use crate::config::ResolvedSiteConfig;
+use tola_input::{InputMode, InputScope};
 
 /// The module configuration one preparation froze, shared by development subscriptions and
 /// a build attempt so both read the same manifests.
 pub struct PreparedHookWatch {
-    config: Arc<ResolvedSiteConfig>,
-    inputs: HookWatchInputs,
+    site: crate::modules::prepared::PreparedSite,
     scope: InputScope,
 }
 
 impl PreparedHookWatch {
-    /// The configuration these paths were read from.
-    pub fn config(&self) -> &Arc<ResolvedSiteConfig> {
-        &self.config
+    /// The configuration this preparation applied.
+    pub fn config(&self) -> &ResolvedSiteConfig {
+        self.site.config()
+    }
+    /// The applied configuration as the build's shared handle.
+    pub fn config_arc(&self) -> &std::sync::Arc<ResolvedSiteConfig> {
+        self.site.config_arc()
+    }
+    /// The prepared contribution these paths were derived from.
+    pub fn site(&self) -> &crate::modules::prepared::PreparedSite {
+        &self.site
     }
     /// Conservative watch paths declared by that same configuration.
     pub fn inputs(&self) -> &HookWatchInputs {
-        &self.inputs
+        &self.site.contribution().watch
     }
     pub(crate) fn scope(&self) -> InputScope {
         self.scope
@@ -55,23 +42,9 @@ pub fn prepare_hook_watch(
     mode: InputMode,
     cancellation: &crate::cancellation::BuildCancellation,
 ) -> Result<PreparedHookWatch> {
-    let config = Arc::new(super::prepared::configure(config, mode, cancellation)?);
-    let mut inputs = HookWatchInputs::default();
-    for module in config.module_inputs.configured.values() {
-        super::hooks::watch_inputs(
-            config.get_root(),
-            &module.module,
-            &mut inputs.rerun_paths,
-            &mut inputs.generated_paths,
-        )?;
-    }
-    inputs.rerun_paths.sort_unstable();
-    inputs.rerun_paths.dedup();
-    inputs.generated_paths.sort_unstable();
-    inputs.generated_paths.dedup();
+    let site = crate::modules::prepared::prepare_site(config, mode, cancellation)?;
     Ok(PreparedHookWatch {
-        config,
-        inputs,
+        site,
         scope: mode.scope(),
     })
 }
@@ -94,18 +67,19 @@ mod tests {
         fs::write(
             &manifest,
             r#"
-[[hooks]]
-stage = "before-build"
+[options]
+enabled = false
+
+[[hooks.before-build]]
 name = "conditional"
-command = ["this-must-not-run"]
+argv = ["this-must-not-run"]
 enabled-by = "enabled"
-rerun-on = [{module = "tool.txt"}, {project = "input/{name}"}]
+rerun-on = { include = ["tool.txt", "data/**/*.json", {project = "input/{name}"}], exclude = [{project = "module/data/vendor"}] }
 generates = ["generated/{name}.txt"]
-[[hooks]]
-stage = "after-publish"
+[[hooks.after-publish]]
 name = "disabled-in-dev"
-command = ["unused"]
-rerun-on = [{project = "not-watched"}]
+argv = ["unused"]
+rerun-on = { include = [{project = "not-watched"}] }
 "#,
         )
         .unwrap();
@@ -117,20 +91,22 @@ rerun-on = [{project = "not-watched"}]
             &Default::default(),
         )
         .unwrap();
+        let rerun_roots: Vec<_> = prepared
+            .inputs()
+            .rerun_selections()
+            .iter()
+            .flat_map(tola_module::hooks::RerunSelection::roots)
+            .collect();
         assert!(
-            prepared
-                .inputs()
-                .rerun_paths()
+            rerun_roots
                 .iter()
                 .any(|path| path.ends_with("module/tool.txt"))
         );
-        assert!(
-            prepared
-                .inputs()
-                .rerun_paths()
-                .iter()
-                .any(|path| path.ends_with("input/notes"))
-        );
+        assert!(rerun_roots.iter().any(|path| path.ends_with("input/notes")));
+        let selection = &prepared.inputs().rerun_selections()[0];
+        let module = prepared.config().get_root().join("module");
+        assert!(selection.matches(&module.join("data/entry.json")));
+        assert!(!selection.matches(&module.join("data/vendor/entry.json")));
         assert!(
             prepared
                 .inputs()
@@ -138,13 +114,7 @@ rerun-on = [{project = "not-watched"}]
                 .iter()
                 .any(|path| path.ends_with("generated/notes.txt"))
         );
-        assert!(
-            !prepared
-                .inputs()
-                .rerun_paths()
-                .iter()
-                .any(|path| path.ends_with("not-watched"))
-        );
+        assert!(!rerun_roots.iter().any(|path| path.ends_with("not-watched")));
         let mut session = BuildSession::new();
         let attempt = session
             .prepare_with_hook_watch(&prepared, BuildRequest::default())

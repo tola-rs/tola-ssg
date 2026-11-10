@@ -30,6 +30,8 @@ pub(crate) enum WatchError {
     Stopped,
     #[error("failed to observe generated inputs: {0}")]
     HookInputs(#[source] anyhow::Error),
+    #[error("could not watch `rerun-on` paths: {0}")]
+    RerunOn(#[source] anyhow::Error),
     #[error("could not watch a configured path")]
     Attach {
         path: PathBuf,
@@ -95,13 +97,13 @@ struct PendingEvent {
 #[derive(Clone)]
 struct FoldedHookEvents {
     revision: u64,
-    outputs: Arc<[tola_build::filesystem::FilesystemSourceIdentity]>,
+    outputs: Arc<[tola_input::FilesystemSourceIdentity]>,
     affected: Vec<bool>,
     represented_by_hook: bool,
 }
 
 impl FoldedHookEvents {
-    fn roots(&self) -> impl Iterator<Item = &tola_build::filesystem::FilesystemSourceIdentity> {
+    fn roots(&self) -> impl Iterator<Item = &tola_input::FilesystemSourceIdentity> {
         self.outputs
             .iter()
             .zip(&self.affected)
@@ -750,7 +752,7 @@ struct RunningHookPathCheck {
 }
 
 struct QuarantinedHookPaths {
-    source_identities: Vec<tola_build::filesystem::FilesystemSourceIdentity>,
+    source_identities: Vec<tola_input::FilesystemSourceIdentity>,
     paths: std::collections::BTreeSet<PathBuf>,
     rebuild_scope: RebuildScope,
     overflowed: bool,
@@ -837,10 +839,10 @@ impl FileChangeSource {
     ) -> Result<Self, WatchError> {
         let (event_tx, events) = WatchEventQueue::channel();
         let event_epoch = EventEpoch::default();
-        let roots = RootSet::from_config(config, dynamic);
+        let roots = RootSet::from_config(config, dynamic).map_err(WatchError::RerunOn)?;
         let callback_epoch = event_epoch.clone();
         let callback_events = event_tx.clone();
-        let log_file = log_file.map(tola_build::filesystem::normalize_existing_prefix);
+        let log_file = log_file.map(tola_input::normalize_existing_prefix);
         let observer = DirectoryObserver::start(move || {
             notify::recommended_watcher(move |event| {
                 forward_watch_result(
@@ -882,7 +884,10 @@ impl FileChangeSource {
         config: &ResolvedSiteConfig,
         dynamic: &WatchRequirements,
     ) -> Result<WatchSelection, WatchError> {
-        let (observing, subscriptions, retain) = self.roots.staged_selection(config, dynamic);
+        let (observing, subscriptions, retain) = self
+            .roots
+            .staged_selection(config, dynamic)
+            .map_err(WatchError::RerunOn)?;
         self.install_selection(observing, retain).await?;
         Ok(subscriptions)
     }
@@ -893,7 +898,10 @@ impl FileChangeSource {
         configs: impl IntoIterator<Item = &'a ResolvedSiteConfig>,
         dynamic: &WatchRequirements,
     ) -> Result<bool, WatchError> {
-        let (selection, retain) = self.roots.configs_selection(configs, dynamic);
+        let (selection, retain) = self
+            .roots
+            .configs_selection(configs, dynamic)
+            .map_err(WatchError::RerunOn)?;
         self.install_selection(selection, retain).await
     }
 
@@ -933,10 +941,7 @@ impl FileChangeSource {
     }
 
     /// Add the module outputs a prepared hook watch declares, before any hook starts.
-    pub(crate) fn extend_hook_candidate_claims(
-        &mut self,
-        inputs: &tola_build::modules::HookWatchInputs,
-    ) {
+    pub(crate) fn extend_hook_candidate_claims(&mut self, inputs: &tola_module::HookWatchInputs) {
         if let Some(candidate) = self.hook_candidate.as_mut() {
             candidate
                 .source_identities
@@ -1470,12 +1475,12 @@ impl FileChangeSource {
 
 /// Every generated path a prepared hook watch declares, as a watch source identity.
 fn generated_source_identities(
-    inputs: &tola_build::modules::HookWatchInputs,
-) -> impl Iterator<Item = tola_build::filesystem::FilesystemSourceIdentity> + '_ {
+    inputs: &tola_module::HookWatchInputs,
+) -> impl Iterator<Item = tola_input::FilesystemSourceIdentity> + '_ {
     inputs
         .generated_paths()
         .iter()
-        .map(|path| tola_build::filesystem::FilesystemSourceIdentity::from_path(path))
+        .map(|path| tola_input::FilesystemSourceIdentity::from_path(path))
 }
 
 fn forward_watch_result<S: WatchMessageSink>(
@@ -1487,9 +1492,9 @@ fn forward_watch_result<S: WatchMessageSink>(
     if let (Ok(event), Some(log_file)) = (&mut event, log_file)
         && !event.need_rescan()
     {
-        event.paths.retain(|path| {
-            tola_build::filesystem::normalize_existing_prefix(path).as_path() != log_file
-        });
+        event
+            .paths
+            .retain(|path| tola_input::normalize_existing_prefix(path).as_path() != log_file);
         if event.paths.is_empty() {
             return;
         }
@@ -1552,7 +1557,12 @@ fn forward_watch_result<S: WatchMessageSink>(
     }
     let mut read_budget = COMMITTED_CONTENT_READ_BUDGET;
     let classified = event::normalized_event_paths(&event)
-        .filter(|path| rescan || !is_editor_temp(path) || boundary.admits_editor_artifact(path))
+        .filter(|path| {
+            rescan
+                || !invalidated.is_empty()
+                || !is_editor_temp(path)
+                || boundary.admits_editor_artifact(path, event::is_structural(event.kind))
+        })
         .filter_map(|path| {
             let classified = if invalidated.is_empty() {
                 boundary.classify_change(&path, event.kind)
@@ -1679,14 +1689,13 @@ fn take_rebuild_batch(
 /// Roots excluded from development rebuilds for one resolved configuration; one filter per
 /// configuration attempt resolves the excluded roots once instead of once per candidate path.
 struct RebuildPathFilter {
-    excluded: [Option<tola_build::filesystem::FilesystemSourceIdentity>; 5],
+    excluded: [Option<tola_input::FilesystemSourceIdentity>; 5],
 }
 
 impl RebuildPathFilter {
     fn for_config(config: &ResolvedSiteConfig) -> Self {
-        use tola_build::filesystem::{
-            FilesystemSourceIdentity, INTERNAL_DIR, SITE_BUILD_LOCK_FILE, swap_workspace,
-        };
+        use tola_build::filesystem::{SITE_BUILD_LOCK_FILE, swap_workspace};
+        use tola_input::{FilesystemSourceIdentity, INTERNAL_DIR};
         let root = config.get_root();
         Self {
             excluded: [
@@ -1701,7 +1710,7 @@ impl RebuildPathFilter {
     }
 
     fn accepts(&self, path: &Path) -> bool {
-        let path = tola_build::filesystem::FilesystemSourceIdentity::from_path(path);
+        let path = tola_input::FilesystemSourceIdentity::from_path(path);
         !self.excluded.iter().flatten().any(|boundary| {
             [path.logical_path(), path.physical_path()]
                 .into_iter()
@@ -1715,14 +1724,10 @@ impl RebuildPathFilter {
 
 fn hook_output_source_identities(
     config: &ResolvedSiteConfig,
-) -> Vec<tola_build::filesystem::FilesystemSourceIdentity> {
+) -> Vec<tola_input::FilesystemSourceIdentity> {
     roots::development_before_build_hooks(config)
         .flat_map(|hook| hook.generates.iter())
-        .map(|path| {
-            tola_build::filesystem::FilesystemSourceIdentity::from_path(
-                &config.get_root().join(path),
-            )
-        })
+        .map(|path| tola_input::FilesystemSourceIdentity::from_path(&config.get_root().join(path)))
         .collect()
 }
 
@@ -1798,7 +1803,7 @@ mod tests {
         source_hooks: &tola_build::hooks::SourceHookOutputs,
     ) -> FileChangeSource {
         let (event_tx, events) = WatchEventQueue::channel();
-        let roots = RootSet::from_config(config, &WatchRequirements::default());
+        let roots = RootSet::from_config(config, &WatchRequirements::default()).unwrap();
         let observer = DirectoryObserver::start(|| Ok(notify::NullWatcher))
             .await
             .unwrap();
@@ -1868,6 +1873,7 @@ mod tests {
         let directory = tempfile::TempDir::new().unwrap();
         let config = watch_config(directory.path());
         let boundary = RootSet::from_config(&config, &WatchRequirements::default())
+            .unwrap()
             .initial_selection()
             .boundary();
         let expected_producers = boundary.producers();
@@ -1987,6 +1993,7 @@ mod tests {
             let member = config.get_root().join(&member);
             let epoch = EventEpoch::default();
             epoch.lock().boundary = RootSet::from_config(&config, &required)
+                .unwrap()
                 .initial_selection()
                 .boundary();
             let (events, mut received) = mpsc::unbounded_channel();
@@ -2014,6 +2021,7 @@ mod tests {
     fn watching_epoch(config: &ResolvedSiteConfig, required: &WatchRequirements) -> EventEpoch {
         let epoch = EventEpoch::default();
         epoch.lock().boundary = RootSet::from_config(config, required)
+            .unwrap()
             .initial_selection()
             .boundary();
         epoch
@@ -2049,11 +2057,10 @@ mod tests {
             module.join("tola-module.toml"),
             r#"
 
-[[hooks]]
-stage = "before-build"
+[[hooks.before-build]]
 name = "generate"
-command = ["sh", "-c", "mkdir -p generated; printf generated > generated/notes.txt"]
-rerun-on = [{module = "tools/input.txt"}]
+argv = ["sh", "-c", "mkdir -p generated; printf generated > generated/notes.txt"]
+rerun-on = { include = ["tools/*.txt"] }
 generates = ["generated/{name}.txt"]
 "#,
         )
@@ -2068,7 +2075,7 @@ generates = ["generated/{name}.txt"]
         .into_config();
         let hook_watch = tola_build::modules::prepare_hook_watch(
             &config,
-            tola_build::inputs::InputMode::new(tola_build::InputScope::Online, false),
+            tola_input::InputMode::new(tola_input::InputScope::Online, false),
             &Default::default(),
         )
         .unwrap();
@@ -2201,7 +2208,7 @@ generates = ["generated/{name}.txt"]
         let config = watch_config(&alias_root);
 
         let filter = RebuildPathFilter::for_config(&config);
-        let mirror = tola_build::filesystem::layout::builtin_packages(&alias_root);
+        let mirror = tola_input::layout::builtin_packages(&alias_root);
         assert!(!filter.accepts(&alias_root.join("public/index.html")));
         assert!(!filter.accepts(&mirror.join("cache")));
         assert!(!filter.accepts(&alias_root.join(".tola-build.lock")));

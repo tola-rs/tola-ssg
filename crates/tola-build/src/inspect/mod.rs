@@ -22,8 +22,6 @@ pub enum SourceInspectionError {
     Boundary(#[from] typst::diag::FileError),
     #[error(transparent)]
     Content(#[from] ContentDiscoveryError),
-    #[error(transparent)]
-    Options(#[from] crate::modules::OptionsFailure),
 }
 
 /// Discover selected content sources without evaluating them.
@@ -102,22 +100,37 @@ pub fn inspect_sources(
     cancellation: &crate::cancellation::BuildCancellation,
 ) -> Result<InspectedSources> {
     cancellation.ensure_active()?;
-    let configured =
-        crate::modules::prepared::configure(config, resources.input_mode(), cancellation)?;
-    let config = &configured;
+    let bundle = cancellation.bundle_cancellation();
+    let site = crate::modules::prepared::prepare_site_with_bundle(
+        config,
+        resources.input_mode(),
+        &bundle,
+    )?;
+    let config = site.config();
     cancellation.ensure_active()?;
     resources
         .source_boundary(config)
         .check(&config.build.content_dir)?;
-    let host =
-        crate::compiler::TypstHost::for_config_with_resources(config, resources, cancellation)?;
+    let host = crate::compiler::SiteHost::for_config(
+        config,
+        resources,
+        std::sync::Arc::clone(site.local_packages()),
+        cancellation,
+    )?;
     let units =
         crate::content::discover_content_units_for_config_with_cancellation(config, cancellation)?;
     let files = crate::content::select_content_sources(config, paths, &units)?;
     cancellation.ensure_active()?;
     let selected = files.len();
-    let (sources, diagnostics) =
-        sources::inspect(&files, &units, config, &host, resources, cancellation)?;
+    let (sources, diagnostics) = sources::inspect(
+        &files,
+        &units,
+        config,
+        site.prepared(),
+        &host,
+        resources,
+        cancellation,
+    )?;
     Ok(InspectedSources {
         sources,
         selected,
@@ -148,13 +161,8 @@ mod tests {
         fs::write(
             module.join("tola-module.toml"),
             r#"
-name = "sample"
-version = "1.0.0"
 [typst]
 entry = "lib.typ"
-[options]
-schema = "options.typ"
-export = "schema"
 "#,
         )
         .unwrap();
@@ -168,17 +176,11 @@ export = "schema"
 "#,
         )
         .unwrap();
-        fs::write(
-            module.join("options.typ"),
-            r#"
-#import "@tola/schema:0.0.0" as s
-#let schema = s.schema((title: s.optional(str, default: "From schema")))
-"#,
-        )
-        .unwrap();
-        let base = "[modules.sample]\npath='../module'\n";
+        let base =
+            "[modules.sample]\npath='../module'\n[modules.sample.options]\ntitle='From project'\n";
         let config = crate::config::tests::load_test_config(&root, base);
-        let resources = crate::BuildResources::new().with_input_scope(crate::InputScope::Offline);
+        let resources =
+            crate::BuildResources::new().with_input_scope(tola_input::InputScope::Offline);
         let cancellation = crate::cancellation::BuildCancellation::default();
         let inspected = inspect_sources(&[], &config, &resources, &cancellation).unwrap();
         assert_eq!(inspected.matched(), 1);
@@ -189,35 +191,7 @@ export = "schema"
                 .to_typst_dict()
                 .get("title")
                 .unwrap(),
-            &"From schema".into_value(),
-        );
-        let invalid = crate::config::tests::load_test_config(
-            &root,
-            &format!("{base}[modules.sample.options]\ntitle=7\n"),
-        );
-        let error = inspect_sources(&[], &invalid, &resources, &cancellation)
-            .err()
-            .expect("invalid options must stop source inspection");
-        let diagnostics =
-            tola_diagnostic::attached(&error).expect("structured options diagnostics");
-        assert!(
-            diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.message.contains("title")
-                    && diagnostic.message.contains("str")
-                    && diagnostic.message.contains("int")),
-            "diagnostics: {diagnostics:#?}"
-        );
-        assert!(
-            diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic
-                    .location
-                    .as_ref()
-                    .is_some_and(
-                        |location| location.path.ends_with("tola.toml") && location.line == Some(4)
-                    )),
-            "diagnostics: {diagnostics:#?}"
+            &"From project".into_value(),
         );
     }
 }

@@ -6,7 +6,7 @@ mod inputs;
 mod lock;
 mod tola;
 
-pub(crate) use bindings::{SiteBindings, site_values};
+pub(crate) use bindings::SiteBindings;
 pub(crate) use inputs::{prepare_icons, prepare_package_inputs};
 pub use lock::{
     LockedPackageRoot, PACKAGES_TREE, PackageLockError, record_package_reads,

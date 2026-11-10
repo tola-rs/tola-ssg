@@ -1,37 +1,23 @@
-//! Module declarations and explicit remote source acquisition.
-
-mod arguments;
-pub(crate) mod bootstrap;
-pub(crate) mod checkout;
-mod declaration;
-pub mod entities;
-pub mod hooks;
-pub(crate) mod options;
-pub(crate) mod prepared;
-pub mod query;
-pub(crate) mod remote;
-pub mod semantics;
-mod watch;
-
-pub use watch::{HookWatchInputs, PreparedHookWatch, prepare_hook_watch};
-
-pub use arguments::expand_argument;
-pub use checkout::CheckoutError;
-pub use declaration::*;
-pub(crate) use declaration::{is_relative_path, valid_name};
-pub use manifest::{InitializerSource, NuModule, resolve_initializer, resolve_nu_modules};
-pub use options::{OptionsFailure, validate_options};
-pub use prepared::configure as prepare;
-pub use remote::FetchError;
+//! Build-side module facade: project configuration, resolution wrappers, and help text.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, ensure};
+use tola_input::InputMode;
 
-use crate::inputs::InputMode;
+use tola_module::module_set::{self, LoadedModule};
 
-/// Help for the site's module declarations.
+pub mod entities;
+pub mod hooks;
+pub mod manifest;
+pub(crate) mod prepared;
+pub mod query;
+mod watch;
+
+pub use manifest::{find_initializer, read_declarations, read_nu_modules};
+pub use prepared::{PreparedSite, prepare_site};
+pub use watch::{PreparedHookWatch, prepare_hook_watch};
+
 pub const HELP: &str = r#"A module namespace selects a directory containing `tola-module.toml`:
 
 ```toml
@@ -41,151 +27,131 @@ path = "theme"
 
 Paths are relative to the site root unless absolute. Manifests are read when a module is used,
 under the invocation's input scope. `--pure` requires its physical directory inside the site.
-Module directories are inputs: publication and before-build generators cannot overwrite them.
-Only explicitly declared modules are loaded; there is no automatic configuration merging.
+Module directories are build inputs. A site before-build hook can generate files in a
+subdirectory of a site-owned local module. Publication cannot replace module inputs.
+Tola loads the modules the site declares.
+
+A prepared module can also come from an HTTPS download or a local archive:
+
+```toml
+[modules.notes]
+tarball = { url = "https://github.com/example/notebook/releases/download/v1.0.0/theme.tar.zst" }
+```
+
+`path`, `git`, and `tarball` are mutually exclusive. A `tarball` table has exactly one
+`url` or file `path`, plus optional `sha256` as 64 hexadecimal digits. It accepts tar.gz,
+tar.zst, and ZIP (stored/deflate). The archive must contain one outer directory with
+`tola-module.toml` directly inside it. That outer layer is removed; no `subdir` or
+manifest search is performed. Acquisition never runs author hooks. HTTPS downloads
+must not embed credentials; private Release authentication is not provided.
 
 For an `https` or `ssh` Git repository, replace `path` with a remote source:
 
 ```toml
 [modules.notes]
-git = "https://github.com/example/notebook"
-tag = "v1.0.0"
-subdir = "theme"
+git = { url = "https://github.com/example/notebook", tag = "v1.0.0", subdir = "theme" }
 ```
 
-`git` and `path` are mutually exclusive. Only a `git` module may declare `subdir` or one
-of `tag`, `branch`, or `rev`. `rev` is a full commit ID, `subdir` is a relative path
-inside the repository, and `git` accepts `https://`, `ssh://`, or `git@host:path`.
+The `git` table holds `url`, optional `subdir`,
+and at most one of `tag`, `branch`, or `rev`. `git.rev` is a full commit ID; `git.subdir`
+is relative to the repository root. `git.url` accepts `https://`, `ssh://`, or `git@host:path`.
 Omitting all three selectors selects the repository's default branch.
 
 A private `https` repository uses your Git credential helper. An `ssh` address, including
 `git@host:path`, uses the system `ssh` with its agent, `~/.ssh/config`, and `known_hosts`.
 `tola.lock` records addresses, selectors, commits, and digests, never credentials.
 
-Resolution writes `tola.lock`: the repository, the declared selector, the commit it resolved to,
-and the digest of the module directory. Commit `tola.lock` and the frozen inputs below `vendor/`
-with the site. `tola build`, `tola dev`, and `tola check` resolve missing or changed inputs
-when the network is allowed; `--locked` refuses to write the lock, `--offline` refuses the
-network, and `--pure` reads only the site, `vendor/`, and `tola.lock`. Run `tola update`
-to refresh a tag, branch, or default branch, then `tola vendor` to update the frozen copies.
+`tola.lock` pins Git commits and module trees, or archive files and their expanded trees.
+Every existing locked input is verified. `--locked` forbids changing the lock but can
+fetch its missing bytes; `--offline` forbids network access but can record local inputs.
+`--pure` requires locked inputs from the site and vendor, without host caches or network.
+Project-local tarballs can be expanded afresh in pure mode. Run `tola update notes` after
+changing a source or to refresh it, then `tola vendor --refresh` to replace frozen copies.
+An ordinary checksum failure never refreshes the lock automatically.
 Remote initialization is not implemented; initialization still takes a local module directory.
 
-To let a module generate the site, select it with `[theme] module = "notes"`. Do not also
-declare `[build].entry`. The module's public library is imported as
-`@tola-modules/notes:0.0.0`; `0.0.0` is the host alias version, not the module's release version.
-Declare the theme's exports in its manifest:
+Select a module as the site entry with `[build] entry = { module = "notes" }`.
+Its public library is imported as `@tola-modules/notes:0.0.0`. The manifest declares
+its site entry, public exports, assets, and option defaults:
 
 ```toml
-name = "notebook"
-version = "1.0.0"
 [typst]
 entry = "lib.typ"
-[site]
+[build]
 entry = "site.typ"
-[options]
-schema = "options.typ"
-export = "schema"
 [assets]
-directory = "assets"
-[slots]
-footer = "components/footer.typ"
+trees = [{ source = "assets", url-prefix = "/" }]
+[options]
+search = false
 ```
 
-Manifest paths belong to the module. Project `[modules.notes.options]` values are validated
-with the exported `@tola/schema` schema; explicit false and empty arrays retain their values.
-`[modules.notes.overrides] footer = "site/footer.typ"` replaces a declared slot with a project
-file, preserving its own relative imports. Unknown slots are errors. Module assets publish
-under `/_modules/notes/`, with the site's deployment prefix applied normally.
+Manifest paths are relative to the module. Project `[modules.notes.options]` values
+replace the defaults, with recursive merging when both values are tables.
 
-Select literal relative file paths or directory subtrees; these are not glob patterns. An omitted
-`include` selects everything, an empty array selects nothing, and `exclude` takes precedence.
-`enabled = false` disables the module's static publisher while keeping its library available.
-The selection and replacement settings remain configured but inactive; replacement sources need
-not exist until the publisher is enabled. An explicit replacement names a selected existing module file and uses a project-relative file:
+Module assets publish under `/_tola-modules/notes/`, with the site's deployment prefix.
+`enable = false` under `[modules.notes.assets]` disables the instance's static assets.
+A replacement keeps the public resource name and reads from a project-relative file:
 
 ```toml
-[modules.notes.assets]
-enabled = true
-include = ["style.css", "scripts"]
-exclude = ["scripts/legacy.js"]
 [modules.notes.assets.replace]
 "style.css" = "static/custom.css"
 ```
 
-`get-module().assets.files` maps selected relative names to their native input paths, including
-project-rooted replacements. `assets.urls` has the same keys and already includes the deployment
-mount and any configured cache-busting identity. These are the selected static publisher's files,
-not arbitrary Bundle or hook outputs. Use the URL directly rather than adding `base-path` again.
+Within a module, import `get-module` from `@tola/module:0.0.0` to read its alias, options,
+and assets. `assets.files` contains native input paths and `assets.urls` contains their
+final URLs. Package absolute paths remain relative to the package root. Use `project-path`
+from `@tola/site:0.0.0` to construct a project input path.
 
-Within the package, import `get-module` from `@tola/module:0.0.0` to read its configured options,
-native slot paths, version and asset prefix. Package absolute paths remain relative to the package
-root. Import `project-path` from `@tola/site:0.0.0` to construct a project input path explicitly.
-
-Modules may declare finite build hooks in their manifest. For example:
+Modules may declare build hooks:
 
 ```toml
-[[hooks]]
-stage = "generate-outputs"
+[[hooks.generate-outputs]]
 name = "search"
-command = ["node", "{module}/tools/search.mjs"]
+nu = "tools/search.nu"
 enabled-by = "search"
-options = ["search"]
-rerun-on = [{ module = "tools/search.mjs" }, { project = "content" }]
+rerun-on = { include = [{ project = "content/**/*.typ" }] }
 outputs = [{ tree = "search" }]
 ```
 
-`enabled-by` names a validated top-level boolean option; missing or non-boolean values are errors.
-The stages are `before-build`, `generate-outputs`, and `after-publish`, with the same `dev`
-rules as project hooks. `generates` names project-relative inputs for `before-build`; `outputs`
-names published relative files or trees for `generate-outputs`. Every `rerun-on` path explicitly
-selects its module or project root. Each stage runs module hooks by alias and manifest order,
-then project hooks. Module hooks receive `TOLA_MODULE_NAME` (the alias), `TOLA_MODULE_ROOT`,
-and `TOLA_MODULE_MANIFEST` as well as the common hook environment.
-In command arguments, `{name}`, `{module}`, `{project}`, and `{tola}` are replaced literally by the
-alias, module root, project root, and current executable. In `generates`, `outputs`, and project `rerun-on` paths, `{name}`
-is replaced by the alias before validation; `{module}` and `{project}` are only for arguments.
-`options` explicitly selects validated top-level options to serialize as JSON. Missing keys and
-non-JSON values are errors; unselected options can contain any supported Typst values.
-`TOLA_MODULE_OPTIONS` names the resulting JSON file in the invocation's temporary directory;
-the file exists only for that invocation, and an empty selection produces `{}`.
+`enabled-by` names a top-level boolean option. A string in `rerun-on.include` or
+`rerun-on.exclude` is relative to the module root. A `{ project = "..." }` entry is
+relative to the project root. Both forms accept globs and substitute `{name}` with
+the module alias. The Nu script is observed automatically. Module hooks run in
+alias and declaration order. Site hooks run first in before-build and last in the
+other stages. External hooks read effective options as JSON from the file named by
+`TOLA_MODULE_OPTIONS`. Embedded Nu hooks read `(get-module).options`.
 
-The manifest has an optional `summary` and named queries and commands:
+Queries and commands are named in the manifest:
 
 ```toml
-summary = "Notebook tools"
-
 [queries.nodes]
 entry = "model.typ"
 label = "notebook-nodes"
-format = "entities"
+returns = "entities"
 
 [commands.list]
 help = "List notebook entries."
-kind = "query"
 query = "nodes"
 projection = ["id", "title"]
 
 [commands.edit]
 help = "Open a notebook entry."
-kind = "argv"
 argv = ["{module}/tools/edit"]
 ```
 
 Run `tola notes --help`, `tola notes list --help`, or `tola query notes.nodes`.
 Built-in command names are reserved; different aliases may select the same module. Help reads
 declarations without evaluating a query or running its tool. Unknown manifest fields are errors.
-Help, initializers and argv tools do not require unrelated query entries, slots or assets to
-exist. Query execution and site construction validate those inputs when they are needed.
-For `{tola} nu` commands, define arguments, types, defaults, and a description in the script's
-`main` signature and comments. Root, namespace, and command help read that signature without
-executing the script; Nu binds arguments when it runs. The manifest's `help` is optional and can
-override the description. Other argv commands can use `help` to describe their usage.
+A Nu command uses `nu = "tools/new.nu"` and may declare `args = ["--release"]`.
+Define arguments, types, defaults, and a description in the script's `main` signature
+and comments. Help reads the signature without executing the script. An explicit
+`help` overrides its description. External commands use the declared `help`.
 
 A query entry is relative to its module, including a declared module outside the site root.
 It runs with the site's source discovery and packages, preserving the site root while replacing
 only the query's entry. Its label must identify exactly one metadata value. The default `json`
 format accepts JSON scalars, arrays and dictionaries. Project content, paths and functions need an
-explicit projection. `format = "entities"` instead accepts an array of
+explicit projection. `returns = "entities"` instead accepts an array of
 records with unique string `id`, string `label`, optional string `detail` and `url`, and an optional
 native Typst `source` path. The source and external URL are distinct; the CLI reports a source's
 virtual root and path. Entity queries can support editor semantics through manifest declarations:
@@ -202,14 +168,11 @@ Each role names an export of `[typst].entry` and an `entities` query. Dot-separa
 traverse public members, such as `content.local`, never private module paths. A definition role uses
 `role = "definition"`; named parameters use `parameter = { named = "address" }`.
 Queries run no hooks, export no pages, and publish nothing. Missing generated inputs remain errors:
-prepare them explicitly. Results identify the input mode and skipped hook policy, report declared
-generated inputs as unverified, and carry diagnostics. Module input declarations are listed
-regardless of their `enabled-by` condition: they describe possible producers, not executed hooks.
-`resultDigest` hashes returned data; it is
-not an input revision and must not be used as a precondition for editing files.
+prepare them explicitly. Module input declarations are listed regardless of their `enabled-by`
+condition: they describe possible producers, not executed hooks.
 
-Queries print their JSON value by default. `--report` includes schema, diagnostics and input
-evidence; `--pretty` indents JSON, and `--output` writes the ordinary result to a file. `-i`
+Queries print a human-readable table by default. `--json` returns compact JSON,
+`--json --pretty` indents it, and `--json --output FILE` writes it to a file. `-i`
 browses a value in a terminal. A command's fixed `projection` is applied after selection, so
 interactive previews keep the original fields. Use Nu `where` and `select` for further filtering.
 
@@ -221,7 +184,7 @@ tool call the same Tola executable with the caller's input policy; they do not s
 Tola forwards exit status and cancellation and restores a controlling terminal after an interactive
 command. Shell job suspension with Ctrl-Z is not managed by this interface.
 
-Use `["{tola}", "nu", "tools/new.nu"]` to run a module script with the embedded Nushell runtime.
+Declare `nu = "tools/new.nu"` to run a module script with the embedded Nushell runtime.
 The script entry is relative to its declaring module; the working directory remains the project
 root. A direct `tola nu file.nu` invocation resolves the entry from the caller's directory.
 No separate Nushell installation is needed. `tola nu --lsp` serves Nu files; `tola lsp` serves Typst.
@@ -271,11 +234,10 @@ A module can also declare its site initializer:
 
 ```toml
 [init]
-argv = ["{tola}", "nu", "tools/init.nu"]
+nu = "tools/init.nu"
 ```
 
-Run `tola init notes --from path/to/module -- --title "My notes"` before a site exists.
-`--alias forest` selects the new site's namespace; otherwise the manifest's name is used.
+Run `tola init notes --from path/to/module --alias forest -- --title "My notes"` before a site exists.
 An existing site can invoke the same operation as `tola forest init notes`.
 `[init]` and `[commands.init]` cannot both be declared.
 
@@ -288,420 +250,73 @@ the final target, and the selected module must be registered under `TOLA_MODULE_
 
 Tola validates the candidate configuration and module options before creating target files.
 `--dry-run` runs generation and validation but writes no target files. `--force` permits an
-occupied target without overwriting existing files. An initializer is an ordinary external
-program, not a sandbox: it must keep its proposed writes in `TOLA_INIT_OUTPUT_DIR`.
+occupied target without overwriting existing files. Initializers write their proposed files
+to the temporary generation directory. Nu initializers read it through `get-init`.
 
 For another configuration, use `tola notes --config other.toml COMMAND ...`; after COMMAND,
 arguments belong to that command. A declared tool never silently falls back to a global plugin.
 "#;
 
-pub mod manifest;
-
-/// The paths and exact bytes from which a module manifest was parsed.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ManifestEvidence {
-    root: crate::filesystem::FilesystemSourceIdentity,
-    manifest: crate::filesystem::FilesystemSourceIdentity,
-    digest: blake3::Hash,
-}
-
-impl ManifestEvidence {
-    pub(crate) fn paths(
-        &self,
-    ) -> (
-        &crate::filesystem::FilesystemSourceIdentity,
-        &crate::filesystem::FilesystemSourceIdentity,
-    ) {
-        (&self.root, &self.manifest)
-    }
-
-    pub(crate) fn is_current(
-        &self,
-        cancellation: &crate::cancellation::BuildCancellation,
-    ) -> std::result::Result<bool, crate::cancellation::BuildCancelled> {
-        cancellation.ensure_active()?;
-        let identity = || {
-            (
-                crate::filesystem::FilesystemSourceIdentity::from_path(self.root.logical_path()),
-                crate::filesystem::FilesystemSourceIdentity::from_path(
-                    self.manifest.logical_path(),
-                ),
-            )
-        };
-        if identity() != (self.root.clone(), self.manifest.clone()) {
-            return Ok(false);
-        }
-        let mut hasher = blake3::Hasher::new();
-        match crate::filesystem::read_file_chunks(
-            self.manifest.logical_path(),
-            cancellation,
-            |bytes| {
-                hasher.update(bytes);
-            },
-        ) {
-            Ok(()) => {}
-            Err(crate::filesystem::FileReadError::Cancelled(error)) => return Err(error),
-            Err(crate::filesystem::FileReadError::Io(_)) => return Ok(false),
-        }
-        cancellation.ensure_active()?;
-        Ok(hasher.finalize() == self.digest
-            && identity() == (self.root.clone(), self.manifest.clone()))
-    }
-}
-
-/// A module and the manifest that supplied its declarations.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ResolvedModule {
-    pub name: String,
-    pub root: PathBuf,
-    pub manifest: PathBuf,
-    /// Evidence captured from the exact manifest bytes parsed for this module.
-    pub manifest_evidence: Option<ManifestEvidence>,
-    pub summary: String,
-    pub package_name: Option<String>,
-    pub version: Option<tola_typst::PackageVersion>,
-    pub typst: Option<Entry>,
-    pub nu: Option<Entry>,
-    pub site: Option<Entry>,
-    pub options_schema: Option<OptionsSchema>,
-    pub assets: Option<Assets>,
-    pub slots: BTreeMap<String, PathBuf>,
-    pub queries: BTreeMap<String, Query>,
-    pub semantics: Vec<semantics::SemanticRole>,
-    pub commands: BTreeMap<String, Command>,
-    pub initializer: Option<Initializer>,
-    pub hooks: Vec<hooks::ModuleHook>,
-}
-
-/// A module path Tola could not read, or one that leaves its module.
-#[derive(Debug, thiserror::Error)]
-pub enum ModulePathError {
-    #[error("Tola could not read `{path}`")]
-    Unreadable {
-        path: String,
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("`{path}` is outside module `{module}`")]
-    Outside { module: String, path: String },
-    #[error("`{path}` is not a file")]
-    NotAFile { path: String },
-    #[error("`{path}` is not a directory")]
-    NotADirectory { path: String },
-}
-
-/// Why one declared module could not be resolved.
-#[derive(Debug, thiserror::Error)]
-pub enum ModuleResolutionError {
-    #[error(transparent)]
-    Manifest(#[from] manifest::ManifestError),
-    #[error(transparent)]
-    Roots(#[from] crate::inputs::ModuleRootError),
-    #[error(transparent)]
-    ModulePath(#[from] ModulePathError),
-    #[error("resolve entry for query {query}")]
-    QueryEntry {
-        query: String,
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("query {query} entry escapes its module or is not a file")]
-    QueryEntryOutside { query: String },
-}
-
-fn validate_module_path(
-    site_root: &Path,
-    module: &str,
-    root: &Path,
-    path: &Path,
-    directory: bool,
-) -> std::result::Result<PathBuf, ModulePathError> {
-    let shown = crate::filesystem::display_path(&root.join(path), site_root);
-    let resolved =
-        root.join(path)
-            .canonicalize()
-            .map_err(|source| ModulePathError::Unreadable {
-                path: shown.clone(),
-                source,
-            })?;
-    if !resolved.starts_with(root) {
-        return Err(ModulePathError::Outside {
-            module: module.to_owned(),
-            path: shown,
-        });
-    }
-    let right_type = if directory {
-        resolved.is_dir()
-    } else {
-        resolved.is_file()
-    };
-    if !right_type {
-        return Err(if directory {
-            ModulePathError::NotADirectory { path: shown }
-        } else {
-            ModulePathError::NotAFile { path: shown }
-        });
-    }
-    Ok(resolved)
-}
-
-/// Commands and initializer rooted in one module, independent of its build inputs.
-#[derive(Debug)]
-pub struct ModuleCommands {
-    pub name: String,
-    pub root: PathBuf,
-    pub manifest: PathBuf,
-    pub summary: String,
-    pub commands: BTreeMap<String, Command>,
-    pub initializer: Option<Initializer>,
-    pub skill: Option<PathBuf>,
-}
-
-/// Command declarations remain available when unrelated build inputs need repair.
-pub fn resolve_command_modules(
-    site_root: &Path,
-    vendor: Option<&Path>,
-    declarations: &BTreeMap<String, ModuleDeclaration>,
-    mode: InputMode,
-    cancellation: &crate::cancellation::BuildCancellation,
-) -> std::result::Result<BTreeMap<String, ModuleCommands>, manifest::ManifestError> {
-    let roots = crate::inputs::module_roots(site_root, mode, vendor, declarations, cancellation)?;
-    Ok(
-        manifest::read_selected(site_root, declarations, &roots, mode)?
-            .into_iter()
-            .map(|(name, loaded)| {
-                let skill = loaded
-                    .manifest
-                    .skill
-                    .as_ref()
-                    .map(|skill| loaded.root.join(&skill.path));
-                (
-                    name.clone(),
-                    ModuleCommands {
-                        name,
-                        root: loaded.root,
-                        manifest: loaded.path,
-                        summary: loaded.manifest.summary,
-                        commands: loaded.manifest.commands,
-                        initializer: loaded.manifest.init,
-                        skill,
-                    },
-                )
-            })
-            .collect(),
-    )
-}
-
 /// Resolve the declared modules' roots and read their manifests.
-///
-/// A command that has not resolved roots yet uses this entry. A build reads manifests through the
-/// roots it already resolved, so every module is hashed once.
-pub fn resolve_modules(
+pub fn load_modules(
     site_root: &Path,
     vendor: Option<&Path>,
-    declarations: &BTreeMap<String, ModuleDeclaration>,
+    declarations: &BTreeMap<String, tola_module::ModuleDeclaration>,
     mode: InputMode,
     cancellation: &crate::cancellation::BuildCancellation,
-) -> std::result::Result<BTreeMap<String, ResolvedModule>, ModuleResolutionError> {
-    let roots = crate::inputs::module_roots(site_root, mode, vendor, declarations, cancellation)?;
-    resolve_modules_with_roots(site_root, declarations, &roots, mode)
+) -> std::result::Result<BTreeMap<String, LoadedModule>, module_set::ModuleLoadError> {
+    let bundle = cancellation.bundle_cancellation();
+    let roots = tola_module::inputs::module_roots_with_bundle(
+        site_root,
+        mode,
+        vendor,
+        declarations,
+        &bundle,
+    )?;
+    module_set::load_modules_with_roots(site_root, declarations, &roots, mode)
 }
 
 /// Read every declared module's manifest through a resolved root.
-///
-/// Resolution already decided where each module reads from. Relative query entries
-/// must stay within their own module, including after following symlinks.
-pub fn resolve_modules_with_roots(
+pub fn load_modules_with_roots(
     site_root: &Path,
-    declarations: &BTreeMap<String, ModuleDeclaration>,
+    declarations: &BTreeMap<String, tola_module::ModuleDeclaration>,
     roots: &BTreeMap<String, PathBuf>,
     mode: InputMode,
-) -> std::result::Result<BTreeMap<String, ResolvedModule>, ModuleResolutionError> {
-    let mut result = BTreeMap::new();
-    for (name, loaded) in manifest::read_selected(site_root, declarations, roots, mode)? {
-        let root = loaded.root;
-        let canonical_manifest = loaded.path;
-        let evidence = loaded.evidence;
-        let manifest = loaded.manifest;
-        for entry in [
-            manifest.typst.as_ref().map(|v| &v.entry),
-            manifest.nu.as_ref().map(|v| &v.entry),
-            manifest.site.as_ref().map(|v| &v.entry),
-            manifest.options.as_ref().map(|v| &v.schema),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            validate_module_path(site_root, &name, &root, entry, false)?;
-        }
-        let assets_disabled = declarations
-            .get(&name)
-            .and_then(|declaration| declaration.assets.as_ref())
-            .is_some_and(|policy| !policy.enabled);
-        if let Some(assets) = &manifest.assets
-            && !assets_disabled
-        {
-            validate_module_path(site_root, &name, &root, &assets.directory, true)?;
-        }
-        for path in manifest.slots.values() {
-            validate_module_path(site_root, &name, &root, path, false)?;
-        }
-        for (query_name, query) in &manifest.queries {
-            let query_key = format!("{name}.{query_name}");
-            let entry = root.join(&query.entry).canonicalize().map_err(|source| {
-                ModuleResolutionError::QueryEntry {
-                    query: query_key.clone(),
-                    source,
-                }
-            })?;
-            if !(entry.starts_with(&root) && entry.is_file()) {
-                return Err(ModuleResolutionError::QueryEntryOutside { query: query_key });
-            }
-        }
-        result.insert(
-            name.clone(),
-            ResolvedModule {
-                name: name.clone(),
-                root,
-                manifest: canonical_manifest,
-                manifest_evidence: Some(evidence),
-                summary: manifest.summary,
-                package_name: manifest.name,
-                version: manifest.version,
-                typst: manifest.typst,
-                nu: manifest.nu,
-                site: manifest.site,
-                options_schema: manifest.options,
-                assets: manifest.assets,
-                slots: manifest.slots,
-                queries: manifest.queries,
-                semantics: manifest.semantics,
-                commands: manifest.commands,
-                initializer: manifest.init,
-                hooks: manifest.hooks,
-            },
-        );
-    }
-    Ok(result)
+) -> std::result::Result<BTreeMap<String, LoadedModule>, module_set::ModuleLoadError> {
+    module_set::load_modules_with_roots(site_root, declarations, roots, mode)
 }
 
-/// One imported module with its project-owned options and slot overrides.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ConfiguredModule {
-    pub module: ResolvedModule,
-    pub options: BTreeMap<String, toml::Value>,
-    /// Slot implementations resolved from either the module or the project.
-    pub slots: BTreeMap<String, PathBuf>,
-}
-
-/// Check project-owned configuration for any imported module.
-pub fn configure_module(
-    config: &crate::config::ResolvedSiteConfig,
-    module: ResolvedModule,
-) -> Result<ConfiguredModule> {
-    let namespace = &module.name;
-    let declaration = config
-        .modules()
-        .get(namespace)
-        .with_context(|| format!("module `{namespace}` is not declared in `modules`"))?;
-    ensure!(
-        declaration.options.is_empty() || module.options_schema.is_some(),
-        "module `{namespace}` has options but declares no `options.schema`"
-    );
-    let site_root = config
-        .get_root()
-        .canonicalize()
-        .context("Tola could not read the site directory")?;
-    let mut slots = module
-        .slots
-        .iter()
-        .map(|(name, path)| (name.clone(), module.root.join(path)))
-        .collect::<BTreeMap<_, _>>();
-    for (name, path) in &declaration.overrides {
-        ensure!(
-            slots.contains_key(name),
-            "module `{namespace}` has no slot `{name}`"
-        );
-        ensure!(
-            is_relative_path(path),
-            "`modules.{namespace}.overrides.{name}` must be a relative path inside the site"
-        );
-        let resolved = site_root.join(path).canonicalize().with_context(|| {
-            format!("Tola could not read `modules.{namespace}.overrides.{name}`")
-        })?;
-        ensure!(
-            resolved.starts_with(&site_root) && resolved.is_file(),
-            "`modules.{namespace}.overrides.{name}` points outside the site or is not a file"
-        );
-        slots.insert(name.clone(), resolved);
-    }
-    Ok(ConfiguredModule {
-        module,
-        options: declaration.options.clone(),
-        slots,
-    })
-}
-
-/// The selected site driver and its project-owned configuration.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ResolvedTheme {
-    pub module: ResolvedModule,
-    pub site_entry: PathBuf,
-    pub options: BTreeMap<String, toml::Value>,
-    pub slots: BTreeMap<String, PathBuf>,
-}
-
-/// Resolve the selected theme only when the caller knows its input scope.
-pub fn resolve_theme(
-    config: &crate::config::ResolvedSiteConfig,
+/// Command declarations remain available when unrelated build inputs need repair.
+pub fn select_command_modules(
+    site_root: &Path,
+    vendor: Option<&Path>,
+    declarations: &BTreeMap<String, tola_module::ModuleDeclaration>,
     mode: InputMode,
     cancellation: &crate::cancellation::BuildCancellation,
-) -> Result<Option<ResolvedTheme>> {
-    let Some(namespace) = &config.theme().module else {
-        return Ok(None);
-    };
-    let roots = crate::inputs::module_roots(
-        config.get_root(),
-        mode,
-        config.vendor().path.as_deref(),
-        config.modules(),
-        cancellation,
-    )?;
-    let module = resolve_modules_with_roots(config.get_root(), config.modules(), &roots, mode)?
-        .remove(namespace)
-        .expect("theme namespace was validated during configuration");
-    ensure!(
-        module.package_name.is_some() && module.version.is_some(),
-        "the theme module `{namespace}` needs `name` and `version`"
-    );
-    let site = module
-        .site
-        .as_ref()
-        .with_context(|| format!("the theme module `{namespace}` declares no `site.entry`"))?;
-    let site_entry = module.root.join(&site.entry);
-    let configured = configure_module(config, module)?;
-    Ok(Some(ResolvedTheme {
-        module: configured.module,
-        site_entry,
-        options: configured.options,
-        slots: configured.slots,
-    }))
+) -> std::result::Result<
+    BTreeMap<String, module_set::ModuleCommands>,
+    tola_module::manifest::ManifestError,
+> {
+    let bundle = cancellation.bundle_cancellation();
+    module_set::select_command_modules(site_root, vendor, declarations, mode, &bundle)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::InputScope;
     use std::fs;
+    use tola_input::InputScope;
+    use tola_module::declaration::*;
+    use tola_module::module_set::{LoadedModule, ModuleLoadError};
 
-    fn resolved_modules(
+    fn loaded_modules(
         site: &Path,
         declarations: &BTreeMap<String, ModuleDeclaration>,
         mode: InputMode,
-    ) -> std::result::Result<BTreeMap<String, ResolvedModule>, ModuleResolutionError> {
+    ) -> std::result::Result<BTreeMap<String, LoadedModule>, ModuleLoadError> {
         let roots =
             crate::inputs::module_roots(site, mode, None, declarations, &Default::default())?;
-        resolve_modules_with_roots(site, declarations, &roots, mode)
+        load_modules_with_roots(site, declarations, &roots, mode)
     }
 
     fn theme_site(manifest: &str) -> (tempfile::TempDir, BTreeMap<String, ModuleDeclaration>) {
@@ -725,130 +340,98 @@ mod tests {
     }
 
     const VALID: &str = r#"
-summary = "Forest tools"
 [queries.nodes]
 entry = "model.typ"
 label = "forest-nodes"
 [commands.list]
 help = "List nodes"
-kind = "query"
 query = "nodes"
 projection = ["id", "title"]
 [commands.edit]
 help = "Edit a node"
-kind = "argv"
 argv = ["editor", "--wait"]
 "#;
 
     #[test]
-    fn theme_paths_options_project_slot() {
-        let manifest = r#"
-name = "forest"
-version = "2.1.3"
-[typst]
-entry = "lib.typ"
-[site]
-entry = "site.typ"
-[options]
-schema = "options.typ"
-export = "schema"
-[assets]
-directory = "assets"
-[slots]
-footer = "footer.typ"
-"#;
-        let (site, _) = theme_site(manifest);
-        let module = site.path().join("theme");
-        for file in ["lib.typ", "site.typ", "options.typ", "footer.typ"] {
-            fs::write(module.join(file), "").unwrap();
+    fn a_prepared_tarball_can_supply_the_site_program() {
+        use crate::config::loading::{BuildOverrides, load_site_config};
+        use crate::{BuildResources, BuildSession};
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        fs::create_dir(root.join("content")).unwrap();
+        let gzip = flate2::write::GzEncoder::new(
+            fs::File::create(root.join("theme.tar.gz")).unwrap(),
+            flate2::Compression::fast(),
+        );
+        let mut archive = tar::Builder::new(gzip);
+        for (name, text) in [
+            ("theme/tola-module.toml", "[build]\nentry = 'site.typ'\n"),
+            (
+                "theme/site.typ",
+                "#document(\"index.html\", format: \"html\")[A packaged site]",
+            ),
+        ] {
+            let mut header = tar::Header::new_gnu();
+            header.set_mode(0o644);
+            header.set_size(text.len() as u64);
+            archive
+                .append_data(&mut header, name, text.as_bytes())
+                .unwrap();
         }
-        fs::create_dir(module.join("assets")).unwrap();
-        fs::write(site.path().join("custom.typ"), "").unwrap();
-        let source = "[modules.forest]\npath = \"theme\"\n[modules.forest.options]\nshow = false\nitems = [\"a\", \"b\"]\nnested = { count = 3 }\n[modules.forest.overrides]\nfooter = \"custom.typ\"\n[theme]\nmodule = \"forest\"\n";
-        let config = crate::config::loading::resolve_site_config(
-            &site.path().join("tola.toml"),
-            source,
+        archive.into_inner().unwrap().finish().unwrap();
+        fs::write(root.join("tola.toml"), "[build]\nentry = { module = 'theme' }\n[modules.theme]\ntarball = { path = 'theme.tar.gz' }\n[typst.fonts]\nsystem = false\n").unwrap();
+        let config = load_site_config(
+            Some(&root.join("tola.toml")),
             tola_typst::PackageLocations::default(),
-            &crate::config::loading::BuildOverrides::default(),
+            &BuildOverrides::default(),
         )
         .unwrap()
         .into_config();
-        let selected = resolve_theme(
-            &config,
-            crate::inputs::InputMode::new(InputScope::Pure, false),
-            &Default::default(),
-        )
-        .unwrap()
-        .unwrap();
-        assert_eq!(selected.module.version.unwrap().to_string(), "2.1.3");
-        assert_eq!(
-            selected.module.typst.unwrap().entry,
-            PathBuf::from("lib.typ")
+        let mut session = BuildSession::with_resources(
+            BuildResources::new().with_input_scope(InputScope::Offline),
         );
-        assert_eq!(selected.options["show"], toml::Value::Boolean(false));
-        assert_eq!(selected.options["items"].as_array().unwrap().len(), 2);
-        assert_eq!(selected.options["nested"]["count"].as_integer(), Some(3));
-        assert_eq!(
-            selected.slots["footer"],
-            site.path().join("custom.typ").canonicalize().unwrap()
-        );
-        assert_eq!(
-            selected.site_entry,
-            module.canonicalize().unwrap().join("site.typ")
-        );
-        let invalid = source.replace("footer = \"custom.typ\"", "missing = \"custom.typ\"");
-        let config = crate::config::loading::resolve_site_config(
-            &site.path().join("tola.toml"),
-            &invalid,
-            tola_typst::PackageLocations::default(),
-            &crate::config::loading::BuildOverrides::default(),
-        )
-        .unwrap()
-        .into_config();
-        assert!(
-            resolve_theme(
-                &config,
-                crate::inputs::InputMode::new(InputScope::Online, false),
-                &Default::default()
-            )
-            .is_err()
-        );
-        #[cfg(unix)]
-        {
-            let outside = tempfile::tempdir().unwrap();
-            fs::write(outside.path().join("outside.typ"), "").unwrap();
-            fs::remove_file(site.path().join("custom.typ")).unwrap();
-            std::os::unix::fs::symlink(
-                outside.path().join("outside.typ"),
-                site.path().join("custom.typ"),
-            )
+        session
+            .build_and_write(&config, crate::build::BuildRequest::default())
             .unwrap();
-            let config = crate::config::loading::resolve_site_config(
-                &site.path().join("tola.toml"),
-                source,
-                tola_typst::PackageLocations::default(),
-                &crate::config::loading::BuildOverrides::default(),
-            )
-            .unwrap()
-            .into_config();
-            assert!(
-                resolve_theme(
-                    &config,
-                    crate::inputs::InputMode::new(InputScope::Online, false),
-                    &Default::default()
-                )
-                .is_err()
-            );
-        }
+        assert!(root.join("public/index.html").is_file());
+        assert!(matches!(
+            tola_input::InputLock::read(root).unwrap().unwrap().modules["theme"],
+            tola_input::LockedModule::Tarball { .. }
+        ));
+    }
+
+    #[test]
+    fn module_options_merge_with_defaults() {
+        let manifest = r#"
+[options]
+show = true
+items = ["default"]
+nested = { count = 2, date = 2026-01-01 }
+"#;
+        let (site, mut declarations) = theme_site(manifest);
+        declarations.get_mut("forest").unwrap().options =
+            toml::from_str("show = false\nitems = []\nnested = { count = 3 }").unwrap();
+        let modules = loaded_modules(
+            site.path(),
+            &declarations,
+            InputMode::new(InputScope::Pure, false),
+        )
+        .unwrap();
+        let options = &modules["forest"].options;
+        assert_eq!(options["show"].as_bool(), Some(false));
+        assert!(options["items"].as_array().unwrap().is_empty());
+        assert_eq!(options["nested"]["count"].as_integer(), Some(3));
+        assert_eq!(options["nested"]["date"].as_str(), Some("2026-01-01"));
     }
 
     #[test]
     fn reads_local_module_without_executing_commands() {
         let (site, declarations) = theme_site(VALID);
-        let modules = resolved_modules(
+        let modules = loaded_modules(
             site.path(),
             &declarations,
-            crate::inputs::InputMode::new(InputScope::Pure, false),
+            tola_input::InputMode::new(InputScope::Pure, false),
         )
         .unwrap();
         let forest = &modules["forest"];
@@ -858,10 +441,11 @@ footer = "footer.typ"
         );
         assert_eq!(forest.queries["nodes"].label, "forest-nodes");
         assert_eq!(
-            forest.commands["edit"].action,
-            CommandAction::Argv {
-                argv: vec!["editor".into(), "--wait".into()]
-            }
+            forest.commands["edit"].action().unwrap(),
+            CommandAction::Execute(tola_module::Action::Argv(vec![
+                "editor".into(),
+                "--wait".into(),
+            ]))
         );
     }
 
@@ -869,10 +453,10 @@ footer = "footer.typ"
     fn rejects_escape_allows_distinct_aliases() {
         let (site, mut declarations) = theme_site(&VALID.replace("model.typ", "../outside.typ"));
         assert!(
-            resolved_modules(
+            loaded_modules(
                 site.path(),
                 &declarations,
-                crate::inputs::InputMode::new(InputScope::Online, false)
+                tola_input::InputMode::new(InputScope::Online, false)
             )
             .is_err()
         );
@@ -887,10 +471,10 @@ footer = "footer.typ"
             },
         );
         assert_eq!(
-            resolved_modules(
+            loaded_modules(
                 site.path(),
                 &declarations,
-                crate::inputs::InputMode::new(InputScope::Online, false)
+                tola_input::InputMode::new(InputScope::Online, false)
             )
             .unwrap()
             .len(),
@@ -901,10 +485,10 @@ footer = "footer.typ"
     #[test]
     fn rejects_unknown_command_fields() {
         let (site, declarations) = theme_site(&VALID.replace("argv = [", "typo = true\nargv = ["));
-        let error = resolved_modules(
+        let error = loaded_modules(
             site.path(),
             &declarations,
-            crate::inputs::InputMode::new(InputScope::Online, false),
+            tola_input::InputMode::new(InputScope::Online, false),
         )
         .unwrap_err();
         assert!(format!("{:#}", anyhow::Error::new(error)).contains("unknown field"));
@@ -919,14 +503,16 @@ footer = "footer.typ"
         fs::remove_file(&path).unwrap();
         fs::write(site.path().join("outside.typ"), "outside").unwrap();
         symlink(site.path().join("outside.typ"), path).unwrap();
-        assert!(
-            resolved_modules(
-                site.path(),
-                &declarations,
-                crate::inputs::InputMode::new(InputScope::Online, false)
-            )
-            .is_err()
-        );
+        let mode = InputMode::new(InputScope::Online, false);
+        assert!(matches!(
+            loaded_modules(site.path(), &declarations, mode),
+            Err(ModuleLoadError::Roots(
+                tola_module::inputs::ModuleRootError::Tree {
+                    source: tola_input::TreeHashError::Escapes { .. },
+                    ..
+                }
+            )),
+        ));
     }
 
     #[test]
@@ -943,18 +529,18 @@ footer = "footer.typ"
             },
         )]);
         assert!(
-            resolved_modules(
+            loaded_modules(
                 site.path(),
                 &declarations,
-                crate::inputs::InputMode::new(InputScope::Online, false)
+                tola_input::InputMode::new(InputScope::Online, false)
             )
             .is_ok()
         );
         assert!(
-            resolved_modules(
+            loaded_modules(
                 site.path(),
                 &declarations,
-                crate::inputs::InputMode::new(InputScope::Pure, false)
+                tola_input::InputMode::new(InputScope::Pure, false)
             )
             .is_err()
         );
@@ -967,7 +553,8 @@ footer = "footer.typ"
         use crate::build::{BuildMode, BuildRequest, BuildReuse, BuildTrigger};
         use crate::config::ResolvedSiteConfig;
         use crate::config::loading::{BuildOverrides, load_site_config};
-        use crate::{BuildResources, BuildSession, InputScope};
+        use crate::{BuildResources, BuildSession};
+        use tola_input::InputScope;
 
         fn write(root: &Path, name: &str, value: &str) {
             let path = root.join(name);
@@ -1009,7 +596,7 @@ footer = "footer.typ"
                 write(
                     &module,
                     "tola-module.toml",
-                    "name=\"sample\"\nversion=\"1.0.0\"\n[typst]\nentry=\"lib.typ\"\n[site]\nentry=\"site.typ\"\n[assets]\ndirectory=\"assets\"\n",
+                    "[typst]\nentry=\"lib.typ\"\n[build]\nentry=\"site.typ\"\n[options]\nlegacy=false\nfonts=false\n[assets]\ntrees=[{ source=\"assets\", url-prefix=\"/\" }]\nfiles=[{ source=\"assets/scripts/legacy.js\", url=\"/scripts/legacy.js\", enabled-by=\"legacy\" }, { source=\"assets/fonts/body.woff2\", url=\"/fonts/body.woff2\", enabled-by=\"fonts\" }]\n",
                 );
                 write(&module, "lib.typ", "#let marker = [Library available]");
                 write(&module, "assets/style.css", "module-style");
@@ -1046,7 +633,7 @@ footer = "footer.typ"
                     &self.root,
                     "tola.toml",
                     &format!(
-                        "[site]\nbase-path=\"/notes/\"\n[modules.demo]\npath=\"../module\"\n[theme]\nmodule=\"demo\"\n[typst.fonts]\nsystem=false\n[build.minify]\nhtml=false\ncss=false\njavascript=false\n{extra}"
+                        "[site]\nbase-path=\"/notes/\"\n[modules.demo]\npath=\"../module\"\n[build]\nentry={{ module=\"demo\" }}\n[typst.fonts]\nsystem=false\n[build.minify]\nhtml=false\ncss=false\njavascript=false\n{extra}"
                     ),
                 );
             }
@@ -1078,7 +665,7 @@ footer = "footer.typ"
                     .expect_err("the build must fail")
             }
             fn asset(&self, path: &str) -> String {
-                fs::read_to_string(self.root.join("public/_modules/demo").join(path)).unwrap()
+                fs::read_to_string(self.root.join("public/_tola-modules/demo").join(path)).unwrap()
             }
             fn develop(&self) -> (ResolvedSiteConfig, BuildSession) {
                 let config = self.loaded();
@@ -1100,19 +687,19 @@ footer = "footer.typ"
         #[test]
         fn disabled_assets_keep_library_available() {
             let project = Project::new();
-            project.config("[modules.demo.assets]\nenabled=false\ninclude=[\"scripts\"]\n[modules.demo.assets.replace]\n\"style.css\"=\"missing.css\"\n");
+            project.config("[modules.demo.assets]\nenable=false\n[modules.demo.assets.replace]\n\"style.css\"=\"missing.css\"\n");
             project.build();
             assert!(project.html().contains("Library available"));
-            assert!(!project.root.join("public/_modules/demo").exists());
+            assert!(!project.root.join("public/_tola-modules/demo").exists());
         }
 
         #[test]
         fn selected_assets_publish_replacements() {
             let project = Project::new();
             write(&project.root, "overrides/custom.css", "project-style");
-            project.config("[assets]\ncache-busting=true\n[modules.demo.assets]\ninclude=[\"style.css\",\"scripts\"]\nexclude=[\"scripts/legacy.js\"]\n[modules.demo.assets.replace]\n\"style.css\"=\"overrides/custom.css\"\n");
+            project.config("[assets]\ncache-busting=true\n[modules.demo.assets.replace]\n\"style.css\"=\"overrides/custom.css\"\n");
             project.build();
-            let output = project.root.join("public/_modules/demo");
+            let output = project.root.join("public/_tola-modules/demo");
             assert_eq!(
                 fs::read_to_string(output.join("style.css")).unwrap(),
                 "project-style"
@@ -1127,29 +714,27 @@ footer = "footer.typ"
             for text in [
                 "style-input: project-style",
                 "script-input: main-script",
-                "/notes/_modules/demo/style.css?h=",
-                "/notes/_modules/demo/scripts/main.js?h=",
+                "/notes/_tola-modules/demo/style.css?h=",
+                "/notes/_tola-modules/demo/scripts/main.js?h=",
             ] {
                 assert!(html.contains(text), "{text}: {html}");
             }
         }
 
         #[test]
-        fn empty_include_rejects_bad_replacement() {
+        fn disabled_replacement_is_skipped_and_unknown_asset_is_rejected() {
             let project = Project::new();
-            write(&project.root, "custom.css", "replacement");
-            project.config("[modules.demo.assets]\ninclude=[]\n");
+            project.config("[modules.demo.assets.replace]\n\"scripts/legacy.js\"=\"missing.js\"\n");
             project.build();
-            assert!(project.html().contains("Library available"));
-            assert!(!project.root.join("public/_modules/demo/style.css").exists());
-            for extra in [
-                "[modules.demo.assets]\ninclude=[]\n[modules.demo.assets.replace]\n\"style.css\"=\"custom.css\"\n",
-                "[modules.demo.assets]\nexclude=[\"style.css\"]\n[modules.demo.assets.replace]\n\"style.css\"=\"custom.css\"\n",
-                "[modules.demo.assets.replace]\n\"missing.css\"=\"custom.css\"\n",
-            ] {
-                project.config(extra);
-                project.build_error();
-            }
+            assert!(
+                !project
+                    .root
+                    .join("public/_tola-modules/demo/scripts/legacy.js")
+                    .exists()
+            );
+
+            project.config("[modules.demo.assets.replace]\n\"missing.css\"=\"custom.css\"\n");
+            project.build_error();
         }
 
         #[test]
@@ -1166,20 +751,32 @@ footer = "footer.typ"
         }
 
         #[test]
-        fn excluded_invalid_name_does_not_block() {
+        fn disabled_exact_file_takes_over_invalid_tree_name() {
             let project = Project::new();
-            write(
-                &project.module,
-                "assets/scripts/bad#name.js",
-                "not published",
+            write(&project.module, "assets/scripts/bad#name.js", "disabled");
+            let manifest = project.module.join("tola-module.toml");
+            let source = fs::read_to_string(&manifest).unwrap().replace(
+                "files=[",
+                "files=[{ source=\"assets/scripts/bad#name.js\", url=\"/scripts/ignored.js\", enable=false }, ",
             );
-            project.config("[modules.demo.assets]\ninclude=[\"style.css\"]\n");
+            fs::write(manifest, source).unwrap();
             project.build();
-            assert!(project.root.join("public/_modules/demo/style.css").exists());
+            assert!(
+                project
+                    .root
+                    .join("public/_tola-modules/demo/style.css")
+                    .exists()
+            );
             assert!(
                 !project
                     .root
-                    .join("public/_modules/demo/scripts/bad#name.js")
+                    .join("public/_tola-modules/demo/scripts/ignored.js")
+                    .exists()
+            );
+            assert!(
+                !project
+                    .root
+                    .join("public/_tola-modules/demo/scripts/bad#name.js")
                     .exists()
             );
         }
@@ -1211,7 +808,7 @@ footer = "footer.typ"
                     fs::read_to_string(
                         project
                             .root
-                            .join(format!("public/_modules/{alias}/style.css"))
+                            .join(format!("public/_tola-modules/{alias}/style.css"))
                     )
                     .unwrap(),
                     "module-style"
@@ -1251,7 +848,8 @@ footer = "footer.typ"
         use crate::cancellation::BuildCancellation;
         use crate::config::ResolvedSiteConfig;
         use crate::config::loading::{BuildOverrides, load_site_config};
-        use crate::{BuildResources, BuildSession, InputScope, modules};
+        use crate::{BuildResources, BuildSession, modules};
+        use tola_input::InputScope;
 
         struct Project {
             _workspace: tempfile::TempDir,
@@ -1276,20 +874,15 @@ footer = "footer.typ"
                     &module,
                     "tola-module.toml",
                     r#"
-        name = "forester"
-        version = "1.0.0"
-        summary = "An independently stored notebook theme"
         [typst]
         entry = "lib.typ"
-        [site]
+        [build]
         entry = "site.typ"
-        [options]
-        schema = "options.typ"
-        export = "schema"
         [assets]
-        directory = "assets"
-        [slots]
-        footer = "components/footer.typ"
+        trees = [{ source = "assets", url-prefix = "/" }]
+        [options]
+        show-footer = true
+        labels = ["Default label"]
         [queries.nodes]
         entry = "model.typ"
         label = "theme-acceptance-nodes"
@@ -1313,16 +906,6 @@ footer = "footer.typ"
                     "helper.typ",
                     r#"#let helper-marker = read("data.txt").trim()"#,
                 );
-                write(
-                    &module,
-                    "options.typ",
-                    r#"#import "@tola/schema:0.0.0" as s
-        #let schema = s.schema((
-          show-footer: s.optional(bool, default: true),
-          labels: s.optional(s.array-of(str), default: ("Default label",)),
-        ))
-        "#,
-                );
                 write(&module, "components/footer.typ", "Default module footer.");
                 write(
                     &module,
@@ -1340,15 +923,13 @@ footer = "footer.typ"
                     &module,
                     "site.typ",
                     r#"#import "@tola/source:0.0.0": all-sources
-        #import "@tola/address:0.0.0": asset-url
         #import "lib.typ": helper-marker, package-marker, source-content, module-settings
         #document("index.html", format: "html")[
-          #html.elem("link", attrs: (rel: "stylesheet", href: asset-url(module-settings.asset-prefix + "/style.css")))
+          #html.elem("link", attrs: (rel: "stylesheet", href: module-settings.assets.urls.at("style.css")))
           #helper-marker / #package-marker
           Labels count: #module-settings.options.labels.len()
-          Distribution: #module-settings.package / #module-settings.version
           #for source in all-sources() { source-content(source) }
-          #if module-settings.options.show-footer { include module-settings.slots.footer }
+          #if module-settings.options.show-footer { include "components/footer.typ" }
         ]
         "#,
                 );
@@ -1364,8 +945,6 @@ footer = "footer.typ"
           relative: helper-marker,
           absolute: package-marker,
           alias: module-settings.name,
-          distribution: module-settings.package,
-          version: module-settings.version,
           options: module-settings.options,
         )))<theme-acceptance-nodes>
         "#,
@@ -1396,8 +975,8 @@ footer = "footer.typ"
         base-path = "/mounted/"
         [modules.forester]
         path = "../forester"
-        [theme]
-        module = "forester"
+        [build]
+        entry = {{ module = "forester" }}
         [typst.fonts]
         system = false
         {extra}
@@ -1451,7 +1030,7 @@ footer = "footer.typ"
                 "Project body marker.",
                 "Default module footer.",
                 "Labels count: 1",
-                "/mounted/_modules/forester/style.css",
+                "/mounted/_tola-modules/forester/style.css",
             ] {
                 assert!(html.contains(expected), "{expected}: {html}");
             }
@@ -1459,7 +1038,7 @@ footer = "footer.typ"
             assert!(!project.root.join("site.typ").exists());
             assert!(!project.root.join("theme").exists());
             let stylesheet =
-                fs::read_to_string(project.root.join("public/_modules/forester/style.css"))
+                fs::read_to_string(project.root.join("public/_tola-modules/forester/style.css"))
                     .unwrap();
             assert!(stylesheet.contains("body") && stylesheet.contains("color"));
         }
@@ -1467,17 +1046,25 @@ footer = "footer.typ"
         #[test]
         fn private_query_keeps_project_paths() {
             let project = Project::new();
+            // The query cannot assume before-build has produced the declared asset tree.
+            fs::remove_dir_all(project.module.join("assets")).unwrap();
+            let model = project.module.join("model.typ");
+            let source = fs::read_to_string(&model).unwrap().replace(
+                "options: module-settings.options,",
+                "options: module-settings.options, assets-ready: module-settings.assets != none,",
+            );
+            fs::write(model, source).unwrap();
             project.configure(
-                r#"[[build.hooks.before-build]]
+                r#"[[hooks.before-build]]
         name = "must-not-run-for-a-query"
-        command = ["this-module-test-hook-must-never-be-spawned"]
+        argv = ["this-module-test-hook-must-never-be-spawned"]
         "#,
             );
             let config = Arc::new(project.config().unwrap());
-            let resolved = super::resolved_modules(
+            let resolved = super::loaded_modules(
                 config.get_root(),
                 config.modules(),
-                crate::inputs::InputMode::new(InputScope::Offline, false),
+                tola_input::InputMode::new(InputScope::Offline, false),
             )
             .unwrap();
             let module = &resolved["forester"];
@@ -1498,8 +1085,7 @@ footer = "footer.typ"
             assert_eq!(row["relative"], "Relative module data");
             assert_eq!(row["absolute"], "Absolute module data");
             assert_eq!(row["alias"], "forester");
-            assert_eq!(row["distribution"], "forester");
-            assert_eq!(row["version"], "1.0.0");
+            assert_eq!(row["assets-ready"], false);
             assert_eq!(row["options"]["show-footer"], true);
             assert_eq!(
                 row["options"]["labels"],
@@ -1519,18 +1105,18 @@ footer = "footer.typ"
             let project = Project::new();
             project.configure("[modules.another]\npath = '../forester'\n");
             let config = project.config().unwrap();
-            let resolved = super::resolved_modules(
+            let resolved = super::loaded_modules(
                 config.get_root(),
                 config.modules(),
-                crate::inputs::InputMode::new(InputScope::Offline, false),
+                tola_input::InputMode::new(InputScope::Offline, false),
             )
             .unwrap();
             assert_eq!(resolved["forester"].root, resolved["another"].root);
             assert!(
-                super::resolved_modules(
+                super::loaded_modules(
                     config.get_root(),
                     config.modules(),
-                    crate::inputs::InputMode::new(InputScope::Pure, false)
+                    tola_input::InputMode::new(InputScope::Pure, false)
                 )
                 .is_err()
             );
@@ -1557,75 +1143,12 @@ footer = "footer.typ"
         }
 
         #[test]
-        fn footer_override_keeps_project_root() {
-            let project = Project::new();
-            write(
-                &project.root,
-                "overrides/footer.typ",
-                "#read(\"label.txt\")",
-            );
-            write(
-                &project.root,
-                "overrides/label.txt",
-                "Project footer override.",
-            );
-            write(
-                &project.module,
-                "overrides/footer.typ",
-                "WRONG MODULE FOOTER",
-            );
-            project.configure("[modules.forester.overrides]\nfooter = 'overrides/footer.typ'\n");
-            project.build().unwrap();
-            let html = project.html();
-            assert!(html.contains("Project footer override."), "{html}");
-            assert!(!html.contains("Default module footer."), "{html}");
-            assert!(!html.contains("WRONG MODULE FOOTER"), "{html}");
-        }
-
-        #[test]
-        fn theme_configuration_errors_name_their_cause() {
-            for (extra, needles) in [
-                (
-                    "[build]\nentry = 'custom.typ'\n",
-                    ["entry", "theme"].as_slice(),
-                ),
-                (
-                    "[modules.forester.overrides]\nmisspelled = 'overrides/footer.typ'\n",
-                    ["misspelled"].as_slice(),
-                ),
-            ] {
-                let project = Project::new();
-                write(
-                    &project.root,
-                    "custom.typ",
-                    "#document(\"index.html\")[User driver]",
-                );
-                write(&project.root, "overrides/footer.typ", "User footer");
-                project.configure(extra);
-                let error = project
-                    .config()
-                    .and_then(|config| {
-                        crate::modules::resolve_theme(
-                            &config,
-                            crate::inputs::InputMode::new(InputScope::Offline, false),
-                            &Default::default(),
-                        )
-                    })
-                    .expect_err("the theme configuration must be rejected");
-                let message = format!("{error:#}");
-                for needle in needles {
-                    assert!(message.contains(needle), "{message}");
-                }
-            }
-        }
-
-        #[test]
         fn theme_assets_hit_collision_checks() {
             let project = Project::new();
             let entry = project.module.join("site.typ");
             let mut source = fs::read_to_string(&entry).unwrap();
             source.push_str(
-                "\n#asset(\"_modules/forester/style.css\", \"Conflicting stylesheet\")\n",
+                "\n#asset(\"_tola-modules/forester/style.css\", \"Conflicting stylesheet\")\n",
             );
             fs::write(entry, source).unwrap();
             let error = project.build_error();
@@ -1642,10 +1165,10 @@ footer = "footer.typ"
                 .replace("../forester", "../missing-forester");
             fs::write(&config_path, source).unwrap();
             let failure = project.config().and_then(|config| {
-                super::resolved_modules(
+                super::loaded_modules(
                     config.get_root(),
                     config.modules(),
-                    crate::inputs::InputMode::new(InputScope::Offline, false),
+                    tola_input::InputMode::new(InputScope::Offline, false),
                 )
                 .map_err(anyhow::Error::new)
             });

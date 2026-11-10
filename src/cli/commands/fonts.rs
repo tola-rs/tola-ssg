@@ -4,9 +4,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use serde::Serialize;
-use tola_build::InputScope;
 use tola_build::font_failure;
 use tola_diagnostic::DiagnosticError;
+use tola_input::InputScope;
 use tola_typst::prelude::{CompilerFont, CompilerFontInput, FontLoadError, FontOptions, FontStore};
 use typst::text::{FontAxis, FontStyle, StandardAxes};
 

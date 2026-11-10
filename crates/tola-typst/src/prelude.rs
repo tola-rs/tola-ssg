@@ -47,6 +47,8 @@ pub use crate::world::font::{
 
 pub use crate::world::library::{GLOBAL_LIBRARY, create_library_with_inputs};
 
+pub use crate::host::{TypstHost, TypstHostParts};
+
 pub use crate::world::{
     SourceBoundary, SourceRefusal, TypstWorld, WorldBuildError, WorldBuilder, normalize_path,
 };

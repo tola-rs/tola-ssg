@@ -6,8 +6,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::cancellation::BuildCancellation;
-use crate::filesystem::open_regular_file;
-use crate::filesystem::{FilesystemSourceIdentity, SourceOverrides};
+use crate::filesystem::SourceOverrides;
+use tola_fs::open_regular_file;
+use tola_input::FilesystemSourceIdentity;
 use tola_typst::ContentDigest;
 
 use super::IconError;
@@ -204,7 +205,7 @@ fn read_chunks(
     ensure_collection_size(path, length)?;
     let mut consumed = 0u64;
     let mut overflow = None;
-    crate::filesystem::read_chunks(reader, cancellation, |chunk| {
+    tola_input::read_chunks(reader, cancellation.flag(), |chunk| {
         consumed += chunk.len() as u64;
         if let Err(error) = ensure_collection_size(path, consumed) {
             overflow = Some(error);
@@ -215,11 +216,13 @@ fn read_chunks(
     })
     .map(|_| ())
     .map_err(|error| match error {
-        crate::filesystem::FileReadError::Io(source) => IconError::Read {
+        tola_input::FileReadError::Io(source) => IconError::Read {
             path: path.to_path_buf(),
             source,
         },
-        crate::filesystem::FileReadError::Cancelled(cancelled) => IconError::Cancelled(cancelled),
+        tola_input::FileReadError::Cancelled(_) => {
+            IconError::Cancelled(crate::cancellation::BuildCancelled)
+        }
     })?;
     if let Some(error) = overflow {
         return Err(error);
@@ -281,11 +284,12 @@ pub(super) fn svg_paths(
                 path: path.clone(),
                 source,
             })?;
-            let linked = crate::filesystem::automatic_path_is_link_like(&path, &file_type)
-                .map_err(|source| IconError::Read {
+            let linked = tola_fs::entry_is_link_like(&entry, &file_type).map_err(|source| {
+                IconError::Read {
                     path: path.clone(),
                     source,
-                })?;
+                }
+            })?;
             if linked {
                 return Err(IconError::LinkedDirectoryMember { path });
             }

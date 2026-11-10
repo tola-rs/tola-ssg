@@ -25,7 +25,7 @@ pub use path::{
     OutputPath, OutputPathError, PortablePathError, RESERVED_ROOT, SiteReference, UrlPath,
     UrlPathError, asset_directory_index_alias, asset_output_from_url, asset_url_from_output,
     browser_location, portable_collision_key, portable_key_is_below, portable_key_is_reserved,
-    portable_keys_overlap, route_for_output,
+    portable_keys_overlap, route_for_output, validate_portable_segment,
 };
 pub use route::{RouteSegmentError, slugify_segments};
 

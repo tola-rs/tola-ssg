@@ -10,30 +10,20 @@ use tola_address::{OutputPath, SiteUrlMount, browser_url, route_for_output};
 use typst::diag::{At, SourceResult};
 use typst::engine::Engine;
 use typst::foundations::{Array, Dict, Func, IntoValue, Module, NativeFunc, Scope, Str, Value};
-use typst::syntax::{RootedPath, Span};
+use typst::syntax::Span;
 use typst::utils::LazyHash;
 
 use crate::protocol::{
-    ASSET_ORIGINS_MEMBER, ASSET_URLS_MEMBER, HOST_MODULE, MODULE_VALIDATION_MEMBER, MODULES_MEMBER,
-    SOURCE_ORIGINS_MEMBER, SOURCE_RECORDS_BY_FILE_MEMBER, SOURCE_RECORDS_MEMBER,
+    ASSET_ORIGINS_MEMBER, ASSET_URLS_MEMBER, HOST_MODULE, MODULES_MEMBER, SOURCE_ORIGINS_MEMBER,
+    SOURCE_RECORDS_BY_FILE_MEMBER, SOURCE_RECORDS_MEMBER,
 };
-
-/// Private inputs for one module's options validation pass.
-pub struct ModuleValidation {
-    /// Package-rooted path of the schema being evaluated.
-    pub schema: RootedPath,
-    /// Only this module's unvalidated input, passed to the private wrapper.
-    pub options: Dict,
-}
 
 /// The site-specific values one compilation is bound to; every field takes part in reuse.
 pub struct HostInputs {
     /// The `@tola/site` values the engine resolved from the site configuration.
     pub site: Dict,
-    /// Validated module records keyed by the site's module aliases.
+    /// Configured module records keyed by the site's module aliases.
     pub modules: Dict,
-    /// Present only when evaluating an options schema, before module records exist.
-    pub module_validation: Option<ModuleValidation>,
     /// Final configured asset URLs, keyed by the declared site-root URL.
     pub asset_urls: Dict,
     /// Site-root source paths for exact-file asset declarations, keyed by declared URL.
@@ -80,12 +70,6 @@ impl SiteLibrary {
             inputs.source_origins.into_value(),
         );
         values.insert(MODULES_MEMBER.into(), inputs.modules.into_value());
-        if let Some(validation) = inputs.module_validation {
-            let mut data = Dict::new();
-            data.insert("schema".into(), validation.schema.into_value());
-            data.insert("options".into(), validation.options.into_value());
-            values.insert(MODULE_VALIDATION_MEMBER.into(), data.into_value());
-        }
         values.insert(ASSET_URLS_MEMBER.into(), inputs.asset_urls.into_value());
         values.insert(
             ASSET_ORIGINS_MEMBER.into(),
@@ -248,12 +232,7 @@ fn sys_inputs<'a>(engine: &Engine<'a>) -> Option<&'a Dict> {
     Some(inputs)
 }
 
-/// Whether this library is evaluating an options schema before modules are validated.
-pub(super) fn in_module_validation(engine: &Engine<'_>) -> bool {
-    sys_inputs(engine).is_some_and(|inputs| inputs.get(MODULE_VALIDATION_MEMBER).is_ok())
-}
-
-/// Validated module records bound to this compilation.
+/// Configured module records bound to this compilation.
 pub(super) fn module_records<'a>(engine: &Engine<'a>) -> Option<&'a Dict> {
     dict_member(engine, MODULES_MEMBER)
 }

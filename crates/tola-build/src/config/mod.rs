@@ -9,12 +9,12 @@ mod schema;
 pub mod section;
 mod source;
 
-pub(crate) use resolved::{EntryOrigin, GeneratedExclusion};
+pub(crate) use resolved::GeneratedExclusion;
 pub use resolved::{ResolvedSiteConfig, VendorRootError};
 pub use schema::{SiteConfigSchema, field_documentation, field_paths, field_values, section_help};
 pub use source::{ConfigSource, ParsedConfig};
 
-pub use section::build::{BuildSectionConfig, ReferenceLevel};
+pub use section::build::{BuildEntry, BuildSectionConfig, ReferenceLevel, ResolvedBuildConfig};
 pub use section::{AssetsConfig, FontsConfig, IconCollectionSource, IconsConfig, Sha256Digest};
 
 pub use tola_config::{
@@ -303,7 +303,7 @@ path = "icons"
         let error = SiteConfigSchema::parse(
             Path::new("tola.toml"),
             &content,
-            crate::resources::InputScope::Online,
+            tola_input::InputScope::Online,
         )
         .unwrap_err();
         let message = error.to_string();
@@ -323,11 +323,11 @@ path = "icons"
 
     #[test]
     fn unknown_hook_field_lists_allowed_fields() {
-        let content = config_source("[build.hooks]\nunknown_stage = true");
+        let content = config_source("[hooks]\nunknown_stage = true");
         let error = SiteConfigSchema::parse(
             Path::new("tola.toml"),
             &content,
-            crate::resources::InputScope::Online,
+            tola_input::InputScope::Online,
         )
         .unwrap_err();
         let diagnostic = &attached_diagnostics(&error)[0];
@@ -469,7 +469,7 @@ path = "icons"
 
         let directory = tempfile::TempDir::new().unwrap();
         let root = directory.path();
-        let internal = root.join(crate::filesystem::INTERNAL_DIR);
+        let internal = root.join(tola_input::INTERNAL_DIR);
         std::fs::create_dir_all(internal.join("icons")).unwrap();
         symlink(internal.join("icons"), root.join("icons")).unwrap();
         let config_path = root.join("tola.toml");

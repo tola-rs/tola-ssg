@@ -300,8 +300,7 @@ fn failure_chain(error: &anyhow::Error) -> String {
     let mut message = String::new();
     for cause in error.chain() {
         if (cause.is::<tola_diagnostic::DiagnosticError>() && cause.source().is_some())
-            || (cause.is::<tola_build::modules::ModuleResolutionError>()
-                && cause.source().is_some())
+            || (cause.is::<tola_module::ModuleLoadError>() && cause.source().is_some())
             || (cause.is::<tola_build::modules::query::QueryError>() && cause.source().is_some())
             || cause.is::<tola_typst::BundleCompileFailure>()
             || cause.is::<tola_typst::CompileFailure>()

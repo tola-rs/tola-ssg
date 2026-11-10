@@ -72,7 +72,7 @@ impl BuildReport {
                 Resource::Asset { route } => json!({
                     "url": url.as_str(),
                     "kind": "asset",
-                    "source": route.source.as_deref().map(|path| crate::filesystem::display_path(path, root)),
+                    "source": route.source.as_deref().map(|path| tola_diagnostic::display_path(path, root)),
                 }),
             })
         }).collect::<Result<Vec<_>, BuildCancelled>>()?);

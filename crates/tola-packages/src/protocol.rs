@@ -13,9 +13,6 @@ pub const HOST_MODULE: &str = "__tola";
 /// The `sys.inputs` member holding module records keyed by the project alias.
 pub const MODULES_MEMBER: &str = "__tola_modules";
 
-/// Private options-validation input; this is a protocol key, not a security boundary.
-pub const MODULE_VALIDATION_MEMBER: &str = "__tola_module_validation";
-
 /// The `sys.inputs` member holding the ordered source records.
 pub const SOURCE_RECORDS_MEMBER: &str = "__tola_source_records";
 

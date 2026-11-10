@@ -7,8 +7,8 @@ use serde_json::{Value, json};
 use crate::cancellation::BuildCancellation;
 use crate::config::ResolvedSiteConfig;
 use crate::config::section::IconCollectionSource;
-use crate::filesystem::display_path;
 use crate::resources::BuildResources;
+use tola_diagnostic::display_path;
 
 /// Project configured icon namespaces, or each name in the selected namespace.
 ///

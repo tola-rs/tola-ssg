@@ -5,10 +5,10 @@ use std::path::Path;
 use anyhow::{Context, Result, ensure};
 use tola_build::cancellation::BuildCancellation;
 use tola_build::config::{
-    AssetsConfig, BuildSectionConfig, FontsConfig, IconsConfig, ResolvedSiteConfig,
-    SiteConfigSchema, section::VendorConfig,
+    AssetsConfig, FontsConfig, IconsConfig, ResolvedSiteConfig, SiteConfigSchema,
+    section::{VendorConfig, build::HooksConfig},
 };
-use tola_build::filesystem::{layout, normalize_existing_prefix};
+use tola_input::{layout, normalize_existing_prefix};
 
 use crate::cli::output::CommandOutput;
 use crate::terminal::{display_path, display_path_within};
@@ -220,7 +220,10 @@ pub(crate) fn check_file(log: Option<&Path>, path: &Path) -> Result<()> {
 
 /// The configuration sections whose declared paths a log destination must stay clear of.
 pub(crate) struct SiteInputSections<'a> {
-    build: &'a BuildSectionConfig,
+    entry: Option<&'a Path>,
+    content_dir: &'a Path,
+    publish_dir: &'a Path,
+    hooks: &'a HooksConfig,
     assets: &'a AssetsConfig,
     fonts: &'a FontsConfig,
     icons: &'a IconsConfig,
@@ -231,7 +234,11 @@ impl<'a> SiteInputSections<'a> {
     /// The sections of a configuration that has been resolved into a site.
     pub(crate) fn from_config(config: &'a ResolvedSiteConfig) -> Self {
         Self {
-            build: config.build(),
+            entry: (!config.build().entry.as_os_str().is_empty())
+                .then_some(config.build().entry.as_path()),
+            content_dir: &config.build().content_dir,
+            publish_dir: &config.build().publish_dir,
+            hooks: config.hooks(),
             assets: config.assets(),
             fonts: config.fonts(),
             icons: config.icons(),
@@ -242,7 +249,10 @@ impl<'a> SiteInputSections<'a> {
     /// The sections of a configuration the command has not resolved yet.
     pub(crate) fn from_schema(schema: &'a SiteConfigSchema) -> Self {
         Self {
-            build: &schema.build,
+            entry: schema.build.entry.project_path(),
+            content_dir: &schema.build.content_dir,
+            publish_dir: &schema.build.publish_dir,
+            hooks: &schema.hooks,
             assets: &schema.assets,
             fonts: &schema.typst.fonts,
             icons: &schema.icons,
@@ -264,7 +274,10 @@ pub(crate) fn check_site(
     let log = normalize_existing_prefix(log);
     let log = log.as_path();
     let SiteInputSections {
-        build,
+        entry,
+        content_dir,
+        publish_dir,
+        hooks,
         assets,
         fonts,
         icons,
@@ -276,8 +289,7 @@ pub(crate) fn check_site(
         &root.join(tola_build::filesystem::SITE_BUILD_LOCK_FILE),
         Some(root),
     )?;
-    if let Some(workspace) = tola_build::filesystem::swap_workspace(&root.join(&build.publish_dir))
-    {
+    if let Some(workspace) = tola_build::filesystem::swap_workspace(&root.join(publish_dir)) {
         check_tree_within(log, &workspace, Some(root))?;
     }
     if let Some(path) = vendor.path.as_deref()
@@ -285,7 +297,7 @@ pub(crate) fn check_site(
     {
         check_tree_within(log, &workspace, Some(root))?;
     }
-    for file in std::iter::once(build.entry.as_path()).chain(assets.file_sources()) {
+    for file in entry.into_iter().chain(assets.file_sources()) {
         check_file_within(Some(log), &root.join(file), Some(root))?;
     }
     for collection in icons.collections.values() {
@@ -300,15 +312,14 @@ pub(crate) fn check_site(
             _ => {}
         }
     }
-    for tree in [&build.content_dir, &build.publish_dir]
+    for tree in [content_dir, publish_dir]
         .into_iter()
-        .map(std::path::PathBuf::as_path)
         .chain(fonts.paths.iter().map(std::path::PathBuf::as_path))
         .chain(assets.tree_sources())
     {
         check_tree_within(log, &root.join(tree), Some(root))?;
     }
-    for hook in &build.hooks.before_build {
+    for hook in &hooks.before_build {
         for generated in &hook.generates {
             check_tree_within(log, &root.join(generated), Some(root))?;
         }

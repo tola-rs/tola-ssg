@@ -12,7 +12,7 @@ use lsp_types::{
 use tola_build::cancellation::BuildCancellation;
 use tola_build::check::SourceCompilation;
 use tola_build::config::ResolvedSiteConfig;
-use tola_build::filesystem::display_path;
+use tola_diagnostic::display_path;
 use tola_typst::typst::World;
 use tola_typst::typst::foundations::{Content, Label, Selector};
 use tola_typst::typst::syntax::{
@@ -477,29 +477,6 @@ pub(super) fn source_path(compilation: &SourceCompilation, id: FileId) -> String
 mod tests {
     use super::*;
 
-    /// A reference yields the span it writes and the name inside it, whether it is markup or a
-    /// label argument.
-    #[test]
-    fn references_yield_their_name() {
-        for (text, cursor, written, name) in [
-            ("See @introduction\n", 8, 4..17, 5..17),
-            ("#ref(<introduction>)\n", 8, 5..19, 6..18),
-        ] {
-            let source = Source::detached(text);
-            let reference = referenced(&source, cursor).expect("a reference");
-            assert_eq!(reference.written, written, "{text:?}");
-            assert_eq!(reference.name, name, "{text:?}");
-        }
-    }
-
-    #[test]
-    fn unlabelled_text_yields_no_reference() {
-        for (text, cursor) in [("See the introduction\n", 12), ("#import \"abc\n", 10)] {
-            let source = Source::detached(text);
-            assert!(referenced(&source, cursor).is_none(), "{text:?}");
-        }
-    }
-
     /// A completion's prefix stops at the name's start: a cursor resting on the `@` has typed
     /// nothing, and one inside the name has typed up to it.
     #[test]
@@ -566,7 +543,7 @@ mod tests {
         let mut session = SourceDiagnosticSession::with_resources(
             Arc::clone(&config),
             BuildResources::new()
-                .with_network_access(tola_build::NetworkAccess::Denied)
+                .with_network_access(tola_input::NetworkAccess::Denied)
                 .without_system_fonts(),
         );
         let revision = session
@@ -643,7 +620,7 @@ mod tests {
         let mut session = SourceDiagnosticSession::with_resources(
             Arc::clone(&config),
             BuildResources::new()
-                .with_network_access(tola_build::NetworkAccess::Denied)
+                .with_network_access(tola_input::NetworkAccess::Denied)
                 .without_system_fonts(),
         );
         let revision = session

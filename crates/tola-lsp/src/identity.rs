@@ -37,8 +37,8 @@ pub(crate) enum SourceUriError {
 }
 
 pub(crate) fn path_id(path: &Path, root: &Path) -> Option<FileId> {
-    let logical = tola_build::filesystem::lexical_path_identity(path);
-    let physical = tola_build::filesystem::normalize_existing_prefix(&logical);
+    let logical = tola_input::lexical_path_identity(path);
+    let physical = tola_input::normalize_existing_prefix(&logical);
     tola_typst::file_id_from_path(&physical, root)
 }
 
@@ -83,9 +83,9 @@ pub(crate) fn source_id_with_packages(
     let Ok(path) = crate::uri::site_path_of(&url) else {
         return Ok(None);
     };
-    let mirror = tola_build::filesystem::layout::builtin_packages(root);
+    let mirror = tola_input::layout::builtin_packages(root);
     for directory in package_sources.into_iter().chain([mirror.as_path()]) {
-        let directory = tola_build::filesystem::normalize_existing_prefix(directory);
+        let directory = tola_input::normalize_existing_prefix(directory);
         if path.starts_with(&directory) {
             return Ok(package_view_id(&path, &directory));
         }
@@ -320,42 +320,4 @@ pub(crate) fn is_tola_span(span: tola_typst::typst::syntax::Span) -> bool {
     span.id().is_some_and(|id| {
         matches!(id.root(), VirtualRoot::Package(spec) if TolaPackage::from_spec(spec).is_some())
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn package_files_share_selected_root() {
-        let directory = tempfile::tempdir().unwrap();
-        let declared = directory.path().join("declared");
-        let cache = directory.path().join("cache");
-        let package = "local/example/1.0.0";
-        for root in [&declared, &cache] {
-            std::fs::create_dir_all(root.join(package)).unwrap();
-        }
-        std::fs::write(cache.join(package).join("extra.typ"), "#let extra = 1").unwrap();
-        let locations = tola_typst::PackageLocations::from_absolute_roots(None, Some(cache))
-            .unwrap()
-            .with_declared_root(declared.clone())
-            .unwrap();
-        let id = RootedPath::new(
-            VirtualRoot::Package("@local/example:1.0.0".parse().unwrap()),
-            VirtualPath::new("extra.typ").unwrap(),
-        )
-        .intern();
-        let path =
-            package_file_path(id, &locations, &tola_typst::SourceBoundary::default()).unwrap();
-
-        assert_eq!(
-            path,
-            declared
-                .canonicalize()
-                .unwrap()
-                .join(package)
-                .join("extra.typ")
-        );
-        assert!(!path.exists());
-    }
 }

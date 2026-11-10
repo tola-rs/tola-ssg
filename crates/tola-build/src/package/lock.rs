@@ -13,7 +13,7 @@ use tola_typst::{
     PackageVerificationError, PackageVerifier,
 };
 
-use crate::inputs::{
+use tola_input::{
     InputLock, InputMode, LockError, LockedPackage, Sha256Digest, TreeHashError, tree_sha256,
 };
 
@@ -225,18 +225,18 @@ pub fn write_package_lock(
 
 /// Verify every package root this build read against the lock.
 ///
-/// Only attempts that require a lock check anything: `--offline`, `--pure`, and `--locked`
-/// builds. A resolving build records what it read instead.
+/// Existing package versions must retain their locked bytes. A build that may write the lock
+/// can introduce a new explicitly imported version, but cannot silently replace a known one.
 pub fn verify_package_reads(
     reads: &[PackageRead],
     lock: &InputLock,
     mode: InputMode,
     site_root: &Path,
 ) -> Result<(), PackageLockError> {
-    if !mode.requires_lock() {
-        return Ok(());
-    }
     for read in reads {
+        if !must_verify(lock, mode, read.package()) {
+            continue;
+        }
         verify_package_root(
             read.package(),
             read.root(),
@@ -248,22 +248,33 @@ pub fn verify_package_reads(
     Ok(())
 }
 
-/// The pre-read check of every selected package root, when this attempt requires a lock.
+/// The pre-read check of every package root whose version is already locked.
 ///
 /// Install it on the resolver's package store so an unverified directory can never supply bytes to
-/// a compilation. A resolving build returns `None`: it records what it reads instead of refusing it.
+/// a compilation. New versions may be recorded when the invocation allows lock writes.
 pub fn verifier(lock: &InputLock, mode: InputMode, site_root: &Path) -> Option<PackageVerifier> {
-    if !mode.requires_lock() {
+    if !mode.requires_lock() && lock.packages.is_empty() {
         return None;
     }
     let lock = lock.clone();
     let site_root = site_root.to_path_buf();
     Some(std::sync::Arc::new(
         move |package: &PackageSpec, root: &Path| {
+            if !must_verify(&lock, mode, package) {
+                return Ok(());
+            }
             verify_package_root(package, root, None, &lock, &site_root)
                 .map_err(|error| PackageVerificationError::new(error.to_string()))
         },
     ))
+}
+
+fn must_verify(lock: &InputLock, mode: InputMode, package: &PackageSpec) -> bool {
+    mode.requires_lock()
+        || lock
+            .packages
+            .get(&package_key(package))
+            .is_some_and(|locked| locked.version == package.version.to_string())
 }
 
 /// Resolve every locked package from the package roots this site reads, verifying the locked tree.
@@ -532,7 +543,7 @@ fn extra_package(path: &Path, packages_root: &Path, site_root: &Path) -> Package
 fn describe_root(root: &Path, tier: Option<PackageTier>, site_root: Option<&Path>) -> String {
     let site_relative = site_root.filter(|site_root| site_holds(root, site_root));
     if let Some(site_root) = site_relative {
-        return format!("`{}`", crate::filesystem::display_path(root, site_root));
+        return format!("`{}`", tola_diagnostic::display_path(root, site_root));
     }
     match tier {
         Some(PackageTier::Declared) => "the declared package root".to_owned(),
@@ -545,8 +556,8 @@ fn describe_root(root: &Path, tier: Option<PackageTier>, site_root: Option<&Path
 /// Whether a package root is inside the site, including when the two are spelled differently.
 fn site_holds(root: &Path, site_root: &Path) -> bool {
     root.starts_with(site_root)
-        || crate::filesystem::normalize_existing_prefix(root)
-            .starts_with(crate::filesystem::normalize_existing_prefix(site_root))
+        || tola_input::normalize_existing_prefix(root)
+            .starts_with(tola_input::normalize_existing_prefix(site_root))
 }
 
 /// The next step for a tree that disagrees with the lock.
@@ -584,7 +595,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::InputScope;
+    use tola_input::InputScope;
 
     fn spec(name: &str, version: &str) -> PackageSpec {
         format!("@{name}:{version}").parse().unwrap()
@@ -616,25 +627,16 @@ mod tests {
         lock.packages
             .insert("@preview/demo".to_owned(), locked("0.1.0", &root));
 
-        assert!(verifier(&lock, mode(InputScope::Online, false), site.path()).is_none());
+        let online = verifier(&lock, mode(InputScope::Online, false), site.path()).unwrap();
         let check = verifier(&lock, mode(InputScope::Pure, false), site.path()).unwrap();
 
         assert!(check(&spec("preview/demo", "0.1.0"), &root).is_ok());
-
-        let error = check(&spec("preview/other", "0.1.0"), &root).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("records no package `@preview/other`"),
-            "{error}"
-        );
+        assert!(online(&spec("preview/demo", "0.1.0"), &root).is_ok());
+        assert!(check(&spec("preview/other", "0.1.0"), &root).is_err());
 
         std::fs::write(root.join("lib.typ"), "= changed").unwrap();
-        let error = check(&spec("preview/demo", "0.1.0"), &root).unwrap_err();
-        let message = error.to_string();
-        assert!(message.contains("does not match `tola.lock`"), "{message}");
-        assert!(message.contains("@preview/demo"), "{message}");
-        assert!(message.contains("preview/demo/0.1.0"), "{message}");
+        assert!(check(&spec("preview/demo", "0.1.0"), &root).is_err());
+        assert!(online(&spec("preview/demo", "0.1.0"), &root).is_err());
     }
 
     #[test]

@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 
 use crate::cancellation::BuildCancellation;
 use crate::filesystem::SourceOverrides;
-use crate::inputs::{IconSource, InputMode, LockedIcon, Sha256Digest};
 use crate::resources::{BuildResources, HttpDownloadError};
+use tola_input::{IconSource, InputMode, LockedIcon, Sha256Digest};
 
 use super::iconify;
 use super::input::{IconFileRead, MAX_COLLECTION_BYTES, read_bounded, read_file};
@@ -74,7 +74,7 @@ fn collection_bytes(request: &RemoteCollection<'_>) -> Result<CollectionBytes, I
             let (bytes, lock) = resolve(request)?;
             let pending_cache = request
                 .mode
-                .may_write_lock()
+                .may_read_cache()
                 .then(|| cache_entry(&request.cache_root, lock.sha256));
             Ok(CollectionBytes {
                 bytes,
@@ -191,7 +191,7 @@ fn locked_bytes(
         source: None,
         pending_cache: request
             .mode
-            .may_write_lock()
+            .may_read_cache()
             .then(|| cache_entry(&request.cache_root, locked.sha256)),
     })
 }
@@ -446,11 +446,10 @@ fn read_cache(request: &RemoteCollection<'_>, path: &Path) -> Result<Option<Vec<
         }
         Ok(_) => {}
     }
-    let mut file =
-        crate::filesystem::open_regular_file(path, false).map_err(|source| IconError::Read {
-            path: path.to_path_buf(),
-            source,
-        })?;
+    let mut file = tola_fs::open_regular_file(path, false).map_err(|source| IconError::Read {
+        path: path.to_path_buf(),
+        source,
+    })?;
     read_bounded(&mut file, path, request.cancellation).map(Some)
 }
 

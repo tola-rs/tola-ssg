@@ -14,9 +14,10 @@ use tola_build::BuildResources;
 use tola_build::cancellation::BuildCancelled;
 use tola_build::check::SourceCompilation;
 use tola_build::config::ResolvedSiteConfig;
-use tola_build::modules::ResolvedModule;
-use tola_build::modules::entities::{Entity, EntityQueryResult};
-use tola_build::modules::semantics::{SemanticKind, SemanticParameter};
+use tola_build::modules::entities::EntityQueryResult;
+use tola_module::entities::Entity;
+use tola_module::module_set::LoadedModule;
+use tola_module::semantics::{SemanticKind, SemanticParameter};
 use tola_typst::typst::World;
 use tola_typst::typst::foundations::{Repr, Str, Value};
 use tola_typst::typst::syntax::ast::AstNode;
@@ -54,7 +55,7 @@ pub(super) struct EntityQuery<'a> {
 
 /// The module query one entity argument belongs to, and the model that proves it.
 struct EntityScope<'a> {
-    module: &'a ResolvedModule,
+    module: &'a LoadedModule,
     query_name: &'a str,
     model: &'a EntityQueryResult,
     compilation: &'a SourceCompilation,
@@ -91,7 +92,7 @@ pub(super) fn respond(mut request: EntityQuery<'_>) -> Result<Option<SourceReply
     {
         return Ok(None);
     }
-    let modules = tola_build::modules::resolve_modules(
+    let modules = tola_build::modules::load_modules(
         site.configuration.get_root(),
         site.configuration.vendor().path.as_deref(),
         site.configuration.modules(),
@@ -230,7 +231,7 @@ impl EntityAnswers {
 /// The answer one entity argument gets: collected, or the reply that ends the request.
 fn answer_argument(
     request: &mut EntityQuery<'_>,
-    modules: &BTreeMap<String, ResolvedModule>,
+    modules: &BTreeMap<String, LoadedModule>,
     scope: &EntityScope<'_>,
     semantics: &mut Semantic<'_>,
     argument: entities::EntityArgument,
@@ -358,7 +359,7 @@ fn definition_ranges(
 fn entity_bindings(
     semantics: &mut Semantic<'_>,
     package: &tola_typst::LocalPackage,
-    roles: &[&tola_build::modules::semantics::SemanticRole],
+    roles: &[&tola_module::semantics::SemanticRole],
 ) -> Result<Vec<EntityBinding>> {
     let mut bindings = Vec::new();
     for role in roles.iter().copied() {
@@ -436,7 +437,7 @@ fn refused_rename(query: &SourceQuery, refusal: NameQueryError) -> Result<Source
 /// The reply one entity argument gets, by the question it asks.
 fn entity_answer(
     request: &mut EntityQuery<'_>,
-    modules: &BTreeMap<String, ResolvedModule>,
+    modules: &BTreeMap<String, LoadedModule>,
     scope: &EntityScope<'_>,
     entity: &Entity,
     selected: &entities::EntityArgument,
@@ -464,7 +465,7 @@ fn entity_answer(
 /// The reply a rename or rename preparation answers.
 fn rename_answer(
     request: &mut EntityQuery<'_>,
-    modules: &BTreeMap<String, ResolvedModule>,
+    modules: &BTreeMap<String, LoadedModule>,
     scope: &EntityScope<'_>,
     entity: &Entity,
     range: Option<lsp_types::Range>,
@@ -546,7 +547,7 @@ fn writable_definition<'a>(
 /// The rename reply, once the proposed text keeps every query's entity identities.
 fn rename_workspace_edit(
     request: &mut EntityQuery<'_>,
-    modules: &BTreeMap<String, ResolvedModule>,
+    modules: &BTreeMap<String, LoadedModule>,
     scope: &EntityScope<'_>,
     entity: &Entity,
     new_name: &str,
@@ -893,7 +894,7 @@ fn entity_sources(
         .collect()
 }
 
-fn query_names(module: &ResolvedModule) -> BTreeSet<&str> {
+fn query_names(module: &LoadedModule) -> BTreeSet<&str> {
     module
         .semantics
         .iter()
@@ -903,10 +904,10 @@ fn query_names(module: &ResolvedModule) -> BTreeSet<&str> {
 
 /// Every configured query except the one the editor selected.
 fn other_queries<'a>(
-    modules: &'a BTreeMap<String, ResolvedModule>,
+    modules: &'a BTreeMap<String, LoadedModule>,
     selected_module: &'a str,
     selected_query: &'a str,
-) -> impl Iterator<Item = (&'a ResolvedModule, &'a str)> + 'a {
+) -> impl Iterator<Item = (&'a LoadedModule, &'a str)> + 'a {
     modules.values().flat_map(move |module| {
         query_names(module)
             .into_iter()
@@ -917,7 +918,7 @@ fn other_queries<'a>(
 
 fn proposed_model(
     request: &EntityQuery<'_>,
-    module: &ResolvedModule,
+    module: &LoadedModule,
     query: &str,
     proposed: &[(PathBuf, Arc<str>)],
 ) -> Result<EntityQueryResult> {
@@ -935,7 +936,7 @@ fn proposed_model(
 /// A shared source does not make configured query namespaces interchangeable.
 fn refuse_shared_definition(
     request: &mut EntityQuery<'_>,
-    modules: &BTreeMap<String, ResolvedModule>,
+    modules: &BTreeMap<String, LoadedModule>,
     scope: &EntityScope<'_>,
     entity: &Entity,
     definition: &Occurrence,
@@ -955,7 +956,7 @@ fn refuse_shared_definition(
         ..
     } = *scope;
     let target = crate::uri::to_site_path(definition.uri.as_str())?;
-    let target = tola_build::filesystem::normalize_existing_prefix(&target);
+    let target = tola_input::normalize_existing_prefix(&target);
     for (module, query) in other_queries(modules, selected_module.name.as_str(), selected_query) {
         let model = request
             .cache
@@ -984,7 +985,7 @@ fn refuse_shared_definition(
         let Ok(path) = crate::uri::to_site_path(uri.as_str()) else {
             continue;
         };
-        if tola_build::filesystem::normalize_existing_prefix(&path) != target {
+        if tola_input::normalize_existing_prefix(&path) != target {
             continue;
         }
         let Ok(source) = compilation.world().source(source_id) else {
@@ -1025,7 +1026,7 @@ fn writable(source: &Source, config: &ResolvedSiteConfig, packages: &PackageAcce
     let path = config
         .get_root()
         .join(source.id().vpath().get_without_slash());
-    let physical = tola_build::filesystem::normalize_existing_prefix(&path);
+    let physical = tola_input::normalize_existing_prefix(&path);
     physical.starts_with(config.get_root()) && packages.boundary.check(&physical).is_ok()
 }
 
@@ -1046,7 +1047,7 @@ mod tests {
     use super::*;
     use crate::query::tests::{QuerySession, marked_cursor};
 
-    const ENTITY_QUERY: &str = "entry=\"model.typ\"\nlabel=\"entities\"\nformat=\"entities\"\n";
+    const ENTITY_QUERY: &str = "entry=\"model.typ\"\nlabel=\"entities\"\nreturns=\"entities\"\n";
 
     fn configure_modules(site: &mut QuerySession, modules: &str) {
         let config = std::fs::read_to_string(site.site.root().join("tola.toml")).unwrap();
@@ -1074,8 +1075,6 @@ mod tests {
             &format!(
                 r#"
 
-name="notes"
-version="1.0.0"
 [typst]
 entry="lib.typ"
 [queries.entities]
@@ -1115,8 +1114,6 @@ query="entities"
                 &format!(
                     r#"
 
-name="{directory}"
-version="1.0.0"
 [typst]
 entry="lib.typ"
 [queries.catalog]
@@ -1341,8 +1338,6 @@ query="catalog"
             &format!(
                 r#"
 
-name="alpha"
-version="1.0.0"
 [typst]
 entry="lib.typ"
 [queries.nodes]
@@ -1377,8 +1372,6 @@ query="nodes"
             &format!(
                 r#"
 
-name="beta"
-version="1.0.0"
 [typst]
 entry="lib.typ"
 [queries.nodes]
@@ -1500,84 +1493,6 @@ query="nodes"
             std::fs::read_to_string(target_path)
                 .unwrap()
                 .contains("sku:α-42")
-        );
-    }
-
-    #[test]
-    fn post_model_reads_share_world() {
-        use crate::compiler::tests::site_configuration;
-        use tola_build::InputScope;
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path();
-        std::fs::create_dir(root.join("content")).unwrap();
-        std::fs::create_dir(root.join("theme")).unwrap();
-        std::fs::write(root.join("theme/tola-module.toml"), "name='notes'\nversion='1.0.0'\n[typst]\nentry='lib.typ'\n[queries.nodes]\nentry='model.typ'\nlabel='nodes'\nformat='entities'\n").unwrap();
-        std::fs::write(
-            root.join("theme/model.typ"),
-            "#metadata(((id: \"ONE\", label: \"One\"),))<nodes>",
-        )
-        .unwrap();
-        std::fs::write(
-            root.join("theme/lib.typ"),
-            "#let settings = json(\"settings.json\")\n#let local(address) = settings.prefix",
-        )
-        .unwrap();
-        let settings = root.join("theme/settings.json");
-        std::fs::write(&settings, r#"{"prefix":"first"}"#).unwrap();
-        let configuration = site_configuration(root, "[modules.notes]\npath='theme'\n");
-        let modules = tola_build::modules::resolve_modules(
-            configuration.get_root(),
-            configuration.vendor().path.as_deref(),
-            configuration.modules(),
-            tola_build::inputs::InputMode::new(InputScope::Offline, true),
-            &Default::default(),
-        )
-        .unwrap();
-        let resources = BuildResources::new()
-            .with_input_scope(InputScope::Offline)
-            .without_system_fonts();
-        let cancellation = tola_build::cancellation::BuildCancellation::default();
-        let mut cache = EntityQueries::default();
-        cache.prepare(&configuration, 1, InputScope::Offline, &[], &modules);
-        let first = cache
-            .get(&modules["notes"], "nodes", resources.clone(), &cancellation)
-            .unwrap();
-        assert!(first.result.success, "{:?}", first.result.diagnostics);
-        let first_revision = first.revision.as_ref().unwrap();
-        let settings = configuration.get_root().join("theme/settings.json");
-        assert!(
-            !first_revision.disk_reads().contains(&settings),
-            "the model never imported the public library"
-        );
-        let compilation = first_revision.checked().unwrap();
-        let entry = compilation
-            .world()
-            .local_packages()
-            .iter()
-            .next()
-            .unwrap()
-            .entry_id();
-        let mut semantic = Semantic::new(compilation, &cancellation);
-        let old_function = semantic.public_export(entry, "local").unwrap().unwrap();
-        cache.observe_accessed(semantic.accessed());
-        assert!(
-            cache
-                .observed_paths(&configuration, 1, &[])
-                .contains(&settings)
-        );
-
-        std::fs::write(&settings, r#"{"prefix":"changed"}"#).unwrap();
-        cache.prepare(&configuration, 2, InputScope::Offline, &[], &modules);
-        let changed = cache
-            .get(&modules["notes"], "nodes", resources, &cancellation)
-            .unwrap();
-        assert!(changed.result.success, "{:?}", changed.result.diagnostics);
-        let compilation = changed.revision.as_ref().unwrap().checked().unwrap();
-        let mut semantic = Semantic::new(compilation, &cancellation);
-        let changed_function = semantic.public_export(entry, "local").unwrap().unwrap();
-        assert!(
-            old_function != changed_function,
-            "the next revision must capture changed helper data"
         );
     }
 }

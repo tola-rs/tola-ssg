@@ -111,8 +111,8 @@ impl IconInventoryEvidence {
         }
         if self.configuration != config.icons
             || self.internal_root
-                != crate::filesystem::normalize_existing_prefix(
-                    &config.get_root().join(crate::filesystem::INTERNAL_DIR),
+                != tola_input::normalize_existing_prefix(
+                    &config.get_root().join(tola_input::INTERNAL_DIR),
                 )
         {
             return Ok(false);
@@ -260,7 +260,7 @@ pub(crate) enum IconError {
     #[error("icon collection `{namespace}` has no bytes for digest {sha256}; run `tola vendor`")]
     MissingBytes {
         namespace: String,
-        sha256: crate::inputs::Sha256Digest,
+        sha256: tola_input::Sha256Digest,
     },
     /// The declaration names neither a preset nor a URL.
     #[error("icon collection `{namespace}` names neither a preset nor a URL")]
@@ -391,7 +391,7 @@ pub(crate) fn error_diagnostic(error: &anyhow::Error, root: &Path) -> Option<Dia
         _ => diagnostic,
     };
     Some(match error.path() {
-        Some(path) => diagnostic.with_path(crate::filesystem::display_path(path, root)),
+        Some(path) => diagnostic.with_path(tola_diagnostic::display_path(path, root)),
         None => diagnostic,
     })
 }
@@ -405,9 +405,8 @@ pub(crate) fn prepare(
     overrides: &SourceOverrides,
 ) -> anyhow::Result<IconInventory> {
     cancellation.ensure_active()?;
-    let internal = crate::filesystem::normalize_existing_prefix(
-        &config.get_root().join(crate::filesystem::INTERNAL_DIR),
-    );
+    let internal =
+        tola_input::normalize_existing_prefix(&config.get_root().join(tola_input::INTERNAL_DIR));
     let boundary = resources.source_boundary(config);
     let previous = previous.filter(|inventory| {
         inventory.evidence.internal_root == internal
@@ -502,7 +501,7 @@ fn remote_request<'a>(
     else {
         anyhow::bail!("`{namespace}` is not a configured remote icon collection");
     };
-    let lock = crate::inputs::InputLock::read(config.get_root())?.unwrap_or_default();
+    let lock = tola_input::InputLock::read(config.get_root())?.unwrap_or_default();
     Ok(remote::RemoteCollection {
         namespace,
         preset: preset.as_deref(),
@@ -560,7 +559,9 @@ fn prepare_collection(
             let request = remote_request(config, namespace, cancellation, resources, boundary)?;
             if let Some(previous) = previous {
                 let reusable = match &previous.reads {
-                    CollectionReads::Pinned => resources.input_scope() != crate::InputScope::Pure,
+                    CollectionReads::Pinned => {
+                        resources.input_scope() != tola_input::InputScope::Pure
+                    }
                     CollectionReads::Json(read) => read.is_fresh(overrides, cancellation)?,
                     CollectionReads::SvgDirectory { .. } => false,
                 };
@@ -681,7 +682,7 @@ fn parse_collection(
 }
 
 fn reject_internal_source(path: &Path, internal: &Path) -> Result<(), IconError> {
-    if crate::filesystem::normalize_existing_prefix(path).starts_with(internal) {
+    if tola_input::normalize_existing_prefix(path).starts_with(internal) {
         return Err(IconError::InternalSource {
             path: path.to_path_buf(),
         });
@@ -693,9 +694,9 @@ fn reject_internal_source(path: &Path, internal: &Path) -> Result<(), IconError>
 pub(crate) fn configured_collection_watch_evidence(
     config: &ResolvedSiteConfig,
 ) -> crate::filesystem::FilesystemWatchEvidence {
-    use crate::filesystem::{
-        FilesystemSourceIdentity, FilesystemSourceKind, FilesystemWatchEvidence,
-    };
+    use tola_input::FilesystemSourceIdentity;
+
+    use crate::filesystem::{FilesystemSourceKind, FilesystemWatchEvidence};
     FilesystemWatchEvidence::from_sources(config.icons.collections.values().filter_map(|source| {
         let (kind, path) = match source {
             IconCollectionSource::LocalJson { path } => (FilesystemSourceKind::File, path),
@@ -770,11 +771,7 @@ mod tests {
         std::fs::write(root.join("brand/mark.svg"), SVG).unwrap();
         let config = brand_icons_config(root);
         let inventory = prepare_icons(&config, &BuildCancellation::new(), None).unwrap();
-        symlink(
-            root.join("brand"),
-            root.join(crate::filesystem::INTERNAL_DIR),
-        )
-        .unwrap();
+        symlink(root.join("brand"), root.join(tola_input::INTERNAL_DIR)).unwrap();
 
         let error =
             prepare_icons(&config, &BuildCancellation::new(), Some(&inventory)).unwrap_err();

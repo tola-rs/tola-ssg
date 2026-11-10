@@ -9,12 +9,12 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use tola_build::InputScope;
 use tola_build::config::loading::{
     BuildOverrides, SiteConfigWithSourceDigest, resolve_parsed_site_config,
 };
 use tola_build::config::{ConfigSource, FieldPath, ResolvedSiteConfig, SiteConfigSchema};
 use tola_config::Config;
+use tola_input::InputScope;
 
 pub(crate) use dev::DevConfig;
 pub(crate) use diagnostics::DiagnosticsConfig;
@@ -221,7 +221,8 @@ fn resolve_source(
     if let Some(watch) = inputs.overrides.watch {
         dev.watch = watch;
     }
-    let core = resolve_parsed_site_config(core, inputs.packages.clone(), &inputs.overrides.build)?;
+    let core = resolve_parsed_site_config(core, inputs.packages.clone(), &inputs.overrides.build)?
+        .with_hook_runner(crate::cli::hook_runner());
     Ok((core, server, dev, diagnostics))
 }
 
@@ -272,6 +273,10 @@ impl ConfigCandidate {
             && self.config.package_locations() == config.package_locations()
             && same_section(self.config.site(), config.site())?
             && same_section(self.config.build(), config.build())?
+            && self.config.module_entry() == config.module_entry()
+            && self.config.modules() == config.modules()
+            && self.config.hooks() == config.hooks()
+            && self.config.options() == config.options()
             && same_section(self.config.assets(), config.assets())?
             && same_section(self.config.fonts(), config.fonts())?
             && same_section(self.config.icons(), config.icons())?
@@ -578,6 +583,12 @@ mod tests {
             ),
             ("vendor", "[vendor]\npath = \"vendor\"\n"),
             ("formatter", "[formatter]\nindent = 4\n"),
+            (
+                "hooks",
+                "[[hooks.before-build]]\nname = 'prepare'\nargv = ['tool']\n",
+            ),
+            ("options", "[options]\nsearch = true\n"),
+            ("modules", "[modules.notes]\npath = 'theme'\n"),
         ];
         for (section, added) in rows {
             std::fs::write(&path, "# base\n").unwrap();
@@ -593,6 +604,22 @@ mod tests {
                 "{section} must be a setting in effect"
             );
         }
+    }
+
+    #[test]
+    fn changing_module_entry_alias_requires_a_new_configuration() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("tola.toml");
+        let modules = "[modules.first]\npath = 'theme'\n[modules.second]\npath = 'theme'\n";
+        let source = |alias| format!("[build]\nentry = {{ module = '{alias}' }}\n{modules}");
+        std::fs::write(&path, source("first")).unwrap();
+        let (config, _, _, loader) = load_at(&path).into_parts();
+        let candidate = loader
+            .load_text_candidate(&source("second"))
+            .unwrap()
+            .unwrap();
+
+        assert!(!candidate.has_same_effective_settings(&config).unwrap());
     }
 
     #[test]

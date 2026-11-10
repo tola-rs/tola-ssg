@@ -4,8 +4,8 @@ use std::ffi::OsString;
 
 use anyhow::Result;
 use clap::{Args, FromArgMatches};
-use tola_build::InputScope;
-use tola_build::modules::ModuleCommands;
+use tola_input::InputScope;
+use tola_module::ModuleCommands;
 
 use super::help::{is_help, render_help};
 use crate::cancellation::Cancellation;

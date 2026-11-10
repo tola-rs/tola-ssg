@@ -1,270 +1,15 @@
 //! `[assets]` section configuration.
-//!
-//! `source` names a filesystem path; `url` and `url-prefix` are site-root URL
-//! addresses and prefixes, not filesystem locations.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
+use tola_address::UrlPath;
 use tola_config::Config;
 
 use crate::config::{ConfigDiagnostics, FieldPath};
-use tola_address::{OutputPath, OutputPathError, UrlPath, UrlPathError};
-
-/// A configured asset URL could not establish a portable output identity.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum AssetUrlError {
-    #[error(transparent)]
-    Url(#[from] UrlPathError),
-    #[error(transparent)]
-    Output(#[from] OutputPathError),
-    #[error("asset output `{output}` is reserved for Tola")]
-    Reserved { output: OutputPath },
-}
-
-/// A validated site-root prefix for an asset tree, with a canonical trailing slash.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
-#[serde(try_from = "String", into = "String")]
-pub struct AssetUrlPrefix {
-    url: UrlPath,
-    output: Option<OutputPath>,
-}
-
-impl AssetUrlPrefix {
-    pub fn parse(raw: &str) -> Result<Self, AssetUrlError> {
-        let url = UrlPath::parse(raw)?;
-        // A prefix names a directory, so `/assets` and `/assets/` are one prefix.
-        let url = if url.as_str().trim_matches('/').is_empty() {
-            url
-        } else {
-            let normalized = format!("/{}/", url.as_str().trim_matches('/'));
-            UrlPath::from_decoded(&normalized)?
-        };
-        let output = if url.as_str() != "/" {
-            let output = OutputPath::parse(url.as_str().trim_matches('/'))?;
-            require_asset_output(&output)?;
-            Some(output)
-        } else {
-            None
-        };
-        Ok(Self { url, output })
-    }
-
-    pub fn as_str(&self) -> &str {
-        self.url.as_str()
-    }
-
-    pub fn url_path(&self) -> &UrlPath {
-        &self.url
-    }
-
-    pub(crate) fn output_for(&self, member: &OutputPath) -> Result<OutputPath, AssetUrlError> {
-        match &self.output {
-            Some(prefix) => Ok(prefix.join(member)),
-            None => {
-                require_asset_output(member)?;
-                Ok(member.clone())
-            }
-        }
-    }
-}
-
-impl TryFrom<String> for AssetUrlPrefix {
-    type Error = AssetUrlError;
-    fn try_from(raw: String) -> Result<Self, Self::Error> {
-        Self::parse(&raw)
-    }
-}
-
-impl From<AssetUrlPrefix> for String {
-    fn from(prefix: AssetUrlPrefix) -> Self {
-        let encoded = prefix.url.to_encoded();
-        if encoded == "/" {
-            encoded
-        } else {
-            encoded.trim_end_matches('/').to_owned()
-        }
-    }
-}
-
-impl std::fmt::Display for AssetUrlPrefix {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(self.as_str())
-    }
-}
-
-/// One validated site-root asset URL and the logical output file it maps to.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(try_from = "String", into = "String")]
-pub struct AssetUrl {
-    url: UrlPath,
-    output: OutputPath,
-}
-
-impl AssetUrl {
-    pub fn parse(raw: &str) -> Result<Self, AssetUrlError> {
-        let url = UrlPath::parse(raw)?;
-        let output = tola_address::asset_output_from_url(&url)?;
-        require_asset_output(&output)?;
-        Ok(Self { url, output })
-    }
-
-    pub fn as_str(&self) -> &str {
-        self.url.as_str()
-    }
-
-    pub fn url_path(&self) -> &UrlPath {
-        &self.url
-    }
-
-    pub fn output_path(&self) -> &OutputPath {
-        &self.output
-    }
-}
-
-impl TryFrom<String> for AssetUrl {
-    type Error = AssetUrlError;
-    fn try_from(raw: String) -> Result<Self, Self::Error> {
-        Self::parse(&raw)
-    }
-}
-
-impl From<AssetUrl> for String {
-    fn from(url: AssetUrl) -> Self {
-        url.url.to_encoded()
-    }
-}
-
-impl std::fmt::Display for AssetUrl {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(self.as_str())
-    }
-}
-
-fn require_asset_output(output: &OutputPath) -> Result<(), AssetUrlError> {
-    if output.is_reserved_for_non_system_output() {
-        Err(AssetUrlError::Reserved {
-            output: output.clone(),
-        })
-    } else {
-        Ok(())
-    }
-}
-
-/// Internal per-module filtering of one asset tree; paths are literal output-relative names.
-#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) struct AssetSelection {
-    pub include: Option<Vec<String>>,
-    pub exclude: Vec<String>,
-    pub replaced: Vec<String>,
-}
-
-impl AssetSelection {
-    pub(crate) fn selects(&self, path: &str) -> bool {
-        self.selects_path(Path::new(path))
-    }
-
-    fn selects_path(&self, path: &Path) -> bool {
-        self.include
-            .as_ref()
-            .is_none_or(|items| items.iter().any(|item| path.starts_with(Path::new(item))))
-            && !self
-                .exclude
-                .iter()
-                .any(|item| path.starts_with(Path::new(item)))
-    }
-
-    /// Whether a directory may contain a selected descendant.
-    pub(crate) fn may_descend(&self, path: &Path) -> bool {
-        if self
-            .exclude
-            .iter()
-            .any(|item| path.starts_with(Path::new(item)))
-        {
-            return false;
-        }
-        self.include.as_ref().is_none_or(|items| {
-            items.iter().any(|item| {
-                let item = Path::new(item);
-                path.starts_with(item) || item.starts_with(path)
-            })
-        })
-    }
-
-    pub(crate) fn publishes(&self, path: &Path) -> bool {
-        self.selects_path(path) && !self.replaced.iter().any(|item| path == Path::new(item))
-    }
-}
-
-/// One site directory published below one site-root URL prefix.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct AssetTreeDeclaration {
-    /// Logical source directory. TOML supplies a site-relative path; resolved runtime
-    /// configuration holds its logical absolute path without following symlinks.
-    pub source: PathBuf,
-
-    /// Site-root URL prefix for descendants of `source`.
-    #[serde(rename = "url-prefix")]
-    pub url_prefix: AssetUrlPrefix,
-}
-
-impl AssetTreeDeclaration {
-    /// Declare a source tree with an already validated URL prefix.
-    pub fn new(source: impl Into<PathBuf>, url_prefix: AssetUrlPrefix) -> Self {
-        Self {
-            source: source.into(),
-            url_prefix,
-        }
-    }
-
-    pub fn source(&self) -> &Path {
-        &self.source
-    }
-
-    pub fn url_prefix(&self) -> &AssetUrlPrefix {
-        &self.url_prefix
-    }
-
-    fn resolve_source(&mut self, root: &Path) {
-        self.source = crate::filesystem::lexical_path_identity(&root.join(&self.source));
-    }
-}
-
-/// One site file published at one exact site-root URL.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct AssetFileDeclaration {
-    /// Logical source file. TOML supplies a site-relative path; resolved runtime configuration
-    /// holds its logical absolute path without following symlinks.
-    pub source: PathBuf,
-
-    /// Exact site-root URL of this file. The URL is an address only: its extension
-    /// does not transcode the source bytes.
-    pub url: AssetUrl,
-}
-
-impl AssetFileDeclaration {
-    /// Declare a source file with an already validated URL and output identity.
-    pub fn new(source: impl Into<PathBuf>, url: AssetUrl) -> Self {
-        Self {
-            source: source.into(),
-            url,
-        }
-    }
-
-    pub fn source(&self) -> &Path {
-        &self.source
-    }
-
-    pub fn url(&self) -> &AssetUrl {
-        &self.url
-    }
-
-    fn resolve_source(&mut self, root: &Path) {
-        self.source = crate::filesystem::lexical_path_identity(&root.join(&self.source));
-    }
-}
+pub use tola_module::assets::{
+    AssetFileDeclaration, AssetTreeDeclaration, AssetUrl, AssetUrlError, AssetUrlPrefix,
+};
 
 /// Publish declared files and directories at the site-root URLs they name.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, Config)]
@@ -277,7 +22,7 @@ pub struct AssetsConfig {
     #[config(name = "cache-busting")]
     pub cache_busting: bool,
 
-    /// Source directories published below a URL prefix, each written as
+    /// Selected members of source directories published below a URL prefix, each written as
     /// `{ source = "static/icons", url-prefix = "/icons" }`.
     #[config(collection = inline)]
     pub trees: Vec<AssetTreeDeclaration>,
@@ -305,6 +50,14 @@ files = [{ source = \"static/web-assets/tailwind-output/site.css\", url = \"/ass
 Here `files` takes over the generated stylesheet from the tree: it publishes at `/assets/css/site.css`,
 not `/assets/tailwind-output/site.css`. The tree still publishes its other members. `source` is a
 path relative to the site root; `url` and `url-prefix` are site-root URL paths, before `site.base-path`.
+Set `include` and `exclude` on a tree to select members using case-sensitive paths and globs
+relative to the declaring site or module root. For the tree above,
+`include = [\"static/web-assets/**/*.svg\"]` selects its SVG files at any depth and
+`exclude = [\"static/web-assets/drafts\"]` skips its `drafts` directory. A matched directory
+selects its descendants within the tree. Omitting `include` selects the whole tree, while
+`include = []` selects no files. `exclude` defaults to an empty list and applies only to that tree.
+Use `enable = false` to disable a declaration or `enabled-by` to require a boolean site option.
+A disabled exact file still takes over its tree member. Set `minify = false` to preserve bytes.
 A `before-build` hook can write that source; a `generate-outputs` hook adds its outputs directly
 and needs no `[assets]` entry.
 
@@ -357,10 +110,10 @@ publishing, Tola checks these rules across `[assets]`, the Bundle, and hook outp
 
     pub fn normalize(&mut self, root: &Path) {
         for declaration in &mut self.trees {
-            declaration.resolve_source(root);
+            declaration.read_source(root);
         }
         for declaration in &mut self.files {
-            declaration.resolve_source(root);
+            declaration.read_source(root);
         }
     }
 
@@ -405,17 +158,29 @@ publishing, Tola checks these rules across `[assets]`, the Bundle, and hook outp
 
     fn validate_output_ownership(&self, diag: &mut ConfigDiagnostics) {
         for (index, tree) in self.trees.iter().enumerate() {
+            if !tree.enable || tree.enabled_by.is_some() {
+                continue;
+            }
             let url_prefix = tree.url_prefix().url_path();
             for (other_index, other) in self.trees.iter().enumerate().skip(index + 1) {
+                if !other.enable || other.enabled_by.is_some() {
+                    continue;
+                }
                 let other_url_prefix = other.url_prefix().url_path();
                 report_url_prefix_overlap(url_prefix, index, other_url_prefix, other_index, diag);
             }
         }
 
         for (index, file) in self.files.iter().enumerate() {
+            if !file.enable || file.enabled_by.is_some() {
+                continue;
+            }
             let url = file.url().url_path();
             let url_key = url.url_collision_key();
             for (other_index, other) in self.files.iter().enumerate().skip(index + 1) {
+                if !other.enable || other.enabled_by.is_some() {
+                    continue;
+                }
                 let other_url = other.url().url_path();
                 let other_key = other_url.url_collision_key();
                 if tola_address::portable_keys_overlap(&url_key, &other_key) {
@@ -432,9 +197,15 @@ publishing, Tola checks these rules across `[assets]`, the Bundle, and hook outp
         }
 
         for (tree_index, tree) in self.trees.iter().enumerate() {
+            if !tree.enable || tree.enabled_by.is_some() {
+                continue;
+            }
             let url_prefix = tree.url_prefix().url_path();
             let prefix_key = url_prefix.url_collision_key();
             for (file_index, file) in self.files.iter().enumerate() {
+                if !file.enable || file.enabled_by.is_some() {
+                    continue;
+                }
                 let url = file.url().url_path();
                 let url_key = url.url_collision_key();
                 // A file URL inside a tree's prefix is how an exact declaration
@@ -521,8 +292,8 @@ fn report_contained_url(
 }
 
 fn logical_path_is_inside(path: &Path, parent: &Path) -> bool {
-    let path = crate::filesystem::lexical_path_identity(path);
-    let parent = crate::filesystem::lexical_path_identity(parent);
+    let path = tola_input::lexical_path_identity(path);
+    let parent = tola_input::lexical_path_identity(parent);
     path != parent && path.starts_with(parent)
 }
 
@@ -530,6 +301,7 @@ fn logical_path_is_inside(path: &Path, parent: &Path) -> bool {
 mod tests {
     use super::*;
     use crate::asset::tests::file_declaration;
+    use std::path::PathBuf;
 
     fn tree_declaration(
         source: impl Into<PathBuf>,
@@ -673,7 +445,7 @@ files = [{ source = "", url = "/favicon.ico" }]
         let site = directory.path();
         let content = site.join("content");
         let output = site.join("public");
-        let internal = site.join(crate::filesystem::INTERNAL_DIR);
+        let internal = site.join(tola_input::INTERNAL_DIR);
         std::fs::create_dir_all(&content).unwrap();
         std::fs::create_dir_all(&output).unwrap();
         std::fs::create_dir_all(&internal).unwrap();

@@ -37,13 +37,12 @@ mod resources;
 mod seo;
 pub mod site;
 
-pub use asset::{AssetOrigin, AssetUrls, PublishedAsset};
+pub use asset::{AssetOrigin, AssetUrls, ModuleAsset, ModuleAssetInput, PublishedAsset};
 pub use build::BuildSession;
 pub use compiler::diagnostic::font_failure;
 pub use content::{
     ContentDiscoveryError, SourceDescriptorField, SourceDescriptorFieldKind, has_typ_extension,
 };
-pub use filesystem::INTERNAL_DIR;
 pub use icon::remote_collection_bytes;
-pub use resources::{BuildResources, HttpDownloadError, InputScope, NetworkAccess};
+pub use resources::{BuildResources, HttpDownloadError};
 pub use seo::feed::FeedFormat;

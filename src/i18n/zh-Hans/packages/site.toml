@@ -19,7 +19,7 @@ summary = [
   '''
 本站的配置值，解析自 `tola.toml`。
 
-`site` 为每项 `[site]` 设置提供一个条目，另外还有派生出来的 `url`：`origin`、`base-path`、`url`、`title`、`authors`、`description`、`language` 和 `languages`。
+`site` 为每项 `[site]` 设置提供一个条目，另外还有派生出来的 `url`：`origin`、`base-path`、`url`、`title`、`authors`、`description`、`language` 和 `languages`。顶层 `[options]` 表通过 `site.options` 读取，默认为空字典 `(:)`。
 
 `base-path` 是主机根之下的部署路径，默认是 `/`。`url` 把 `origin` 和 `base-path` 拼成站点的规范地址。没有声明 `site.origin` 的站点只发布相对地址，所以它的 `url` 是 `none`。
 

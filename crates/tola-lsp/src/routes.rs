@@ -268,41 +268,40 @@ mod tests {
             .collect()
     }
 
+    /// The index lists every compiled page with its source, route and output, ordered by route,
+    /// whichever source contributes it.
     #[test]
-    fn index_maps_each_page_source() {
-        let (_directory, configuration) = rendering_site(&[
+    fn index_lists_each_compiled_page_in_route_order() {
+        for (label, files) in [
             (
-                "content/one.typ",
-                "#include \"../templates/note.typ\"\nOne.\n",
+                "one template contributes two pages",
+                &[
+                    (
+                        "content/one.typ",
+                        "#include \"../templates/note.typ\"\nOne.\n",
+                    ),
+                    (
+                        "content/two.typ",
+                        "#include \"../templates/note.typ\"\nTwo.\n",
+                    ),
+                    ("templates/note.typ", "Note.\n"),
+                ][..],
             ),
             (
-                "content/two.typ",
-                "#include \"../templates/note.typ\"\nTwo.\n",
+                "sources are written in reverse route order",
+                &[("content/two.typ", "Two.\n"), ("content/one.typ", "One.\n")][..],
             ),
-            ("templates/note.typ", "Note.\n"),
-        ]);
-
-        assert_eq!(
-            listed(&indexed_routes(&configuration)),
-            [
-                (Some("content/one.typ"), "/one/", "one/index.html"),
-                (Some("content/two.typ"), "/two/", "two/index.html"),
-            ]
-        );
-    }
-
-    #[test]
-    fn index_orders_pages_by_route() {
-        let (_directory, configuration) =
-            rendering_site(&[("content/two.typ", "Two.\n"), ("content/one.typ", "One.\n")]);
-
-        assert_eq!(
-            listed(&indexed_routes(&configuration)),
-            [
-                (Some("content/one.typ"), "/one/", "one/index.html"),
-                (Some("content/two.typ"), "/two/", "two/index.html"),
-            ]
-        );
+        ] {
+            let (_directory, configuration) = rendering_site(files);
+            assert_eq!(
+                listed(&indexed_routes(&configuration)),
+                [
+                    (Some("content/one.typ"), "/one/", "one/index.html"),
+                    (Some("content/two.typ"), "/two/", "two/index.html"),
+                ],
+                "{label}"
+            );
+        }
     }
 
     #[test]

@@ -6,8 +6,8 @@ use std::path::Path;
 
 use anyhow::Result;
 use tola_build::config::ResolvedSiteConfig;
-use tola_build::filesystem::normalize_existing_prefix;
 use tola_diagnostic::Diagnostic;
+use tola_input::normalize_existing_prefix;
 
 use crate::protocol::CheckProgress;
 
@@ -128,9 +128,7 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
                 .into_iter()
                 .map(|exclusion| exclusion.directory)
                 .chain([
-                    configuration
-                        .get_root()
-                        .join(tola_build::filesystem::INTERNAL_DIR),
+                    configuration.get_root().join(tola_input::INTERNAL_DIR),
                     configuration
                         .get_root()
                         .join(tola_build::filesystem::SITE_BUILD_LOCK_FILE),

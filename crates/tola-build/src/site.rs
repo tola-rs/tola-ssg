@@ -20,13 +20,14 @@ pub use space::{AddressRegistrationError, AddressSpace};
 /// from one build, obtained through [`crate::build::BuildSession::install_revision`].
 /// The application selects which revision is current.
 pub struct SiteRevision {
-    config: Arc<ResolvedSiteConfig>,
-    outputs: crate::output::revision::OutputRevision,
-    index: SiteIndex,
-    references: references::References,
-    diagnostics: Vec<tola_diagnostic::Diagnostic>,
-    mode: crate::mode::BuildMode,
-    input_observation: crate::observation::InputObservation,
+    pub(crate) config: Arc<ResolvedSiteConfig>,
+    pub(crate) outputs: crate::output::revision::OutputRevision,
+    pub(crate) index: SiteIndex,
+    pub(crate) references: references::References,
+    pub(crate) diagnostics: Vec<tola_diagnostic::Diagnostic>,
+    pub(crate) mode: crate::mode::BuildMode,
+    pub(crate) scope: tola_input::InputScope,
+    pub(crate) input_observation: crate::observation::InputObservation,
 }
 
 impl std::fmt::Debug for SiteRevision {
@@ -40,26 +41,6 @@ impl std::fmt::Debug for SiteRevision {
 }
 
 impl SiteRevision {
-    pub(crate) fn new(
-        config: Arc<ResolvedSiteConfig>,
-        outputs: crate::output::revision::OutputRevision,
-        index: SiteIndex,
-        references: references::References,
-        diagnostics: Vec<tola_diagnostic::Diagnostic>,
-        mode: crate::mode::BuildMode,
-        input_observation: crate::observation::InputObservation,
-    ) -> Self {
-        Self {
-            config,
-            outputs,
-            index,
-            references,
-            diagnostics,
-            mode,
-            input_observation,
-        }
-    }
-
     /// Input boundaries belonging to this immutable revision, independent of caches.
     pub fn input_observation(&self) -> &crate::observation::InputObservation {
         &self.input_observation
@@ -68,6 +49,11 @@ impl SiteRevision {
     /// Output policy used to construct this revision.
     pub fn mode(&self) -> crate::mode::BuildMode {
         self.mode
+    }
+
+    /// The input scope this revision was built under, for after-publish hooks.
+    pub fn scope(&self) -> tola_input::InputScope {
+        self.scope
     }
 
     /// A read-only filesystem view of this revision's complete output, for a consumer
@@ -142,15 +128,16 @@ mod tests {
     }
 
     fn site_revision(config: Arc<ResolvedSiteConfig>, outputs: OutputRevision) -> SiteRevision {
-        SiteRevision::new(
+        SiteRevision {
             config,
             outputs,
-            SiteIndex::default(),
-            references::References::default(),
-            Vec::new(),
-            crate::mode::BuildMode::Production,
-            crate::observation::InputObservation::default(),
-        )
+            index: SiteIndex::default(),
+            references: references::References::default(),
+            diagnostics: Vec::new(),
+            mode: crate::mode::BuildMode::Production,
+            scope: tola_input::InputScope::Online,
+            input_observation: crate::observation::InputObservation::default(),
+        }
     }
 
     #[test]
@@ -181,10 +168,10 @@ mod tests {
     }
 
     const CONSUMER_CONFIG: &str = "\
-[[build.hooks.after-publish]]
+[[hooks.after-publish]]
 name = \"consumer\"
-command = [\"consume\"]
-rerun-on = [\"consume.mjs\"]
+argv = [\"consume\"]
+rerun-on = { include = [\"consume.mjs\"] }
 ";
 
     #[test]

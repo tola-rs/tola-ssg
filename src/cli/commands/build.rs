@@ -7,13 +7,13 @@ use std::time::Instant;
 
 use anyhow::Result;
 
-pub(in crate::cli) fn run(request: super::SiteRequest<'_>, json: bool) -> Result<()> {
-    let mut report = super::report::SiteReport::new("build", request.scope, "candidate", true);
+pub(in crate::cli) fn run(request: super::SiteRequest<'_>, json: bool, pretty: bool) -> Result<()> {
+    let mut report = super::report::SiteReport::new("build", request.scope(), "candidate", true);
     let output = request.output;
     let cancellation = request.cancellation;
     let completion = execute(request, json, &mut report)
         .and_then(|()| cancellation.token().ensure_active().map_err(Into::into));
-    report.finish(completion, output, json)
+    report.finish(completion, output, json, pretty)
 }
 
 fn execute(
@@ -29,7 +29,7 @@ fn execute(
     report.configuration(&config);
     output.status("Building site…")?;
     output.hook_overview(
-        &config.build().hooks,
+        config.hooks(),
         tola_build::build::BuildMode::Production,
         crate::terminal::EVERY_STAGE,
     )?;

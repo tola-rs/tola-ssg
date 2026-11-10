@@ -19,7 +19,7 @@ use super::section::{
 use super::{
     BuildSectionConfig, ConfigDiagnostics, ConfigPresence, ConfigSource, FieldPath, ParsedConfig,
 };
-use crate::resources::InputScope;
+use tola_input::InputScope;
 
 /// Pure `tola.toml` schema before invocation overrides or path resolution.
 ///
@@ -52,10 +52,14 @@ pub struct SiteConfigSchema {
     pub formatter: FormatterConfig,
 
     #[config(sub)]
-    pub theme: crate::modules::ThemeConfig,
+    pub hooks: HooksConfig,
+
+    /// Site options available to Typst, Nu, and site hooks.
+    #[serde(deserialize_with = "tola_module::options::deserialize_options")]
+    pub options: toml::Table,
 
     /// Local modules selected by namespace.
-    pub modules: BTreeMap<String, crate::modules::ModuleDeclaration>,
+    pub modules: BTreeMap<String, tola_module::ModuleDeclaration>,
 }
 
 impl SiteConfigSchema {
@@ -63,7 +67,7 @@ impl SiteConfigSchema {
     ///
     /// Each section declares its own key, so adding a section to this schema is the one edit
     /// that extends the list a host needs to decode the core sections.
-    pub const SECTIONS: [&'static str; 9] = [
+    pub const SECTIONS: [&'static str; 10] = [
         SiteSectionConfig::TEMPLATE_SECTION,
         BuildSectionConfig::TEMPLATE_SECTION,
         AssetsConfig::TEMPLATE_SECTION,
@@ -72,7 +76,8 @@ impl SiteConfigSchema {
         VendorConfig::TEMPLATE_SECTION,
         FormatterConfig::TEMPLATE_SECTION,
         "modules",
-        crate::modules::ThemeConfig::TEMPLATE_SECTION,
+        HooksConfig::TEMPLATE_SECTION,
+        "options",
     ];
 
     /// Decode the core sections while preserving host-owned sections in the source document.
@@ -84,37 +89,15 @@ impl SiteConfigSchema {
         ConfigSource::parse(path, content, scope)?.decode_site()
     }
 
-    pub(super) fn validate_theme(&self, presence: &ConfigPresence) -> Result<()> {
+    pub(super) fn validate_entry(&self) -> Result<()> {
         let mut diagnostics = ConfigDiagnostics::new();
-        for (namespace, module) in &self.modules {
-            for (slot, path) in &module.overrides {
-                if path.as_os_str().is_empty()
-                    || !path.components().all(|part| {
-                        matches!(
-                            part,
-                            std::path::Component::Normal(_) | std::path::Component::CurDir
-                        )
-                    })
-                {
-                    diagnostics.error(
-                        FieldPath::new("modules"),
-                        format!(
-                            "`modules.{namespace}.overrides.{slot}` must be relative to the site root"
-                        ),
-                    );
-                }
-            }
-        }
-        if let Some(module) = &self.theme.module {
-            if !self.modules.contains_key(module) {
-                diagnostics.error(
-                    FieldPath::new("theme.module"),
-                    format!("the theme module `{module}` is not declared in `modules`"),
-                );
-            }
-            if presence.contains(FieldPath::new("build.entry").as_str()) {
-                diagnostics.error(FieldPath::new("theme.module"), "`theme.module` and an explicit `build.entry` cannot both select the site entry");
-            }
+        if let super::section::build::BuildEntry::Module { module } = &self.build.entry
+            && !self.modules.contains_key(module)
+        {
+            diagnostics.error(
+                FieldPath::new("build.entry"),
+                format!("the entry module `{module}` is not declared in `modules`"),
+            );
         }
         diagnostics.into_result().map_err(config_error)
     }
@@ -190,8 +173,10 @@ pub fn section_help(section: &str) -> Option<&'static str> {
         (FormatterConfig::TEMPLATE_SECTION, FormatterConfig::HELP),
         ("modules", crate::modules::HELP),
         (
-            crate::modules::ThemeConfig::TEMPLATE_SECTION,
-            crate::modules::ThemeConfig::HELP,
+            "options",
+            "Define site data in the top-level `[options]` table. Typst reads it through `site.options`, and Nu reads it through `(get-site).options`. A site hook's `enabled-by` names a boolean at the top level of this table.
+
+TOML dates and times become strings. Numbers must be finite. Module instances have their own effective options in `[modules.<alias>.options]`.",
         ),
         (FontsConfig::TEMPLATE_SECTION, FontsConfig::HELP),
         (IconsConfig::TEMPLATE_SECTION, IconsConfig::HELP),
@@ -219,15 +204,11 @@ type DeclaredConfigSection = (
 );
 
 /// Each declaration's keys and value sets, in the order the sections nest.
-fn core_declarations() -> [DeclaredConfigSection; 16] {
+fn core_declarations() -> [DeclaredConfigSection; 15] {
     [
         (
             SiteConfigSchema::DECLARED_FIELDS,
             SiteConfigSchema::DECLARED_VALUES,
-        ),
-        (
-            crate::modules::ThemeConfig::DECLARED_FIELDS,
-            crate::modules::ThemeConfig::DECLARED_VALUES,
         ),
         (
             SiteSectionConfig::DECLARED_FIELDS,
@@ -279,19 +260,14 @@ impl ParsedConfig<SiteConfigSchema> {
     pub fn validate_settings(&self) -> Result<()> {
         self.validate_source_paths()?;
         self.schema
-            .validate_theme(self.source.core_presence())
+            .validate_entry()
             .and_then(|()| {
-                settings_diagnostics(
-                    &self.schema.site,
-                    &self.schema.build,
-                    &self.schema.assets,
-                    &self.schema.icons,
-                    &self.schema.typst,
-                    &self.schema.vendor,
-                    self.source.core_presence(),
-                )
-                .into_result()
-                .map_err(config_error)
+                validate_hook_options(&mut self.schema.hooks.clone(), &self.schema.options)
+            })
+            .and_then(|()| {
+                settings_diagnostics(&self.schema, self.source.core_presence())
+                    .into_result()
+                    .map_err(config_error)
             })
             .map_err(|error| self.source.attach_load(error))
     }
@@ -304,28 +280,31 @@ impl ParsedConfig<SiteConfigSchema> {
     }
 }
 
+pub(super) fn validate_hook_options(hooks: &mut HooksConfig, options: &toml::Table) -> Result<()> {
+    hooks.apply_site_options(options).map_err(|error| {
+        let mut diagnostics = ConfigDiagnostics::new();
+        diagnostics.error(FieldPath::new("hooks"), error.to_string());
+        config_error(diagnostics)
+    })
+}
+
 pub(super) fn settings_diagnostics(
-    site: &SiteSectionConfig,
-    build: &BuildSectionConfig,
-    assets: &AssetsConfig,
-    icons: &IconsConfig,
-    typst: &TypstSectionConfig,
-    vendor: &VendorConfig,
+    config: &SiteConfigSchema,
     presence: &ConfigPresence,
 ) -> ConfigDiagnostics {
     let mut diagnostics = ConfigDiagnostics::new();
     diagnostics.set_presence(presence.clone());
-    site.validate_field_status(&mut diagnostics);
-    build.validate_field_status(&mut diagnostics);
-    assets.validate_field_status(&mut diagnostics);
-    typst.fonts.validate_field_status(&mut diagnostics);
-    icons.validate_field_status(&mut diagnostics);
-    vendor.validate_field_status(&mut diagnostics);
-    site.validate_address(&mut diagnostics);
-    site.validate_language(&mut diagnostics);
-    build.hooks.validate(&mut diagnostics);
-    assets.validate(&mut diagnostics);
-    icons.validate(&mut diagnostics);
+    config.site.validate_field_status(&mut diagnostics);
+    config.build.validate_field_status(&mut diagnostics);
+    config.assets.validate_field_status(&mut diagnostics);
+    config.typst.fonts.validate_field_status(&mut diagnostics);
+    config.icons.validate_field_status(&mut diagnostics);
+    config.vendor.validate_field_status(&mut diagnostics);
+    config.site.validate_address(&mut diagnostics);
+    config.site.validate_language(&mut diagnostics);
+    config.hooks.validate(&mut diagnostics);
+    config.assets.validate(&mut diagnostics);
+    config.icons.validate(&mut diagnostics);
     diagnostics
 }
 
@@ -346,7 +325,7 @@ mod tests {
         .into_config();
         assert_eq!(
             config.modules()["forest"].source,
-            crate::modules::ModuleSource::Local {
+            tola_module::declaration::ModuleSource::Local {
                 path: std::path::PathBuf::from("theme")
             }
         );
@@ -354,7 +333,7 @@ mod tests {
     }
 
     #[test]
-    fn module_roots_protected_publication_hooks() {
+    fn module_roots_protected_from_publication_and_author_hook_replacement() {
         let site = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(site.path().join("themes/forest")).unwrap();
         let config = |extra: &str| format!("[modules.forest]\npath = \"themes/forest\"\n{extra}");
@@ -371,9 +350,9 @@ mod tests {
                 resolve(&config(&format!("[build]\npublish-dir = \"{output}\"\n"))).unwrap_err();
             assert!(format!("{error:#}").contains("module root"), "{error:#}");
         }
-        let error = resolve(&config("[[build.hooks.before-build]]\nenable = true\nname = \"overwrite\"\ncommand = [\"tool\"]\ngenerates = [\"themes/forest/data\"]\n")).unwrap_err();
+        let error = resolve(&config("[[hooks.before-build]]\nenable = true\nname = \"overwrite\"\nargv = [\"tool\"]\ngenerates = [\"themes/forest\"]\n")).unwrap_err();
         assert!(format!("{error:#}").contains("module root"), "{error:#}");
-        assert!(resolve(&config("[[build.hooks.before-build]]\nenable = false\nname = \"off\"\ncommand = [\"tool\"]\ngenerates = [\"themes/forest/data\"]\n")).is_ok());
+        assert!(resolve(&config("[[hooks.before-build]]\nenable = false\nname = \"off\"\nargv = [\"tool\"]\ngenerates = [\"themes/forest/data\"]\n")).is_ok());
     }
 
     #[cfg(unix)]
@@ -396,24 +375,6 @@ mod tests {
         )
         .unwrap_err();
         assert!(format!("{error:#}").contains("module root"), "{error:#}");
-    }
-
-    #[test]
-    fn theme_module_excludes_explicit_entry() {
-        let site = tempfile::tempdir().unwrap();
-        let resolve = |source: &str| {
-            crate::config::loading::resolve_site_config(
-                &site.path().join("tola.toml"),
-                source,
-                tola_typst::PackageLocations::default(),
-                &crate::config::loading::BuildOverrides::default(),
-            )
-        };
-        assert!(
-            resolve("[modules.forest]\npath = \"theme\"\n[theme]\nmodule = \"forest\"\n").is_ok()
-        );
-        assert!(resolve("[theme]\nmodule = \"missing\"\n").is_err());
-        assert!(resolve("[modules.forest]\npath = \"theme\"\n[theme]\nmodule = \"forest\"\n[build]\nentry = \"site.typ\"\n").is_err());
     }
 
     #[test]
@@ -476,7 +437,7 @@ mod tests {
         for expected in [
             "site.title",
             "build.entry",
-            "build.hooks.before-build",
+            "hooks.before-build",
             "build.minify.html",
             "typst.fonts.paths",
             "icons.collections",

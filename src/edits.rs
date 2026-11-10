@@ -120,7 +120,7 @@ impl EditBatch {
         }
         let mut seen = BTreeSet::new();
         for change in &self.changes {
-            let path = tola_build::filesystem::lexical_path_identity(&change.path);
+            let path = tola_input::lexical_path_identity(&change.path);
             ensure!(
                 seen.insert(path),
                 "duplicate edit target {}",

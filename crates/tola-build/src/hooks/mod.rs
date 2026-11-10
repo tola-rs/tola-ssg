@@ -3,13 +3,16 @@
 mod command;
 mod evidence;
 mod generate;
+mod pack;
 mod report;
 mod reuse;
 mod runner;
 
 pub(crate) use crate::config::section::build::hooks::hook_identity;
+pub use command::{HookRunner, NuHook};
 pub use evidence::{FailedHookOutputs, HookOutputEvidence, SourceHookOutputs};
 pub(crate) use generate::generate_outputs;
+pub use pack::run_before_pack;
 pub use reuse::AfterPublishDependencies;
 pub(crate) use reuse::{ReusableHookOutputs, observe_after_publish};
 pub use runner::*;
@@ -23,7 +26,6 @@ pub struct ConfiguredHook<'a> {
     pub stage: HookStage,
     /// Required name from the hook declaration.
     pub label: &'a str,
-    pub command: &'a [String],
     dev: DevParticipation,
 }
 
@@ -40,40 +42,23 @@ pub fn configured_hooks(hooks: &HooksConfig) -> impl Iterator<Item = ConfiguredH
         .before_build
         .iter()
         .filter(|hook| hook.enable)
-        .map(|hook| announcement(HookStage::BeforeBuild, &hook.name, &hook.command, hook.dev));
+        .map(|hook| announcement(HookStage::BeforeBuild, &hook.name, hook.dev));
     let generate_outputs = hooks
         .generate_outputs
         .iter()
         .filter(|command| command.enable)
-        .map(|command| {
-            announcement(
-                HookStage::GenerateOutputs,
-                &command.name,
-                &command.command,
-                command.dev,
-            )
-        });
+        .map(|command| announcement(HookStage::GenerateOutputs, &command.name, command.dev));
     let after_publish = hooks
         .after_publish
         .iter()
         .filter(|hook| hook.enable)
-        .map(|hook| announcement(HookStage::AfterPublish, &hook.name, &hook.command, hook.dev));
+        .map(|hook| announcement(HookStage::AfterPublish, &hook.name, hook.dev));
     before_build.chain(generate_outputs).chain(after_publish)
 }
 
 /// One enabled hook of any stage, as the host announces it.
-fn announcement<'a>(
-    stage: HookStage,
-    label: &'a str,
-    command: &'a [String],
-    dev: DevParticipation,
-) -> ConfiguredHook<'a> {
-    ConfiguredHook {
-        stage,
-        label,
-        command,
-        dev,
-    }
+fn announcement<'a>(stage: HookStage, label: &'a str, dev: DevParticipation) -> ConfiguredHook<'a> {
+    ConfiguredHook { stage, label, dev }
 }
 
 /// Whether one declared hook contributes to this mode.
@@ -132,26 +117,26 @@ mod tests {
             r#"
 [[before-build]]
 name = "tailwind"
-command = ["tailwindcss", "-i", "static/css/site.css"]
+argv = ["tailwindcss", "-i", "static/css/site.css"]
 
 [[before-build]]
 name = "retired"
 enable = false
-command = ["unused"]
+argv = ["unused"]
 
 [[before-build]]
 name = "sitemap"
-command = ["node", "scripts/sitemap.mjs"]
+argv = ["node", "scripts/sitemap.mjs"]
 dev = "skip"
 
 [[generate-outputs]]
 name = "pagefind"
-command = ["pagefind"]
+argv = ["pagefind"]
 outputs = [{ tree = "search" }]
 
 [[after-publish]]
 name = "deploy"
-command = ["scripts/deploy.sh"]
+argv = ["scripts/deploy.sh"]
 "#,
         );
 
@@ -160,7 +145,6 @@ command = ["scripts/deploy.sh"]
                 (
                     hook.stage.as_str(),
                     hook.label.to_owned(),
-                    hook.command.iter().map(String::as_str).collect::<Vec<_>>(),
                     hook.participates(BuildMode::Development),
                     hook.participates(BuildMode::Production),
                 )
@@ -170,34 +154,10 @@ command = ["scripts/deploy.sh"]
         assert_eq!(
             listed,
             [
-                (
-                    "before-build",
-                    "tailwind".to_owned(),
-                    vec!["tailwindcss", "-i", "static/css/site.css"],
-                    true,
-                    true
-                ),
-                (
-                    "before-build",
-                    "sitemap".to_owned(),
-                    vec!["node", "scripts/sitemap.mjs"],
-                    false,
-                    true
-                ),
-                (
-                    "generate-outputs",
-                    "pagefind".to_owned(),
-                    vec!["pagefind"],
-                    true,
-                    true
-                ),
-                (
-                    "after-publish",
-                    "deploy".to_owned(),
-                    vec!["scripts/deploy.sh"],
-                    false,
-                    true
-                ),
+                ("before-build", "tailwind".to_owned(), true, true),
+                ("before-build", "sitemap".to_owned(), false, true),
+                ("generate-outputs", "pagefind".to_owned(), true, true),
+                ("after-publish", "deploy".to_owned(), false, true),
             ]
         );
     }

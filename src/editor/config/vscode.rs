@@ -69,7 +69,7 @@ pub(super) fn merge(source: Option<&str>, directory: &EditorDirectory) -> Result
 }
 
 fn expected(directory: &EditorDirectory) -> Value {
-    let root = tola_build::filesystem::normalize_existing_prefix(directory.root());
+    let root = tola_input::normalize_existing_prefix(directory.root());
     let mut settings = serde_json::Map::new();
     for (key, value) in directory
         .tola_settings()
@@ -80,7 +80,7 @@ fn expected(directory: &EditorDirectory) -> Value {
             || value.clone(),
             |value| {
                 let path = Path::new(value);
-                let normalized = tola_build::filesystem::normalize_existing_prefix(path);
+                let normalized = tola_input::normalize_existing_prefix(path);
                 let relative = normalized.strip_prefix(&root).unwrap_or(path);
                 Value::String(if relative.as_os_str().is_empty() {
                     ".".to_owned()
@@ -115,8 +115,8 @@ fn same_setting(key: &str, actual: &Value, required: &Value, root: &Path) -> boo
     };
     let resolve = |value: &str| {
         let expanded = value.replace("${workspaceFolder}", &absolute_root.to_string_lossy());
-        let path = tola_build::filesystem::lexical_path_identity(&absolute_root.join(expanded));
-        tola_build::filesystem::normalize_existing_prefix(&path)
+        let path = tola_input::lexical_path_identity(&absolute_root.join(expanded));
+        tola_input::normalize_existing_prefix(&path)
     };
     resolve(actual) == resolve(required)
 }

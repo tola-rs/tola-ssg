@@ -21,23 +21,7 @@ impl Runtime {
         let path = path.to_str().ok_or(NuError::NotUtf8 { what: "script" })?;
         let mut working = StateWorkingSet::new(&engine);
         crate::execution::parse(&mut working, path, &source)?;
-        let invocation = crate::execution::main_invocation(prefix);
-        let block = nu_parser::parse_fresh(
-            &mut working,
-            Some("Tola command invocation"),
-            invocation.as_bytes(),
-            false,
-        );
-        if !working.compile_errors.is_empty()
-            || working.parse_errors.iter().any(|error| {
-                !matches!(
-                    error,
-                    ParseError::MissingPositional(..) | ParseError::MissingRequiredFlag(..)
-                )
-            })
-        {
-            return Ok(None);
-        }
+        let block = crate::execution::parse_main(&mut working, prefix);
         let Some(Expr::Call(call)) = block
             .pipelines
             .first()
@@ -46,11 +30,21 @@ impl Runtime {
         else {
             return Ok(None);
         };
-        let declaration = working.get_decl(call.decl_id);
-        if declaration.name() != "main" && !declaration.name().starts_with("main ") {
-            return Ok(None);
-        }
-        let Some(block_id) = declaration.block_id() else {
+        let block_id = {
+            let declaration = working.get_decl(call.decl_id);
+            if declaration.name() != "main" && !declaration.name().starts_with("main ") {
+                return Ok(None);
+            }
+            declaration.block_id()
+        };
+        working.parse_errors.retain(|error| {
+            !matches!(
+                error,
+                ParseError::MissingPositional(..) | ParseError::MissingRequiredFlag(..)
+            )
+        });
+        crate::execution::check_errors(&working)?;
+        let Some(block_id) = block_id else {
             return Ok(None);
         };
         // The parser writes the authoritative signature onto the block; the `BlockCommand`

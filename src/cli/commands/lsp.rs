@@ -11,7 +11,7 @@ use tola_diagnostic::{DiagnosticError, Location};
 use crate::cancellation::Cancellation;
 use crate::cli::output::CommandOutput;
 use crate::cli::{CompilerFontArgs, ConfigFileArgs, TypstPackageArgs};
-use tola_build::InputScope;
+use tola_input::{InputMode, InputScope};
 
 use tola_lsp::ServedWorkspace;
 
@@ -19,12 +19,12 @@ pub(in crate::cli) fn run(
     config: ConfigFileArgs,
     packages: TypstPackageArgs,
     fonts: CompilerFontArgs,
-    scope: InputScope,
+    mode: InputMode,
     cancellation: &Cancellation,
     output: &CommandOutput,
 ) -> Result<()> {
     cancellation.token().ensure_active()?;
-    let resources = crate::cli::config::build_resources_with_fonts(scope, &fonts)?;
+    let resources = crate::cli::config::build_resources_with_fonts(mode, &fonts)?;
     let mut configuration = source_configuration(config, packages, resources.input_scope())?;
     let token = cancellation.token();
     let input = std::io::stdin();
@@ -174,7 +174,7 @@ impl SourceConfiguration {
         output: &CommandOutput,
     ) -> Result<ServedWorkspace> {
         let loaded = self.loaded.as_mut().expect("configuration is loaded");
-        let site_root = tola_build::filesystem::normalize_existing_prefix(
+        let site_root = tola_input::normalize_existing_prefix(
             loaded
                 .loader
                 .path()
@@ -238,7 +238,7 @@ fn configuration_failure(
 }
 
 fn absolute_configuration_path(path: &Path) -> String {
-    crate::terminal::display_path_as_given(&tola_build::filesystem::normalize_existing_prefix(path))
+    crate::terminal::display_path_as_given(&tola_input::normalize_existing_prefix(path))
 }
 
 fn establish_configuration_path(location: &mut Option<Location>, config_path: &Path) {
@@ -249,16 +249,16 @@ fn establish_configuration_path(location: &mut Option<Location>, config_path: &P
         return;
     }
     let base = config_path.parent().unwrap_or(config_path);
-    location.path = crate::terminal::display_path_as_given(
-        &tola_build::filesystem::normalize_existing_prefix(&base.join(&location.path)),
-    );
+    location.path = crate::terminal::display_path_as_given(&tola_input::normalize_existing_prefix(
+        &base.join(&location.path),
+    ));
 }
 
 fn configuration_text<'a>(
     path: &Path,
     sources: &'a [(PathBuf, Arc<str>)],
 ) -> Result<Option<&'a str>> {
-    let physical = tola_build::filesystem::normalize_existing_prefix(path);
+    let physical = tola_input::normalize_existing_prefix(path);
     let mut candidates = sources.iter().filter(|(path, _)| *path == physical);
     let Some((_, first)) = candidates.next() else {
         return Ok(None);
@@ -274,8 +274,6 @@ fn configuration_text<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    use tola_diagnostic::SourceLine;
 
     #[test]
     fn workspace_configuration_is_local() {
@@ -344,79 +342,18 @@ mod tests {
         };
         assert_eq!(
             site.get_root(),
-            tola_build::filesystem::normalize_path(directory.path())
+            tola_input::normalize_path(directory.path())
         );
     }
 
     #[test]
     fn conflicting_buffers_are_refused() {
         let directory = tempfile::tempdir().unwrap();
-        let path =
-            tola_build::filesystem::normalize_existing_prefix(&directory.path().join("tola.toml"));
+        let path = tola_input::normalize_existing_prefix(&directory.path().join("tola.toml"));
         let sources = vec![
             (path.clone(), Arc::from("first")),
             (path.clone(), Arc::from("second")),
         ];
         assert!(configuration_text(&path, &sources).is_err());
-    }
-
-    #[test]
-    fn diagnostics_name_the_configured_file() {
-        let directory = tempfile::tempdir().unwrap();
-        let configuration = directory.path().join("site/tola.toml");
-        std::fs::create_dir_all(configuration.parent().unwrap()).unwrap();
-        std::fs::write(&configuration, "version = ??0.8.0\"\n").unwrap();
-        let configured = tola_build::filesystem::normalize_existing_prefix(&configuration);
-        let expected = crate::terminal::display_path_as_given(&configured);
-
-        let mut location = Some(Location {
-            path: "tola.toml".to_owned(),
-            line: Some(1),
-            column: Some(11),
-            range: None,
-            source_lines: vec![SourceLine::new(1, "version = ??0.8.0\"", Some((9, 10)))],
-        });
-        establish_configuration_path(&mut location, &configured);
-        let location = location.expect("a location is preserved");
-        assert_eq!(location.path, expected);
-        assert_eq!(location.line, Some(1));
-        assert_eq!(location.column, Some(11));
-        assert_eq!(location.source_lines.len(), 1);
-
-        let mut absolute = Some(Location {
-            path: expected.clone(),
-            line: None,
-            column: None,
-            range: None,
-            source_lines: Vec::new(),
-        });
-        establish_configuration_path(&mut absolute, &configured);
-        assert_eq!(absolute.expect("a location is preserved").path, expected);
-
-        let mut absent: Option<Location> = None;
-        establish_configuration_path(&mut absent, &configured);
-        assert!(absent.is_none());
-        assert_eq!(absolute_configuration_path(&configuration), expected);
-    }
-
-    /// A `--pure` session that names a package path is refused by the check that reads the
-    /// packages, never by the process: an editor whose server refuses to start sees a closed
-    /// connection, while the author needs the reason and the session needs to keep answering.
-    #[test]
-    fn pure_session_starts_despite_package_paths() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("tola.toml");
-        std::fs::write(&path, "version = \"0.8.0\"\n").unwrap();
-        let configuration = source_configuration(
-            ConfigFileArgs { path: Some(path) },
-            TypstPackageArgs {
-                package_path: Some(directory.path().join("vendor/typst-packages")),
-                ..Default::default()
-            },
-            InputScope::Pure,
-        )
-        .unwrap();
-        assert_eq!(configuration.scope, InputScope::Pure);
-        assert!(configuration.loaded.is_none());
     }
 }

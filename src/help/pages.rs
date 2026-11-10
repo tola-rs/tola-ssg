@@ -63,7 +63,7 @@ const TABLES: &[ConfigTable] = &[
     ConfigTable::new(FontsConfig::TEMPLATE_SECTION),
     ConfigTable::new(IconsConfig::TEMPLATE_SECTION),
     ConfigTable::new("modules"),
-    ConfigTable::new(tola_build::modules::ThemeConfig::TEMPLATE_SECTION),
+    ConfigTable::new("options"),
     ConfigTable::new(VendorConfig::TEMPLATE_SECTION),
     ConfigTable::new(FormatterConfig::TEMPLATE_SECTION),
     ConfigTable::new(ServerConfig::TEMPLATE_SECTION),
@@ -160,7 +160,7 @@ fn overview_page(language: HelpLanguage) -> HelpPage {
     ));
     markdown.push_str(&format!(
         "- {}\n",
-        named("tola help \"[build.hooks]\"", table_target("build.hooks"))
+        named("tola help \"[hooks]\"", table_target("hooks"))
     ));
     HelpPage::new(id, markdown)
 }
@@ -172,7 +172,7 @@ fn index_page(category: HelpCategory) -> HelpPage {
         HelpCategory::Config => {
             markdown.push_str("# Configuration tables\n\n");
             // A table with settings of its own is an entry; so is a container grouping several
-            // child tables, such as `[build.hooks]`.
+            // child tables.
             for table in TABLES.iter().filter(|table| {
                 let children = child_tables(table.section).count();
                 has_own_key(table.section)
@@ -838,9 +838,9 @@ mod tests {
             HelpDocument::parse(&page(&targets(&["config"]), HelpLanguage::English).unwrap());
         let links = cross_references(&index);
         for (section, shown) in [
-            ("build.hooks", true),
+            ("hooks", true),
             ("modules", true),
-            ("theme", true),
+            ("options", true),
             ("typst", false),
         ] {
             let target = PageId::Config {

@@ -385,7 +385,7 @@ impl<'a> Selection<'a> {
         let client_root = answer.site.client_root;
         // A written asset URL resolves to the file its declaration names, before the ordinary
         if let Some((_, bytes)) = self.asset_url_argument(semantics)? {
-            let urls = AssetUrls::for_check(configuration, cancellation)?;
+            let urls = AssetUrls::for_check_project(configuration, cancellation)?;
             if let Some(definition) =
                 crate::assets::written_definition(&urls, client_root, self.source, bytes)
             {
@@ -653,7 +653,7 @@ impl<'a> Selection<'a> {
         // An argument the site's own declarations constrain to published asset URLs
         // completes with those URLs alone: a name this file holds names no URL.
         if let Some((typed, bytes)) = self.asset_url_argument(semantics)? {
-            let urls = AssetUrls::for_check(configuration, cancellation)?;
+            let urls = AssetUrls::for_check_project(configuration, cancellation)?;
             return Ok(SourceReply::Completion(crate::assets::url_completions(
                 &urls,
                 configuration.get_root(),
@@ -792,7 +792,7 @@ mod tests {
     /// file id must read the root this way: macOS reports `/var` for `/private/var`, and an answer
     /// keyed by the temporary directory's own spelling misses.
     pub(crate) fn resolved_root(site: &SiteDirectory) -> PathBuf {
-        tola_build::filesystem::normalize_existing_prefix(site.root())
+        tola_input::normalize_existing_prefix(site.root())
     }
 
     pub(crate) struct QuerySession {
@@ -821,7 +821,7 @@ mod tests {
             let session = tola_build::check::SourceDiagnosticSession::with_resources(
                 Arc::clone(&config),
                 tola_build::BuildResources::new()
-                    .with_network_access(tola_build::NetworkAccess::Denied)
+                    .with_network_access(tola_input::NetworkAccess::Denied)
                     .without_system_fonts(),
             );
             Self {
@@ -847,7 +847,7 @@ mod tests {
         pub(crate) fn reload(&mut self) {
             self.reload_with(
                 tola_build::BuildResources::new()
-                    .with_network_access(tola_build::NetworkAccess::Denied)
+                    .with_network_access(tola_input::NetworkAccess::Denied)
                     .without_system_fonts(),
             );
         }
@@ -1342,7 +1342,7 @@ mod tests {
         fn install(mut site: QuerySession, module: &Path) -> QuerySession {
             fs::write(
                 module.join("tola-module.toml"),
-                "name='notes'\nversion='1.0.0'\n[typst]\nentry='lib.typ'\n",
+                "[typst]\nentry='lib.typ'\n",
             )
             .unwrap();
             let old = fs::read_to_string(site.site.root().join("tola.toml")).unwrap();
@@ -1352,7 +1352,7 @@ mod tests {
                 &format!("{old}\n[modules.notes]\npath={path}\n"),
             );
             site.reload_with(
-                tola_build::BuildResources::new().with_input_scope(tola_build::InputScope::Offline),
+                tola_build::BuildResources::new().with_input_scope(tola_input::InputScope::Offline),
             );
             site
         }

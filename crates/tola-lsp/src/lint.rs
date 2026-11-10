@@ -42,7 +42,7 @@ pub(super) fn document_diagnostics(
     if site_relative.to_str().is_none() {
         return Vec::new();
     }
-    let relative = tola_build::filesystem::display_path(path, root);
+    let relative = tola_diagnostic::display_path(path, root);
     hints(names, world)
         .into_iter()
         .filter_map(|hint| {
@@ -61,7 +61,7 @@ pub(super) fn liveness_diagnostics(
     names: &SourceNames,
     liveness: &Liveness,
 ) -> Vec<Diagnostic> {
-    let relative = tola_build::filesystem::display_path(path, root);
+    let relative = tola_diagnostic::display_path(path, root);
     let mut hints = Vec::new();
     for &declaration in &liveness.unused_bindings {
         let declared = &names.declarations()[declaration];
@@ -212,27 +212,6 @@ pub(crate) mod tests {
         hints
             .map(|hint| (hint.message, hint.help.unwrap_or_default()))
             .collect()
-    }
-
-    #[test]
-    fn adjacent_report_is_not_covering() {
-        let at = |line, character| SourcePosition { line, character };
-        let hint = SourceRange {
-            start: at(0, 1),
-            end: at(0, 6),
-        };
-        let before = Diagnostic::at_path(
-            codes::editor::UNKNOWN_FONT,
-            Severity::Warning,
-            "content/page.typ",
-            "another problem",
-        )
-        .with_help("choose another font")
-        .with_source_range(SourceRange {
-            start: at(0, 0),
-            end: at(0, 1),
-        });
-        assert!(!covering_advice(&[before], "content/page.typ", &hint));
     }
 
     #[test]

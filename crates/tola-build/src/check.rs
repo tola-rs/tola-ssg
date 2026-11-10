@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::cancellation::{BuildCancellation, BuildCancelled};
-use crate::compiler::TypstHost;
+use crate::compiler::SiteHost;
 use crate::config::ResolvedSiteConfig;
 use crate::content::ContentUnit;
 use tola_diagnostic::Diagnostic;
@@ -16,13 +16,16 @@ const RETAINED_DERIVATION_GENERATIONS: usize = 1;
 /// Compiler resources for read-only checks of successive editor revisions.
 pub struct SourceDiagnosticSession {
     config: Arc<ResolvedSiteConfig>,
+    /// The contribution applied to `config`, when this session prepared its modules.
+    site: Option<Arc<crate::modules::PreparedSite>>,
     resources: crate::resources::BuildResources,
     environment: SourceEnvironment,
-    host: Option<TypstHost>,
+    host: Option<SiteHost>,
     icons: Option<crate::icon::IconInventory>,
     analysis: Option<CheckAnalysisEvidence>,
     reused_analysis: bool,
-    frozen_modules: bool,
+    /// A one-shot query supplied `site`; keep it instead of preparing again.
+    external_site: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -276,7 +279,7 @@ impl CheckAnalysisEvidence {
         config: &ResolvedSiteConfig,
         content: &[ContentUnit],
         unsaved: &BTreeMap<PathBuf, Arc<str>>,
-        host: &TypstHost,
+        host: &SiteHost,
         cancellation: &BuildCancellation,
     ) -> anyhow::Result<Self> {
         cancellation.ensure_active()?;
@@ -334,26 +337,27 @@ impl SourceDiagnosticSession {
     ) -> Self {
         Self {
             config,
+            site: None,
             resources,
             environment: SourceEnvironment::Site,
             host: None,
             icons: None,
             analysis: None,
             reused_analysis: false,
-            frozen_modules: false,
+            external_site: false,
         }
     }
 
-    /// A one-shot query already selected its entry from these prepared module inputs.
+    /// A one-shot query already selected its entry from this prepared site.
     /// Its caller owns the manifest freshness checks around inspection.
     pub(crate) fn with_prepared_modules(
-        config: Arc<ResolvedSiteConfig>,
+        site: Arc<crate::modules::PreparedSite>,
         resources: crate::resources::BuildResources,
     ) -> Self {
-        Self {
-            frozen_modules: true,
-            ..Self::with_resources(config, resources)
-        }
+        let mut session = Self::with_resources(site.config_arc().clone(), resources);
+        session.site = Some(site);
+        session.external_site = true;
+        session
     }
 
     /// Create a session for independent documents without a site's content inventory.
@@ -379,7 +383,7 @@ impl SourceDiagnosticSession {
     /// Release the parsed sources one session stopped reading; a live world keeps its slots.
     pub fn evict_stale_file_cache_entries(&self) {
         if let Some(host) = &self.host {
-            host.evict_stale_file_cache_entries(TypstHost::RETAINED_FILE_CACHE_EPOCHS);
+            host.evict_stale_file_cache_entries(SiteHost::RETAINED_FILE_CACHE_EPOCHS);
         }
     }
 
@@ -401,10 +405,14 @@ impl SourceDiagnosticSession {
         overrides: &crate::filesystem::SourceOverrides,
         cancellation: &BuildCancellation,
     ) -> anyhow::Result<(
-        TypstHost,
+        SiteHost,
         Vec<crate::content::ContentUnit>,
         crate::package::SiteBindings,
     )> {
+        let site = self
+            .site
+            .as_ref()
+            .expect("sources are prepared before the compiler runs");
         let boundary = self.resources.source_boundary(config);
         if self.environment == SourceEnvironment::Site {
             boundary.check(&config.build.content_dir)?;
@@ -424,8 +432,13 @@ impl SourceDiagnosticSession {
             .transpose()?
             .unwrap_or(false);
         if !reusable {
-            let host = TypstHost::for_config_with_resources(config, &self.resources, cancellation)
-                .map_err(tola_typst::CompileError::from)?;
+            let host = SiteHost::for_config(
+                config,
+                &self.resources,
+                Arc::clone(site.local_packages()),
+                cancellation,
+            )
+            .map_err(tola_typst::CompileError::from)?;
             cancellation.ensure_active()?;
             self.host = Some(host);
             self.analysis = None;
@@ -459,12 +472,12 @@ impl SourceDiagnosticSession {
         )?;
         let host = host
             .with_icons(packages.icons.collections())
-            .with_local_packages(Arc::clone(&config.module_inputs.packages));
+            .with_local_packages(Arc::clone(site.local_packages()));
         let bindings = crate::package::SiteBindings::from_config(
             config,
-            crate::asset::AssetUrls::for_check(config, cancellation)?,
+            crate::asset::AssetUrls::for_check_with(config, site.applied_assets(), cancellation)?,
         )
-        .prepare_modules(config, &host, cancellation)?;
+        .prepare_modules(site.prepared())?;
         Ok((host, content, bindings))
     }
 
@@ -474,18 +487,28 @@ impl SourceDiagnosticSession {
         cancellation: &BuildCancellation,
     ) -> Result<Arc<ResolvedSiteConfig>, CheckStop> {
         cancellation.ensure_active().map_err(CheckStop::Cancelled)?;
-        if self.frozen_modules {
+        if self.external_site {
             return Ok(Arc::clone(&self.config));
         }
-        crate::modules::prepared::configure(&self.config, self.resources.input_mode(), cancellation)
-            .map(Arc::new)
-            .map_err(|error| {
-                CheckStop::Revision(Box::new(SourceRevision {
-                    diagnostics: source_failure_diagnostics(&error, self.config.get_root()),
-                    checked: None,
-                    accessed: CheckReads::default(),
-                }))
-            })
+        let bundle = cancellation.bundle_cancellation();
+        let site = crate::modules::prepared::prepare_site_with_bundle(
+            &self.config,
+            self.resources.input_mode(),
+            &bundle,
+        )
+        .map_err(|error| {
+            CheckStop::Revision(Box::new(SourceRevision {
+                diagnostics: source_failure_diagnostics(&error, self.config.get_root()),
+                checked: None,
+                accessed: CheckReads::default(),
+            }))
+        })?;
+        self.config = site.config_arc().clone();
+        self.site = Some(Arc::new(site));
+        self.host = None;
+        self.analysis = None;
+        self.reused_analysis = false;
+        Ok(Arc::clone(&self.config))
     }
 
     /// Check one source on its own, with the diagnostics it produced.
@@ -665,7 +688,7 @@ impl SourceDiagnosticSession {
                 && held.dependencies.virtual_reads_match(
                     |evidence| match evidence.locator() {
                         tola_typst::ReadLocator::ProvidedRoot(relative) => overrides
-                            .get_physical(&crate::filesystem::normalize_existing_prefix(
+                            .get_physical(&tola_input::normalize_existing_prefix(
                                 &config.get_root().join(relative),
                             ))
                             .is_some_and(|source| source.digest == evidence.digest()),
@@ -862,7 +885,7 @@ mod tests {
         .unwrap();
         fs::write(directory.path().join("data.txt"), "payload\n").unwrap();
         let source =
-            crate::config::ConfigSource::defaults(directory.path(), crate::InputScope::Online)
+            crate::config::ConfigSource::defaults(directory.path(), tola_input::InputScope::Online)
                 .unwrap();
         let config = Arc::new(
             crate::config::loading::resolve_parsed_site_config(
@@ -888,7 +911,7 @@ mod tests {
         std::os::unix::fs::symlink(outside.path(), &alias).unwrap();
         let mut session = SourceDiagnosticSession::with_resources(
             config,
-            crate::BuildResources::new().with_input_scope(crate::InputScope::Pure),
+            crate::BuildResources::new().with_input_scope(tola_input::InputScope::Pure),
         );
         let diagnostics = session
             .check(

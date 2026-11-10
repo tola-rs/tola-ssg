@@ -12,7 +12,7 @@ use anyhow::Result;
 use crate::terminal::{display_path, display_path_as_given, display_path_within};
 use crate::writes::FileWrites;
 
-use tola_build::filesystem::layout;
+use tola_input::layout;
 
 pub(crate) use site::EditorDirectory;
 

@@ -39,7 +39,7 @@ impl Link {
         if !matches!(self.target.root(), VirtualRoot::Project) {
             return None;
         }
-        let path = tola_build::filesystem::normalize_existing_prefix(
+        let path = tola_input::normalize_existing_prefix(
             &root.join(self.target.vpath().get_without_slash()),
         );
         path.starts_with(root).then_some(path)
@@ -58,7 +58,7 @@ pub(super) fn hover(
     cursor: usize,
     cancellation: &BuildCancellation,
 ) -> Result<Option<Hover>> {
-    let root = tola_build::filesystem::normalize_existing_prefix(config.get_root());
+    let root = tola_input::normalize_existing_prefix(config.get_root());
     let links = declared(source);
     let Some(link) = holding(&links, cursor) else {
         return Ok(None);
@@ -75,7 +75,7 @@ pub(super) fn hover(
             Some(link.range),
         )));
     }
-    let named = tola_build::filesystem::display_path(&target, &root);
+    let named = tola_diagnostic::display_path(&target, &root);
     let Some(id) = crate::identity::path_id(&target, &root) else {
         return Ok(None);
     };
@@ -383,81 +383,51 @@ mod tests {
             })
             .collect()
     }
+
+    /// Every link a source can write — reader file arguments, bibliography sources and styles,
+    /// raw themes and syntaxes — is extracted with the text it writes and the address it resolves
+    /// to; a shadowed function is not a reader call.
     #[test]
-    fn reader_calls_link_their_file_arguments() {
-        assert_eq!(
-            rendered(
+    fn document_links_extract_their_targets() {
+        for (writing, text, expected) in [
+            (
                 "site.typ",
-                "#let data = json(\"data/site.json\")\n#let notes = read(path: \"notes.md\", encoding: \"utf-8\")\n"
+                "#let data = json(\"data/site.json\")\n#let notes = read(path: \"notes.md\", encoding: \"utf-8\")\n",
+                &[
+                    ("data/site.json", "data/site.json"),
+                    ("notes.md", "notes.md"),
+                ][..],
             ),
-            [
-                link_line("data/site.json", "data/site.json"),
-                link_line("notes.md", "notes.md"),
-            ]
-        );
-    }
-
-    /// A bibliography names its sources and its citation style, and each is a file of the site.
-    #[test]
-    fn bibliography_paths_declare_their_links() {
-        assert_eq!(
-            rendered(
+            (
                 "content/post.typ",
-                "#bibliography((\"../assets/refs.bib\", \"../assets/more.bib\"), style: \"../assets/style.csl\")\n"
+                "#bibliography((\"../assets/refs.bib\", \"../assets/more.bib\"), style: \"../assets/style.csl\")\n",
+                &[
+                    ("../assets/refs.bib", "assets/refs.bib"),
+                    ("../assets/more.bib", "assets/more.bib"),
+                    ("../assets/style.csl", "assets/style.csl"),
+                ][..],
             ),
-            [
-                link_line("../assets/refs.bib", "assets/refs.bib"),
-                link_line("../assets/more.bib", "assets/more.bib"),
-                link_line("../assets/style.csl", "assets/style.csl"),
-            ]
-        );
-    }
-
-    #[test]
-    fn raw_theme_and_syntax_links() {
-        assert_eq!(
-            rendered(
+            (
                 "content/post.typ",
-                "#set raw(theme: \"../assets/my.tmTheme\", syntaxes: (\"../assets/a.sublime-syntax\", \"../assets/b.sublime-syntax\"))\n#raw(\"text\", theme: \"../assets/my.tmTheme\")\n"
+                "#set raw(theme: \"../assets/my.tmTheme\", syntaxes: (\"../assets/a.sublime-syntax\", \"../assets/b.sublime-syntax\"))\n#raw(\"text\", theme: \"../assets/my.tmTheme\")\n",
+                &[
+                    ("../assets/my.tmTheme", "assets/my.tmTheme"),
+                    ("../assets/a.sublime-syntax", "assets/a.sublime-syntax"),
+                    ("../assets/b.sublime-syntax", "assets/b.sublime-syntax"),
+                    ("../assets/my.tmTheme", "assets/my.tmTheme"),
+                ][..],
             ),
-            [
-                link_line("../assets/my.tmTheme", "assets/my.tmTheme"),
-                link_line("../assets/a.sublime-syntax", "assets/a.sublime-syntax"),
-                link_line("../assets/b.sublime-syntax", "assets/b.sublime-syntax"),
-                link_line("../assets/my.tmTheme", "assets/my.tmTheme"),
-            ]
-        );
-        assert!(
-            rendered(
+            (
                 "content/post.typ",
-                "#let raw(theme) = theme\n#raw(theme: \"../assets/my.tmTheme\")\n"
-            )
-            .is_empty()
-        );
-    }
-    #[test]
-    fn link_follows_caller_root_spelling() {
-        let directory = tempfile::tempdir().unwrap();
-        let spelled = directory.path().join("client-site");
-        let id = RootedPath::new(
-            VirtualRoot::Project,
-            VirtualPath::new("content/document.typ").expect("a site path"),
-        )
-        .intern();
-        let source = Source::new(id, "#include \"page.typ\"\n".to_owned());
-        let target = paths(
-            &source,
-            directory.path(),
-            &crate::uri::ClientRoot::with_resolved(&spelled, directory.path()),
-        )
-        .unwrap_or_default()
-        .into_iter()
-        .next()
-        .and_then(|link| link.target)
-        .expect("a link target");
-        assert_eq!(
-            target,
-            crate::uri::from_file_path(&spelled.join("content/page.typ")).unwrap()
-        );
+                "#let raw(theme) = theme\n#raw(theme: \"../assets/my.tmTheme\")\n",
+                &[] as &[(&str, &str)],
+            ),
+        ] {
+            let expected: Vec<String> = expected
+                .iter()
+                .map(|&(written, resolved)| link_line(written, resolved))
+                .collect();
+            assert_eq!(rendered(writing, text), expected, "{writing}");
+        }
     }
 }

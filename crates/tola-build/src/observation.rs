@@ -19,6 +19,10 @@ pub struct ObservedInputPath {
     input: InputKind,
     scope: InputPathScope,
     required: bool,
+    asset_selection: Option<(
+        std::path::PathBuf,
+        std::sync::Arc<tola_input::FileSelection>,
+    )>,
 }
 
 impl ObservedInputPath {
@@ -33,6 +37,12 @@ impl ObservedInputPath {
     }
     pub fn required(&self) -> bool {
         self.required
+    }
+    /// The owner-relative tree source and its selection, when this is an asset tree.
+    pub fn asset_selection(&self) -> Option<(&std::path::Path, &tola_input::FileSelection)> {
+        self.asset_selection
+            .as_ref()
+            .map(|(source, selection)| (source.as_path(), selection.as_ref()))
     }
 }
 
@@ -73,6 +83,7 @@ impl InputObservation {
                 input,
                 scope: InputPathScope::Exact,
                 required,
+                asset_selection: None,
             }));
     }
 
@@ -91,6 +102,27 @@ impl InputObservation {
                 input,
                 scope,
                 required,
+                asset_selection: None,
+            }));
+    }
+
+    pub(crate) fn selected_tree_paths(
+        &mut self,
+        input: InputKind,
+        required: bool,
+        logical_path: &std::path::Path,
+        physical_path: &std::path::Path,
+        source_prefix: &std::path::Path,
+        selection: &tola_input::FileSelection,
+    ) {
+        let selection = std::sync::Arc::new(selection.clone());
+        self.paths
+            .extend([logical_path, physical_path].map(|path| ObservedInputPath {
+                path: path.to_path_buf(),
+                input,
+                scope: InputPathScope::Recursive,
+                required,
+                asset_selection: Some((source_prefix.to_path_buf(), selection.clone())),
             }));
     }
 
@@ -140,7 +172,7 @@ impl InputKind {
             Self::ConfiguredAssets => "`assets` files",
             Self::Icons => "`icons` sources",
             Self::FontInventory => "`fonts` files",
-            Self::BeforeBuildHookOutputs => "`build.hooks.before-build` generates",
+            Self::BeforeBuildHookOutputs => "`hooks.before-build` generates",
         }
     }
 }

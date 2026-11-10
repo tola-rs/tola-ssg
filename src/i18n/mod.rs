@@ -73,8 +73,8 @@ impl HelpText {
                  Esc finishes browsing. Documentation is in English \
                  by default; use \
                  `--lang zh` for Simplified Chinese.\n\n\
-                 `tola skill` introduces the task-focused authoring guide. Use `tola skill math` \
-                 or `tola skill headings levels` to read only what the task needs. `--list` shows \
+                 `tola skill` introduces the task-focused authoring guide. Use `tola skill writing math` \
+                 or `tola skill modules create` to read only what the task needs. `--list` shows \
                  the heading tree; `--all` includes the selected topic’s subsections."
             }
         }

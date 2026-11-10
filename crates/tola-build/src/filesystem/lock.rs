@@ -8,7 +8,7 @@ use std::time::Duration;
 use crate::cancellation::{BuildCancellation, BuildCancelled};
 
 use super::file_handle::{OpenLockError, open_lock_file};
-use super::sys::automatic_path_is_link_like;
+use tola_fs::is_link_like;
 
 const LOCK_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
@@ -105,15 +105,12 @@ fn create_lock_parent(root: &Path, path: &Path) -> io::Result<()> {
             Err(error) => return Err(error),
         }
         let metadata = fs::symlink_metadata(&directory)?;
-        if !metadata.is_dir()
-            || automatic_path_is_link_like(&directory, &metadata.file_type())
-                .map_err(io::Error::other)?
-        {
+        if !metadata.is_dir() || is_link_like(&metadata) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!(
                     "lock directory `{}` is a symbolic link or not a directory; replace it with a real directory",
-                    super::path::display_path(&directory, root)
+                    tola_diagnostic::display_path(&directory, root)
                 ),
             ));
         }

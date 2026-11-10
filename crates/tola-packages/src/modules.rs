@@ -2,7 +2,7 @@
 
 use typst::diag::{SourceResult, bail};
 use typst::engine::Engine;
-use typst::foundations::{Dict, Smart, Str, Value, func};
+use typst::foundations::{Args, Dict, Str, Value, func};
 use typst::syntax::{FileId, Span, VirtualRoot};
 
 fn caller_alias(id: FileId) -> Option<String> {
@@ -36,20 +36,18 @@ fn lookup(engine: &Engine, name: &str, span: Span) -> SourceResult<Dict> {
 #[func]
 pub(super) fn get_module(
     engine: &mut Engine,
+    args: &mut Args,
     span: Span,
-    /// The module alias declared by the site, or `auto` for the calling module.
-    #[default(Smart::Auto)]
-    name: Smart<Str>,
+    /// The configured module alias. Omit it to select the calling module.
+    #[external]
+    #[default]
+    name: Str,
 ) -> SourceResult<Dict> {
-    if super::library::in_module_validation(engine) {
-        bail!(
-            span,
-            "module configuration is unavailable while validating options schemas"
-        );
-    }
+    let name = args.eat::<Str>()?;
+    args.take().finish()?;
     let alias = match name {
-        Smart::Custom(name) => name.to_string(),
-        Smart::Auto => {
+        Some(name) => name.to_string(),
+        None => {
             let Some(alias) = span.id().and_then(caller_alias) else {
                 bail!(
                     span,

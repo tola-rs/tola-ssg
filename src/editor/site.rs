@@ -6,7 +6,7 @@ use anyhow::Result;
 use serde_json::{Value, json};
 
 use tola_build::config::ResolvedSiteConfig;
-use tola_build::filesystem::normalize_existing_prefix;
+use tola_input::normalize_existing_prefix;
 use tola_typst::{PackageLocation, PackageLocations};
 
 /// The executable every editor runs, named as the PATH entries an author's terminal already has.

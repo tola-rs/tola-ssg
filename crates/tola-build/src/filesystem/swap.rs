@@ -10,7 +10,8 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 use super::atomic_write;
-use super::path::{display_path, path_failure_reason, render_relative};
+use super::path::path_failure_reason;
+use tola_diagnostic::{display_path, render_relative};
 
 const OWNER_FILE: &str = "owner";
 const OWNER_HEADER: &str = "tola-swap";
@@ -110,7 +111,7 @@ impl TreeSwap {
 
     /// Whether this workspace holds the record that it belongs to this target.
     pub fn is_claimed(&self) -> Result<bool, SwapError> {
-        let mut record = match super::open_regular_file(&self.owner_file(), false) {
+        let mut record = match tola_fs::open_regular_file(&self.owner_file(), false) {
             Ok(record) => record,
             Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(false),
             Err(source) => {

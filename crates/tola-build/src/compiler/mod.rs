@@ -14,7 +14,7 @@ pub(crate) use dependency::{
     CompilationDependencies, RebuildDecision, ReusedDependencyReaders, TypstDependencyReader,
 };
 pub(crate) use diagnostic::{error_diagnostics, source_location, warning_diagnostics};
-pub(crate) use host::TypstHost;
+pub(crate) use host::SiteHost;
 pub(crate) use html::minify_generated_payloads;
 pub(crate) use inputs::BuildInputs;
 
@@ -36,9 +36,9 @@ pub(crate) struct SiteProgramCache {
 
 impl SiteProgramCache {
     pub(crate) fn matches_site(&self, config: &crate::config::ResolvedSiteConfig) -> bool {
-        self.root == crate::filesystem::normalize_path(config.get_root())
-            && crate::filesystem::normalize_path(&self.entry)
-                == crate::filesystem::normalize_path(&config.build.entry)
+        self.root == tola_input::normalize_path(config.get_root())
+            && tola_input::normalize_path(&self.entry)
+                == tola_input::normalize_path(&config.build.entry)
             && config
                 .entry_file()
                 .or_else(|| {
@@ -103,7 +103,7 @@ pub(crate) mod tests {
     /// Typst host for `config` with default build resources and a fresh cancellation token.
     pub(crate) fn compiler_host(
         config: &crate::config::ResolvedSiteConfig,
-    ) -> std::result::Result<crate::compiler::TypstHost, tola_typst::FontLoadError> {
+    ) -> std::result::Result<crate::compiler::SiteHost, tola_typst::FontLoadError> {
         compiler_host_with(config, &crate::resources::BuildResources::default())
     }
 
@@ -111,10 +111,11 @@ pub(crate) mod tests {
     pub(crate) fn compiler_host_with(
         config: &crate::config::ResolvedSiteConfig,
         resources: &crate::resources::BuildResources,
-    ) -> std::result::Result<crate::compiler::TypstHost, tola_typst::FontLoadError> {
-        crate::compiler::TypstHost::for_config_with_resources(
+    ) -> std::result::Result<crate::compiler::SiteHost, tola_typst::FontLoadError> {
+        crate::compiler::SiteHost::for_config(
             config,
             resources,
+            std::sync::Arc::new(tola_typst::LocalPackages::default()),
             &crate::cancellation::BuildCancellation::default(),
         )
     }
@@ -174,9 +175,10 @@ pub(crate) mod tests {
         std::fs::create_dir_all(directory.path().join("content")).unwrap();
         std::fs::write(directory.path().join("site.typ"), site).unwrap();
         let config = crate::config::tests::load_test_config(directory.path(), "");
-        let host = crate::compiler::TypstHost::for_config_with_resources(
+        let host = crate::compiler::SiteHost::for_config(
             &config,
             &crate::resources::BuildResources::default(),
+            std::sync::Arc::new(tola_typst::LocalPackages::default()),
             &crate::cancellation::BuildCancellation::default(),
         )
         .unwrap();
@@ -219,8 +221,9 @@ pub(crate) mod tests {
     fn cached_driver_switches_native_alias() {
         use crate::build::{BuildRequest, BuildReuse, BuildTrigger};
         use crate::config::loading::{BuildOverrides, load_site_config};
-        use crate::{BuildResources, BuildSession, InputScope};
+        use crate::{BuildResources, BuildSession};
         use std::{fs, sync::Arc};
+        use tola_input::InputScope;
 
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("project");
@@ -230,11 +233,9 @@ pub(crate) mod tests {
         fs::write(
             module.join("tola-module.toml"),
             r#"
-name = "shared-driver"
-version = "1.0.0"
 [typst]
 entry = "lib.typ"
-[site]
+[build]
 entry = "site.typ"
 "#,
         )
@@ -258,8 +259,8 @@ entry = "site.typ"
 path = "../module"
 [modules.second]
 path = "../module"
-[theme]
-module = "{alias}"
+[build]
+entry = {{ module = "{alias}" }}
 [typst.fonts]
 system = false
 "#
@@ -286,15 +287,15 @@ system = false
             "first"
         );
         let second = configure("second");
-        let prepared_first = crate::modules::prepared::configure(
+        let prepared_first = crate::modules::prepared::prepare_site(
             &first,
-            crate::inputs::InputMode::new(InputScope::Offline, false),
+            tola_input::InputMode::new(InputScope::Offline, false),
             &Default::default(),
         )
         .unwrap();
-        let prepared_second = crate::modules::prepared::configure(
+        let prepared_second = crate::modules::prepared::prepare_site(
             &second,
-            crate::inputs::InputMode::new(InputScope::Offline, false),
+            tola_input::InputMode::new(InputScope::Offline, false),
             &Default::default(),
         )
         .unwrap();

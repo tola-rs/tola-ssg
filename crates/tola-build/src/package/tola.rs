@@ -203,7 +203,6 @@ path = "icons/brand"
             source_records_by_file: Dict::new(),
             source_origins: Dict::new(),
             modules: Dict::new(),
-            module_validation: None,
         })
         .shared()
     }
@@ -342,7 +341,8 @@ path = "icons/brand"
         .collections();
         let asset_urls = crate::asset::render_configured_asset_inventory(
             &config,
-            &crate::resources::source_boundary(&config, crate::InputScope::Online),
+            crate::modules::prepared::AppliedAssets::project_only(&config),
+            &crate::resources::source_boundary(&config, tola_input::InputScope::Online),
             &cancellation,
             None,
             &[],
@@ -1188,7 +1188,8 @@ path = "icons/brand"
         ) -> crate::asset::ConfiguredAssetInventory {
             crate::asset::render_configured_asset_inventory(
                 config,
-                &crate::resources::source_boundary(config, crate::InputScope::Online),
+                crate::modules::prepared::AppliedAssets::project_only(config),
+                &crate::resources::source_boundary(config, tola_input::InputScope::Online),
                 &crate::cancellation::BuildCancellation::default(),
                 None,
                 &[],

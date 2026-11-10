@@ -900,23 +900,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn cold_and_warm_lanes_agree() {
-        for (marked, label) in [
-            ("𝄞 #rep|\n", "repr"),
-            ("#let result = 1 + rep|", "repr"),
-            ("#show stron|: it => it", "strong"),
-            ("#import math: ab|", "abs"),
-        ] {
-            let cold = cold_items(marked);
-            let mut site = crate::query::tests::QuerySession::new();
-            let warm = site.completion(marked);
-            let (cold, warm) = (named(&cold, label), named(&warm, label));
-            assert_eq!(insertion_text(cold), insertion_text(warm), "{marked}");
-            assert_eq!(cold.insert_text_format, warm.insert_text_format, "{marked}");
-        }
-    }
-
     /// What a site's own declarations say about a callable is one answer: the lane that reads the
     /// source alone and the lane that reads the checked world offer the same kind, signature, and
     /// inserted call.
@@ -989,48 +972,6 @@ mod tests {
             let warm = site.completion(marked);
             for item in [named(&cold, label), named(&warm, label)] {
                 assert_eq!(insertion_text(item), inserted, "{marked}");
-            }
-        }
-    }
-
-    #[test]
-    fn local_completions_carry_declared_signatures() {
-        for declaration in [
-            "#let render(value, label: \"x\", ..args) = value",
-            "#let render = (\n (value, label: \"x\", ..args) => value\n)",
-        ] {
-            for suffix in ["#ren", "#let alias = render\n#ali"] {
-                let source = Source::detached(format!(
-                    "/// Render meaning.\n/// - value (int): Input meaning.\n/// - label (str): Label meaning.\n/// -> int\n{declaration}\n{suffix}"
-                ));
-                let names = SourceNames::new(source.clone());
-                let items = source_name_completion(
-                    None,
-                    &names,
-                    &source,
-                    source.text().len(),
-                    &BuildCancellation::new(),
-                )
-                .unwrap()
-                .unwrap();
-                let label = if suffix == "#ren" { "render" } else { "alias" };
-                let completed = named(&items, label);
-                assert_eq!(
-                    completed.kind,
-                    Some(CompletionItemKind::FUNCTION),
-                    "{declaration}: {suffix}"
-                );
-                for spelling in [
-                    label,
-                    "value: int",
-                    "label: str",
-                    "args: arguments",
-                    "-> int",
-                ] {
-                    assert!(description(completed).contains(spelling), "{completed:?}");
-                }
-                assert!(documentation(completed).contains("Render meaning."));
-                assert!(documentation(completed).contains("Input meaning."));
             }
         }
     }

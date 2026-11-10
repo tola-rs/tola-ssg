@@ -40,8 +40,8 @@ impl SourceOverrides {
             if !path.is_absolute() {
                 return Err(SourceOverrideError::Relative.into());
             }
-            let logical = super::lexical_path_identity(&path);
-            let physical = super::normalize_existing_prefix(&logical);
+            let logical = tola_input::lexical_path_identity(&path);
+            let physical = tola_input::normalize_existing_prefix(&logical);
             if physical.is_dir() {
                 return Err(SourceOverrideError::Directory.into());
             }
@@ -128,7 +128,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(overrides.sources().count(), 1);
-        let normalized = crate::filesystem::normalize_existing_prefix(&physical.join("new.typ"));
+        let normalized = tola_input::normalize_existing_prefix(&physical.join("new.typ"));
         let resolved = overrides.get_physical(&normalized).unwrap();
         assert!(Arc::ptr_eq(&resolved.text, &text));
         assert!(

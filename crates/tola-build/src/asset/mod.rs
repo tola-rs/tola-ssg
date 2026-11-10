@@ -7,7 +7,7 @@ mod urls;
 
 pub(crate) use inventory::{ConfiguredAssetInventory, render_configured_asset_inventory};
 pub(crate) use minify::AssetMinifyWarning;
-pub use urls::{AssetOrigin, AssetUrls, PublishedAsset};
+pub use urls::{AssetOrigin, AssetUrls, ModuleAsset, ModuleAssetInput, PublishedAsset};
 
 #[cfg(test)]
 pub(crate) mod tests {

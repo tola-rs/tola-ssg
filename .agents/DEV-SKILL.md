@@ -702,7 +702,10 @@ This checkout is jj-colocated: `.jj/repo/store` points at `.git`, so jj and git 
 - `jj new`, `squash`, `split`, `edit`, `resolve`, and `undo` are the normal operations. Ask before rewriting history or touching a remote.
 - The tree may carry unrelated user changes: read them as context, never revert or claim them.
 - Prefer jj. A pull-request contribution from a user without jj may use git; do not be rigid about it.
-- Write a commit description only when the user asks. Follow Linux kernel style: `subsystem: imperative summary` of about 50 characters with no trailing period, a blank line, then a body explaining why, wrapped at 72 columns. One change per commit.
+- Format the title as `scope: imperative summary`, about 50 characters with no trailing period. In [Scoped Commits](https://scopedcommits.com/), `scope` names the affected subsystem, module, or area. Choose the area that owns the change, or a shared parent area for a change spanning modules.
+- After a blank line, write a [Linux kernel-style body](https://docs.kernel.org/process/submitting-patches.html#describe-your-changes), wrapped at 72 columns. Describe the problem, previous behaviour, and impact; then explain the final change and why it addresses the problem. Include significant trade-offs or compatibility effects when relevant. Keep simple changes brief; fixed section headings are unnecessary.
+- Add relevant issue or design-discussion links when useful. Keep the essential reasoning in the body so the description makes sense without opening those links or reading the conversation.
+- Split independent changes that can be reviewed and reverted separately. A structural change needed to fix a bug can belong in the same commit as the fix; explain that dependency rather than splitting solely to fit `feat`, `fix`, or `refactor` labels.
 
 ## Workspace
 
@@ -739,12 +742,16 @@ This checkout is jj-colocated: `.jj/repo/store` points at `.git`, so jj and git 
 - Names are short, clear, and rigorous; a reader should know what the value is without opening its definition.
 - No arbitrary prefixes such as `a_foo_bar`, and no filler conjunctions (`and`, `or`, `with`, `for`) that name no real distinction.
 - One authoritative representation per concept; derived views name their owner.
+- Use the concrete noun the code holds or returns. Reject umbrella words when a narrower one exists: `policy` → `scope`/`access`/`limits`, `facts` → the field names, `plan` → `entries`/`hooks`/`steps`.
+- Verbs name the concrete action: `read`, `load`, `select`, `store`, `pass`, `move`, `record`; not `resolve`, `carry`, `thread`, or `surface`.
+- Cargo `description` and doc comments are declarative: what the crate holds and what it does. Drop filler such as "shared by" or "one build attempt runs under". A crate description is a short noun phrase naming the crate's subject.
 
 ### Comments
 
 - A comment earns its line by stating an invariant, an ownership reason, or an unavoidable external constraint.
 - No restating code, narrating steps, or stories about removed implementations.
 - Keep names inside comments current through a rename; a stale comment is a defect.
+- Name the concrete field, value, file, or action; no metaphor or management vocabulary (`policy`, `facts`, `plan`).
 
 ### Diagnostics
 

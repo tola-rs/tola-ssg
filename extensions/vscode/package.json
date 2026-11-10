@@ -535,7 +535,7 @@
           {
             "id": "create",
             "title": "Create a site",
-            "description": "Create a site with VS Code settings included.\n[Create a site](command:tola.initSite)",
+            "description": "Create a Tola site, then run Set Up Editor Integration.\n[Create a site](command:tola.initSite)",
             "media": {
               "image": "icon.png"
             },
@@ -545,8 +545,8 @@
           },
           {
             "id": "setup",
-            "title": "Configure an existing site",
-            "description": "For an existing site, add editor settings and refresh package sources. Sites created here already include these settings.\n[Set up this folder](command:tola.editorSetup)",
+            "title": "Set up the editor integration",
+            "description": "Add the workspace settings and package sources the integration needs.\n[Set Up Editor Integration](command:tola.editorSetup)",
             "media": {
               "image": "icon.png"
             },

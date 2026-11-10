@@ -1,6 +1,7 @@
 //! Which job each lane runs next, when a due check is dispatched, and when an idle connection lets
 //! its compiled site go.
 
+use std::collections::VecDeque;
 use std::io::Write;
 use std::time::{Duration, Instant};
 
@@ -30,6 +31,53 @@ const CHECK_STARVATION_LIMIT: Duration = Duration::from_secs(2);
 /// retains. Answering again re-derives it.
 const IDLE_RELEASE_DELAY: Duration = Duration::from_secs(300);
 
+/// One lane's waiting jobs, each with the moment it was queued.
+///
+/// The queue owns the timestamp, so the enqueue that pushes a job records it in the same place and
+/// dispatch reads the wait without a parallel table of timestamps.
+pub(super) struct JobQueue<J> {
+    queued: VecDeque<QueuedJob<J>>,
+}
+
+/// One job waiting for its lane, with the moment it was queued.
+struct QueuedJob<J> {
+    queued_at: Instant,
+    job: J,
+}
+
+impl<J> JobQueue<J> {
+    pub(super) fn new() -> Self {
+        Self {
+            queued: VecDeque::new(),
+        }
+    }
+
+    pub(super) fn push_back(&mut self, job: J) {
+        self.queued.push_back(QueuedJob {
+            queued_at: Instant::now(),
+            job,
+        });
+    }
+
+    /// Take the oldest job, with the time it waited for its lane.
+    pub(super) fn pop_front(&mut self) -> Option<(J, Duration)> {
+        let QueuedJob { queued_at, job } = self.queued.pop_front()?;
+        Some((job, queued_at.elapsed()))
+    }
+
+    pub(super) fn retain(&mut self, mut keep: impl FnMut(&J) -> bool) {
+        self.queued.retain(|queued| keep(&queued.job));
+    }
+
+    pub(super) fn clear(&mut self) {
+        self.queued.clear();
+    }
+
+    pub(super) fn is_empty(&self) -> bool {
+        self.queued.is_empty()
+    }
+}
+
 impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
     /// The next job the compiler worker may run, at `now`.
     pub(crate) fn next_job(&mut self, now: Instant) -> Option<SourceJob> {
@@ -40,9 +88,10 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
             .as_ref()
             .is_some_and(|check| now >= check.due + CHECK_STARVATION_LIMIT);
         if !starved {
-            while let Some(job) = self.queries.pop_front() {
+            while let Some((job, waited)) = self.queries.pop_front() {
                 if !job.is_cancelled() {
                     self.resume_after_release();
+                    log_dispatched(&job, waited);
                     return Some(job);
                 }
             }
@@ -58,16 +107,28 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
             .check
             .take()
             .filter(|check| !check.sources.cancellation.is_cancelled())?;
-        self.running_check = Some(pending.checked_revision);
+        let checked_revision = pending.checked_revision;
+        let waited = now.saturating_duration_since(pending.queued_at);
+        self.running_check = Some(checked_revision);
         self.resume_after_release();
         // A report is timed from the moment its check started running, so a check that answers
         // inside the window never shows one, and the first check shows one at once.
         self.begin_progress(now);
-        Some(SourceJob::Check(CheckRequest {
-            checked_revision: pending.checked_revision,
+        let job = SourceJob::Check(CheckRequest {
+            checked_revision,
             sources: pending.sources,
             view: self.open.view(),
-        }))
+        });
+        // A check is a pending revision rather than a queue entry: its wait is measured from the
+        // moment the revision became pending, settle delay included.
+        tracing::debug!(
+            lane = "compiler",
+            kind = job.kind(),
+            checked_revision,
+            wait_ms = millis(waited),
+            "lane job dispatched"
+        );
+        Some(job)
     }
 
     /// Record that a job now holds the lane: a released site is about to be derived again, so
@@ -79,8 +140,9 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
     }
 
     pub(crate) fn next_analysis(&mut self) -> Option<AnalysisRequest> {
-        while let Some(request) = self.analyses.pop_front() {
+        while let Some((request, waited)) = self.analyses.pop_front() {
             if !request.sources.cancellation.is_cancelled() {
+                log_analysis_dispatched(&request, waited);
                 return Some(request);
             }
         }
@@ -116,8 +178,42 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
         let idle = now.duration_since(self.last_work) >= IDLE_RELEASE_DELAY;
         if self.open.overrides().is_empty() || idle {
             self.idle_release = IdleRelease::Requested;
+            tracing::debug!(
+                lane = "compiler",
+                idle_ms = millis(now.duration_since(self.last_work)),
+                open_sources = self.open.overrides().len(),
+                "an idle connection asks its compiler lane to release the compiled site"
+            );
         }
     }
+}
+
+/// Log one compiler-lane job as it leaves its queue: what it is and how long it waited.
+fn log_dispatched(job: &SourceJob, waited: Duration) {
+    tracing::debug!(
+        lane = "compiler",
+        kind = job.kind(),
+        checked_revision = job.checked_revision(),
+        serial = job.serial(),
+        wait_ms = millis(waited),
+        "lane job dispatched"
+    );
+}
+
+/// Log one analysis-lane request as it leaves its queue.
+fn log_analysis_dispatched(request: &AnalysisRequest, waited: Duration) {
+    tracing::debug!(
+        lane = "analysis",
+        kind = request.kind(),
+        serial = request.serial,
+        wait_ms = millis(waited),
+        "lane job dispatched"
+    );
+}
+
+/// One wait, in whole milliseconds, as the logs record it.
+fn millis(waited: Duration) -> u64 {
+    u64::try_from(waited.as_millis()).unwrap_or(u64::MAX)
 }
 
 #[cfg(test)]

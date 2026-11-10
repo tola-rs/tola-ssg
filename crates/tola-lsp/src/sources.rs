@@ -27,7 +27,7 @@ pub(super) fn load(
     package_sources: Option<&Path>,
     parsed: Option<&Source>,
 ) -> Option<Source> {
-    let root = tola_build::filesystem::normalize_existing_prefix(root);
+    let root = tola_input::normalize_existing_prefix(root);
     let id = crate::identity::source_id(uri, &root, package_sources, boundary).ok()??;
     if let Some(text) = crate::identity::embedded_source(id) {
         return Some(Source::new(id, text.into_owned()));
@@ -217,14 +217,20 @@ pub(super) struct OpenSources {
     /// The generated state one resolved configuration adds: the output tree, and the publication
     /// and vendor workspaces.
     resolved_generated: Option<SourceBoundary>,
-    revision: u64,
+    /// The site revision: the newest change to a named document or a site file. A compilation, or
+    /// a whole-site check, is reused only within one.
+    site_revision: u64,
+    /// The view revision: every accepted change to a tracked document, including an unnamed
+    /// buffer. An answer about one document goes stale only when that document moves, so an
+    /// unnamed draft cannot supersede the site's checks or compilations.
+    view_revision: u64,
     view: SourceView,
 }
 
 impl OpenSources {
     pub(super) fn new(root: &Path) -> Self {
         Self {
-            root: tola_build::filesystem::normalize_existing_prefix(root),
+            root: tola_input::normalize_existing_prefix(root),
             // Containment is a read's business: a file change is refused for generated state
             // alone, so this boundary never has to require the site root.
             generated: generated_state_boundary(root),
@@ -250,7 +256,7 @@ impl OpenSources {
 
     /// A resolved configuration can select a root before which only the workspace was known.
     pub(super) fn rebase(&mut self, root: &Path) {
-        let root = tola_build::filesystem::normalize_existing_prefix(root);
+        let root = tola_input::normalize_existing_prefix(root);
         if self.root == root {
             return;
         }
@@ -259,7 +265,7 @@ impl OpenSources {
             .site_boundary(&generated_state_boundary(&root))
             .into_owned();
         self.root = root;
-        self.refresh_paths(self.revision);
+        self.refresh_paths(self.view_revision);
         self.view.overrides = self.open_source_texts().into();
     }
 
@@ -309,51 +315,65 @@ impl OpenSources {
         self.view.sources.get(uri).map(|source| source.version)
     }
 
-    /// The source revision these documents and their unsaved text belong to.
+    /// The site revision these named documents and their unsaved text belong to.
     ///
-    /// Every accepted change to a tracked document, and every file-change notification, starts a
-    /// new revision: a compilation, or a name graph, is reused only within one.
+    /// Every accepted change to a named document or a site file, and every file-change
+    /// notification, starts a new one: a compilation, or a whole-site check, is reused only
+    /// within one. Text an unnamed buffer holds is view state, so it advances the view revision
+    /// and leaves the site's checks and compilations standing.
     pub(super) fn revision(&self) -> u64 {
-        self.revision
+        self.site_revision
     }
 
     pub(super) fn apply(&mut self, message: Notification) -> Result<bool> {
-        let revision = self.revision + 1;
-        let document = message
-            .params
-            .get("textDocument")
-            .and_then(|document| document.get("uri"))
-            .and_then(serde_json::Value::as_str);
-        let unnamed = document.is_some_and(|uri| uri.starts_with("untitled:"));
+        let view_revision = self.view_revision + 1;
+        let document = document_uri(&message);
+        let unnamed = document.is_some_and(is_untitled_uri);
         // A document that is generated state is not a source: tracking its buffer would cost a
         // revision and a whole-site check that cannot differ, because no read reaches it.
         if document.is_some_and(|uri| self.is_generated_state(uri)) {
             return Ok(false);
         }
+        if !self.apply_change(message, view_revision, unnamed)? {
+            return Ok(false);
+        }
+        self.commit_change(unnamed, view_revision);
+        Ok(true)
+    }
+
+    /// Apply one notification to the tracked documents, reporting whether it changed any.
+    fn apply_change(
+        &mut self,
+        message: Notification,
+        view_revision: u64,
+        unnamed: bool,
+    ) -> Result<bool> {
         let changed = match message.method.as_str() {
-            notification::DidOpenTextDocument::METHOD => self.open_document(message, revision)?,
+            notification::DidOpenTextDocument::METHOD => {
+                self.open_document(message, view_revision)?
+            }
             notification::DidChangeTextDocument::METHOD => {
-                self.change_document(message, revision)?
+                self.change_document(message, view_revision)?
             }
             notification::DidCloseTextDocument::METHOD => self.close_document(message)?,
             notification::DidSaveTextDocument::METHOD => {
                 if unnamed {
                     return Ok(false);
                 }
-                self.save_document(message, revision)?
+                self.save_document(message, view_revision)?
             }
             notification::DidChangeWatchedFiles::METHOD => {
                 let params = extract::<notification::DidChangeWatchedFiles>(message)?;
                 self.refresh_unless_generated(
                     params.changes.iter().map(|change| change.uri.as_str()),
-                    revision,
+                    view_revision,
                 )
             }
             notification::DidCreateFiles::METHOD => {
                 let params = extract::<notification::DidCreateFiles>(message)?;
                 self.refresh_unless_generated(
                     params.files.iter().map(|file| file.uri.as_str()),
-                    revision,
+                    view_revision,
                 )
             }
             notification::DidRenameFiles::METHOD => {
@@ -362,28 +382,33 @@ impl OpenSources {
                     .files
                     .iter()
                     .flat_map(|file| [file.old_uri.as_str(), file.new_uri.as_str()]);
-                self.refresh_unless_generated(moved, revision)
+                self.refresh_unless_generated(moved, view_revision)
             }
             notification::DidDeleteFiles::METHOD => {
                 let params = extract::<notification::DidDeleteFiles>(message)?;
                 self.refresh_unless_generated(
                     params.files.iter().map(|file| file.uri.as_str()),
-                    revision,
+                    view_revision,
                 )
             }
             _ => return Ok(false),
         };
-        if !changed {
-            return Ok(false);
-        }
-        self.revision = revision;
-        if !unnamed {
-            self.view.overrides = self.open_source_texts().into();
-        }
-        Ok(true)
+        Ok(changed)
     }
 
-    fn open_document(&mut self, message: Notification, revision: u64) -> Result<bool> {
+    /// Commit one accepted change to the view, and to the site when a named document or site file
+    /// moved.
+    fn commit_change(&mut self, unnamed: bool, view_revision: u64) {
+        self.view_revision = view_revision;
+        // An unnamed buffer is view state: it changes what its own answers read, never what the
+        // site's check or compilation reads.
+        if !unnamed {
+            self.site_revision += 1;
+            self.view.overrides = self.open_source_texts().into();
+        }
+    }
+
+    fn open_document(&mut self, message: Notification, view_revision: u64) -> Result<bool> {
         let params = extract::<notification::DidOpenTextDocument>(message)?;
         let document = params.text_document;
         let Some(path) = document_path(document.uri.as_str()) else {
@@ -405,7 +430,7 @@ impl OpenSources {
             DocumentPath::Site(_) => None,
         }
         .map(|source| ParsedSource {
-            revision,
+            revision: view_revision,
             source,
             names: Arc::default(),
         });
@@ -421,7 +446,7 @@ impl OpenSources {
         Ok(true)
     }
 
-    fn change_document(&mut self, message: Notification, revision: u64) -> Result<bool> {
+    fn change_document(&mut self, message: Notification, view_revision: u64) -> Result<bool> {
         let params = extract::<notification::DidChangeTextDocument>(message)?;
         let document = params.text_document;
         if document_path(document.uri.as_str()).is_none() {
@@ -443,7 +468,7 @@ impl OpenSources {
         Arc::make_mut(&mut self.view.sources)
             .get_mut(document.uri.as_str())
             .expect("the validated open document remains tracked")
-            .replace_text(document.version, text, revision);
+            .replace_text(document.version, text, view_revision);
         Ok(true)
     }
 
@@ -454,20 +479,20 @@ impl OpenSources {
             .is_some())
     }
 
-    fn save_document(&mut self, message: Notification, revision: u64) -> Result<bool> {
+    fn save_document(&mut self, message: Notification, view_revision: u64) -> Result<bool> {
         let params = extract::<notification::DidSaveTextDocument>(message)?;
         let uri = params.text_document.uri;
         if let Some(open) = Arc::make_mut(&mut self.view.sources).get_mut(uri.as_str()) {
-            open.refresh_path(uri.as_str(), &self.root, revision);
+            open.refresh_path(uri.as_str(), &self.root, view_revision);
         }
         // A save costs a revision even when the editor no longer tracks the document: the client
         // wrote those bytes to disk.
         Ok(true)
     }
 
-    fn refresh_paths(&mut self, revision: u64) {
+    fn refresh_paths(&mut self, view_revision: u64) {
         for (uri, open) in Arc::make_mut(&mut self.view.sources) {
-            open.refresh_path(uri, &self.root, revision);
+            open.refresh_path(uri, &self.root, view_revision);
         }
     }
 
@@ -479,12 +504,12 @@ impl OpenSources {
     fn refresh_unless_generated<'a>(
         &mut self,
         changed: impl IntoIterator<Item = &'a str>,
-        revision: u64,
+        view_revision: u64,
     ) -> bool {
         if changed.into_iter().all(|uri| self.is_generated_state(uri)) {
             return false;
         }
-        self.refresh_paths(revision);
+        self.refresh_paths(view_revision);
         true
     }
 
@@ -506,8 +531,8 @@ impl OpenSources {
 pub(super) fn base_source_boundary(root: &Path, contained: bool) -> SourceBoundary {
     SourceBoundary::new(root, contained)
         .excluding_except(
-            root.join(tola_build::filesystem::INTERNAL_DIR),
-            tola_build::filesystem::layout::builtin_packages(root),
+            root.join(tola_input::INTERNAL_DIR),
+            tola_input::layout::builtin_packages(root),
         )
         .excluding(root.join(tola_build::filesystem::SITE_BUILD_LOCK_FILE))
 }
@@ -519,12 +544,26 @@ pub(super) fn base_source_boundary(root: &Path, contained: bool) -> SourceBounda
 /// Tola's own writing rather than an author edit.
 fn generated_state_boundary(root: &Path) -> SourceBoundary {
     SourceBoundary::new(root, false)
-        .excluding(root.join(tola_build::filesystem::INTERNAL_DIR))
+        .excluding(root.join(tola_input::INTERNAL_DIR))
         .excluding(root.join(tola_build::filesystem::SITE_BUILD_LOCK_FILE))
 }
 
 fn extract<N: LspNotification>(message: Notification) -> Result<N::Params> {
     message.extract(N::METHOD).map_err(Into::into)
+}
+
+/// The document URI one notification names, if it names one.
+fn document_uri(message: &Notification) -> Option<&str> {
+    message
+        .params
+        .get("textDocument")
+        .and_then(|document| document.get("uri"))
+        .and_then(serde_json::Value::as_str)
+}
+
+/// Whether one URI names an unnamed editor buffer rather than a file.
+fn is_untitled_uri(uri: &str) -> bool {
+    uri.starts_with("untitled:")
 }
 
 /// Whether a path names a Typst source, the only file kind this connection parses.
@@ -549,7 +588,7 @@ impl DocumentPath {
 }
 
 fn document_path(uri: &str) -> Option<DocumentPath> {
-    if uri.starts_with("untitled:") {
+    if is_untitled_uri(uri) {
         return Some(DocumentPath::Untitled);
     }
     Some(DocumentPath::Site(crate::uri::to_site_path(uri).ok()?))
@@ -652,8 +691,7 @@ mod tests {
         let source = crate::identity::embedded_source(id).expect("a builtin source");
         let boundary = base_source_boundary(root, true);
         let configured = tempfile::tempdir().unwrap();
-        let mirror = tola_build::filesystem::layout::builtin_packages(root)
-            .join("tola/source/0.0.0/lib.typ");
+        let mirror = tola_input::layout::builtin_packages(root).join("tola/source/0.0.0/lib.typ");
         for (path, package_sources) in [
             (mirror.clone(), None),
             (
@@ -714,6 +752,41 @@ mod tests {
         assert_eq!(sources.version(uri.as_str()), Some(2));
         assert_eq!(previous.get(&uri).unwrap().source.text(), original);
     }
+    /// An unnamed buffer is view state: its edits must not supersede the site's check or
+    /// compilation revision, while the answer about the buffer itself still sees the new text.
+    #[test]
+    fn unnamed_edits_keep_the_site_revision() {
+        let directory = tempfile::tempdir().unwrap();
+        let site_uri = crate::uri::from_file_path(&directory.path().join("document.typ")).unwrap();
+        let draft: Uri = "untitled:Draft".parse().unwrap();
+        let mut sources = OpenSources::new(directory.path());
+        sources.apply(opened(site_uri.clone(), "Site.")).unwrap();
+        let site_revision = sources.revision();
+        let view_revision = sources.view_revision;
+
+        sources.apply(opened(draft.clone(), "Draft.")).unwrap();
+        sources
+            .apply(changed(draft.clone(), 2, vec![edit(None, "Draft!")]))
+            .unwrap();
+
+        assert_eq!(
+            sources.revision(),
+            site_revision,
+            "an unnamed edit must not advance the site revision"
+        );
+        assert_eq!(sources.view_revision, view_revision + 2);
+        assert_eq!(
+            sources.view().get(&draft).unwrap().revision,
+            sources.view_revision
+        );
+
+        sources
+            .apply(changed(site_uri, 2, vec![edit(None, "Site!")]))
+            .unwrap();
+        assert_eq!(sources.revision(), site_revision + 1);
+        assert_eq!(sources.view_revision, view_revision + 3);
+    }
+
     /// A retargeted symlink answers as the source it now resolves to, and the view a request
     /// already holds keeps the source it read.
     #[test]

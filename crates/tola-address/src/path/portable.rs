@@ -1,4 +1,4 @@
-//! Portable output filename rules shared by URLs and bundle paths.
+//! Portable filename rules shared by published paths and module archives.
 
 use caseless::Caseless;
 use thiserror::Error;
@@ -6,7 +6,7 @@ use unicode_normalization::UnicodeNormalization;
 
 pub(crate) const MAX_PORTABLE_SEGMENT_BYTES: usize = 255;
 
-/// Why a logical output component cannot be represented portably on supported filesystems.
+/// Why a filename component cannot be represented portably on supported filesystems.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum PortablePathError {
     #[error("the path must not start with a drive letter or filesystem prefix")]
@@ -21,10 +21,8 @@ pub enum PortablePathError {
     SegmentTooLong { byte_len: usize },
 }
 
-pub(crate) fn validate_portable_segment(
-    segment: &str,
-    first: bool,
-) -> Result<(), PortablePathError> {
+/// Check a filename component's filesystem spelling; callers check separators and dot segments.
+pub fn validate_portable_segment(segment: &str, first: bool) -> Result<(), PortablePathError> {
     if first && is_windows_prefix(segment) {
         return Err(PortablePathError::FilesystemPrefix);
     }

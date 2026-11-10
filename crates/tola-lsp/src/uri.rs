@@ -72,9 +72,7 @@ pub(super) fn file_path_of(url: &Url) -> Result<PathBuf, UriError> {
 
 /// The site identity one parsed editor URL names.
 pub(super) fn site_path_of(url: &Url) -> Result<PathBuf, UriError> {
-    Ok(tola_build::filesystem::normalize_existing_prefix(
-        &file_path_of(url)?,
-    ))
+    Ok(tola_input::normalize_existing_prefix(&file_path_of(url)?))
 }
 
 /// The two spellings of one site root: the path Tola resolves and the one the editor named.
@@ -91,7 +89,7 @@ impl ClientRoot {
     /// The root a client spelled, with the form the filesystem resolves it to derived here.
     pub(super) fn new(spelled: impl Into<PathBuf>) -> Self {
         let spelled = spelled.into();
-        let resolved = tola_build::filesystem::normalize_existing_prefix(&spelled);
+        let resolved = tola_input::normalize_existing_prefix(&spelled);
         Self::with_resolved(spelled, resolved)
     }
 

@@ -57,7 +57,7 @@ pub(crate) struct FileWrites {
 
 impl FileWrites {
     pub(crate) fn new(root: &Path) -> Result<Self> {
-        let root = tola_build::filesystem::normalize_existing_prefix(root);
+        let root = tola_input::normalize_existing_prefix(root);
         if !root.is_absolute() {
             bail!("write root `{}` must be absolute", display_path(&root));
         }
@@ -355,7 +355,7 @@ impl Directory {
                 }
                 Component::RootDir => {
                     current.push(component);
-                    handles.push(crate::sys::open_filesystem_root(&current)?);
+                    handles.push(tola_fs::open_filesystem_root(&current)?);
                     continue;
                 }
                 Component::CurDir => continue,
@@ -368,14 +368,14 @@ impl Directory {
             let parent = handles.last().expect("absolute path starts at a root");
             // The refusal covers only the final component: never pass a
             // multi-component path, even for links staying in the root.
-            let directory = match crate::sys::open_directory_nofollow(parent, name) {
+            let directory = match tola_fs::open_directory_nofollow(parent, name) {
                 Err(error) if create && error.kind() == io::ErrorKind::NotFound => {
                     match parent.create_dir(name) {
                         Ok(()) => created.push(current.clone()),
                         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
                         Err(error) => return Err(error),
                     }
-                    crate::sys::open_directory_nofollow(parent, name)?
+                    tola_fs::open_directory_nofollow(parent, name)?
                 }
                 result => result?,
             };
@@ -397,7 +397,7 @@ impl Directory {
     }
 
     fn read(&self, name: &OsStr) -> io::Result<Vec<u8>> {
-        let mut file = crate::sys::open_file_for_read(self.dir(), name)?;
+        let mut file = tola_fs::open_file_for_read(self.dir(), name)?;
         if !file.metadata()?.is_file() {
             return Err(io::Error::other("write target is not a regular file"));
         }
@@ -411,7 +411,7 @@ impl Directory {
     }
 
     fn publish(&self, from: &OsStr, to: &OsStr) -> io::Result<()> {
-        crate::sys::rename_without_replacing(self.dir(), &self.path, from, to)
+        tola_fs::rename_without_replacing(self.dir(), &self.path, from, to)
     }
 
     fn restore(&self, from: &OsStr, to: &OsStr) -> Result<()> {
@@ -438,7 +438,7 @@ impl Directory {
             anyhow::anyhow!("Tola could not replace the file; run the command again")
         })?;
         let name = OsString::from(format!(".tola-{}.{suffix}", hex::encode(random)));
-        let mut file = crate::sys::create_new_file(self.dir(), &name)?;
+        let mut file = tola_fs::create_new_file(self.dir(), &name)?;
         let staged = StoredFile {
             directory: self.clone(),
             name,

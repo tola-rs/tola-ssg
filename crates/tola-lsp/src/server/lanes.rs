@@ -1,6 +1,7 @@
 //! The two worker lanes: what each job owes, panic containment, and job execution.
 
 use std::path::PathBuf;
+use std::time::Instant;
 
 use crossbeam_channel::{Receiver, Sender};
 use lsp_server::RequestId;
@@ -94,6 +95,42 @@ impl JobOwner {
     }
 }
 
+/// What a lane's dispatch and run records name about one job: the lane it runs on, its kind, and
+/// the revision or serial its answer is keyed by.
+pub(super) struct JobTrace {
+    lane: &'static str,
+    kind: &'static str,
+    checked_revision: Option<u64>,
+    serial: Option<u64>,
+}
+
+/// One job either lane runs, named for its dispatch and run records.
+pub(super) trait LaneJob {
+    fn trace(&self) -> JobTrace;
+}
+
+impl LaneJob for SourceJob {
+    fn trace(&self) -> JobTrace {
+        JobTrace {
+            lane: "compiler",
+            kind: SourceJob::kind(self),
+            checked_revision: SourceJob::checked_revision(self),
+            serial: SourceJob::serial(self),
+        }
+    }
+}
+
+impl LaneJob for AnalysisRequest {
+    fn trace(&self) -> JobTrace {
+        JobTrace {
+            lane: "analysis",
+            kind: AnalysisRequest::kind(self),
+            checked_revision: None,
+            serial: Some(self.serial),
+        }
+    }
+}
+
 /// Run one lane job, turning a panic into the completion its owner is answered with.
 ///
 /// The lane's caches are keyed and revalidated, so whatever a panicking job left half-written is
@@ -113,8 +150,53 @@ fn contain_panic<J>(
     }
 }
 
+/// Run one job inside the debug span that records what it ran, how long it took, and how it
+/// ended.
+fn run_job<J: LaneJob>(
+    job: J,
+    owner: JobOwner,
+    work: &mut impl FnMut(J) -> SourceCompilation,
+) -> SourceCompilation {
+    let trace = job.trace();
+    let span = tracing::debug_span!(
+        "lsp.job",
+        lane = trace.lane,
+        kind = trace.kind,
+        checked_revision = trace.checked_revision,
+        serial = trace.serial,
+        elapsed_ms = tracing::field::Empty,
+        outcome = tracing::field::Empty,
+    );
+    let started = Instant::now();
+    let completed = span.in_scope(|| contain_panic(job, owner, work));
+    let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let ended = outcome(&completed);
+    span.record("elapsed_ms", elapsed_ms);
+    span.record("outcome", ended);
+    tracing::debug!(parent: &span, elapsed_ms, outcome = ended, "lane job finished");
+    completed
+}
+
+/// The outcome one completion records: whether the job answered, was cancelled, panicked, or
+/// failed.
+fn outcome(completed: &SourceCompilation) -> &'static str {
+    let failure = match completed {
+        SourceCompilation::Checked { checked, .. } => checked.as_ref().err(),
+        SourceCompilation::Answered { response, .. } => response.as_ref().err(),
+        SourceCompilation::Tokens { response, .. } => response.as_ref().err(),
+        SourceCompilation::Selected { selected, .. } => selected.as_ref().err(),
+        SourceCompilation::Continued(_) | SourceCompilation::Released => None,
+    };
+    match failure {
+        None => "completed",
+        Some(SourceFailure::Cancelled) => "cancelled",
+        Some(SourceFailure::Panicked) => "panicked",
+        Some(SourceFailure::Failed(_)) => "failed",
+    }
+}
+
 /// Run one lane's jobs until its channel closes or the connection is cancelled.
-pub(super) fn run<J>(
+pub(super) fn run<J: LaneJob>(
     jobs: Receiver<J>,
     events: &Sender<Event>,
     cancellation: &BuildCancellation,
@@ -127,7 +209,7 @@ pub(super) fn run<J>(
             break;
         }
         let owner = owner_of(&job);
-        let completed = contain_panic(job, owner, &mut work);
+        let completed = run_job(job, owner, &mut work);
         if !send_event(events, event_of(completed), cancellation) {
             break;
         }

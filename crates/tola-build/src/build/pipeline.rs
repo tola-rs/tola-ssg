@@ -3,7 +3,7 @@
 use anyhow::{Context, Result};
 
 use crate::{
-    compiler::TypstHost, config::ResolvedSiteConfig, hooks, resources::BuildResources,
+    compiler::SiteHost, config::ResolvedSiteConfig, hooks, resources::BuildResources,
     site::SiteIndex,
 };
 
@@ -99,14 +99,12 @@ fn attach_attempt_diagnostics(
 }
 
 pub(super) fn build_site_inner(
-    config: &ResolvedSiteConfig,
+    site: &crate::modules::PreparedSite,
     request: &BuildRequest,
     producers: &mut BuildAttemptProducers,
-    prepare_compiler: impl FnOnce(
-        &mut BuildAttemptProducers,
-        bool,
-    ) -> Result<crate::compiler::TypstHost>,
+    prepare_compiler: impl FnOnce(&mut BuildAttemptProducers, bool) -> Result<crate::compiler::SiteHost>,
 ) -> Result<SiteBuild> {
+    let config = site.config();
     let build_started = std::time::Instant::now();
     let mut hook_diagnostics = Vec::new();
     let built = (|| {
@@ -114,6 +112,7 @@ pub(super) fn build_site_inner(
         let before_build = hooks::run_before_build_hooks_with_cancellation(
             config,
             request.mode,
+            producers.resources.input_scope(),
             request.hook_execution.clone(),
             Some(&producers.cancellation),
             &mut hook_diagnostics,
@@ -133,7 +132,7 @@ pub(super) fn build_site_inner(
             producers.clear_pre_scan_reuse();
         }
         let built = build_site_candidate(
-            config,
+            site,
             &typst_host,
             request,
             producers,
@@ -142,7 +141,7 @@ pub(super) fn build_site_inner(
             std::mem::take(&mut hook_diagnostics),
         );
         producers.font_read_paths = typst_host.font_read_paths();
-        typst_host.evict_stale_file_cache_entries(TypstHost::RETAINED_FILE_CACHE_EPOCHS);
+        typst_host.evict_stale_file_cache_entries(SiteHost::RETAINED_FILE_CACHE_EPOCHS);
         typst::comemo::evict(RETAINED_DERIVATION_GENERATIONS);
         built
     })();
@@ -153,22 +152,23 @@ pub(super) fn build_site_inner(
 }
 
 fn build_site_candidate(
-    config: &ResolvedSiteConfig,
-    typst_host: &crate::compiler::TypstHost,
+    site: &crate::modules::PreparedSite,
+    typst_host: &crate::compiler::SiteHost,
     request: &BuildRequest,
     producers: &mut BuildAttemptProducers,
     build_started: std::time::Instant,
     before_build_elapsed: std::time::Duration,
     mut build_diagnostics: Vec<tola_diagnostic::Diagnostic>,
 ) -> Result<SiteBuild> {
+    let config = site.config();
     let mut warnings = tola_typst::Diagnostics::new();
     producers.cancellation.ensure_active()?;
     // Capture discovery identity before later hooks can change inputs.
-    let content_root = crate::filesystem::normalize_existing_prefix(&config.build.content_dir);
+    let content_root = tola_input::normalize_existing_prefix(&config.build.content_dir);
     let sealed = (|| -> Result<_> {
         let producers_started = build_started.elapsed();
         let mut compiled_outputs = compile_site_program(
-            config,
+            site,
             typst_host,
             &mut warnings,
             &mut build_diagnostics,
@@ -181,11 +181,20 @@ fn build_site_candidate(
             std::mem::take(&mut producers.generated_files),
             &producers.cancellation,
         )?;
+        let mut hook_config = config.clone();
+        if let Some(runner) = hook_config.hook_runner.take() {
+            let assets = compiled_outputs
+                .producer_caches
+                .configured_assets
+                .asset_urls(config)?;
+            hook_config.hook_runner = Some(runner.with_assets(assets));
+        }
+        let hook_config = std::sync::Arc::new(hook_config);
         let previous_hook_reuse = producers.previous_hook_reuse.take();
         let compiled_outputs = compiled_outputs.generate_outputs(
-            config,
-            request.mode,
-            request.hook_execution.clone(),
+            &hook_config,
+            request,
+            site.scope(),
             previous_hook_reuse.as_ref(),
             &producers.cancellation,
             &mut build_diagnostics,
@@ -193,7 +202,7 @@ fn build_site_candidate(
         let compile_elapsed = build_started.elapsed();
         producers.cancellation.ensure_active()?;
         let candidate = compiled_outputs.seal(
-            config,
+            &hook_config,
             &producers.cancellation,
             request.reference_checks,
             &mut build_diagnostics,
@@ -210,11 +219,11 @@ fn build_site_candidate(
             total_ms = total_elapsed.as_secs_f64() * 1000.0,
             "completed site candidate phases"
         );
-        Ok(candidate)
+        Ok((candidate, hook_config))
     })();
     build_diagnostics.extend(crate::compiler::warning_diagnostics(config, &mut warnings));
     tola_diagnostic::coalesce_reports(&mut build_diagnostics);
-    let candidate = match sealed {
+    let (candidate, hook_config) = match sealed {
         Ok(candidate) => candidate,
         Err(error) => {
             return Err(attach_attempt_diagnostics(
@@ -225,7 +234,7 @@ fn build_site_candidate(
         }
     };
     Ok(SiteBuild {
-        config: std::sync::Arc::new(config.clone()),
+        config: hook_config,
         mode: request.mode,
         cancellation: producers.cancellation.clone(),
         index: candidate.index,
@@ -240,6 +249,8 @@ fn build_site_candidate(
         references: candidate.references,
         source_hooks: producers.source_hooks.clone(),
         report: producers.report.take(),
+        modules: site.prepared().clone(),
+        scope: site.scope(),
     })
 }
 
@@ -269,19 +280,20 @@ impl CompiledSiteOutputs {
     pub(super) fn generate_outputs(
         mut self,
         config: &ResolvedSiteConfig,
-        mode: super::BuildMode,
-        hook_execution: crate::hooks::HookExecution,
+        request: &BuildRequest,
+        scope: tola_input::InputScope,
         previous: Option<&crate::hooks::ReusableHookOutputs>,
         cancellation: &crate::cancellation::BuildCancellation,
         diagnostics: &mut Vec<tola_diagnostic::Diagnostic>,
     ) -> Result<Self> {
-        if !hook_execution.runs() {
+        if !request.hook_execution.runs() {
             return Ok(self);
         }
         let generated = crate::hooks::generate_outputs(
             config,
             self.outputs.outputs(),
-            mode,
+            request.mode,
+            scope,
             previous,
             cancellation,
             diagnostics,
@@ -409,12 +421,13 @@ fn reexport_cached_site_program(
 /// Native files and output commands join this open graph before sealing. Reused
 /// and compiled Bundles retain their own read evidence and diagnostics.
 pub(super) fn compile_site_program(
-    config: &ResolvedSiteConfig,
-    typst_host: &TypstHost,
+    site: &crate::modules::PreparedSite,
+    typst_host: &SiteHost,
     warnings: &mut tola_typst::Diagnostics,
     diagnostics: &mut Vec<tola_diagnostic::Diagnostic>,
     producers: &mut BuildAttemptProducers,
 ) -> Result<CompiledSiteOutputs> {
+    let config = site.config();
     let cancellation = producers.cancellation.clone();
     let (
         configured_asset_inventory,
@@ -423,13 +436,13 @@ pub(super) fn compile_site_program(
             icons,
             typst_host,
         },
-    ) = prepare_beside_configured_assets(config, typst_host, producers, &cancellation)?;
+    ) = prepare_beside_configured_assets(site, typst_host, producers, &cancellation)?;
     let CompiledRootBundle {
         site_program,
         dependencies,
         source_analysis,
     } = compile_root_bundle(
-        config,
+        site,
         &typst_host,
         &content,
         &configured_asset_inventory,
@@ -439,7 +452,7 @@ pub(super) fn compile_site_program(
     )?;
     diagnostics.extend_from_slice(&site_program.payload_diagnostics);
     let mut outputs = crate::output::graph::OutputGraphBuilder::new();
-    insert_code_stylesheet(&mut outputs)?;
+    insert_code_stylesheet(&mut outputs, config.build.minify.css)?;
     producers.cancellation.ensure_active()?;
     outputs.insert_graph(&site_program.outputs)?;
     collect_configured_assets(
@@ -506,14 +519,15 @@ pub(super) fn compile_site_program(
 
 /// A configured asset's bytes decide its address, so the Bundle waits for the inventory.
 fn prepare_beside_configured_assets(
-    config: &ResolvedSiteConfig,
-    typst_host: &TypstHost,
+    site: &crate::modules::PreparedSite,
+    typst_host: &SiteHost,
     producers: &mut BuildAttemptProducers,
     cancellation: &crate::cancellation::BuildCancellation,
 ) -> Result<(
     crate::asset::ConfiguredAssetInventory,
     PreparedProducerInputs,
 )> {
+    let config = site.config();
     let previous_assets = producers.configured_assets.take();
     let configured_changes = producers.configured_asset_changes.take();
     let subscriber = tracing::dispatcher::get_default(Clone::clone);
@@ -532,6 +546,7 @@ fn prepare_beside_configured_assets(
                 let started = std::time::Instant::now();
                 let assets = crate::asset::render_configured_asset_inventory(
                     config,
+                    site.applied_assets(),
                     &producers.resources.source_boundary(config),
                     cancellation,
                     configured_changes.as_ref().and(previous_assets.as_ref()),
@@ -591,7 +606,7 @@ fn prepare_beside_configured_assets(
 struct PreparedProducerInputs {
     content: std::sync::Arc<[crate::content::ContentUnit]>,
     icons: crate::icon::IconInventory,
-    typst_host: TypstHost,
+    typst_host: SiteHost,
 }
 
 struct CompiledRootBundle {
@@ -600,21 +615,9 @@ struct CompiledRootBundle {
     source_analysis: crate::compiler::analysis::SourceAnalysisCache,
 }
 
-/// A failed module preparation keeps the inputs it recorded before it stopped.
-pub(super) fn record_module_preparation_failure(
-    error: &mut anyhow::Error,
-    config: &ResolvedSiteConfig,
-    inputs: &mut crate::compiler::BuildInputs,
-) -> Option<Vec<tola_diagnostic::Diagnostic>> {
-    let failure = error.downcast_mut::<crate::modules::options::OptionsFailure>()?;
-    inputs.record_accessed(&failure.accessed);
-    let mut carried = failure.diagnostics.take()?;
-    Some(crate::compiler::warning_diagnostics(config, &mut carried))
-}
-
 fn compile_root_bundle(
-    config: &ResolvedSiteConfig,
-    typst_host: &TypstHost,
+    site: &crate::modules::PreparedSite,
+    typst_host: &SiteHost,
     content: &[crate::content::ContentUnit],
     configured_assets: &crate::asset::ConfiguredAssetInventory,
     producers: &mut BuildAttemptProducers,
@@ -623,24 +626,11 @@ fn compile_root_bundle(
     // source-analysis output, so the declaration warnings join the attempt's diagnostics here.
     diagnostics: &mut Vec<tola_diagnostic::Diagnostic>,
 ) -> Result<CompiledRootBundle> {
+    let config = site.config();
     let cancellation = producers.cancellation.bundle_cancellation();
     let bindings =
         crate::package::SiteBindings::from_config(config, configured_assets.asset_urls(config)?);
-    let package_bindings =
-        match bindings.prepare_modules(config, typst_host, &producers.cancellation) {
-            Ok(package_bindings) => package_bindings,
-            Err(mut error) => {
-                diagnostics.extend(
-                    record_module_preparation_failure(&mut error, config, producers.inputs_mut())
-                        .unwrap_or_default(),
-                );
-                return Err(error);
-            }
-        };
-    producers
-        .inputs_mut()
-        .record_accessed(package_bindings.module_accessed());
-    warnings.extend_distinct(package_bindings.module_diagnostics());
+    let package_bindings = bindings.prepare_modules(site.prepared())?;
     let reuse = producers.reuse.take();
     let reuse = reuse.as_ref();
     let source_analysis_reuse = reuse
@@ -761,7 +751,7 @@ fn compile_root_bundle(
         reused_dependencies,
     )?;
     let site_program = crate::compiler::SiteProgramCache {
-        root: crate::filesystem::normalize_path(config.get_root()),
+        root: tola_input::normalize_path(config.get_root()),
         documents: compiled_program.documents,
         outputs: bundle_outputs.finish(),
         diagnostics: compiled_program.diagnostics,
@@ -780,15 +770,22 @@ fn compile_root_bundle(
     })
 }
 
-fn insert_code_stylesheet(outputs: &mut crate::output::graph::OutputGraphBuilder) -> Result<()> {
+fn insert_code_stylesheet(
+    outputs: &mut crate::output::graph::OutputGraphBuilder,
+    minify: bool,
+) -> Result<()> {
     // The code stylesheet is published for every build: a site links it from its head, and that
     // URL has to resolve whether or not this build renders any code. Its bytes are the shared
-    // consumer stylesheet, minified here once per build.
+    // consumer stylesheet, with the site's CSS minification setting applied.
     let stylesheet = tola_packages::TolaPackage::Code
         .file(std::path::Path::new(tola_packages::CODE_STYLESHEET_FILE))
         .context("Tola could not read the code stylesheet `@tola/code` provides")?;
-    let stylesheet = tola_minify::minify_css(&stylesheet)
-        .context("Tola could not minify the code stylesheet `@tola/code` provides")?;
+    let stylesheet = if minify {
+        tola_minify::minify_css(&stylesheet)
+            .context("Tola could not minify the code stylesheet `@tola/code` provides")?
+    } else {
+        stylesheet.into_owned()
+    };
     outputs.insert_system(
         "code-stylesheet",
         &tola_packages::code_stylesheet_output(),
@@ -1063,9 +1060,9 @@ mod tests {
             for relative in case.recorded {
                 let path = root.join(relative);
                 let recorded = if path.exists() {
-                    crate::filesystem::normalize_path(&path)
+                    tola_input::normalize_path(&path)
                 } else {
-                    crate::filesystem::normalize_existing_prefix(&path)
+                    tola_input::normalize_existing_prefix(&path)
                 };
                 assert!(
                     reads.contains(&recorded),

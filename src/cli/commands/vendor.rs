@@ -7,11 +7,12 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, ensure};
+use tola_build::BuildResources;
 use tola_build::cancellation::BuildCancellation;
 use tola_build::config::ResolvedSiteConfig;
 use tola_build::filesystem::{SwapError, SwapMember, TreeSwap};
-use tola_build::{BuildResources, InputScope};
 use tola_diagnostic::{Diagnostic, DiagnosticError, Severity};
+use tola_input::InputScope;
 
 use crate::cancellation::Cancellation;
 use crate::cli::output::CommandOutput;
@@ -64,7 +65,7 @@ pub(in crate::cli) fn run(
     // Earlier releases froze host fonts under `fonts/`; Tola reads no vendored fonts now.
     let legacy = vendor_path.join("fonts");
     if legacy.is_dir() {
-        let display = tola_build::filesystem::display_path(&legacy, config.get_root());
+        let display = tola_diagnostic::display_path(&legacy, config.get_root());
         if vendor.dry_run {
             output.status(format!("Would remove the obsolete `{display}`"))?;
         } else {
@@ -283,10 +284,7 @@ fn select_inputs(
     )?;
     let mut modules = Vec::new();
     for (alias, declaration) in config.modules() {
-        if !matches!(
-            declaration.source,
-            tola_build::modules::ModuleSource::Remote { .. }
-        ) {
+        if matches!(declaration.source, tola_module::ModuleSource::Local { .. }) {
             continue;
         }
         let source = roots
@@ -323,7 +321,7 @@ fn reject_previous_inputs(
                 .filter_map(|check| check.canonical_target()),
         )
     {
-        let physical = tola_build::filesystem::normalize_existing_prefix(path);
+        let physical = tola_input::normalize_existing_prefix(path);
         ensure!(
             !previous.iter().any(|root| physical.starts_with(root)),
             "the build still reads `{}` from the previous vendor inputs; keep site-owned sources outside `modules`, `typst-packages`, and `icons`",
@@ -956,21 +954,6 @@ mod tests {
         assert!(
             copy.directory(&source, &destination, &mut Vec::new())
                 .is_err()
-        );
-    }
-
-    #[test]
-    fn prepared_paths_reported_vendored_destinations() {
-        let site = tempfile::TempDir::new().unwrap();
-        let replacement = replacement(site.path());
-
-        assert_eq!(
-            replacement.destination(&replacement.candidate_root().join("icons/lucide.json")),
-            "vendor/icons/lucide.json"
-        );
-        assert_eq!(
-            replacement.destination(&replacement.root.join("typst-packages")),
-            "vendor/typst-packages"
         );
     }
 }

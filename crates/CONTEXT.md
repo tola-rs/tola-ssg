@@ -5,6 +5,7 @@ Every crate owns one responsibility and its public contract. Read the crate-spec
 ## Large subsystems
 
 - [`tola-build/CONTEXT.md`](tola-build/CONTEXT.md) — independently consumable site construction engine.
+- [`tola-module/CONTEXT.md`](tola-module/CONTEXT.md) — site modules: declarations, acquisition, preparation, queries, hooks.
 - [`tola-typst/CONTEXT.md`](tola-typst/CONTEXT.md) — reusable Typst world and official compiler/exporter.
 - [`tola-lsp/CONTEXT.md`](tola-lsp/CONTEXT.md) — Tola language service.
 - [`tola-nu/CONTEXT.md`](tola-nu/CONTEXT.md) — embedded Nushell runtime.
@@ -12,6 +13,8 @@ Every crate owns one responsibility and its public contract. Read the crate-spec
 ## Ownership
 
 - `tola-address` — slugs, routes, logical output paths, site URLs, deployment mounts, browser reference rules.
+- `tola-fs` — native filesystem operations; see [`tola-fs/CONTEXT.md`](tola-fs/CONTEXT.md).
+- `tola-input` — input identity, lock entries, and the access limits one build attempt runs under.
 - `tola-slugify` — turning text into a slug: naming rules, character policy, script-specific romanization.
 - `tola-pronunciations` — pronunciation tables Tola carries, one feature per source, with provenance and licence.
 - `tola-config`, `tola-config-macros` — reusable configuration protocol and derive macros.

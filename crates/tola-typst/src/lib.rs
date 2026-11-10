@@ -8,6 +8,7 @@
 pub mod bundle;
 pub mod compile;
 pub mod diagnostic;
+pub mod host;
 pub mod html;
 pub mod introspection;
 pub mod prelude;

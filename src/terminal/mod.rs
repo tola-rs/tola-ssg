@@ -16,6 +16,7 @@ pub(crate) mod session;
 pub(crate) mod sink;
 mod source;
 pub(crate) mod style;
+pub(crate) mod table;
 pub(crate) mod text;
 pub(crate) mod ui;
 pub(crate) mod wrap;

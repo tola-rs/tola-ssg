@@ -12,7 +12,7 @@ use rayon::prelude::*;
 
 use crate::cancellation::{BuildCancellation, OptionalCancellation};
 use crate::filesystem::TemporaryDirectory;
-use crate::filesystem::layout;
+use tola_input::layout;
 
 /// Prose for one staged output operation, rendered exactly as the site author reads it.
 #[derive(Debug, thiserror::Error)]

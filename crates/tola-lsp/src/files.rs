@@ -65,16 +65,33 @@ mod tests {
             .collect()
     }
 
+    /// A site root holding only links to files outside it owns nothing but its configuration.
+    #[cfg(unix)]
+    fn linked_entries_are_not_owned() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("shared.typ"), "").unwrap();
+        std::os::unix::fs::symlink(outside.path().join("shared.typ"), root.join("linked.typ"))
+            .unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.join("linked-directory")).unwrap();
+        assert_eq!(listed_files(root), ["tola.toml"]);
+    }
+
+    /// The files the site owns: its sources and configuration, not the published output and not
+    /// links that leave the site.
     #[test]
-    fn owned_files_exclude_published_output() {
+    fn owned_files_list_the_site() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path();
         std::fs::create_dir_all(root.join("content")).unwrap();
         std::fs::create_dir_all(root.join("public")).unwrap();
         std::fs::write(root.join("content/index.typ"), "").unwrap();
         std::fs::write(root.join("public/index.html"), "published").unwrap();
-
         assert_eq!(listed_files(root), ["content/index.typ", "tola.toml"]);
+
+        #[cfg(unix)]
+        linked_entries_are_not_owned();
     }
 
     #[test]
@@ -86,19 +103,5 @@ mod tests {
 
         let error = owned_file_ids(&config, &canceller.token()).unwrap_err();
         assert!(error.is::<tola_build::cancellation::BuildCancelled>());
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn owned_files_omit_linked_entries() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path();
-        let outside = tempfile::tempdir().unwrap();
-        std::fs::write(outside.path().join("shared.typ"), "").unwrap();
-        std::os::unix::fs::symlink(outside.path().join("shared.typ"), root.join("linked.typ"))
-            .unwrap();
-        std::os::unix::fs::symlink(outside.path(), root.join("linked-directory")).unwrap();
-
-        assert_eq!(listed_files(root), ["tola.toml"]);
     }
 }

@@ -3,13 +3,13 @@
 use anyhow::Result;
 use serde::Serialize;
 use serde_json::Value;
-use tola_build::InputScope;
+use tola_input::InputScope;
 
 use crate::cancellation::Cancellation;
-use crate::cli::args::JsonOutputArgs;
+use crate::cli::args::OutputArgs;
 use crate::cli::output::CommandOutput;
 
-pub(super) fn check_output(args: &JsonOutputArgs, output: &CommandOutput) -> Result<()> {
+pub(super) fn check_output(args: &OutputArgs, output: &CommandOutput) -> Result<()> {
     if let Some(path) = &args.output {
         crate::cli::log::destination::check_file(output.log().map(|log| log.path()), path)?;
     }
@@ -26,7 +26,7 @@ enum Browse<'a> {
 pub(super) fn select(
     value: &Value,
     title: &str,
-    args: &JsonOutputArgs,
+    args: &OutputArgs,
     scope: InputScope,
     cancellation: &Cancellation,
 ) -> Result<Option<Value>> {
@@ -57,7 +57,7 @@ pub(super) fn select(
 
 pub(super) fn write_json(
     value: &Value,
-    args: &JsonOutputArgs,
+    args: &OutputArgs,
     output: &CommandOutput,
     cancellation: &Cancellation,
 ) -> Result<()> {
@@ -78,14 +78,28 @@ pub(super) fn write_json(
 pub(super) fn write(
     value: &Value,
     title: &str,
-    args: &JsonOutputArgs,
+    args: &OutputArgs,
     scope: InputScope,
     output: &CommandOutput,
     cancellation: &Cancellation,
 ) -> Result<()> {
     check_output(args, output)?;
     if let Some(selected) = select(value, title, args, scope, cancellation)? {
-        write_json(&selected, args, output, cancellation)?;
+        write_value(&selected, args, output, cancellation)?;
     }
     Ok(())
+}
+
+/// Write one selected value in the invocation's chosen representation.
+pub(super) fn write_value(
+    value: &Value,
+    args: &OutputArgs,
+    output: &CommandOutput,
+    cancellation: &Cancellation,
+) -> Result<()> {
+    if args.json {
+        return write_json(value, args, output, cancellation);
+    }
+    cancellation.token().ensure_active()?;
+    output.write_stdout_line(crate::terminal::table::render(value))
 }

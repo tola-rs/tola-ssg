@@ -10,15 +10,15 @@ use crate::cancellation::BuildCancellation;
 use crate::config::ResolvedSiteConfig;
 use crate::config::section::build::hooks::{CommandOutput, HookStage, OutputCommandConfig};
 use crate::filesystem::TemporaryDirectory;
-use crate::filesystem::layout;
 use crate::mode::BuildMode;
 use crate::output::files::HookOutputFiles;
 use crate::output::graph::OutputFile;
 use crate::output::owner::{OutputOwner, OutputRootOwnership};
 use crate::output::semantics::OutputDeclaration;
 use tola_address::OutputPath;
+use tola_input::layout;
 
-use super::command::{HookCall, HookDirectories, HookInvocation};
+use super::command::{HookCall, HookDirectories, run_action};
 use super::report::{hook_command_error, report_reused, run_hook_entry};
 use super::reuse::{ReusableHookOutput, ReusableHookOutputs, observe};
 
@@ -35,13 +35,13 @@ pub(crate) fn generate_outputs(
     config: &ResolvedSiteConfig,
     upstream: &[OutputFile],
     mode: BuildMode,
+    scope: tola_input::InputScope,
     previous: Option<&ReusableHookOutputs>,
     cancellation: &BuildCancellation,
     diagnostics: &mut Vec<tola_diagnostic::Diagnostic>,
 ) -> Result<GeneratedOutputs> {
     cancellation.ensure_active()?;
     let mut participating = config
-        .build
         .hooks
         .generate_outputs
         .iter()
@@ -58,7 +58,7 @@ pub(crate) fn generate_outputs(
         cancellation.ensure_active()?;
         let reuses_outputs = mode == BuildMode::Development && command.dev.reuses_outputs();
         let inputs = if reuses_outputs {
-            Some(observe(config.get_root(), command, upstream)?)
+            Some(observe(config, command, upstream)?)
         } else {
             None
         };
@@ -111,6 +111,7 @@ pub(crate) fn generate_outputs(
                 candidate,
                 config,
                 mode,
+                scope,
                 cancellation,
                 diagnostics,
             })
@@ -139,6 +140,7 @@ struct GenerateEntry<'a> {
     candidate: &'a HookOutputFiles,
     config: &'a ResolvedSiteConfig,
     mode: BuildMode,
+    scope: tola_input::InputScope,
     cancellation: &'a BuildCancellation,
     diagnostics: &'a mut Vec<tola_diagnostic::Diagnostic>,
 }
@@ -152,21 +154,24 @@ fn generate_entry(entry: GenerateEntry<'_>) -> Result<bool> {
         candidate,
         config,
         mode,
+        scope,
         cancellation,
         diagnostics,
     } = entry;
     if command.outputs.is_empty() {
         return Err(super::hook_contract_error(
-            format!("`build.hooks.generate-outputs[{index}].outputs` is empty"),
+            format!("`hooks.generate-outputs[{index}].outputs` is empty"),
             "declare each output with `{ file = … }` or `{ tree = … }`",
         ));
     }
     let generated =
         TemporaryDirectory::create(&layout::hook_outputs(config.get_root()), "outputs")?;
-    let invocation = HookInvocation::new(
-        &command.command,
+    let identity = super::hook_identity(HookStage::GenerateOutputs, &command.name);
+    let submitted = run_action(
+        config,
+        command.action(),
         HookCall {
-            site: config.into(),
+            site: super::command::HookSitePaths::new(config, scope),
             name: &command.name,
             origin: command.origin.as_ref(),
             mode,
@@ -175,14 +180,10 @@ fn generate_entry(entry: GenerateEntry<'_>) -> Result<bool> {
                 output: generated.path(),
             },
         },
-    )?;
-    let identity = super::hook_identity(HookStage::GenerateOutputs, &command.name);
-    let completion = invocation.run(Some(cancellation));
-
-    cancellation.ensure_active()?;
-    let submitted = invocation
-        .finish(completion, Some(cancellation), diagnostics)
-        .map_err(|error| hook_command_error(HookStage::GenerateOutputs, &identity, error))?;
+        Some(cancellation),
+        diagnostics,
+    )
+    .map_err(|error| hook_command_error(HookStage::GenerateOutputs, &identity, error))?;
     let files = read_generated_files(generated.path(), cancellation)
         .with_context(|| format!("Tola could not read the files written by {identity}"))?;
     let declarations = DeclaredOutputs::new(&command.outputs, cancellation)?;
@@ -306,7 +307,7 @@ fn read_generated_files(
             let relative = absolute
                 .strip_prefix(root)
                 .expect("generated child remains below its root");
-            let generated_display = crate::filesystem::display_path(&absolute, root);
+            let generated_display = tola_diagnostic::display_path(&absolute, root);
             let metadata = fs::symlink_metadata(&absolute).with_context(|| {
                 format!("Tola could not read the generated file `{generated_display}`")
             })?;
@@ -336,10 +337,10 @@ fn read_generated_files(
                 let path = OutputPath::parse(&path)
                     .with_context(|| format!("`{path}` cannot be used as a published path"))?;
                 let mut bytes = Vec::new();
-                crate::filesystem::read_file_chunks(&absolute, cancellation, |chunk| {
+                tola_input::read_file_chunks(&absolute, cancellation.flag(), |chunk| {
                     bytes.extend_from_slice(chunk);
                 })
-                .map_err(crate::filesystem::FileReadError::into_anyhow)
+                .map_err(crate::filesystem::FileReadErrorExt::into_anyhow)
                 .with_context(|| format!("Tola could not read the generated file `{path}`"))?;
                 files.insert(path, bytes);
             } else {
@@ -375,9 +376,11 @@ mod tests {
     ) -> (tempfile::TempDir, ResolvedSiteConfig, OutputGraphBuilder) {
         let directory = tempfile::TempDir::new().unwrap();
         let mut config = crate::config::tests::load_test_config(directory.path(), "");
-        config.build.hooks.generate_outputs = vec![OutputCommandConfig {
+        config.hooks.generate_outputs = vec![OutputCommandConfig {
             name: "search".into(),
-            command: hook_child_command(&format!("hooks::generate::tests::{child}")),
+            argv: Some(hook_child_command(&format!(
+                "hooks::generate::tests::{child}"
+            ))),
             outputs: outputs
                 .iter()
                 .map(|path| CommandOutput::File(OutputPath::parse(path).unwrap()))
@@ -515,13 +518,14 @@ mod tests {
     fn generated_outputs_join_the_graph() {
         let (_directory, mut config, mut upstream) =
             output_command_config("child_writes_search_index", &["search.json"]);
-        let mut disabled = config.build.hooks.generate_outputs[0].clone();
+        let mut disabled = config.hooks.generate_outputs[0].clone();
         disabled.enable = false;
-        config.build.hooks.generate_outputs.insert(0, disabled);
+        config.hooks.generate_outputs.insert(0, disabled);
         let outputs = generate_outputs(
             &config,
             upstream.outputs(),
             BuildMode::Production,
+            tola_input::InputScope::Online,
             None,
             &BuildCancellation::new(),
             &mut Vec::new(),
@@ -563,6 +567,7 @@ mod tests {
                 &config,
                 upstream.outputs(),
                 BuildMode::Production,
+                tola_input::InputScope::Online,
                 None,
                 &BuildCancellation::new(),
                 &mut Vec::new(),
@@ -582,6 +587,7 @@ mod tests {
             &config,
             upstream.outputs(),
             BuildMode::Production,
+            tola_input::InputScope::Online,
             None,
             &BuildCancellation::new(),
             &mut Vec::new(),
@@ -616,6 +622,7 @@ mod tests {
                 &config,
                 upstream.outputs(),
                 BuildMode::Production,
+                tola_input::InputScope::Online,
                 None,
                 &worker_cancellation,
                 &mut Vec::new(),
@@ -632,20 +639,15 @@ mod tests {
         observer.join().unwrap();
         assert_eq!(ready.unwrap().unwrap(), [b'R']);
         let error = completion.unwrap_err();
-        assert!(
-            matches!(
-                error.downcast_ref::<crate::cancellation::BuildCancelled>(),
-                Some(crate::cancellation::BuildCancelled)
-            ),
-            "{error:#}"
-        );
+        assert!(crate::cancellation::is_cancelled(&error), "{error:#}");
+        assert!(tola_diagnostic::attached(&error).is_none());
     }
 
     #[test]
     fn output_command_receives_build_mode() {
         let (_directory, mut config, upstream) =
             output_command_config("child_restores_cached_search_index", &[]);
-        config.build.hooks.generate_outputs[0].outputs =
+        config.hooks.generate_outputs[0].outputs =
             vec![CommandOutput::Tree(OutputPath::parse("search").unwrap())];
 
         for (mode, expected) in [
@@ -656,6 +658,7 @@ mod tests {
                 &config,
                 upstream.outputs(),
                 mode,
+                tola_input::InputScope::Online,
                 None,
                 &BuildCancellation::new(),
                 &mut Vec::new(),
@@ -714,12 +717,13 @@ mod tests {
         ] {
             let (directory, mut config, upstream) =
                 output_command_config("child_counts_runs", &["search.json"]);
-            config.build.hooks.generate_outputs[0].dev = case.dev;
+            config.hooks.generate_outputs[0].dev = case.dev;
             let cancellation = BuildCancellation::new();
             let first = generate_outputs(
                 &config,
                 upstream.outputs(),
                 case.mode,
+                tola_input::InputScope::Online,
                 None,
                 &cancellation,
                 &mut Vec::new(),
@@ -753,6 +757,7 @@ mod tests {
                 &config,
                 next.outputs(),
                 case.mode,
+                tola_input::InputScope::Online,
                 Some(&first.reuse),
                 &cancellation,
                 &mut Vec::new(),
