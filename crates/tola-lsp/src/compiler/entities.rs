@@ -95,8 +95,9 @@ impl EntityQueries {
         }
         let mut paths = self.observed.iter().cloned().collect::<Vec<_>>();
         for (alias, module) in &self.modules {
-            let declared = tola_build::modules::declared_root(
+            let declared = tola_build::inputs::declaration_root(
                 configuration.get_root(),
+                configuration.vendor().path.as_deref(),
                 alias,
                 &configuration.modules()[alias].source,
             )
@@ -171,15 +172,21 @@ mod tests {
         std::fs::create_dir(root.join("content")).unwrap();
         std::fs::create_dir(root.join("theme")).unwrap();
         let manifest = root.join("theme/tola-module.toml");
-        std::fs::write(&manifest, "schema-version=1\n[queries.nodes]\nentry='model.typ'\nlabel='nodes'\nschema-version=1\nformat='entities'\n").unwrap();
+        std::fs::write(
+            &manifest,
+            "\n[queries.nodes]\nentry='model.typ'\nlabel='nodes'\n\nformat='entities'\n",
+        )
+        .unwrap();
         let model = root.join("theme/model.typ");
         let first_model = "#metadata(((id: \"ONE\", label: \"One\"),))<nodes>";
         std::fs::write(&model, first_model).unwrap();
         let configuration = site_configuration(root, "[modules.notes]\npath='theme'\n");
         let modules = tola_build::modules::resolve_modules(
             configuration.get_root(),
+            configuration.vendor().path.as_deref(),
             configuration.modules(),
-            InputScope::Offline,
+            tola_build::inputs::InputMode::new(InputScope::Offline, true),
+            &Default::default(),
         )
         .unwrap();
         let resources = BuildResources::new()
@@ -218,8 +225,10 @@ mod tests {
         std::fs::write(&manifest, changed).unwrap();
         let updated = tola_build::modules::resolve_modules(
             configuration.get_root(),
+            configuration.vendor().path.as_deref(),
             configuration.modules(),
-            InputScope::Offline,
+            tola_build::inputs::InputMode::new(InputScope::Offline, true),
+            &Default::default(),
         )
         .unwrap();
         cache.prepare(&configuration, 2, InputScope::Offline, &overlays, &updated);
@@ -263,7 +272,11 @@ mod tests {
         let root = directory.path();
         std::fs::create_dir(root.join("content")).unwrap();
         std::fs::create_dir(root.join("theme")).unwrap();
-        std::fs::write(root.join("theme/tola-module.toml"), "schema-version=1\n[queries.nodes]\nentry='model.typ'\nlabel='nodes'\nschema-version=1\nformat='entities'\n").unwrap();
+        std::fs::write(
+            root.join("theme/tola-module.toml"),
+            "\n[queries.nodes]\nentry='model.typ'\nlabel='nodes'\n\nformat='entities'\n",
+        )
+        .unwrap();
         std::fs::write(
             root.join("theme/model.typ"),
             "#metadata(json(\"missing.json\"))<nodes>",
@@ -272,8 +285,10 @@ mod tests {
         let configuration = site_configuration(root, "[modules.notes]\npath='theme'\n");
         let modules = tola_build::modules::resolve_modules(
             configuration.get_root(),
+            configuration.vendor().path.as_deref(),
             configuration.modules(),
-            InputScope::Offline,
+            tola_build::inputs::InputMode::new(InputScope::Offline, true),
+            &Default::default(),
         )
         .unwrap();
         let resources = BuildResources::new()

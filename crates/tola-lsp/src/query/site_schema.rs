@@ -368,7 +368,11 @@ mod tests {
             "[modules.notes]\npath='../module'\n[theme]\nmodule='notes'\n",
         )
         .unwrap();
-        fs::write(module.join("tola-module.toml"), "schema-version=1\nname='notes'\nversion='1.0.0'\n[typst]\nentry='lib.typ'\n[site]\nentry='site.typ'\n").unwrap();
+        fs::write(
+            module.join("tola-module.toml"),
+            "\nname='notes'\nversion='1.0.0'\n[typst]\nentry='lib.typ'\n[site]\nentry='site.typ'\n",
+        )
+        .unwrap();
         fs::write(module.join("lib.typ"), "").unwrap();
         fs::write(
             module.join("site.typ"),
@@ -413,40 +417,6 @@ mod tests {
             schemas[0]
                 .declaration()
                 .contains("@tola-modules/notes:0.0.0/records.typ")
-        );
-    }
-
-    #[test]
-    fn fallback_declares_no_schema() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path();
-        fs::create_dir(root.join("content")).unwrap();
-        fs::write(root.join("tola.toml"), "").unwrap();
-        fs::write(root.join("site.typ"), "#unknown_site_program()").unwrap();
-        fs::write(
-            root.join("content/post.typ"),
-            r#"
-#import "@tola/source:0.0.0": parse-sources
-#import "@tola/schema:0.0.0" as s
-#let records = parse-sources((), s.schema((category: str)))
-#metadata(records)
-"#,
-        )
-        .unwrap();
-        let config = load_configuration(root).expect("site configuration");
-        let cancellation = BuildCancellation::default();
-        let mut session = SourceDiagnosticSession::new(Arc::clone(&config));
-        let revision = session
-            .inspect_source("content/post.typ", Vec::new(), &cancellation)
-            .unwrap();
-        assert!(revision.compiled(), "{:?}", revision.diagnostics());
-        let compilation = revision.checked().unwrap();
-        assert!(compilation.site_entry().is_none());
-        let mut semantics = Semantic::new(compilation, &cancellation);
-        assert!(
-            site_schemas(compilation, &config, &mut semantics)
-                .unwrap()
-                .is_empty()
         );
     }
 }

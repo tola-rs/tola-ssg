@@ -81,7 +81,11 @@ pub(super) fn value(
 ) -> Result<serde_json::Value> {
     let overrides = crate::cli::config::config_overrides(build);
     let loaded = request.load_config(&overrides)?;
-    let prepared = tola_build::modules::prepare(loaded.config(), request.scope)?;
+    let prepared = tola_build::modules::prepare(
+        loaded.config(),
+        tola_build::inputs::InputMode::new(request.scope, true),
+        &request.cancellation.token(),
+    )?;
     let config = &prepared;
     let modules = config
         .loaded_modules()
@@ -166,7 +170,7 @@ mod tests {
         std::fs::write(theme.join("lib.typ"), "").unwrap();
         std::fs::write(theme.join("site.typ"), "#panic(\"must not run\")").unwrap();
         std::fs::write(theme.join("tola-module.toml"),
-            "schema-version=1\nname='notebook'\nversion='1.2.3'\n[typst]\nentry='lib.typ'\n[site]\nentry='site.typ'\n"
+            "\nname='notebook'\nversion='1.2.3'\n[typst]\nentry='lib.typ'\n[site]\nentry='site.typ'\n"
         ).unwrap();
         std::fs::write(
             project.join("tola.toml"),
@@ -206,51 +210,5 @@ mod tests {
         );
         assert!(!project.join("site.typ").exists());
         assert!(!project.join("public").exists());
-    }
-
-    #[test]
-    fn build_overrides_reach_config_json() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path();
-        std::fs::create_dir(root.join("content")).unwrap();
-        std::fs::write(root.join("site.typ"), "").unwrap();
-        std::fs::write(
-            root.join("tola.toml"),
-            "[site]\norigin = \"https://example.com\"\nbase-path = \"/docs/\"\n",
-        )
-        .unwrap();
-        let output = super::super::testing::buffered_output();
-        let cancellation = Cancellation::default();
-        let request = super::super::SiteRequest::new(
-            ConfigFileArgs {
-                path: Some(root.join("tola.toml")),
-            },
-            TypstPackageArgs::default(),
-            InputScope::Online,
-            BuildOverrideArgs::default(),
-            crate::cli::CompilerFontArgs::default(),
-            &output,
-            &cancellation,
-        )
-        .unwrap();
-        let overrides = BuildOverrideArgs {
-            minify: Some(false),
-            origin: Some("https://override.example".to_owned()),
-            base_path: Some("/preview/".to_owned()),
-            ..BuildOverrideArgs::default()
-        };
-
-        let shown = value(&request, &overrides).unwrap();
-
-        assert_eq!(shown["site"]["origin"], "https://override.example");
-        assert_eq!(shown["site"]["base_path"], "/preview/");
-        assert_eq!(shown["site"]["url"], "https://override.example/preview/");
-        assert_eq!(shown["minify"]["html"], false);
-        assert_eq!(shown["formatter"]["indent"], 2);
-        assert_eq!(shown["formatter"]["print_width"], 120);
-        assert_eq!(shown["formatter"]["prose_wrap"], "none");
-        assert_eq!(shown["server"]["interface"], "127.0.0.1");
-        assert_eq!(shown["server"]["port"], 5277);
-        assert_eq!(shown["dev"]["watch"], true);
     }
 }

@@ -54,8 +54,9 @@ pub use crate::world::{
 pub use crate::world::package;
 pub use crate::world::package::{
     PackageAvailability, PackageCheck, PackageFetchPolicy, PackageLocation, PackageLocationSource,
-    PackageLocations, PackagePreparationFailure, PackageSpec, PackageStore, PackageTier,
-    PackageVersion, PreparedPackage, sort_package_checks,
+    PackageLocations, PackagePreparationFailure, PackageRead, PackageSpec, PackageStore,
+    PackageTier, PackageVerificationError, PackageVerifier, PackageVersion, PreparedPackage,
+    sort_package_checks, sort_package_reads,
 };
 
 pub use crate::html::{

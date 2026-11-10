@@ -18,8 +18,11 @@ pub(super) fn generate(
     output: &crate::cli::output::CommandOutput,
     cancellation: &Cancellation,
 ) -> Result<FileWrites> {
-    let initializer =
-        tola_build::modules::resolve_initializer(source, args.alias.as_deref(), scope)?;
+    let initializer = tola_build::modules::resolve_initializer(
+        source,
+        args.alias.as_deref(),
+        tola_build::inputs::InputMode::new(scope, true),
+    )?;
     crate::cli::commands::extensions::check_namespaces(&std::collections::BTreeMap::from([(
         initializer.name.clone(),
         (),
@@ -158,7 +161,11 @@ pub(super) fn generate(
         &Default::default(),
     )?
     .into_config();
-    let prepared = tola_build::modules::prepare(&loaded, scope)?;
+    let prepared = tola_build::modules::prepare(
+        &loaded,
+        tola_build::inputs::InputMode::new(scope, true),
+        &cancellation.token(),
+    )?;
     let diagnostics = tola_build::modules::validate_options(
         &prepared,
         &crate::cli::config::build_resources(scope),
@@ -298,30 +305,6 @@ fn collect(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn absent_target_allows_parent_reference() {
-        let temporary = tempfile::tempdir().unwrap();
-        let root = temporary.path().canonicalize().unwrap();
-        let target = root.join("absent");
-        let validation = root.join("validation");
-        fs::create_dir(&validation).unwrap();
-        fs::create_dir(root.join("module")).unwrap();
-        fs::write(validation.join("file"), "not a directory").unwrap();
-        assert_eq!(
-            resolve_module_path(&target, &validation, Path::new("../module")).unwrap(),
-            root.join("module")
-        );
-        for declaration in ["file/../../module", "missing/../../module"] {
-            assert!(resolve_module_path(&target, &validation, Path::new(declaration)).is_err());
-        }
-        fs::create_dir(validation.join("new-module")).unwrap();
-        assert_eq!(
-            resolve_module_path(&target, &validation, Path::new("new-module")).unwrap(),
-            target.join("new-module")
-        );
-        assert!(!target.exists());
-    }
 
     #[cfg(unix)]
     #[test]

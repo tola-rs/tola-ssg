@@ -22,7 +22,6 @@ pub(super) struct ClientFeatures {
     hover_markup: Option<MarkupKind>,
     signature_markup: Option<MarkupKind>,
     signature_active_parameter: bool,
-    pub(super) hierarchical_symbols: bool,
     pub(super) will_rename_files: bool,
     document_changes: bool,
     resource_operations: Vec<ResourceOperationKind>,
@@ -91,10 +90,6 @@ impl ClientFeatures {
             ),
             signature_active_parameter: signature_information
                 .and_then(|signature| signature.active_parameter_support)
-                .unwrap_or(false),
-            hierarchical_symbols: document
-                .and_then(|document| document.document_symbol.as_ref())
-                .and_then(|symbols| symbols.hierarchical_document_symbol_support)
                 .unwrap_or(false),
             will_rename_files: workspace
                 .and_then(|workspace| workspace.file_operations.as_ref())
@@ -373,7 +368,6 @@ impl ClientFeatures {
                     })
                     .collect(),
             };
-            #[expect(clippy::mutable_key_type, reason = "the protocol keys edits by URI")]
             let documents = edit.changes.get_or_insert_default();
             for document in changes {
                 documents

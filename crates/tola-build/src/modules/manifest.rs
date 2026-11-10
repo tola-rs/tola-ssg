@@ -2,10 +2,10 @@
 
 use super::{
     Assets, Command, CommandAction, Entry, Initializer, ManifestEvidence, ModuleDeclaration,
-    ModuleSource, OptionsSchema, Query, QueryFormat, Skill, hooks, is_relative_path, semantics,
-    valid_name,
+    OptionsSchema, Query, Skill, hooks, is_relative_path, semantics, valid_name,
 };
 use crate::InputScope;
+use crate::inputs::InputMode;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -13,7 +13,6 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub(super) struct Manifest {
-    pub(super) schema_version: u32,
     #[serde(default)]
     pub(super) name: Option<String>,
     #[serde(default)]
@@ -67,23 +66,37 @@ pub struct NuModule {
 pub(super) fn read_selected(
     site_root: &Path,
     declarations: &BTreeMap<String, ModuleDeclaration>,
-    scope: InputScope,
+    roots: &BTreeMap<String, PathBuf>,
+    mode: InputMode,
 ) -> std::result::Result<BTreeMap<String, ReadManifest>, ManifestError> {
     let site = site_root
         .canonicalize()
         .map_err(|source| ManifestError::SiteRoot { source })?;
     declarations
-        .iter()
-        .map(|(name, declaration)| Ok((name.clone(), read_one(&site, name, declaration, scope)?)))
+        .keys()
+        .map(|name| {
+            let root = roots
+                .get(name)
+                .cloned()
+                .ok_or_else(|| ManifestError::Source {
+                    message: format!(
+                        "module @@{name}@@ was not resolved; run @@tola update {name}@@"
+                    ),
+                })?;
+            Ok((name.clone(), read_one(&site, name, root, mode)?))
+        })
         .collect()
 }
 
 pub fn resolve_nu_modules(
     site_root: &Path,
+    vendor: Option<&Path>,
     declarations: &BTreeMap<String, ModuleDeclaration>,
-    scope: InputScope,
+    mode: InputMode,
+    cancellation: &crate::cancellation::BuildCancellation,
 ) -> std::result::Result<BTreeMap<String, NuModule>, ManifestError> {
-    read_selected(site_root, declarations, scope)?
+    let roots = crate::inputs::module_roots(site_root, mode, vendor, declarations, cancellation)?;
+    read_selected(site_root, declarations, &roots, mode)?
         .into_iter()
         .map(|(name, loaded)| {
             let entry = loaded.manifest.nu.map(|nu| nu.entry);
@@ -116,22 +129,12 @@ pub struct InitializerSource {
 pub fn resolve_initializer(
     source: &Path,
     alias: Option<&str>,
-    scope: InputScope,
+    mode: InputMode,
 ) -> std::result::Result<InitializerSource, ManifestError> {
     let root = source
         .canonicalize()
         .map_err(|source| ManifestError::InitializerRoot { source })?;
-    let loaded = read_one(
-        &root,
-        alias.unwrap_or("init"),
-        &ModuleDeclaration {
-            source: ModuleSource::Local {
-                path: PathBuf::from("."),
-            },
-            ..Default::default()
-        },
-        scope,
-    )?;
+    let loaded = read_one(&root, alias.unwrap_or("init"), root.clone(), mode)?;
     let name = alias
         .map(str::to_owned)
         .or(loaded.manifest.name)
@@ -155,10 +158,13 @@ pub(super) struct ReadManifest {
 /// Read only configuration-selected module manifests, without loading their referenced inputs.
 pub fn read_declarations(
     site_root: &Path,
+    vendor: Option<&Path>,
     declarations: &BTreeMap<String, ModuleDeclaration>,
-    scope: InputScope,
+    mode: InputMode,
+    cancellation: &crate::cancellation::BuildCancellation,
 ) -> std::result::Result<BTreeMap<String, ModuleDeclarations>, ManifestError> {
-    read_selected(site_root, declarations, scope)?
+    let roots = crate::inputs::module_roots(site_root, mode, vendor, declarations, cancellation)?;
+    read_selected(site_root, declarations, &roots, mode)?
         .into_iter()
         .map(|(name, loaded)| {
             let manifest = loaded.manifest;
@@ -193,12 +199,12 @@ pub enum ManifestError {
         #[source]
         source: std::io::Error,
     },
+    #[error(transparent)]
+    Roots(#[from] crate::inputs::ModuleRootError),
     #[error("`{name}` is not a usable module name")]
     Namespace { name: String },
     #[error("{message}")]
     Source { message: String },
-    #[error("`modules.{module}.path` is empty")]
-    EmptyPath { module: String },
     #[error("Tola could not read the module directory `{path}`")]
     RootPath {
         path: String,
@@ -247,8 +253,8 @@ pub enum ManifestError {
         #[source]
         source: hooks::HookDeclarationError,
     },
-    #[error("module `{module}` declares unsupported `schema-version` {version}")]
-    SchemaVersion { module: String, version: u32 },
+    #[error("`{path}` declares `{field}`, which no longer exists; delete the key")]
+    RemovedField { path: String, field: String },
     #[error("`{name}` is not a usable package name for module `{module}`")]
     PackageName { module: String, name: String },
     #[error("module `{module}` must declare `name` and `version` together")]
@@ -265,10 +271,6 @@ pub enum ManifestError {
     QueryName { module: String, query: String },
     #[error("query `{query}` needs a `label`")]
     QueryLabel { query: String },
-    #[error("query `{query}` has an invalid `schema-version`")]
-    QuerySchemaVersion { query: String },
-    #[error("`{query}` must use `schema-version` 1 to return entities")]
-    EntityQuerySchemaVersion { query: String },
     #[error("module `{module}` declares invalid semantics: {source}")]
     Semantics {
         module: String,
@@ -302,31 +304,48 @@ pub enum ManifestError {
     ModulePath(#[from] super::ModulePathError),
 }
 
+/// Reject a key the input model removed, naming the repair instead of "`unknown field`".
+fn reject_removed_fields(content: &str, path: &str) -> std::result::Result<(), ManifestError> {
+    let Ok(value) = toml::from_str::<toml::Value>(content) else {
+        // The typed parse below reports a real syntax error with its own location.
+        return Ok(());
+    };
+    for field in ["schema-version", "minimal-tola-version"] {
+        if value.get(field).is_some() {
+            return Err(ManifestError::RemovedField {
+                path: path.to_owned(),
+                field: field.to_owned(),
+            });
+        }
+    }
+    if let Some(queries) = value.get("queries").and_then(toml::Value::as_table) {
+        for query in queries.values() {
+            if query
+                .as_table()
+                .is_some_and(|query| query.contains_key("schema-version"))
+            {
+                return Err(ManifestError::RemovedField {
+                    path: path.to_owned(),
+                    field: "queries.*.schema-version".to_owned(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn read_one(
     site: &Path,
     name: &str,
-    declaration: &ModuleDeclaration,
-    scope: InputScope,
+    declared_root: PathBuf,
+    mode: InputMode,
 ) -> std::result::Result<ReadManifest, ManifestError> {
     if !valid_name(name) {
         return Err(ManifestError::Namespace {
             name: name.to_owned(),
         });
     }
-    let declared_root = match &declaration.source {
-        ModuleSource::Local { path } => {
-            if path.as_os_str().is_empty() {
-                return Err(ManifestError::EmptyPath {
-                    module: name.to_owned(),
-                });
-            }
-            site.join(path)
-        }
-        ModuleSource::Remote { .. } => super::locked::module_root(site, name, &declaration.source)
-            .map_err(|_| ManifestError::Source {
-                message: format!("module `{name}` is not ready; run `tola module fetch {name}`"),
-            })?,
-    };
+
     // Every path this error names reads the way the author wrote it under the site root.
     let shown = |path: &Path| crate::filesystem::display_path(path, site);
     let root_identity = crate::filesystem::FilesystemSourceIdentity::from_path(&declared_root);
@@ -346,7 +365,7 @@ pub(super) fn read_one(
             path: shown(&declared_root),
         });
     }
-    if scope == InputScope::Pure && !root.starts_with(site) {
+    if mode.scope() == InputScope::Pure && !root.starts_with(site) {
         return Err(ManifestError::OutsideSiteInPureMode {
             module: name.to_owned(),
         });
@@ -389,6 +408,7 @@ pub(super) fn read_one(
             path: shown(&manifest_path),
             source,
         })?;
+    reject_removed_fields(content, &shown(&manifest_path))?;
     let manifest: Manifest =
         toml::from_str(content).map_err(|source| ManifestError::ManifestParse {
             path: shown(&manifest_path),
@@ -398,12 +418,6 @@ pub(super) fn read_one(
         module: name.to_owned(),
         source,
     })?;
-    if manifest.schema_version != 1 {
-        return Err(ManifestError::SchemaVersion {
-            module: name.to_owned(),
-            version: manifest.schema_version,
-        });
-    }
     if let Some(package_name) = &manifest.name
         && !valid_name(package_name)
     {
@@ -476,12 +490,6 @@ pub(super) fn read_one(
         let query_label = format!("{name}.{query_name}");
         if query.label.is_empty() {
             return Err(ManifestError::QueryLabel { query: query_label });
-        }
-        if query.schema_version == 0 {
-            return Err(ManifestError::QuerySchemaVersion { query: query_label });
-        }
-        if query.format == QueryFormat::Entities && query.schema_version != 1 {
-            return Err(ManifestError::EntityQuerySchemaVersion { query: query_label });
         }
         relative(&query.entry, format!("query {query_label} entry"))?;
     }
@@ -559,14 +567,6 @@ pub(super) fn read_one(
             root: root_identity,
             manifest: manifest_identity,
             digest,
-            locked_source: match &declaration.source {
-                ModuleSource::Remote { .. } => Some((
-                    site.to_path_buf(),
-                    name.to_owned(),
-                    declaration.source.clone(),
-                )),
-                ModuleSource::Local { .. } => None,
-            },
         },
         manifest,
     })
@@ -575,6 +575,20 @@ pub(super) fn read_one(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::modules::ModuleSource;
+
+    fn resolved_modules(
+        site: &std::path::Path,
+        declarations: &std::collections::BTreeMap<String, crate::modules::ModuleDeclaration>,
+        mode: crate::inputs::InputMode,
+    ) -> std::result::Result<
+        std::collections::BTreeMap<String, crate::modules::ResolvedModule>,
+        crate::modules::ModuleResolutionError,
+    > {
+        let roots =
+            crate::inputs::module_roots(site, mode, None, declarations, &Default::default())?;
+        crate::modules::resolve_modules_with_roots(site, declarations, &roots, mode)
+    }
 
     #[test]
     fn nu_selection_prepares_no_site_inputs() {
@@ -587,7 +601,6 @@ mod tests {
         std::fs::write(
             directory.path().join("tola-module.toml"),
             r#"
-schema-version = 1
 name = "tools"
 version = "1.0.0"
 [nu]
@@ -606,13 +619,25 @@ directory = "not-generated-assets"
                 ..Default::default()
             },
         )]);
-        let loaded = resolve_nu_modules(directory.path(), &declared, InputScope::Pure).unwrap();
+        let loaded = resolve_nu_modules(
+            directory.path(),
+            None,
+            &declared,
+            InputMode::new(InputScope::Pure, false),
+            &Default::default(),
+        )
+        .unwrap();
         assert_eq!(
             loaded["local"].entry.as_deref(),
             Some(Path::new("tools.nu"))
         );
         assert!(
-            super::super::resolve_modules(directory.path(), &declared, InputScope::Pure).is_err()
+            resolved_modules(
+                directory.path(),
+                &declared,
+                crate::inputs::InputMode::new(InputScope::Pure, false),
+            )
+            .is_err()
         );
     }
 
@@ -638,20 +663,38 @@ directory = "not-generated-assets"
         for entry in ["", "../outside.nu"] {
             std::fs::write(
                 module.join("tola-module.toml"),
-                format!("schema-version=1\nname='tools'\nversion='1.0.0'\n[nu]\nentry={entry:?}\n"),
+                format!("name='tools'\nversion='1.0.0'\n[nu]\nentry={entry:?}\n"),
             )
             .unwrap();
-            assert!(resolve_nu_modules(directory.path(), &declared, InputScope::Pure).is_err());
+            assert!(
+                resolve_nu_modules(
+                    directory.path(),
+                    None,
+                    &declared,
+                    InputMode::new(InputScope::Pure, false),
+                    &Default::default()
+                )
+                .is_err()
+            );
         }
         #[cfg(unix)]
         {
             std::os::unix::fs::symlink("../outside.nu", module.join("linked.nu")).unwrap();
             std::fs::write(
                 module.join("tola-module.toml"),
-                "schema-version=1\nname='tools'\nversion='1.0.0'\n[nu]\nentry='linked.nu'\n",
+                "name='tools'\nversion='1.0.0'\n[nu]\nentry='linked.nu'\n",
             )
             .unwrap();
-            assert!(resolve_nu_modules(directory.path(), &declared, InputScope::Pure).is_err());
+            assert!(
+                resolve_nu_modules(
+                    directory.path(),
+                    None,
+                    &declared,
+                    InputMode::new(InputScope::Pure, false),
+                    &Default::default()
+                )
+                .is_err()
+            );
         }
     }
 
@@ -661,7 +704,6 @@ directory = "not-generated-assets"
         std::fs::write(
             directory.path().join("tola-module.toml"),
             r#"
-schema-version = 1
 name = "notebook"
 version = "1.0.0"
 [site]
@@ -671,11 +713,20 @@ argv = ["not-installed", "{module}/init.nu"]
 "#,
         )
         .unwrap();
-        let initializer = resolve_initializer(directory.path(), None, InputScope::Pure).unwrap();
+        let initializer = resolve_initializer(
+            directory.path(),
+            None,
+            InputMode::new(InputScope::Pure, false),
+        )
+        .unwrap();
         assert_eq!(initializer.name, "notebook");
         assert_eq!(initializer.argv, ["not-installed", "{module}/init.nu"]);
-        let initializer =
-            resolve_initializer(directory.path(), Some("notes"), InputScope::Pure).unwrap();
+        let initializer = resolve_initializer(
+            directory.path(),
+            Some("notes"),
+            InputMode::new(InputScope::Pure, false),
+        )
+        .unwrap();
         assert_eq!(initializer.name, "notes");
         let declarations = BTreeMap::from([(
             "notes".into(),
@@ -686,11 +737,22 @@ argv = ["not-installed", "{module}/init.nu"]
                 ..Default::default()
             },
         )]);
-        let help = read_declarations(directory.path(), &declarations, InputScope::Pure).unwrap();
+        let help = read_declarations(
+            directory.path(),
+            None,
+            &declarations,
+            InputMode::new(InputScope::Pure, false),
+            &Default::default(),
+        )
+        .unwrap();
         assert!(help["notes"].commands.contains_key("init"));
         assert!(
-            crate::modules::resolve_modules(directory.path(), &declarations, InputScope::Pure)
-                .is_err()
+            resolved_modules(
+                directory.path(),
+                &declarations,
+                crate::inputs::InputMode::new(InputScope::Pure, false),
+            )
+            .is_err()
         );
     }
 }

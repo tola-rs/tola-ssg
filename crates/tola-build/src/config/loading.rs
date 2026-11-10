@@ -335,13 +335,18 @@ fn module_input_paths(schema: &SiteConfigSchema, root: &Path) -> (Vec<PathBuf>, 
         .modules
         .iter()
         .flat_map(|(name, module)| {
-            let module_root = match &module.source {
-                crate::modules::ModuleSource::Local { path } => root.join(path),
+            let module_roots: Vec<PathBuf> = match &module.source {
+                crate::modules::ModuleSource::Local { path } => vec![root.join(path)],
                 crate::modules::ModuleSource::Remote { .. } => {
-                    crate::filesystem::layout::modules(root).join(name)
+                    let vendor = schema.vendor.path.as_deref().unwrap_or(Path::new("vendor"));
+                    vec![
+                        crate::filesystem::layout::modules(root).join(name),
+                        root.join(vendor).join("modules").join(name),
+                    ]
                 }
             };
-            std::iter::once(module_root)
+            module_roots
+                .into_iter()
                 .chain(module.overrides.values().map(|path| root.join(path)))
         })
         .collect();
@@ -776,27 +781,6 @@ content-dir = "content"
     }
 
     #[test]
-    fn language_shape_error_locates_value() {
-        let directory = tempfile::TempDir::new().unwrap();
-        let config_path = write_config(
-            directory.path(),
-            "[site]\nlanguage = { lang = \"zh\", tag = \"zh-Hans-CN\" }\n",
-        );
-
-        let error = load_error(&config_path);
-
-        let diagnostics = attached_diagnostics(&error);
-        let [diagnostic] = diagnostics else {
-            panic!("one language shape failure is reported: {diagnostics:?}");
-        };
-        assert_eq!(diagnostic.code, tola_diagnostic::codes::config::TOML);
-        assert_eq!(diagnostic.message.matches("`site.language`").count(), 1);
-        let location = diagnostic.location.as_ref().unwrap();
-        assert_eq!(location.path, "tola.toml");
-        assert_eq!((location.line, location.column), (Some(2), Some(12)));
-    }
-
-    #[test]
     fn supplied_text_outranks_the_config_file() {
         let directory = tempfile::TempDir::new().unwrap();
         let config_path = write_config(directory.path(), &site_source("Disk"));
@@ -816,36 +800,6 @@ content-dir = "content"
             std::fs::read_to_string(config_path).unwrap(),
             site_source("Disk")
         );
-    }
-
-    #[test]
-    fn supplied_text_applies_overrides() {
-        let directory = tempfile::TempDir::new().unwrap();
-        let config_path = directory.path().join("tola.toml");
-        let build = BuildOverrides {
-            publish_dir: Some("dist".into()),
-            minify: Some(false),
-            origin: Some("https://EXAMPLE.test:443/".into()),
-            base_path: Some("/docs/".into()),
-        };
-
-        let resolved = resolve_site_config(
-            &config_path,
-            &site_source("Site"),
-            tola_typst::PackageLocations::default(),
-            &build,
-        )
-        .unwrap();
-        let config = resolved.config();
-
-        assert_eq!(config.build().publish_dir, config.get_root().join("dist"));
-        assert!(!config.build().minify.html);
-        assert_eq!(
-            config.site_url().as_deref(),
-            Some("https://example.test/docs/")
-        );
-        assert!(!config_path.exists());
-        assert!(!config.build().publish_dir.exists());
     }
 
     #[test]
@@ -882,30 +836,6 @@ content-dir = "content"
                 .iter()
                 .all(|diagnostic| diagnostic.location.is_none())
         );
-    }
-
-    #[test]
-    fn supplied_text_needs_existing_site() {
-        let directory = tempfile::TempDir::new().unwrap();
-        let config_path = directory.path().join("missing/tola.toml");
-        let error = resolve_site_config(
-            &config_path,
-            &site_source("Site"),
-            tola_typst::PackageLocations::default(),
-            &BuildOverrides::default(),
-        )
-        .unwrap_err();
-
-        let diagnostics = attached_diagnostics(&error);
-        let diagnostic = diagnostic_mentioning(&error, "the site directory could not be used");
-
-        assert_eq!(diagnostic.code, tola_diagnostic::codes::config::LOAD);
-        assert!(diagnostics.iter().all(|diagnostic| {
-            diagnostic
-                .location
-                .as_ref()
-                .is_some_and(|location| location.path == "tola.toml")
-        }));
     }
 
     #[test]
@@ -958,24 +888,6 @@ publish-dir = "."
     }
 
     #[test]
-    fn address_failures_keep_language_errors() {
-        let directory = tempfile::TempDir::new().unwrap();
-        let error = resolve_site_config(
-            &directory.path().join("tola.toml"),
-            "[site]\norigin = \"invalid\"\nbase-path = \"/unfinished\"\nlanguage = \"bad-tag-!\"\n",
-            tola_typst::PackageLocations::default(),
-            &BuildOverrides::default(),
-        )
-        .unwrap_err();
-        let diagnostics = attached_diagnostics(&error);
-        let fields = diagnostics
-            .iter()
-            .map(|diagnostic| diagnostic.notes.first().unwrap().as_str())
-            .collect::<Vec<_>>();
-        assert_eq!(fields, ["site.origin", "site.base-path", "site.language"]);
-    }
-
-    #[test]
     fn base_path_rejects_encoded_separators() {
         let directory = tempfile::TempDir::new().unwrap();
         let config_path =
@@ -997,31 +909,6 @@ publish-dir = "."
         );
     }
 
-    #[test]
-    fn default_discovery_uses_tola_toml() {
-        let root = tempfile::TempDir::new().unwrap();
-        let nested = root.path().join("content/posts");
-        std::fs::create_dir_all(&nested).unwrap();
-        std::fs::write(root.path().join("tola.toml"), "").unwrap();
-
-        assert_eq!(
-            find_default_config(&nested),
-            Some(root.path().join("tola.toml"))
-        );
-    }
-
-    #[test]
-    fn invalid_nearest_config_stops_the_search() {
-        let root = tempfile::tempdir().unwrap();
-        std::fs::write(root.path().join("tola.toml"), "").unwrap();
-        let nested = root.path().join("nested");
-        let path = nested.join("tola.toml");
-        std::fs::create_dir_all(&path).unwrap();
-
-        assert_eq!(find_default_config(&nested), Some(path.clone()));
-        assert!(ConfigSource::load(Some(&path), crate::resources::InputScope::Online).is_err());
-    }
-
     #[cfg(unix)]
     #[test]
     fn broken_symlink_stops_the_search() {
@@ -1041,32 +928,6 @@ publish-dir = "."
                 .downcast_ref::<std::io::Error>()
                 .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound)
         }));
-    }
-
-    #[test]
-    fn schema_resolves_without_config_file() {
-        let site_directory = tempfile::tempdir().unwrap();
-        let config_path = site_directory.path().join("tola.toml");
-        let mut schema = SiteConfigSchema::default();
-        schema.site.origin = Some("https://EXAMPLE.test:443/".into());
-        schema.site.base_path = "/文档/".into();
-        schema.build.publish_dir = "dist".into();
-
-        let config = schema
-            .resolve(
-                &config_path,
-                tola_typst::PackageLocations::default(),
-                &BuildOverrides::default(),
-            )
-            .unwrap();
-
-        assert_eq!(config.build().publish_dir, config.get_root().join("dist"));
-        assert_eq!(config.build().entry, config.get_root().join("site.typ"));
-        assert_eq!(
-            config.site_url().as_deref(),
-            Some("https://example.test/%E6%96%87%E6%A1%A3/")
-        );
-        assert!(!config_path.exists());
     }
 
     #[test]

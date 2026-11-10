@@ -72,36 +72,28 @@ where
 }
 
 macro_rules! impl_extractor_for_tuple {
-    ($first:ident $(, $rest:ident)*) => {
-        impl<$first: Extractor $(, $rest: Extractor)*> Extractor for ($first, $($rest,)*) {
-            type Output = ($first::Output, $($rest::Output,)*);
+    ($first_ty:ident => $first_val:ident $(, $ty:ident => $val:ident)* $(,)?) => {
+        impl<$first_ty: Extractor $(, $ty: Extractor)*> Extractor for ($first_ty, $($ty,)*) {
+            type Output = ($first_ty::Output, $($ty::Output,)*);
 
-            #[expect(
-                non_snake_case,
-                reason = "the tuple's type parameters name the bindings"
-            )]
             fn visit(&mut self, elem: &Content) {
-                let ($first, $($rest,)*) = self;
-                $first.visit(elem);
-                $($rest.visit(elem);)*
+                let ($first_val, $($val,)*) = self;
+                $first_val.visit(elem);
+                $($val.visit(elem);)*
             }
 
-            #[expect(
-                non_snake_case,
-                reason = "the tuple's type parameters name the bindings"
-            )]
             fn finish(self) -> Self::Output {
-                let ($first, $($rest,)*) = self;
-                ($first.finish(), $($rest.finish(),)*)
+                let ($first_val, $($val,)*) = self;
+                ($first_val.finish(), $($val.finish(),)*)
             }
         }
 
-        impl_extractor_for_tuple!($($rest),*);
+        impl_extractor_for_tuple!($($ty => $val),*);
     };
     () => {};
 }
 
-impl_extractor_for_tuple!(A, B, C, D, E, F, G, H);
+impl_extractor_for_tuple!(A => a, B => b, C => c, D => d, E => e, F => f, G => g, H => h);
 
 /// Extracts all links from realized content.
 #[derive(Debug)]

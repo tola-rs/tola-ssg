@@ -366,18 +366,13 @@ mod tests {
 
     #[test]
     // Exhaustive on purpose: a new phrase stops this test compiling until it is listed.
-    #[expect(
-        clippy::single_element_loop,
-        reason = "exhaustive on purpose: a new phrase stops this test compiling until it is listed"
-    )]
     fn phrases_have_translations() {
-        for phrase in [HelpText::HelpUsage] {
-            match phrase {
-                HelpText::HelpUsage => {}
-            }
-            let translated = text(HelpLanguage::SimplifiedChinese, phrase);
-            assert_ne!(translated, phrase.english(), "{:?}", phrase.key());
+        let phrase = HelpText::HelpUsage;
+        match phrase {
+            HelpText::HelpUsage => {}
         }
+        let translated = text(HelpLanguage::SimplifiedChinese, phrase);
+        assert_ne!(translated, phrase.english(), "{:?}", phrase.key());
     }
 
     /// Every bundled package carries a translation, every translated unit names a real export or

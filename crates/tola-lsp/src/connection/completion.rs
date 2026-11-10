@@ -14,7 +14,7 @@ use tola_diagnostic::Diagnostic;
 use crate::compiler::{
     CheckedSources, QueryRequest, SourceCompilation, SourceFailure, SourceJob, checked_root,
 };
-use crate::diagnostic::refine_unread_configuration;
+use crate::diagnostic::{PublishInputs, refine_unread_configuration};
 use crate::protocol::{CheckProgress, SourceReply};
 
 use super::replies::{
@@ -312,15 +312,15 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
         workspace
             .diagnostics
             .keep_selection(checked_revision, root, Arc::clone(&checked.selected));
-        workspace.diagnostics.publish(
-            &mut self.writer,
+        workspace.diagnostics.publish(PublishInputs {
+            output: &mut self.writer,
             root,
-            &entry,
-            &self.open,
-            &workspace.features,
-            &checked.selected,
+            entry: &entry,
+            open: &self.open,
+            features: &workspace.features,
+            selected: &checked.selected,
             diagnostics,
-        )
+        })
     }
 
     /// Ask a client that pulls to read the diagnostics the check just produced.
@@ -777,7 +777,7 @@ mod tests {
         );
         let mut connection = uninitialized();
         connection.request(Request::new(1.into(), request::Initialize::METHOD.into(), json!({
-            "rootUri":crate::uri::from_file_path(directory.path()).unwrap(),
+            "workspaceFolders":[{"uri":crate::uri::from_file_path(directory.path()).unwrap(),"name":"site"}],
             "capabilities":{"textDocument":{"diagnostic":{}},"workspace":{"diagnostics":{"refreshSupport":true}}}
         }))).unwrap();
         let initialized = response(&mut connection).response_result.unwrap();

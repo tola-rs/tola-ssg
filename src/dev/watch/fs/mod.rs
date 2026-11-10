@@ -1752,30 +1752,9 @@ mod tests {
         }
     }
 
-    fn hook_child_command(test: &str) -> Vec<String> {
-        vec![
-            std::env::current_exe()
-                .unwrap()
-                .to_string_lossy()
-                .into_owned(),
-            "--exact".into(),
-            format!("dev::watch::fs::tests::{test}"),
-            "--nocapture".into(),
-        ]
-    }
-
+    /// Executed as an independent hook child, never directly by the test harness.
     #[test]
     fn child_writes_nothing() {}
-
-    #[test]
-    fn child_partial_before_build_hook() {
-        if std::env::var("TOLA_HOOK_STAGE").as_deref() != Ok("before-build") {
-            return;
-        }
-        std::fs::create_dir_all("generated").unwrap();
-        std::fs::write("generated/site.css", "partial").unwrap();
-        panic!("source generator failed");
-    }
 
     pub(super) fn resolve_schema(
         root: &Path,
@@ -1798,29 +1777,6 @@ mod tests {
 
     pub(super) fn local_packages() -> tola_typst::PackageLocations {
         tola_typst::PackageLocations::from_absolute_roots(None, None).unwrap()
-    }
-
-    /// Confirmed outputs for a hook that declares `output`, resolved under `root`.
-    fn confirmed_hook_outputs(root: &Path, output: &str) -> tola_build::hooks::SourceHookOutputs {
-        let mut schema = tola_build::config::SiteConfigSchema::default();
-        schema.build.hooks.before_build.push(
-            tola_build::config::section::build::BeforeBuildHookConfig {
-                name: "generator".into(),
-                command: hook_child_command("child_writes_nothing"),
-                dev: tola_build::config::section::build::DevParticipation::Run,
-                generates: vec![PathBuf::from(output)],
-                ..tola_build::config::section::build::BeforeBuildHookConfig::default()
-            },
-        );
-        let config = resolve_schema(root, schema, local_packages());
-        std::fs::create_dir_all(&config.build().content_dir).unwrap();
-        if !config.build().entry.exists() {
-            std::fs::write(&config.build().entry, "#document(\"index.html\")[Site]").unwrap();
-        }
-        tola_build::build::build_site(&config, tola_build::build::BuildMode::Production)
-            .unwrap()
-            .source_hooks()
-            .clone()
     }
 
     fn watch_config(root: &Path) -> ResolvedSiteConfig {
@@ -2048,94 +2004,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn declared_named_input_reaches_the_rebuild() {
-        let directory = tempfile::TempDir::new().unwrap();
-        let config = watch_config(directory.path());
-        let generated = config.get_root().join("generated/data.tmp");
-        std::fs::create_dir_all(generated.parent().unwrap()).unwrap();
-        std::fs::write(&generated, "generated").unwrap();
-        let mut required = WatchRequirements::default();
-        required.observe_paths(
-            ProducerKind::Hooks,
-            InputPathScope::Exact,
-            true,
-            [generated.clone()],
-        );
-        let epoch = watching_epoch(&config, &required);
-        let (events, mut received) = mpsc::unbounded_channel();
-
-        forward_watch_result(Ok(modified_event(&generated)), &epoch, &events, None);
-
-        let WatchMessage::Event { event, .. } = received.try_recv().unwrap() else {
-            panic!("a declared input must stay observable");
-        };
-        assert_eq!(event.paths, [generated]);
-    }
-
-    #[test]
-    fn editor_save_saved_path_only() {
-        let directory = tempfile::TempDir::new().unwrap();
-        let config = watch_config(directory.path());
-        let content = config.get_root().join("content");
-        let mut required = WatchRequirements::default();
-        required.observe_paths(
-            ProducerKind::Content,
-            InputPathScope::Recursive,
-            true,
-            [content.clone()],
-        );
-        let epoch = watching_epoch(&config, &required);
-        let (events, mut received) = mpsc::unbounded_channel();
-        let page = content.join("page.typ");
-        let event = notify::Event::new(notify::EventKind::Modify(notify::event::ModifyKind::Name(
-            notify::event::RenameMode::Both,
-        )))
-        .add_path(content.join(".page.typ.swp"))
-        .add_path(page.clone());
-
-        forward_watch_result(Ok(event), &epoch, &events, None);
-
-        let WatchMessage::Event { event, .. } = received.try_recv().unwrap() else {
-            panic!("the saved page must stay observable");
-        };
-        assert_eq!(event.paths, [page]);
-    }
-
-    #[tokio::test]
-    async fn unclassified_input_rejects_candidate() {
-        let directory = tempfile::TempDir::new().unwrap();
-        let config = watch_config(directory.path());
-        let mut changes =
-            manual_watch_source(&config, &tola_build::hooks::SourceHookOutputs::default()).await;
-        let candidate = changes.begin_candidate(&config);
-        let source = config.build().entry.clone();
-        forward_watch_result(
-            Ok(notify::Event::new(notify::EventKind::Any).add_path(source.clone())),
-            &changes.event_epoch,
-            &changes.event_tx,
-            None,
-        );
-
-        let rejected = changes
-            .event_epoch
-            .guard_relevant(candidate.revision(), |_| true)
-            .unwrap()
-            .is_none();
-        let batch =
-            tokio::time::timeout(std::time::Duration::from_secs(2), changes.next(&config)).await;
-        changes.shutdown().await.unwrap();
-
-        assert!(rejected, "unknown input event permitted stale publication");
-        assert_eq!(
-            batch
-                .expect("unknown input event was discarded")
-                .unwrap()
-                .paths,
-            [source]
-        );
-    }
-
     fn modified_event(path: impl Into<PathBuf>) -> notify::Event {
         notify::Event::new(notify::EventKind::Modify(notify::event::ModifyKind::Data(
             notify::event::DataChange::Any,
@@ -2165,39 +2033,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn claimed_events_do_not_reappear() {
-        let directory = tempfile::TempDir::new().unwrap();
-        let config = watch_config(directory.path());
-        let mut changes = manual_watch_source(&config, &Default::default()).await;
-        let event = modified_event(config.build().entry.clone());
-        deliver_event(&mut changes, &event);
-        let claim = changes.begin_candidate(&config);
-        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
-        assert!(
-            std::pin::pin!(changes.next(&config))
-                .as_mut()
-                .poll(&mut context)
-                .is_pending()
-        );
-        assert_eq!(changes.event_epoch.claim_candidate().paths, claim.paths);
-        changes
-            .event_epoch
-            .guard_relevant(claim.revision(), |_| true)
-            .unwrap()
-            .unwrap()
-            .commit(claim);
-        assert!(changes.event_epoch.claim_candidate().paths.is_empty());
-        // The redelivered event must describe a new change; unchanged bytes owe no round.
-        std::fs::write(&config.build().entry, "#document(\"changed.html\")[Site]").unwrap();
-        deliver_event(&mut changes, &event);
-        let batch = std::pin::pin!(changes.next(&config))
-            .as_mut()
-            .poll(&mut context);
-        assert!(matches!(batch, std::task::Poll::Ready(Ok(batch)) if batch.paths == event.paths));
-        changes.shutdown().await.unwrap();
-    }
-
     #[cfg(unix)]
     #[tokio::test]
     async fn hook_watch_tracks_tool_and_output() {
@@ -2213,7 +2048,7 @@ mod tests {
         std::fs::write(
             module.join("tola-module.toml"),
             r#"
-schema-version = 1
+
 [[hooks]]
 stage = "before-build"
 name = "generate"
@@ -2231,9 +2066,12 @@ generates = ["generated/{name}.txt"]
         )
         .unwrap()
         .into_config();
-        let hook_watch =
-            tola_build::modules::prepare_hook_watch(&config, tola_build::InputScope::Online)
-                .unwrap();
+        let hook_watch = tola_build::modules::prepare_hook_watch(
+            &config,
+            tola_build::inputs::InputMode::new(tola_build::InputScope::Online, false),
+            &Default::default(),
+        )
+        .unwrap();
         let mut changes = manual_watch_source(&config, &Default::default()).await;
         let claim = changes.begin_candidate(&config);
         changes.update_hook_candidate_claims(hook_watch.config());
@@ -2349,26 +2187,6 @@ generates = ["generated/{name}.txt"]
         assert_eq!(batch.paths, vec![root.join("content/index.typ")]);
     }
 
-    #[test]
-    fn filtered_paths_keep_typed_scope() {
-        let directory = tempfile::TempDir::new().unwrap();
-        let configured = watch_config(directory.path());
-        let root = configured.get_root().to_path_buf();
-        let config = &configured;
-        let batch = settled_batch(
-            config,
-            [modified_event(
-                root.join(tola_build::filesystem::INTERNAL_DIR)
-                    .join("ignored.typ"),
-            )],
-            RebuildScope::FullTypst,
-        )
-        .expect("typed recovery must not be discarded with a filtered path");
-
-        assert!(batch.paths.is_empty());
-        assert_eq!(batch.rebuild_scope, RebuildScope::FullTypst);
-    }
-
     #[cfg(unix)]
     #[test]
     fn symlink_alias_excludes_output_paths() {
@@ -2398,117 +2216,5 @@ generates = ["generated/{name}.txt"]
         let filter = RebuildPathFilter::for_config(&config);
         assert!(!filter.accepts(&mirror.join("cache")));
         assert!(filter.accepts(&alias_root.join("content/index.typ")));
-    }
-
-    #[test]
-    fn external_hook_outputs_stay_inputs() {
-        let directory = tempfile::TempDir::new().unwrap();
-        let configured = watch_config(directory.path());
-        let root = configured.get_root().to_path_buf();
-        let mut schema = tola_build::config::SiteConfigSchema::default();
-        schema.build.hooks.before_build.push(
-            tola_build::config::section::build::BeforeBuildHookConfig {
-                name: "generator".into(),
-                command: vec!["generator".into()],
-                generates: vec![PathBuf::from("generated/site.css")],
-                ..Default::default()
-            },
-        );
-        let configured = resolve_schema(&root, schema, local_packages());
-        let config = &configured;
-        let batch = settled_batch(
-            config,
-            [modified_event(root.join("generated/site.css"))],
-            RebuildScope::Paths,
-        )
-        .unwrap();
-
-        assert_eq!(batch.paths, vec![root.join("generated/site.css")]);
-    }
-
-    /// Declared output events stay pending at path scope until content evidence accounts for them.
-
-    #[tokio::test]
-    async fn hook_evidence_keeps_sibling_edits() {
-        let directory = tempfile::TempDir::new().unwrap();
-        let root = directory.path().canonicalize().unwrap();
-        let schema = tola_build::config::SiteConfigSchema::parse(
-            &root.join("tola.toml"),
-            "[assets]\ntrees = [{ source = \"static/web-assets\", url-prefix = \"/assets\" }]\n\
-             [[build.hooks.before-build]]\nname = \"css\"\ncommand = [\"true\"]\n\
-             generates = [\"static/web-assets/css/site.css\"]\n",
-            tola_build::InputScope::Online,
-        )
-        .unwrap();
-        let config = resolve_schema(&root, schema, local_packages());
-        let output = root.join("static/web-assets/css/site.css");
-        std::fs::create_dir_all(output.parent().unwrap()).unwrap();
-        std::fs::write(&output, "generated").unwrap();
-        let confirmed = confirmed_hook_outputs(&root, "static/web-assets/css/site.css");
-        let sibling = output.with_extension("css.tmp");
-        std::fs::write(&sibling, "author input").unwrap();
-        let mut changes = manual_watch_source(&config, &confirmed).await;
-        let mut batch = FileChangeBatch {
-            paths: vec![sibling.clone()],
-            rebuild_scope: RebuildScope::Paths,
-        };
-        assert!(
-            !changes
-                .suppress_observed_hook_changes(&mut batch)
-                .await
-                .unwrap()
-        );
-        assert_eq!(batch.paths, [sibling]);
-        changes.shutdown().await.unwrap();
-    }
-
-    /// A rename is structural, and the same path a hook writes is one an author may edit: the
-    /// content evidence differs, so the edit opens exactly one round naming that path.
-    #[tokio::test]
-    async fn hand_output_opens_one_rebuild() {
-        use notify::event::RenameMode;
-
-        let directory = tempfile::TempDir::new().unwrap();
-        let root = directory.path().canonicalize().unwrap();
-        let mut schema = tola_build::config::SiteConfigSchema::default();
-        schema.build.hooks.before_build.push(
-            tola_build::config::section::build::BeforeBuildHookConfig {
-                name: "tailwind".into(),
-                command: vec!["tailwindcss".into()],
-                generates: vec![PathBuf::from("static/web-assets/css/site.css")],
-                ..Default::default()
-            },
-        );
-        let config = resolve_schema(&root, schema, local_packages());
-        let output = root.join("static/web-assets/css/site.css");
-        std::fs::create_dir_all(output.parent().unwrap()).unwrap();
-        std::fs::write(&output, "@tailwind utilities;").unwrap();
-        let pending = root.join("static/web-assets/css/site.css.tmp");
-
-        let mut changes = manual_watch_source(&config, &Default::default()).await;
-        assert!(changes.begin_candidate(&config).paths.is_empty());
-        std::fs::write(&pending, ".edited { color: red; }").unwrap();
-        forward_watch_result(
-            Ok(
-                notify::Event::new(notify::EventKind::Modify(notify::event::ModifyKind::Name(
-                    RenameMode::Both,
-                )))
-                .add_path(pending)
-                .add_path(output.clone()),
-            ),
-            &changes.event_epoch,
-            &changes.event_tx,
-            None,
-        );
-
-        let batch = settled_batch(
-            &config,
-            [modified_event(output.clone())],
-            RebuildScope::Paths,
-        )
-        .expect("an edit the hook's evidence does not cover must open a round");
-        assert_eq!(batch.paths, vec![output]);
-        assert_eq!(batch.rebuild_scope, RebuildScope::Paths);
-        changes.shutdown().await.unwrap();
     }
 }

@@ -87,4 +87,4 @@ mod tokens;
 mod transport;
 mod uri;
 
-pub use server::{ServedWorkspace, serve};
+pub use server::{ServeRequest, ServedWorkspace, serve};

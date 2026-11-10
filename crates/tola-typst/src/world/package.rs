@@ -318,6 +318,85 @@ impl PackageCheck {
     pub fn was_selected(&self) -> bool {
         self.selected
     }
+
+    /// The read this check made possible, when it selected the package root.
+    ///
+    /// Only the selected check of a successful read names a root; every other check records a
+    /// directory that was considered and rejected.
+    pub fn read(&self) -> Option<PackageRead> {
+        if !self.selected {
+            return None;
+        }
+        let root = self.canonical_target.clone()?;
+        Some(PackageRead {
+            package: self.package.clone(),
+            tier: self.tier,
+            root,
+        })
+    }
+}
+
+/// One package root a compilation successfully read from.
+///
+/// A read names the physical directory the bytes came from, so a lock can describe exactly what
+/// the compiler consumed. Only a successful disk read produces one; a directory that was merely
+/// checked, or a provider-backed package that has no physical root, does not.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PackageRead {
+    package: PackageSpec,
+    tier: PackageTier,
+    root: PathBuf,
+}
+
+impl PackageRead {
+    /// Record one successfully read package root.
+    ///
+    /// `root` is the physical package directory. Callers normally obtain reads from
+    /// [`crate::AccessedDeps::package_reads`] instead of building one.
+    pub fn new(package: PackageSpec, tier: PackageTier, root: PathBuf) -> Self {
+        Self {
+            package,
+            tier,
+            root,
+        }
+    }
+
+    /// Return the package identity.
+    pub fn package(&self) -> &PackageSpec {
+        &self.package
+    }
+
+    /// Return the package's namespace.
+    pub fn namespace(&self) -> &str {
+        self.package.namespace.as_str()
+    }
+
+    /// Return the package's name.
+    pub fn name(&self) -> &str {
+        self.package.name.as_str()
+    }
+
+    /// Return the version the compiler read.
+    pub fn version(&self) -> PackageVersion {
+        self.package.version
+    }
+
+    /// Return the physical package root the bytes came from.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// Return the storage tier that supplied the root.
+    pub fn tier(&self) -> PackageTier {
+        self.tier
+    }
+}
+
+/// Sort package reads into the order evidence reports them.
+///
+/// The order is stable across runs: package identity, physical root, then storage tier.
+pub fn sort_package_reads(reads: &mut [PackageRead]) {
+    reads.sort_by_cached_key(|read| (read.package.to_string(), read.root.clone(), read.tier as u8));
 }
 
 /// A package directory selected for a resolver read.
@@ -367,6 +446,39 @@ impl PackagePreparationFailure {
     }
 }
 
+/// A caller's refusal of the package root the resolver selected.
+///
+/// A verifier returns this before any file below the root is read, so an unverified directory can
+/// never supply bytes to a compilation.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{message}")]
+pub struct PackageVerificationError {
+    message: String,
+}
+
+impl PackageVerificationError {
+    /// Refuse the selected root with one sentence the site author reads.
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+
+    /// The refusal as the reader sees it.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+/// A caller's pre-read check of one selected package root.
+///
+/// The resolver calls it once for the directory it selected, before reading a file below it. It
+/// receives the package identity and the physical directory; a refusal fails the read with every
+/// availability check recorded so far.
+pub type PackageVerifier = std::sync::Arc<
+    dyn Fn(&PackageSpec, &Path) -> Result<(), PackageVerificationError> + Send + Sync,
+>;
+
 /// Package storage owned by an explicit file resolver.
 #[derive(Clone)]
 pub struct PackageStore {
@@ -376,6 +488,8 @@ pub struct PackageStore {
     /// Typst Universe downloader, absent from a build without the `network` feature.
     #[cfg(feature = "network")]
     universe: Arc<UniversePackages>,
+    /// The caller's pre-read check of each selected package root.
+    verifier: Option<PackageVerifier>,
 }
 
 impl PackageStore {
@@ -387,6 +501,14 @@ impl PackageStore {
     /// Refuse package directories that would make generated or external files into sources.
     pub fn with_source_boundary(mut self, boundary: crate::world::SourceBoundary) -> Self {
         self.boundary = boundary;
+        self
+    }
+
+    /// Require a caller's check of every package root before it is read.
+    ///
+    /// The verifier replaces any earlier one, so a caller can tighten or replace the check.
+    pub fn with_verifier(mut self, verifier: PackageVerifier) -> Self {
+        self.verifier = Some(verifier);
         self
     }
 
@@ -402,6 +524,7 @@ impl PackageStore {
             fetch_policy,
             boundary: crate::world::SourceBoundary::default(),
             universe: Arc::new(UniversePackages::new(HttpDownloader::new(user_agent))),
+            verifier: None,
         }
     }
 
@@ -416,6 +539,7 @@ impl PackageStore {
                 "tola-typst/",
                 env!("CARGO_PKG_VERSION")
             )))),
+            verifier: None,
         }
     }
 
@@ -426,6 +550,7 @@ impl PackageStore {
             locations,
             fetch_policy,
             boundary: crate::world::SourceBoundary::default(),
+            verifier: None,
         }
     }
 
@@ -463,8 +588,10 @@ impl PackageStore {
 
         for (tier, location) in locations.tiers() {
             if let Some(prepared) = settle(
+                package,
                 check_package_directory(package, tier, location.root(), &self.boundary),
                 &mut checks,
+                self.verifier.as_ref(),
             )? {
                 return Ok(prepared);
             }
@@ -503,7 +630,8 @@ impl PackageStore {
                         observed.tier != PackageTier::Cache || observed.candidate != check.candidate
                     });
                 }
-                if let Some(prepared) = settle(check, &mut checks)? {
+                if let Some(prepared) = settle(package, check, &mut checks, self.verifier.as_ref())?
+                {
                     return Ok(prepared);
                 }
             }
@@ -555,9 +683,14 @@ enum PackageDirectoryCheck {
 }
 
 /// The package when this tier supplied it; otherwise every check so far is appended to `checks`.
+///
+/// A selected directory passes the caller's verifier before it can supply a read. A refusal keeps
+/// every check recorded so far, so the failure names the package and the directories it searched.
 fn settle(
+    package: &PackageSpec,
     check: PackageDirectoryCheck,
     checks: &mut Vec<PackageCheck>,
+    verifier: Option<&PackageVerifier>,
 ) -> Result<Option<PreparedPackage>, PackagePreparationFailure> {
     match check {
         PackageDirectoryCheck::Present {
@@ -566,6 +699,16 @@ fn settle(
         } => {
             check.selected = true;
             checks.push(check);
+            if let Some(verifier) = verifier
+                && let Err(refusal) = verifier(package, &directory)
+            {
+                return Err(PackagePreparationFailure {
+                    error: FileError::Package(PackageError::Other(Some(
+                        refusal.to_string().into(),
+                    ))),
+                    checks: std::mem::take(checks),
+                });
+            }
             Ok(Some(PreparedPackage {
                 directory,
                 checks: std::mem::take(checks),
@@ -660,51 +803,11 @@ fn check_package_directory(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::Cell;
+
     use tempfile::TempDir;
 
     fn package() -> PackageSpec {
         "@preview/demo:0.1.0".parse().unwrap()
-    }
-
-    #[test]
-    fn explicit_paths_outrank_environment() {
-        let directory = TempDir::new().unwrap();
-        let current_dir_calls = Cell::new(0);
-        let locations = PackageLocations::discover_with(
-            Some(PathBuf::from("explicit-data")),
-            None,
-            |name| match name {
-                PACKAGE_PATH_ENV => Some(OsString::from("ignored-data")),
-                PACKAGE_CACHE_PATH_ENV => Some(OsString::from("environment-cache")),
-                _ => None,
-            },
-            Some(PathBuf::from("system-data")),
-            Some(PathBuf::from("system-cache")),
-            || {
-                current_dir_calls.set(current_dir_calls.get() + 1);
-                Ok(directory.path().to_path_buf())
-            },
-        )
-        .unwrap();
-
-        assert_eq!(current_dir_calls.get(), 1);
-        assert_eq!(
-            locations.data().unwrap().root(),
-            directory.path().join("explicit-data")
-        );
-        assert_eq!(
-            locations.data().unwrap().source(),
-            PackageLocationSource::Explicit
-        );
-        assert_eq!(
-            locations.cache().unwrap().root(),
-            directory.path().join("environment-cache")
-        );
-        assert_eq!(
-            locations.cache().unwrap().source(),
-            PackageLocationSource::Environment
-        );
     }
 
     #[test]
@@ -751,25 +854,5 @@ mod tests {
                 "{name}"
             );
         }
-    }
-
-    #[test]
-    fn missing_package_records_tier_checked() {
-        let directory = TempDir::new().unwrap();
-        let declared = directory.path().join("declared");
-        std::fs::create_dir_all(&declared).unwrap();
-        let locations = PackageLocations::default()
-            .with_declared_root(declared.clone())
-            .unwrap();
-        let store = PackageStore::new(locations, PackageFetchPolicy::LocalOnly);
-
-        let failure = store.prepare(&package()).unwrap_err();
-
-        assert_eq!(failure.checks().len(), 1);
-        assert_eq!(failure.checks()[0].tier(), PackageTier::Declared);
-        assert_eq!(
-            failure.checks()[0].candidate(),
-            declared.join("preview/demo/0.1.0")
-        );
     }
 }

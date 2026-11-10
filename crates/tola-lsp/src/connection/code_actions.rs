@@ -51,6 +51,17 @@ impl RequestKinds {
     }
 }
 
+/// The report evidence one code-action request judges, and the params it may rewrite.
+struct ReconcileReports<'a> {
+    uri: &'a lsp_types::Uri,
+    root: &'a Path,
+    source: Option<&'a Source>,
+    kinds: RequestKinds,
+    echoes_causes: bool,
+    published_reports: Option<&'a [lsp_types::Diagnostic]>,
+    params: &'a mut CodeActionParams,
+}
+
 impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
     pub(super) fn code_actions(
         &mut self,
@@ -79,15 +90,15 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
         let published_reports = (kinds.fix_all || !echoes_causes)
             .then(|| self.published_diagnostics(&uri))
             .flatten();
-        if !self.reconcile_reports(
-            &uri,
-            &root,
-            source.as_ref(),
+        if !self.reconcile_reports(ReconcileReports {
+            uri: &uri,
+            root: &root,
+            source: source.as_ref(),
             kinds,
             echoes_causes,
-            published_reports.as_deref(),
-            &mut params,
-        )? {
+            published_reports: published_reports.as_deref(),
+            params: &mut params,
+        })? {
             return self.await_selection(id, params, root);
         }
         let mut actions = match &source {
@@ -149,20 +160,16 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
     ///
     /// `false` when a file-scope statement is another source's to select: the request then waits for
     /// this revision's selection index rather than reading a stale one.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "each report echo is distinct evidence for one request"
-    )]
-    fn reconcile_reports(
-        &mut self,
-        uri: &lsp_types::Uri,
-        root: &Path,
-        source: Option<&Source>,
-        kinds: RequestKinds,
-        echoes_causes: bool,
-        published_reports: Option<&[lsp_types::Diagnostic]>,
-        params: &mut CodeActionParams,
-    ) -> Result<bool> {
+    fn reconcile_reports(&mut self, inputs: ReconcileReports<'_>) -> Result<bool> {
+        let ReconcileReports {
+            uri,
+            root,
+            source,
+            kinds,
+            echoes_causes,
+            published_reports,
+            params,
+        } = inputs;
         if !echoes_causes && kinds.asks_for_reports() {
             params.context.diagnostics = published_reports.unwrap_or_default().to_vec();
         }

@@ -375,8 +375,6 @@ pub(super) fn rename(
     if !literal_name(new_name) {
         return Ok(None);
     }
-    // The protocol's own edit map is keyed by URI, which clippy reads as interior-mutable.
-    #[expect(clippy::mutable_key_type, reason = "the protocol keys edits by URI")]
     let mut changes: HashMap<Uri, Vec<TextEdit>> = HashMap::new();
     for spelled in locations(compilation, name, true, cancellation, client_root)? {
         changes.entry(spelled.uri).or_default().push(TextEdit {
@@ -677,8 +675,6 @@ mod tests {
         let rename = rename(&compilation, "intro", "outro", &cancellation, &client_root)
             .expect("a rename")
             .expect("edits");
-        // The protocol's own edit map is keyed by URI, which clippy reads as interior-mutable.
-        #[expect(clippy::mutable_key_type, reason = "the protocol keys edits by URI")]
         let changes = rename.changes.expect("edits by URI");
         assert_eq!(changes.keys().collect::<Vec<_>>(), [&expected]);
     }
@@ -840,7 +836,6 @@ mod tests {
             ("#let factor = 2\n#f|actor\n", "scale", 2),
         ] {
             let edit = site.rename(text, new_name).expect("the rename edits");
-            #[expect(clippy::mutable_key_type, reason = "the protocol keys edits by URI")]
             let changes = edit.changes.expect("edits by file");
             assert_eq!(changes.len(), 1, "{changes:?}");
             let edits = changes.values().flatten().collect::<Vec<_>>();

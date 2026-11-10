@@ -6,8 +6,8 @@ use crate::cli::log::destination;
 use anyhow::Result;
 
 use super::{Cli, Commands, commands};
+use crate::cli::BuildOverrideArgs;
 use crate::cli::output::CommandOutput;
-use crate::cli::{BuildOverrideArgs, CompilerFontArgs, TypstPackageArgs};
 use tola_build::InputScope;
 
 pub(crate) fn dispatch(
@@ -23,34 +23,17 @@ pub(crate) fn dispatch(
         return report_failure(failure, output, error);
     }
     let scope = cli.input_scope();
+    let mode = cli.input_mode();
     match cli.command {
         Commands::Nu(_) => unreachable!("script runs before cancellation is installed"),
         Commands::Extension(arguments) => {
             commands::extensions::run(arguments, scope, output, cancellation)
         }
-        Commands::Module { config, command } => {
-            let request = commands::SiteRequest::new(
-                config,
-                TypstPackageArgs::default(),
-                scope,
-                BuildOverrideArgs::default(),
-                CompilerFontArgs::default(),
-                output,
-                cancellation,
-            )?;
-            let loaded = request.load_config(&crate::config::ConfigOverrides::default())?;
-            let super::args::ModuleCommand::Fetch { alias } = command;
-            output.status("Fetching remote modules")?;
-            tola_build::modules::fetch_modules(
-                loaded.config().get_root(),
-                loaded.config().modules(),
-                alias.as_deref(),
-                scope,
-                &cancellation.token(),
-            )?;
-            output.status("Remote modules are ready")?;
-            Ok(())
-        }
+        Commands::Update {
+            config,
+            packages,
+            update,
+        } => commands::update::run(config, packages, mode, update, output, cancellation),
         Commands::Init(args) => commands::init::run(&args, scope, output, cancellation),
         Commands::Edit { config, command } => {
             commands::edit::run(config, command, output, cancellation)

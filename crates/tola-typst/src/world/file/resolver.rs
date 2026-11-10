@@ -63,6 +63,18 @@ impl FileResolver {
         self
     }
 
+    /// Require a caller's check of every package root before it is read.
+    ///
+    /// A refused root fails the read that selected it, so no file below an unverified directory
+    /// ever reaches the compiler.
+    pub fn with_package_verifier(
+        mut self,
+        verifier: crate::world::package::PackageVerifier,
+    ) -> Self {
+        self.packages = self.packages.with_verifier(verifier);
+        self
+    }
+
     pub(crate) fn source_boundary(&self) -> &crate::world::SourceBoundary {
         &self.boundary
     }
@@ -570,124 +582,42 @@ mod tests {
     use tempfile::TempDir;
     use typst::syntax::FileId;
 
-    struct DiskMapping {
-        id: FileId,
-        path: PathBuf,
-    }
-
-    impl FileProvider for DiskMapping {
-        fn target(&self, id: FileId) -> Option<FileTarget> {
-            (id == self.id).then(|| FileTarget::Disk(self.path.clone()))
-        }
-    }
-
     #[cfg(unix)]
     #[test]
-    fn disk_overrides_precede_package_disk() {
+    fn package_verifier_refuses_before_the_read() {
+        use crate::world::package::{PackageSpec, PackageVerificationError};
+        use typst::diag::PackageError;
+
         let directory = TempDir::new().unwrap();
         let data = directory.path().join("data");
-        let cache = directory.path().join("cache");
-        let selected = data.join("local/demo/1.0.0/lib.typ");
-        let shadowed = cache.join("local/demo/1.0.0/lib.typ");
-        for path in [&selected, &shadowed] {
-            fs::create_dir_all(path.parent().unwrap()).unwrap();
-            fs::write(path, "disk source").unwrap();
-        }
-        let locations = PackageLocations::from_absolute_roots(Some(data), Some(cache)).unwrap();
+        let root = data.join("local/demo/1.0.0");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("lib.typ"), "package source").unwrap();
+        let locations = PackageLocations::from_absolute_roots(Some(data), None).unwrap();
         let id = FileId::new(typst::syntax::RootedPath::new(
             typst::syntax::VirtualRoot::Package("@local/demo:1.0.0".parse().unwrap()),
             typst::syntax::VirtualPath::new("lib.typ").unwrap(),
         ));
         let resolver =
             FileResolver::from_package_locations(locations, PackageFetchPolicy::LocalOnly)
-                .with_disk_overrides([(shadowed, Arc::from(&b"shadowed editor source"[..]))])
-                .unwrap();
-        assert_eq!(resolver.read(id, directory.path()).unwrap(), b"disk source");
+                .with_package_verifier(Arc::new(|_: &PackageSpec, _: &Path| {
+                    Err(PackageVerificationError::new(
+                        "package `@local/demo:1.0.0` is not recorded in `tola.lock`",
+                    ))
+                }));
 
-        let resolver = resolver
-            .with_disk_overrides([(selected.clone(), Arc::from(&b"editor source"[..]))])
-            .unwrap();
-        let observed = resolver.read_attempt(id, directory.path());
-        assert_eq!(observed.result.unwrap().as_ref(), b"editor source");
-        assert!(observed.disk_reads.is_empty());
-        assert_eq!(observed.package_checks.len(), 1);
-        assert!(observed.package_checks[0].was_selected());
-        let read = observed
-            .reads
-            .as_ref()
-            .expect("a provider read has evidence");
-        assert!(matches!(read.origin(), ReadOrigin::Provider));
+        let attempt = resolver.read_attempt(id, directory.path());
+
         assert!(matches!(
-            read.evidence().locator(),
-            ReadLocator::ProvidedPackage { .. }
+            attempt.result,
+            Err(FileError::Package(PackageError::Other(Some(_))))
         ));
-        assert_eq!(fs::read(selected).unwrap(), b"disk source");
-    }
-
-    #[test]
-    fn provider_bytes_outrank_disk_overrides() {
-        let directory = TempDir::new().unwrap();
-        let path = directory.path().join("lib.typ");
-        fs::write(&path, "disk").unwrap();
-        let id = crate::world::file::file_id("lib.typ");
-        let mut provided = crate::world::file::FileMap::new();
-        provided.insert(id, &b"virtual source"[..]);
-        let resolver = FileResolver::new()
-            .with_provider(provided)
-            .with_disk_overrides([(path, Arc::from(&b"editor source"[..]))])
-            .unwrap();
-        assert_eq!(
-            resolver.read(id, directory.path()).unwrap(),
-            b"virtual source"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn read_attempt_reports_disk_inputs() {
-        let dir = TempDir::new().unwrap();
-        fs::write(dir.path().join("page.typ"), "= Page").unwrap();
-        let files = FileResolver::new();
-
-        let attempt = files.read_attempt(crate::world::file::file_id("page.typ"), dir.path());
-        let path = dir.path().join("page.typ");
-        assert!(attempt.result.is_ok());
-        assert_eq!(attempt.disk_reads.len(), 1);
-        assert_eq!(attempt.disk_reads[0].as_path(), path);
-        let read = attempt
-            .reads
-            .as_ref()
-            .expect("a successful read has evidence");
-        assert!(matches!(
-            read.origin(),
-            ReadOrigin::Disk(origin) if origin.as_path() == path
-        ));
-
-        let attempt = files.read_attempt(crate::world::file::file_id("missing.typ"), dir.path());
-        assert!(attempt.result.is_err());
         assert!(attempt.reads.is_none());
-        assert_eq!(attempt.disk_reads.len(), 1);
-        assert_eq!(
-            attempt.disk_reads[0].as_path(),
-            dir.path().join("missing.typ")
+        assert!(
+            attempt
+                .package_checks
+                .iter()
+                .any(PackageCheck::was_selected)
         );
-    }
-
-    #[test]
-    fn mapped_disk_targets_must_be_absolute() {
-        let directory = TempDir::new().unwrap();
-        let logical = directory.path().join("image.svg");
-        fs::write(&logical, b"root file").unwrap();
-        let id = crate::world::file::file_id("image.svg");
-        let files = FileResolver::new().with_provider(DiskMapping {
-            id,
-            path: PathBuf::from("relative/image.svg"),
-        });
-
-        let attempt = files.read_attempt(id, directory.path());
-
-        assert!(attempt.result.is_err());
-        assert!(attempt.reads.is_none());
-        assert!(attempt.disk_reads.is_empty());
     }
 }

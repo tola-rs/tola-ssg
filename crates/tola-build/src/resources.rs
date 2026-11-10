@@ -57,6 +57,7 @@ pub enum NetworkAccess {
 #[derive(Clone)]
 pub struct BuildResources {
     scope: InputScope,
+    locked: bool,
     network: NetworkAccess,
     files: Arc<tola_typst::SharedFileCache>,
     include_system_fonts: bool,
@@ -86,7 +87,22 @@ impl BuildResources {
         self.scope
     }
 
-    /// Effective package tiers, excluding host roots in pure builds even when they are local.
+    /// Refuse to write `tola.lock`; `--pure` implies this through
+    /// [`InputMode::new`](crate::inputs::InputMode::new).
+    pub fn with_locked(mut self, locked: bool) -> Self {
+        self.locked = locked;
+        self
+    }
+
+    /// What this attempt may write, fetch, and read for its inputs.
+    pub fn input_mode(&self) -> crate::inputs::InputMode {
+        crate::inputs::InputMode::new(self.scope, self.locked)
+    }
+
+    /// Effective package tiers. A pure build reads only the roots the site declares — its
+    /// `vendor/` tree — and never a host package root or host cache, because those bytes live
+    /// outside the site and are not part of a reproducible build. Every other scope keeps the
+    /// tiers its configuration resolved.
     pub fn package_locations(
         &self,
         config: &crate::config::ResolvedSiteConfig,
@@ -200,16 +216,22 @@ impl BuildResources {
 /// The exclusions every site read applies, before any output path is known.
 ///
 /// Configuration is read before a resolved configuration exists, so it shares this much of the
-/// boundary and adds the output exclusions later through [`source_boundary`]. The package view
-/// and fetched module sources are readable inside the internal directory; other generated paths
-/// stay refused.
+/// boundary and adds the output exclusions later through [`source_boundary`]. A pure build reads
+/// no state below the internal directory. A resolving build may read the two caches Tola
+/// publishes there — fetched module snapshots at the commits `tola.lock` pins, and the package
+/// view that mirrors embedded package sources — because they are copies, never a source of
+/// selection. A pure build also requires every source to resolve inside the site root.
 pub(crate) fn base_source_boundary(root: &Path, scope: InputScope) -> tola_typst::SourceBoundary {
-    tola_typst::SourceBoundary::new(root, scope == InputScope::Pure)
-        .excluding_except_many(
-            root.join(INTERNAL_DIR),
+    let boundary = tola_typst::SourceBoundary::new(root, scope == InputScope::Pure);
+    let internal = root.join(INTERNAL_DIR);
+    let boundary = match scope {
+        InputScope::Pure => boundary.excluding(internal),
+        InputScope::Online | InputScope::Offline => boundary.excluding_except_many(
+            internal,
             [layout::builtin_packages(root), layout::modules(root)],
-        )
-        .excluding(root.join(crate::filesystem::SITE_BUILD_LOCK_FILE))
+        ),
+    };
+    boundary.excluding(root.join(crate::filesystem::SITE_BUILD_LOCK_FILE))
 }
 
 pub(crate) fn source_boundary(
@@ -242,6 +264,7 @@ impl Default for BuildResources {
     fn default() -> Self {
         Self {
             scope: InputScope::Online,
+            locked: false,
             network: NetworkAccess::Allowed,
             files: Arc::new(tola_typst::SharedFileCache::new()),
             include_system_fonts: true,
@@ -414,25 +437,27 @@ mod tests {
         assert_eq!(InputScope::parse("Online"), None);
     }
 
-    /// The view `tola editor setup` publishes is read while every other generated path stays
-    /// refused, so a file-only client can open the file a definition named.
+    /// A pure build reads no state below Tola's internal directory: the package view, the module
+    /// cache, and inspection state all stay refused.
     #[test]
-    fn package_view_counts_as_source() {
+    fn pure_scope_refuses_internal_directory() {
         let directory = tempfile::TempDir::new().unwrap();
         let root = directory.path();
-        let boundary = base_source_boundary(root, InputScope::Online);
-        let view = layout::builtin_packages(root).join("tola/source/0.0.0/lib.typ");
-        std::fs::create_dir_all(view.parent().unwrap()).unwrap();
-        std::fs::write(&view, "#let value = 1\n").unwrap();
-        let sibling = root.join(INTERNAL_DIR).join("inspection/state.json");
-        std::fs::create_dir_all(sibling.parent().unwrap()).unwrap();
-        std::fs::write(&sibling, "{}").unwrap();
-
-        assert!(boundary.check(&view).is_ok(), "{:?}", boundary.check(&view));
-        assert_eq!(
-            boundary.refusal(&sibling).unwrap(),
-            Some(tola_typst::SourceRefusal::GeneratedState)
-        );
+        let boundary = base_source_boundary(root, InputScope::Pure);
+        for relative in [
+            "mirrors/builtin-packages/tola/source/0.0.0/lib.typ",
+            "modules/forester/lib.typ",
+            "inspection/state.json",
+        ] {
+            let path = root.join(INTERNAL_DIR).join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, "#let value = 1\n").unwrap();
+            assert_eq!(
+                boundary.refusal(&path).unwrap(),
+                Some(tola_typst::SourceRefusal::GeneratedState),
+                "{relative}"
+            );
+        }
     }
 
     /// A site whose output already holds the published `404.html` page.

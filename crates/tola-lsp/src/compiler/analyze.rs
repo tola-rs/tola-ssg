@@ -27,18 +27,18 @@ pub(crate) fn analyze(
             );
             let names = source_graph(disk, graphs, &request, include_dependents)?;
             if crate::analysis::unproven(&names, &request.source, cursor, query).is_empty() {
-                crate::analysis::respond(
-                    &names,
-                    &request.source,
+                crate::analysis::respond(crate::analysis::NameGraphReply {
+                    graph: &names,
+                    source: &request.source,
                     cursor,
                     query,
-                    &request.view,
-                    &*disk,
-                    &request.source_root,
-                    &crate::uri::ClientRoot::new(&request.sources.root),
-                    request.package_locations.as_ref(),
-                    &request.boundary,
-                )?
+                    view: &request.view,
+                    disk: &*disk,
+                    source_root: &request.source_root,
+                    client_root: &crate::uri::ClientRoot::new(&request.sources.root),
+                    locations: request.package_locations.as_ref(),
+                    boundary: &request.boundary,
+                })?
             } else {
                 // A statement the graph never resolved may still be answered by the checked world.
                 None
@@ -89,20 +89,20 @@ fn source_graph(
     request: &AnalysisRequest,
     include_dependents: bool,
 ) -> Result<std::sync::Arc<tola_typst_syntax::imports::NameGraph>> {
-    crate::analysis::source_only_graph(
-        &request.source_root,
-        &request.view,
-        &request.source,
-        request.package_locations.as_ref(),
-        &request.boundary,
+    crate::analysis::source_only_graph(crate::analysis::SourceOnlyGraph {
+        root: &request.source_root,
+        view: &request.view,
+        source: &request.source,
+        locations: request.package_locations.as_ref(),
+        boundary: &request.boundary,
         include_dependents,
         disk,
-        Some(crate::analysis::CachedGraph {
+        cache: Some(crate::analysis::CachedGraph {
             cache: graphs,
             revision: request.sources.source_revision,
         }),
-        &request.sources.cancellation,
-    )
+        cancellation: &request.sources.cancellation,
+    })
 }
 
 fn analyze_tokens(
@@ -170,18 +170,20 @@ fn source_completion(
         };
     let graph = if needs_graph {
         Some(crate::analysis::source_only_graph(
-            &request.source_root,
-            &request.view,
-            source,
-            request.package_locations.as_ref(),
-            &request.boundary,
-            false,
-            disk,
-            Some(crate::analysis::CachedGraph {
-                cache: graphs,
-                revision: request.sources.source_revision,
-            }),
-            cancellation,
+            crate::analysis::SourceOnlyGraph {
+                root: &request.source_root,
+                view: &request.view,
+                source,
+                locations: request.package_locations.as_ref(),
+                boundary: &request.boundary,
+                include_dependents: false,
+                disk,
+                cache: Some(crate::analysis::CachedGraph {
+                    cache: graphs,
+                    revision: request.sources.source_revision,
+                }),
+                cancellation,
+            },
         )?)
     } else {
         None

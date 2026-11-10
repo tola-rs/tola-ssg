@@ -63,8 +63,13 @@ pub(in crate::cli) fn run(
         let (namespace, local) = target.split_once('.').context(
             "choose a module-qualified query such as `notes.nodes`, or an explicit `./query.typ` file",
         )?;
-        let modules =
-            tola_build::modules::resolve_modules(config.get_root(), config.modules(), scope)?;
+        let modules = tola_build::modules::resolve_modules(
+            config.get_root(),
+            config.vendor().path.as_deref(),
+            config.modules(),
+            resources.input_mode(),
+            &cancellation.token(),
+        )?;
         super::extensions::check_namespaces(&modules)?;
         let module = modules
             .get(namespace)
@@ -86,22 +91,33 @@ pub(in crate::cli) fn run(
     complete(result, &args.options, &[], scope, output, cancellation)
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "a declared query's inputs are distinct configuration values"
-)]
-pub(in crate::cli) fn run_declared(
-    config: Arc<ResolvedSiteConfig>,
-    module: &ResolvedModule,
-    query: &Query,
-    name: &str,
-    usage: &str,
-    projection: Option<&[String]>,
-    tail: &[OsString],
-    resources: BuildResources,
-    output: &CommandOutput,
-    cancellation: &Cancellation,
-) -> Result<()> {
+/// A module-declared query's inputs.
+pub(in crate::cli) struct DeclaredQuery<'a> {
+    pub(in crate::cli) config: Arc<ResolvedSiteConfig>,
+    pub(in crate::cli) module: &'a ResolvedModule,
+    pub(in crate::cli) query: &'a Query,
+    pub(in crate::cli) name: &'a str,
+    pub(in crate::cli) usage: &'a str,
+    pub(in crate::cli) projection: Option<&'a [String]>,
+    pub(in crate::cli) tail: &'a [OsString],
+    pub(in crate::cli) resources: BuildResources,
+    pub(in crate::cli) output: &'a CommandOutput,
+    pub(in crate::cli) cancellation: &'a Cancellation,
+}
+
+pub(in crate::cli) fn run_declared(declared: DeclaredQuery<'_>) -> Result<()> {
+    let DeclaredQuery {
+        config,
+        module,
+        query,
+        name,
+        usage,
+        projection,
+        tail,
+        resources,
+        output,
+        cancellation,
+    } = declared;
     let command =
         QueryOptions::augment_args(clap::Command::new(name.to_owned()).bin_name(usage.to_owned()));
     let matches = match command.try_get_matches_from(

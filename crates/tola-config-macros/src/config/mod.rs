@@ -27,6 +27,20 @@ fn is_toml_bare_key(key: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
 }
 
+/// The generated field struct's name: the input ident in PascalCase.
+fn pascal_case(name: &syn::Ident) -> String {
+    name.to_string()
+        .split('_')
+        .map(|segment| {
+            let mut chars = segment.chars();
+            chars
+                .next()
+                .map(|first| first.to_uppercase().chain(chars).collect::<String>())
+                .unwrap_or_default()
+        })
+        .collect()
+}
+
 /// Generate Config field paths, template methods, and status validation.
 pub fn derive(input: &DeriveInput) -> TokenStream {
     match expand(input) {
@@ -37,7 +51,7 @@ pub fn derive(input: &DeriveInput) -> TokenStream {
 
 fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
     let name = &input.ident;
-    let fields_struct_name = syn::Ident::new(&format!("{}Fields", name), name.span());
+    let fields_struct_name = syn::Ident::new(&format!("{}Fields", pascal_case(name)), name.span());
 
     let struct_attrs = ConfigAttrs::parse(&input.attrs, ConfigAttrScope::Struct)?;
     let section = match struct_attrs.section {
@@ -138,36 +152,44 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
     });
 
     // Status diagnostics depend on explicit TOML presence, not differences from defaults.
-    let status_checks = config_fields.iter().filter(|f| !f.skip).filter_map(|f| {
-        let field_name = &f.rust_ident;
-        let status = generate_runtime_status_code(f.status, &runtime_crate)?;
-        Some(quote! {
-            if diag.is_present(Self::FIELDS.#field_name.as_str()) {
-                #runtime_crate::status::check_field_status(
-                    Self::FIELDS.#field_name.as_str(),
-                    #status,
-                    diag,
-                );
-            }
+    let status_checks: Vec<TokenStream> = config_fields
+        .iter()
+        .filter(|f| !f.skip)
+        .filter_map(|f| {
+            let field_name = &f.rust_ident;
+            let status = generate_runtime_status_code(f.status, &runtime_crate)?;
+            Some(quote! {
+                if diag.is_present(Self::FIELDS.#field_name.as_str()) {
+                    #runtime_crate::status::check_field_status(
+                        Self::FIELDS.#field_name.as_str(),
+                        #status,
+                        diag,
+                    );
+                }
+            })
         })
-    });
+        .collect();
 
-    let nested_calls = config_fields.iter().filter(|f| !f.skip && f.sub).map(|f| {
-        let field_name = &f.rust_ident;
-        if f.collection == Some(CollectionShape::ArrayTable) {
-            quote! {
-                for (index, value) in self.#field_name.iter().enumerate() {
-                    diag.with_array_element(Self::FIELDS.#field_name.as_str(), index, |diag| {
-                        value.validate_field_status(diag);
-                    });
+    let nested_calls: Vec<TokenStream> = config_fields
+        .iter()
+        .filter(|f| !f.skip && f.sub)
+        .map(|f| {
+            let field_name = &f.rust_ident;
+            if f.collection == Some(CollectionShape::ArrayTable) {
+                quote! {
+                    for (index, value) in self.#field_name.iter().enumerate() {
+                        diag.with_array_element(Self::FIELDS.#field_name.as_str(), index, |diag| {
+                            value.validate_field_status(diag);
+                        });
+                    }
+                }
+            } else {
+                quote! {
+                    self.#field_name.validate_field_status(diag);
                 }
             }
-        } else {
-            quote! {
-                self.#field_name.validate_field_status(diag);
-            }
-        }
-    });
+        })
+        .collect();
 
     let section_status_check =
         generate_runtime_status_code(section_status, &runtime_crate).map(|status_token| {
@@ -182,9 +204,16 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
             }
         });
 
+    let uses_diagnostics =
+        section_status_check.is_some() || !status_checks.is_empty() || !nested_calls.is_empty();
+    let diag = if uses_diagnostics {
+        quote!(diag)
+    } else {
+        quote!(_diag)
+    };
+
     Ok(quote! {
         /// Generated field path accessors.
-        #[allow(non_camel_case_types)]
         pub struct #fields_struct_name {
             #(#field_defs)*
         }
@@ -242,8 +271,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
             }
 
             /// Validate field status (experimental, deprecated, not_implemented).
-            #[allow(unused_variables)]
-            pub fn validate_field_status(&self, diag: &mut #runtime_crate::ConfigDiagnostics) {
+            pub fn validate_field_status(&self, #diag: &mut #runtime_crate::ConfigDiagnostics) {
                 #section_status_check
                 #(#status_checks)*
                 #(#nested_calls)*

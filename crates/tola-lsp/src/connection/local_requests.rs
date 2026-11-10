@@ -122,12 +122,8 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
         id: RequestId,
         parameters: DocumentSymbolParams,
     ) -> Result<()> {
-        let workspace = self.workspace();
-        let hierarchical = workspace.features.hierarchical_symbols;
         let uri = &parameters.text_document.uri;
-        let symbols = self.text_request(uri, |source| {
-            crate::symbols::outline(source, uri, hierarchical)
-        });
+        let symbols = self.text_request(uri, crate::symbols::outline);
         self.reply(Response::new_ok(id, symbols))
     }
 

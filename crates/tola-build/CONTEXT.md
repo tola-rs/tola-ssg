@@ -24,4 +24,5 @@
 - Cache reuse preserves the same diagnostics, dependency evidence, and observable bytes as the authoritative build.
 - Cancellation belongs to the superseded attempt and never renders as an ordinary failure.
 - Library code returns structured values and diagnostics; terminal rendering belongs to the caller.
+- Remote module locks hash materialized bytes: fetch pins EOL and runs no filter drivers, so `tree_sha256` stays host-independent; user Git config supplies credentials, rewrites, proxies, and CAs.
 - Public library: keep the API documented, feature boundaries valid, and `forbid(unsafe_code)`.

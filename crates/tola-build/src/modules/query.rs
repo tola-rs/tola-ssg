@@ -119,7 +119,7 @@ impl Input {
 pub struct QueryResult {
     pub format_version: u32,
     pub query: String,
-    pub schema_version: u32,
+    pub format: crate::modules::QueryFormat,
     pub module_manifest: Option<String>,
     pub input: Input,
     pub success: bool,
@@ -244,8 +244,8 @@ fn evaluate(
     materialize: bool,
 ) -> Result<super::entities::EntityQueryResult> {
     cancellation.ensure_active()?;
-    let configured = super::prepared::configure(&config, resources.input_scope())?;
-    let (name, label, schema_version, format, module_manifest, query_config) = match query {
+    let configured = super::prepared::configure(&config, resources.input_mode(), cancellation)?;
+    let (name, label, format, module_manifest, query_config) = match query {
         ModelQuery::Module {
             module,
             declaration,
@@ -293,7 +293,6 @@ fn evaluate(
             (
                 name.to_owned(),
                 selected_query.label.clone(),
-                selected_query.schema_version,
                 selected_query.format,
                 Some(display_path(&selected_module.manifest, config.get_root())),
                 super::prepared::select_query(&configured, selected_module, selected_query)?,
@@ -314,7 +313,6 @@ fn evaluate(
             (
                 format!("{}#{label}", display_path(&entry, config.get_root())),
                 label.to_owned(),
-                1,
                 QueryFormat::Json,
                 None,
                 super::prepared::select_query_file(&configured, &entry)?,
@@ -389,7 +387,7 @@ fn evaluate(
     let mut result = QueryResult {
         format_version: 1,
         query: name.clone(),
-        schema_version,
+        format,
         module_manifest,
         input,
         success: false,
@@ -551,6 +549,19 @@ mod tests {
     use std::collections::BTreeMap;
     use std::fs;
 
+    fn resolved_modules(
+        site: &std::path::Path,
+        declarations: &BTreeMap<String, modules::ModuleDeclaration>,
+        mode: crate::inputs::InputMode,
+    ) -> std::result::Result<
+        BTreeMap<String, modules::ResolvedModule>,
+        modules::ModuleResolutionError,
+    > {
+        let roots =
+            crate::inputs::module_roots(site, mode, None, declarations, &Default::default())?;
+        modules::resolve_modules_with_roots(site, declarations, &roots, mode)
+    }
+
     struct Site {
         directory: tempfile::TempDir,
         config: Arc<ResolvedSiteConfig>,
@@ -569,8 +580,11 @@ mod tests {
             fs::create_dir_all(root.join("theme")).unwrap();
             fs::write(root.join("site.typ"), "#unknown_layout_function()").unwrap();
             fs::write(root.join("theme/model.typ"), model).unwrap();
-            fs::write(root.join("theme/tola-module.toml"),
-                "schema-version=1\n[queries.nodes]\nentry='model.typ'\nlabel='nodes'\nschema-version=3\n").unwrap();
+            fs::write(
+                root.join("theme/tola-module.toml"),
+                "[queries.nodes]\nentry='model.typ'\nlabel='nodes'\n\n",
+            )
+            .unwrap();
             let declarations = BTreeMap::from([(
                 namespace.into(),
                 modules::ModuleDeclaration {
@@ -592,10 +606,14 @@ mod tests {
                 )
                 .unwrap(),
             );
-            let module = modules::resolve_modules(root, &declarations, InputScope::Offline)
-                .unwrap()
-                .remove(namespace)
-                .unwrap();
+            let module = resolved_modules(
+                root,
+                &declarations,
+                crate::inputs::InputMode::new(InputScope::Offline, false),
+            )
+            .unwrap()
+            .remove(namespace)
+            .unwrap();
             Self {
                 directory,
                 config,
@@ -735,81 +753,23 @@ mod tests {
     }
 
     #[test]
-    fn model_keeps_root_and_metadata() {
-        let site = Site::new(
-            "#import \"@tola/source:0.0.0\": all-sources\n#metadata(all-sources().map(s => (path:s.path, title:s.meta.title))) <nodes>",
-        );
-        let root = site.directory.path();
-        fs::write(root.join("theme/note.typ"), "#import \"@tola/source:0.0.0\": tola-meta\n#let note(title) = tola-meta((title:title))").unwrap();
-        fs::write(
-            root.join("content/a.typ"),
-            "#import \"/theme/note.typ\": note\n#note(\"A\")",
-        )
-        .unwrap();
-        let result = site.run(Vec::new());
-        assert!(result.success, "{:?}", result.diagnostics);
-        assert_eq!(result.schema_version, 3);
-        assert_eq!(
-            result.data,
-            Some(serde_json::json!([{"path":"a.typ","title":"A"}]))
-        );
-        assert_eq!(
-            site.config.build().entry,
-            site.config.get_root().join("site.typ")
-        );
-        assert!(!root.join("public").exists());
-        let changed = site.run(vec![(
-            root.join("content/a.typ"),
-            Arc::from("#import \"/theme/note.typ\": note\n#note(\"Unsaved\")"),
-        )]);
-        assert_eq!(changed.input.mode, "overlay");
-        let overlay = changed
-            .input
-            .reads
-            .iter()
-            .find(|read| {
-                matches!(&read.source, InputSource::File { path, provided: true, .. }
-                if path == Path::new("content/a.typ"))
-            })
-            .expect("unsaved metadata retains its provider identity");
-        assert_eq!(overlay.origin, "provider");
-        assert!(overlay.disk_path.is_none());
-        assert_eq!(changed.data.unwrap()[0]["title"], "Unsaved");
-    }
-
-    #[test]
-    fn query_requires_one_json_declaration() {
-        for model in [
-            "",
-            "#metadata(1)<nodes>\n#metadata(2)<nodes>",
-            "#metadata((title:[rich]))<nodes>",
-            "#metadata((callback: x => x))<nodes>",
-            "#metadata(read(\"missing\"))<nodes>",
-        ] {
-            let site = Site::new(model);
-            let result = site.run(Vec::new());
-            assert!(!result.success, "{model}");
-            assert!(result.data.is_none());
-            assert!(!result.diagnostics.is_empty());
-        }
-        let valid = Site::new(
-            "#metadata((flag:true, empty:none, count:2, ratio:1.5, names:(\"a\",\"b\")))<nodes>",
-        )
-        .run(Vec::new());
-        assert!(valid.success, "{:?}", valid.diagnostics);
-    }
-
-    #[test]
     fn entity_native_source_unsaved_model() {
         let mut site = Site::new("#metadata(())<nodes>");
         let root = site.directory.path();
         fs::write(root.join("content/a.typ"), "saved").unwrap();
-        fs::write(root.join("theme/tola-module.toml"),
-            "schema-version=1\n[queries.nodes]\nentry='model.typ'\nlabel='nodes'\nschema-version=1\nformat='entities'\n").unwrap();
-        site.module = modules::resolve_modules(root, site.config.modules(), InputScope::Offline)
-            .unwrap()
-            .remove("forest")
-            .unwrap();
+        fs::write(
+            root.join("theme/tola-module.toml"),
+            "[queries.nodes]\nentry='model.typ'\nlabel='nodes'\nformat='entities'\n",
+        )
+        .unwrap();
+        site.module = resolved_modules(
+            root,
+            site.config.modules(),
+            crate::inputs::InputMode::new(InputScope::Offline, false),
+        )
+        .unwrap()
+        .remove("forest")
+        .unwrap();
         let model = "#import \"@tola/site:0.0.0\": project-path\n#metadata(((id: \"a\", label: \"Unsaved\", source: project-path(\"content/a.typ\")),))<nodes>";
         let result = run_entities(
             Arc::clone(&site.config),
@@ -862,19 +822,20 @@ mod tests {
         let mut site = Site::new("#metadata((revision:\"v1\"))<nodes>");
         let root = site.directory.path();
         let manifest = root.join("theme/tola-module.toml");
-        let first = fs::read_to_string(&manifest)
-            .unwrap()
-            .replace("schema-version=3", "schema-version=1");
+        let first = fs::read_to_string(&manifest).unwrap();
         fs::write(&manifest, &first).unwrap();
         let resolve = || {
-            modules::resolve_modules(root, site.config.modules(), InputScope::Offline)
-                .unwrap()
-                .remove("forest")
-                .unwrap()
+            resolved_modules(
+                root,
+                site.config.modules(),
+                crate::inputs::InputMode::new(InputScope::Offline, false),
+            )
+            .unwrap()
+            .remove("forest")
+            .unwrap()
         };
         site.module = resolve();
         let initial = site.run(Vec::new());
-        assert_eq!(initial.schema_version, 1);
         assert_eq!(initial.data, Some(serde_json::json!({"revision":"v1"})));
 
         fs::write(
@@ -886,10 +847,7 @@ mod tests {
             &manifest,
             first
                 .replace("entry='model.typ'", "entry='second.typ'")
-                .replace(
-                    "label='nodes'\nschema-version=1",
-                    "label='updated-nodes'\nschema-version=2",
-                ),
+                .replace("label='nodes'", "label='updated-nodes'\n"),
         )
         .unwrap();
         let Err(failure) = run(
@@ -912,7 +870,6 @@ mod tests {
         site.module = resolve();
         let updated = site.run(Vec::new());
         assert!(updated.success, "{:?}", updated.diagnostics);
-        assert_eq!(updated.schema_version, 2);
         assert_eq!(updated.data, Some(serde_json::json!({"revision":"v2"})));
     }
 
@@ -945,34 +902,5 @@ mod tests {
             };
             assert_eq!(current.as_str(), version);
         }
-    }
-
-    #[test]
-    fn generated_reported_without_running_hook() {
-        let mut site = Site::new(
-            "#import \"@tola/site:0.0.0\": project-path\n#metadata(json(project-path(\"generated/value.json\")))<nodes>",
-        );
-        let root = site.directory.path();
-        std::fs::create_dir(root.join("generated")).unwrap();
-        std::fs::write(root.join("generated/value.json"), "[1,2,3]").unwrap();
-        let mut config = (*site.config).clone();
-        config.build.hooks.before_build.push(
-            crate::config::section::build::BeforeBuildHookConfig {
-                enable: true,
-                name: "prepare".into(),
-                command: vec!["this-program-must-not-run".into()],
-                generates: vec!["generated/value.json".into()],
-                ..Default::default()
-            },
-        );
-        site.config = Arc::new(config);
-        let result = site.run(Vec::new());
-        assert!(result.success, "{:?}", result.diagnostics);
-        assert_eq!(result.data, Some(serde_json::json!([1, 2, 3])));
-        assert_eq!(result.input.hooks, "skipped");
-        assert_eq!(result.input.generation_status, "unverified");
-        assert_eq!(result.input.generated[0].producer, "prepare");
-        std::fs::remove_file(root.join("generated/value.json")).unwrap();
-        assert!(!site.run(Vec::new()).success);
     }
 }

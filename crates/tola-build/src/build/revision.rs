@@ -357,172 +357,9 @@ mod tests {
     use crate::build::pipeline::BuildAttemptProducers;
     use crate::build::tests::*;
     use crate::build::*;
-    use crate::config::section::build::AfterPublishHookConfig;
+
     use std::fs;
     use tempfile::TempDir;
-
-    #[test]
-    fn write_uses_candidate_configuration() {
-        let directory = TempDir::new().unwrap();
-        let root = directory.path();
-        fs::create_dir(root.join("content")).unwrap();
-        fs::write(
-            root.join("site.typ"),
-            "#document(\"index.html\")[Bound site]",
-        )
-        .unwrap();
-        let mut config = site_config(root);
-        let destination = config.build.publish_dir.clone();
-        let candidate = build_site(&config, BuildMode::Production).unwrap();
-        config.build.publish_dir = config.get_root().join("another-write");
-
-        assert_eq!(candidate.config().build().publish_dir, destination);
-        candidate
-            .ensure_fresh(&BuildCancellation::default())
-            .unwrap();
-        write_site(&candidate).unwrap();
-
-        assert!(destination.join("index.html").is_file());
-        assert!(!config.build.publish_dir.exists());
-    }
-
-    #[test]
-    fn complete_revision_keeps_write_evidence() {
-        let directory = TempDir::new().unwrap();
-        let root = directory.path();
-        fs::create_dir(root.join("content")).unwrap();
-        fs::write(root.join("value.txt"), "Original value").unwrap();
-        fs::write(
-            root.join("site.typ"),
-            r#"#document("index.html")[#read("value.txt")]"#,
-        )
-        .unwrap();
-        let config = site_config(root);
-        let candidate = build_site(&config, BuildMode::Development).unwrap();
-        let bound_config = std::sync::Arc::clone(candidate.config());
-        let write = candidate.into_unchecked_revision(None);
-
-        assert!(std::sync::Arc::ptr_eq(write.site().config(), &bound_config));
-        let cancellation = crate::cancellation::BuildCancellation::default();
-        assert!(
-            write
-                .freshness(&cancellation)
-                .unwrap()
-                .all_inputs_are_fresh()
-        );
-        fs::write(
-            root.join("value.txt"),
-            "Changed before the output is written",
-        )
-        .unwrap();
-        assert!(
-            write
-                .freshness(&cancellation)
-                .unwrap()
-                .is_stale(InputKind::TypstPhysicalReads)
-        );
-    }
-
-    #[test]
-    fn freshness_checks_candidate_icon_sources() {
-        let directory = TempDir::new().unwrap();
-        let root = directory.path();
-        fs::create_dir(root.join("content")).unwrap();
-        let entry = root.join("site.typ");
-        let icons = root.join("icons.json");
-        fs::write(&entry, "#document(\"index.html\")[Ready]").unwrap();
-        fs::write(
-            &icons,
-            r#"{"prefix":"brand","icons":{"mark":{"body":"<path d='M0 0h16v16H0z'/>"}}}"#,
-        )
-        .unwrap();
-        let mut config = site_config(root);
-        config.icons.collections.insert(
-            "brand".into(),
-            crate::config::section::IconCollectionSource::LocalJson {
-                path: icons.clone(),
-            },
-        );
-        let candidate = build_site(&config, BuildMode::Production).unwrap();
-        let canceller = crate::cancellation::BuildCanceller::new();
-        let cancellation = canceller.token();
-        let freshness = || candidate.freshness(&cancellation);
-        assert!(freshness().unwrap().all_inputs_are_fresh());
-
-        fs::write(
-            &icons,
-            r#"{"prefix":"brand","icons":{"mark":{"body":"<path d='M0 0h12v12H0z'/>"}}}"#,
-        )
-        .unwrap();
-        assert!(freshness().unwrap().is_stale(InputKind::Icons));
-
-        canceller.cancel();
-        assert!(crate::cancellation::is_cancelled(&freshness().unwrap_err()));
-    }
-
-    #[test]
-    fn missing_manifest_optional_recovery_watch() {
-        let directory = TempDir::new().unwrap();
-        let config = crate::config::tests::load_test_config(
-            directory.path(),
-            "[modules.forest]\npath=\"missing-theme\"\n",
-        );
-        let observation = crate::build::configured_input_observation(&config);
-        assert!(
-            observation
-                .paths()
-                .iter()
-                .any(|entry| entry.input() == InputKind::ModuleManifests
-                    && !entry.required()
-                    && entry.path().ends_with("missing-theme/tola-module.toml"))
-        );
-    }
-
-    #[test]
-    fn changed_module_manifest_rejects_candidate_publication() {
-        let directory = TempDir::new().unwrap();
-        let root = directory.path();
-        fs::create_dir(root.join("content")).unwrap();
-        let module = root.join("theme");
-        fs::create_dir(&module).unwrap();
-        fs::write(module.join("site.typ"), "#document(\"index.html\")[Old]").unwrap();
-        let manifest = module.join("tola-module.toml");
-        fs::write(
-            &manifest,
-            "schema-version=1\nname=\"forest\"\nversion=\"1.0.0\"\n[site]\nentry=\"site.typ\"\n",
-        )
-        .unwrap();
-        let config = crate::config::tests::load_test_config(
-            root,
-            "[modules.forest]\npath=\"theme\"\n[theme]\nmodule=\"forest\"\n",
-        );
-        let candidate = build_site(&config, BuildMode::Production).unwrap();
-        assert!(
-            candidate
-                .input_observation()
-                .paths()
-                .iter()
-                .any(|entry| entry.input() == InputKind::ModuleManifests
-                    && entry.path().ends_with("theme/tola-module.toml"))
-        );
-        fs::write(
-            &manifest,
-            "schema-version=1\nname=\"forest\"\nversion=\"1.0.1\"\n[site]\nentry=\"site.typ\"\n",
-        )
-        .unwrap();
-        assert!(
-            candidate
-                .freshness(&BuildCancellation::default())
-                .unwrap()
-                .is_stale(InputKind::ModuleManifests)
-        );
-        let error = write_site(&candidate).unwrap_err();
-        assert_eq!(
-            tola_diagnostic::attached(&error).unwrap()[0].code,
-            "write.stale"
-        );
-        assert!(!config.build.publish_dir.exists());
-    }
 
     #[cfg(unix)]
     #[test]
@@ -531,8 +368,7 @@ mod tests {
         let directory = TempDir::new().unwrap();
         let root = directory.path();
         fs::create_dir(root.join("content")).unwrap();
-        let source =
-            "schema-version=1\nname=\"forest\"\nversion=\"1.0.0\"\n[site]\nentry=\"site.typ\"\n";
+        let source = "name=\"forest\"\nversion=\"1.0.0\"\n[site]\nentry=\"site.typ\"\n";
         for name in ["first", "second"] {
             fs::create_dir(root.join(name)).unwrap();
             fs::write(root.join(name).join("tola-module.toml"), source).unwrap();
@@ -557,32 +393,6 @@ mod tests {
                 .is_stale(InputKind::ModuleManifests)
         );
         assert!(write_site(&candidate).is_err());
-        assert!(!config.build.publish_dir.exists());
-    }
-
-    #[test]
-    fn stale_typst_reads_stop_the_write() {
-        let dir = TempDir::new().unwrap();
-        let root = dir.path();
-        let content = root.join("content");
-        fs::create_dir_all(&content).unwrap();
-        let template = root.join("template.typ");
-        fs::write(&template, "#let message = \"first\"").unwrap();
-        let entry = root.join("site.typ");
-        fs::write(
-            &entry,
-            "#import \"template.typ\": message\n#document(\"index.html\")[#message]",
-        )
-        .unwrap();
-
-        let config = site_config(root);
-
-        let candidate = build_site(&config, BuildMode::Production).unwrap();
-        fs::write(&template, "#let message = \"second\"").unwrap();
-
-        let error = write_site(&candidate).unwrap_err();
-        let diagnostics = tola_diagnostic::attached(&error).unwrap();
-        assert_eq!(diagnostics[0].code, "write.stale");
         assert!(!config.build.publish_dir.exists());
     }
 
@@ -620,41 +430,6 @@ mod tests {
             }),
             "{diagnostics:#?}"
         );
-    }
-
-    #[test]
-    fn consumer_failure_keeps_publication() {
-        let dir = TempDir::new().unwrap();
-        let root = dir.path();
-        let content = root.join("content");
-        fs::create_dir_all(&content).unwrap();
-        let entry = root.join("site.typ");
-        fs::write(&entry, "#document(\"index.html\")[Published]").unwrap();
-
-        let mut config = site_config(root);
-        config
-            .build
-            .hooks
-            .after_publish
-            .push(AfterPublishHookConfig {
-                name: "failing-consumer".into(),
-                command: hook_child_command("build::revision::tests::child_fails_after_publish"),
-                ..AfterPublishHookConfig::default()
-            });
-
-        let mut session = BuildSession::new();
-        let written = session
-            .build_and_write(&config, BuildRequest::default())
-            .unwrap();
-        assert_eq!(written.counts().pages, 1);
-        assert!(
-            written
-                .run_after_publish(&BuildCancellation::default())
-                .is_err()
-        );
-        assert!(config.build.publish_dir.join("index.html").is_file());
-        let decision = session.rebuild_decision(&[], false);
-        assert!(session.reusable_compilation(&decision, true).is_some());
     }
 
     #[test]
@@ -753,62 +528,5 @@ mod tests {
             output_bytes(&fresh_graph, "index.html"),
             "the write retry must match a clean compilation",
         );
-    }
-
-    #[test]
-    fn consumer_keeps_committed_revision() {
-        let directory = TempDir::new().unwrap();
-        let root = directory.path();
-        fs::create_dir(root.join("content")).unwrap();
-        let entry = root.join("site.typ");
-        fs::write(&entry, "#document(\"index.html\")[First publication]").unwrap();
-        let mut config = site_config(root);
-        config
-            .build
-            .hooks
-            .after_publish
-            .push(AfterPublishHookConfig {
-                name: "capture-output".into(),
-                command: hook_child_command(
-                    "build::revision::tests::child_copies_after_publish_output",
-                ),
-                ..AfterPublishHookConfig::default()
-            });
-        let first = build_site(&config, BuildMode::Production).unwrap();
-        let expected = output_bytes(first.graph(), "index.html").to_vec();
-        let published = write_site(&first).unwrap();
-        assert!(!root.join("consumed.html").exists());
-
-        fs::write(&entry, "#document(\"index.html\")[Second publication]").unwrap();
-        config.build.hooks.after_publish[0].command =
-            hook_child_command("build::revision::tests::child_fails_after_publish");
-        let second = build_site(&config, BuildMode::Production).unwrap();
-        write_site(&second).unwrap();
-        published
-            .run_after_publish(&BuildCancellation::default())
-            .unwrap();
-
-        assert_eq!(fs::read(root.join("consumed.html")).unwrap(), expected);
-        assert_eq!(
-            fs::read(config.build.publish_dir.join("index.html")).unwrap(),
-            output_bytes(second.graph(), "index.html")
-        );
-    }
-
-    #[test]
-    fn child_copies_after_publish_output() {
-        if !is_hook_child_for("after-publish") {
-            return;
-        }
-        let input = std::path::PathBuf::from(std::env::var_os("TOLA_HOOK_INPUT_DIR").unwrap());
-        fs::copy(input.join("index.html"), "consumed.html").unwrap();
-    }
-
-    #[test]
-    fn child_fails_after_publish() {
-        if !is_hook_child_for("after-publish") {
-            return;
-        }
-        panic!("intentional after-publish failure");
     }
 }

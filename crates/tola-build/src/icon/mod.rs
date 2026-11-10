@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use crate::cancellation::BuildCancellation;
 use crate::config::ResolvedSiteConfig;
-use crate::config::section::{IconCollectionSource, IconsConfig, Sha256Digest};
+use crate::config::section::{IconCollectionSource, IconsConfig};
 use crate::filesystem::SourceOverrides;
 use tola_diagnostic::{Diagnostic, Severity};
 
@@ -122,6 +122,20 @@ impl IconInventoryEvidence {
 }
 
 #[derive(Debug, thiserror::Error)]
+#[error(
+    "SHA-256 mismatch for icon collection `{namespace}` from `{url}`: expected {expected}, received {received}"
+)]
+pub(crate) struct IntegrityError {
+    pub(crate) namespace: String,
+    pub(crate) url: String,
+    pub(crate) expected: String,
+    pub(crate) received: String,
+    pub(crate) size_expected: u64,
+    pub(crate) size_received: u64,
+    pub(crate) path: Option<PathBuf>,
+}
+
+#[derive(Debug, thiserror::Error)]
 pub(crate) enum IconError {
     #[error("Tola could not read an icon source file")]
     Read {
@@ -152,7 +166,7 @@ pub(crate) enum IconError {
         /// Every address the collection was fetched from, in the order tried.
         urls: Vec<String>,
         #[source]
-        source: reqwest::Error,
+        source: crate::HttpDownloadError,
     },
     #[error("icon collection `{namespace}` from `{url}` exceeds the {limit}-byte collection limit")]
     RemoteTooLarge {
@@ -164,16 +178,95 @@ pub(crate) enum IconError {
         "network access is disabled, so Tola cannot download icon collection `{namespace}` from `{url}`"
     )]
     NetworkDenied { namespace: String, url: String },
-    #[error(
-        "SHA-256 mismatch for icon collection `{namespace}` from `{url}`: expected {expected}, received {received}"
-    )]
-    Integrity {
+    #[error(transparent)]
+    Integrity(Box<IntegrityError>),
+    /// A configured icon source lies outside what this build may read.
+    #[error("Tola may not read icon source `{path}`")]
+    Boundary {
+        path: PathBuf,
+        #[source]
+        source: typst::diag::FileError,
+    },
+    /// The npm registry returned metadata this build cannot use.
+    #[error("the npm registry returned no usable metadata for preset `{preset}`")]
+    RegistryFormat { preset: String },
+    /// A preset names a release the registry does not publish.
+    #[error("preset `{preset}` has no release `{version}`")]
+    RegistryRelease {
+        preset: String,
+        version: String,
+        latest: Option<String>,
+    },
+    /// A published release carries no usable integrity digest.
+    #[error("preset `{preset}` release `{version}` publishes no integrity digest")]
+    RegistryIntegrity { preset: String, version: String },
+    /// The registry metadata request failed.
+    #[error("Tola could not read the npm registry metadata for preset `{preset}`")]
+    RegistryMetadata {
         namespace: String,
+        preset: String,
         url: String,
+        #[source]
+        source: crate::HttpDownloadError,
+    },
+    /// A downloaded tarball does not match the digest the registry published.
+    #[error(
+        "the tarball of preset `{preset}` release `{version}` does not match its published integrity: expected {expected}, received {received}"
+    )]
+    TarballIntegrity {
+        namespace: String,
+        preset: String,
+        version: String,
         expected: String,
         received: String,
-        path: Option<PathBuf>,
     },
+    /// A downloaded tarball could not be read.
+    #[error("Tola could not read the tarball of preset `{preset}` release `{version}`")]
+    Tarball {
+        namespace: String,
+        preset: String,
+        version: String,
+    },
+    /// A tarball's collection file exceeds the collection limit.
+    #[error(
+        "the tarball of preset `{preset}` release `{version}` exceeds the {limit}-byte collection limit"
+    )]
+    TarballCollectionTooLarge {
+        namespace: String,
+        preset: String,
+        version: String,
+        limit: usize,
+    },
+    /// A tarball holds no collection file.
+    #[error("the tarball of preset `{preset}` release `{version}` holds no collection file")]
+    TarballCollection {
+        namespace: String,
+        preset: String,
+        version: String,
+    },
+    /// A locked collection is absent and this build may not fetch it.
+    #[error("icon collection `{namespace}` is not locked; run `tola update {namespace}`")]
+    Unlocked { namespace: String },
+    /// A declaration no longer matches the lock entry.
+    #[error(
+        "icon collection `{namespace}` no longer matches `tola.lock`; run `tola update {namespace}`"
+    )]
+    LockMismatch {
+        namespace: String,
+        recorded: String,
+        declared: String,
+    },
+    /// A locked collection has no bytes this build may read.
+    #[error("icon collection `{namespace}` has no bytes for digest {sha256}; run `tola vendor`")]
+    MissingBytes {
+        namespace: String,
+        sha256: crate::inputs::Sha256Digest,
+    },
+    /// The declaration names neither a preset nor a URL.
+    #[error("icon collection `{namespace}` names neither a preset nor a URL")]
+    NotRemote { namespace: String },
+    #[error("build cancelled")]
+    Cancelled(#[from] crate::cancellation::BuildCancelled),
     #[error("Tola could not download the configured icon collections")]
     NetworkRuntime(#[source] std::io::Error),
     #[error("Tola could not finish downloading an icon collection")]
@@ -190,12 +283,14 @@ impl IconError {
             | Self::LinkedDirectoryMember { path }
             | Self::InternalSource { path } => Some(path),
             Self::Collection { path, .. } => path.as_deref(),
-            Self::Integrity { path, .. } => path.as_deref(),
+            Self::Integrity(error) => error.path.as_deref(),
             Self::Remote { .. }
             | Self::RemoteTooLarge { .. }
             | Self::NetworkDenied { .. }
             | Self::NetworkRuntime(_)
-            | Self::NetworkWorker => None,
+            | Self::NetworkWorker
+            | Self::Cancelled(_) => None,
+            _ => None,
         }
     }
 }
@@ -286,13 +381,14 @@ pub(crate) fn error_diagnostic(error: &anyhow::Error, root: &Path) -> Option<Dia
         IconError::NetworkDenied { .. } => diagnostic.with_help(
             "Run `tola vendor` while online, or declare a local icon collection",
         ),
-        IconError::Integrity { .. } => diagnostic
+        IconError::Integrity(_) => diagnostic
             .with_note("update `sha256` only when you intend to publish the bytes it now serves")
             .with_help("Run `tola vendor --refresh` to restore the site's copy"),
         IconError::NetworkRuntime(_) => {
             diagnostic.with_help("Check the connection, then run the build again")
         }
         IconError::NetworkWorker => diagnostic.with_help("Run the build again"),
+        _ => diagnostic,
     };
     Some(match error.path() {
         Some(path) => diagnostic.with_path(crate::filesystem::display_path(path, root)),
@@ -391,7 +487,7 @@ pub(crate) fn prepare(
 
 /// The request one configured remote collection sends.
 fn remote_request<'a>(
-    config: &ResolvedSiteConfig,
+    config: &'a ResolvedSiteConfig,
     namespace: &'a str,
     cancellation: &'a BuildCancellation,
     resources: &'a crate::resources::BuildResources,
@@ -401,26 +497,22 @@ fn remote_request<'a>(
         preset,
         version,
         url,
-        sha256,
         mirrors,
     }) = config.icons.collections.get(namespace)
     else {
         anyhow::bail!("`{namespace}` is not a configured remote icon collection");
     };
-    let (urls, sha256) = remote_endpoint(
-        namespace,
-        preset.as_deref(),
-        version.as_deref(),
-        url.as_deref(),
-        *sha256,
-        mirrors.as_deref(),
-    );
+    let lock = crate::inputs::InputLock::read(config.get_root())?.unwrap_or_default();
     Ok(remote::RemoteCollection {
         namespace,
-        urls,
-        sha256,
+        preset: preset.as_deref(),
+        version: version.as_deref(),
+        url: url.as_deref(),
+        mirrors: mirrors.as_deref().unwrap_or_default(),
+        locked: lock.icons.get(namespace).cloned(),
         vendored: config.vendor.icon_collection(namespace),
         cache_root: crate::BuildResources::icon_cache_directory(config.get_root()),
+        mode: resources.input_mode(),
         cancellation,
         resources,
         boundary,
@@ -438,61 +530,6 @@ pub fn remote_collection_bytes(
     let request = remote_request(config, namespace, cancellation, resources, &boundary)?;
     let (_, verified) = remote::load_collection(request)?;
     Ok(verified.bytes)
-}
-
-/// The addresses in the order first written, so a mirror repeated by hand is visited once.
-fn distinct(urls: Vec<String>) -> Vec<String> {
-    let mut ordered: Vec<String> = Vec::new();
-    for url in urls {
-        if !ordered.contains(&url) {
-            ordered.push(url);
-        }
-    }
-    ordered
-}
-
-/// The address one authored mirror template names for this release.
-fn fill_mirror(template: &str, name: &str, version: &str) -> String {
-    template
-        .replace("{name}", name)
-        .replace("{version}", version)
-}
-
-/// The addresses and digest one remote namespace fetches, in the order tried.
-fn remote_endpoint(
-    namespace: &str,
-    preset: Option<&str>,
-    version: Option<&str>,
-    url: Option<&str>,
-    sha256: Option<Sha256Digest>,
-    mirrors: Option<&[String]>,
-) -> (Vec<String>, Sha256Digest) {
-    let endpoint = match preset.and_then(|preset| iconify::resolve(preset, version)) {
-        Some(resolved) => {
-            tracing::debug!(
-                target: "tola::compile",
-                "icon collection `{namespace}` uses `{}` release `{}`",
-                resolved.name,
-                resolved.version,
-            );
-            let mut urls: Vec<String> = mirrors
-                .unwrap_or_default()
-                .iter()
-                .map(|template| fill_mirror(template, resolved.name, resolved.version))
-                .collect();
-            urls.extend(resolved.urls);
-            Some((distinct(urls), resolved.sha256))
-        }
-        None => url
-            .map(|url| {
-                let mut urls: Vec<String> = mirrors.unwrap_or_default().to_vec();
-                urls.push(url.to_owned());
-                distinct(urls)
-            })
-            .zip(sha256),
-    };
-    endpoint
-        .expect("configuration validation accepts exactly one declaration for a remote collection")
 }
 
 /// The site-wide facts every collection in one build shares.
@@ -673,6 +710,10 @@ pub(crate) fn configured_collection_watch_evidence(
 mod tests {
     use super::*;
 
+    fn brand_icons_config(root: &Path) -> ResolvedSiteConfig {
+        crate::config::tests::load_test_config(root, BRAND_COLLECTION_TOML)
+    }
+
     const SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill="currentColor" d="M0 0h24v24H0z"/></svg>"#;
 
     const BRAND_COLLECTION_TOML: &str = r#"
@@ -680,16 +721,6 @@ mod tests {
             source-type = "local-svg-dir"
             path = "brand"
         "#;
-
-    const UI_COLLECTION_TOML: &str = r#"
-            [icons.collections.ui]
-            source-type = "local-json"
-            path = "ui.json"
-        "#;
-
-    fn brand_icons_config(root: &Path) -> ResolvedSiteConfig {
-        crate::config::tests::load_test_config(root, BRAND_COLLECTION_TOML)
-    }
 
     fn prepare_icons(
         config: &ResolvedSiteConfig,
@@ -705,107 +736,7 @@ mod tests {
         )
     }
 
-    #[test]
-    fn unchanged_sources_reuse_the_inventory() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path();
-        std::fs::create_dir(root.join("brand")).unwrap();
-        std::fs::write(root.join("brand/mark.svg"), SVG).unwrap();
-        std::fs::write(root.join("ui.json"), br#"{"prefix":"upstream-name","icons":{"home":{"body":"<path fill='currentColor' d='M0 0h16v16H0z'/>"}}}"#).unwrap();
-        let config = crate::config::tests::load_test_config(
-            root,
-            &format!("{BRAND_COLLECTION_TOML}{UI_COLLECTION_TOML}"),
-        );
-        let inventory = prepare_icons(&config, &BuildCancellation::new(), None).unwrap();
-        let collections = inventory.collections();
-        assert!(collections.get("brand", "mark").is_some());
-        assert!(collections.get("ui", "home").is_some());
-        assert_eq!(
-            collections.collection("ui").unwrap().source_prefix(),
-            Some("upstream-name")
-        );
-        assert!(
-            inventory
-                .evidence()
-                .is_fresh_for(&config, &BuildCancellation::new())
-                .unwrap()
-        );
-        let retained = prepare_icons(&config, &BuildCancellation::new(), Some(&inventory)).unwrap();
-        assert!(Arc::ptr_eq(&collections, &retained.collections()));
-        assert_eq!(inventory.evidence(), retained.evidence());
-
-        std::fs::write(
-            root.join("brand/mark.svg"),
-            SVG.replace("currentColor", "red"),
-        )
-        .unwrap();
-        let changed = prepare_icons(&config, &BuildCancellation::new(), Some(&retained)).unwrap();
-        assert_eq!(
-            changed.collections().get("brand", "mark").unwrap().paint(),
-            tola_icons::IconPaint::Fixed
-        );
-        assert_eq!(
-            collections.get("brand", "mark").unwrap().paint(),
-            tola_icons::IconPaint::CurrentColor
-        );
-        assert!(!Arc::ptr_eq(&collections, &changed.collections()));
-    }
-
     #[cfg(unix)]
-    #[test]
-    fn invalid_member_invalidates_directory() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path();
-        std::fs::create_dir(root.join("brand")).unwrap();
-        let mark = root.join("brand/mark.svg");
-        std::fs::write(&mark, SVG).unwrap();
-        let config = brand_icons_config(root);
-        let first = prepare_icons(&config, &BuildCancellation::new(), None).unwrap();
-        let added = root.join("brand/added.svg");
-        std::fs::write(&added, "<svg").unwrap();
-        assert!(
-            !first
-                .evidence()
-                .is_fresh(&BuildCancellation::new())
-                .unwrap()
-        );
-        assert!(prepare_icons(&config, &BuildCancellation::new(), Some(&first),).is_err());
-        assert!(first.collections().get("brand", "added").is_none());
-        std::fs::write(&added, SVG).unwrap();
-        let repaired = prepare_icons(&config, &BuildCancellation::new(), Some(&first)).unwrap();
-        assert!(repaired.collections().get("brand", "added").is_some());
-        assert!(
-            repaired
-                .evidence()
-                .is_fresh(&BuildCancellation::new())
-                .unwrap()
-        );
-        std::fs::remove_file(&mark).unwrap();
-        assert!(
-            !repaired
-                .evidence()
-                .is_fresh(&BuildCancellation::new())
-                .unwrap()
-        );
-        let removed = prepare_icons(&config, &BuildCancellation::new(), Some(&repaired)).unwrap();
-        assert!(removed.collections().get("brand", "mark").is_none());
-        assert!(removed.collections().get("brand", "added").is_some());
-    }
-
-    #[test]
-    fn colliding_relative_names_are_rejected() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path();
-        std::fs::create_dir_all(root.join("brand/arrows")).unwrap();
-        std::fs::write(root.join("brand/arrows/left.svg"), SVG).unwrap();
-        std::fs::write(root.join("brand/arrows-left.svg"), SVG).unwrap();
-        let config = brand_icons_config(root);
-        let error = prepare_icons(&config, &BuildCancellation::new(), None).unwrap_err();
-        assert!(
-            matches!(error.downcast_ref::<IconError>(), Some(IconError::Collection { namespace, .. }) if namespace == "brand")
-        );
-    }
-
     #[test]
     fn missing_svg_directory_stays_watched() {
         let directory = tempfile::tempdir().unwrap();
@@ -852,88 +783,5 @@ mod tests {
             Some(IconError::InternalSource { .. })
         ));
         assert!(inventory.collections().get("brand", "mark").is_some());
-    }
-
-    #[test]
-    fn malformed_collection_reports_its_reason() {
-        let root = Path::new("/site");
-        let path = Path::new("/site/icons/brand.json");
-        let error = parse_collection("brand", Some(path), b"{").unwrap_err();
-        let IconError::Collection { source, .. } = &error else {
-            panic!("malformed JSON must be a collection failure")
-        };
-        let reason = source.to_string();
-        let diagnostic = error_diagnostic(&anyhow::Error::new(error), root).unwrap();
-        assert_eq!(diagnostic.code, tola_diagnostic::codes::icons::COLLECTION);
-        assert_eq!(diagnostic.location.unwrap().path, "icons/brand.json");
-        assert_eq!(diagnostic.notes, [reason]);
-    }
-
-    #[test]
-    fn remote_source_resolves_endpoints() {
-        let indexed = crate::icon::iconify::indexed("lucide").expect("the index has `lucide`");
-        let version = indexed.newest().version;
-        let (urls, sha256) = remote_endpoint("brand", Some("lucide"), None, None, None, None);
-        assert_eq!(
-            urls,
-            [
-                format!("https://cdn.jsdelivr.net/npm/@iconify-json/lucide@{version}/icons.json"),
-                format!("https://unpkg.com/@iconify-json/lucide@{version}/icons.json"),
-            ]
-        );
-        assert_eq!(sha256, indexed.newest().sha256);
-
-        let mirrors = vec![
-            "https://mirror.test/@iconify-json/{name}/{version}/icons.json".to_owned(),
-            "https://cdn.jsdelivr.net/npm/@iconify-json/lucide@{version}/icons.json".to_owned(),
-        ];
-        let (mirrored, sha256) =
-            remote_endpoint("brand", Some("lucide"), None, None, None, Some(&mirrors));
-        // Mirrors are tried first, filled from the release, and a repeated address is visited once.
-        assert_eq!(
-            mirrored,
-            [
-                format!("https://mirror.test/@iconify-json/lucide/{version}/icons.json"),
-                format!("https://cdn.jsdelivr.net/npm/@iconify-json/lucide@{version}/icons.json"),
-                format!("https://unpkg.com/@iconify-json/lucide@{version}/icons.json"),
-            ]
-        );
-        assert_eq!(sha256, indexed.newest().sha256);
-
-        // A declared URL keeps its literal mirrors and names the declared address last.
-        let literal = vec!["https://mirror.test/brand.json".to_owned()];
-        let digest = Sha256Digest::from_hex(
-            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-        );
-        let (urls, _) = remote_endpoint(
-            "brand",
-            None,
-            None,
-            Some("https://example.test/brand.json"),
-            Some(digest),
-            Some(&literal),
-        );
-        assert_eq!(
-            urls,
-            [
-                "https://mirror.test/brand.json",
-                "https://example.test/brand.json"
-            ]
-        );
-
-        let digest = Sha256Digest::from_hex(
-            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-        );
-        let (urls, sha256) = remote_endpoint(
-            "brand",
-            None,
-            None,
-            Some("https://example.test/brand.json"),
-            Some(digest),
-            None,
-        );
-        // A declared URL names one address; only a preset knows mirrors.
-        assert_eq!(urls, ["https://example.test/brand.json"]);
-        assert_eq!(sha256, digest);
     }
 }

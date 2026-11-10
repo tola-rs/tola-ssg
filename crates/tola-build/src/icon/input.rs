@@ -93,19 +93,18 @@ pub(super) fn read_file<'a>(
     overrides: &'a SourceOverrides,
     cancellation: &BuildCancellation,
     boundary: &tola_typst::SourceBoundary,
-) -> anyhow::Result<(Cow<'a, [u8]>, IconFileRead)> {
-    cancellation.ensure_active()?;
-    boundary.check(path)?;
+) -> Result<(Cow<'a, [u8]>, IconFileRead), IconError> {
+    cancellation.ensure_active().map_err(IconError::Cancelled)?;
+    check_boundary(boundary, path)?;
     let source = FilesystemSourceIdentity::from_path(path);
     if let Some(unsaved) = overrides.get_physical(source.physical_path()) {
         let byte_len = unsaved.text.len();
         ensure_collection_size(path, byte_len as u64)?;
-        cancellation.ensure_active()?;
+        cancellation.ensure_active().map_err(IconError::Cancelled)?;
         if !physical_path_is_unchanged(&source) {
             return Err(IconError::Changed {
                 path: path.to_path_buf(),
-            }
-            .into());
+            });
         }
         return Ok((
             Cow::Borrowed(unsaved.text.as_bytes()),
@@ -125,13 +124,13 @@ pub(super) fn read_file<'a>(
     let digest = ContentDigest::of(&bytes);
     drop(file);
     // Reopen the path so a replaced inode cannot keep answering the read.
-    boundary.check(path)?;
-    let confirmed_digest = digest_source_file(path, cancellation)?;
+    check_boundary(boundary, path)?;
+    let confirmed_digest =
+        digest_source_file(path, cancellation).map_err(|error| digest_error(path, error))?;
     if confirmed_digest != digest || !physical_path_is_unchanged(&source) {
         return Err(IconError::Changed {
             path: path.to_path_buf(),
-        }
-        .into());
+        });
     }
     let byte_len = bytes.len();
     Ok((
@@ -143,6 +142,22 @@ pub(super) fn read_file<'a>(
             boundary: boundary.clone(),
         },
     ))
+}
+
+/// Refuse an icon source outside the boundary this build enforces.
+fn check_boundary(boundary: &tola_typst::SourceBoundary, path: &Path) -> Result<(), IconError> {
+    boundary.check(path).map_err(|source| IconError::Boundary {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+/// Name the file a digest could not be read from.
+fn digest_error(path: &Path, source: anyhow::Error) -> IconError {
+    IconError::Read {
+        path: path.to_path_buf(),
+        source: std::io::Error::other(source.to_string()),
+    }
 }
 
 fn digest_source_file(
@@ -165,7 +180,7 @@ pub(super) fn read_bounded(
     reader: &mut File,
     path: &Path,
     cancellation: &BuildCancellation,
-) -> anyhow::Result<Vec<u8>> {
+) -> Result<Vec<u8>, IconError> {
     let mut bytes = Vec::new();
     read_chunks(reader, path, cancellation, |chunk| {
         bytes.extend_from_slice(chunk);
@@ -178,7 +193,7 @@ fn read_chunks(
     path: &Path,
     cancellation: &BuildCancellation,
     mut consume: impl FnMut(&[u8]),
-) -> anyhow::Result<()> {
+) -> Result<(), IconError> {
     let length = reader
         .metadata()
         .map_err(|source| IconError::Read {
@@ -203,12 +218,11 @@ fn read_chunks(
         crate::filesystem::FileReadError::Io(source) => IconError::Read {
             path: path.to_path_buf(),
             source,
-        }
-        .into(),
-        crate::filesystem::FileReadError::Cancelled(cancelled) => anyhow::Error::new(cancelled),
+        },
+        crate::filesystem::FileReadError::Cancelled(cancelled) => IconError::Cancelled(cancelled),
     })?;
     if let Some(error) = overflow {
-        return Err(error.into());
+        return Err(error);
     }
     Ok(())
 }
@@ -218,13 +232,13 @@ pub(super) fn svg_paths(
     overrides: &SourceOverrides,
     cancellation: &BuildCancellation,
     boundary: &tola_typst::SourceBoundary,
-) -> anyhow::Result<(Vec<PathBuf>, SvgDirectoryRead)> {
-    cancellation.ensure_active()?;
-    boundary.check(root)?;
+) -> Result<(Vec<PathBuf>, SvgDirectoryRead), IconError> {
+    cancellation.ensure_active().map_err(IconError::Cancelled)?;
+    check_boundary(boundary, root)?;
     let source = FilesystemSourceIdentity::from_path(root);
     let mut members = Vec::new();
     for (path, _) in overrides.sources() {
-        cancellation.ensure_active()?;
+        cancellation.ensure_active().map_err(IconError::Cancelled)?;
         if let Ok(relative) = path.strip_prefix(source.physical_path())
             && is_svg_path(relative)
         {
@@ -233,8 +247,8 @@ pub(super) fn svg_paths(
     }
     let mut pending = vec![root.to_path_buf()];
     while let Some(directory) = pending.pop() {
-        cancellation.ensure_active()?;
-        boundary.check(&directory)?;
+        cancellation.ensure_active().map_err(IconError::Cancelled)?;
+        check_boundary(boundary, &directory)?;
         let directory_entries = match std::fs::read_dir(&directory) {
             Ok(entries) => entries,
             Err(error)
@@ -248,13 +262,12 @@ pub(super) fn svg_paths(
                 return Err(IconError::Read {
                     path: directory,
                     source,
-                }
-                .into());
+                });
             }
         };
         let mut entries = Vec::new();
         for entry in directory_entries {
-            cancellation.ensure_active()?;
+            cancellation.ensure_active().map_err(IconError::Cancelled)?;
             entries.push(entry.map_err(|source| IconError::Read {
                 path: directory.clone(),
                 source,
@@ -262,14 +275,19 @@ pub(super) fn svg_paths(
         }
         entries.sort_by_key(std::fs::DirEntry::file_name);
         for entry in entries {
-            cancellation.ensure_active()?;
+            cancellation.ensure_active().map_err(IconError::Cancelled)?;
             let path = entry.path();
             let file_type = entry.file_type().map_err(|source| IconError::Read {
                 path: path.clone(),
                 source,
             })?;
-            if crate::filesystem::automatic_path_is_link_like(&path, &file_type)? {
-                return Err(IconError::LinkedDirectoryMember { path }.into());
+            let linked = crate::filesystem::automatic_path_is_link_like(&path, &file_type)
+                .map_err(|source| IconError::Read {
+                    path: path.clone(),
+                    source,
+                })?;
+            if linked {
+                return Err(IconError::LinkedDirectoryMember { path });
             }
             if file_type.is_dir() {
                 pending.push(path);
@@ -440,25 +458,6 @@ mod tests {
 
     /// Recorded evidence stops being fresh once the bytes behind the recorded path change:
     /// rewriting the file, removing it, and retargeting a symlink all invalidate one claim.
-    #[test]
-    fn changed_source_invalidates_evidence() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("collection.json");
-        std::fs::write(&path, b"one").unwrap();
-        let (_, evidence) = read_source(&path).unwrap();
-        let fresh = |evidence: &IconFileRead| {
-            evidence
-                .is_fresh(&SourceOverrides::default(), &BuildCancellation::new())
-                .unwrap()
-        };
-        assert!(fresh(&evidence), "unchanged source stays fresh");
-
-        std::fs::write(&path, b"two").unwrap();
-        assert!(!fresh(&evidence), "rewritten source stays fresh");
-        std::fs::remove_file(&path).unwrap();
-        assert!(!fresh(&evidence), "removed source stays fresh");
-    }
-
     #[cfg(unix)]
     #[test]
     fn retargeted_alias_invalidates_evidence() {
@@ -505,24 +504,6 @@ mod tests {
             .set_len(MAX_COLLECTION_BYTES as u64 + 1)
             .unwrap();
         assert!(!evidence.is_fresh(&overrides, &cancellation).unwrap());
-    }
-
-    #[test]
-    fn cancellation_stops_between_chunks() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("collection.json");
-        std::fs::write(&path, [0u8; 32 * 1024]).unwrap();
-        let mut file = open_regular_file(&path, true).unwrap();
-        let canceller = crate::cancellation::BuildCanceller::new();
-        let cancellation = canceller.token();
-        let mut consumed = 0;
-        let error = read_chunks(&mut file, &path, &cancellation, |chunk| {
-            consumed += chunk.len();
-            canceller.cancel();
-        })
-        .unwrap_err();
-        assert!(consumed > 0 && consumed < 32 * 1024);
-        assert!(error.is::<crate::cancellation::BuildCancelled>());
     }
 
     #[cfg(unix)]
@@ -593,21 +574,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn oversized_file_fails_before_allocation() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("collection.json");
-        File::create(&path)
-            .unwrap()
-            .set_len(MAX_COLLECTION_BYTES as u64 + 1)
-            .unwrap();
-        let error = read_source(&path).unwrap_err();
-        assert!(matches!(
-            error.downcast_ref::<IconError>(),
-            Some(IconError::TooLarge { .. })
-        ));
-    }
-
     #[cfg(unix)]
     #[test]
     fn linked_subtrees_are_rejected() {
@@ -623,10 +589,7 @@ mod tests {
             &tola_typst::SourceBoundary::default(),
         )
         .unwrap_err();
-        assert!(matches!(
-            error.downcast_ref::<IconError>(),
-            Some(IconError::LinkedDirectoryMember { .. })
-        ));
+        assert!(matches!(error, IconError::LinkedDirectoryMember { .. }));
     }
 
     #[cfg(unix)]

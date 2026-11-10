@@ -263,14 +263,14 @@ mod tests {
             let path = self.path();
             let selected = selected_interfaces(self.root.path(), &self.open);
             self.client
-                .publish(
-                    &mut self.bytes,
-                    self.root.path(),
-                    &path,
-                    &self.open,
-                    &features(),
-                    &selected,
-                    messages
+                .publish(crate::diagnostic::PublishInputs {
+                    output: &mut self.bytes,
+                    root: self.root.path(),
+                    entry: &path,
+                    open: &self.open,
+                    features: &features(),
+                    selected: &selected,
+                    diagnostics: messages
                         .iter()
                         .map(|message| {
                             Diagnostic::at_path(
@@ -281,7 +281,7 @@ mod tests {
                             )
                         })
                         .collect(),
-                )
+                })
                 .unwrap();
         }
 

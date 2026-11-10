@@ -66,20 +66,29 @@ pub(super) fn bind_with_port_fallback(
     Err(tola_diagnostic::DiagnosticError::new(message, vec![diagnostic]).into())
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the server owns each of these services for its lifetime"
-)]
-pub(super) async fn serve_http(
-    listener: tokio::net::TcpListener,
-    sites: CurrentSite,
-    initial_config: Arc<tola_build::config::ResolvedSiteConfig>,
-    reload_endpoint: Option<crate::dev::reload::transport::ReloadEndpoint>,
-    publications: Option<tokio::sync::mpsc::Sender<PublicationRequest>>,
-    shutdown: crate::cancellation::Cancellation,
-    events: crate::dev::events::Events,
-    url: String,
-) -> Result<()> {
+/// The services the development server owns for its lifetime.
+pub(super) struct HttpServices {
+    pub(super) listener: tokio::net::TcpListener,
+    pub(super) sites: CurrentSite,
+    pub(super) initial_config: Arc<tola_build::config::ResolvedSiteConfig>,
+    pub(super) reload_endpoint: Option<crate::dev::reload::transport::ReloadEndpoint>,
+    pub(super) publications: Option<tokio::sync::mpsc::Sender<PublicationRequest>>,
+    pub(super) shutdown: crate::cancellation::Cancellation,
+    pub(super) events: crate::dev::events::Events,
+    pub(super) url: String,
+}
+
+pub(super) async fn serve_http(services: HttpServices) -> Result<()> {
+    let HttpServices {
+        listener,
+        sites,
+        initial_config,
+        reload_endpoint,
+        publications,
+        shutdown,
+        events,
+        url,
+    } = services;
     if shutdown.is_requested() {
         return Ok(());
     }

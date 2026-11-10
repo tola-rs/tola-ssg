@@ -17,6 +17,17 @@ use super::projection::{DiagnosticTexts, editor_diagnostic};
 use super::store::{ClientDiagnostics, carries_cause};
 use super::unread::{unread_documents, unread_import_diagnostics};
 
+/// One publish's client output, the site and document it addresses, and the check it reports.
+pub(crate) struct PublishInputs<'a, W: Write> {
+    pub(crate) output: &'a mut W,
+    pub(crate) root: &'a Path,
+    pub(crate) entry: &'a Path,
+    pub(crate) open: &'a OpenSources,
+    pub(crate) features: &'a crate::capabilities::ClientFeatures,
+    pub(crate) selected: &'a names::SelectedInterfaces,
+    pub(crate) diagnostics: Vec<Diagnostic>,
+}
+
 impl ClientDiagnostics {
     /// Report one completed check's diagnostics to the client.
     ///
@@ -25,20 +36,16 @@ impl ClientDiagnostics {
     /// ready otherwise waits forever on a site that compiles. A document no client holds is
     /// addressed by its own path, so an editor reading the site from disk still learns what a
     /// check found there.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "where the report goes, which site and document it addresses, the revision's own documents, its selection index, and its diagnostics are independent inputs"
-    )]
-    pub(crate) fn publish(
-        &mut self,
-        output: &mut impl Write,
-        root: &Path,
-        entry: &Path,
-        open: &OpenSources,
-        features: &crate::capabilities::ClientFeatures,
-        selected: &names::SelectedInterfaces,
-        diagnostics: Vec<Diagnostic>,
-    ) -> Result<()> {
+    pub(crate) fn publish<W: Write>(&mut self, inputs: PublishInputs<'_, W>) -> Result<()> {
+        let PublishInputs {
+            output,
+            root,
+            entry,
+            open,
+            features,
+            selected,
+            diagnostics,
+        } = inputs;
         let mut documents = BTreeMap::<PathBuf, Vec<EditorDiagnostic>>::new();
         // A client that reads no related information still reads the sentences one has, so a
         // located help or trace folds into the message it belongs to below.
@@ -223,14 +230,15 @@ mod tests {
         for path in [Some("first.typ"), Some("second.typ"), None, None] {
             let mut bytes = Vec::new();
             client
-                .publish(
-                    &mut bytes,
-                    &root,
-                    &root.join("site.typ"),
-                    &open,
-                    &features(),
-                    &selected,
-                    path.into_iter()
+                .publish(PublishInputs {
+                    output: &mut bytes,
+                    root: &root,
+                    entry: &root.join("site.typ"),
+                    open: &open,
+                    features: &features(),
+                    selected: &selected,
+                    diagnostics: path
+                        .into_iter()
                         .map(|path| {
                             Diagnostic::at_path(
                                 tola_diagnostic::codes::typst::COMPILE,
@@ -240,7 +248,7 @@ mod tests {
                             )
                         })
                         .collect(),
-                )
+                })
                 .unwrap();
             sent.push(
                 reports(&mut std::io::Cursor::new(bytes))
@@ -289,20 +297,20 @@ mod tests {
         let open = OpenSources::new(&resolved);
         let selected = selected_interfaces(&resolved, &open);
         client
-            .publish(
-                &mut bytes,
-                &resolved,
-                &resolved.join("index.typ"),
-                &open,
-                &features(),
-                &selected,
-                vec![Diagnostic::at_path(
+            .publish(PublishInputs {
+                output: &mut bytes,
+                root: &resolved,
+                entry: &resolved.join("index.typ"),
+                open: &open,
+                features: &features(),
+                selected: &selected,
+                diagnostics: vec![Diagnostic::at_path(
                     tola_diagnostic::codes::typst::COMPILE,
                     Severity::Error,
                     page.to_string_lossy(),
                     "source error",
                 )],
-            )
+            })
             .unwrap();
         let mut input = std::io::Cursor::new(bytes);
         let addressed: Vec<String> = reports(&mut input)

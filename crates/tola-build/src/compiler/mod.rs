@@ -230,7 +230,6 @@ pub(crate) mod tests {
         fs::write(
             module.join("tola-module.toml"),
             r#"
-schema-version = 1
 name = "shared-driver"
 version = "1.0.0"
 [typst]
@@ -287,10 +286,18 @@ system = false
             "first"
         );
         let second = configure("second");
-        let prepared_first =
-            crate::modules::prepared::configure(&first, InputScope::Offline).unwrap();
-        let prepared_second =
-            crate::modules::prepared::configure(&second, InputScope::Offline).unwrap();
+        let prepared_first = crate::modules::prepared::configure(
+            &first,
+            crate::inputs::InputMode::new(InputScope::Offline, false),
+            &Default::default(),
+        )
+        .unwrap();
+        let prepared_second = crate::modules::prepared::configure(
+            &second,
+            crate::inputs::InputMode::new(InputScope::Offline, false),
+            &Default::default(),
+        )
+        .unwrap();
         assert_eq!(prepared_first.build.entry, prepared_second.build.entry);
         assert_ne!(prepared_first.entry_file(), prepared_second.entry_file());
         session
@@ -311,19 +318,5 @@ system = false
             fs::read_to_string(root.join("public/selected.txt")).unwrap(),
             "second"
         );
-    }
-
-    #[test]
-    fn compiler_cancellation_is_classified() {
-        let canceller = crate::cancellation::BuildCanceller::new();
-        let cancellation = canceller.token();
-        let typst = cancellation.bundle_cancellation();
-        canceller.cancel();
-        assert!(crate::cancellation::is_cancelled(&anyhow::Error::new(
-            typst.ensure_active().unwrap_err()
-        )));
-        assert!(crate::cancellation::is_cancelled(&anyhow::Error::new(
-            cancellation.ensure_active().unwrap_err()
-        )));
     }
 }

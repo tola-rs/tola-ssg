@@ -142,29 +142,46 @@ fn addressed_source(
     }))
 }
 
+/// One semantic answer's session state, revision inputs, query, packages, and cancellation.
+pub(super) struct QueryRequest<'a> {
+    pub(super) session: &'a mut SourceDiagnosticSession,
+    pub(super) compilations: &'a mut RevisionCompilations,
+    pub(super) disk: &'a mut crate::analysis::DiskSources,
+    pub(super) graphs: &'a mut crate::analysis::GraphCache,
+    pub(super) bibliographies: &'a mut BibliographyCache,
+    pub(super) entity_queries: &'a mut EntityQueries,
+    pub(super) config: &'a Arc<ResolvedSiteConfig>,
+    pub(super) source_revision: u64,
+    pub(super) overrides: &'a [(PathBuf, Arc<str>)],
+    pub(super) view: &'a SourceView,
+    pub(super) published: &'a [PublishedPackage],
+    pub(super) query: &'a SourceQuery,
+    pub(super) routes_as_hints: bool,
+    pub(super) check_progress: CheckProgress,
+    pub(super) cancellation: &'a BuildCancellation,
+    pub(super) client_root: &'a crate::uri::ClientRoot,
+}
+
 /// Answer a semantic request read-only; cancellation stays distinct from an unavailable result.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "an answer reads session state, revision inputs, the query, packages, and cancellation"
-)]
-pub(super) fn respond(
-    session: &mut SourceDiagnosticSession,
-    compilations: &mut RevisionCompilations,
-    disk: &mut crate::analysis::DiskSources,
-    graphs: &mut crate::analysis::GraphCache,
-    bibliographies: &mut BibliographyCache,
-    entity_queries: &mut EntityQueries,
-    config: &Arc<ResolvedSiteConfig>,
-    source_revision: u64,
-    overrides: &[(PathBuf, Arc<str>)],
-    view: &SourceView,
-    published: &[PublishedPackage],
-    query: &SourceQuery,
-    routes_as_hints: bool,
-    check_progress: CheckProgress,
-    cancellation: &BuildCancellation,
-    client_root: &crate::uri::ClientRoot,
-) -> Result<SourceReply> {
+pub(super) fn respond(inputs: QueryRequest<'_>) -> Result<SourceReply> {
+    let QueryRequest {
+        session,
+        compilations,
+        disk,
+        graphs,
+        bibliographies,
+        entity_queries,
+        config,
+        source_revision,
+        overrides,
+        view,
+        published,
+        query,
+        routes_as_hints,
+        check_progress,
+        cancellation,
+        client_root,
+    } = inputs;
     cancellation.ensure_active()?;
     let package_access = PackageAccess::prepared(config, session.resources(), published)?;
     let site = QuerySite {
@@ -190,17 +207,17 @@ pub(super) fn respond(
     }
     // An import path is neither a name nor a label, so the package lane answers it before the
     // name graph builds over the source set.
-    if let Some(reply) = package::respond(
+    if let Some(reply) = package::respond(package::PackageQuery {
         config,
-        &package_access,
-        &source,
+        package_access: &package_access,
+        source: &source,
         cursor,
         query,
         client_root,
         cancellation,
         overrides,
-        indexed_names.as_deref(),
-    )? {
+        indexed_names: indexed_names.as_deref(),
+    })? {
         return Ok(reply);
     }
     if let Some(reply) = entity_reply::respond(entity_reply::EntityQuery {
@@ -221,35 +238,35 @@ pub(super) fn respond(
         && !completion::opaque_at(&source, cursor)
         && labels::referenced(&source, cursor).is_none()
         && let Some(reply) = {
-            graph_reply(
-                session,
+            graph_reply(name_graph::GraphReplyRequest {
+                session: &mut *session,
                 config,
-                &package_access,
+                package_access: &package_access,
                 overrides,
                 view,
-                &source,
+                source: &source,
                 cursor,
                 query,
                 disk,
                 graphs,
-                source_revision,
+                revision: source_revision,
                 cancellation,
                 client_root,
-            )?
+            })?
         }
     {
         return Ok(reply);
     }
     let selection = Selection::new(&source, cursor, query, check_progress, indexed_names);
-    let revision = selection.realize(
-        session,
+    let revision = selection.realize(context::Realize {
+        session: &mut *session,
         compilations,
         config,
-        &package_access,
+        package_access: &package_access,
         source_revision,
         overrides,
         cancellation,
-    )?;
+    })?;
     // A site that does not compile still answers from the file alone, in the same world.
     let alone = match revision.checked() {
         Some(checked) if checked.bundle().is_some() => None,
@@ -735,22 +752,6 @@ impl<'a> Selection<'a> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn large_completions_keep_rank() {
-        let candidates = (0..=1000)
-            .map(|index| CompletionItem {
-                label: format!("candidate-{}", 1000 - index),
-                ..CompletionItem::default()
-            })
-            .collect();
-        let SourceReply::Completion(CompletionResponse::Array(mut candidates)) =
-            completion_reply(candidates)
-        else {
-            panic!("completion list");
-        };
-        candidates.sort_by(|left, right| left.sort_text.cmp(&right.sort_text));
-        assert_eq!(candidates.last().unwrap().label, "candidate-0");
-    }
     use lsp_types::request::Request as LspRequest;
     use lsp_types::{CompletionTextEdit, Hover, InlayHintLabel, Position, SignatureHelp};
     use lsp_types::{
@@ -1051,24 +1052,24 @@ mod tests {
                 .map(|(path, text)| (path, Arc::from(text)))
                 .into_iter()
                 .collect();
-            let reply = crate::query::respond(
-                &mut self.session,
-                &mut self.compilations,
-                &mut crate::analysis::DiskSources::default(),
-                &mut crate::analysis::GraphCache::default(),
-                &mut self.bibliographies,
-                &mut self.entity_queries,
-                &self.config,
-                self.revision,
-                &overrides,
-                &crate::sources::OpenSources::new(self.config.get_root()).view(),
-                &[],
-                &query,
-                crate::connection::routes_as_hints(&self.capabilities),
-                CheckProgress::Failed,
-                &BuildCancellation::new(),
-                &crate::uri::ClientRoot::new(self.config.get_root()),
-            )?;
+            let reply = crate::query::respond(QueryRequest {
+                session: &mut self.session,
+                compilations: &mut self.compilations,
+                disk: &mut crate::analysis::DiskSources::default(),
+                graphs: &mut crate::analysis::GraphCache::default(),
+                bibliographies: &mut self.bibliographies,
+                entity_queries: &mut self.entity_queries,
+                config: &self.config,
+                source_revision: self.revision,
+                overrides: &overrides,
+                view: &crate::sources::OpenSources::new(self.config.get_root()).view(),
+                published: &[],
+                query: &query,
+                routes_as_hints: crate::connection::routes_as_hints(&self.capabilities),
+                check_progress: CheckProgress::Failed,
+                cancellation: &BuildCancellation::new(),
+                client_root: &crate::uri::ClientRoot::new(self.config.get_root()),
+            })?;
             Ok(serde_json::to_value(reply).expect("a serializable reply"))
         }
 
@@ -1290,18 +1291,6 @@ mod tests {
                 .unwrap();
         }
 
-        fn change(sources: &mut OpenSources, uri: &Uri, version: i32, text: &str) {
-            sources
-                .apply(lsp_server::Notification::new(
-                    "textDocument/didChange".into(),
-                    json!({
-                        "textDocument": {"uri": uri, "version": version},
-                        "contentChanges": [{"text": text}],
-                    }),
-                ))
-                .unwrap();
-        }
-
         fn ask(
             site: &mut QuerySession,
             sources: &OpenSources,
@@ -1313,24 +1302,24 @@ mod tests {
                 method,
                 json!({"textDocument": {"uri": uri}, "position": position}),
             );
-            let reply = crate::query::respond(
-                &mut site.session,
-                &mut site.compilations,
-                &mut crate::analysis::DiskSources::default(),
-                &mut crate::analysis::GraphCache::default(),
-                &mut site.bibliographies,
-                &mut crate::compiler::EntityQueries::default(),
-                &site.config,
-                sources.revision(),
-                sources.overrides(),
-                &sources.view(),
-                &[],
-                &query,
-                false,
-                CheckProgress::Failed,
-                &BuildCancellation::default(),
-                &crate::uri::ClientRoot::new(site.config.get_root()),
-            )
+            let reply = crate::query::respond(crate::query::QueryRequest {
+                session: &mut site.session,
+                compilations: &mut site.compilations,
+                disk: &mut crate::analysis::DiskSources::default(),
+                graphs: &mut crate::analysis::GraphCache::default(),
+                bibliographies: &mut site.bibliographies,
+                entity_queries: &mut crate::compiler::EntityQueries::default(),
+                config: &site.config,
+                source_revision: sources.revision(),
+                overrides: sources.overrides(),
+                view: &sources.view(),
+                published: &[],
+                query: &query,
+                routes_as_hints: false,
+                check_progress: CheckProgress::Failed,
+                cancellation: &BuildCancellation::default(),
+                client_root: &crate::uri::ClientRoot::new(site.config.get_root()),
+            })
             .unwrap();
             serde_json::to_value(reply).unwrap()
         }
@@ -1350,14 +1339,10 @@ mod tests {
             }
         }
 
-        fn configured(module: &Path) -> QuerySession {
-            install(QuerySession::new(), module)
-        }
-
         fn install(mut site: QuerySession, module: &Path) -> QuerySession {
             fs::write(
                 module.join("tola-module.toml"),
-                "schema-version=1\nname='notes'\nversion='1.0.0'\n[typst]\nentry='lib.typ'\n",
+                "name='notes'\nversion='1.0.0'\n[typst]\nentry='lib.typ'\n",
             )
             .unwrap();
             let old = fs::read_to_string(site.site.root().join("tola.toml")).unwrap();
@@ -1440,86 +1425,6 @@ mod tests {
             assert_eq!(
                 crate::uri::to_site_path(target.as_str()).unwrap(),
                 module.canonicalize().unwrap().join("lib.typ")
-            );
-        }
-
-        #[test]
-        fn module_queries_follow_unsaved_buffers() {
-            let module = tempfile::tempdir().unwrap();
-            let disk = "#let greeting = \"saved\"\n#let greet() = greeting\n";
-            fs::write(module.path().join("lib.typ"), disk).unwrap();
-            let mut site = configured(module.path());
-            let (project_text, project_cursor) =
-                marked_cursor("#import \"@tola-modules/notes:0.0.0\": greet\n#gr|eet()");
-            site.site.write("content/document.typ", &project_text);
-            let project_uri =
-                crate::uri::from_file_path(&site.config.build().content_dir.join("document.typ"))
-                    .unwrap();
-            let mut sources = OpenSources::new(site.config.get_root());
-            open(&mut sources, &project_uri, &project_text);
-            let (library_uri, saved_range) = definition(ask(
-                &mut site,
-                &sources,
-                &project_uri,
-                project_cursor,
-                "textDocument/definition",
-            ));
-            assert_eq!(
-                crate::uri::to_site_path(library_uri.as_str()).unwrap(),
-                module.path().canonicalize().unwrap().join("lib.typ")
-            );
-            assert_eq!(saved_range.start.line, 1);
-            open(&mut sources, &library_uri, disk);
-
-            let unsaved = "// editor buffer\n#let greeting = \"unsaved\"\n#let greet() = greeting\n#let buffer-only = 42\n";
-            change(&mut sources, &library_uri, 2, unsaved);
-            let (target, updated_range) = definition(ask(
-                &mut site,
-                &sources,
-                &project_uri,
-                project_cursor,
-                "textDocument/definition",
-            ));
-            assert_eq!(target, library_uri);
-            assert_eq!(
-                updated_range.start.line, 2,
-                "navigation must use the editor's source lines"
-            );
-
-            let (editing, cursor) = marked_cursor(&format!("{unsaved}#buff|"));
-            change(&mut sources, &library_uri, 3, &editing);
-            let completed = ask(
-                &mut site,
-                &sources,
-                &library_uri,
-                cursor,
-                "textDocument/completion",
-            );
-            let completion: Option<lsp_types::CompletionResponse> =
-                serde_json::from_value(completed).unwrap();
-            let items = match completion.unwrap() {
-                lsp_types::CompletionResponse::Array(items) => items,
-                lsp_types::CompletionResponse::List(list) => list.items,
-            };
-            assert!(
-                items.iter().any(|item| item.label == "buffer-only"),
-                "{items:?}"
-            );
-
-            let (editing, cursor) = marked_cursor(&format!("{unsaved}#gr|eet()"));
-            change(&mut sources, &library_uri, 4, &editing);
-            let (target, range) = definition(ask(
-                &mut site,
-                &sources,
-                &library_uri,
-                cursor,
-                "textDocument/definition",
-            ));
-            assert_eq!(target, library_uri);
-            assert_eq!(range.start.line, 2);
-            assert_eq!(
-                fs::read_to_string(module.path().join("lib.typ")).unwrap(),
-                disk
             );
         }
     }

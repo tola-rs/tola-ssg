@@ -635,23 +635,17 @@ fn nearest_config(workspace: &Path) -> Option<PathBuf> {
 fn workspace(params: &Value) -> std::result::Result<PathBuf, String> {
     let params: InitializeParams = serde_json::from_value(params.clone())
         .map_err(|error| format!("invalid initialize parameters: {error}"))?;
-    #[allow(deprecated)]
     let uri = params
         .workspace_folders
         .as_ref()
         .and_then(|folders| folders.first())
-        .map(|folder| folder.uri.clone())
-        .or(params.root_uri);
+        .map(|folder| folder.uri.clone());
     if let Some(uri) = uri {
         let url = url::Url::parse(uri.as_str())
             .map_err(|_| "Nu workspace must be a file URI".to_owned())?;
         return url
             .to_file_path()
             .map_err(|()| "Nu workspace must be a local file URI".to_owned());
-    }
-    #[allow(deprecated)]
-    if let Some(path) = params.root_path {
-        return Ok(path.into());
     }
     std::env::current_dir().map_err(|error| format!("cannot determine Nu workspace: {error}"))
 }
@@ -855,7 +849,6 @@ $x"
         let params = json!({
             "processId": null,
             "capabilities": {},
-            "rootUri": "file:///root",
             "workspaceFolders": [{"uri": "file:///folder", "name": "folder"}]
         });
         assert!(workspace(&params).unwrap().ends_with("folder"));

@@ -27,7 +27,8 @@ fn by_source_path(left: &FileId, right: &FileId) -> std::cmp::Ordering {
 
 pub(crate) use disk::DiskSources;
 pub(crate) use graph::{
-    CachedGraph, GraphCache, file_resolver, graph, import_target, source_only_graph,
+    CachedGraph, GraphCache, GraphInputs, SourceOnlyGraph, file_resolver, graph, import_target,
+    source_only_graph,
 };
 pub(crate) use selection::{site_selected_interfaces, site_sources};
 
@@ -156,22 +157,33 @@ impl<'a> EditorLocations<'a> {
     }
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "source identities and client URI spelling have distinct roots"
-)]
-pub(crate) fn respond(
-    graph: &NameGraph,
-    source: &Source,
-    cursor: usize,
-    query: &SourceQuery,
-    view: &crate::sources::SourceView,
-    disk: &DiskSources,
-    source_root: &Path,
-    client_root: &crate::uri::ClientRoot,
-    locations: Option<&tola_typst::PackageLocations>,
-    boundary: &tola_typst::SourceBoundary,
-) -> Result<Option<SourceReply>> {
+/// One name-graph answer's graph, source, client view, and resolution inputs.
+pub(crate) struct NameGraphReply<'a> {
+    pub(crate) graph: &'a NameGraph,
+    pub(crate) source: &'a Source,
+    pub(crate) cursor: usize,
+    pub(crate) query: &'a SourceQuery,
+    pub(crate) view: &'a crate::sources::SourceView,
+    pub(crate) disk: &'a DiskSources,
+    pub(crate) source_root: &'a Path,
+    pub(crate) client_root: &'a crate::uri::ClientRoot,
+    pub(crate) locations: Option<&'a tola_typst::PackageLocations>,
+    pub(crate) boundary: &'a tola_typst::SourceBoundary,
+}
+
+pub(crate) fn respond(inputs: NameGraphReply<'_>) -> Result<Option<SourceReply>> {
+    let NameGraphReply {
+        graph,
+        source,
+        cursor,
+        query,
+        view,
+        disk,
+        source_root,
+        client_root,
+        locations,
+        boundary,
+    } = inputs;
     if !query.answered_from_name_graph() {
         return Ok(None);
     }
@@ -339,10 +351,6 @@ fn rename_changes(
     located: &mut EditorLocations<'_>,
     edits: Vec<NameEdit>,
 ) -> Result<HashMap<lsp_types::Uri, Vec<TextEdit>>> {
-    #[expect(
-        clippy::mutable_key_type,
-        reason = "the protocol keys workspace edits by URI"
-    )]
     let mut changes = HashMap::new();
     for edit in edits {
         let EditorLocation {

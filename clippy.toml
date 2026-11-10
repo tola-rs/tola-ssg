@@ -1,0 +1,4 @@
+# lsp_types::Uri is the LSP protocol's map key for workspace edits. Its
+# interior mutability does not affect its Hash/Eq semantics; clippy's
+# mutable_key_type otherwise flags every HashMap<Uri, _> the protocol requires.
+ignore-interior-mutability = ["lsp_types::Uri"]

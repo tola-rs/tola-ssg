@@ -16,38 +16,81 @@ use crate::icon::iconify;
 #[config(section = "icons")]
 pub struct IconsConfig {
     /// Each namespace names where its icons come from: a local SVG tree or IconifyJSON file, or
-    /// a remote collection named by an indexed preset or by a URL and digest.
+    /// a remote collection named by an npm-published preset or by a URL.
     pub collections: BTreeMap<String, IconCollectionSource>,
 }
 
 /// Where one icon namespace's content comes from.
-#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "source-type", rename_all = "kebab-case", deny_unknown_fields)]
+#[derive(Clone, Serialize, PartialEq, Eq)]
+#[serde(tag = "source-type", rename_all = "kebab-case")]
 pub enum IconCollectionSource {
     /// One local IconifyJSON collection file.
     LocalJson { path: PathBuf },
     /// A local SVG tree; relative path components become hyphenated icon names.
     LocalSvgDir { path: PathBuf },
-    /// IconifyJSON fetched over HTTP, named either by an indexed collection or by bytes the author
-    /// pins themselves.
+    /// IconifyJSON fetched over HTTP, named either by an npm-published preset or by an address
+    /// the author writes.
     RemoteJson {
-        /// The Iconify collection Tola indexes.
+        /// The `@iconify-json` package that publishes this collection.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         preset: Option<String>,
-        /// The release to fetch, or the newest release Tola indexes when omitted.
+        /// The package release to resolve, or the registry's latest release when omitted.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         version: Option<String>,
-        /// The URL serving this collection's IconifyJSON.
+        /// The address serving this collection's IconifyJSON.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         url: Option<String>,
-        /// The SHA-256 digest of the bytes `url` serves.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        sha256: Option<Sha256Digest>,
         /// Addresses tried before the declared one, in the order written. Only a `preset` fills
         /// `{name}` and `{version}`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         mirrors: Option<Vec<String>>,
     },
+}
+
+impl<'de> Deserialize<'de> for IconCollectionSource {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(tag = "source-type", rename_all = "kebab-case", deny_unknown_fields)]
+        enum Written {
+            LocalJson {
+                path: PathBuf,
+            },
+            LocalSvgDir {
+                path: PathBuf,
+            },
+            RemoteJson {
+                preset: Option<String>,
+                version: Option<String>,
+                url: Option<String>,
+                /// A key this model replaced; accepted only to name the repair.
+                sha256: Option<String>,
+                mirrors: Option<Vec<String>>,
+            },
+        }
+        match Written::deserialize(deserializer)? {
+            Written::LocalJson { path } => Ok(Self::LocalJson { path }),
+            Written::LocalSvgDir { path } => Ok(Self::LocalSvgDir { path }),
+            Written::RemoteJson {
+                sha256: Some(_), ..
+            } => Err(serde::de::Error::custom(
+                "`sha256` is no longer part of `[icons.collections]`: icon integrity lives in `tola.lock`; delete `sha256` and run `tola update`",
+            )),
+            Written::RemoteJson {
+                preset,
+                version,
+                url,
+                mirrors,
+                ..
+            } => Ok(Self::RemoteJson {
+                preset,
+                version,
+                url,
+                mirrors,
+            }),
+        }
+    }
 }
 
 impl fmt::Debug for IconCollectionSource {
@@ -65,7 +108,6 @@ impl fmt::Debug for IconCollectionSource {
                 preset,
                 version,
                 url,
-                sha256,
                 mirrors,
             } => {
                 // A URL's query may hold credentials or a token, so it never reaches a log.
@@ -82,98 +124,10 @@ impl fmt::Debug for IconCollectionSource {
                 if mirrors.is_some() {
                     entry.field("mirrors", &"<redacted>");
                 }
-                if let Some(sha256) = sha256 {
-                    entry.field("sha256", sha256);
-                }
                 entry.finish()
             }
         }
     }
-}
-
-/// The expected SHA-256 digest of a remote collection's exact bytes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(try_from = "String", into = "String")]
-pub struct Sha256Digest([u8; 32]);
-
-impl Sha256Digest {
-    pub(crate) fn bytes(self) -> [u8; 32] {
-        self.0
-    }
-
-    /// Decode the digest of one indexed release.
-    ///
-    /// A malformed digest in the generated index fails the compilation.
-    pub(crate) const fn from_hex(encoded: &str) -> Self {
-        match decode_hex(encoded) {
-            Some(bytes) => Self(bytes),
-            None => panic!("an indexed icon collection digest must be 64 hexadecimal digits"),
-        }
-    }
-}
-
-impl TryFrom<String> for Sha256Digest {
-    type Error = &'static str;
-
-    fn try_from(encoded: String) -> Result<Self, Self::Error> {
-        decode_hex(&encoded)
-            .map(Self)
-            .ok_or("`sha256` is not 64 hexadecimal digits")
-    }
-}
-
-impl From<Sha256Digest> for String {
-    fn from(digest: Sha256Digest) -> Self {
-        encode_hex(digest.0)
-    }
-}
-
-impl fmt::Display for Sha256Digest {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&encode_hex(self.0))
-    }
-}
-
-/// Decode the 64 hexadecimal digits of one digest.
-const fn decode_hex(encoded: &str) -> Option<[u8; 32]> {
-    let digits = encoded.as_bytes();
-    if digits.len() != 64 {
-        return None;
-    }
-    let mut bytes = [0; 32];
-    let mut index = 0;
-    while index < bytes.len() {
-        let high = match hex_digit(digits[index * 2]) {
-            Some(high) => high,
-            None => return None,
-        };
-        let low = match hex_digit(digits[index * 2 + 1]) {
-            Some(low) => low,
-            None => return None,
-        };
-        bytes[index] = (high << 4) | low;
-        index += 1;
-    }
-    Some(bytes)
-}
-
-const fn hex_digit(digit: u8) -> Option<u8> {
-    match digit {
-        b'0'..=b'9' => Some(digit - b'0'),
-        b'a'..=b'f' => Some(digit - b'a' + 10),
-        b'A'..=b'F' => Some(digit - b'A' + 10),
-        _ => None,
-    }
-}
-
-fn encode_hex(bytes: [u8; 32]) -> String {
-    const DIGITS: &[u8; 16] = b"0123456789abcdef";
-    let mut encoded = String::with_capacity(64);
-    for byte in bytes {
-        encoded.push(DIGITS[usize::from(byte >> 4)] as char);
-        encoded.push(DIGITS[usize::from(byte & 0x0f)] as char);
-    }
-    encoded
 }
 
 impl IconsConfig {
@@ -190,7 +144,6 @@ impl IconsConfig {
                 preset,
                 version,
                 url,
-                sha256,
                 mirrors,
             } = source
             {
@@ -199,7 +152,6 @@ impl IconsConfig {
                     preset.as_deref(),
                     version.as_deref(),
                     url.as_deref(),
-                    *sha256,
                     mirrors.as_deref(),
                     diagnostics,
                 );
@@ -214,7 +166,7 @@ every `\"namespace:name\"` id you write in Typst: `brand:mark` names `mark` in t
 `brand`. Ids are case-sensitive. `icon()` checks the id when called, including when its returned
 content is unused. A missing name may suggest a close match from that configured collection.
 
-A directory of SVG files you own, and a collection Tola already indexes:
+A directory of SVG files you own, and a collection published on the npm registry:
 
 ```toml
 # SVG files you own: icons/brand/mark.svg becomes brand:mark.
@@ -224,45 +176,45 @@ path = \"icons/brand\"
 
 [icons.collections.lucide]
 source-type = \"remote-json\"
-preset = \"lucide\"                  # newest release Tola indexes
+preset = \"lucide\"                  # the newest release of @iconify-json/lucide
 ```
 
-A preset names a collection Tola already indexes, such as `lucide`, `mdi`, `tabler`, or
-`simple-icons`, so you only write `preset = \"lucide\"`: Tola fills in the download address and that
-file's `sha256`, which verifies the bytes it downloads. Add `version = \"1.2.144\"` beside the preset
-to pin the release it downloads; that version is Iconify's packaging number for the collection, not
-the icon set's own release.
+A preset names an `@iconify-json` package, such as `lucide`, `mdi`, `tabler`, or `simple-icons`. Tola
+resolves it through the npm registry: it reads the release's `dist.integrity`, downloads that
+tarball, verifies the bytes it received, and takes the collection file the tarball carries. Write
+`version = \"0.468.0\"` beside the preset to pin the release instead of following the registry's
+latest; that version is Iconify's packaging number for the collection, not the icon set's own
+release.
 
-A preset downloads from `cdn.jsdelivr.net` and falls back to `unpkg.com` when that mirror cannot
-deliver. The pinned `sha256` decides the bytes, so either mirror is equally good.
+Resolution happens when you build, run `tola dev`, or run `tola update`; its result goes to
+`tola.lock`: the resolved version, the tarball address, and the SHA-256 of the collection bytes.
+The lock, not the configuration, holds integrity. `tola vendor` freezes the locked bytes into
+`vendor/icons/<namespace>.json`, and a pure build reads them from there.
 
-`mirrors` lists other addresses to try first, in the order written:
+`mirrors` lists other addresses tried when the registry's tarball cannot be downloaded, in the
+order written. `{name}` and `{version}` come from the preset:
 
 ```toml
 [icons.collections.lucide]
 source-type = \"remote-json\"
 preset = \"lucide\"
-mirrors = [\"https://registry.npmmirror.com/@iconify-json/{name}/{version}/files/icons.json\"]
+mirrors = [\"https://registry.npmmirror.com/@iconify-json/{name}/-/{name}-{version}.tgz\"]
 ```
 
-`{name}` and `{version}` come from the preset. Beside a `url`, write each address out. The bytes
-must still match `sha256`; a mirror that serves different bytes fails the build.
+A mirror must serve the same tarball the registry published, because that release's integrity pins
+its bytes.
 
-Run `tola inspect icons --presets` to list every preset this release supports.
-
-Write `url` yourself, with the `sha256` of its bytes, when no preset covers the collection or
-version you want:
+Write `url` when no registry package carries the collection you want:
 
 ```toml
 [icons.collections.brand-remote]
 source-type = \"remote-json\"
 url = \"https://cdn.example.com/brand/1.0.0/icons.json\"
-sha256 = \"<64 hexadecimal digits>\"
 ```
 
-The two remote forms are exclusive: `version` belongs with `preset`, `sha256` with `url`. To find
-the digest, download that exact file, run `shasum -a 256 icons.json`, and paste the 64 hexadecimal
-digits it prints; a build refuses bytes that do not match them.
+The two remote forms are exclusive: `version` belongs with `preset`. A `url` collection has no
+published integrity, so its first download is trusted and recorded in `tola.lock`; every later
+build verifies the same bytes. A `mirrors` list beside a `url` must write each address out.
 
 Draw a configured icon in a page, and publish one as a file of its own:
 
@@ -304,8 +256,9 @@ Without a namespace, the JSON array has one row per collection: its namespace, r
 own icon prefix, and icon count. Naming a namespace returns one `namespace`/`name` row per icon
 or alias, in lexical order. Interactive selection returns the selected row.
 
-A remote collection downloads and caches exactly as a build downloads it. `tola vendor` freezes a
-site's remote collections into its own `icons/<namespace>.json`, so another machine builds offline.";
+`tola inspect icons` reads the locked inputs; run `tola update` first when a remote collection has
+not been resolved yet. `tola vendor` freezes a site's remote collections into its own
+`icons/<namespace>.json`, so another machine builds offline.";
 
     pub(crate) fn local_paths(&self) -> impl Iterator<Item = &Path> {
         self.collections.values().filter_map(|source| match source {
@@ -370,50 +323,33 @@ site's remote collections into its own `icons/<namespace>.json`, so another mach
     }
 }
 
-/// Accept exactly one way of naming a remote collection, and only a collection Tola indexes.
+/// Accept exactly one way of naming a remote collection.
 fn validate_remote_json(
     namespace: &str,
     preset: Option<&str>,
     version: Option<&str>,
     url: Option<&str>,
-    sha256: Option<Sha256Digest>,
     mirrors: Option<&[String]>,
     diagnostics: &mut ConfigDiagnostics,
 ) {
     let field = IconsConfig::FIELDS.collections;
     match (preset, url) {
         (Some(preset), None) => {
-            if sha256.is_some() {
-                sha256_needs_url(namespace, diagnostics);
-                return;
-            }
-            let Some(indexed) = iconify::indexed(preset) else {
-                let help = match iconify::nearest(preset) {
-                    Some(suggestion) => format!("Did you mean `{suggestion}`?"),
-                    None => "run `tola inspect icons --presets`, or declare `url` and `sha256`"
-                        .to_owned(),
-                };
+            if !iconify::usable_preset(preset) {
                 diagnostics.error_with_help(
                     field,
-                    format!(
-                        "icon collection `{namespace}`: Tola does not index an Iconify collection named `{preset}`"
-                    ),
-                    help,
+                    format!("icon collection `{namespace}`: `preset` `{preset}` is not an `@iconify-json` package name"),
+                    "Write the package name after the `@iconify-json/` scope, for example `lucide`",
                 );
                 return;
-            };
+            }
             if let Some(version) = version
-                && indexed.release(version).is_none()
+                && !iconify::usable_version(version)
             {
                 diagnostics.error_with_help(
                     field,
-                    format!(
-                        "icon collection `{namespace}`: Tola does not index release `{version}` of `{preset}`"
-                    ),
-                    format!(
-                        "use {}, or declare that release's `url` with the `sha256` of its bytes",
-                        indexed_versions(indexed)
-                    ),
+                    format!("icon collection `{namespace}`: `version` `{version}` is not a published release name"),
+                    "Write the `@iconify-json` release exactly as the registry publishes it, or omit `version` to follow the latest release",
                 );
             }
             if let Some(mirrors) = mirrors {
@@ -423,16 +359,6 @@ fn validate_remote_json(
         (None, Some(url)) => {
             if version.is_some() {
                 version_needs_preset(namespace, diagnostics);
-                return;
-            }
-            if sha256.is_none() {
-                diagnostics.error_with_help(
-                    field,
-                    format!(
-                        "icon collection `{namespace}`: `url` needs the `sha256` of the bytes it serves"
-                    ),
-                    "download that file and run `shasum -a 256` on it, then write the digest",
-                );
                 return;
             }
             if !usable_url(url) {
@@ -452,14 +378,15 @@ fn validate_remote_json(
             "remove the declaration this namespace does not need",
         ),
         (None, None) if version.is_some() => version_needs_preset(namespace, diagnostics),
-        (None, None) if sha256.is_some() => sha256_needs_url(namespace, diagnostics),
         (None, None) => {
-            // A namespace that is itself an indexed collection name is almost always an author
-            // who wrote the section header and stopped there.
-            let help = if iconify::indexed(namespace).is_some() {
-                format!("write `preset = \"{namespace}\"`")
+            // A namespace that is itself a usable preset name is almost always an author who
+            // wrote the section header and stopped there.
+            let help = if iconify::usable_preset(namespace) {
+                format!(
+                    "write `preset = \"{namespace}\"` to download the `@iconify-json/{namespace}` package"
+                )
             } else {
-                "write `preset = \"…\"` for a collection Tola indexes, or `url` with `sha256`"
+                "write `preset` naming an `@iconify-json` package, or `url` naming an IconifyJSON file"
                     .to_owned()
             };
             diagnostics.error_with_help(
@@ -469,15 +396,6 @@ fn validate_remote_json(
             );
         }
     }
-}
-
-/// `sha256` verifies the bytes a `url` serves, so it needs one.
-fn sha256_needs_url(namespace: &str, diagnostics: &mut ConfigDiagnostics) {
-    diagnostics.error_with_help(
-        IconsConfig::FIELDS.collections,
-        format!("icon collection `{namespace}`: `sha256` needs the `url` it verifies"),
-        "remove `sha256`, or write the `url` it belongs to",
-    );
 }
 
 /// `version` pins the release of a `preset`, so it needs one.
@@ -565,182 +483,25 @@ fn validate_mirrors(
     }
 }
 
-/// The releases Tola indexes for one collection, bounded so one diagnostic stays readable.
-fn indexed_versions(indexed: &iconify::IndexedCollection) -> String {
-    let named = indexed
-        .versions()
-        .take(3)
-        .map(|version| format!("`{version}`"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    match indexed.versions().count().saturating_sub(3) {
-        0 => named,
-        remaining => format!("{named}, or {remaining} more"),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn icon_sources_group_by_namespace() {
-        let config: IconsConfig = toml::from_str(
-            r#"
-            [collections.brand]
-            source-type = "local-svg-dir"
-            path = "assets/brand"
-            [collections.ui]
-            source-type = "local-json"
-            path = "icons/ui.json"
-            [collections.social]
-            source-type = "remote-json"
-            url = "https://example.test/social/1.0.0/icons.json"
-            sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-            [collections.icons]
-            source-type = "remote-json"
-            preset = "lucide"
-            "#,
-        )
-        .unwrap();
-        let mut diagnostics = ConfigDiagnostics::new();
-        config.validate(&mut diagnostics);
-        config.validate_paths(&mut diagnostics);
-        assert!(diagnostics.into_result().is_ok());
-        assert_eq!(config.collections.len(), 4);
-        assert_eq!(
-            config.local_paths().collect::<Vec<_>>(),
-            [Path::new("assets/brand"), Path::new("icons/ui.json")]
-        );
-    }
-
-    #[test]
-    fn url_mirrors_cannot_carry_placeholders() {
-        let config: IconsConfig = toml::from_str(
+    fn sha256_is_refused_with_its_repair() {
+        let error = toml::from_str::<IconsConfig>(
             r#"
             [collections.ui]
             source-type = "remote-json"
             url = "https://example.test/icons.json"
             sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-            mirrors = ["https://mirror.test/{version}/icons.json"]
             "#,
         )
-        .unwrap();
-        let mut diagnostics = ConfigDiagnostics::new();
-        config.validate(&mut diagnostics);
-        let [error] = diagnostics.errors() else {
-            panic!("expected one error, got {:?}", diagnostics.errors())
-        };
-        assert!(error.message.contains("needs a `preset` to fill"));
-    }
-
-    #[test]
-    fn bad_mirror_addresses_are_refused() {
-        for (mirror, expected) in [
-            (
-                "https://mirror.test/{unknown}/{version}/icons.json",
-                "unknown placeholder",
-            ),
-            ("ftp://mirror.test/icons.json", "is not a usable URL"),
-            ("", "is not a usable URL"),
-        ] {
-            let config: IconsConfig = toml::from_str(&format!(
-                "[collections.ui]\nsource-type = \"remote-json\"\npreset = \"lucide\"\nmirrors = [\"{mirror}\"]\n"
-            ))
-            .unwrap();
-            let mut diagnostics = ConfigDiagnostics::new();
-            config.validate(&mut diagnostics);
-            let [error] = diagnostics.errors() else {
-                panic!(
-                    "expected one error for `{mirror}`, got {:?}",
-                    diagnostics.errors()
-                )
-            };
-            assert!(error.message.contains(expected), "{}", error.message);
-        }
-    }
-
-    #[test]
-    fn preset_accepts_mirrors() {
-        let config: IconsConfig = toml::from_str(
-            r#"
-            [collections.ui]
-            source-type = "remote-json"
-            preset = "lucide"
-            mirrors = [
-                "https://registry.npmmirror.com/@iconify-json/{name}/{version}/files/icons.json",
-                "https://mirror.test/@iconify-json/{name}/{version}/icons.json",
-            ]
-            "#,
-        )
-        .unwrap();
-        let mut diagnostics = ConfigDiagnostics::new();
-        config.validate(&mut diagnostics);
-        assert!(diagnostics.into_result().is_ok());
-    }
-
-    #[test]
-    fn unindexed_preset_or_release_is_refused() {
-        let newest_lucide = iconify::indexed("lucide")
-            .unwrap()
-            .versions()
-            .next()
-            .unwrap();
-        for (declaration, expected, help_fragment) in [
-            (
-                "preset = \"not-a-real-collection\"",
-                "does not index an Iconify collection named `not-a-real-collection`",
-                "tola inspect icons --presets",
-            ),
-            (
-                "preset = \"lucid\"",
-                "does not index an Iconify collection named `lucid`",
-                "Did you mean `lucide`?",
-            ),
-            (
-                "preset = \"lucide\"\nversion = \"0.0.1\"",
-                "does not index release `0.0.1` of `lucide`",
-                newest_lucide,
-            ),
-        ] {
-            let config: IconsConfig = toml::from_str(&format!(
-                "[collections.ui]\nsource-type = \"remote-json\"\n{declaration}\n"
-            ))
-            .unwrap();
-            let mut diagnostics = ConfigDiagnostics::new();
-            config.validate(&mut diagnostics);
-
-            let errors = diagnostics.errors();
-            assert_eq!(errors.len(), 1, "{declaration}");
-            assert!(
-                errors[0].message.contains(expected),
-                "{}",
-                errors[0].message
-            );
-            let help = errors[0]
-                .help
-                .as_deref()
-                .expect("the refusal names what to write instead");
-            assert!(help.contains(help_fragment), "{help}");
-        }
-    }
-
-    #[test]
-    fn empty_collection_suggests_its_preset() {
-        let config: IconsConfig = toml::from_str(
-            r#"
-            [collections.lucide]
-            source-type = "remote-json"
-            "#,
-        )
-        .unwrap();
-        let mut diagnostics = ConfigDiagnostics::new();
-        config.validate(&mut diagnostics);
-        let [error] = diagnostics.errors() else {
-            panic!("expected one error, got {:?}", diagnostics.errors())
-        };
-        assert!(error.message.contains("declares no source"));
-        assert_eq!(error.help.as_deref(), Some("write `preset = \"lucide\"`"));
+        .unwrap_err();
+        let reason = error.message();
+        assert!(reason.contains("sha256"), "{reason}");
+        assert!(reason.contains("tola.lock"), "{reason}");
+        assert!(reason.contains("tola update"), "{reason}");
     }
 
     #[test]
@@ -749,33 +510,11 @@ mod tests {
             preset: None,
             version: None,
             url: Some("https://example.test/icons.json?token=private".into()),
-            sha256: Some(Sha256Digest([0; 32])),
             mirrors: None,
         };
         let debug = format!("{source:?}");
         assert!(debug.contains("<redacted>"));
         assert!(!debug.contains("private"));
-    }
-
-    #[test]
-    fn local_sources_stay_inside_the_site() {
-        for path in ["", "../icons", ".tola/icons", "/external/icons"] {
-            let config = IconsConfig {
-                collections: BTreeMap::from([(
-                    "brand".into(),
-                    IconCollectionSource::LocalSvgDir { path: path.into() },
-                )]),
-            };
-            let mut diagnostics = ConfigDiagnostics::new();
-            config.validate_paths(&mut diagnostics);
-            assert!(!diagnostics.errors().is_empty(), "accepted {path}");
-            assert!(
-                diagnostics
-                    .errors()
-                    .iter()
-                    .all(|diagnostic| diagnostic.field == IconsConfig::FIELDS.collections)
-            );
-        }
     }
 
     #[test]

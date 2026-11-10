@@ -85,21 +85,31 @@ fn with_closing_quote(mut content: String, unterminated: bool) -> String {
     content
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "package queries retain source, client projection, and open files"
-)]
-pub(super) fn respond(
-    config: &ResolvedSiteConfig,
-    package_access: &PackageAccess<'_>,
-    source: &Source,
-    cursor: usize,
-    query: &SourceQuery,
-    client_root: &crate::uri::ClientRoot,
-    cancellation: &BuildCancellation,
-    overrides: &[(PathBuf, Arc<str>)],
-    indexed_names: Option<&SourceNames>,
-) -> Result<Option<SourceReply>> {
+/// One package-path query: the site, the package access it reads, and the editor's cursor.
+pub(super) struct PackageQuery<'a, 'b> {
+    pub(super) config: &'a ResolvedSiteConfig,
+    pub(super) package_access: &'a PackageAccess<'b>,
+    pub(super) source: &'a Source,
+    pub(super) cursor: usize,
+    pub(super) query: &'a SourceQuery,
+    pub(super) client_root: &'a crate::uri::ClientRoot,
+    pub(super) cancellation: &'a BuildCancellation,
+    pub(super) overrides: &'a [(PathBuf, Arc<str>)],
+    pub(super) indexed_names: Option<&'a SourceNames>,
+}
+
+pub(super) fn respond(inputs: PackageQuery<'_, '_>) -> Result<Option<SourceReply>> {
+    let PackageQuery {
+        config,
+        package_access,
+        source,
+        cursor,
+        query,
+        client_root,
+        cancellation,
+        overrides,
+        indexed_names,
+    } = inputs;
     let completing = matches!(query, SourceQuery::Completion(_));
     let import = import_path(source, cursor);
     // A completion answers the spelling being written, before a definition or a hover answers it.
@@ -973,17 +983,17 @@ mod tests {
         .1;
         let package_access =
             PackageAccess::new(config, &tola_build::BuildResources::new(), published);
-        match respond(
+        match respond(PackageQuery {
             config,
-            &package_access,
-            &source,
+            package_access: &package_access,
+            source: &source,
             cursor,
-            &query,
-            &crate::uri::ClientRoot::new(config.get_root()),
-            &BuildCancellation::new(),
-            &[],
-            None,
-        )
+            query: &query,
+            client_root: &crate::uri::ClientRoot::new(config.get_root()),
+            cancellation: &BuildCancellation::new(),
+            overrides: &[],
+            indexed_names: None,
+        })
         .expect("a reply")
         {
             Some(SourceReply::Completion(CompletionResponse::Array(items))) => {
@@ -1040,17 +1050,17 @@ mod tests {
         .expect("a definition query")
         .1;
         let package_access = PackageAccess::new(&config, &tola_build::BuildResources::new(), &[]);
-        let reply = respond(
-            &config,
-            &package_access,
-            &source,
+        let reply = respond(PackageQuery {
+            config: &config,
+            package_access: &package_access,
+            source: &source,
             cursor,
-            &query,
-            &client_root,
-            &BuildCancellation::new(),
-            &[],
-            None,
-        )
+            query: &query,
+            client_root: &client_root,
+            cancellation: &BuildCancellation::new(),
+            overrides: &[],
+            indexed_names: None,
+        })
         .expect("a reply");
         let Some(SourceReply::Definition(Some(GotoDefinitionResponse::Scalar(location)))) = reply
         else {
@@ -1103,24 +1113,24 @@ mod tests {
             (root.join("content/existing.typ"), Arc::from("Unsaved\n")),
             (root.join("public/hidden.typ"), Arc::from("Generated\n")),
         ];
-        let reply = crate::query::respond(
-            &mut site.session,
-            &mut site.compilations,
-            &mut crate::analysis::DiskSources::default(),
-            &mut crate::analysis::GraphCache::default(),
-            &mut site.bibliographies,
-            &mut crate::compiler::EntityQueries::default(),
-            &site.config,
-            site.revision,
-            &overrides,
-            &crate::sources::SourceView::default(),
-            &[],
-            &query,
-            false,
-            crate::protocol::CheckProgress::Failed,
-            &BuildCancellation::new(),
-            &crate::uri::ClientRoot::new(&root),
-        )
+        let reply = crate::query::respond(crate::query::QueryRequest {
+            session: &mut site.session,
+            compilations: &mut site.compilations,
+            disk: &mut crate::analysis::DiskSources::default(),
+            graphs: &mut crate::analysis::GraphCache::default(),
+            bibliographies: &mut site.bibliographies,
+            entity_queries: &mut crate::compiler::EntityQueries::default(),
+            config: &site.config,
+            source_revision: site.revision,
+            overrides: &overrides,
+            view: &crate::sources::SourceView::default(),
+            published: &[],
+            query: &query,
+            routes_as_hints: false,
+            check_progress: crate::protocol::CheckProgress::Failed,
+            cancellation: &BuildCancellation::new(),
+            client_root: &crate::uri::ClientRoot::new(&root),
+        })
         .unwrap();
         let SourceReply::Completion(CompletionResponse::Array(items)) = reply else {
             panic!("a path completion reply");
@@ -1166,17 +1176,17 @@ mod tests {
                 "position": position::utf16_range(source.lines(), cursor..cursor).unwrap().start,
             }),
         )).unwrap().1;
-        let reply = respond(
-            &config,
-            &access,
-            &source,
+        let reply = respond(PackageQuery {
+            config: &config,
+            package_access: &access,
+            source: &source,
             cursor,
-            &query,
-            &crate::uri::ClientRoot::new(&root),
-            &BuildCancellation::new(),
-            &[],
-            None,
-        )
+            query: &query,
+            client_root: &crate::uri::ClientRoot::new(&root),
+            cancellation: &BuildCancellation::new(),
+            overrides: &[],
+            indexed_names: None,
+        })
         .unwrap();
         let Some(SourceReply::Definition(Some(GotoDefinitionResponse::Scalar(location)))) = reply
         else {

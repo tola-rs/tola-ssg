@@ -71,37 +71,61 @@ impl GraphCache {
     }
 }
 
+/// One source-only graph build: the site's root and view, the source, and the cache it may reuse.
+pub(crate) struct SourceOnlyGraph<'a> {
+    pub(crate) root: &'a Path,
+    pub(crate) view: &'a SourceView,
+    pub(crate) source: &'a Source,
+    pub(crate) locations: Option<&'a PackageLocations>,
+    pub(crate) boundary: &'a SourceBoundary,
+    pub(crate) include_dependents: bool,
+    pub(crate) disk: &'a mut DiskSources,
+    pub(crate) cache: Option<CachedGraph<'a>>,
+    pub(crate) cancellation: &'a BuildCancellation,
+}
+
 /// Builds the source-only graph: no import expression has a host-established target.
 ///
 /// The connection's direct answers and the analysis lane build their graphs through this shape;
 /// the query lane builds the same graph with the targets the compiler proved through [`graph`].
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the source graph reads root, view, source, resolution inputs, disk, cache, and cancellation"
-)]
-pub(crate) fn source_only_graph(
-    root: &Path,
-    view: &SourceView,
-    source: &Source,
-    locations: Option<&PackageLocations>,
-    boundary: &SourceBoundary,
-    include_dependents: bool,
-    disk: &mut DiskSources,
-    cache: Option<CachedGraph<'_>>,
-    cancellation: &BuildCancellation,
-) -> Result<Arc<NameGraph>> {
-    graph(
+pub(crate) fn source_only_graph(inputs: SourceOnlyGraph<'_>) -> Result<Arc<NameGraph>> {
+    let SourceOnlyGraph {
         root,
         view,
         source,
         locations,
         boundary,
         include_dependents,
-        &[],
         disk,
         cache,
         cancellation,
-    )
+    } = inputs;
+    graph(GraphInputs {
+        root,
+        view,
+        source,
+        locations,
+        boundary,
+        include_dependents,
+        resolved: &[],
+        disk,
+        cache,
+        cancellation,
+    })
+}
+
+/// One graph build over a source set, with the host-established targets the compiler proved.
+pub(crate) struct GraphInputs<'a> {
+    pub(crate) root: &'a Path,
+    pub(crate) view: &'a SourceView,
+    pub(crate) source: &'a Source,
+    pub(crate) locations: Option<&'a PackageLocations>,
+    pub(crate) boundary: &'a SourceBoundary,
+    pub(crate) include_dependents: bool,
+    pub(crate) resolved: &'a [(PendingImport, FileId)],
+    pub(crate) disk: &'a mut DiskSources,
+    pub(crate) cache: Option<CachedGraph<'a>>,
+    pub(crate) cancellation: &'a BuildCancellation,
 }
 
 /// Builds the graph over one source set, with host-established targets for import expressions.
@@ -109,22 +133,19 @@ pub(crate) fn source_only_graph(
 /// `resolved` holds the targets the official compiler semantics proved for statements
 /// [`NameGraph::unresolved_imports`] reported; their sources join the graph so the identity
 /// those statements provide becomes visible to every name query.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the graph reads root, view, source, resolution inputs, proven targets, disk, cache, and cancellation"
-)]
-pub(crate) fn graph(
-    root: &Path,
-    view: &SourceView,
-    source: &Source,
-    locations: Option<&PackageLocations>,
-    boundary: &SourceBoundary,
-    include_dependents: bool,
-    resolved: &[(PendingImport, FileId)],
-    disk: &mut DiskSources,
-    cache: Option<CachedGraph<'_>>,
-    cancellation: &BuildCancellation,
-) -> Result<Arc<NameGraph>> {
+pub(crate) fn graph(inputs: GraphInputs<'_>) -> Result<Arc<NameGraph>> {
+    let GraphInputs {
+        root,
+        view,
+        source,
+        locations,
+        boundary,
+        include_dependents,
+        resolved,
+        disk,
+        cache,
+        cancellation,
+    } = inputs;
     cancellation.ensure_active()?;
     // Every path this graph reads or compares is a filesystem path, and a client may name the
     // root through a symlink: the resolved spelling is what `VirtualPath::virtualize` accepts,
@@ -173,18 +194,18 @@ pub(crate) fn graph(
         .filter(|(_, target)| source_within_boundary(*target, root, boundary))
         .collect();
     let mut targets = HashMap::new();
-    reach_sources(
-        &mut sources,
-        &mut targets,
+    reach_sources(ReachSources {
+        sources: &mut sources,
+        targets: &mut targets,
         view,
         root,
         boundary,
-        resolver.as_ref(),
-        &established,
-        PackageSources::Joined,
-        disk,
+        resolver: resolver.as_ref(),
+        established: &established,
+        package_sources: PackageSources::Joined,
+        disk: &mut *disk,
         cancellation,
-    )?;
+    })?;
     disk.retain_pass();
     if let Some(cached) = cache.as_ref()
         && resolved.is_empty()
@@ -288,6 +309,20 @@ pub(super) enum PackageSources {
     Joined,
 }
 
+/// One import-closure pass over the sources a site holds.
+pub(super) struct ReachSources<'a> {
+    pub(super) sources: &'a mut HashMap<FileId, Arc<SourceNames>>,
+    pub(super) targets: &'a mut HashMap<FileId, BTreeMap<String, FileId>>,
+    pub(super) view: &'a SourceView,
+    pub(super) root: &'a Path,
+    pub(super) boundary: &'a SourceBoundary,
+    pub(super) resolver: Option<&'a FileResolver>,
+    pub(super) established: &'a [(PendingImport, FileId)],
+    pub(super) package_sources: PackageSources,
+    pub(super) disk: &'a mut DiskSources,
+    pub(super) cancellation: &'a BuildCancellation,
+}
+
 /// Read every source the given sources import or include, to a fixed point.
 ///
 /// `targets` records the file each import resolves to, which is the resolver the name
@@ -296,22 +331,19 @@ pub(super) enum PackageSources {
 /// and a target nothing answers for is left out: a file no reader produced has no identity.
 ///
 /// [`PackageSources`] decides whether a `@`-package path's own source joins the set.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the closure reads sources, targets, view, root, boundary, resolver, proven targets, package sources, parsed sources, and cancellation"
-)]
-pub(super) fn reach_sources(
-    sources: &mut HashMap<FileId, Arc<SourceNames>>,
-    targets: &mut HashMap<FileId, BTreeMap<String, FileId>>,
-    view: &SourceView,
-    root: &Path,
-    boundary: &SourceBoundary,
-    resolver: Option<&FileResolver>,
-    established: &[(PendingImport, FileId)],
-    package_sources: PackageSources,
-    disk: &mut DiskSources,
-    cancellation: &BuildCancellation,
-) -> Result<()> {
+pub(super) fn reach_sources(inputs: ReachSources<'_>) -> Result<()> {
+    let ReachSources {
+        sources,
+        targets,
+        view,
+        root,
+        boundary,
+        resolver,
+        established,
+        package_sources,
+        disk,
+        cancellation,
+    } = inputs;
     let mut visited = HashSet::new();
     loop {
         cancellation.ensure_active()?;
@@ -590,29 +622,29 @@ mod tests {
         .1;
         let boundary = tola_typst::SourceBoundary::new(root, true);
         let mut disk = DiskSources::default();
-        let graph = source_only_graph(
+        let graph = source_only_graph(SourceOnlyGraph {
             root,
-            &view,
+            view: &view,
             source,
-            None,
-            &boundary,
-            true,
-            &mut disk,
-            None,
-            &BuildCancellation::new(),
-        )?;
-        Ok(super::super::respond(
-            &graph,
+            locations: None,
+            boundary: &boundary,
+            include_dependents: true,
+            disk: &mut disk,
+            cache: None,
+            cancellation: &BuildCancellation::new(),
+        })?;
+        Ok(super::super::respond(super::super::NameGraphReply {
+            graph: &graph,
             source,
             cursor,
-            &query,
-            &view,
-            &disk,
-            root,
-            &crate::uri::ClientRoot::new(root),
-            None,
-            &boundary,
-        )?
+            query: &query,
+            view: &view,
+            disk: &disk,
+            source_root: root,
+            client_root: &crate::uri::ClientRoot::new(root),
+            locations: None,
+            boundary: &boundary,
+        })?
         .unwrap())
     }
 
@@ -856,32 +888,32 @@ mod tests {
         let mut cache = GraphCache::default();
         for text in ["#let marker = 1", "\n\n#let marker = 2"] {
             std::fs::write(&library, text).unwrap();
-            let cached = source_only_graph(
+            let cached = source_only_graph(SourceOnlyGraph {
                 root,
-                &view,
+                view: &view,
                 source,
-                None,
-                &boundary,
-                true,
-                &mut disk,
-                Some(CachedGraph {
+                locations: None,
+                boundary: &boundary,
+                include_dependents: true,
+                disk: &mut disk,
+                cache: Some(CachedGraph {
                     cache: &mut cache,
                     revision: sources.revision(),
                 }),
-                &cancellation,
-            )
+                cancellation: &cancellation,
+            })
             .unwrap();
-            let fresh = source_only_graph(
+            let fresh = source_only_graph(SourceOnlyGraph {
                 root,
-                &view,
+                view: &view,
                 source,
-                None,
-                &boundary,
-                true,
-                &mut DiskSources::default(),
-                None,
-                &cancellation,
-            )
+                locations: None,
+                boundary: &boundary,
+                include_dependents: true,
+                disk: &mut DiskSources::default(),
+                cache: None,
+                cancellation: &cancellation,
+            })
             .unwrap();
             let definition = |graph: &NameGraph| {
                 graph.definition(
@@ -912,17 +944,17 @@ mod tests {
         );
         let view = sources.view();
         let source = &view.get(&importer).unwrap().source;
-        let names = source_only_graph(
+        let names = source_only_graph(SourceOnlyGraph {
             root,
-            &view,
+            view: &view,
             source,
-            None,
-            &tola_typst::SourceBoundary::new(root, true),
-            false,
-            &mut DiskSources::default(),
-            None,
-            &BuildCancellation::new(),
-        )
+            locations: None,
+            boundary: &tola_typst::SourceBoundary::new(root, true),
+            include_dependents: false,
+            disk: &mut DiskSources::default(),
+            cache: None,
+            cancellation: &BuildCancellation::new(),
+        })
         .unwrap();
         let cursor = source.text().rfind("local").unwrap();
         let binding = names
@@ -970,17 +1002,17 @@ mod tests {
         let view = sources.view();
         let source = &view.get(&first).unwrap().source;
         let cursor = source.text().rfind("marker").unwrap();
-        let graph = source_only_graph(
+        let graph = source_only_graph(SourceOnlyGraph {
             root,
-            &view,
+            view: &view,
             source,
-            None,
-            &tola_typst::SourceBoundary::new(root, true),
-            true,
-            &mut DiskSources::default(),
-            None,
-            &BuildCancellation::new(),
-        )
+            locations: None,
+            boundary: &tola_typst::SourceBoundary::new(root, true),
+            include_dependents: true,
+            disk: &mut DiskSources::default(),
+            cache: None,
+            cancellation: &BuildCancellation::new(),
+        })
         .unwrap();
         let binding = graph
             .selected(source.id(), cursor)

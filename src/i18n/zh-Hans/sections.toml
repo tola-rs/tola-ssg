@@ -390,20 +390,19 @@ source-type = "remote-json"
 preset = "lucide"                  # newest release Tola indexes
 ```
 
-preset 指明一个 Tola 已索引的 collection，比如 `lucide`、`mdi`、`tabler`、`simple-icons`，所以你只需要写
-比如 `preset = "lucide"`：Tola 会替你填上默认的下载地址与那份文件的 `sha256`（校验下载到的字节）。在 preset
-旁边加上 `version = "1.2.144"` 来固定要下载的 release；这个版本号是 Iconify 对该 collection 的打包号，不是图标集自身的版本。
+preset 指明一个 Iconify collection，比如 `lucide`、`mdi`、`tabler`、`simple-icons`。Tola 通过 npm
+registry 解析版本与完整性，并写入 `tola.lock`；在 preset 旁边加上 `version = "0.468.0"` 可固定 release。
 
-若 `preset` 里没有你想要的 collection 或版本，就自己写 `url`，并配上那份字节的 `sha256`：
+若 `preset` 里没有你想要的 collection 或版本，就自己写 `url`：首次解析按 TOFU 把 `sha256` 与 `size`
+写入 `tola.lock`，之后按锁校验：
 
 ```toml
 [icons.collections.brand-remote]
 source-type = "remote-json"
 url = "https://cdn.example.com/brand/1.0.0/icons.json"
-sha256 = "<64 hexadecimal digits>"
 ```
 
-两种远程写法互斥：`version` 跟 `preset` 一起用，`sha256` 跟 `url` 一起用。要拿到摘要，把那个文件原样下载下来，执行 `shasum -a 256 icons.json`，把它打印的 64 位十六进制数粘进来；字节对不上时构建会拒绝。
+配置里不再声明 `sha256`：完整性只存在于 `tola.lock`。要刷新，运行 `tola update brand-remote`，再运行 `tola vendor` 更新冻结副本。
 
 在页面里画一个已配置的图标，或把它作为独立文件发布：
 
@@ -462,23 +461,24 @@ path = "theme"
 
 路径相对于站点根目录，也可以写绝对路径。使用模块时，Tola 按本次调用的输入范围读取清单；`--pure` 要求模块的物理目录位于站点内。模块目录是构建输入，发布目录和 before-build 生成器不能覆盖它。只加载项目明确声明的模块，不自动合并多份站点配置。
 
-使用 HTTPS Git 仓库时，将 `path` 换成远程来源：
+使用 `https` 或 `ssh` Git 仓库时，将 `path` 换成远程来源：
 
 ```toml
 [modules.notes]
-repository = "https://github.com/example/notebook"
+git = "https://github.com/example/notebook"
 tag = "v1.0.0"
 subdir = "theme"
 ```
 
-`tag`、`branch`、`rev` 选一个；`rev` 是完整提交 ID。`subdir` 默认为仓库根。运行 `tola module fetch notes`，由 gix 获取并写入 `tola.lock`，不调用系统 Git。省略别名则获取所有声明的远程模块。`tola.lock` 随站点提交，源码保存在 `.tola/modules`。
+`git` 与 `path` 互斥，接受 `https://`、`ssh://` 或 `git@host:path`。`rev` 是完整提交 ID；三个选择器都不写时选择默认分支。解析会写入 `tola.lock`，记录解析出的提交与模块目录摘要；随站点一起提交。
 
-构建、查询和帮助只读已锁定源码，不隐式联网。显式 fetch 才更新分支或标签；已准备的固定提交直接复用。`--offline` 可以读取已有源码，fetch 要求在线模式；`--pure` 使用本地 `path` 声明。远程初始化尚未实现，初始化仍接收本地模块目录。
+私有 `https` 仓库使用你自己配置的 Git credential helper；`ssh` 地址（包括 `git@host:path`）使用系统 `ssh`，因此 SSH agent、`~/.ssh/config` 与 `known_hosts` 照常生效。`tola.lock` 不保存任何凭据。
+
+允许联网时，`tola build`、`tola dev`、`tola check` 会解析缺失或已变化的输入；`--locked` 禁止写锁，`--offline` 禁止联网，`--pure` 只读站点、`vendor/` 与 `tola.lock`。运行 `tola update` 刷新 tag、branch 或默认分支，再运行 `tola vendor` 更新冻结副本。远程初始化尚未实现，初始化仍接收本地模块目录。
 
 用 `[theme] module = "notes"` 选择模块提供整站入口，此时不要再显式设置 `[build].entry`。作者从 `@tola-modules/notes:0.0.0` 导入公开写作 API；`0.0.0` 是宿主别名版本，不是主题的发行版本。主题清单声明：
 
 ```toml
-schema-version = 1
 name = "notebook"
 version = "1.0.0"
 [typst]
@@ -530,16 +530,14 @@ outputs = [{ tree = "search" }]
 
 命令参数中的 `{name}`、`{module}`、`{project}`、`{tola}` 分别逐字替换为别名、模块根目录、项目根目录和当前可执行文件。`generates`、`outputs` 和项目 `rerun-on` 路径支持 `{name}`，替换后仍执行路径校验；`{module}`、`{project}` 只用于命令参数。
 
-清单包含 `schema-version = 1`、可选的 `summary`，以及命名查询和命令：
+清单包含可选的 `summary`，以及命名查询和命令：
 
 ```toml
-schema-version = 1
 summary = "Notebook tools"
 
 [queries.nodes]
 entry = "model.typ"
 label = "notebook-nodes"
-schema-version = 1
 
 [commands.list]
 help = "List notebook entries."
@@ -559,7 +557,7 @@ argv = ["{module}/tools/edit"]
 
 查询入口相对于模块目录，支持声明在站点根之外的模块。查询沿用站点的源文件发现与包解析，保持站点根不变，只替换查询入口。label 必须对应恰好一个 metadata 值；默认 `json` 格式只接受 JSON 标量、数组和字典，项目内容、路径及函数需要显式投影。
 
-`format = "entities"` 且 `schema-version = 1` 时，值为实体数组：每项有唯一字符串 `id`、字符串 `label`，可选字符串 `detail`、`url` 和原生 Typst `source` 路径。源文件与外来 URL 分开表示；命令输出的源路径包含虚拟根和路径。清单可用 `[[semantics]]`、`export = "local"`、`parameter = { positional = 0 }`、`role = "reference"`、`query = "nodes"` 声明公开入口的语义角色；点分路径如 `content.local` 按公开成员查找，不指定私有文件。具名参数使用 `{ named = "address" }`，定义角色使用 `"definition"`。角色必须引用实体查询。
+`format = "entities"` 时，值为实体数组：每项有唯一字符串 `id`、字符串 `label`，可选字符串 `detail`、`url` 和原生 Typst `source` 路径。源文件与外来 URL 分开表示；命令输出的源路径包含虚拟根和路径。清单可用 `[[semantics]]`、`export = "local"`、`parameter = { positional = 0 }`、`role = "reference"`、`query = "nodes"` 声明公开入口的语义角色；点分路径如 `content.local` 按公开成员查找，不指定私有文件。具名参数使用 `{ named = "address" }`，定义角色使用 `"definition"`。角色必须引用实体查询。
 
 ```toml
 [[semantics]]

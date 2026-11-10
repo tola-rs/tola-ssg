@@ -56,6 +56,33 @@ impl ServedWorkspace {
     }
 }
 
+/// One language-server connection's inputs: its streams, the build resources it runs under, the
+/// host's configuration loader and diagnostic recorder, and the host's configuration sections.
+pub struct ServeRequest<R, W, F, D>
+where
+    R: Read + Send + 'static,
+    W: Write,
+    F: FnMut(&Path, &[(PathBuf, Arc<str>)]) -> Result<ServedWorkspace> + Send + 'static,
+    D: Fn(&[Diagnostic]),
+{
+    /// The client's input stream; reading runs on a detached thread.
+    pub reader: R,
+    /// The client's output stream.
+    pub writer: W,
+    /// The resources the connection compiles with.
+    pub resources: BuildResources,
+    /// Ends the connection's work when cancelled.
+    pub cancellation: BuildCancellation,
+    /// Loads the workspace's configuration from the editor root and its unsaved sources.
+    pub load_configuration: F,
+    /// Receives complete current diagnostics before their LSP projection.
+    pub record_diagnostics: D,
+    /// The configuration file the invocation named, when it named one.
+    pub named_configuration: Option<PathBuf>,
+    /// The configuration sections the host declares beyond the core schema.
+    pub host_sections: HostSections,
+}
+
 /// Serve one independent Tola language-server connection.
 ///
 /// `load_configuration` receives the editor root and exact unsaved sources for
@@ -80,26 +107,23 @@ impl ServedWorkspace {
 /// client that stops reading blocks the connection inside its next write: reads run on the detached
 /// reader thread, and the host's token is observed between messages, so no cancellation reaches a
 /// write already in flight.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "transport, compilation and host callbacks are independent connection inputs"
-)]
-pub fn serve<R, W, F, D>(
-    reader: R,
-    writer: W,
-    resources: BuildResources,
-    cancellation: BuildCancellation,
-    load_configuration: F,
-    record_diagnostics: D,
-    named_configuration: Option<PathBuf>,
-    host_sections: HostSections,
-) -> Result<()>
+pub fn serve<R, W, F, D>(inputs: ServeRequest<R, W, F, D>) -> Result<()>
 where
     R: Read + Send + 'static,
     W: Write,
     F: FnMut(&Path, &[(PathBuf, Arc<str>)]) -> Result<ServedWorkspace> + Send + 'static,
     D: Fn(&[Diagnostic]),
 {
+    let ServeRequest {
+        reader,
+        writer,
+        resources,
+        cancellation,
+        load_configuration,
+        record_diagnostics,
+        named_configuration,
+        host_sections,
+    } = inputs;
     let (event_sender, events) = crossbeam_channel::bounded(0);
     let (compiler_jobs, compiler_receiver) = crossbeam_channel::bounded(1);
     let (analysis_jobs, analysis_receiver) = crossbeam_channel::bounded(1);

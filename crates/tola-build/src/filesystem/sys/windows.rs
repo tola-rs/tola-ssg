@@ -88,7 +88,7 @@ pub(in crate::filesystem) fn open_lock_file(path: &Path) -> io::Result<File> {
 mod tests {
     use crate::cancellation::BuildCancellation;
     use crate::filesystem::{
-        FileLock, FileLockError, FilesystemSourceIdentity, observe_tree_source,
+        FileLock, FileLockError, FilesystemSourceIdentity, TreeObservation, observe_tree_source,
     };
 
     #[test]
@@ -112,16 +112,16 @@ mod tests {
         let identity = FilesystemSourceIdentity::from_path(&root);
         let cancellation = BuildCancellation::default();
         assert!(
-            observe_tree_source(
-                &identity,
-                &tola_typst::SourceBoundary::default(),
-                None,
-                &[],
-                &cancellation,
-                &root,
-                "source member",
-                &|_, _| Ok(()),
-            )
+            observe_tree_source(TreeObservation {
+                source_identity: &identity,
+                boundary: &tola_typst::SourceBoundary::default(),
+                previous: None,
+                changed_paths: &[],
+                cancellation: &cancellation,
+                display_root: &root,
+                member_label: "source member",
+                validate_member: &|_, _| Ok(()),
+            })
             .is_err()
         );
 

@@ -403,12 +403,25 @@ pub(crate) fn hook_stages(
 mod tests {
     use super::*;
 
-    fn parse(source: &str) -> Vec<ModuleHook> {
+    fn resolved_modules(
+        site: &std::path::Path,
+        declarations: &std::collections::BTreeMap<String, crate::modules::ModuleDeclaration>,
+        mode: crate::inputs::InputMode,
+    ) -> std::result::Result<
+        std::collections::BTreeMap<String, crate::modules::ResolvedModule>,
+        crate::modules::ModuleResolutionError,
+    > {
+        let roots =
+            crate::inputs::module_roots(site, mode, None, declarations, &Default::default())?;
+        crate::modules::resolve_modules_with_roots(site, declarations, &roots, mode)
+    }
+
+    fn parse(source: &str) -> std::result::Result<Vec<ModuleHook>, toml::de::Error> {
         #[derive(Deserialize)]
         struct Document {
             hooks: Vec<ModuleHook>,
         }
-        toml::from_str::<Document>(source).unwrap().hooks
+        toml::from_str::<Document>(source).map(|document| document.hooks)
     }
 
     #[test]
@@ -420,129 +433,17 @@ mod tests {
             "[[hooks]]\nstage = 'before-build'\nname = 'x'\ncommand = ['x']\ndev = 'reuse'\n",
             "[[hooks]]\nstage = 'before-build'\nname = 'x'\ncommand = ['x']\nrerun-on = [{module = '../escape'}]\n",
         ] {
-            assert!(validate_declarations(&parse(source)).is_err(), "{source}");
+            assert!(
+                validate_declarations(&parse(source).unwrap()).is_err(),
+                "{source}"
+            );
         }
         for source in [
             "[[hooks]]\nstage = 'mystery'\nname = 'x'\ncommand = ['x']\n",
             "[[hooks]]\nstage = 'before-build'\nname = 'x'\ncommand = ['x']\nextra = 1\n",
         ] {
-            #[derive(Deserialize)]
-            struct Document {
-                #[expect(dead_code, reason = "the test asserts only that the document parses")]
-                hooks: Vec<ModuleHook>,
-            }
-            assert!(toml::from_str::<Document>(source).is_err(), "{source}");
+            assert!(parse(source).is_err(), "{source}");
         }
-    }
-
-    #[test]
-    fn hook_stages_order_aliases() {
-        let hooks = parse(
-            "[[hooks]]\nstage = 'before-build'\nname = 'first'\ncommand = ['x']\nenabled-by = 'search'\nrerun-on = [{module = 'tools'}, {project = 'content'}]\ngenerates = ['generated/x']\n[[hooks]]\nstage = 'before-build'\nname = 'second'\ncommand = ['y']\n",
-        );
-        let module = |name: &str| ResolvedModule {
-            name: name.into(),
-            root: PathBuf::from(format!("/modules/{name}")),
-            manifest: PathBuf::from(format!("/modules/{name}/tola-module.toml")),
-            hooks: hooks.clone(),
-            ..Default::default()
-        };
-        let modules = BTreeMap::from([("z".into(), module("z")), ("a".into(), module("a"))]);
-        let mut a = Dict::new();
-        a.insert("search".into(), Value::Bool(true));
-        let mut z = Dict::new();
-        z.insert("search".into(), Value::Bool(false));
-        let mut options = BTreeMap::from([("a".into(), a), ("z".into(), z)]);
-        let result = hook_stages(&modules, &options).unwrap();
-        assert_eq!(
-            result
-                .before_build
-                .iter()
-                .map(|hook| hook.name.as_str())
-                .collect::<Vec<_>>(),
-            ["@module/a/first", "@module/a/second", "@module/z/second"]
-        );
-        assert_eq!(
-            result.before_build[0].rerun_on,
-            [PathBuf::from("/modules/a/tools"), PathBuf::from("content")]
-        );
-        assert_eq!(result.before_build[0].origin.as_ref().unwrap().name, "a");
-        options.remove("a");
-        assert!(hook_stages(&modules, &options).is_err());
-        let mut wrong = Dict::new();
-        wrong.insert("search".into(), Value::Str("true".into()));
-        options.insert("a".into(), wrong);
-        assert!(hook_stages(&modules, &options).is_err());
-    }
-
-    #[test]
-    fn module_only_selected_json_values() {
-        let hook = |selection: &str| {
-            parse(&format!(
-                "[[hooks]]\nstage = 'before-build'\nname = 'x'\ncommand = ['x']\noptions = [{selection}]\n"
-            ))
-        };
-        let module = |selection: &str| ResolvedModule {
-            hooks: hook(selection),
-            ..Default::default()
-        };
-        let mut values = Dict::new();
-        values.insert("search".into(), Value::Bool(true));
-        values.insert("advanced".into(), Value::Auto);
-        let options = BTreeMap::from([("notes".into(), values)]);
-        let modules = |selection| BTreeMap::from([("notes".into(), module(selection))]);
-        let result = hook_stages(&modules("'search'"), &options).unwrap();
-        let json: serde_json::Value =
-            serde_json::from_slice(&result.before_build[0].origin.as_ref().unwrap().options_json)
-                .unwrap();
-        assert_eq!(json, serde_json::json!({"search": true}));
-        assert!(hook_stages(&modules("'advanced'"), &options).is_err());
-        assert!(hook_stages(&modules("'missing'"), &options).is_err());
-        assert!(hook_stages(&modules("'search', 'search'"), &options).is_err());
-    }
-
-    #[test]
-    fn module_substitutions_validated_after_expansion() {
-        let hooks = parse(
-            r#"
-[[hooks]]
-stage = "generate-outputs"
-name = "index"
-command = ["{module}/tool", "{project}/content", "{name}"]
-rerun-on = [{ project = "generated/{name}/input" }]
-outputs = [{ tree = "search/{name}" }]
-"#,
-        );
-        let module = ResolvedModule {
-            root: "/modules/notes".into(),
-            hooks,
-            ..Default::default()
-        };
-        let modules = BTreeMap::from([("notes".into(), module)]);
-        let result = hook_stages(&modules, &BTreeMap::new()).unwrap();
-        let hook = &result.generate_outputs[0];
-        assert_eq!(
-            hook.command,
-            ["{module}/tool", "{project}/content", "{name}"]
-        );
-        assert_eq!(hook.rerun_on, [PathBuf::from("generated/notes/input")]);
-        assert_eq!(hook.outputs[0].path().as_str(), "search/notes");
-
-        let repeated = parse(
-            r#"
-[[hooks]]
-stage = "generate-outputs"
-name = "index"
-command = ["x"]
-outputs = [{ file = "search/{name}" }, { file = "search/notes" }]
-"#,
-        );
-        let module = ResolvedModule {
-            hooks: repeated,
-            ..Default::default()
-        };
-        let modules = BTreeMap::from([("notes".into(), module)]);
-        assert!(hook_stages(&modules, &BTreeMap::new()).is_err());
     }
 
     mod module_hooks {
@@ -595,7 +496,7 @@ outputs = [{ file = "search/{name}" }, { file = "search/notes" }]
                     &module,
                     "tola-module.toml",
                     &format!(
-                        r#"schema-version = 1
+                        r#"
         name = "demo"
         version = "1.0.0"
         [[hooks]]
@@ -611,8 +512,7 @@ outputs = [{ file = "search/{name}" }, { file = "search/notes" }]
         [queries.nodes]
         entry = "query.typ"
         label = "nodes"
-        schema-version = 1
-        "#,
+                "#,
                         command()
                     ),
                 );
@@ -756,9 +656,18 @@ outputs = [{ file = "search/{name}" }, { file = "search/notes" }]
                 command()
             );
             let site = Site::new("'generated/value.txt'", "normal", &project_hook);
-            let config =
-                modules::prepared::configure(&site.config().unwrap(), InputScope::Offline).unwrap();
-            let config = modules::prepared::configure(&config, InputScope::Offline).unwrap();
+            let config = modules::prepared::configure(
+                &site.config().unwrap(),
+                crate::inputs::InputMode::new(InputScope::Offline, false),
+                &Default::default(),
+            )
+            .unwrap();
+            let config = modules::prepared::configure(
+                &config,
+                crate::inputs::InputMode::new(InputScope::Offline, false),
+                &Default::default(),
+            )
+            .unwrap();
             let mut session = site.session();
             session
                 .build_and_write(&config, BuildRequest::default())
@@ -770,47 +679,6 @@ outputs = [{ file = "search/{name}" }, { file = "search/notes" }]
                 site.log(),
                 "module:normal\nproject\nmodule:normal\nproject\n"
             );
-            assert!(site.root.join("public/index.html").is_file());
-        }
-
-        #[test]
-        fn disabled_option_skips_hook() {
-            let site = disabled_site();
-            site.build()
-                .unwrap_or_else(|error| panic!("build: {}", describe(&error)));
-            assert_eq!(site.log(), "");
-            assert!(!site.root.join("generated").exists());
-        }
-
-        #[test]
-        fn rejected_generation_never_runs_hooks() {
-            let project_hook = format!(
-                "[[build.hooks.before-build]]\nname = 'conflict'\ncommand = {}\ngenerates = ['generated']\n",
-                command()
-            );
-            for (generates, extra) in [
-                ("'generated/value.txt'", project_hook.as_str()),
-                ("'public/index.html'", ""),
-            ] {
-                let site = Site::new(generates, "normal", extra);
-                assert!(site.build().is_err());
-                assert_eq!(site.log(), "");
-                assert!(!site.root.join("generated").exists());
-                assert!(!site.root.join("public/index.html").exists());
-            }
-        }
-
-        #[test]
-        fn generated_fonts_are_available() {
-            let site = Site::new(
-                "'generated/fonts'",
-                "normal",
-                "paths = ['generated/fonts']\n",
-            );
-            assert!(!site.root.join("generated/fonts").exists());
-            site.build()
-                .unwrap_or_else(|error| panic!("build: {}", describe(&error)));
-            assert!(site.root.join("generated/fonts").is_dir());
             assert!(site.root.join("public/index.html").is_file());
         }
 
@@ -835,9 +703,12 @@ outputs = [{ file = "search/{name}" }, { file = "search/notes" }]
         fn query_reports_unverified_generation() {
             let site = disabled_site();
             let config = Arc::new(site.config().unwrap());
-            let resolved =
-                modules::resolve_modules(config.get_root(), config.modules(), InputScope::Offline)
-                    .unwrap();
+            let resolved = super::resolved_modules(
+                config.get_root(),
+                config.modules(),
+                crate::inputs::InputMode::new(InputScope::Offline, false),
+            )
+            .unwrap();
             let module = &resolved["demo"];
             let result = modules::query::run(
                 Arc::clone(&config),

@@ -104,8 +104,8 @@ pub(crate) fn generate_outputs(
         let root_start = generated_outputs.root_ownerships.len();
         let diagnostic_start = diagnostics.len();
         let submitted = run_hook_entry(HookStage::GenerateOutputs, &command.name, || {
-            generate_entry(
-                &mut generated_outputs,
+            generate_entry(GenerateEntry {
+                generated_outputs: &mut generated_outputs,
                 command,
                 index,
                 candidate,
@@ -113,7 +113,7 @@ pub(crate) fn generate_outputs(
                 mode,
                 cancellation,
                 diagnostics,
-            )
+            })
         })?;
         if let Some(inputs) = inputs {
             generated_outputs.reuse.insert(
@@ -131,21 +131,30 @@ pub(crate) fn generate_outputs(
     Ok(generated_outputs)
 }
 
-/// The declaration is a contract: no unowned file and no missing declared file.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "one entry's inputs are all distinct build state"
-)]
-fn generate_entry(
-    generated_outputs: &mut GeneratedOutputs,
-    command: &OutputCommandConfig,
+/// One generate-outputs entry's inputs.
+struct GenerateEntry<'a> {
+    generated_outputs: &'a mut GeneratedOutputs,
+    command: &'a OutputCommandConfig,
     index: usize,
-    candidate: &HookOutputFiles,
-    config: &ResolvedSiteConfig,
+    candidate: &'a HookOutputFiles,
+    config: &'a ResolvedSiteConfig,
     mode: BuildMode,
-    cancellation: &BuildCancellation,
-    diagnostics: &mut Vec<tola_diagnostic::Diagnostic>,
-) -> Result<bool> {
+    cancellation: &'a BuildCancellation,
+    diagnostics: &'a mut Vec<tola_diagnostic::Diagnostic>,
+}
+
+/// The declaration is a contract: no unowned file and no missing declared file.
+fn generate_entry(entry: GenerateEntry<'_>) -> Result<bool> {
+    let GenerateEntry {
+        generated_outputs,
+        command,
+        index,
+        candidate,
+        config,
+        mode,
+        cancellation,
+        diagnostics,
+    } = entry;
     if command.outputs.is_empty() {
         return Err(super::hook_contract_error(
             format!("`build.hooks.generate-outputs[{index}].outputs` is empty"),

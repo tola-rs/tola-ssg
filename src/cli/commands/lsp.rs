@@ -35,16 +35,20 @@ pub(in crate::cli) fn run(
     // The configuration the author named stays known to the server before a check resolves one, so
     // the editor's own document answers while the site does not compile.
     let named_configuration = configuration.named.clone();
-    tola_lsp::serve(
-        input,
+    tola_lsp::serve(tola_lsp::ServeRequest {
+        reader: input,
         writer,
         resources,
-        token,
-        move |root, sources| configuration.load(root, sources, &loader_output, &loader_cancel),
-        move |diagnostics| diagnostics_output.record_diagnostics(None, diagnostics),
+        cancellation: token,
+        load_configuration: move |root, sources| {
+            configuration.load(root, sources, &loader_output, &loader_cancel)
+        },
+        record_diagnostics: move |diagnostics| {
+            diagnostics_output.record_diagnostics(None, diagnostics)
+        },
         named_configuration,
-        crate::config::HOST_SECTIONS,
-    )
+        host_sections: crate::config::HOST_SECTIONS,
+    })
 }
 
 /// The site configuration one language-server session reads its sources through.

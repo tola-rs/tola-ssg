@@ -14,21 +14,30 @@ use tola_typst::typst::syntax::{FileId, Source};
 
 use crate::compiler::RevisionCompilations;
 
+/// One lens request's compiled revision and the client's spelling of the root.
+pub(super) struct Lens<'a> {
+    pub(super) session: &'a mut SourceDiagnosticSession,
+    pub(super) compilations: &'a mut RevisionCompilations,
+    pub(super) config: &'a Arc<ResolvedSiteConfig>,
+    pub(super) source_revision: u64,
+    pub(super) client_root: &'a Path,
+    pub(super) overrides: &'a [(PathBuf, Arc<str>)],
+    pub(super) source: &'a Source,
+    pub(super) cancellation: &'a BuildCancellation,
+}
+
 /// The lenses one source has, or `None` when its check realizes no page.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "a lens reads session state, revision inputs, the source, its client spelling, and cancellation"
-)]
-pub(super) fn respond(
-    session: &mut SourceDiagnosticSession,
-    compilations: &mut RevisionCompilations,
-    config: &Arc<ResolvedSiteConfig>,
-    source_revision: u64,
-    client_root: &Path,
-    overrides: &[(PathBuf, Arc<str>)],
-    source: &Source,
-    cancellation: &BuildCancellation,
-) -> Result<Option<Vec<CodeLens>>> {
+pub(super) fn respond(inputs: Lens<'_>) -> Result<Option<Vec<CodeLens>>> {
+    let Lens {
+        session,
+        compilations,
+        config,
+        source_revision,
+        client_root,
+        overrides,
+        source,
+        cancellation,
+    } = inputs;
     let routes = crate::routes::respond(
         session,
         compilations,

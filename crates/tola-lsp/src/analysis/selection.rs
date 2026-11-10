@@ -13,7 +13,9 @@ use tola_typst_syntax::names::{SelectedInterfaces, SourceNames};
 
 use super::by_source_path;
 use super::disk::DiskSources;
-use super::graph::{PackageSources, add_walked_sources, reach_sources, source_within_boundary};
+use super::graph::{
+    PackageSources, ReachSources, add_walked_sources, reach_sources, source_within_boundary,
+};
 use crate::sources::SourceView;
 
 /// What every source of one site selects from every other's interface.
@@ -71,18 +73,18 @@ pub(crate) fn site_sources(
     // The index skips a package path itself, so the closure resolves path imports alone: nothing
     // here can read a package the site would have to fetch.
     let mut targets = HashMap::new();
-    reach_sources(
-        &mut sources,
-        &mut targets,
+    reach_sources(ReachSources {
+        sources: &mut sources,
+        targets: &mut targets,
         view,
         root,
         boundary,
-        None,
-        &[],
-        PackageSources::Skipped,
-        disk,
+        resolver: None,
+        established: &[],
+        package_sources: PackageSources::Skipped,
+        disk: &mut *disk,
         cancellation,
-    )?;
+    })?;
     disk.retain_pass();
     let mut sources: Vec<Arc<SourceNames>> = sources.into_values().collect();
     sources.sort_by(|left, right| by_source_path(&left.source().id(), &right.source().id()));

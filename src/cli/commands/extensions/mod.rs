@@ -89,8 +89,13 @@ pub(in crate::cli) fn run(
     )?;
     let loaded = request.load_config(&crate::config::ConfigOverrides::default())?;
     let config = std::sync::Arc::new(loaded.into_config());
-    let modules =
-        tola_build::modules::resolve_command_modules(config.get_root(), config.modules(), scope)?;
+    let modules = tola_build::modules::resolve_command_modules(
+        config.get_root(),
+        config.vendor().path.as_deref(),
+        config.modules(),
+        tola_build::inputs::InputMode::new(scope, false),
+        &cancellation.token(),
+    )?;
     check_namespaces(&modules)?;
     let module = modules
         .get(&invocation.namespace)
@@ -188,8 +193,13 @@ pub(in crate::cli) fn run(
             complete_report(completion, reports, output)
         }
         CommandAction::Query { query, projection } => {
-            let modules =
-                tola_build::modules::resolve_modules(config.get_root(), config.modules(), scope)?;
+            let modules = tola_build::modules::resolve_modules(
+                config.get_root(),
+                config.vendor().path.as_deref(),
+                config.modules(),
+                tola_build::inputs::InputMode::new(scope, false),
+                &cancellation.token(),
+            )?;
             let module = modules
                 .get(&invocation.namespace)
                 .context("module declarations changed; run the command again")?;
@@ -201,18 +211,18 @@ pub(in crate::cli) fn run(
                 .queries
                 .get(query)
                 .context("module query changed; run the command again")?;
-            super::query::run_declared(
+            super::query::run_declared(super::query::DeclaredQuery {
                 config,
                 module,
-                query_declaration,
-                &format!("{}.{}", module.name, query),
-                &format!("tola {} {name}", module.name),
-                (!projection.is_empty()).then_some(projection.as_slice()),
+                query: query_declaration,
+                name: &format!("{}.{}", module.name, query),
+                usage: &format!("tola {} {name}", module.name),
+                projection: (!projection.is_empty()).then_some(projection.as_slice()),
                 tail,
-                request.resources,
+                resources: request.resources,
                 output,
                 cancellation,
-            )
+            })
         }
         CommandAction::Skill => {
             let matches = help::skill_command(module, name)

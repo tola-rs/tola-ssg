@@ -54,16 +54,16 @@ mod tests {
         }
         let cancellation = BuildCancellation::new();
         assert!(
-            serve(
-                FailedInput,
-                Vec::new(),
-                BuildResources::default(),
-                cancellation.clone(),
-                |_, _| unreachable!(),
-                |_| {},
-                None,
-                &[],
-            )
+            serve(crate::ServeRequest {
+                reader: FailedInput,
+                writer: Vec::new(),
+                resources: BuildResources::default(),
+                cancellation: cancellation.clone(),
+                load_configuration: |_, _| unreachable!(),
+                record_diagnostics: |_| {},
+                named_configuration: None,
+                host_sections: &[],
+            })
             .is_err()
         );
         assert!(!cancellation.is_cancelled());

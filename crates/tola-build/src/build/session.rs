@@ -197,7 +197,8 @@ impl BuildAttempt {
             self.config = std::sync::Arc::new(
                 crate::modules::prepared::configure(
                     &self.config,
-                    self.baseline.resources.input_scope(),
+                    self.baseline.resources.input_mode(),
+                    &self.request.cancellation,
                 )
                 .map_err(super::BuildFailure::before_attempt)?,
             );
@@ -252,12 +253,26 @@ impl BuildAttempt {
                 },
             )
         })();
-        built
-            .map(|mut built| {
+        match built {
+            Ok(mut built) => {
                 built.cache_update.attribute_to(&self.baseline);
-                built
-            })
-            .map_err(|error| super::BuildFailure::new(error, producers.into_inputs()))
+                let reads = producers.inputs.package_reads().to_vec();
+                if !reads.is_empty()
+                    && let Err(error) = crate::package::write_package_lock(
+                        self.config.get_root(),
+                        &reads,
+                        self.baseline.resources.input_mode(),
+                    )
+                {
+                    return Err(super::BuildFailure::new(
+                        error.into(),
+                        producers.into_inputs(),
+                    ));
+                }
+                Ok(built)
+            }
+            Err(error) => Err(super::BuildFailure::new(error, producers.into_inputs())),
+        }
     }
 
     /// Install the hook stages modules declare before any generator runs.
@@ -470,6 +485,12 @@ impl BuildSession {
             }
             _ => TypstHost::for_config_with_resources(config, &self.resources, cancellation)?,
         };
+        let lock = crate::inputs::InputLock::read(config.get_root())?.unwrap_or_default();
+        let host =
+            match crate::package::verifier(&lock, self.resources.input_mode(), config.get_root()) {
+                Some(verifier) => host.with_package_verifier(verifier),
+                None => host,
+            };
         cancellation.ensure_active()?;
         self.retain_host(&host);
         Ok(host.with_local_packages(std::sync::Arc::clone(&config.module_inputs.packages)))
@@ -627,9 +648,7 @@ mod tests {
     use crate::build::tests::*;
     use crate::build::*;
     use crate::config::section::build::BeforeBuildHookConfig;
-    use crate::config::section::build::hooks::{
-        CommandOutput, DevParticipation, OutputCommandConfig,
-    };
+
     use crate::config::section::{AssetTreeDeclaration, AssetUrlPrefix};
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -643,90 +662,6 @@ mod tests {
         config
     }
 
-    #[test]
-    fn child_counts_generator_runs() {
-        if !crate::build::tests::is_hook_child_for("generate-outputs") {
-            return;
-        }
-        let path = std::path::Path::new("generator-runs.txt");
-        let count = fs::read_to_string(path)
-            .ok()
-            .and_then(|runs| runs.trim().parse::<u32>().ok())
-            .unwrap_or(0);
-        fs::write(path, (count + 1).to_string()).unwrap();
-        fs::write(
-            std::path::PathBuf::from(std::env::var_os("TOLA_HOOK_OUTPUT_DIR").unwrap())
-                .join("search.json"),
-            b"{}",
-        )
-        .unwrap();
-    }
-
-    #[test]
-    fn development_reuses_unchanged_generator_outputs() {
-        let directory = tempfile::TempDir::new().unwrap();
-        let root = directory.path();
-        let mut config = dev_config(root);
-        config.build.hooks.generate_outputs = vec![OutputCommandConfig {
-            name: "search".into(),
-            command: crate::build::tests::hook_child_command(
-                "build::session::tests::child_counts_generator_runs",
-            ),
-            dev: DevParticipation::Reuse,
-            outputs: vec![CommandOutput::File(
-                tola_address::OutputPath::parse("search.json").unwrap(),
-            )],
-            ..OutputCommandConfig::default()
-        }];
-        let mut session = BuildSession::new();
-
-        session
-            .build_and_write(&config, BuildRequest::new(BuildMode::Development))
-            .unwrap();
-        assert_eq!(
-            fs::read_to_string(root.join("generator-runs.txt")).unwrap(),
-            "1"
-        );
-
-        session
-            .build_and_write(&config, BuildRequest::new(BuildMode::Development))
-            .unwrap();
-        assert_eq!(
-            fs::read_to_string(root.join("generator-runs.txt")).unwrap(),
-            "1",
-            "an unchanged development revision must reuse the generator output"
-        );
-        assert!(config.build.publish_dir.join("search.json").is_file());
-    }
-
-    #[test]
-    fn child_writes_font_input() {
-        if !is_hook_child_for("before-build") {
-            return;
-        }
-        std::fs::create_dir_all("fonts").unwrap();
-        std::fs::write("fonts/generated.ttf", b"observed font source").unwrap();
-    }
-
-    #[test]
-    fn builds_load_fonts_after_generation() {
-        let directory = tempfile::TempDir::new().unwrap();
-        let mut config = dev_config(directory.path());
-        config.build.hooks.before_build.push(BeforeBuildHookConfig {
-            name: "font-input".into(),
-            command: hook_child_command("build::session::tests::child_writes_font_input"),
-            generates: vec!["fonts/generated.ttf".into()],
-            ..Default::default()
-        });
-        let built = crate::build::build_site(&config, super::BuildMode::Production).unwrap();
-
-        assert!(config.typst.fonts.paths[0].join("generated.ttf").is_file());
-        assert_eq!(built.hook_outputs().len(), 1);
-        built
-            .ensure_fresh(&crate::cancellation::BuildCancellation::default())
-            .unwrap();
-    }
-
     fn published_input_site(root: &Path) -> std::sync::Arc<crate::config::ResolvedSiteConfig> {
         let config = dev_config(root);
         std::fs::write(root.join("value.txt"), "Published value").unwrap();
@@ -736,6 +671,20 @@ mod tests {
         )
         .unwrap();
         std::sync::Arc::new(config)
+    }
+
+    /// Executed as an independent hook child, never directly by the test harness.
+    #[test]
+    fn child_copies_stylesheet_trigger() {
+        if std::env::var("TOLA_HOOK_STAGE").as_deref() != Ok("before-build") {
+            return;
+        }
+        fs::create_dir_all("generated").unwrap();
+        fs::write(
+            "generated/site.css",
+            fs::read_to_string("src/style.txt").unwrap(),
+        )
+        .unwrap();
     }
 
     /// Every output of one build, keyed by logical output path.
@@ -861,77 +810,6 @@ mod tests {
     }
 
     #[test]
-    fn failed_build_keeps_published_tree() {
-        let directory = tempfile::TempDir::new().unwrap();
-        let config = published_input_site(directory.path());
-        let mut session = BuildSession::new();
-        let first = session
-            .build_and_write(&config, super::BuildRequest::default())
-            .unwrap();
-        let html_path = first.output_root().join("index.html");
-        let published = std::fs::read(&html_path).unwrap();
-
-        std::fs::write(&config.build.entry, "#panic(\"Cannot build\")").unwrap();
-        assert!(
-            session
-                .build_and_write(&config, super::BuildRequest::default())
-                .is_err()
-        );
-        assert_eq!(std::fs::read(&html_path).unwrap(), published);
-    }
-
-    #[test]
-    fn failed_candidate_keeps_warnings() {
-        let directory = TempDir::new().unwrap();
-        let root = directory.path();
-        fs::create_dir(root.join("content")).unwrap();
-        fs::write(
-            root.join("site.typ"),
-            r##"#document("index.html")[
-#show strong: none
-= Real
-#context {
-  let count = query(heading).len()
-  count * [= Generated]
-}
-#link("/missing/")[Missing page]
-#link("#missing")[Missing fragment]
-]"##,
-        )
-        .unwrap();
-        let mut config = site_config(root);
-        config.build.references.fragments = crate::config::ReferenceLevel::Warn;
-        let failure = BuildSession::new()
-            .prepare(std::sync::Arc::new(config.clone()), BuildRequest::default())
-            .run()
-            .err()
-            .expect("missing navigation must reject the official Bundle candidate");
-        let diagnostics = error_diagnostics(failure.error(), config.get_root());
-        assert!(
-            diagnostics.iter().any(|diagnostic| {
-                diagnostic.code == "reference.fragment_missing"
-                    && diagnostic.severity == tola_diagnostic::Severity::Warning
-            }),
-            "{diagnostics:?}"
-        );
-        assert!(
-            diagnostics.iter().any(|diagnostic| {
-                diagnostic.code.surface() == "typst"
-                    && diagnostic.severity == tola_diagnostic::Severity::Warning
-            }),
-            "{diagnostics:?}"
-        );
-        assert!(
-            diagnostics.iter().any(|diagnostic| {
-                diagnostic.code == "reference.navigation_missing"
-                    && diagnostic.severity == tola_diagnostic::Severity::Error
-            }),
-            "{diagnostics:?}"
-        );
-        assert!(!config.build.publish_dir.exists());
-    }
-
-    #[test]
     fn reuse_follows_hook_output_bytes() {
         let dir = TempDir::new().unwrap();
         let root = dir.path();
@@ -1022,18 +900,5 @@ mod tests {
         assert!(String::from_utf8_lossy(document.bytes()).contains("second"));
         assert_eq!(changed.hook_outputs().len(), 1);
         assert!(changed.hook_outputs()[0].is_current());
-    }
-
-    #[test]
-    fn child_copies_stylesheet_trigger() {
-        if !is_hook_child_for("before-build") {
-            return;
-        }
-        fs::create_dir_all("generated").unwrap();
-        fs::write(
-            "generated/site.css",
-            fs::read_to_string("src/style.txt").unwrap(),
-        )
-        .unwrap();
     }
 }

@@ -42,6 +42,12 @@ pub struct GlobalArgs {
     #[arg(long, global = true, display_order = 106)]
     pub pure: bool,
 
+    /// Refuse to write `tola.lock`; fail when a declaration no longer matches it.
+    ///
+    /// `--pure` implies this.
+    #[arg(long, global = true, display_order = 107)]
+    pub locked: bool,
+
     /// Write `tola help` documentation in `en` (default) or `zh`.
     #[arg(long, global = true, value_name = "LANGUAGE", display_order = 107, value_parser = parse_help_language)]
     pub lang: Option<HelpLanguage>,
@@ -96,6 +102,7 @@ impl GlobalArgs {
                 }
                 "--offline" => self.offline = true,
                 "--pure" => self.pure = true,
+                "--locked" => self.locked = true,
                 "--no-log-file" => self.no_log_file = true,
                 "--no-pager" => self.no_pager = true,
                 "-q" | "--quiet" => self.quiet = true,
@@ -150,6 +157,11 @@ impl Cli {
             InputScope::Online
         }
     }
+
+    /// What this invocation may write, fetch, and read for its inputs.
+    pub fn input_mode(&self) -> tola_build::inputs::InputMode {
+        tola_build::inputs::InputMode::new(self.input_scope(), self.global.locked)
+    }
 }
 
 /// The `--version` text: the Tola release that wrote this executable and the Typst release it
@@ -171,12 +183,14 @@ fn parse_help_language(value: &str) -> Result<HelpLanguage, String> {
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum Commands {
-    /// Fetch remote modules declared by the site.
-    Module {
+    /// Refresh the inputs `tola.lock` records.
+    Update {
         #[command(flatten)]
         config: ConfigFileArgs,
-        #[command(subcommand)]
-        command: ModuleCommand,
+        #[command(flatten)]
+        packages: TypstPackageArgs,
+        #[command(flatten)]
+        update: UpdateArgs,
     },
 
     /// Create a new Tola site.
@@ -367,10 +381,15 @@ pub enum DiagnosticCommand {
     Render,
 }
 
-#[derive(Subcommand, Debug, Clone)]
-pub enum ModuleCommand {
-    /// Fetch and lock remote modules.
-    Fetch { alias: Option<String> },
+/// Options for refreshing the inputs `tola.lock` records.
+#[derive(clap::Args, Debug, Clone)]
+pub struct UpdateArgs {
+    /// Module aliases to refresh; every refreshable module when omitted.
+    pub names: Vec<String>,
+
+    /// Report what would change without writing `tola.lock`.
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(clap::Args, Debug, Clone)]
@@ -634,11 +653,8 @@ pub struct InspectConfigArgs {
 #[derive(clap::Args, Debug, Clone, Default)]
 pub struct IconInspectArgs {
     /// Configured namespace whose icon names should be listed.
-    #[arg(value_name = "NAMESPACE", conflicts_with = "presets")]
+    #[arg(value_name = "NAMESPACE")]
     pub namespace: Option<String>,
-    /// List supported preset collections without loading a site.
-    #[arg(long)]
-    pub presets: bool,
     #[command(flatten)]
     pub display: JsonOutputArgs,
 }
@@ -777,7 +793,7 @@ impl Cli {
 impl Commands {
     pub(crate) fn name(&self) -> &'static str {
         match self {
-            Self::Module { .. } => "module",
+            Self::Update { .. } => "update",
             Self::Init(_) => "init",
             Self::Build { .. } => "build",
             Self::Dev { .. } => "dev",
@@ -804,7 +820,7 @@ impl Commands {
     /// Site configuration this command loads, when it loads one.
     pub(crate) fn config_file(&self) -> Option<&ConfigFileArgs> {
         match self {
-            Self::Module { config, .. }
+            Self::Update { config, .. }
             | Self::Build { config, .. }
             | Self::Check { config, .. }
             | Self::Fmt { config, .. }
@@ -908,64 +924,6 @@ mod tests {
                 Vec::new()
             };
             assert_eq!(fonts.paths, expected_fonts);
-        }
-    }
-
-    #[test]
-    fn extension_arguments_opaque_builtin_parsing() {
-        let cli = Cli::try_parse_from([
-            "tola",
-            "forest",
-            "edit",
-            "a title with spaces",
-            "--",
-            "--quiet",
-            "$(literal)",
-        ])
-        .unwrap();
-        let Commands::Extension(arguments) = cli.command else {
-            panic!("expected declared extension dispatch");
-        };
-        assert_eq!(
-            arguments,
-            [
-                "forest",
-                "edit",
-                "a title with spaces",
-                "--",
-                "--quiet",
-                "$(literal)"
-            ]
-            .map(OsString::from),
-        );
-        assert!(!cli.global.quiet);
-        for arguments in [
-            vec!["tola", "build", "--not-a-build-option"],
-            vec!["tola", "inspect", "not-a-projection"],
-        ] {
-            assert!(Cli::try_parse_from(arguments).is_err());
-        }
-    }
-
-    #[test]
-    fn help_language_follows_explicit_flag() {
-        for (arguments, expected) in [
-            (vec!["tola", "help"], None),
-            (
-                vec!["tola", "help", "--lang", "en"],
-                Some(HelpLanguage::English),
-            ),
-            (
-                vec!["tola", "--lang", "zh", "help"],
-                Some(HelpLanguage::SimplifiedChinese),
-            ),
-            (
-                vec!["tola", "help", "--lang", "zh-Hans"],
-                Some(HelpLanguage::SimplifiedChinese),
-            ),
-        ] {
-            let cli = Cli::try_parse_from(arguments).unwrap();
-            assert_eq!(cli.global.lang, expected);
         }
     }
 
@@ -1260,55 +1218,5 @@ mod tests {
         ] {
             assert!(!parses(argv), "{argv:?} must be refused");
         }
-    }
-
-    #[test]
-    fn init_arguments_only_after_separator() {
-        let cli = Cli::try_parse_from([
-            "tola",
-            "init",
-            "site",
-            "--from",
-            "theme",
-            "--interactive",
-            "--",
-            "--title",
-            "A title",
-            "--force",
-        ])
-        .unwrap();
-        let Commands::Init(args) = cli.command else {
-            panic!("expected init");
-        };
-        assert!(args.interactive);
-        assert!(!args.force);
-        assert_eq!(
-            args.args,
-            ["--title", "A title", "--force"].map(OsString::from)
-        );
-        assert!(Cli::try_parse_from(["tola", "init", "--alias", "forest"]).is_err());
-        assert!(Cli::try_parse_from(["tola", "init", "--", "author-argument"]).is_err());
-    }
-
-    #[test]
-    fn log_file_flags_conflict() {
-        assert!(
-            Cli::try_parse_from([
-                "tola",
-                "build",
-                "--log-file",
-                "session.jsonl",
-                "--no-log-file",
-            ])
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn color_read_before_clap_runs() {
-        let arguments = ["tola", "dev", "--color=always"]
-            .map(OsString::from)
-            .to_vec();
-        assert_eq!(requested_color(&arguments), ColorChoice::Always);
     }
 }

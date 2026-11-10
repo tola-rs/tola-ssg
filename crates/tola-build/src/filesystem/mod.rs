@@ -83,8 +83,9 @@ pub use identity::FilesystemSourceIdentity;
 pub(crate) use identity::{FilesystemSourceKind, FilesystemWatchEvidence};
 pub(crate) use lock::{FileLock, FileLockError};
 pub(crate) use observation::{
-    FilesystemSourceFile, FilesystemSourceObservation, observe_file_source, observe_tree_source,
-    observe_tree_source_selected, walk_tree_members, walk_tree_members_selected,
+    FilesystemSourceFile, FilesystemSourceObservation, SelectedTreeObservation, TreeObservation,
+    observe_file_source, observe_tree_source, observe_tree_source_selected, walk_tree_members,
+    walk_tree_members_selected,
 };
 pub use output_boundary::OutputBoundaryError;
 pub(crate) use output_boundary::{

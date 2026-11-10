@@ -95,25 +95,36 @@ pub(super) fn prepare(
     source_item(root, named.unwrap_or(source.id()), None, client_root)
 }
 
+/// One incoming-calls read: the roots, view, and compiled revision the answer reads.
+pub(super) struct Incoming<'a> {
+    pub(super) disk: &'a mut crate::analysis::DiskSources,
+    pub(super) root: &'a Path,
+    pub(super) view: &'a SourceView,
+    pub(super) locations: Option<&'a PackageLocations>,
+    pub(super) boundary: &'a SourceBoundary,
+    pub(super) config: &'a ResolvedSiteConfig,
+    pub(super) compilation: &'a SourceCompilation,
+    pub(super) source: &'a Source,
+    pub(super) cancellation: &'a BuildCancellation,
+    pub(super) client_root: &'a crate::uri::ClientRoot,
+}
+
 /// Every source that reaches `source`, with the ranges inside each that write its path.
 ///
 /// Sources resolve through `root`; item URIs keep the spelling `client_root` maps them to.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the incoming read takes source and client roots, disk, view, locations, boundary, config, compilation, source, and cancellation"
-)]
-pub(super) fn incoming(
-    disk: &mut crate::analysis::DiskSources,
-    root: &Path,
-    view: &SourceView,
-    locations: Option<&PackageLocations>,
-    boundary: &SourceBoundary,
-    config: &ResolvedSiteConfig,
-    compilation: &SourceCompilation,
-    source: &Source,
-    cancellation: &BuildCancellation,
-    client_root: &crate::uri::ClientRoot,
-) -> Result<Vec<CallHierarchyIncomingCall>> {
+pub(super) fn incoming(inputs: Incoming<'_>) -> Result<Vec<CallHierarchyIncomingCall>> {
+    let Incoming {
+        disk,
+        root,
+        view,
+        locations,
+        boundary,
+        config,
+        compilation,
+        source,
+        cancellation,
+        client_root,
+    } = inputs;
     cancellation.ensure_active()?;
     let resolver = crate::analysis::file_resolver(locations, boundary);
     let resolved = tola_build::filesystem::normalize_existing_prefix(root);
@@ -135,17 +146,17 @@ pub(super) fn incoming(
                 detail: served_at(std::slice::from_ref(&page.route)),
             });
     }
-    let graph = crate::analysis::source_only_graph(
-        &resolved,
+    let graph = crate::analysis::source_only_graph(crate::analysis::SourceOnlyGraph {
+        root: &resolved,
         view,
         source,
         locations,
         boundary,
-        true,
+        include_dependents: true,
         disk,
-        None,
+        cache: None,
         cancellation,
-    )?;
+    })?;
     for names in graph.sources() {
         cancellation.ensure_active()?;
         let writer = names.source().id();
@@ -352,18 +363,18 @@ mod tests {
         name: &str,
     ) -> Vec<CallHierarchyIncomingCall> {
         let root = configuration.get_root();
-        incoming(
-            &mut crate::analysis::DiskSources::default(),
+        incoming(Incoming {
+            disk: &mut crate::analysis::DiskSources::default(),
             root,
-            &SourceView::default(),
-            None,
-            &crate::sources::base_source_boundary(root, true),
-            configuration,
-            revision.checked().expect("the site compiles"),
-            &source(root, name),
+            view: &SourceView::default(),
+            locations: None,
+            boundary: &crate::sources::base_source_boundary(root, true),
+            config: configuration,
+            compilation: revision.checked().expect("the site compiles"),
+            source: &source(root, name),
             cancellation,
-            &crate::uri::ClientRoot::new(root),
-        )
+            client_root: &crate::uri::ClientRoot::new(root),
+        })
         .unwrap()
     }
 

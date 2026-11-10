@@ -30,6 +30,15 @@ just ctx --check .agents/DEV-SKILL.md
 - Conclusion first, then the reason; keep only details that change a decision.
 - Report commands actually run and their results; say when something was not run.
 - Raise a wrong premise in the first sentence.
+- When the question is what a boundary should be, answer the target before the path; see `Design`.
+
+### Design
+
+- A question about what a boundary should be is answered from the target, not from the current tree. State the invariant the boundary would own, the dependency direction it fixes, and the end-state graph before costing the move.
+- Existing coupling, missing prerequisites, and in-flight work decide when the change lands, never whether the target is right. Name them as schedule when they are schedule; never let them stand in for design merit.
+- Test every perceived blocker as a claim: say what it would take to dissolve it and whether the dissolved state is cleaner than the alternative. A blocker that dissolves into a worse interface is the argument for `no`.
+- A `no` must hold even if its objections were solved, and it names the falsifier that would reverse it.
+- Separate the two answers — "the target should be X" and "the path is Y then Z" — and do not merge them to avoid defending the target.
 
 ### Report
 
@@ -124,6 +133,7 @@ Each document has one job; a fact lives in exactly one of them.
 - Workspace crates live under `crates/`; the application is `src/` (`tola`).
 - Focused loops: `cargo test --locked -p tola <name>`, `cargo test --locked -p tola-build`.
 - Format with `cargo fmt --all`; lint with `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`.
+- Test-only imports and helpers live inside `mod tests`. Never mark an item or import `#[cfg(test)]` beside production code: a helper two test modules share is written in each `mod tests` where it is used.
 
 ### Nushell
 

@@ -136,7 +136,12 @@ pub fn configured_input_observation(config: &ResolvedSiteConfig) -> InputObserva
         let root = match &declaration.source {
             crate::modules::ModuleSource::Local { path } => config.get_root().join(path),
             crate::modules::ModuleSource::Remote { .. } => {
-                match crate::modules::declared_root(config.get_root(), name, &declaration.source) {
+                match crate::inputs::declaration_root(
+                    config.get_root(),
+                    config.vendor().path.as_deref(),
+                    name,
+                    &declaration.source,
+                ) {
                     Ok(root) => root,
                     Err(_) => continue,
                 }

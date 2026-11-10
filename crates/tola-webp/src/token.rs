@@ -215,6 +215,19 @@ impl Default for TokenCosts {
     }
 }
 
+/// The running state of one wide coefficient-block scan.
+///
+/// Every field is a borrow or a copy, so continuing a scan allocates nothing.
+struct WideScan<'a> {
+    levels: &'a [i16; 16],
+    plane: CoefficientPlane,
+    first: usize,
+    rate: u64,
+    position: usize,
+    context: usize,
+    last: usize,
+}
+
 impl TokenCosts {
     pub(crate) fn new(probs: &[u8; COEFFICIENT_PROBABILITIES]) -> Self {
         let mut tokens = [[0; TOKENS]; ENTRIES];
@@ -371,7 +384,15 @@ impl TokenCosts {
             let first_magnitude = levels[usize::from(offsets & 15)].unsigned_abs();
             let second_magnitude = levels[usize::from(offsets >> 4)].unsigned_abs();
             if (first_magnitude | second_magnitude) >= 64 {
-                return self.block_rate_wide(levels, plane, first, rate, position, context, last);
+                return self.block_rate_wide(WideScan {
+                    levels,
+                    plane,
+                    first,
+                    rate,
+                    position,
+                    context,
+                    last,
+                });
             }
             let packed = usize::from(first_magnitude | (second_magnitude << 6)) & 0xfff;
             rate += u64::from(
@@ -410,21 +431,17 @@ impl TokenCosts {
     }
 
     /// Continue from the first pair carrying a magnitude of 64 or more.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "the scan continues from the caller's position, running rate, and context"
-    )]
     #[inline(never)]
-    fn block_rate_wide(
-        &self,
-        levels: &[i16; 16],
-        plane: CoefficientPlane,
-        first: usize,
-        mut rate: u64,
-        mut position: usize,
-        mut context: usize,
-        last: usize,
-    ) -> (u64, bool) {
+    fn block_rate_wide(&self, scan: WideScan<'_>) -> (u64, bool) {
+        let WideScan {
+            levels,
+            plane,
+            first,
+            mut rate,
+            mut position,
+            mut context,
+            last,
+        } = scan;
         let mut previous_was_zero = position != first && levels[ZIGZAG[position - 1]] == 0;
         while position < last {
             let first_magnitude = levels[ZIGZAG[position]].unsigned_abs();

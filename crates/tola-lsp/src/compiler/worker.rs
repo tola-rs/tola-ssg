@@ -279,24 +279,24 @@ where
                     SourceQuery::Completion(_) | SourceQuery::InlayHints(_)
                 ),
             );
-            let mut response = crate::query::respond(
+            let mut response = crate::query::respond(crate::query::QueryRequest {
                 session,
-                &mut self.compilations,
-                &mut self.disk,
-                &mut self.graphs,
-                &mut self.bibliographies,
-                &mut self.entity_queries,
-                configuration,
-                request.sources.source_revision,
-                &request.sources.overrides,
-                &request.view,
+                compilations: &mut self.compilations,
+                disk: &mut self.disk,
+                graphs: &mut self.graphs,
+                bibliographies: &mut self.bibliographies,
+                entity_queries: &mut self.entity_queries,
+                config: configuration,
+                source_revision: request.sources.source_revision,
+                overrides: &request.sources.overrides,
+                view: &request.view,
                 published,
-                &request.query,
-                request.routes_as_hints,
-                request.check_progress,
-                &request.sources.cancellation,
-                &client_root,
-            )
+                query: &request.query,
+                routes_as_hints: request.routes_as_hints,
+                check_progress: request.check_progress,
+                cancellation: &request.sources.cancellation,
+                client_root: &client_root,
+            })
             .map_err(SourceFailure::of)?;
             if let SourceReply::Definition(Some(definition)) = &mut response
                 && let Some(directory) = request.view.package_sources()

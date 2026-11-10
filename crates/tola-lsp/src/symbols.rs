@@ -1,8 +1,8 @@
 //! The protocol's symbols: one source's outline and labels, and the site's realized pages.
 
 use lsp_types::{
-    DocumentSymbol, DocumentSymbolResponse, Location, OneOf, Position, Range, SymbolInformation,
-    SymbolKind, Uri, WorkspaceSymbol,
+    DocumentSymbol, DocumentSymbolResponse, Location, OneOf, Position, Range, SymbolKind,
+    WorkspaceSymbol,
 };
 use percent_encoding::percent_decode_str;
 use tola_typst_syntax::outline::{self as outline_of, Declaration, DeclarationKind};
@@ -97,67 +97,20 @@ pub(super) fn labels(source: &Source, query: &str) -> Vec<(String, lsp_types::Ra
     found
 }
 
-pub(super) fn outline(
-    source: &Source,
-    uri: &Uri,
-    hierarchical: bool,
-) -> Option<DocumentSymbolResponse> {
+pub(super) fn outline(source: &Source) -> Option<DocumentSymbolResponse> {
     let symbols = outline_of::outline(source)?;
     let first_break = position::first_break(source.text());
-    if hierarchical {
-        Some(DocumentSymbolResponse::Nested(
-            symbols
-                .into_iter()
-                .filter_map(|symbol| document_symbol(symbol, source.lines(), first_break))
-                .collect(),
-        ))
-    } else {
-        let mut flat = Vec::new();
-        flatten(symbols, source.lines(), uri, None, &mut flat, first_break);
-        Some(DocumentSymbolResponse::Flat(flat))
-    }
+    Some(DocumentSymbolResponse::Nested(
+        symbols
+            .into_iter()
+            .filter_map(|symbol| document_symbol(symbol, source.lines(), first_break))
+            .collect(),
+    ))
 }
 
 #[expect(
     deprecated,
-    reason = "SymbolInformation retains deprecated for older clients"
-)]
-fn flatten(
-    symbols: Vec<Declaration>,
-    lines: &Lines<String>,
-    uri: &Uri,
-    container: Option<&str>,
-    flat: &mut Vec<SymbolInformation>,
-    first_break: Option<usize>,
-) {
-    for symbol in symbols {
-        let Some(range) = position::utf16_range_indexed(lines, symbol.name_range, first_break)
-        else {
-            continue;
-        };
-        let parent = (!symbol.children.is_empty()).then(|| symbol.name.clone());
-        flat.push(SymbolInformation {
-            name: symbol.name,
-            kind: symbol_kind(symbol.kind),
-            tags: None,
-            deprecated: None,
-            location: Location::new(uri.clone(), range),
-            container_name: container.map(str::to_owned),
-        });
-        flatten(
-            symbol.children,
-            lines,
-            uri,
-            parent.as_deref(),
-            flat,
-            first_break,
-        );
-    }
-}
-
-#[expect(
-    deprecated,
-    reason = "the protocol keeps `deprecated` for clients that predate symbol tags"
+    reason = "lsp-types marks the field deprecated but requires it to construct DocumentSymbol"
 )]
 fn document_symbol(
     declaration: Declaration,
@@ -267,8 +220,7 @@ mod tests {
     fn symbol_ranges_follow_protocol_lines() {
         let text = "#let first = 1\u{2028}#let greet(name) = {\n  [Hi #name]\n}\n";
         let source = Source::detached(text);
-        let uri = "untitled:Symbols".parse().unwrap();
-        let Some(DocumentSymbolResponse::Nested(symbols)) = outline(&source, &uri, true) else {
+        let Some(DocumentSymbolResponse::Nested(symbols)) = outline(&source) else {
             panic!("hierarchical document symbols");
         };
         let greet = symbols
@@ -280,16 +232,5 @@ mod tests {
         let start = position::byte_offset(source.lines(), greet.selection_range.start).unwrap();
         let end = position::byte_offset(source.lines(), greet.selection_range.end).unwrap();
         assert_eq!(&text[start..end], "greet");
-        let Some(DocumentSymbolResponse::Flat(flat)) = outline(&source, &uri, false) else {
-            panic!("flat document symbols");
-        };
-        assert_eq!(
-            flat.iter()
-                .find(|symbol| symbol.name == "greet")
-                .unwrap()
-                .location
-                .range,
-            greet.selection_range
-        );
     }
 }

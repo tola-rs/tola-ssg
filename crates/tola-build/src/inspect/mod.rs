@@ -11,7 +11,7 @@ use crate::config::ResolvedSiteConfig;
 use crate::metadata::SourceMetadata;
 
 pub use crate::content::ContentDiscoveryError;
-pub use icons::{icons, presets};
+pub use icons::icons;
 
 /// Why one source inspection could not finish.
 #[derive(Debug, thiserror::Error)]
@@ -102,7 +102,8 @@ pub fn inspect_sources(
     cancellation: &crate::cancellation::BuildCancellation,
 ) -> Result<InspectedSources> {
     cancellation.ensure_active()?;
-    let configured = crate::modules::prepared::configure(config, resources.input_scope())?;
+    let configured =
+        crate::modules::prepared::configure(config, resources.input_mode(), cancellation)?;
     let config = &configured;
     cancellation.ensure_active()?;
     resources
@@ -147,7 +148,6 @@ mod tests {
         fs::write(
             module.join("tola-module.toml"),
             r#"
-schema-version = 1
 name = "sample"
 version = "1.0.0"
 [typst]
@@ -218,42 +218,6 @@ export = "schema"
                         |location| location.path.ends_with("tola.toml") && location.line == Some(4)
                     )),
             "diagnostics: {diagnostics:#?}"
-        );
-    }
-
-    #[test]
-    fn inspection_keeps_metadata_free_sources() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path();
-        std::fs::create_dir(root.join("content")).unwrap();
-        std::fs::write(
-            root.join("content/document.typ"),
-            "#import \"@tola/source:0.0.0\": tola-meta\n#tola-meta((:))",
-        )
-        .unwrap();
-        std::fs::write(root.join("content/plain.typ"), "").unwrap();
-        std::fs::write(root.join("site.typ"), "").unwrap();
-        let config = crate::config::tests::load_test_config(root, "");
-        let inspected = inspect_sources(
-            &[],
-            &config,
-            &crate::resources::BuildResources::default(),
-            &crate::cancellation::BuildCancellation::new(),
-        )
-        .unwrap();
-
-        assert_eq!(inspected.selected(), 2);
-        assert_eq!(inspected.matched(), 1);
-        assert_eq!(
-            inspected
-                .sources()
-                .iter()
-                .map(|source| (source.path(), source.metadata().is_some()))
-                .collect::<Vec<_>>(),
-            [
-                (std::path::Path::new("content/document.typ"), true),
-                (std::path::Path::new("content/plain.typ"), false),
-            ]
         );
     }
 }

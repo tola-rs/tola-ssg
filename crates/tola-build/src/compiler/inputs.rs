@@ -9,6 +9,7 @@ use tola_typst::sort_package_checks;
 pub(crate) struct BuildInputs {
     file_reads: FileReads,
     package_checks: PackageChecks,
+    package_reads: Vec<tola_typst::PackageRead>,
     successful_reads: HashSet<tola_typst::FileRead>,
 }
 
@@ -24,6 +25,12 @@ impl BuildInputs {
         );
         self.package_checks
             .record(accessed.package_checks.iter().cloned());
+        self.package_reads.extend(accessed.package_reads());
+    }
+
+    /// The package directories this attempt actually read.
+    pub(crate) fn package_reads(&self) -> &[tola_typst::PackageRead] {
+        &self.package_reads
     }
 
     pub(crate) fn successful_reads(&self) -> impl Iterator<Item = &tola_typst::FileRead> {

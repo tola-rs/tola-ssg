@@ -10,6 +10,7 @@ mod store;
 mod unread;
 
 pub(crate) use projection::compiler_source_range;
+pub(crate) use publish::PublishInputs;
 pub(crate) use refine::refine_unread_configuration;
 pub(crate) use store::{ClientDiagnostics, Pulled};
 pub(crate) use unread::UnreadImports;
@@ -89,7 +90,13 @@ pub(crate) mod tests {
     pub(crate) struct Site {
         /// Keeps the site's directory alive for as long as the test holds it. Only the unix
         /// symlink test reads the path, so other targets see the handle as unused.
-        #[allow(dead_code)]
+        #[cfg_attr(
+            not(unix),
+            expect(
+                dead_code,
+                reason = "the TempDir is kept alive for the unix symlink tests"
+            )
+        )]
         pub(crate) root: tempfile::TempDir,
         /// The root as the server spells it: the filesystem's own spelling, symlinks followed.
         pub(crate) physical: PathBuf,
@@ -138,15 +145,15 @@ pub(crate) mod tests {
         ) {
             let selected = selected_interfaces(&self.physical, &self.open);
             self.client
-                .publish(
-                    &mut self.bytes,
-                    &self.physical,
-                    &self.physical.join("index.typ"),
-                    &self.open,
+                .publish(crate::diagnostic::PublishInputs {
+                    output: &mut self.bytes,
+                    root: &self.physical,
+                    entry: &self.physical.join("index.typ"),
+                    open: &self.open,
                     features,
-                    &selected,
+                    selected: &selected,
                     diagnostics,
-                )
+                })
                 .unwrap();
         }
 

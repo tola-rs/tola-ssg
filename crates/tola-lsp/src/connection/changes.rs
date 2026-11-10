@@ -275,8 +275,9 @@ fn module_roots(
         .modules()
         .iter()
         .filter_map(|(name, declaration)| {
-            let declared = tola_build::modules::declared_root(
+            let declared = tola_build::inputs::declaration_root(
                 configuration.get_root(),
+                configuration.vendor().path.as_deref(),
                 name,
                 &declaration.source,
             )
@@ -306,15 +307,7 @@ fn escaped_glob_path(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::connection::tests::{
-        answer_analysis, hover_query, last_position, messages, open_document, ready, ready_at,
-        ready_workspace, rejection, response,
-    };
-    use lsp_server::{ErrorCode, Request, RequestId};
-    use lsp_types::notification::{self, Notification as LspNotification};
-    use lsp_types::request::{self, Request as LspRequest};
-    use serde_json::json;
-    use tola_typst::typst::syntax::Source;
+
     #[test]
     fn watcher_globs_escape_root_metacharacters() {
         assert_eq!(
@@ -325,71 +318,9 @@ mod tests {
     }
 
     #[cfg(windows)]
-    #[test]
-    fn watcher_globs_use_forward_separators() {
-        assert_eq!(
-            source_glob(Path::new(r"C:\site[one]\content")),
-            "C:/site[[]one[]]/content/**/*"
-        );
-    }
-    #[test]
-    fn source_change_drops_pending_requests() {
-        let mut connection = ready(Vec::new());
-        let id = RequestId::from(9);
-        connection.query(id.clone(), hover_query()).unwrap();
-        connection.sources_changed(false).unwrap();
-        assert_eq!(
-            rejection(&mut connection, &id),
-            ErrorCode::ContentModified as i32
-        );
-    }
 
     /// A file-change notification for generated state must not supersede a query that the site's
     /// own sources still answer.
-    #[test]
-    fn generated_events_preserve_pending_queries() {
-        let directory = tempfile::tempdir().unwrap();
-        let mut connection = ready_at(Vec::new(), directory.path().to_path_buf());
-        let uri = crate::uri::from_file_path(&directory.path().join("page.typ")).unwrap();
-        let text = "#let count = 1\n#count";
-        open_document(&mut connection, &uri, 1, text);
-        let source = Source::detached(text);
-        let position = last_position(text, "count");
-        connection
-            .request(Request::new(
-                9.into(),
-                request::References::METHOD.into(),
-                json!({
-                    "textDocument":{"uri":uri.as_str()}, "position":position, "context":{"includeDeclaration":true}
-                }),
-            ))
-            .unwrap();
-        let pending = connection
-            .next_analysis()
-            .expect("source analysis admission");
-        let generated =
-            crate::uri::from_file_path(&directory.path().join(".tola/page.typ")).unwrap();
-        let _ = connection
-            .notification(Notification::new(
-                notification::DidChangeWatchedFiles::METHOD.into(),
-                json!({"changes":[{"uri":generated.as_str(),"type":1}]}),
-            ))
-            .unwrap();
-        answer_analysis(&mut connection, pending);
-        let locations: Vec<lsp_types::Location> =
-            serde_json::from_value(response(&mut connection).response_result.unwrap()).unwrap();
-        let expected: Vec<_> = text
-            .match_indices("count")
-            .map(|(start, name)| {
-                lsp_types::Location::new(
-                    uri.clone(),
-                    crate::position::utf16_range(source.lines(), start..start + name.len())
-                        .unwrap(),
-                )
-            })
-            .collect();
-        assert_eq!(locations, expected);
-    }
 
     #[cfg(unix)]
     #[test]

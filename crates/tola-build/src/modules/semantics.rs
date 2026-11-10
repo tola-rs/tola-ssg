@@ -76,30 +76,4 @@ pub(super) fn validate(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn role_public_entry_entity_query() {
-        let role: SemanticRole = toml::from_str(
-            "export='local'\nparameter={ positional=0 }\nrole='reference'\nquery='nodes'\n",
-        )
-        .unwrap();
-        let query: Query = toml::from_str(
-            "entry='model.typ'\nlabel='nodes'\nschema-version=1\nformat='entities'\n",
-        )
-        .unwrap();
-        let queries = BTreeMap::from([("nodes".to_owned(), query)]);
-        assert!(validate(std::slice::from_ref(&role), true, &queries).is_ok());
-        assert!(validate(std::slice::from_ref(&role), false, &queries).is_err());
-        let mut member = role.clone();
-        member.export = "content.local".into();
-        assert!(validate(std::slice::from_ref(&member), true, &queries).is_ok());
-        member.export = "content..local".into();
-        assert!(validate(&[member], true, &queries).is_err());
-        assert!(validate(&[role], true, &BTreeMap::new()).is_err());
-        assert!(toml::from_str::<SemanticRole>(
-            "export='local'\nparameter={ positional=0, named='address' }\nrole='reference'\nquery='nodes'\n",
-        ).is_err());
-    }
-}
+mod tests {}

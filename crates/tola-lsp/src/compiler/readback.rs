@@ -152,18 +152,18 @@ where
         let Some(compilation) = revision.checked() else {
             return Ok(SourceReply::IncomingCalls(None));
         };
-        crate::call_hierarchy::incoming(
-            &mut self.disk,
-            configuration.get_root(),
-            &request.view,
-            Some(&locations),
-            &boundary,
-            configuration,
+        crate::call_hierarchy::incoming(crate::call_hierarchy::Incoming {
+            disk: &mut self.disk,
+            root: configuration.get_root(),
+            view: &request.view,
+            locations: Some(&locations),
+            boundary: &boundary,
+            config: configuration,
             compilation,
-            &request.source,
-            &request.sources.cancellation,
-            &crate::uri::ClientRoot::new(&request.sources.root),
-        )
+            source: &request.source,
+            cancellation: &request.sources.cancellation,
+            client_root: &crate::uri::ClientRoot::new(&request.sources.root),
+        })
         .map(|calls| SourceReply::IncomingCalls(Some(calls)))
         .map_err(SourceFailure::of)
     }
@@ -241,16 +241,16 @@ where
         ) else {
             return Ok(SourceReply::CodeLenses(None));
         };
-        crate::lenses::respond(
+        crate::lenses::respond(crate::lenses::Lens {
             session,
-            &mut self.compilations,
-            configuration,
-            request.sources.source_revision,
-            &request.sources.root,
-            &request.sources.overrides,
-            &source,
-            &request.sources.cancellation,
-        )
+            compilations: &mut self.compilations,
+            config: configuration,
+            source_revision: request.sources.source_revision,
+            client_root: &request.sources.root,
+            overrides: &request.sources.overrides,
+            source: &source,
+            cancellation: &request.sources.cancellation,
+        })
         .map(SourceReply::CodeLenses)
         .map_err(SourceFailure::of)
     }

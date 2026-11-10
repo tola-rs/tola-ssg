@@ -912,38 +912,40 @@ fn observe_source(
             // Observe the union once; each alias selects its own published subset later.
             let observation = if publication.selections.is_some() {
                 crate::filesystem::observe_tree_source_selected(
-                    source_identity,
-                    boundary,
-                    previous,
-                    cancellation,
-                    display_root,
-                    TREE_MEMBER_LABEL,
-                    &|relative, directory| {
-                        if directory {
-                            publication.may_descend(relative)
-                        } else {
-                            publication.publishes(relative)
-                        }
+                    crate::filesystem::SelectedTreeObservation {
+                        source_identity,
+                        boundary,
+                        previous,
+                        cancellation,
+                        display_root,
+                        member_label: TREE_MEMBER_LABEL,
+                        selected: &|relative, directory| {
+                            if directory {
+                                publication.may_descend(relative)
+                            } else {
+                                publication.publishes(relative)
+                            }
+                        },
+                        validate_member: &validate,
                     },
-                    &validate,
                 )?
             } else {
-                crate::filesystem::observe_tree_source(
+                crate::filesystem::observe_tree_source(crate::filesystem::TreeObservation {
                     source_identity,
                     boundary,
                     previous,
                     changed_paths,
                     cancellation,
                     display_root,
-                    TREE_MEMBER_LABEL,
-                    &|relative, logical_source| {
+                    member_label: TREE_MEMBER_LABEL,
+                    validate_member: &|relative, logical_source| {
                         if publication.publishes(relative) {
                             validate(relative, logical_source)
                         } else {
                             Ok(())
                         }
                     },
-                )?
+                })?
             };
             if !publication.has_exact_owners() {
                 return Ok(observation);

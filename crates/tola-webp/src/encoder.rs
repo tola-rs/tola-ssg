@@ -1335,16 +1335,16 @@ fn analyze_i4<S: Simd>(
                 pixels,
                 coefficients: residual_coefficients(quantizer.simd, block_samples, &pixels),
             };
-            if let Some(candidate) = analyze_subblock(
+            if let Some(candidate) = analyze_subblock(SubblockInputs {
                 quantizer,
-                block_samples,
-                &prediction,
+                samples: block_samples,
+                prediction: &prediction,
                 mode_cost,
-                neighbors.y(block),
-                Quantization::Nearest,
-                None,
-                limit,
-            ) {
+                context: neighbors.y(block),
+                method: Quantization::Nearest,
+                previous_levels: None,
+                score_limit: limit,
+            }) {
                 best = Some(candidate);
             }
         }
@@ -1354,16 +1354,16 @@ fn analyze_i4<S: Simd>(
         // still a floor on any trellis refinement of it.
         if quantizer.lambda != 0
             && quantizer.lambda * candidate.mode_cost / 256 < candidate.score
-            && let Some(refined) = analyze_subblock(
+            && let Some(refined) = analyze_subblock(SubblockInputs {
                 quantizer,
-                block_samples,
-                &candidate.prediction,
-                candidate.mode_cost,
-                neighbors.y(block),
-                Quantization::Trellis,
-                Some(&candidate.levels),
-                candidate.score,
-            )
+                samples: block_samples,
+                prediction: &candidate.prediction,
+                mode_cost: candidate.mode_cost,
+                context: neighbors.y(block),
+                method: Quantization::Trellis,
+                previous_levels: Some(&candidate.levels),
+                score_limit: candidate.score,
+            })
         {
             candidate = refined;
         }
@@ -1389,20 +1389,29 @@ fn analyze_i4<S: Simd>(
     })
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "a candidate is scored from the quantizer, its prediction, context, and method, and the search's limits"
-)]
-fn analyze_subblock<S: Simd>(
-    quantizer: &Quantizer<S>,
-    samples: &[u8; 16],
-    prediction: &BlockPrediction,
+/// The scoring inputs of one subblock candidate.
+struct SubblockInputs<'a, S: Simd> {
+    quantizer: &'a Quantizer<S>,
+    samples: &'a [u8; 16],
+    prediction: &'a BlockPrediction,
     mode_cost: u64,
     context: usize,
     method: Quantization,
-    previous_levels: Option<&[i16; 16]>,
+    previous_levels: Option<&'a [i16; 16]>,
     score_limit: u64,
-) -> Option<BlockCandidate> {
+}
+
+fn analyze_subblock<S: Simd>(inputs: SubblockInputs<'_, S>) -> Option<BlockCandidate> {
+    let SubblockInputs {
+        quantizer,
+        samples,
+        prediction,
+        mode_cost,
+        context,
+        method,
+        previous_levels,
+        score_limit,
+    } = inputs;
     let levels = quantizer.block(
         &prediction.coefficients,
         CoefficientPlane::Luma,

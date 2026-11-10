@@ -183,10 +183,6 @@ mod tests {
     }
 
     #[test]
-    #[expect(
-        clippy::mutable_key_type,
-        reason = "the protocol defines a Uri-keyed map, and Uri carries its own parser state"
-    )]
     fn entity_edits_keep_open_versions() {
         use crate::connection::tests::{open_document, ready_at, ready_workspace};
         let temporary = tempfile::tempdir().unwrap();

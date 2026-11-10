@@ -4,8 +4,10 @@ Tola is a Rust workspace for a Typst-based static site generator. One root Typst
 
 ## Rules
 
-1. Ask before editing. A question, an assessment, or a bug report is not permission to change the tree. Report what you found and the change it implies; wait for approval.
-2. Report every two tool calls. Before the third one starts, write one or two lines: what changed, what it returned, what waits. A silent stretch longer than that is a defect. Announcing what you are about to do is not a report; the report follows the result.
+These rules bind the Lead, every teammate, and every subagent; they are requirements, not advice.
+
+1. **Report every two tool calls, before the third.** After every result, write one or two lines: what changed, what it returned, what waits. A third call without that line is a defect: stop and report before continuing. Announcing what you are about to do is not a report; the report follows the result. The Lead, every teammate, and every subagent report at this cadence, and a final summary never replaces it. A task is not complete until its report reaches the Lead; the Lead reports to the user.
+2. Ask before editing. A question, an assessment, or a bug report is not permission to change the tree. Report what you found and the change it implies; wait for approval.
 3. Stay in scope. No adjacent cleanup, renames, dependency bumps, formatting churn, or speculative features. No compatibility layers, aliases, or dual paths. Addition needs a reason; deletion does not.
 4. Do not build, test, or install to check your work. Read the source and edit it; the Lead runs the build, the tests, and the review once, at the end. A subagent that compiles the workspace or runs a suite starves the machine and stalls every other agent. One exception: a single parse check of a script you just wrote (`nu -c 'use tools/lib/x.nu *'`), never a repeated run.
 5. Do not invent tests. Add one only when the author asks or a real bug needs the smallest reproducer. Delete tests that pin rendered wording, private call order, or incidental bytes.
@@ -20,6 +22,7 @@ Tola is a Rust workspace for a Typst-based static site generator. One root Typst
 14. Stop on ambiguity. When the request, scope, or intended outcome is ambiguous, stop and ask before choosing a path; state the options and consequences. Do not pick a default to keep moving, and confirm understanding before a long or irreversible step.
 15. Write concise, precise code. No line-count padding; decompose at real boundaries and name locals and helpers so the logic reads at a glance. Names are short, clear, and rigorous: no arbitrary prefixes, no filler conjunctions.
 16. Watch the pace. When generation outruns digestion — a long uncommitted stretch, repeated churn, files growing without review — say so and propose a pause: review the recent code for quality, readability, naming, architecture, organization, and concision. The pause is a suggestion; do not start an unrequested refactor.
+17. **Judge the target before the path.** When asked whether a boundary should exist or how the code should be shaped, answer the end-state question first: the invariant the boundary would own, the dependency direction it fixes, and whether the solved state is cleaner than the alternative. Existing coupling, prerequisites, and in-flight work decide *when* the change lands, never *whether* the target is right. A `no` must hold even if every solvable objection were solved, and it names the falsifier that would reverse it.
 
 ## Context
 

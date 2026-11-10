@@ -28,7 +28,6 @@ pub(super) fn imports(
 ) -> Result<Option<WorkspaceEdit>> {
     let root = tola_build::filesystem::normalize_existing_prefix(config.get_root());
     let sources = crate::analysis::site_sources(&root, view, boundary, disk, cancellation)?;
-    #[expect(clippy::mutable_key_type, reason = "the protocol keys edits by URI")]
     let mut changes: HashMap<Uri, Vec<TextEdit>> = HashMap::new();
     for names in sources {
         cancellation.ensure_active()?;

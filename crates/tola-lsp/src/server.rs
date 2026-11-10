@@ -9,7 +9,7 @@ mod lanes;
 mod reader;
 mod serve;
 
-pub use serve::{HostSections, ServedWorkspace, serve};
+pub use serve::{HostSections, ServeRequest, ServedWorkspace, serve};
 
 #[cfg(test)]
 pub(crate) mod tests {
@@ -245,18 +245,18 @@ pub(crate) mod tests {
             thread::Builder::new()
                 .name("tola-lsp-test-server".to_owned())
                 .spawn(move || {
-                    let outcome = crate::serve(
-                        server_input,
-                        server_output,
-                        BuildResources::new()
+                    let outcome = crate::serve(crate::ServeRequest {
+                        reader: server_input,
+                        writer: server_output,
+                        resources: BuildResources::new()
                             .with_network_access(tola_build::NetworkAccess::Denied)
                             .without_system_fonts(),
-                        server_cancellation,
-                        load,
-                        |_: &[Diagnostic]| {},
-                        None,
-                        &[],
-                    );
+                        cancellation: server_cancellation,
+                        load_configuration: load,
+                        record_diagnostics: |_: &[Diagnostic]| {},
+                        named_configuration: None,
+                        host_sections: &[],
+                    });
                     let _ = exit.send(outcome);
                 })
                 .expect("a server thread");

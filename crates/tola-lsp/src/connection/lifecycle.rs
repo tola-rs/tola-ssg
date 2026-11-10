@@ -52,8 +52,6 @@ enum WorkspaceError {
     SeveralFolders,
     #[error("the workspace root must be a local file URI")]
     RootNotLocal(#[source] crate::uri::UriError),
-    #[error("resolve workspace root")]
-    UnresolvableRoot(#[source] std::io::Error),
     #[error("resolve workspace directory")]
     UnresolvableDirectory(#[source] std::io::Error),
     #[error("{0}")]
@@ -104,26 +102,15 @@ impl Workspace {
     }
 }
 
-#[expect(
-    deprecated,
-    reason = "LSP clients may still select a workspace through rootUri or rootPath"
-)]
 fn initialization_root(parameters: &InitializeParams) -> Result<PathBuf, WorkspaceError> {
     let folders = parameters.workspace_folders.as_deref().unwrap_or_default();
     if folders.len() > 1 {
         return Err(WorkspaceError::SeveralFolders);
     }
-    if let Some(uri) = parameters
-        .root_uri
-        .as_ref()
-        .or_else(|| folders.first().map(|folder| &folder.uri))
-    {
+    if let Some(folder) = folders.first() {
         // The client's own spelling of the root is kept: diagnostics are published back under the
         // identity the editor opened, while paths are normalized wherever Tola compares them.
-        return crate::uri::to_file_path(uri.as_str()).map_err(WorkspaceError::RootNotLocal);
-    }
-    if let Some(root) = &parameters.root_path {
-        return std::path::absolute(root).map_err(WorkspaceError::UnresolvableRoot);
+        return crate::uri::to_file_path(folder.uri.as_str()).map_err(WorkspaceError::RootNotLocal);
     }
     std::env::current_dir().map_err(WorkspaceError::UnresolvableDirectory)
 }
@@ -261,15 +248,15 @@ mod tests {
     fn initialization_refuses_roots_it_cannot_serve() {
         let parameters = |value| serde_json::from_value::<InitializeParams>(value).unwrap();
         assert!(
-            initialization_root(&parameters(
-                json!({"capabilities":{},"rootUri":"https://example.test/site"})
-            ))
+            initialization_root(&parameters(json!({
+                "capabilities":{},
+                "workspaceFolders":[{"uri":"https://example.test/site","name":"site"}],
+            })))
             .is_err()
         );
         assert!(
             initialization_root(&parameters(json!({
                 "capabilities":{},
-                "rootUri":"file:///site",
                 "workspaceFolders":[
                     {"uri":"file:///site","name":"site"},
                     {"uri":"file:///other","name":"other"},

@@ -108,25 +108,36 @@ impl FilesystemSourceObservation {
     }
 }
 
+/// The source identity, boundary, previous state, changed paths, and member policy of one tree observation.
+pub(crate) struct TreeObservation<'a> {
+    pub(crate) source_identity: &'a FilesystemSourceIdentity,
+    pub(crate) boundary: &'a tola_typst::SourceBoundary,
+    pub(crate) previous: Option<&'a FilesystemSourceObservation>,
+    pub(crate) changed_paths: &'a [PathBuf],
+    pub(crate) cancellation: &'a crate::cancellation::BuildCancellation,
+    pub(crate) display_root: &'a Path,
+    pub(crate) member_label: &'a str,
+    pub(crate) validate_member: &'a dyn Fn(&Path, &Path) -> Result<()>,
+}
+
 /// Observe one already-resolved recursive tree.
 ///
 /// The caller must resolve the canonical root immediately before this call and
 /// apply its root-symlink policy. Members that are symlinks or reparse points
 /// are rejected. `display_root` is the site root that reported paths are relative to.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "a tree observation reads source identity, boundary, previous state, changed paths, and the caller's member policy"
-)]
 pub(crate) fn observe_tree_source(
-    source_identity: &FilesystemSourceIdentity,
-    boundary: &tola_typst::SourceBoundary,
-    previous: Option<&FilesystemSourceObservation>,
-    changed_paths: &[PathBuf],
-    cancellation: &crate::cancellation::BuildCancellation,
-    display_root: &Path,
-    member_label: &str,
-    validate_member: &dyn Fn(&Path, &Path) -> Result<()>,
+    observation: TreeObservation<'_>,
 ) -> Result<FilesystemSourceObservation> {
+    let TreeObservation {
+        source_identity,
+        boundary,
+        previous,
+        changed_paths,
+        cancellation,
+        display_root,
+        member_label,
+        validate_member,
+    } = observation;
     cancellation.ensure_active()?;
     boundary.check(source_identity.logical_path())?;
     let canonical_root = canonical_source_path(source_identity, display_root)?;
@@ -171,21 +182,32 @@ pub(crate) fn observe_tree_source(
     ))
 }
 
+/// The source identity, boundary, previous state, and selection policy of one selected tree observation.
+pub(crate) struct SelectedTreeObservation<'a> {
+    pub(crate) source_identity: &'a FilesystemSourceIdentity,
+    pub(crate) boundary: &'a tola_typst::SourceBoundary,
+    pub(crate) previous: Option<&'a FilesystemSourceObservation>,
+    pub(crate) cancellation: &'a crate::cancellation::BuildCancellation,
+    pub(crate) display_root: &'a Path,
+    pub(crate) member_label: &'a str,
+    pub(crate) selected: &'a dyn Fn(&Path, bool) -> bool,
+    pub(crate) validate_member: &'a dyn Fn(&Path, &Path) -> Result<()>,
+}
+
 /// Observe selected members while retaining the visited directory membership and root watch.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "a member selection reads source identity, boundary, previous state, and the caller's selection policy"
-)]
 pub(crate) fn observe_tree_source_selected(
-    source_identity: &FilesystemSourceIdentity,
-    boundary: &tola_typst::SourceBoundary,
-    previous: Option<&FilesystemSourceObservation>,
-    cancellation: &crate::cancellation::BuildCancellation,
-    display_root: &Path,
-    member_label: &str,
-    selected: &dyn Fn(&Path, bool) -> bool,
-    validate_member: &dyn Fn(&Path, &Path) -> Result<()>,
+    observation: SelectedTreeObservation<'_>,
 ) -> Result<FilesystemSourceObservation> {
+    let SelectedTreeObservation {
+        source_identity,
+        boundary,
+        previous,
+        cancellation,
+        display_root,
+        member_label,
+        selected,
+        validate_member,
+    } = observation;
     cancellation.ensure_active()?;
     boundary.check(source_identity.logical_path())?;
     let canonical_root = canonical_source_path(source_identity, display_root)?;
@@ -610,16 +632,16 @@ mod tests {
         previous: Option<&FilesystemSourceObservation>,
         changed: &[PathBuf],
     ) -> FilesystemSourceObservation {
-        observe_tree_source(
-            &FilesystemSourceIdentity::from_path(root),
-            &tola_typst::SourceBoundary::default(),
+        observe_tree_source(TreeObservation {
+            source_identity: &FilesystemSourceIdentity::from_path(root),
+            boundary: &tola_typst::SourceBoundary::default(),
             previous,
-            changed,
-            &crate::cancellation::BuildCancellation::default(),
-            root,
-            "asset",
-            &|_, _| Ok(()),
-        )
+            changed_paths: changed,
+            cancellation: &crate::cancellation::BuildCancellation::default(),
+            display_root: root,
+            member_label: "asset",
+            validate_member: &|_, _| Ok(()),
+        })
         .unwrap()
     }
 
@@ -686,16 +708,16 @@ mod tests {
         let before = observe(&root, None, &[]);
         std::fs::rename(&nested, &moved).unwrap();
         std::os::unix::fs::symlink(&moved, &nested).unwrap();
-        let error = observe_tree_source(
-            &FilesystemSourceIdentity::from_path(&root),
-            &tola_typst::SourceBoundary::default(),
-            Some(&before),
-            &[changed],
-            &crate::cancellation::BuildCancellation::default(),
-            &root,
-            "asset",
-            &|_, _| Ok(()),
-        )
+        let error = observe_tree_source(TreeObservation {
+            source_identity: &FilesystemSourceIdentity::from_path(&root),
+            boundary: &tola_typst::SourceBoundary::default(),
+            previous: Some(&before),
+            changed_paths: &[changed],
+            cancellation: &crate::cancellation::BuildCancellation::default(),
+            display_root: &root,
+            member_label: "asset",
+            validate_member: &|_, _| Ok(()),
+        })
         .unwrap_err();
         assert!(
             error.to_string().contains("symbolic link or reparse point"),

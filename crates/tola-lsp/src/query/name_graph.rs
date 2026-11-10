@@ -20,26 +20,40 @@ use tola_typst::typst::World;
 use super::colors;
 use super::semantic::Semantic;
 
+/// One graph reply's session, packages, source, query, lane caches, and cancellation.
+pub(super) struct GraphReplyRequest<'a, 'b> {
+    pub(super) session: &'a mut SourceDiagnosticSession,
+    pub(super) config: &'a ResolvedSiteConfig,
+    pub(super) package_access: &'a PackageAccess<'b>,
+    pub(super) overrides: &'a [(PathBuf, Arc<str>)],
+    pub(super) view: &'a SourceView,
+    pub(super) source: &'a Source,
+    pub(super) cursor: usize,
+    pub(super) query: &'a SourceQuery,
+    pub(super) disk: &'a mut crate::analysis::DiskSources,
+    pub(super) graphs: &'a mut crate::analysis::GraphCache,
+    pub(super) revision: u64,
+    pub(super) cancellation: &'a BuildCancellation,
+    pub(super) client_root: &'a crate::uri::ClientRoot,
+}
+
 /// The graph's answer; a statement the compiler cannot prove stays unproven.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "a graph reply reads session, packages, the source, the query, the lane's caches, and cancellation"
-)]
-pub(super) fn graph_reply(
-    session: &mut SourceDiagnosticSession,
-    config: &ResolvedSiteConfig,
-    package_access: &PackageAccess<'_>,
-    overrides: &[(PathBuf, Arc<str>)],
-    view: &SourceView,
-    source: &Source,
-    cursor: usize,
-    query: &SourceQuery,
-    disk: &mut crate::analysis::DiskSources,
-    graphs: &mut crate::analysis::GraphCache,
-    revision: u64,
-    cancellation: &BuildCancellation,
-    client_root: &crate::uri::ClientRoot,
-) -> Result<Option<SourceReply>> {
+pub(super) fn graph_reply(inputs: GraphReplyRequest<'_, '_>) -> Result<Option<SourceReply>> {
+    let GraphReplyRequest {
+        session,
+        config,
+        package_access,
+        overrides,
+        view,
+        source,
+        cursor,
+        query,
+        disk,
+        graphs,
+        revision,
+        cancellation,
+        client_root,
+    } = inputs;
     let root = config.get_root();
     let locations = Some(&package_access.locations);
     let include_dependents = matches!(query, SourceQuery::References(_) | SourceQuery::Rename(_));
@@ -49,21 +63,21 @@ pub(super) fn graph_reply(
     let mut compilations: HashMap<String, Option<SourceCompilation>> = HashMap::new();
     // The proven statements are the only input that changes between builds.
     let mut build_graph = |proven: &[(PendingImport, FileId)]| {
-        crate::analysis::graph(
+        crate::analysis::graph(crate::analysis::GraphInputs {
             root,
             view,
             source,
             locations,
-            &package_access.boundary,
+            boundary: &package_access.boundary,
             include_dependents,
-            proven,
-            disk,
-            proven.is_empty().then_some(crate::analysis::CachedGraph {
-                cache: graphs,
+            resolved: proven,
+            disk: &mut *disk,
+            cache: proven.is_empty().then_some(crate::analysis::CachedGraph {
+                cache: &mut *graphs,
                 revision,
             }),
             cancellation,
-        )
+        })
     };
     let mut names = build_graph(&proven)?;
     loop {
@@ -96,18 +110,18 @@ pub(super) fn graph_reply(
         }
         names = build_graph(&proven)?;
     }
-    crate::analysis::respond(
-        &names,
+    crate::analysis::respond(crate::analysis::NameGraphReply {
+        graph: &names,
         source,
         cursor,
         query,
         view,
-        disk,
-        root,
+        disk: &*disk,
+        source_root: root,
         client_root,
         locations,
-        &package_access.boundary,
-    )
+        boundary: &package_access.boundary,
+    })
 }
 /// The one file the compiler proves an import statement names; anything less is no identity.
 fn proven_import(

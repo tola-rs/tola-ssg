@@ -189,16 +189,16 @@ fn run_server(launch: ServerLaunch, purpose: ServerPurpose) -> Result<()> {
                     let build_resources = resources.clone();
                     let hooks = hooks.as_ref().map(HookQueue::sender);
                     let mut building = tokio::task::spawn_blocking(move || {
-                        build_site_once(
-                            build_config,
-                            build_sites,
-                            &build_output,
+                        build_site_once(BuildAttempt {
+                            config: build_config,
+                            sites: build_sites,
+                            output: &build_output,
                             purpose,
-                            build_cancellation,
+                            cancellation: build_cancellation,
                             hooks,
-                            build_resources,
+                            resources: build_resources,
                             events,
-                        )
+                        })
                     });
                     tokio::select! {
                         biased;
@@ -245,16 +245,16 @@ fn run_server(launch: ServerLaunch, purpose: ServerPurpose) -> Result<()> {
                         (false, _) => "Press Ctrl+C to stop",
                     })?;
                 }
-                let http = super::http::serve_http(
+                let http = super::http::serve_http(super::http::HttpServices {
                     listener,
                     sites,
-                    config,
+                    initial_config: config,
                     reload_endpoint,
-                    rebuild.as_ref().map(RebuildLoop::publication_sender),
-                    shutdown.clone(),
+                    publications: rebuild.as_ref().map(RebuildLoop::publication_sender),
+                    shutdown: shutdown.clone(),
                     events,
                     url,
-                );
+                });
                 tokio::pin!(http);
                 if let Some(rebuild) = rebuild.take() {
                     let rebuilding = rebuild.run();
@@ -306,36 +306,45 @@ fn run_server(launch: ServerLaunch, purpose: ServerPurpose) -> Result<()> {
     serving
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "one development attempt's services are all distinct state"
-)]
-fn build_site_once(
+/// One development attempt's services.
+struct BuildAttempt<'a> {
     config: Arc<ResolvedSiteConfig>,
     sites: CurrentSite,
-    output: &CommandOutput,
+    output: &'a CommandOutput,
     purpose: ServerPurpose,
     cancellation: BuildCancellation,
     hooks: Option<HookSender>,
     resources: tola_build::BuildResources,
     events: super::events::Events,
-) -> Result<()> {
-    events.build_started(1)?;
-    let root = config.get_root().to_path_buf();
-    let mut diagnostics = Vec::new();
-    let mut published = false;
-    let outcome = build_site_once_inner(
+}
+
+fn build_site_once(attempt: BuildAttempt<'_>) -> Result<()> {
+    let BuildAttempt {
         config,
-        sites.clone(),
+        sites,
         output,
         purpose,
         cancellation,
         hooks,
         resources,
-        &mut diagnostics,
-        &mut published,
         events,
-    );
+    } = attempt;
+    events.build_started(1)?;
+    let root = config.get_root().to_path_buf();
+    let mut diagnostics = Vec::new();
+    let mut published = false;
+    let outcome = build_site_once_inner(BuildAttemptInner {
+        config,
+        sites: sites.clone(),
+        output,
+        purpose,
+        cancellation,
+        hooks,
+        resources,
+        attempt_diagnostics: &mut diagnostics,
+        published: &mut published,
+        events,
+    });
     if events.0 && !published {
         let status = if outcome
             .as_ref()
@@ -357,22 +366,33 @@ fn build_site_once(
     outcome
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "one development attempt's services are all distinct state"
-)]
-fn build_site_once_inner(
+/// One development attempt's services, plus the attempt's reporting state.
+struct BuildAttemptInner<'a> {
     config: Arc<ResolvedSiteConfig>,
     sites: CurrentSite,
-    output: &CommandOutput,
+    output: &'a CommandOutput,
     purpose: ServerPurpose,
     cancellation: BuildCancellation,
     hooks: Option<HookSender>,
     resources: tola_build::BuildResources,
-    attempt_diagnostics: &mut Vec<tola_diagnostic::Diagnostic>,
-    published: &mut bool,
+    attempt_diagnostics: &'a mut Vec<tola_diagnostic::Diagnostic>,
+    published: &'a mut bool,
     events: super::events::Events,
-) -> Result<()> {
+}
+
+fn build_site_once_inner(attempt: BuildAttemptInner<'_>) -> Result<()> {
+    let BuildAttemptInner {
+        config,
+        sites,
+        output,
+        purpose,
+        cancellation,
+        hooks,
+        resources,
+        attempt_diagnostics,
+        published,
+        events,
+    } = attempt;
     cancellation.ensure_active()?;
     let started = std::time::Instant::now();
     let mut session = BuildSession::with_resources(resources);
@@ -497,16 +517,16 @@ mod tests {
             })
             .transpose()
             .expect("start test hook consumer");
-        let built = build_site_once(
+        let built = build_site_once(BuildAttempt {
             config,
             sites,
             output,
             purpose,
-            BuildCancellation::default(),
-            hooks.as_ref().map(HookQueue::sender),
-            tola_build::BuildResources::default(),
-            super::super::events::Events(false),
-        );
+            cancellation: BuildCancellation::default(),
+            hooks: hooks.as_ref().map(HookQueue::sender),
+            resources: tola_build::BuildResources::default(),
+            events: super::super::events::Events(false),
+        });
         if let Some(hooks) = hooks {
             hooks.finish().expect("finish test hook consumer");
         }

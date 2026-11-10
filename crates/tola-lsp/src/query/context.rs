@@ -96,6 +96,18 @@ pub(super) enum SelectedSyntax {
     Member(tola_typst_syntax::syntax::Member),
     Call(tola_typst_syntax::syntax::Call),
 }
+
+/// The compiler revision and source admission one query realises.
+pub(super) struct Realize<'a, 'b> {
+    pub(super) session: &'a mut SourceDiagnosticSession,
+    pub(super) compilations: &'a mut RevisionCompilations,
+    pub(super) config: &'a Arc<ResolvedSiteConfig>,
+    pub(super) package_access: &'a PackageAccess<'b>,
+    pub(super) source_revision: u64,
+    pub(super) overrides: &'a [(PathBuf, Arc<str>)],
+    pub(super) cancellation: &'a BuildCancellation,
+}
+
 impl<'a> Selection<'a> {
     pub(super) fn new(
         source: &'a Source,
@@ -199,20 +211,16 @@ impl<'a> Selection<'a> {
             .is_none_or(|node| self.range_keeps_source_text(prepared, node.range()))
     }
 
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "a query keeps its compiler revision and source admission separate"
-    )]
-    pub(super) fn realize(
-        &self,
-        session: &mut SourceDiagnosticSession,
-        compilations: &mut RevisionCompilations,
-        config: &Arc<ResolvedSiteConfig>,
-        package_access: &PackageAccess<'_>,
-        source_revision: u64,
-        overrides: &[(PathBuf, Arc<str>)],
-        cancellation: &BuildCancellation,
-    ) -> Result<Arc<SourceRevision>> {
+    pub(super) fn realize(&self, inputs: Realize<'_, '_>) -> Result<Arc<SourceRevision>> {
+        let Realize {
+            session,
+            compilations,
+            config,
+            package_access,
+            source_revision,
+            overrides,
+            cancellation,
+        } = inputs;
         let mut prepared = overrides.to_vec();
         let editable = editable_source_path(self.source, config, package_access).is_some();
         if editable {
@@ -347,9 +355,9 @@ mod tests {
     use crate::position;
     use crate::query::meta::{call_around, meta_call, meta_key, meta_key_at};
     use crate::query::name_graph::bare_name;
-    use crate::query::respond;
     use crate::query::semantic;
     use crate::query::tests::*;
+    use crate::query::{QueryRequest, respond};
     use crate::sources::SourceView;
     use lsp_types::CompletionTextEdit;
     use lsp_types::Position;
@@ -405,30 +413,30 @@ mod tests {
         let path = site.config.build().content_dir.join("document.typ");
         let canceller = tola_build::cancellation::BuildCanceller::new();
         canceller.cancel();
-        let result = respond(
-            &mut site.session,
-            &mut site.compilations,
-            &mut crate::analysis::DiskSources::default(),
-            &mut crate::analysis::GraphCache::default(),
-            &mut site.bibliographies,
-            &mut crate::compiler::EntityQueries::default(),
-            &site.config,
-            0,
-            &[],
-            &SourceView::default(),
-            &[],
-            &decode(
+        let result = respond(QueryRequest {
+            session: &mut site.session,
+            compilations: &mut site.compilations,
+            disk: &mut crate::analysis::DiskSources::default(),
+            graphs: &mut crate::analysis::GraphCache::default(),
+            bibliographies: &mut site.bibliographies,
+            entity_queries: &mut crate::compiler::EntityQueries::default(),
+            config: &site.config,
+            source_revision: 0,
+            overrides: &[],
+            view: &SourceView::default(),
+            published: &[],
+            query: &decode(
                 "textDocument/completion",
                 json!({
                     "textDocument": { "uri": crate::uri::from_file_path(&path).unwrap().as_str() },
                     "position": { "line": 0, "character": 0 },
                 }),
             ),
-            false,
-            CheckProgress::Failed,
-            &canceller.token(),
-            &crate::uri::ClientRoot::new(site.config.get_root()),
-        );
+            routes_as_hints: false,
+            check_progress: CheckProgress::Failed,
+            cancellation: &canceller.token(),
+            client_root: &crate::uri::ClientRoot::new(site.config.get_root()),
+        });
         assert!(result.unwrap_err().is::<BuildCancelled>());
     }
     /// The text an editor holds open: ASCII markup, Han, emoji, combining marks, both line
