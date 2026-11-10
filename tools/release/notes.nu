@@ -2,7 +2,7 @@
 # Render release notes for one tag from the commits after the previous tag.
 
 use ../lib/semver.nu [compare-versions, parse-version, tag-version]
-use ../lib/repo.nu [git-output]
+use ../lib/repo.nu [git-output, check-tag]
 
 const CATEGORIES = [
     {prefix: 'feat', title: 'Features'}
@@ -79,12 +79,13 @@ def main [
     --commit: string
     --repository: string
     --output: string
+    --mode: string = 'create'
 ] {
     if $tag == null or $commit == null or $repository == null or $output == null {
         error make { msg: 'notes: --tag, --commit, --repository, and --output are required' }
     }
     let root = ($env.FILE_PWD | path dirname | path dirname)
-    let end = (git-output $root ['rev-parse' '--verify' '--end-of-options' $"($commit)^{commit}"])
+    let end = (check-tag $root $tag $commit --mode $mode)
     let previous = (previous-tag $root $tag)
     let text = (if $previous == null {
         (git-output $root ['log' '-1' '--format=%B' $end]) + "\n"

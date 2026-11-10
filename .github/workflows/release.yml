@@ -7,6 +7,15 @@ on:
         description: "Release tag matching the workspace version, with or without a prerelease suffix."
         required: true
         type: string
+      mode:
+        description: "Create a release, or update its builds and tag while preserving or regenerating its title and notes."
+        required: true
+        type: choice
+        default: create
+        options:
+          - create
+          - update-preserve-notes
+          - update-regenerate-notes
   push:
     tags:
       - 'v*'
@@ -29,6 +38,7 @@ jobs:
     timeout-minutes: 20
     outputs:
       tag: ${{ steps.selection.outputs.tag }}
+      mode: ${{ steps.selection.outputs.mode }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
@@ -43,10 +53,11 @@ jobs:
         id: selection
         env:
           DISPATCH_TAG: ${{ github.event.inputs.tag || '' }}
+          RELEASE_MODE: ${{ github.event.inputs.mode || 'create' }}
         run: |
           set -euo pipefail
           tag="${DISPATCH_TAG:-$GITHUB_REF_NAME}"
-          nu tools/release/check.nu source "$tag" --commit "$GITHUB_SHA"
+          nu tools/release/check.nu source "$tag" --commit "$GITHUB_SHA" --mode "$RELEASE_MODE"
           if [ "$GITHUB_EVENT_NAME" != "workflow_dispatch" ]; then
             git rev-parse --verify "refs/tags/$tag^{commit}" >/dev/null
           fi
@@ -54,6 +65,7 @@ jobs:
           # published version always exists in the main line of development.
           git merge-base --is-ancestor "$GITHUB_SHA" "origin/${{ github.event.repository.default_branch }}"
           printf 'tag=%s\n' "$tag" >> "$GITHUB_OUTPUT"
+          printf 'mode=%s\n' "$RELEASE_MODE" >> "$GITHUB_OUTPUT"
 
   packages:
     name: Check workspace packages
@@ -75,7 +87,8 @@ jobs:
       - name: Verify workspace packages for the selected release
         env:
           RELEASE_TAG: ${{ needs.validate.outputs.tag }}
-        run: nu tools/release/check.nu packages "$RELEASE_TAG" --commit "$GITHUB_SHA"
+          RELEASE_MODE: ${{ needs.validate.outputs.mode }}
+        run: nu tools/release/check.nu packages "$RELEASE_TAG" --commit "$GITHUB_SHA" --mode "$RELEASE_MODE"
       - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: cargo-about@0.9.2
@@ -200,6 +213,7 @@ jobs:
       contents: write
     env:
       RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+      RELEASE_MODE: ${{ needs.validate.outputs.mode }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
@@ -217,6 +231,7 @@ jobs:
           merge-multiple: true
           path: ${{ runner.temp }}/release-archives
       - name: Generate notes for the selected commit
+        if: ${{ env.RELEASE_MODE != 'update-preserve-notes' }}
         env:
           RELEASE_NOTES: ${{ runner.temp }}/release-notes.md
         run: |
@@ -225,6 +240,7 @@ jobs:
             --tag "$RELEASE_TAG" \
             --commit "$GITHUB_SHA" \
             --repository "$GITHUB_REPOSITORY" \
+            --mode "$RELEASE_MODE" \
             --output "$RELEASE_NOTES"
       - name: Publish the verified release
         env:
@@ -233,9 +249,15 @@ jobs:
           RELEASE_NOTES: ${{ runner.temp }}/release-notes.md
         run: |
           set -euo pipefail
+          notes=()
+          if [ "$RELEASE_MODE" != "update-preserve-notes" ]; then
+            notes=(--notes "$RELEASE_NOTES")
+          fi
           nu tools/release/publish.nu \
             --tag "$RELEASE_TAG" \
             --commit "$GITHUB_SHA" \
             --repository "$GITHUB_REPOSITORY" \
+            --event "$GITHUB_EVENT_NAME" \
+            --mode "$RELEASE_MODE" \
             --archives "$RELEASE_ARCHIVES" \
-            --notes "$RELEASE_NOTES"
+            "${notes[@]}"

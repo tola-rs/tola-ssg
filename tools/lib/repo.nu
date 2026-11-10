@@ -34,8 +34,17 @@ export def require-clean [root: string] {
   }
 }
 
-# The checked commit: the tag names the workspace version and points at HEAD.
-export def check-tag [root: string, tag: string, commit?: string]: nothing -> string {
+# The publication modes shared by source checks and the publisher.
+export def release-mode [mode: string]: nothing -> string {
+  if $mode not-in ['create' 'update-preserve-notes' 'update-regenerate-notes'] {
+    error make { msg: $"invalid release mode: ($mode)" }
+  }
+  $mode
+}
+
+# Updates may move the tag after the selected commit and artifacts pass verification.
+export def check-tag [root: string, tag: string, commit?: string, --mode: string = 'create']: nothing -> string {
+  release-mode $mode | ignore
   let expected = (tag-version $tag)
   git-output $root ['check-ref-format' $"refs/tags/($tag)"] | ignore
   let actual = (workspace-version $root)
@@ -59,7 +68,7 @@ export def check-tag [root: string, tag: string, commit?: string]: nothing -> st
   let existing = (git-output $root ['for-each-ref' '--format=%(refname)' $"refs/tags/($tag)"])
   if $existing == $"refs/tags/($tag)" {
     let tagged = (git-output $root ['rev-parse' '--verify' $"refs/tags/($tag)^{commit}"])
-    if $tagged != $head {
+    if $mode == 'create' and $tagged != $head {
       error make { msg: $"tag ($tag) points to ($tagged), not checked commit ($head)" }
     }
   }

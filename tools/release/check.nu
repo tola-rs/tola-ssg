@@ -39,41 +39,44 @@ def check-registry [root: string, version: string] {
   }
 }
 
-def check-source [root: string, tag: string, commit: string] {
+def check-source [root: string, tag: string, commit: string, mode: string] {
   require-clean $root
-  let selected = (check-tag $root $tag ($commit | if $in == '' { null } else { $in }))
+  let selected = (check-tag $root $tag ($commit | if $in == '' { null } else { $in }) --mode $mode)
   let checked = (check-version $root)
   require-clean $root
   print $"Release source ($tag): checked commit ($selected), ($checked.packages | length) workspace packages."
 }
 
-def check-packages [root: string, version: string] {
-  check-registry $root $version
+def check-packages [root: string, version: string, mode: string] {
+  if $mode == 'create' { check-registry $root $version }
   cd $root
   ^cargo package --workspace --locked --all-features --registry crates-io
   print $"Workspace packages for ($version) passed Cargo packaging; nothing was uploaded."
 }
 
-def main [command: string, tag?: string, --commit: string = ''] {
+def main [command: string, tag?: string, --commit: string = '', --mode: string = 'create'] {
+  release-mode $mode | ignore
   let root = ($env.FILE_PWD | path dirname | path dirname)
   match $command {
     'source' => {
       if $tag == null { error make { msg: 'source needs a tag' } }
-      check-source $root $tag $commit
+      check-source $root $tag $commit $mode
     }
     'packages' => {
-      require-clean $root
+      if $tag == null { error make { msg: 'packages needs a tag' } }
+      check-source $root $tag $commit $mode
       let checked = (check-version $root)
-      check-packages $root $checked.version
+      check-packages $root $checked.version $mode
       require-clean $root
     }
     'all' => {
       if $tag == null { error make { msg: 'all needs a tag' } }
-      check-source $root $tag $commit
+      if $mode != 'create' { error make { msg: 'all only supports create mode' } }
+      check-source $root $tag $commit $mode
       let checked = (check-version $root)
       let ci = (^just ci | complete)
       if $ci.exit_code != 0 { error make { msg: 'just ci failed' } }
-      check-packages $root $checked.version
+      check-packages $root $checked.version $mode
       let package = ($root | path join 'tools/release/package.nu')
       let build = (^nu $package build --output ($root | path join 'release') | complete)
       if $build.exit_code != 0 { error make { msg: 'local release build failed' } }
