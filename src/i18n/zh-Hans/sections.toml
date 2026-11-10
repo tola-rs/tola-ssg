@@ -47,7 +47,7 @@ help = '''站点是一个 Typst Bundle，`entry` 是它的入口程序。它 imp
 #let outputs = all-sources().map(source => output-of(join-route(source.route-segments)))
 ```
 
-比如，`tola init` 默认生成的脚手架里，`select-pages` 会校验 metadata、筛掉 `draft: true` 的草稿文章，并根据每个 `source` 默认的 `route-segments` 字段进行 slugify，得到最终的 route；这些逻辑由你自己定义。schema 用 `url-path` 解析 `permalink`，因此选中的 metadata 已经持有解码后的 route。它会覆盖文件布局给出的默认 route，使源移动后 URL 保持不变。
+站点如果在入口里校验 metadata，也可以在这里筛掉草稿、把每个 source 的 `route-segments` slugify；这些策略由你自己定义。schema 用 `url-path` 解析 `permalink`，因此选中的 metadata 已经持有解码后的 route。它会覆盖文件布局给出的默认 route，使源移动后 URL 保持不变。
 
 ```typst
 #let source-route(source) = {
@@ -193,7 +193,7 @@ rerun-on = ["static/tailwind-sources", "deno.json", "deno.lock", "justfile"]
 trees = [{ source = "static/web-assets", url-prefix = "/assets" }]
 ```
 
-页面模板的 head 里链接它（`site/page.typ` 与 `site/not-found.typ`）：
+页面模板的 head 里链接它（`site.typ` 或页面模板）：
 
 ```typst
 #html.link(rel: "stylesheet", href: asset-url("/assets/tailwind-output/site.css"))
@@ -353,7 +353,7 @@ documentation = "Typst 编译器如何找到可用的字体。"
 
 [sections."typst.fonts"]
 documentation = "Typst 编译器可以使用的字体。编译器字体不会被发布：网页字体请在 `[assets]` 下声明。"
-help = '''编译器字体用于 Typst 内容的排版与导出，字体文件本身不会被发布。`paths` 列出相对站点根的目录，递归查找字体。脚手架的目录就是默认值：
+help = '''编译器字体用于 Typst 内容的排版与导出，字体文件本身不会被发布。`paths` 列出相对站点根的目录，递归查找字体。默认值是 `static/typst-fonts`：
 
 ```toml
 [typst.fonts]

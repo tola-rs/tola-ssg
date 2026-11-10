@@ -213,10 +213,10 @@ pub(crate) fn dispatch(
             packages,
             fonts,
         } => commands::lsp::run(config, packages, fonts, scope, cancellation, output),
-        Commands::Skill(args) => commands::skill::run(&args, output, cancellation),
+        Commands::Skill(args) => commands::skill::run_builtin(&args, output, cancellation),
         Commands::Help(args) => commands::help::run(
             &args,
-            cli.lang.unwrap_or_default(),
+            cli.global.lang.unwrap_or_default(),
             scope,
             output,
             cancellation,

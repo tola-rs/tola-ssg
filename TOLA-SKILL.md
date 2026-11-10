@@ -44,18 +44,18 @@ tola dev
 ```
 
 `init` takes a missing or empty directory. `--force` permits other files but does not overwrite
-scaffold files. Use `tola init --help` to choose features rather than assuming CSS, feeds, or
-search are present. Open the URL `dev` prints; save a source and check that it rebuilds.
+scaffold files. It writes `tola.toml`, `site.typ`, `.gitignore`, `.ignore`, and an empty
+`content/`; `site.typ` publishes every source at the route its file layout gives it and serves
+`404.html`. Open the URL `dev` prints; add a source, save it, and check that it rebuilds.
 
 ### Locate
 
 Tola finds the nearest `tola.toml` in the current directory or its parents. A command's
 `-C path/to/tola.toml` selects another site. Paths in the configuration are relative to it.
 
-In the scaffold, `content/` holds content sources; `site.typ` connects `site/selection.typ`
-and `site/page.typ`. `site/schema.typ` owns metadata fields, `site/seo.typ` owns head and SEO
-outputs, and `site/not-found.typ` writes the missing page. These are editable conventions,
-not reserved names. Keep shared helpers outside the content directory.
+`content/` holds content sources. `site.typ` is the entry that turns them into documents; edit
+it to choose routes, metadata, and page layout. Keep shared helpers outside the content
+directory. These are conventions, not reserved names.
 
 ### Editors
 
@@ -248,9 +248,10 @@ An output such as `guide/index.html` publishes at route `/guide/`. `/guide` inst
 a file without an extension. `output-of` turns a route into an output; `output-url` turns
 an output into a browser URL. Use `route-url` when you already have a decoded route.
 
-The scaffold slugs each source's route segments; `about.typ` and `about/index.typ` therefore
-claim the same output. Its `permalink` field changes the address, not the document format.
-Choose outputs once in selection and pass them to every consumer.
+The file layout gives each source its route segments; `slugify` them when the address should be
+lowercase and hyphenated. `about.typ` and `about/index.typ` claim the same output. A metadata
+field your site defines, such as `permalink`, can replace that address; it changes the route,
+not the document format. Choose outputs once in selection and pass them to every consumer.
 
 ### Mount
 
@@ -290,9 +291,9 @@ Exact conversions: `tola help "@tola/address" output-of output-url route-url ass
 
 ## Metadata
 
-Declare metadata with `tola-meta`; validate it in the root program with the site's schema.
-Tola does not assign built-in meaning to fields such as `draft` or `permalink`. The scaffold
-implements those choices, and a theme may choose different fields.
+Declare metadata with `tola-meta`; validate it in the root program with a schema your site
+declares. Tola does not assign built-in meaning to fields such as `draft` or `permalink`; your
+site's schema does.
 
 ### Declaration
 
@@ -309,8 +310,8 @@ selected metadata through a model query with an explicit JSON projection.
 
 ### Fields
 
-Read the site's schema before adding a field. The scaffold's `site/schema.typ` rejects
-unknown fields. Add the field there, then make its consumer use the parsed value.
+Declare the metadata fields your site accepts. A schema rejects unknown fields unless declared
+with `unknown: "keep"`. Add the field there, then make its consumer use the parsed value.
 
 ```typst
 #import "@tola/schema:0.0.0": schema, optional, parse
@@ -327,7 +328,8 @@ parsing each dictionary by hand: it reports the source whose metadata failed.
 
 Choose calendar precision deliberately: `date` is a complete day, `timestamp` is an instant,
 and `partial-date` retains year, month, or day precision without inventing missing fields.
-The scaffold uses `timestamp` for `published` and `union(date, timestamp)` for `updated`.
+Choose `timestamp` for `published` and `union(date, timestamp)` for `updated` when an instant
+and a calendar date must both parse.
 
 ```typst
 #import "@tola/schema:0.0.0" as s
@@ -347,9 +349,9 @@ file path alone does not publish it.
 
 ### Selection
 
-The scaffold's `select-pages(all-sources())` parses every source with `page-schema`, filters
-drafts, and returns `(source:, output:)` records. Edit `site/selection.typ` to change that
-choice; keep rendering in `site/page.typ` and connect them in `site.typ`.
+A site that selects pages parses every source with its schema, filters drafts, and returns
+`(source:, output:)` records. Keep that choice in one function and pass the records to every
+consumer.
 
 `all-sources()` discovers lowercase `.typ` files beneath the configured content directory,
 excluding hidden names, symlinks, and the site entry. Its order is by complete source path,
@@ -531,16 +533,16 @@ does not publish the image: declare that resource too.
 
 ### Head
 
-The scaffold's `site/seo.typ` composes head entries. Canonical and social helpers return
-arrays; render them in the custom head. Build absolute URLs with
-`output-url(page.output, origin: site.origin)`. Use `plain-text` for rich titles.
+Compose head entries in the page template. Canonical and social helpers return arrays; render
+them in the custom head. Build absolute URLs with `output-url(page.output, origin: site.origin)`.
+Use `plain-text` for rich titles.
 See `tola help "@tola/web" canonical open-graph twitter-card`.
 
 ### Feeds
 
-A feed needs an origin and a non-blank title. In the scaffold, absent `feed-content` selects
-the exported body; setting a summary alone does not make an excerpt-only feed. For that,
-change the recipe's `content:` to `none`.
+A feed needs an origin and a non-blank title. An entry without `content` publishes no full-text
+body, so a summary alone makes an excerpt-only entry. Pass a document selection as `content` to
+publish the whole page.
 
 A `(document: output, id: "article")` selection keeps one exported subtree, whose HTML ID
 must occur exactly once. Use it to exclude navigation. Keep entry IDs stable when routes
@@ -549,9 +551,9 @@ and URLs. Exact inputs: `tola help "@tola/web" feed`.
 
 ### Sitemap
 
-Sitemaps name whole documents, not fragments. They accept calendar dates as well as
-timestamps for updates. The scaffold's selected sitemap feature skips its output without
-an origin. Check the serialized entries and exclusions after `tola check` or a build.
+Sitemaps name whole documents, not fragments. They accept calendar dates as well as timestamps
+for updates, and every listed URL is absolute, so the site needs `site.origin`; skip the output
+when it is absent. Check the serialized entries and exclusions after `tola check` or a build.
 Exact inputs: `tola help "@tola/web" sitemap`.
 
 ## Scripts

@@ -19,10 +19,10 @@ const CANCELLED_EXIT_CODE: u8 = 130;
 /// region shows only the latest round while the log keeps every round. The origin decides who
 /// answers for a log Tola cannot use.
 fn session_log_path(cli: &Cli) -> Option<(std::path::PathBuf, LogOrigin)> {
-    if cli.no_log_file {
+    if cli.global.no_log_file {
         return None;
     }
-    if let Some(path) = &cli.log_file {
+    if let Some(path) = &cli.global.log_file {
         return Some((path.clone(), LogOrigin::Explicit));
     }
     match &cli.command {
@@ -45,11 +45,11 @@ pub(crate) fn run() -> ExitCode {
         return code;
     }
     let cli = Cli::parse_for_process();
-    super::theme::install(cli.color);
+    super::theme::install(cli.global.color);
     if let super::Commands::Nu(args) = &cli.command {
-        let scope = if cli.pure {
+        let scope = if cli.global.pure {
             Some("pure")
-        } else if cli.offline {
+        } else if cli.global.offline {
             Some("offline")
         } else {
             None
@@ -60,14 +60,14 @@ pub(crate) fn run() -> ExitCode {
         matches!(&cli.command, super::Commands::Dev { development, .. } if development.json),
     );
     let pages_documentation = matches!(&cli.command, super::Commands::Help(args) if args.format == super::args::HelpFormat::Text);
-    let pager = match if cli.no_pager || !pages_documentation {
+    let pager = match if cli.global.no_pager || !pages_documentation {
         Ok(None)
     } else {
         PagerCommand::for_process()
     } {
         Ok(pager) => pager,
         Err(error) => {
-            let terminal = Terminal::new(cli.color, cli.quiet, None);
+            let terminal = Terminal::new(cli.global.color, cli.global.quiet, None);
             let _ = terminal.diagnostic(&tola_diagnostic::fallback(
                 crate::codes::terminal::PAGER,
                 &error,
@@ -75,7 +75,7 @@ pub(crate) fn run() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let terminal = Terminal::new(cli.color, cli.quiet, pager);
+    let terminal = Terminal::new(cli.global.color, cli.global.quiet, pager);
     let cancellation = match Cancellation::install() {
         Ok(cancellation) => cancellation,
         Err(error) => {
@@ -219,7 +219,7 @@ fn prepare_output(cli: &Cli, terminal: Terminal) -> anyhow::Result<CommandOutput
             }),
         );
     }
-    super::log::tracing::install(cli.verbose, terminal.clone(), log.clone())?;
+    super::log::tracing::install(cli.global.verbose, terminal.clone(), log.clone())?;
     // The warning the site author reads is already out; the cause chain belongs to explicitly requested
     // verbose output, and this is the subscriber that prints it.
     if let Some((path, error)) = &unavailable {

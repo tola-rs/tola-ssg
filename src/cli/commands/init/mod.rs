@@ -1,8 +1,7 @@
-//! One built-in starter or an explicitly declared module initializer.
+//! The built-in minimal site or an explicitly declared module initializer.
 
 mod config;
 mod files;
-mod program;
 mod source;
 mod tree;
 mod validate;
@@ -67,7 +66,7 @@ pub(in crate::cli) fn run(
     let edit = if args.from.is_some() {
         "Edit the site sources."
     } else {
-        "Edit `content/index.typ`."
+        "Add a page under `content/`."
     };
     output.block(format!(
         "Next steps:\n  Switch to `{}`.\n  {edit}\n  Run `tola dev`.\n\n         To connect your editor, run `tola editor setup`.",

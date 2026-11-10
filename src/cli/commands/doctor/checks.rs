@@ -335,8 +335,8 @@ fn vendor_diagnostics(config: &tola_build::config::ResolvedSiteConfig) -> Vec<Di
 
 /// Compiler font directories a build would find nothing in.
 ///
-/// Only the paths the author declared are checked: an absent `typst.fonts.paths` falls back to the
-/// scaffold's directory, which a site relying on the fonts Tola carries need not create. The
+/// Only the paths the author declared are checked: an absent `typst.fonts.paths` falls back to
+/// `static/typst-fonts`, which a site relying on the fonts Tola carries need not create. The
 /// extension rule is the compiler's own, so a directory this reports empty provides no face to a
 /// build either. A directory Tola cannot read is left to the compiler, which reports it there.
 fn font_diagnostics(config: &tola_build::config::ResolvedSiteConfig) -> Vec<Diagnostic> {

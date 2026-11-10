@@ -165,7 +165,7 @@ impl ResolvedSiteConfig {
 
     /// Whether the configuration source declares `typst.fonts.paths` itself.
     ///
-    /// An absent key falls back to the scaffold's directory, which a site using Tola's embedded
+    /// An absent key falls back to the default directory, which a site using Tola's embedded
     /// fonts need not create.
     pub fn declares_font_paths(&self) -> bool {
         self.declares_font_paths

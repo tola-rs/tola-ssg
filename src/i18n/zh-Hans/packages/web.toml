@@ -163,11 +163,11 @@ Example - 发布只有摘要、没有全文正文的 RSS：
 ''',
   'Example - 发布摘要与 article 的完整 HTML，排除导航：',
   '''
-starter 的 `site/seo.typ` 把源 metadata `feed-summary` 映射到条目的 `summary`，把 `feed-content` 映射到 `content`。省略 `feed-content` 或传 `none` 时，这个 recipe 会选择页面的整个 body。因此，只设置 `feed-summary` 仍会发布全文 RSS。需要只有摘要的 feed 时，把这个 recipe 改为传入 `content: none`。
+站点把源 metadata 映射到每个条目：`feed-summary` 对应 `summary`，`feed-content` 对应 `content`。条目没有 `content` 就不发布全文正文，因此只给摘要就是摘要条目；要把整页写进正文，就把文档选择传给 `content`。
 
-Example - 给 starter 页面单独编写一个便于 feed 阅读器使用的正文：
+Example - 给页面单独编写一个便于 feed 阅读器使用的正文：
 
-在启用了 `feed` feature 的站点里，把以下声明放在 `content/note.typ` 开头，后面接页面的普通正文。设置 `site.origin` 与 `site.title`，让 starter 输出 feed。下面的 `feed-content` 只使用支持的文本片段元素。
+把以下声明放在 `content/note.typ` 开头，后面接页面的普通正文。设置 `site.origin` 与 `site.title`，让每个条目都有绝对地址和非空标题。下面的 `feed-content` 只使用支持的文本片段元素。
 ''',
   '',
 ]

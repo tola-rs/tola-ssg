@@ -40,10 +40,12 @@ argv = ["{tola}", "nu", "tools/init.nu"]
   await writeFile(join(root, 'tools/init.nu'), INITIALIZE)
 }
 
-test('starter builds without host packages', async ({ binary, directory: root }) => {
+test('initialized site publishes sources without host packages', async ({ binary, directory: root }) => {
   const run = commandRunner(binary)
   const site = join(root, 'new site')
   expectExited(await run(['init', site, '--pure'], root))
+  expect((await readdir(site)).sort()).toEqual(['.gitignore', '.ignore', 'content', 'site.typ', 'tola.toml'])
+  await writeFile(join(site, 'content/index.typ'), '= Welcome\n')
   expectExited(await run(['build', '--pure'], site, COMMAND_TIMEOUT_MS.build))
   expect(await readFile(join(site, 'public/index.html'), 'utf8')).toContain('Welcome')
   expect(await readFile(join(site, 'public/404.html'), 'utf8')).toContain('Page not found')

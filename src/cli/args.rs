@@ -8,9 +8,8 @@ use tola_build::InputScope;
 use crate::editor::Editor;
 use crate::i18n::HelpLanguage;
 
-#[derive(Parser, Debug, Clone)]
-#[command(version = version_text(), about, long_about = None, arg_required_else_help = true, disable_help_subcommand = true)]
-pub struct Cli {
+#[derive(clap::Args, Debug, Clone)]
+pub struct GlobalArgs {
     /// Choose when to use colored output.
     #[arg(long, global = true, default_value = "auto", display_order = 100)]
     pub color: ColorChoice,
@@ -50,6 +49,80 @@ pub struct Cli {
     /// Do not page `tola help` documentation.
     #[arg(long, global = true, display_order = 108)]
     pub no_pager: bool,
+}
+
+impl GlobalArgs {
+    /// Parse global flags that a module invocation carries before its command name.
+    pub fn adopt_prefix(&mut self, arguments: &mut Vec<OsString>) -> Result<(), String> {
+        while let Some(argument) = arguments.first().and_then(|value| value.to_str()).map(str::to_owned) {
+            let mut consumed = 1;
+            match argument.as_str() {
+                "--" => break,
+                "--color" => {
+                    let value = arguments.get(1).and_then(|value| value.to_str())
+                        .ok_or_else(|| "--color requires a value".to_owned())?;
+                    self.color = Self::parse_color(value)?;
+                    consumed = 2;
+                }
+                value if value.starts_with("--color=") => {
+                    self.color = Self::parse_color(&value["--color=".len()..])?;
+                }
+                "--log-file" => {
+                    let value = arguments.get(1).ok_or_else(|| "--log-file requires a path".to_owned())?;
+                    self.log_file = Some(PathBuf::from(value));
+                    consumed = 2;
+                }
+                value if value.starts_with("--log-file=") => {
+                    self.log_file = Some(PathBuf::from(&value["--log-file=".len()..]));
+                }
+                "--lang" => {
+                    let value = arguments.get(1).and_then(|value| value.to_str())
+                        .ok_or_else(|| "--lang requires a value".to_owned())?;
+                    self.lang = Some(parse_help_language(value)?);
+                    consumed = 2;
+                }
+                value if value.starts_with("--lang=") => {
+                    self.lang = Some(parse_help_language(&value["--lang=".len()..])?);
+                }
+                "--offline" => self.offline = true,
+                "--pure" => self.pure = true,
+                "--no-log-file" => self.no_log_file = true,
+                "--no-pager" => self.no_pager = true,
+                "-q" | "--quiet" => self.quiet = true,
+                "-v" | "--verbose" => self.verbose = self.verbose.saturating_add(1),
+                value if value.starts_with("-v") && value[1..].chars().all(|c| c == 'v') => {
+                    self.verbose = self.verbose.saturating_add((value.len() - 1) as u8);
+                }
+                _ => break,
+            }
+            if self.log_file.is_some() && self.no_log_file {
+                return Err("--log-file conflicts with --no-log-file".to_owned());
+            }
+            arguments.drain(0..consumed);
+        }
+        Ok(())
+    }
+    
+    /// Build a clap command augmented with these options.
+    pub fn augment(command: clap::Command) -> clap::Command {
+        <Self as clap::Args>::augment_args(command)
+    }
+    
+    pub fn parse_color(value: &str) -> Result<ColorChoice, String> {
+        match value {
+            "auto" => Ok(ColorChoice::Auto),
+            "always" => Ok(ColorChoice::Always),
+            "never" => Ok(ColorChoice::Never),
+            value => Err(format!("{value} is not a color choice; use auto, always, or never")),
+        }
+    }
+}
+
+#[derive(Parser, Debug, Clone)]
+#[command(version = version_text(), about, long_about = None, arg_required_else_help = true, disable_help_subcommand = true)]
+pub struct Cli {
+    #[command(flatten)]
+    pub global: GlobalArgs,
 
     #[command(subcommand)]
     pub command: Commands,
@@ -57,9 +130,9 @@ pub struct Cli {
 
 impl Cli {
     pub fn input_scope(&self) -> InputScope {
-        if self.pure {
+        if self.global.pure {
             InputScope::Pure
-        } else if self.offline {
+        } else if self.global.offline {
             InputScope::Offline
         } else {
             InputScope::Online
@@ -412,7 +485,7 @@ pub struct InitArgs {
     #[arg(long, value_name = "NAME", requires = "from")]
     pub alias: Option<String>,
 
-    /// Confirm the starter or enable the module's interactive setup.
+    /// Confirm the files to write or enable the module's interactive setup.
     #[arg(short = 'i', long)]
     pub interactive: bool,
 
@@ -676,7 +749,16 @@ impl Cli {
                 }
                 error.exit()
             });
-        Self::from_arg_matches(&matches).unwrap_or_else(|error| error.exit())
+        let mut cli = Self::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
+        if let Commands::Extension(arguments) = &mut cli.command {
+            let namespace = arguments.remove(0);
+            let result = cli.global.adopt_prefix(arguments);
+            arguments.insert(0, namespace);
+            if let Err(error) = result {
+                clap::Error::raw(clap::error::ErrorKind::InvalidValue, error).exit();
+            }
+        }
+        cli
     }
 }
 
@@ -844,7 +926,7 @@ mod tests {
             ]
             .map(OsString::from),
         );
-        assert!(!cli.quiet);
+        assert!(!cli.global.quiet);
         for arguments in [
             vec!["tola", "build", "--not-a-build-option"],
             vec!["tola", "inspect", "not-a-projection"],
@@ -871,7 +953,7 @@ mod tests {
             ),
         ] {
             let cli = Cli::try_parse_from(arguments).unwrap();
-            assert_eq!(cli.lang, expected);
+            assert_eq!(cli.global.lang, expected);
         }
     }
 
@@ -1085,12 +1167,12 @@ mod tests {
             ),
             (
                 &["tola", "-vv", "build"],
-                |cli| cli.verbose.to_string(),
+                |cli| cli.global.verbose.to_string(),
                 "2",
             ),
             (
                 &["tola", "check", "--offline", "--pure"],
-                |cli| format!("{}/{}", cli.offline, cli.pure),
+                |cli| format!("{}/{}", cli.global.offline, cli.global.pure),
                 "true/true",
             ),
             (
@@ -1098,8 +1180,8 @@ mod tests {
                 |cli| {
                     format!(
                         "{}/{}/{}",
-                        path_text(&cli.log_file),
-                        cli.verbose,
+                        path_text(&cli.global.log_file),
+                        cli.global.verbose,
                         cli.command.name()
                     )
                 },

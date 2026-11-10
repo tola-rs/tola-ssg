@@ -5,7 +5,7 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail, ensure};
-use clap::CommandFactory;
+use clap::{CommandFactory, FromArgMatches};
 use tola_build::InputScope;
 use tola_build::modules::CommandAction;
 use tola_build::report::{REPORT_PATH_ENV, ReportChannel, ReportSources};
@@ -210,6 +210,36 @@ pub(in crate::cli) fn run(
                 (!projection.is_empty()).then_some(projection.as_slice()),
                 tail,
                 request.resources,
+                output,
+                cancellation,
+            )
+        }
+        CommandAction::Skill => {
+            let matches = help::skill_command(module, name)
+                .try_get_matches_from(
+                    std::iter::once(OsString::from(name)).chain(tail.iter().cloned()),
+                )
+                .map_err(|error| anyhow::anyhow!("{error}"))?;
+            let args = crate::cli::args::SkillArgs::from_arg_matches(&matches)?;
+            let path = module
+                .skill
+                .as_deref()
+                .context("module skill changed; run the command again")?;
+            let canonical = path.canonicalize().with_context(|| {
+                format!("Tola could not read the module skill at {}", path.display())
+            })?;
+            ensure!(
+                canonical.starts_with(&module.root) && canonical.is_file(),
+                "module skill `{}` is outside its module or not a file",
+                path.display()
+            );
+            let text = std::fs::read_to_string(&canonical).with_context(|| {
+                format!("Tola could not read the module skill at {}", canonical.display())
+            })?;
+            super::skill::run(
+                &text,
+                &format!("tola {} {name}", module.name),
+                &args,
                 output,
                 cancellation,
             )
