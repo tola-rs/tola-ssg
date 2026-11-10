@@ -10,7 +10,6 @@ repository = "https://github.com/tola-rs/tola-ssg"
 [dependencies]
 tola-fs.workspace = true
 anyhow = "1.0.104"
-gix = { version = "=0.90.0", default-features = false, features = ["blocking-http-transport-reqwest-rust-tls", "worktree-mutation", "sha1"] }
 bytes = "1.12.1"
 comemo = "0.5.1"
 ignore = "0.4.23"

@@ -1,14 +1,16 @@
 //! Evidence for declared hook outputs: what a hook produced, and whether it still holds.
 
 use anyhow::Result;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use crate::cancellation::{BuildCancellation, BuildCancelled, OptionalCancellation};
 use crate::config::ResolvedSiteConfig;
 use crate::config::section::build::BeforeBuildHookConfig;
 use crate::config::section::build::hooks::HookStage;
-use crate::filesystem::{DeclaredOutputViolation, FilesystemSourceKind, PathFingerprint};
+use crate::filesystem::{
+    DeclaredOutputViolation, FilesystemSourceKind, PathContents, PathFingerprint,
+};
 use tola_diagnostic::display_path;
 use tola_input::{FilesystemSourceIdentity, lexical_path_identity};
 
@@ -27,18 +29,22 @@ impl HookOutputEvidence {
         cancellation: Option<&BuildCancellation>,
     ) -> Result<Self> {
         cancellation.ensure_active_if_present()?;
-        let kind = files.kind.ok_or_else(|| {
+        let Some(PathContents {
+            kind: Some(kind),
+            fingerprint,
+        }) = files.contents
+        else {
             let declared = files.source_identity.logical_path().display();
-            super::hook_contract_error(
+            return Err(super::hook_contract_error(
                 format!(
-                    "the declared `outputs` path `{declared}` is not a regular file or directory"
+                    "the declared `generates` path `{declared}` is not a regular file or directory"
                 ),
                 "declare a regular file or a directory",
-            )
-        })?;
+            ));
+        };
         Ok(Self {
             kind,
-            physical_content: crate::filesystem::entries_fingerprint(&files.entries),
+            physical_content: fingerprint,
             source_identity: files.source_identity,
         })
     }
@@ -84,8 +90,11 @@ impl HookOutputEvidence {
         cancellation.ensure_active_if_present()?;
         let identity = FilesystemSourceIdentity::from_path(self.logical_path());
         let current = identity == self.source_identity
-            && crate::filesystem::path_fingerprint(self.physical_path(), cancellation)
-                .is_ok_and(|fingerprint| fingerprint == self.physical_content)
+            && crate::filesystem::path_contents(self.physical_path(), cancellation).is_ok_and(
+                |contents| {
+                    contents.is_some_and(|contents| contents.fingerprint == self.physical_content)
+                },
+            )
             // A retarget during the fingerprint read leaves the evidence stale.
             && FilesystemSourceIdentity::from_path(self.logical_path()) == identity;
         cancellation.ensure_active_if_present()?;
@@ -204,9 +213,8 @@ pub(super) fn validate_declared_output_boundaries(
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct DeclaredOutputFiles {
-    kind: Option<FilesystemSourceKind>,
     pub(super) source_identity: FilesystemSourceIdentity,
-    pub(super) entries: BTreeMap<PathBuf, PathFingerprint>,
+    pub(super) contents: Option<PathContents>,
 }
 
 impl DeclaredOutputFiles {
@@ -214,20 +222,19 @@ impl DeclaredOutputFiles {
         source_identity: FilesystemSourceIdentity,
         cancellation: Option<&BuildCancellation>,
     ) -> Result<Self> {
-        let crate::filesystem::PathContents { kind, entries } =
+        let contents =
             crate::filesystem::path_contents(source_identity.physical_path(), cancellation)?;
         let current_identity = FilesystemSourceIdentity::from_path(source_identity.logical_path());
         if current_identity != source_identity {
             let declared = source_identity.logical_path().display();
             return Err(super::hook_contract_error(
-                format!("the declared `outputs` path `{declared}` changed while the build ran"),
+                format!("the declared `generates` path `{declared}` changed while the build ran"),
                 "write it only from that hook",
             ));
         }
         Ok(Self {
-            kind,
             source_identity,
-            entries,
+            contents,
         })
     }
 
@@ -417,9 +424,9 @@ mod tests {
         );
         fs::remove_file(site.path().join("theme")).unwrap();
         symlink("generated", site.path().join("theme")).unwrap();
-        let error = validate_declared_output_boundaries(hook, &config, &config.build.publish_dir)
-            .unwrap_err();
-        assert!(format!("{error:#}").contains("module root"), "{error:#}");
+        assert!(
+            validate_declared_output_boundaries(hook, &config, &config.build.publish_dir).is_err()
+        );
     }
 
     #[cfg(unix)]

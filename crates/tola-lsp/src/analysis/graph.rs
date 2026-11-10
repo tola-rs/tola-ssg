@@ -1,6 +1,6 @@
 //! Building the name graph over a site's sources.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -344,46 +344,39 @@ pub(super) fn reach_sources(inputs: ReachSources<'_>) -> Result<()> {
         disk,
         cancellation,
     } = inputs;
-    let mut visited = HashSet::new();
+    let mut pending: VecDeque<_> = sources.keys().copied().collect();
     loop {
         cancellation.ensure_active()?;
-        let pending: Vec<_> = sources
-            .keys()
-            .copied()
-            .filter(|id| !visited.contains(id))
-            .collect();
-        if pending.is_empty() {
+        let Some(file) = pending.pop_front() else {
             break;
-        }
-        for file in pending {
+        };
+        let outward = outward_paths(&sources[&file], package_sources);
+        let mut reached = Vec::new();
+        for path in outward.imports {
             cancellation.ensure_active()?;
-            visited.insert(file);
-            let outward = outward_paths(&sources[&file], package_sources);
-            let mut reached = Vec::new();
-            for path in outward.imports {
-                cancellation.ensure_active()?;
-                let Some(target) = reachable_target(file, &path, root, boundary, resolver) else {
-                    continue;
-                };
-                targets.entry(file).or_default().insert(path, target);
-                reached.push(target);
-            }
-            for path in outward.includes {
-                cancellation.ensure_active()?;
-                let Some(target) = reachable_target(file, &path, root, boundary, resolver) else {
-                    continue;
-                };
-                reached.push(target);
-            }
-            reached.extend(
-                established
-                    .iter()
-                    .filter(|(pending, _)| pending.file == file)
-                    .map(|(_, target)| *target),
-            );
-            for target in reached {
-                cancellation.ensure_active()?;
-                collect_reached_source(target, sources, view, root, boundary, resolver, disk);
+            let Some(target) = reachable_target(file, &path, root, boundary, resolver) else {
+                continue;
+            };
+            targets.entry(file).or_default().insert(path, target);
+            reached.push(target);
+        }
+        for path in outward.includes {
+            cancellation.ensure_active()?;
+            let Some(target) = reachable_target(file, &path, root, boundary, resolver) else {
+                continue;
+            };
+            reached.push(target);
+        }
+        reached.extend(
+            established
+                .iter()
+                .filter(|(import, _)| import.file == file)
+                .map(|(_, target)| *target),
+        );
+        for target in reached {
+            cancellation.ensure_active()?;
+            if collect_reached_source(target, sources, view, root, boundary, resolver, disk) {
+                pending.push_back(target);
             }
         }
     }
@@ -434,7 +427,7 @@ fn reachable_target(
     source_within_boundary(target, root, boundary).then_some(target)
 }
 
-/// Add one source the closure reached; a source already in the set keeps its own reader's text.
+/// Add one source the closure reached and report whether it joined the set.
 fn collect_reached_source(
     target: FileId,
     sources: &mut HashMap<FileId, Arc<SourceNames>>,
@@ -443,13 +436,13 @@ fn collect_reached_source(
     boundary: &SourceBoundary,
     resolver: Option<&FileResolver>,
     disk: &mut DiskSources,
-) {
+) -> bool {
     if sources.contains_key(&target) {
-        return;
+        return false;
     }
     if let Some(parsed) = view.by_id(target) {
         sources.insert(target, parsed.names());
-        return;
+        return true;
     }
     // The bytes belong to the physical buffer; the ID keeps this module's import base.
     let physical = matches!(target.root(), VirtualRoot::Project).then(|| {
@@ -457,13 +450,14 @@ fn collect_reached_source(
     });
     let Some(text) = reached_text(target, root, boundary, physical.as_deref(), view, resolver)
     else {
-        return;
+        return false;
     };
     sources.insert(target, disk.names_from_text(target, text));
     if let Some(physical) = physical {
         let logical = root.join(target.vpath().get_without_slash());
         disk.set_alias(target, (physical != logical).then_some(physical));
     }
+    true
 }
 
 /// The bytes of one source the closure reached, from the first reader that holds it.

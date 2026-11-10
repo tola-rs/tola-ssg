@@ -520,12 +520,11 @@ outputs = [{ tree = "_tola-modules/{name}/search" }]
 [queries.nodes]
 entry = "model.typ"
 label = "notebook-nodes"
-returns = "entities"
 
 [commands.list]
 help = "List notebook entries."
 query = "nodes"
-projection = ["id", "title"]
+projection = ["id", "name"]
 
 [commands.edit]
 help = "Open a notebook entry."
@@ -536,17 +535,27 @@ argv = ["{module}/tools/edit"]
 
 帮助、初始化入口和 argv 工具不要求无关的查询入口或资产文件存在；执行查询和构建站点时仍校验相应输入。对于以 `nu` 声明的命令，在脚本的 `main` 签名和注释中定义参数、类型、默认值与说明。根帮助、模块帮助和命令帮助读取这份签名，不执行脚本；运行时由 Nu 绑定参数。清单中的 `help` 可省略，也可用来覆盖说明；其他 argv 工具可用它描述用法。
 
-查询入口相对于模块目录，支持声明在站点根之外的模块。查询沿用站点的源文件发现与包解析，保持站点根不变，只替换查询入口。label 必须对应恰好一个 metadata 值；默认 `json` 格式只接受 JSON 标量、数组和字典，项目内容、路径及函数需要显式投影。
+查询入口相对于模块目录，支持声明在站点根之外的模块。查询沿用站点的源文件发现与包解析，只选择自己的 Typst 入口。`label` 必须选中恰好一个 metadata 值。普通查询接受能转换为 JSON 的标量、数组和字典；原生 Typst 路径转换为包含 `root`、`path` 的记录。内容和函数需要先投影成数据字段。查询可以直接导入模块内部的 helper。
 
-`returns = "entities"` 时，值为实体数组：每项有唯一字符串 `id`、字符串 `label`，可选字符串 `detail`、`url` 和原生 Typst `source` 路径。源文件与外来 URL 分开表示；命令输出的源路径包含虚拟根和路径。清单可用 `[[semantics]]`、`export = "local"`、`parameter = { positional = 0 }`、`role = "reference"`、`query = "nodes"` 声明公开入口的语义角色；点分路径如 `content.local` 按公开成员查找，不指定私有文件。具名参数使用 `{ named = "address" }`，定义角色使用 `"definition"`。角色必须引用实体查询。
+在对应查询下面声明引用和定义。
 
 ```toml
-[[semantics]]
+[[queries.nodes.references]]
 export = "local"
 parameter = { positional = 0 }
-role = "reference"
-query = "nodes"
+
+[[queries.nodes.definitions]]
+export = "subtree"
+parameter = { named = "address" }
 ```
+
+每条记录指定 `[typst].entry` 导出的函数及其一个参数。位置参数从零计数，具名参数按名称选择。`content.local` 这样的点分路径按公开成员查找。数组允许多个函数或参数使用同一个查询。找不到导出、参数不存在或声明冲突时，诊断会指出模块与查询条目。
+
+带有引用或定义的查询自动要求返回记录数组，每项必须有非空且在该查询内唯一的字符串 `id`、字符串 `name`。`description`、`url` 是可选字符串，`source` 是可选原生 Typst 路径。CLI 和 LSP 使用同一套校验。ID 的范围由模块别名和查询名确定。配置中的 `label` 选择整份 metadata，结果中的 `name` 用于显示。普通查询自行定义字段和类型，消费它的工具检查自己的字段要求。
+
+迁移旧清单时，将 `[[semantics]]` 移到对应查询的 `references` 或 `definitions` 数组，删除 `role`、`query` 以及查询的 `returns` 字段。结果字段 `label`、`detail` 分别改为 `name`、`description`，metadata 的 `label` 保留。旧字段会被拒绝。
+
+LSP 为每个模块实例的查询入口保留会话，同一修订中多个标签共用入口编译结果。编辑后复用有效的源分析，回答仍与当前未保存文本一致。配置、模块声明和输入范围改变时更新会话。同一入口中的多个查询共享计算和失败范围。
 
 查询不运行 hook、不导出页面，也不发布站点；缺失的生成输入仍会报错，需要先显式准备。默认输出人类可读的表格；`--json` 返回 compact JSON，`--json --pretty` 缩进。
 
@@ -575,11 +584,11 @@ entry = "tools/mod.nu"
 
 ```nu
 use tola image
-let source = (image metadata-file photo.png)
-image resize-file photo.png preview.webp --width 640 --op fit-width --format webp
+let source = (image metadata photo.png)
+image resize photo.png --output preview.webp --width 640 --op fit-width --format webp
 ```
 
-`resize-file` 返回元数据，目标文件必须不存在且所在目录必须已存在。
+`image resize` 可接收文件路径或管道二进制。指定 `--output` 时写入文件并返回元数据，目标文件必须不存在且所在目录必须已存在。省略 `--output` 时返回编码后的二进制。
 
 模块还可声明站点初始化入口：
 

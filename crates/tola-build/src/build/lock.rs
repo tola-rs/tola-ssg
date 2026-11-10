@@ -237,7 +237,6 @@ mod tests {
             BuildRequest::new(BuildMode::Production),
             || panic!("uncontended build waited"),
         )
-        .map_err(BuildFailure::into_error)
         .unwrap();
 
         let (started, waited) = std::sync::mpsc::channel();

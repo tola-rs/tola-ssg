@@ -20,13 +20,19 @@ pub(crate) enum SourceFailure {
     Cancelled,
     /// The job whose answer this would have been panicked; the request is still answered.
     Panicked,
+    InvalidName(crate::analysis::NameQueryError),
     Failed(anyhow::Error),
 }
 
 impl SourceFailure {
-    pub(super) fn of(error: anyhow::Error) -> Self {
+    pub(crate) fn of(error: anyhow::Error) -> Self {
         if error.chain().any(|cause| cause.is::<BuildCancelled>()) {
             Self::Cancelled
+        } else if let Some(error) = error
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<crate::analysis::NameQueryError>())
+        {
+            Self::InvalidName(error.clone())
         } else {
             Self::Failed(error)
         }
@@ -83,7 +89,7 @@ pub(crate) enum SourceCompilation {
         root: PathBuf,
         selected: Result<Arc<SelectedInterfaces>, SourceFailure>,
     },
-    /// The retained compilation was let go; nothing answers to it.
+    /// A worker released its caches; there is no client reply.
     Released,
 }
 
@@ -213,6 +219,9 @@ where
             SourceJob::ReleaseIdle => {
                 self.compilations.release();
                 self.entity_queries.release();
+                self.disk = Default::default();
+                self.graphs = Default::default();
+                self.bibliographies = Default::default();
                 SourceCompilation::Released
             }
         }

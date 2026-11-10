@@ -1,5 +1,4 @@
-//! Which job each lane runs next, when a due check is dispatched, and when an idle connection lets
-//! its compiled site go.
+//! Which job each lane runs next and when an idle connection releases worker caches.
 
 use std::collections::VecDeque;
 use std::io::Write;
@@ -8,7 +7,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use tola_diagnostic::Diagnostic;
 
-use super::{Connection, IdleRelease};
+use super::Connection;
 use crate::compiler::{AnalysisRequest, CheckRequest, SourceJob};
 
 /// How long typing must pause before a whole-site check is worth its cost.
@@ -25,10 +24,7 @@ pub(super) const CHECK_SETTLE_DELAY: Duration = Duration::from_millis(400);
 /// long as it keeps asking; past this bound the check's freshness outranks the queue's order.
 const CHECK_STARVATION_LIMIT: Duration = Duration::from_secs(2);
 
-/// How long a connection that is answering may hold its compiled site before it lets it go.
-///
-/// The held compilation is a whole site's Bundle, which is the largest thing one connection
-/// retains. Answering again re-derives it.
+/// How long an idle connection with open sources keeps its worker caches.
 const IDLE_RELEASE_DELAY: Duration = Duration::from_secs(300);
 
 /// One lane's waiting jobs, each with the moment it was queued.
@@ -90,15 +86,11 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
         if !starved {
             while let Some((job, waited)) = self.queries.pop_front() {
                 if !job.is_cancelled() {
-                    self.resume_after_release();
+                    self.last_work = Some(now);
                     log_dispatched(&job, waited);
                     return Some(job);
                 }
             }
-        }
-        if self.idle_release == IdleRelease::Requested {
-            self.idle_release = IdleRelease::Released;
-            return Some(SourceJob::ReleaseIdle);
         }
         if self.check.as_ref().is_some_and(|check| now < check.due) {
             return None;
@@ -110,7 +102,7 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
         let checked_revision = pending.checked_revision;
         let waited = now.saturating_duration_since(pending.queued_at);
         self.running_check = Some(checked_revision);
-        self.resume_after_release();
+        self.last_work = Some(now);
         // A report is timed from the moment its check started running, so a check that answers
         // inside the window never shows one, and the first check shows one at once.
         self.begin_progress(now);
@@ -131,17 +123,10 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
         Some(job)
     }
 
-    /// Record that a job now holds the lane: a released site is about to be derived again, so
-    /// letting it go is worth asking another time.
-    fn resume_after_release(&mut self) {
-        if self.idle_release == IdleRelease::Released {
-            self.idle_release = IdleRelease::Available;
-        }
-    }
-
     pub(crate) fn next_analysis(&mut self) -> Option<AnalysisRequest> {
         while let Some((request, waited)) = self.analyses.pop_front() {
             if !request.sources.cancellation.is_cancelled() {
+                self.last_work = Some(Instant::now());
                 log_analysis_dispatched(&request, waited);
                 return Some(request);
             }
@@ -149,42 +134,39 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
         None
     }
 
-    /// The work this connection owes the client between jobs: opening a progress report that is
-    /// due, and letting go of a compiled site nothing is using.
-    pub(crate) fn run_due_work(&mut self, now: Instant) -> Result<()> {
+    /// Open any due progress report and tell the server when both workers may release caches.
+    pub(crate) fn run_due_work(&mut self, now: Instant, lanes_busy: bool) -> Result<bool> {
         self.open_progress(now)?;
-        self.release_idle(now);
-        Ok(())
+        Ok(self.release_idle(now, lanes_busy))
     }
 
-    /// Let go of the compiled site when nothing is answering from it.
-    ///
-    /// The compiled site is the largest thing a connection retains and the cheapest to derive
-    /// again, so a connection with no open document lets it go at once, and one that has answered
-    /// nothing for [`IDLE_RELEASE_DELAY`] lets it go as well. The next request derives it again.
-    fn release_idle(&mut self, now: Instant) {
-        if self.idle_release != IdleRelease::Available {
-            return;
-        }
-        let busy = self.check.is_some()
+    /// Release once per idle period, immediately when there are no open named sources.
+    fn release_idle(&mut self, now: Instant, lanes_busy: bool) -> bool {
+        let Some(last_work) = self.last_work else {
+            return false;
+        };
+        let busy = lanes_busy
+            || self.check.is_some()
             || self.running_check.is_some()
             || !self.requests.is_empty()
             || !self.queries.is_empty()
             || !self.analyses.is_empty();
         if busy {
-            self.last_work = now;
-            return;
+            self.last_work = Some(now);
+            return false;
         }
-        let idle = now.duration_since(self.last_work) >= IDLE_RELEASE_DELAY;
-        if self.open.overrides().is_empty() || idle {
-            self.idle_release = IdleRelease::Requested;
-            tracing::debug!(
-                lane = "compiler",
-                idle_ms = millis(now.duration_since(self.last_work)),
-                open_sources = self.open.overrides().len(),
-                "an idle connection asks its compiler lane to release the compiled site"
-            );
+        let idle_for = now.duration_since(last_work);
+        let open_sources = self.open.overrides().len();
+        if open_sources != 0 && idle_for < IDLE_RELEASE_DELAY {
+            return false;
         }
+        self.last_work = None;
+        tracing::debug!(
+            idle_ms = millis(idle_for),
+            open_sources,
+            "an idle connection releases its worker caches"
+        );
+        true
     }
 }
 
@@ -221,10 +203,11 @@ mod tests {
     use super::*;
     use crate::connection::tests::{open_document, ready, ready_at, ready_workspace};
     use lsp_types::notification::{self, Notification as LspNotification};
+    use lsp_types::request::{self, Request as LspRequest};
     use serde_json::json;
 
     use crate::protocol::CheckMode;
-    use lsp_server::Notification;
+    use lsp_server::{Notification, Request};
 
     /// Only typing defers its check: a save checks at once, so the site answers a deliberate edit
     /// without waiting out a pause the author never made.
@@ -309,18 +292,10 @@ mod tests {
             Some(SourceJob::Check(_))
         ));
     }
-    /// A released site waits for a job that derives it again: asking on every idle turn would
-    /// release nothing.
     #[test]
-    fn released_site_waits_for_new_work() {
+    fn idle_release_waits_for_either_worker_to_do_more_work() {
         let mut connection = ready(Vec::new());
-        let now = Instant::now();
-        connection.run_due_work(now).unwrap();
-        assert!(matches!(
-            connection.next_job(now),
-            Some(SourceJob::ReleaseIdle)
-        ));
-        assert!(connection.next_job(now).is_none());
+        assert!(!connection.run_due_work(Instant::now(), false).unwrap());
 
         let uri = crate::uri::from_file_path(
             &std::env::current_dir()
@@ -336,10 +311,18 @@ mod tests {
         ));
         connection.running_check = None;
         let idle_at = derived_at + IDLE_RELEASE_DELAY;
-        connection.run_due_work(idle_at).unwrap();
-        assert!(matches!(
-            connection.next_job(idle_at),
-            Some(SourceJob::ReleaseIdle)
-        ));
+        assert!(connection.run_due_work(idle_at, false).unwrap());
+        assert!(!connection.run_due_work(idle_at, false).unwrap());
+
+        connection
+            .request(Request::new(
+                1.into(),
+                request::SemanticTokensFullRequest::METHOD.into(),
+                json!({"textDocument":{"uri":uri.as_str()}}),
+            ))
+            .unwrap();
+        crate::connection::tests::finish_analysis(&mut connection);
+        let idle_at = Instant::now() + IDLE_RELEASE_DELAY;
+        assert!(connection.run_due_work(idle_at, false).unwrap());
     }
 }

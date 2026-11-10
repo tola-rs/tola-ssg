@@ -18,32 +18,10 @@ use crate::world::font::{FontLoadError, FontOptions, FontStore};
 use crate::world::package::{PackageFetchPolicy, PackageLocations, PackageSpec, PackageVerifier};
 use crate::world::{ExplicitSources, SourceBoundary, TypstWorld, WorldBuildError};
 
-/// The site-independent inputs a [`TypstHost`] is built from.
-///
-/// Every field is a decision the caller already made; the host only binds them together.
-pub struct TypstHostParts {
-    /// Loaded fonts and their options.
-    pub fonts: Arc<FontStore>,
-    /// File resolver, including the caller's file provider and source boundary.
-    pub files: FileResolver,
-    /// Effective Typst package roots.
-    pub package_locations: PackageLocations,
-    /// Whether missing packages may be fetched.
-    pub fetch_policy: PackageFetchPolicy,
-    /// Physical source restrictions for reads outside the resolver.
-    pub source_boundary: SourceBoundary,
-    /// Parsed-file cache shared with other consumers.
-    pub file_cache: Arc<SharedFileCache>,
-}
-
 /// Typst resources for one compilation, without site concepts.
 #[derive(Clone)]
 pub struct TypstHost {
-    package_locations: PackageLocations,
-    fetch_policy: PackageFetchPolicy,
-    source_boundary: SourceBoundary,
     files: FileResolver,
-    local_packages: Arc<LocalPackages>,
     virtual_files: Arc<FileMap>,
     file_cache: Arc<SharedFileCache>,
     fonts: Arc<FontStore>,
@@ -51,23 +29,23 @@ pub struct TypstHost {
 
 impl TypstHost {
     /// Bind already-decided resources.
-    pub fn new(parts: TypstHostParts) -> Self {
+    pub fn new(
+        fonts: Arc<FontStore>,
+        files: FileResolver,
+        file_cache: Arc<SharedFileCache>,
+    ) -> Self {
         Self {
-            package_locations: parts.package_locations,
-            fetch_policy: parts.fetch_policy,
-            source_boundary: parts.source_boundary,
-            files: parts.files,
-            local_packages: Arc::default(),
+            files,
             virtual_files: Arc::default(),
-            file_cache: parts.file_cache,
-            fonts: parts.fonts,
+            file_cache,
+            fonts,
         }
     }
 
     /// Replace the file provider, keeping virtual files as an overlay above it.
     pub fn with_file_provider<P: FileProvider + 'static>(&self, provider: P) -> Self {
         let mut host = self.clone();
-        host.files = self.files.clone().with_provider(provider);
+        host.files = host.files.with_provider(provider);
         host
     }
 
@@ -80,11 +58,7 @@ impl TypstHost {
     /// Bind one immutable selection of local packages without changing builtin files.
     pub fn with_local_packages(&self, packages: Arc<LocalPackages>) -> Self {
         let mut host = self.clone();
-        host.files = self
-            .files
-            .clone()
-            .with_local_packages(Arc::clone(&packages));
-        host.local_packages = packages;
+        host.files = host.files.with_local_packages(packages);
         host
     }
 
@@ -104,23 +78,23 @@ impl TypstHost {
         overrides: impl IntoIterator<Item = (PathBuf, Arc<[u8]>)>,
     ) -> typst::diag::FileResult<Self> {
         let mut host = self.clone();
-        host.files = self.files.clone().with_disk_overrides(overrides)?;
+        host.files = host.files.with_disk_overrides(overrides)?;
         Ok(host)
     }
 
-    /// Effective Typst package roots.
-    pub fn package_locations(&self) -> &PackageLocations {
-        &self.package_locations
+    /// Frozen Typst package roots or the error that prevented discovery.
+    pub fn package_locations(&self) -> typst::diag::FileResult<&PackageLocations> {
+        self.files.package_store().locations()
     }
 
     /// Whether missing packages may be fetched.
     pub fn fetch_policy(&self) -> PackageFetchPolicy {
-        self.fetch_policy
+        self.files.package_store().fetch_policy()
     }
 
     /// Physical source restrictions applied to disk reads.
     pub fn source_boundary(&self) -> &SourceBoundary {
-        &self.source_boundary
+        self.files.source_boundary()
     }
 
     /// Font options this host loaded with.
@@ -135,7 +109,7 @@ impl TypstHost {
 
     /// Declared local packages bound to this host.
     pub fn local_packages(&self) -> &Arc<LocalPackages> {
-        &self.local_packages
+        self.files.local_packages()
     }
 
     /// The resolver every source read of this host uses.
@@ -176,10 +150,13 @@ impl TypstHost {
     /// Whether this host and `other` would compile from the same inputs.
     pub fn has_same_inputs(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.fonts, &other.fonts)
-            && self.package_locations == other.package_locations
-            && self.fetch_policy == other.fetch_policy
-            && self.source_boundary == other.source_boundary
-            && self.local_packages == other.local_packages
+            && matches!(
+                (self.package_locations(), other.package_locations()),
+                (Ok(left), Ok(right)) if left == right
+            )
+            && self.fetch_policy() == other.fetch_policy()
+            && self.source_boundary() == other.source_boundary()
+            && self.local_packages() == other.local_packages()
             && Arc::ptr_eq(&self.virtual_files, &other.virtual_files)
     }
 

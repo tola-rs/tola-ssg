@@ -93,7 +93,7 @@ pub(crate) struct ReusableHookOutput {
     pub(crate) inputs: HookInputs,
     pub(crate) outputs: Vec<OutputFile>,
     pub(crate) roots: Vec<OutputRootOwnership>,
-    pub(crate) report: Option<Vec<tola_diagnostic::Diagnostic>>,
+    pub(crate) report: Vec<tola_diagnostic::Diagnostic>,
 }
 
 /// Previous development revision's reusable outputs, one entry per hook name.

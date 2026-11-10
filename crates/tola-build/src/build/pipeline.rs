@@ -8,8 +8,8 @@ use crate::{
 };
 
 use super::{
-    AcceptedFileChanges, BuildAttemptInputs, BuildCacheUpdate, BuildFailure, BuildMode,
-    BuildRequest, BuildSession, SiteBuild, SiteBuildGuard, diagnostic,
+    BuildAttemptInputs, BuildCacheUpdate, BuildFailure, BuildMode, BuildRequest, BuildSession,
+    SiteBuild, SiteBuildGuard, diagnostic,
 };
 
 #[derive(Default)]
@@ -26,8 +26,11 @@ pub(crate) struct BuildAttemptProducers {
     pub(crate) reference_reuse: Option<crate::site::references::References>,
     /// Previous successful root Bundle export for exporter-level byte reuse.
     pub(crate) previous_bundle_entries: Option<tola_typst::BundleEntries>,
-    pub(crate) configured_assets: Option<crate::asset::ConfiguredAssetInventory>,
-    pub(crate) configured_asset_changes: Option<AcceptedFileChanges>,
+    /// The accepted inventory and the watcher batch that covers its inputs.
+    pub(crate) asset_reuse: Option<(
+        crate::asset::ConfiguredAssets,
+        std::sync::Arc<[std::path::PathBuf]>,
+    )>,
     /// Published inventory whose membership is unchanged according to filesystem
     /// events. `None` triggers discovery after before-build hooks.
     pub(crate) content_inventory: Option<std::sync::Arc<[crate::content::ContentUnit]>>,
@@ -36,27 +39,12 @@ pub(crate) struct BuildAttemptProducers {
     /// Successful source generation may be newer than the installed revision.
     pub(crate) source_hooks: crate::hooks::SourceHookOutputs,
     pub(crate) failed_hook_outputs: Option<crate::hooks::FailedHookOutputs>,
-    /// Whether the hooks this attempt ran wrote exactly what the accepted revision held.
-    pub(crate) hook_outputs_unchanged: bool,
     /// Reusable `generate-outputs` products from the accepted development revision.
     pub(crate) previous_hook_reuse: Option<crate::hooks::ReusableHookOutputs>,
     pub(crate) report: Option<super::BuildReport>,
 }
 
 impl BuildAttemptProducers {
-    /// Discard reuse justified only by an event a source generator may have invalidated.
-    fn clear_pre_scan_reuse(&mut self) {
-        self.reuse = None;
-        self.previous_bundle_entries = None;
-        self.configured_assets = None;
-        self.configured_asset_changes = None;
-        self.content_inventory = None;
-    }
-
-    pub(crate) fn inputs_mut(&mut self) -> &mut crate::compiler::BuildInputs {
-        &mut self.inputs
-    }
-
     pub(crate) fn into_inputs(self) -> BuildAttemptInputs {
         BuildAttemptInputs {
             compiler: self.inputs,
@@ -128,9 +116,6 @@ pub(super) fn build_site_inner(
         producers.cancellation.ensure_active()?;
 
         let typst_host = prepare_compiler(producers, hooks_executed)?;
-        if hooks_executed && !producers.hook_outputs_unchanged {
-            producers.clear_pre_scan_reuse();
-        }
         let built = build_site_candidate(
             site,
             &typst_host,
@@ -430,7 +415,7 @@ pub(super) fn compile_site_program(
     let config = site.config();
     let cancellation = producers.cancellation.clone();
     let (
-        configured_asset_inventory,
+        configured_assets,
         PreparedProducerInputs {
             content,
             icons,
@@ -445,7 +430,7 @@ pub(super) fn compile_site_program(
         site,
         &typst_host,
         &content,
-        &configured_asset_inventory,
+        &configured_assets,
         producers,
         warnings,
         diagnostics,
@@ -455,13 +440,9 @@ pub(super) fn compile_site_program(
     insert_code_stylesheet(&mut outputs, config.build.minify.css)?;
     producers.cancellation.ensure_active()?;
     outputs.insert_graph(&site_program.outputs)?;
-    collect_configured_assets(
-        &mut outputs,
-        &configured_asset_inventory,
-        &producers.cancellation,
-    )?;
+    collect_configured_assets(&mut outputs, &configured_assets, &producers.cancellation)?;
     diagnostics.extend(
-        configured_asset_inventory
+        configured_assets
             .minify_warnings()
             .into_iter()
             .map(crate::asset::AssetMinifyWarning::diagnostic),
@@ -505,7 +486,7 @@ pub(super) fn compile_site_program(
             dependencies,
             source_analysis,
             site_program,
-            configured_assets: configured_asset_inventory,
+            configured_assets: configured_assets,
             icons,
             images,
             seo,
@@ -523,36 +504,32 @@ fn prepare_beside_configured_assets(
     typst_host: &SiteHost,
     producers: &mut BuildAttemptProducers,
     cancellation: &crate::cancellation::BuildCancellation,
-) -> Result<(
-    crate::asset::ConfiguredAssetInventory,
-    PreparedProducerInputs,
-)> {
+) -> Result<(crate::asset::ConfiguredAssets, PreparedProducerInputs)> {
     let config = site.config();
-    let previous_assets = producers.configured_assets.take();
-    let configured_changes = producers.configured_asset_changes.take();
+    let asset_reuse = producers.asset_reuse.take();
     let subscriber = tracing::dispatcher::get_default(Clone::clone);
     let span = tracing::Span::current();
     // These producers run beside each other rather than on the CPU pool: each one
     // reads its own directories and files directly, so keeping them here is what
     // lets the pool stay available for the compilation work that follows.
     std::thread::scope(
-        |scope| -> Result<(
-            crate::asset::ConfiguredAssetInventory,
-            PreparedProducerInputs,
-        )> {
+        |scope| -> Result<(crate::asset::ConfiguredAssets, PreparedProducerInputs)> {
             let configured_assets = scope.spawn(|| {
                 let _subscriber = tracing::dispatcher::set_default(&subscriber);
                 let _entered = span.enter();
                 let started = std::time::Instant::now();
-                let assets = crate::asset::render_configured_asset_inventory(
+                let (previous, changes) = asset_reuse
+                    .as_ref()
+                    .map_or((None, &[][..]), |(assets, paths)| {
+                        (Some(assets), paths.as_ref())
+                    });
+                let assets = crate::asset::build_configured_assets(
                     config,
                     site.applied_assets(),
                     &producers.resources.source_boundary(config),
                     cancellation,
-                    configured_changes.as_ref().and(previous_assets.as_ref()),
-                    configured_changes
-                        .as_ref()
-                        .map_or(&[], super::AcceptedFileChanges::paths),
+                    previous,
+                    changes,
                 );
                 tracing::debug!(target: "tola::compile",
                 assets_ms = started.elapsed().as_secs_f64() * 1000.0,
@@ -619,7 +596,7 @@ fn compile_root_bundle(
     site: &crate::modules::PreparedSite,
     typst_host: &SiteHost,
     content: &[crate::content::ContentUnit],
-    configured_assets: &crate::asset::ConfiguredAssetInventory,
+    configured_assets: &crate::asset::ConfiguredAssets,
     producers: &mut BuildAttemptProducers,
     warnings: &mut tola_typst::Diagnostics,
     // Every later step of this attempt may fail, and a failed root Bundle reports no other
@@ -664,7 +641,7 @@ fn compile_root_bundle(
             } else {
                 reexport_cached_site_program(config, cached_site_program, &producers.cancellation)?
             };
-            dependencies.record_all_reads(producers.inputs_mut());
+            dependencies.record_all_reads(&mut producers.inputs);
             tracing::debug!(target: "tola::compile", "reused background SiteProgram producer");
             diagnostics.extend_from_slice(source_analysis.declaration_warnings());
             return Ok(CompiledRootBundle {
@@ -682,7 +659,7 @@ fn compile_root_bundle(
         package_bindings,
         &cancellation,
         source_analysis_reuse,
-        producers.inputs_mut(),
+        &mut producers.inputs,
     )
     .map_err(crate::compiler::analysis::SourceAnalysisFailure::into_error)?;
     let sources = evaluated_program.sources();
@@ -701,7 +678,7 @@ fn compile_root_bundle(
         typst_host,
         &cancellation,
         &evaluated_program,
-        producers.inputs_mut(),
+        &mut producers.inputs,
     )
     .map_err(crate::compiler::bundle::RealizeFailure::into_error)?;
     warnings.extend_distinct(realized_bundle.compilation.diagnostics());
@@ -799,7 +776,7 @@ fn insert_code_stylesheet(
 
 fn collect_configured_assets(
     outputs: &mut crate::output::graph::OutputGraphBuilder,
-    configured_assets: &crate::asset::ConfiguredAssetInventory,
+    configured_assets: &crate::asset::ConfiguredAssets,
     cancellation: &crate::cancellation::BuildCancellation,
 ) -> Result<()> {
     for (asset, bytes) in configured_assets.entries() {
@@ -939,10 +916,10 @@ mod tests {
             &mut BuildAttemptProducers {
                 reuse: Some(reuse),
                 previous_bundle_entries: session.bundle_entries(),
-                configured_assets: session.configured_assets().cloned(),
-                configured_asset_changes: Some(AcceptedFileChanges::from_watcher(vec![
-                    stylesheet.clone(),
-                ])),
+                asset_reuse: Some((
+                    session.configured_assets().unwrap().clone(),
+                    [stylesheet.clone()].into(),
+                )),
                 ..BuildAttemptProducers::default()
             },
         )
@@ -963,10 +940,10 @@ mod tests {
             &mut BuildAttemptProducers {
                 reuse: Some(reuse),
                 previous_bundle_entries: session.bundle_entries(),
-                configured_assets: session.configured_assets().cloned(),
-                configured_asset_changes: Some(AcceptedFileChanges::from_watcher(vec![
-                    script.clone(),
-                ])),
+                asset_reuse: Some((
+                    session.configured_assets().unwrap().clone(),
+                    [script.clone()].into(),
+                )),
                 ..BuildAttemptProducers::default()
             },
         )

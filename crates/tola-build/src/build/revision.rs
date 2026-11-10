@@ -146,6 +146,14 @@ impl SiteBuild {
         &self.config
     }
 
+    /// The module directories selected by this build, keyed by their configured aliases.
+    pub fn module_roots(&self) -> impl Iterator<Item = (&str, &std::path::Path)> {
+        self.modules
+            .modules
+            .iter()
+            .map(|(alias, module)| (alias.as_str(), module.root.as_path()))
+    }
+
     /// Realized documents, resources, and addresses from this build.
     pub fn index(&self) -> &SiteIndex {
         &self.index
@@ -432,7 +440,7 @@ mod tests {
 
         // The read boundary refuses the output tree while the Bundle compiles, so publication
         // never reaches the write-stage overlap check that `output/root.rs` exercises directly.
-        let diagnostics = error_diagnostics(error.error(), config.get_root());
+        let diagnostics = error.diagnostics(config.get_root());
         assert!(
             diagnostics.iter().any(|diagnostic| {
                 diagnostic.code == "typst.compile"

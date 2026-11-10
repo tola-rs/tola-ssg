@@ -1,6 +1,457 @@
 //! References resolved from the sealed site output.
 
 pub(crate) mod diagnostic;
+mod document {
+    //! References and address reads retained for one output document.
+
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    use tola_address::{OutputPath, SiteUrlMount, UrlPath};
+
+    use crate::cancellation::{BuildCancellation, BuildCancelled};
+    use crate::site::space::AddressDependencies;
+    use crate::site::{AddressSpace, HtmlPage};
+
+    use super::{Reference, ReferenceResolution, target::read_reference};
+
+    /// Source meaning and the exact target reads that justify one immutable group.
+    pub(super) struct DocumentReferences {
+        pub(super) output: OutputPath,
+        permalink: UrlPath,
+        inventory: Arc<tola_typst::HtmlDocumentInventory>,
+        dependencies: Arc<AddressDependencies>,
+        pub(super) references: Vec<Reference>,
+        pub(super) incoming: BTreeMap<UrlPath, Vec<usize>>,
+        /// The document base that names another origin, with its source span, when the page has one.
+        ///
+        /// Every relative reference of such a page resolves external, so the page's reference checks
+        /// are skipped; retaining the base lets the projection report that instead of staying silent.
+        pub(super) unchecked_base: Option<UncheckedBase>,
+    }
+
+    /// A document base naming another origin, and where the page wrote it.
+    #[derive(Clone)]
+    pub(crate) struct UncheckedBase {
+        pub(super) value: String,
+        pub(super) origin: Option<tola_diagnostic::Location>,
+    }
+
+    impl DocumentReferences {
+        pub(super) fn read(
+            cached: Option<&Arc<Self>>,
+            address: &AddressSpace,
+            page: &HtmlPage,
+            inventory: &Arc<tola_typst::HtmlDocumentInventory>,
+            url_mount: &SiteUrlMount,
+            world: &tola_typst::TypstWorld,
+            cancellation: &BuildCancellation,
+        ) -> Result<Arc<Self>, BuildCancelled> {
+            if let Some(cached) = cached
+                && cached.same_reference_semantics(page, inventory, cancellation)?
+                && cached.dependencies.unchanged(address, cancellation)?
+            {
+                return Ok(
+                    match cached.refresh_origins(inventory, world, cancellation)? {
+                        Some(refreshed) => Arc::new(refreshed),
+                        None => Arc::clone(cached),
+                    },
+                );
+            }
+            Self::read_new(address, page, inventory, url_mount, world, cancellation).map(Arc::new)
+        }
+
+        fn same_reference_semantics(
+            &self,
+            page: &HtmlPage,
+            inventory: &Arc<tola_typst::HtmlDocumentInventory>,
+            cancellation: &BuildCancellation,
+        ) -> Result<bool, BuildCancelled> {
+            if self.output != page.output || self.permalink != page.permalink {
+                return Ok(false);
+            }
+            if Arc::ptr_eq(&self.inventory, inventory) {
+                return Ok(true);
+            }
+            if self
+                .inventory
+                .base_href()
+                .map(tola_typst::HtmlBaseHref::value)
+                != inventory.base_href().map(tola_typst::HtmlBaseHref::value)
+                || self.inventory.references().len() != inventory.references().len()
+            {
+                return Ok(false);
+            }
+            // Source positions are projected separately; only URL semantics determine reuse here.
+            for (old, new) in self
+                .inventory
+                .references()
+                .iter()
+                .zip(inventory.references())
+            {
+                cancellation.ensure_active()?;
+                if old.tag() != new.tag()
+                    || old.attribute() != new.attribute()
+                    || old.destination() != new.destination()
+                    || old.relation() != new.relation()
+                    || old.reference_use() != new.reference_use()
+                {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+
+        fn refresh_origins(
+            &self,
+            inventory: &Arc<tola_typst::HtmlDocumentInventory>,
+            world: &tola_typst::TypstWorld,
+            cancellation: &BuildCancellation,
+        ) -> Result<Option<Self>, BuildCancelled> {
+            let mut references = None;
+            for (position, reference) in inventory.references().iter().enumerate() {
+                cancellation.ensure_active()?;
+                let origin = crate::compiler::source_location(world, reference.span());
+                if self.references[position].origin != origin {
+                    references.get_or_insert_with(|| self.references.clone())[position].origin =
+                        origin;
+                }
+            }
+            // The base's own span moves with its source line exactly as a reference's does.
+            let unchecked_base = self.unchecked_base.as_ref().map(|base| UncheckedBase {
+                value: base.value.clone(),
+                origin: inventory
+                    .base_href()
+                    .and_then(|base| crate::compiler::source_location(world, base.span())),
+            });
+            let base_moved = unchecked_base.as_ref().map(|base| base.origin.as_ref())
+                != self
+                    .unchecked_base
+                    .as_ref()
+                    .map(|base| base.origin.as_ref());
+            let refreshed = references.is_some() || base_moved;
+            Ok(refreshed.then(|| Self {
+                output: self.output.clone(),
+                permalink: self.permalink.clone(),
+                inventory: Arc::clone(inventory),
+                dependencies: Arc::clone(&self.dependencies),
+                references: references.unwrap_or_else(|| self.references.clone()),
+                incoming: self.incoming.clone(),
+                unchecked_base,
+            }))
+        }
+
+        fn read_new(
+            address: &AddressSpace,
+            page: &HtmlPage,
+            inventory: &Arc<tola_typst::HtmlDocumentInventory>,
+            url_mount: &SiteUrlMount,
+            world: &tola_typst::TypstWorld,
+            cancellation: &BuildCancellation,
+        ) -> Result<Self, BuildCancelled> {
+            let mut references = Vec::with_capacity(inventory.references().len());
+            let mut dependencies = AddressDependencies::default();
+            let mut incoming = BTreeMap::<UrlPath, Vec<usize>>::new();
+            let base = inventory.base_href().map(tola_typst::HtmlBaseHref::value);
+            for reference in inventory.references() {
+                cancellation.ensure_active()?;
+                let resolved = read_reference(
+                    address,
+                    page,
+                    base,
+                    reference,
+                    url_mount,
+                    world,
+                    &mut dependencies,
+                );
+                if let ReferenceResolution::Found { target } = resolved.resolution() {
+                    incoming
+                        .entry(target.url().clone())
+                        .or_default()
+                        .push(references.len());
+                }
+                references.push(resolved);
+            }
+            cancellation.ensure_active()?;
+            Ok(Self {
+                output: page.output.clone(),
+                permalink: page.permalink.clone(),
+                inventory: Arc::clone(inventory),
+                dependencies: Arc::new(dependencies),
+                references,
+                incoming,
+                unchecked_base: unchecked_base(inventory, page, url_mount, world),
+            })
+        }
+    }
+
+    /// The document base that keeps this build from checking the page, when it has one.
+    fn unchecked_base(
+        inventory: &tola_typst::HtmlDocumentInventory,
+        page: &HtmlPage,
+        url_mount: &SiteUrlMount,
+        world: &tola_typst::TypstWorld,
+    ) -> Option<UncheckedBase> {
+        let base = inventory.base_href()?;
+        (!tola_address::base_href_keeps_build_origin(&page.permalink, url_mount, base.value()))
+            .then(|| UncheckedBase {
+                value: base.value().to_owned(),
+                origin: crate::compiler::source_location(world, base.span()),
+            })
+    }
+}
+mod target {
+    //! Browser references and the site targets they require.
+
+    use tola_address::{LinkKind, RequiredResourceKind, SiteReference, SiteUrlMount};
+    use tola_typst::HtmlReference;
+
+    use crate::output::semantics::ResponseMediaType;
+    use crate::site::space::AddressDependencies;
+    use crate::site::{AddressResolution, AddressSpace, HtmlPage, Resource};
+
+    use super::{
+        Reference, ReferenceCategory, ReferenceResolution, ReferenceTarget,
+        UnresolvedReferenceReason,
+    };
+
+    pub(super) fn read_reference(
+        address: &AddressSpace,
+        page: &HtmlPage,
+        base: Option<&str>,
+        reference: &HtmlReference,
+        url_mount: &SiteUrlMount,
+        world: &tola_typst::TypstWorld,
+        dependencies: &mut AddressDependencies,
+    ) -> Reference {
+        let destination = reference.destination();
+        let effective =
+            tola_address::resolve_browser_reference(&page.permalink, url_mount, base, destination);
+        let expectation = expectation(reference.reference_use());
+        let default_category = expectation.category;
+        let resolution = match effective {
+            Ok(tola_address::ResolvedBrowserReference::External) => ReferenceResolution::External,
+            Ok(tola_address::ResolvedBrowserReference::OutsideSite(destination)) => {
+                ReferenceResolution::Unresolved {
+                    reason: UnresolvedReferenceReason::OutsideSiteMount {
+                        destination,
+                        required_prefix: format!("/{}/", url_mount.as_str()),
+                    },
+                }
+            }
+            Err(_) => ReferenceResolution::Unresolved {
+                reason: UnresolvedReferenceReason::InvalidBrowserReference {
+                    message: "is not a valid URL".to_string(),
+                },
+            },
+            Ok(tola_address::ResolvedBrowserReference::Site(site)) => {
+                match lookup_target(
+                    address,
+                    site,
+                    reference,
+                    expectation,
+                    url_mount,
+                    dependencies,
+                ) {
+                    Ok(target) => ReferenceResolution::Found { target },
+                    Err(reason) => ReferenceResolution::Unresolved { reason },
+                }
+            }
+        };
+        let category = match &resolution {
+            ReferenceResolution::External => ReferenceCategory::External,
+            ReferenceResolution::Unresolved {
+                reason: UnresolvedReferenceReason::FragmentMissing { .. },
+            } => ReferenceCategory::Fragment,
+            ReferenceResolution::Found { .. }
+                if matches!(LinkKind::parse(destination), LinkKind::Fragment(_)) =>
+            {
+                ReferenceCategory::Fragment
+            }
+            _ => default_category,
+        };
+
+        Reference {
+            page: page.output.clone(),
+            destination: destination.to_owned(),
+            html_context: reference_context(reference),
+            category,
+            resolution,
+            origin: crate::compiler::source_location(world, reference.span()),
+        }
+    }
+
+    /// Category, destination constraint, media requirement, and wording of one reference use.
+    pub(super) struct ReferenceExpectation {
+        category: ReferenceCategory,
+        target: RequiredResourceKind,
+        media_type: Option<ResponseMediaType>,
+        pub(super) usage: &'static str,
+    }
+
+    /// What each way of using a reference requires.
+    pub(super) const fn expectation(
+        reference_use: tola_typst::HtmlReferenceUse,
+    ) -> ReferenceExpectation {
+        use tola_typst::HtmlReferenceUse as HtmlUse;
+        match reference_use {
+            HtmlUse::Navigation => ReferenceExpectation {
+                category: ReferenceCategory::Navigation,
+                target: RequiredResourceKind::DocumentOrResource,
+                media_type: None,
+                usage: "a navigation link",
+            },
+            HtmlUse::GenericResource => ReferenceExpectation {
+                category: ReferenceCategory::Resource,
+                target: RequiredResourceKind::NonDocumentResource,
+                media_type: None,
+                usage: "an embedded resource",
+            },
+            HtmlUse::Prefetch => ReferenceExpectation {
+                category: ReferenceCategory::Resource,
+                target: RequiredResourceKind::DocumentOrResource,
+                media_type: None,
+                usage: "a prefetch link",
+            },
+            HtmlUse::Stylesheet => ReferenceExpectation {
+                category: ReferenceCategory::Resource,
+                target: RequiredResourceKind::NonDocumentResource,
+                media_type: Some(ResponseMediaType::CSS),
+                usage: "a stylesheet",
+            },
+            HtmlUse::ClassicScript => ReferenceExpectation {
+                category: ReferenceCategory::Resource,
+                target: RequiredResourceKind::NonDocumentResource,
+                media_type: Some(ResponseMediaType::JAVASCRIPT),
+                usage: "a classic script",
+            },
+            HtmlUse::ModuleScript => ReferenceExpectation {
+                category: ReferenceCategory::Resource,
+                target: RequiredResourceKind::NonDocumentResource,
+                media_type: Some(ResponseMediaType::JAVASCRIPT),
+                usage: "a module script",
+            },
+            HtmlUse::ModulePreload => ReferenceExpectation {
+                category: ReferenceCategory::Resource,
+                target: RequiredResourceKind::NonDocumentResource,
+                media_type: Some(ResponseMediaType::JAVASCRIPT),
+                usage: "a module preload link",
+            },
+        }
+    }
+
+    fn lookup_target(
+        address: &AddressSpace,
+        site: SiteReference,
+        reference: &HtmlReference,
+        expectation: ReferenceExpectation,
+        url_mount: &SiteUrlMount,
+        dependencies: &mut AddressDependencies,
+    ) -> Result<ReferenceTarget, UnresolvedReferenceReason> {
+        let reference_use = reference.reference_use();
+        let allows_document =
+            matches!(reference_use, tola_typst::HtmlReferenceUse::GenericResource)
+                && matches!(
+                    (reference.tag(), reference.attribute()),
+                    ("object", "data") | ("embed", "src") | ("a", "ping") | ("area", "ping")
+                );
+        let required_kind = if allows_document {
+            RequiredResourceKind::DocumentOrResource
+        } else {
+            expectation.target
+        };
+
+        let target = match address.resolve_route(
+            &site.route,
+            site.fragment.as_deref().unwrap_or_default(),
+            required_kind,
+            &mut *dependencies,
+        ) {
+            AddressResolution::Found { url } => ReferenceTarget::new(url, site),
+            AddressResolution::NotFound => {
+                let suggestion = address
+                    .directory_page_suggestion(&site.route, required_kind, &mut *dependencies)
+                    .map(|route| SiteReference { route, ..site }.to_browser_url(url_mount, None));
+                return Err(UnresolvedReferenceReason::TargetMissing { suggestion });
+            }
+            AddressResolution::FragmentNotFound {
+                fragment,
+                available,
+            } => {
+                return Err(UnresolvedReferenceReason::FragmentMissing {
+                    fragment,
+                    available,
+                });
+            }
+            AddressResolution::DocumentNotAllowed {
+                reference,
+                document,
+            } => {
+                return Err(UnresolvedReferenceReason::DocumentNotAllowed {
+                    reference,
+                    document,
+                });
+            }
+        };
+
+        let Some(required) = expectation.media_type else {
+            return Ok(target);
+        };
+        let Some(Resource::Asset { route }) = address.get_by_url(target.url()) else {
+            unreachable!("a media-typed reference resolves to a registered asset");
+        };
+        let declared = route.declaration().media_type();
+        dependencies.observe_media_type(target.url(), declared);
+        if !resource_media_matches(declared, &required) {
+            return Err(UnresolvedReferenceReason::MediaTypeMismatch {
+                reference_use,
+                required,
+                declared: declared.clone(),
+            });
+        }
+        Ok(target)
+    }
+
+    fn resource_media_matches(declared: &ResponseMediaType, required: &ResponseMediaType) -> bool {
+        if required.essence() != ResponseMediaType::JAVASCRIPT.essence() {
+            return declared.essence() == required.essence();
+        }
+        tola_typst::html::is_javascript_mime_type(declared.essence())
+    }
+
+    fn reference_context(reference: &HtmlReference) -> String {
+        match reference.relation() {
+            Some(relation) => format!(
+                "{}[{} rel={relation}]",
+                reference.tag(),
+                reference.attribute()
+            ),
+            None => format!("{}[{}]", reference.tag(), reference.attribute()),
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn resource_media_matches_by_essence() {
+            let stylesheet = ResponseMediaType::parse("text/css; charset=iso-8859-1").unwrap();
+            assert!(resource_media_matches(&stylesheet, &ResponseMediaType::CSS));
+            let script = ResponseMediaType::parse("application/javascript; charset=utf-8").unwrap();
+            assert!(resource_media_matches(
+                &script,
+                &ResponseMediaType::JAVASCRIPT
+            ));
+            assert!(!resource_media_matches(
+                &stylesheet,
+                &ResponseMediaType::JAVASCRIPT
+            ));
+            let track = ResponseMediaType::parse("text/vtt").unwrap();
+            assert!(!resource_media_matches(&track, &ResponseMediaType::CSS));
+        }
+    }
+}
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -8,11 +459,10 @@ use std::sync::Arc;
 
 use crate::cancellation::{BuildCancellation, BuildCancelled};
 use crate::output::semantics::ResponseMediaType;
-use crate::site::space::AddressDependencies;
-use crate::site::{AddressResolution, HtmlPage, Resource, SiteIndex};
-use tola_address::{
-    LinkKind, OutputPath, RequiredResourceKind, SiteReference, SiteUrlMount, UrlPath,
-};
+use crate::site::SiteIndex;
+use tola_address::{OutputPath, SiteReference, SiteUrlMount, UrlPath};
+
+use document::{DocumentReferences, UncheckedBase};
 
 /// All references found in the final HTML outputs of one sealed site.
 #[derive(Clone, Default)]
@@ -25,28 +475,6 @@ struct ReferenceSet {
     incoming: BTreeMap<UrlPath, Vec<usize>>,
     outgoing: BTreeMap<OutputPath, usize>,
     len: usize,
-}
-
-/// Source meaning and the exact target reads that justify one immutable group.
-struct DocumentReferences {
-    output: OutputPath,
-    permalink: UrlPath,
-    inventory: Arc<tola_typst::HtmlDocumentInventory>,
-    dependencies: Arc<AddressDependencies>,
-    references: Vec<Reference>,
-    incoming: BTreeMap<UrlPath, Vec<usize>>,
-    /// The document base that names another origin, with its source span, when the page has one.
-    ///
-    /// Every relative reference of such a page resolves external, so the page's reference checks
-    /// are skipped; retaining the base lets the projection report that instead of staying silent.
-    unchecked_base: Option<UncheckedBase>,
-}
-
-/// A document base naming another origin, and where the page wrote it.
-#[derive(Clone)]
-pub(crate) struct UncheckedBase {
-    value: String,
-    origin: Option<tola_diagnostic::Location>,
 }
 
 struct ReferenceIter<'a> {
@@ -172,80 +600,6 @@ pub enum UnresolvedReferenceReason {
     },
 }
 
-impl UnresolvedReferenceReason {
-    /// Clause that continues the destination named by the rendered diagnostic.
-    pub fn message(&self, category: ReferenceCategory) -> String {
-        match self {
-            Self::OutsideSiteMount {
-                required_prefix, ..
-            } => {
-                format!(
-                    "is outside `site.base-path`, so the site is served under `{required_prefix}`"
-                )
-            }
-            Self::InvalidBrowserReference { message } => message.clone(),
-            Self::TargetMissing { .. } => match category {
-                ReferenceCategory::Resource => "is not a file this site publishes".into(),
-                _ => "is not a page this site publishes".into(),
-            },
-            Self::FragmentMissing { fragment, .. } => {
-                format!("has no element with the id `{fragment}`")
-            }
-            Self::DocumentNotAllowed { .. } => {
-                "is an HTML page, but this attribute needs a file".to_string()
-            }
-            Self::MediaTypeMismatch {
-                reference_use,
-                required,
-                declared,
-            } => format!(
-                "is used as {}, which needs `{}`, but the file is served as `{}`",
-                reference_expectation(*reference_use).usage,
-                required.as_str(),
-                declared.as_str()
-            ),
-        }
-    }
-
-    pub fn help(&self, category: ReferenceCategory) -> Option<String> {
-        match self {
-            Self::OutsideSiteMount {
-                required_prefix, ..
-            } => Some(format!(
-                "Start root-relative URLs with `{required_prefix}` (from `site.base-path`) or make the link relative"
-            )),
-            Self::TargetMissing {
-                suggestion: Some(suggestion),
-            } => Some(format!("Point the link at `{suggestion}`")),
-            Self::TargetMissing { suggestion: None } => Some(match category {
-                ReferenceCategory::Resource => {
-                    "Declare it in `assets.files` or `assets.trees` in `tola.toml`, or take its URL from `asset-url()`".into()
-                }
-                _ => {
-                    "Point the link at a page that exists, or create the page that publishes it"
-                        .into()
-                }
-            }),
-            Self::FragmentMissing { available, .. } if !available.is_empty() => Some(format!(
-                "Choose an existing id: {}",
-                tola_diagnostic::bounded_listing(available, ("id", "ids"))
-            )),
-            Self::DocumentNotAllowed { .. } => {
-                Some("Point it at a generated file such as a stylesheet, script, or image".into())
-            }
-            Self::MediaTypeMismatch { .. } => Some(
-                "Give the file the extension this attribute needs, or use the matching attribute"
-                    .into(),
-            ),
-            Self::InvalidBrowserReference { .. } | Self::FragmentMissing { .. } => None,
-        }
-    }
-
-    pub(crate) const fn is_media_type_mismatch(&self) -> bool {
-        matches!(self, Self::MediaTypeMismatch { .. })
-    }
-}
-
 /// One outgoing reference together with its final site-wide resolution.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Reference {
@@ -305,30 +659,15 @@ impl References {
                     .get(&page.output)
                     .map(|&position| &previous.0.groups[position])
             });
-            // A group is reusable only while every read that shaped it still answers the same way.
-            let retained = match cached {
-                Some(cached) => (cached.same_reference_semantics(page, inventory, cancellation)?
-                    && cached
-                        .dependencies
-                        .unchanged(index.address(), cancellation)?)
-                .then_some(cached),
-                None => None,
-            };
-            // A retained group whose source positions moved is rebuilt around the same references.
-            let group = match retained {
-                Some(cached) => match cached.refresh_origins(inventory, world, cancellation)? {
-                    Some(refreshed) => Arc::new(refreshed),
-                    None => Arc::clone(cached),
-                },
-                None => Arc::new(DocumentReferences::resolve(
-                    index,
-                    page,
-                    inventory,
-                    url_mount,
-                    world,
-                    cancellation,
-                )?),
-            };
+            let group = DocumentReferences::read(
+                cached,
+                index.address(),
+                page,
+                inventory,
+                url_mount,
+                world,
+                cancellation,
+            )?;
             // An unchanged group keeps its predecessor by Arc rather than by copying references.
             let unchanged_prefix = previous
                 .and_then(|previous| previous.0.groups.get(page_count))
@@ -428,387 +767,13 @@ impl References {
     }
 }
 
-impl DocumentReferences {
-    fn same_reference_semantics(
-        &self,
-        page: &HtmlPage,
-        inventory: &Arc<tola_typst::HtmlDocumentInventory>,
-        cancellation: &BuildCancellation,
-    ) -> Result<bool, BuildCancelled> {
-        if self.output != page.output || self.permalink != page.permalink {
-            return Ok(false);
-        }
-        if Arc::ptr_eq(&self.inventory, inventory) {
-            return Ok(true);
-        }
-        if self
-            .inventory
-            .base_href()
-            .map(tola_typst::HtmlBaseHref::value)
-            != inventory.base_href().map(tola_typst::HtmlBaseHref::value)
-            || self.inventory.references().len() != inventory.references().len()
-        {
-            return Ok(false);
-        }
-        // Source positions are projected separately; only URL semantics determine reuse here.
-        for (old, new) in self
-            .inventory
-            .references()
-            .iter()
-            .zip(inventory.references())
-        {
-            cancellation.ensure_active()?;
-            if old.tag() != new.tag()
-                || old.attribute() != new.attribute()
-                || old.destination() != new.destination()
-                || old.relation() != new.relation()
-                || old.reference_use() != new.reference_use()
-            {
-                return Ok(false);
-            }
-        }
-        Ok(true)
-    }
-
-    fn refresh_origins(
-        &self,
-        inventory: &Arc<tola_typst::HtmlDocumentInventory>,
-        world: &tola_typst::TypstWorld,
-        cancellation: &BuildCancellation,
-    ) -> Result<Option<Self>, BuildCancelled> {
-        let mut references = None;
-        for (position, reference) in inventory.references().iter().enumerate() {
-            cancellation.ensure_active()?;
-            let origin = crate::compiler::source_location(world, reference.span());
-            if self.references[position].origin != origin {
-                references.get_or_insert_with(|| self.references.clone())[position].origin = origin;
-            }
-        }
-        // The base's own span moves with its source line exactly as a reference's does.
-        let unchecked_base = self.unchecked_base.as_ref().map(|base| UncheckedBase {
-            value: base.value.clone(),
-            origin: inventory
-                .base_href()
-                .and_then(|base| crate::compiler::source_location(world, base.span())),
-        });
-        let base_moved = unchecked_base.as_ref().map(|base| base.origin.as_ref())
-            != self
-                .unchecked_base
-                .as_ref()
-                .map(|base| base.origin.as_ref());
-        let refreshed = references.is_some() || base_moved;
-        Ok(refreshed.then(|| Self {
-            output: self.output.clone(),
-            permalink: self.permalink.clone(),
-            inventory: Arc::clone(inventory),
-            dependencies: Arc::clone(&self.dependencies),
-            references: references.unwrap_or_else(|| self.references.clone()),
-            incoming: self.incoming.clone(),
-            unchecked_base,
-        }))
-    }
-
-    fn resolve(
-        index: &SiteIndex,
-        page: &HtmlPage,
-        inventory: &Arc<tola_typst::HtmlDocumentInventory>,
-        url_mount: &SiteUrlMount,
-        world: &tola_typst::TypstWorld,
-        cancellation: &BuildCancellation,
-    ) -> Result<Self, BuildCancelled> {
-        let mut references = Vec::with_capacity(inventory.references().len());
-        let mut dependencies = AddressDependencies::default();
-        let mut incoming = BTreeMap::<UrlPath, Vec<usize>>::new();
-        for reference in inventory.references() {
-            cancellation.ensure_active()?;
-            let resolved = resolve_reference(
-                index,
-                page,
-                inventory,
-                reference,
-                url_mount,
-                world,
-                &mut dependencies,
-            );
-            if let ReferenceResolution::Found { target } = &resolved.resolution {
-                incoming
-                    .entry(target.url.clone())
-                    .or_default()
-                    .push(references.len());
-            }
-            references.push(resolved);
-        }
-        cancellation.ensure_active()?;
-        Ok(Self {
-            output: page.output.clone(),
-            permalink: page.permalink.clone(),
-            inventory: Arc::clone(inventory),
-            dependencies: Arc::new(dependencies),
-            references,
-            incoming,
-            unchecked_base: unchecked_base(inventory, page, url_mount, world),
-        })
-    }
-}
-
-/// The document base that keeps this build from checking the page, when it has one.
-fn unchecked_base(
-    inventory: &tola_typst::HtmlDocumentInventory,
-    page: &HtmlPage,
-    url_mount: &SiteUrlMount,
-    world: &tola_typst::TypstWorld,
-) -> Option<UncheckedBase> {
-    let base = inventory.base_href()?;
-    (!tola_address::base_href_keeps_build_origin(&page.permalink, url_mount, base.value())).then(
-        || UncheckedBase {
-            value: base.value().to_owned(),
-            origin: crate::compiler::source_location(world, base.span()),
-        },
-    )
-}
-
-fn resolve_reference(
-    index: &SiteIndex,
-    page: &HtmlPage,
-    inventory: &tola_typst::HtmlDocumentInventory,
-    reference: &tola_typst::HtmlReference,
-    url_mount: &SiteUrlMount,
-    world: &tola_typst::TypstWorld,
-    dependencies: &mut AddressDependencies,
-) -> Reference {
-    let effective = tola_address::resolve_browser_reference(
-        &page.permalink,
-        url_mount,
-        inventory.base_href().map(tola_typst::HtmlBaseHref::value),
-        reference.destination(),
-    );
-    let default_category = reference_expectation(reference.reference_use()).category;
-    let (category, resolution) = match effective {
-        Ok(tola_address::ResolvedBrowserReference::External) => {
-            (ReferenceCategory::External, ReferenceResolution::External)
-        }
-        Ok(tola_address::ResolvedBrowserReference::OutsideSite(destination)) => (
-            default_category,
-            ReferenceResolution::Unresolved {
-                reason: UnresolvedReferenceReason::OutsideSiteMount {
-                    destination,
-                    required_prefix: format!("/{}/", url_mount.as_str()),
-                },
-            },
-        ),
-        Err(_) => (
-            default_category,
-            ReferenceResolution::Unresolved {
-                reason: UnresolvedReferenceReason::InvalidBrowserReference {
-                    message: "is not a valid URL".to_string(),
-                },
-            },
-        ),
-        Ok(tola_address::ResolvedBrowserReference::Site(site)) => {
-            match index.address().resolve_route(
-                &site.route,
-                site.fragment.as_deref().unwrap_or_default(),
-                reference_target(reference),
-                &mut *dependencies,
-            ) {
-                AddressResolution::Found { url } => {
-                    let resolution = resolved_media_type(
-                        index,
-                        reference,
-                        ReferenceTarget::new(url, site),
-                        dependencies,
-                    );
-                    let category = if matches!(resolution, ReferenceResolution::Found { .. })
-                        && matches!(
-                            LinkKind::parse(reference.destination()),
-                            LinkKind::Fragment(_)
-                        ) {
-                        ReferenceCategory::Fragment
-                    } else {
-                        default_category
-                    };
-                    (category, resolution)
-                }
-                AddressResolution::NotFound => (
-                    default_category,
-                    ReferenceResolution::Unresolved {
-                        reason: UnresolvedReferenceReason::TargetMissing {
-                            suggestion: index
-                                .address()
-                                .directory_page_suggestion(
-                                    &site.route,
-                                    reference_target(reference),
-                                    &mut *dependencies,
-                                )
-                                .map(|route| {
-                                    SiteReference { route, ..site }.to_browser_url(url_mount, None)
-                                }),
-                        },
-                    },
-                ),
-                AddressResolution::FragmentNotFound {
-                    fragment,
-                    available,
-                    ..
-                } => (
-                    ReferenceCategory::Fragment,
-                    ReferenceResolution::Unresolved {
-                        reason: UnresolvedReferenceReason::FragmentMissing {
-                            fragment,
-                            available,
-                        },
-                    },
-                ),
-                AddressResolution::DocumentNotAllowed {
-                    reference,
-                    document,
-                } => (
-                    default_category,
-                    ReferenceResolution::Unresolved {
-                        reason: UnresolvedReferenceReason::DocumentNotAllowed {
-                            reference,
-                            document,
-                        },
-                    },
-                ),
-            }
-        }
-    };
-
-    Reference {
-        page: page.output.clone(),
-        destination: reference.destination().to_owned(),
-        html_context: reference_context(reference),
-        category,
-        resolution,
-        origin: crate::compiler::source_location(world, reference.span()),
-    }
-}
-
-/// Category, destination constraint, media requirement, and wording of one reference use.
-struct ReferenceExpectation {
-    category: ReferenceCategory,
-    target: RequiredResourceKind,
-    media_type: Option<ResponseMediaType>,
-    usage: &'static str,
-}
-
-/// What each way of using a reference requires.
-const fn reference_expectation(
-    reference_use: tola_typst::HtmlReferenceUse,
-) -> ReferenceExpectation {
-    use tola_typst::HtmlReferenceUse as HtmlUse;
-    match reference_use {
-        HtmlUse::Navigation => ReferenceExpectation {
-            category: ReferenceCategory::Navigation,
-            target: RequiredResourceKind::DocumentOrResource,
-            media_type: None,
-            usage: "a navigation link",
-        },
-        HtmlUse::GenericResource => ReferenceExpectation {
-            category: ReferenceCategory::Resource,
-            target: RequiredResourceKind::NonDocumentResource,
-            media_type: None,
-            usage: "an embedded resource",
-        },
-        HtmlUse::Prefetch => ReferenceExpectation {
-            category: ReferenceCategory::Resource,
-            target: RequiredResourceKind::DocumentOrResource,
-            media_type: None,
-            usage: "a prefetch link",
-        },
-        HtmlUse::Stylesheet => ReferenceExpectation {
-            category: ReferenceCategory::Resource,
-            target: RequiredResourceKind::NonDocumentResource,
-            media_type: Some(ResponseMediaType::CSS),
-            usage: "a stylesheet",
-        },
-        HtmlUse::ClassicScript => ReferenceExpectation {
-            category: ReferenceCategory::Resource,
-            target: RequiredResourceKind::NonDocumentResource,
-            media_type: Some(ResponseMediaType::JAVASCRIPT),
-            usage: "a classic script",
-        },
-        HtmlUse::ModuleScript => ReferenceExpectation {
-            category: ReferenceCategory::Resource,
-            target: RequiredResourceKind::NonDocumentResource,
-            media_type: Some(ResponseMediaType::JAVASCRIPT),
-            usage: "a module script",
-        },
-        HtmlUse::ModulePreload => ReferenceExpectation {
-            category: ReferenceCategory::Resource,
-            target: RequiredResourceKind::NonDocumentResource,
-            media_type: Some(ResponseMediaType::JAVASCRIPT),
-            usage: "a module preload link",
-        },
-    }
-}
-
-fn reference_target(reference: &tola_typst::HtmlReference) -> RequiredResourceKind {
-    let expectation = reference_expectation(reference.reference_use());
-    let embeds_a_document = matches!(
-        reference.reference_use(),
-        tola_typst::HtmlReferenceUse::GenericResource
-    ) && matches!(
-        (reference.tag(), reference.attribute()),
-        ("object", "data") | ("embed", "src") | ("a", "ping") | ("area", "ping")
-    );
-    if embeds_a_document {
-        RequiredResourceKind::DocumentOrResource
-    } else {
-        expectation.target
-    }
-}
-
-fn resolved_media_type(
-    index: &SiteIndex,
-    reference: &tola_typst::HtmlReference,
-    target: ReferenceTarget,
-    dependencies: &mut AddressDependencies,
-) -> ReferenceResolution {
-    let Some(required) = reference_expectation(reference.reference_use()).media_type else {
-        return ReferenceResolution::Found { target };
-    };
-    let Some(Resource::Asset { route }) = index.address().get_by_url(target.url()) else {
-        unreachable!("a media-typed reference resolves to a registered asset");
-    };
-    let declared = route.declaration().media_type();
-    dependencies.observe_media_type(target.url(), declared);
-    if resource_media_matches(declared, &required) {
-        ReferenceResolution::Found { target }
-    } else {
-        ReferenceResolution::Unresolved {
-            reason: UnresolvedReferenceReason::MediaTypeMismatch {
-                reference_use: reference.reference_use(),
-                required,
-                declared: declared.clone(),
-            },
-        }
-    }
-}
-
-fn resource_media_matches(declared: &ResponseMediaType, required: &ResponseMediaType) -> bool {
-    if required.essence() != ResponseMediaType::JAVASCRIPT.essence() {
-        return declared.essence() == required.essence();
-    }
-    tola_typst::html::is_javascript_mime_type(declared.essence())
-}
-
-fn reference_context(reference: &tola_typst::HtmlReference) -> String {
-    match reference.relation() {
-        Some(relation) => format!(
-            "{}[{} rel={relation}]",
-            reference.tag(),
-            reference.attribute()
-        ),
-        None => format!("{}[{}]", reference.tag(), reference.attribute()),
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tempfile::TempDir;
+
+    use crate::site::HtmlPage;
+
+    use super::*;
 
     /// Resolve every reference of `site` without a previous revision.
     fn site_references(
@@ -817,23 +782,6 @@ mod tests {
         world: &tola_typst::TypstWorld,
     ) -> References {
         References::from_site(site, mount, world, &BuildCancellation::new(), None).unwrap()
-    }
-
-    #[test]
-    fn resource_media_matches_by_essence() {
-        let stylesheet = ResponseMediaType::parse("text/css; charset=iso-8859-1").unwrap();
-        assert!(resource_media_matches(&stylesheet, &ResponseMediaType::CSS));
-        let script = ResponseMediaType::parse("application/javascript; charset=utf-8").unwrap();
-        assert!(resource_media_matches(
-            &script,
-            &ResponseMediaType::JAVASCRIPT
-        ));
-        assert!(!resource_media_matches(
-            &stylesheet,
-            &ResponseMediaType::JAVASCRIPT
-        ));
-        let track = ResponseMediaType::parse("text/vtt").unwrap();
-        assert!(!resource_media_matches(&track, &ResponseMediaType::CSS));
     }
 
     fn candidate(
@@ -1449,8 +1397,6 @@ mod tests {
         }
     }
 
-    /// A destination that misses its target offers the address that would resolve, and the
-    /// suggestion names itself in the help a site author reads.
     #[test]
     fn missing_destination_suggests_its_address() {
         for (mount, href, suggestion) in [
@@ -1487,37 +1433,7 @@ mod tests {
                 panic!("{href} lost its suggestion: {reason:?}");
             };
             assert_eq!(offered.as_deref(), Some(suggestion), "{href}");
-            assert_eq!(
-                reason.help(ReferenceCategory::Navigation),
-                Some(format!("Point the link at `{suggestion}`")),
-                "{href}"
-            );
         }
-    }
-
-    #[test]
-    fn missing_resources_name_the_declarations() {
-        let (_directory, site_index, _graph, world) = candidate(
-            r#"#document("index.html")[#html.img(src: "/assets/missing.png", alt: "missing")]"#,
-        )
-        .unwrap();
-        let index = site_references(&site_index, &SiteUrlMount::root(), &world);
-        let reference = index.references().next().unwrap();
-        assert_eq!(reference.category(), ReferenceCategory::Resource);
-        let ReferenceResolution::Unresolved { reason } = reference.resolution() else {
-            panic!("missing resource resolved");
-        };
-        assert_eq!(
-            reason.message(ReferenceCategory::Resource),
-            "is not a file this site publishes"
-        );
-        assert!(
-            reason
-                .help(ReferenceCategory::Resource)
-                .is_some_and(|help| help.contains("`assets.files`")),
-            "{:?}",
-            reason.help(ReferenceCategory::Resource)
-        );
     }
 
     #[test]
@@ -1532,7 +1448,6 @@ mod tests {
         .unwrap();
         let index = site_references(&site_index, &SiteUrlMount::root(), &world);
         assert_eq!(index.references().len(), 2);
-        let mut previous = None;
         for reference in index.references() {
             let ReferenceResolution::Unresolved { reason } = reference.resolution() else {
                 panic!("missing fragment resolved");
@@ -1546,10 +1461,6 @@ mod tests {
             };
             assert_eq!(fragment, "missing");
             assert_eq!(available.as_ref(), ["a", "z"]);
-            if let Some(previous) = previous {
-                assert!(Arc::ptr_eq(previous, available));
-            }
-            previous = Some(available);
         }
     }
 

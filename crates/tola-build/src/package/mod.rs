@@ -7,7 +7,7 @@ mod lock;
 mod tola;
 
 pub(crate) use bindings::SiteBindings;
-pub(crate) use inputs::{prepare_icons, prepare_package_inputs};
+pub(crate) use inputs::prepare_icons;
 pub use lock::{
     LockedPackageRoot, PACKAGES_TREE, PackageLockError, record_package_reads,
     resolve_locked_packages, verifier, verify_package_reads, verify_vendored_packages,

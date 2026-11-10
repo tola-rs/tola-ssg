@@ -5,8 +5,6 @@ use serde_json::{Map, Number, Value as Json};
 use typst::World;
 use typst::foundations::Value;
 
-use crate::declaration::QueryReturns;
-
 /// The model value and entity facts one compiled query produced.
 pub struct QueryOutcome {
     /// The projected model value, when the request asked to materialize it.
@@ -22,7 +20,7 @@ pub struct QueryOutcome {
 pub struct QueryRequest<'a> {
     pub name: &'a str,
     pub label: &'a str,
-    pub returns: QueryReturns,
+    pub entities: bool,
     pub materialize: bool,
     pub world: &'a tola_typst::TypstWorld,
     pub bundle: &'a tola_typst::BundleCompilation,
@@ -53,23 +51,22 @@ pub fn run_query(request: QueryRequest<'_>) -> Result<QueryOutcome> {
         accessed: tola_typst::AccessedDeps::default(),
         failure: None,
     };
-    let query_value = match request.returns {
-        QueryReturns::Json => json_value(declarations[0].value(), "data"),
-        QueryReturns::Entities => {
-            super::entities::parse(declarations[0].value()).and_then(|parsed| {
-                let (source_reads, accessed) =
-                    read_entity_sources(&parsed, request.world, request.cancellation)?;
-                outcome.source_reads = source_reads;
-                outcome.accessed = accessed;
-                let entities_json = if request.materialize {
-                    super::entities::json(&parsed)?
-                } else {
-                    Json::Null
-                };
-                outcome.entities = parsed;
-                Ok(entities_json)
-            })
-        }
+    let query_value = if request.entities {
+        super::entities::parse(declarations[0].value()).and_then(|parsed| {
+            let (source_reads, accessed) =
+                read_entity_sources(&parsed, request.world, request.cancellation)?;
+            outcome.source_reads = source_reads;
+            outcome.accessed = accessed;
+            let entities_json = if request.materialize {
+                super::entities::json(&parsed)
+            } else {
+                Json::Null
+            };
+            outcome.entities = parsed;
+            Ok(entities_json)
+        })
+    } else {
+        json_value(declarations[0].value(), "data")
     };
     match query_value {
         Ok(query_json) => {
@@ -118,6 +115,9 @@ fn read_entity_sources(
 }
 
 pub fn json_value(value: &Value, at: &str) -> Result<Json> {
+    if let Ok(path) = value.clone().cast::<typst::syntax::RootedPath>() {
+        return Ok(super::entities::path_json(path.intern()));
+    }
     Ok(match value {
         Value::None => Json::Null,
         Value::Bool(value) => Json::Bool(*value),

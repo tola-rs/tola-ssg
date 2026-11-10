@@ -58,25 +58,22 @@ pub(super) fn merge_code_actions(
     *semantic = (!actions.is_empty()).then_some(actions);
 }
 
-pub(super) fn failed_response(id: RequestId, error: anyhow::Error) -> Response {
-    if error
-        .chain()
-        .any(|cause| cause.is::<tola_build::cancellation::BuildCancelled>())
-    {
-        return error_response(id, CANCELLED_ERROR);
+pub(super) fn failed_response(id: RequestId, failure: SourceFailure) -> Response {
+    match failure {
+        SourceFailure::Cancelled => error_response(id, CANCELLED_ERROR),
+        SourceFailure::Panicked => error_response(id, PANICKED_ERROR),
+        SourceFailure::InvalidName(error) => {
+            let message = error.to_string();
+            crate::protocol::with_data(
+                Response::new_err(id, ErrorCode::InvalidParams as i32, message.clone()),
+                serde_json::json!({ "kind": error.kind(), "message": message }),
+            )
+        }
+        SourceFailure::Failed(error) => {
+            tracing::error!(error = ?error, "a source request failed");
+            error_response(id, REQUEST_FAILED_ERROR)
+        }
     }
-    if let Some(name_error) = error
-        .chain()
-        .find_map(|cause| cause.downcast_ref::<crate::analysis::NameQueryError>())
-    {
-        let message = name_error.to_string();
-        return crate::protocol::with_data(
-            Response::new_err(id, ErrorCode::InvalidParams as i32, message.clone()),
-            serde_json::json!({ "kind": name_error.kind(), "message": message }),
-        );
-    }
-    tracing::error!(error = ?error, "a source request failed");
-    error_response(id, REQUEST_FAILED_ERROR)
 }
 
 impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
@@ -178,7 +175,7 @@ mod tests {
             anyhow::Error::new(crate::analysis::NameQueryError::ConflictingSourceText)
                 .context("a source query failed"),
         ] {
-            let response = failed_response(7.into(), failure);
+            let response = failed_response(7.into(), SourceFailure::of(failure));
             let error = response.response_result.unwrap_err();
             assert_eq!(error.code, ErrorCode::InvalidParams as i32);
             assert_eq!(error.data.unwrap()["kind"], "conflictingSourceText");

@@ -199,7 +199,12 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
             let source_reply = crate::query::source_reply(&source, &query);
             match source_reply {
                 Ok(Some(reply)) => return self.source_reply(id, reply),
-                Err(error) => return self.reply(failed_response(id, error)),
+                Err(error) => {
+                    return self.reply(failed_response(
+                        id,
+                        crate::compiler::SourceFailure::of(error),
+                    ));
+                }
                 Ok(None) => {}
             }
         }

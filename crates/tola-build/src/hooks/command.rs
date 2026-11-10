@@ -170,7 +170,7 @@ pub(super) fn run_action(
     call: HookCall<'_>,
     cancellation: Option<&BuildCancellation>,
     diagnostics: &mut Vec<tola_diagnostic::Diagnostic>,
-) -> Result<bool> {
+) -> Result<()> {
     if let Some(cancellation) = cancellation {
         cancellation.ensure_active()?;
     }
@@ -222,9 +222,8 @@ pub(super) fn run_action(
             }
             let reported = result?;
             tola_diagnostic::ensure_reports_succeed(&reported)?;
-            let submitted = !reported.is_empty();
             diagnostics.extend(reported);
-            Ok(submitted)
+            Ok(())
         }
     }
 }
@@ -296,7 +295,7 @@ impl<'a> HookInvocation<'a> {
                 }
             })
             .collect::<Result<Vec<_>>>()?;
-        let command = Command::from_args(arguments)
+        let command = clear_tola_environment(Command::from_args(arguments))
             .cwd(call.site.root)
             .env("TOLA_EXECUTABLE", &executable)
             .env(crate::report::REPORT_PATH_ENV, reports.path())
@@ -310,9 +309,6 @@ impl<'a> HookInvocation<'a> {
             .env("TOLA_HOOK_TEMP_DIR", temporary.path())
             .env("TOLA_HOOK_STAGE", stage.as_str())
             .env("TOLA_HOOK_NAME", call.declared_name())
-            .env_remove("TOLA_INIT_TARGET_DIR")
-            .env_remove("TOLA_INIT_OUTPUT_DIR")
-            .env_remove("TOLA_INIT_INTERACTIVE")
             .env("TOLA_BUILD_MODE", call.mode.as_str())
             .env("TOLA_HOOK_CACHE_DIR", &cache);
         let command = match call.origin {
@@ -325,22 +321,14 @@ impl<'a> HookInvocation<'a> {
                     .env("TOLA_MODULE_MANIFEST", &origin.manifest)
                     .env("TOLA_MODULE_OPTIONS", options)
             }
-            None => command
-                .env_remove("TOLA_MODULE_NAME")
-                .env_remove("TOLA_MODULE_ROOT")
-                .env_remove("TOLA_MODULE_MANIFEST")
-                .env_remove("TOLA_MODULE_OPTIONS"),
+            None => command,
         };
         let command = match call.directories {
-            HookDirectories::BeforeBuild => command
-                .env_remove("TOLA_HOOK_INPUT_DIR")
-                .env_remove("TOLA_HOOK_OUTPUT_DIR"),
+            HookDirectories::BeforeBuild => command,
             HookDirectories::GenerateOutputs { input, output } => command
                 .env("TOLA_HOOK_INPUT_DIR", input)
                 .env("TOLA_HOOK_OUTPUT_DIR", output),
-            HookDirectories::AfterPublish { input } => command
-                .env("TOLA_HOOK_INPUT_DIR", input)
-                .env_remove("TOLA_HOOK_OUTPUT_DIR"),
+            HookDirectories::AfterPublish { input } => command.env("TOLA_HOOK_INPUT_DIR", input),
         };
         Ok(Self {
             command,
@@ -355,7 +343,7 @@ impl<'a> HookInvocation<'a> {
         completion: Result<Output>,
         cancellation: Option<&BuildCancellation>,
         diagnostics: &mut Vec<tola_diagnostic::Diagnostic>,
-    ) -> Result<bool> {
+    ) -> Result<()> {
         finish_report(self.reports, completion, cancellation, diagnostics)
     }
 
@@ -366,12 +354,39 @@ impl<'a> HookInvocation<'a> {
     }
 }
 
+/// Remove the parent invocation's values before assigning this hook's environment.
+pub(super) fn clear_tola_environment(mut command: Command) -> Command {
+    for name in [
+        "TOLA_PROJECT_ROOT",
+        "TOLA_CONFIG_PATH",
+        "TOLA_CONTENT_ROOT",
+        "TOLA_INPUT_SCOPE",
+        "TOLA_BUILD_MODE",
+        "TOLA_MODULE_NAME",
+        "TOLA_MODULE_ROOT",
+        "TOLA_MODULE_MANIFEST",
+        "TOLA_MODULE_OPTIONS",
+        "TOLA_HOOK_STAGE",
+        "TOLA_HOOK_NAME",
+        "TOLA_HOOK_INPUT_DIR",
+        "TOLA_HOOK_OUTPUT_DIR",
+        "TOLA_HOOK_TEMP_DIR",
+        "TOLA_HOOK_CACHE_DIR",
+        "TOLA_INIT_TARGET_DIR",
+        "TOLA_INIT_OUTPUT_DIR",
+        "TOLA_INIT_INTERACTIVE",
+    ] {
+        command = command.env_remove(name);
+    }
+    command
+}
+
 pub(super) fn finish_report(
     reports: crate::report::ReportChannel,
     completion: Result<Output>,
     cancellation: Option<&BuildCancellation>,
     diagnostics: &mut Vec<tola_diagnostic::Diagnostic>,
-) -> Result<bool> {
+) -> Result<()> {
     use tola_diagnostic::{Diagnostic, DiagnosticError, Severity};
     if let Some(cancellation) = cancellation {
         cancellation.ensure_active()?;
@@ -399,7 +414,6 @@ pub(super) fn finish_report(
             };
         }
     };
-    let submitted = report.is_some();
     let reported = report.unwrap_or_default();
     if let Err(error) = completion {
         return if reported.is_empty() {
@@ -410,7 +424,7 @@ pub(super) fn finish_report(
     }
     tola_diagnostic::ensure_reports_succeed(&reported)?;
     diagnostics.extend(reported);
-    Ok(submitted)
+    Ok(())
 }
 
 fn prepare_cache(call: &HookCall<'_>) -> Result<PathBuf> {

@@ -21,7 +21,7 @@ const SITE_SOURCE: &str = include_str!("templates/site.typ");
 pub(super) fn file_writes(root: &Path) -> Result<FileWrites> {
     let mut writes = FileWrites::new(root)?;
     writes.add_directory(CONTENT_DIR)?;
-    writes.create_file(CONFIG_PATH, config::config_file())?;
+    writes.create_file(CONFIG_PATH, config::config_file(SITE_PATH))?;
     writes.create_file(SITE_PATH, SITE_SOURCE)?;
     let ignore = ignore_file(&BuildSectionConfig::default().publish_dir);
     writes.create_file(".gitignore", ignore.clone())?;

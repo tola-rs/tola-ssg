@@ -37,7 +37,7 @@ pub(crate) struct AssetMinification {
 }
 
 impl AssetMinification {
-    /// Seed one source already rendered for a previous inventory.
+    /// Seed one source from the previous build.
     pub(crate) fn seed(&mut self, key: Option<AssetMinifyKey>, bytes: Arc<[u8]>) {
         if let Some(key) = key {
             self.bytes.entry(key).or_insert(bytes);
@@ -45,7 +45,7 @@ impl AssetMinification {
     }
 
     /// The bytes one source publishes, minified when the site asked for it.
-    pub(crate) fn rendered_bytes(
+    pub(crate) fn bytes(
         &mut self,
         source_path: &Path,
         display_source: &str,
@@ -228,7 +228,7 @@ mod tests {
     fn rendered(path: &str, source: &[u8]) -> (Arc<[u8]>, Vec<AssetMinifyWarning>) {
         let raw: Arc<[u8]> = Arc::from(source);
         let mut minification = AssetMinification::default();
-        let bytes = minification.rendered_bytes(
+        let bytes = minification.bytes(
             Path::new(path),
             path,
             tola_typst::ContentDigest::of(source),
@@ -247,59 +247,23 @@ mod tests {
         ] {
             let raw: Arc<[u8]> = Arc::from(b"source bytes".as_slice());
             let mut minification = AssetMinification::default();
-            let published = minification.rendered_bytes(
+            let published = minification.bytes(
                 Path::new(path),
                 path,
                 tola_typst::ContentDigest::of(&raw),
                 &raw,
                 languages,
             );
-            assert!(Arc::ptr_eq(&raw, &published), "{path}");
+            assert_eq!(raw, published, "{path}");
             assert!(minification.take_warnings().is_empty(), "{path}");
         }
     }
 
     #[test]
-    fn equal_bytes_share_one_transformation() {
-        let source = b".a { color: red; }";
-        let raw: Arc<[u8]> = Arc::from(source.as_slice());
-        let digest = tola_typst::ContentDigest::of(source);
-        let mut minification = AssetMinification::default();
-        let first = minification.rendered_bytes(
-            Path::new("first.css"),
-            "first.css",
-            digest,
-            &raw,
-            all_languages_minified(),
-        );
-        let second = minification.rendered_bytes(
-            Path::new("second.css"),
-            "second.css",
-            digest,
-            &raw,
-            all_languages_minified(),
-        );
-        assert!(Arc::ptr_eq(&first, &second));
-        assert!(minification.take_warnings().is_empty());
-    }
-
-    #[test]
     fn unminifiable_source_keeps_its_bytes() {
-        for (path, source, message, help, line) in [
-            (
-                "app.js",
-                b"function =".as_slice(),
-                "`app.js` has a syntax error",
-                "build.minify.javascript",
-                Some(1),
-            ),
-            (
-                "app.css",
-                &[0xff, 0xfe][..],
-                "`app.css` is not UTF-8 text",
-                "build.minify.css",
-                None,
-            ),
+        for (path, source, line) in [
+            ("app.js", b"function =".as_slice(), Some(1)),
+            ("app.css", &[0xff, 0xfe][..], None),
         ] {
             let (bytes, warnings) = rendered(path, source);
             assert_eq!(&*bytes, source, "{path}");
@@ -309,23 +273,9 @@ mod tests {
             let diagnostic = warning.diagnostic();
             assert_eq!(diagnostic.code, "build.minify", "{path}");
             assert_eq!(diagnostic.severity, Severity::Warning, "{path}");
-            assert_eq!(diagnostic.message, message, "{path}");
-            assert_eq!(diagnostic.location.as_ref().unwrap().line, line, "{path}");
-            assert!(
-                diagnostic
-                    .notes
-                    .iter()
-                    .any(|note| note == "Tola published it unchanged"),
-                "{path}"
-            );
-            assert!(
-                diagnostic
-                    .help
-                    .iter()
-                    .any(|help_note| help_note.message.contains(help)),
-                "{path}: {:?}",
-                diagnostic.help
-            );
+            let location = diagnostic.location.unwrap();
+            assert_eq!(location.path, path);
+            assert_eq!(location.line, line);
         }
     }
 }

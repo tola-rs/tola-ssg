@@ -4,7 +4,7 @@
 
 ## Modules
 
-- `declaration.rs`, `arguments.rs` — TOML declarations, selectors, command and query shapes, argument expansion.
+- `declaration.rs`, `arguments.rs` — TOML declarations, command and query shapes, public function parameter selectors, argument expansion.
 - `manifest.rs` — `tola-module.toml`, static option defaults, grouped hooks, and publication selection.
 - `inputs.rs` — module roots, acquisition, lock recording; the `ModuleAcquisition` context.
 - `remote.rs`, `checkout.rs` — Git fetch and tree materialization; pinned bytes, no filters.
@@ -12,7 +12,7 @@
 - `prepared.rs` — `acquire`/`prepare` and the `Contribution`/`PreparedModules` boundary consumed by `tola-build`.
 - `options.rs` — shared static option values, recursive instance overrides, and boolean keys for optional assets and hooks.
 - `action.rs`, `hooks.rs` — Nu and argv declarations and lifecycle stages.
-- `query.rs`, `assets.rs`, `diagnostics.rs`, `entities.rs`, `semantics.rs`, `watch.rs` — queries, asset declarations, diagnostics, entities, and watch inputs.
+- `query.rs`, `assets.rs`, `diagnostics.rs`, `entities.rs`, `watch.rs` — queries, asset declarations, diagnostics, entities, and watch inputs.
 - `archive.rs` — bounded HTTPS/local archive reads and single-module tar.gz, tar.zst, and ZIP extraction.
 - `check.rs`, `pack.rs`, `pack/selection.rs` — standalone module validation, release file enumeration, and publication.
 
@@ -29,7 +29,8 @@
 - `prepare` is Typst-free; `acquire` reads and fetches; `PreparedModules` is the module state the build applies.
 - A module's `build.entry` names its optional site program; `typst.entry` and `nu.entry` remain public library entries. The site's `build.entry` selects one project file or module instance.
 - Pack, asset trees, and hook inputs share the relative path and glob matcher in `tola-input`. Module patterns use the module root. Hook inputs can also name the project root and expand the instance alias.
-- Pack validates include/exclude syntax before author hooks and selects files after them. Directory matches include descendants, excludes prune directories, and the release manifest is always included.
+- Pack validates include/exclude syntax and rejects targets that can contain selected files before author hooks. It selects files after hooks and verifies that the source manifest stayed current. Directory matches include descendants, excludes prune directories, and the release manifest is always included.
 - Pack produces a checked directory and replaces the entire previous release. It removes author-only `pack` and `hooks.before-pack` declarations from the release manifest. Compression, archive loading, and publication to a remote service are outside this command.
 - Public wrappers and wire types stay in `tola-build`; the CLI and LSP import module types from here.
+- Queries with references or definitions validate `id`, `name`, `description`, `source`, and `url` records. Ordinary queries project values and native paths to JSON.
 - `forbid(unsafe_code)`; public APIs stay documented.

@@ -14,4 +14,8 @@ Modules: `syntax`, `names`, `usage`, `imports`, `outline`, `sections`, `folds`, 
 `loops`, `tokens`, `colours`, `continuation`, `wraps`, `edit`, `errors`, `position`, and `docs`;
 `format` (optional) adds source and range formatting.
 
+Formatting uses the Typst syntax tree to check the replacement in context. It preserves string
+and raw values, and the bytes of nodes marked `@typstyle off`. Generated line breaks follow the
+first physical line ending in the source.
+
 `typst-syntax` and `typst-library` are re-exported at the versions `tola-typst` uses.

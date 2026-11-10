@@ -158,24 +158,19 @@ pub(crate) fn load(
     overrides: &ConfigOverrides,
 ) -> Result<LoadedConfig> {
     let source = ConfigSource::load(explicit, scope).map_err(|error| {
-        if !error
-            .chain()
-            .any(|cause| cause.is::<tola_build::config::loading::ConfigNotFound>())
-        {
-            return error;
+        if !matches!(
+            error,
+            tola_build::config::ConfigSourceError::NotFound { .. }
+        ) {
+            return anyhow::Error::new(error);
         }
-        let diagnostics = tola_diagnostic::attached(&error)
-            .map(<[_]>::to_vec)
-            .unwrap_or_else(|| {
-                vec![tola_diagnostic::fallback(
-                    crate::codes::config::LOAD,
-                    &error,
-                )]
-            })
-            .into_iter()
+        let diagnostics = error
+            .diagnostics()
+            .iter()
+            .cloned()
             .map(|diagnostic| diagnostic.with_help("Run `tola init` to create a site"))
             .collect();
-        tola_diagnostic::DiagnosticError::attach(error, diagnostics).into()
+        tola_diagnostic::DiagnosticError::attach(error.into(), diagnostics).into()
     })?;
     resolve(source, packages, overrides)
 }

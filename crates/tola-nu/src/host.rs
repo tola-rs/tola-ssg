@@ -1,6 +1,6 @@
 use nu_engine::CallExt;
 use nu_protocol::{
-    PipelineData, ShellError, Signature, Span, SyntaxShape, Value,
+    PipelineData, ShellError, Signature, Span, SyntaxShape, Type, Value,
     engine::{Call, Command, EngineState, Stack},
     shell_error::generic::GenericError,
 };
@@ -47,7 +47,7 @@ impl Command for HostCommand {
             Operation::Hook => "get-hook",
             Operation::Init => "get-init",
             Operation::Query => "query",
-            Operation::Submit => "__tola_diagnostic_submit",
+            Operation::Submit => "submit",
         }
     }
 
@@ -58,7 +58,16 @@ impl Command for HostCommand {
             Operation::Hook => "Read the current hook's stage and directories.",
             Operation::Init => "Read the current initializer's source and directories.",
             Operation::Query => "Evaluate a site query.",
-            Operation::Submit => "Submit diagnostics to the current invocation.",
+            Operation::Submit => "Submit one complete batch from a Tola hook or module command.",
+        }
+    }
+
+    fn extra_description(&self) -> &str {
+        match self.0 {
+            Operation::Submit => {
+                "An error fails the host operation after the script finishes. Warnings allow it to succeed."
+            }
+            _ => "",
         }
     }
 
@@ -80,6 +89,9 @@ impl Command for HostCommand {
                     "Metadata label for a Typst file.",
                     None,
                 ),
+            Operation::Submit => {
+                signature.input_output_types(vec![(Type::list(Type::record()), Type::Nothing)])
+            }
             _ => signature,
         }
     }
@@ -145,10 +157,12 @@ impl Command for HostCommand {
                 .map_err(error)?
             }
             Operation::Submit => {
-                let submit = host
-                    .diagnostic
-                    .as_ref()
-                    .ok_or_else(|| error("this invocation has no diagnostic collector".into()))?;
+                let error = |message: String| -> ShellError {
+                    GenericError::new("cannot submit diagnostics", message, span).into()
+                };
+                let submit = host.diagnostic.as_ref().ok_or_else(|| {
+                    error("use `diagnostic submit` in a Tola hook or module command".into())
+                })?;
                 let diagnostics = into_json(input.into_value(span)?).map_err(&error)?;
                 submit(diagnostics).map_err(error)?;
                 return Ok(PipelineData::empty());

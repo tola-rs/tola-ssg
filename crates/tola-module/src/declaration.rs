@@ -1,7 +1,7 @@
 //! Module declaration types and their validation.
 
 use std::collections::BTreeMap;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -239,18 +239,33 @@ pub struct Query {
     /// Source file relative to the module root.
     pub entry: PathBuf,
     pub label: String,
-    /// The shape of the metadata value returned by this query.
     #[serde(default)]
-    pub returns: QueryReturns,
+    pub references: Vec<FunctionParameter>,
+    #[serde(default)]
+    pub definitions: Vec<FunctionParameter>,
 }
 
-/// The supported query result contracts.
-#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
-pub enum QueryReturns {
-    #[default]
-    Json,
-    Entities,
+impl Query {
+    /// Whether this query's records supply IDs for declared function parameters.
+    pub fn has_entities(&self) -> bool {
+        !self.references.is_empty() || !self.definitions.is_empty()
+    }
+}
+
+/// One parameter of a function exported by the module's public Typst entry.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct FunctionParameter {
+    pub export: String,
+    pub parameter: Parameter,
+}
+
+/// Select a positional parameter by its zero-based index or a named parameter by name.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(untagged, deny_unknown_fields)]
+pub enum Parameter {
+    Positional { positional: usize },
+    Named { named: String },
 }
 
 /// A command's statically inspectable description and action.
@@ -346,10 +361,7 @@ pub fn valid_name(name: &str) -> bool {
 
 /// Whether `path` is a nonempty spelling of plain path segments: no `..`, root, or prefix.
 pub fn is_relative_path(path: &Path) -> bool {
-    !path.as_os_str().is_empty()
-        && path
-            .components()
-            .all(|part| matches!(part, Component::Normal(_) | Component::CurDir))
+    tola_input::validate_relative_path(path).is_ok()
 }
 #[cfg(test)]
 mod tests {

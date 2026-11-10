@@ -39,11 +39,6 @@ impl<C> RowBuffer<C> {
         }
     }
 
-    /// Reserves `values` cells; the caller sums the widths of the rows it will push.
-    pub(crate) fn reserve(&mut self, values: usize) {
-        self.values.reserve(values);
-    }
-
     /// Appends one row and returns its actual width, so the caller can check it against the
     /// declared arity.
     pub(crate) fn push_row(&mut self, values: impl IntoIterator<Item = C>) -> usize {
@@ -72,9 +67,13 @@ impl<C: Ord> RowBuffer<C> {
     /// The order is lexicographic over the whole row; `matching_prefix` and the per-column index
     /// rely on it.
     pub(crate) fn canonicalize(mut self) -> RelationRows<C> {
-        let row_order = self.row_order();
-        self.apply_row_order(row_order);
-        self.keep_first_of_each_run();
+        if self.arity == 0 {
+            self.len = usize::from(self.len != 0);
+        } else if self.len > 1 {
+            let row_order = self.row_order();
+            self.apply_row_order(row_order);
+            self.keep_first_of_each_run();
+        }
         RelationRows {
             arity: self.arity,
             len: self.len,
@@ -111,9 +110,6 @@ impl<C: Ord> RowBuffer<C> {
     }
 
     fn keep_first_of_each_run(&mut self) {
-        if self.len == 0 {
-            return;
-        }
         let mut kept = 1;
         for row in 1..self.len {
             if self.row(kept - 1) != self.row(row) {
@@ -215,11 +211,13 @@ impl<C: PartialEq> PartialEq for RelationRows<C> {
     }
 }
 impl<C: Eq> Eq for RelationRows<C> {}
-impl<C: Hash> Hash for RelationRows<C> {
-    fn hash<H: Hasher>(&self, hasher: &mut H) {
-        // `values` hashes its own length, so omitting `len` only lets zero-arity relations collide.
+impl<C> RelationRows<C> {
+    pub(crate) fn hash_with<H: Hasher>(&self, hasher: &mut H, hash_constant: impl Fn(&C, &mut H)) {
         self.arity.hash(hasher);
-        self.values.hash(hasher);
+        self.len.hash(hasher);
+        for value in &self.values {
+            hash_constant(value, hasher);
+        }
     }
 }
 impl<C: std::fmt::Debug> std::fmt::Debug for RelationRows<C> {

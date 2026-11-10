@@ -1,4 +1,4 @@
-//! Editor projection of the public `@tola/schema.inspect` output description.
+//! Editor projection of the input and output shapes from `@tola/schema.inspect`.
 
 use std::collections::BTreeSet;
 
@@ -7,9 +7,9 @@ use super::hover::SECTION_JOIN;
 use tola_typst::typst::foundations::{Array, Dict, Str, Value};
 
 #[derive(Clone)]
-pub(super) struct OutputDescription(Dict);
+pub(super) struct SchemaDescription(Dict);
 
-impl OutputDescription {
+impl SchemaDescription {
     pub(super) fn read(value: Value) -> Option<Self> {
         let Value::Dict(dict) = value else {
             return None;
@@ -57,11 +57,26 @@ impl OutputDescription {
     }
 
     /// Whether callers may write keys this description does not declare: `unknown: "keep"`.
-    pub(super) fn accepts_unknown(&self) -> bool {
+    fn accepts_unknown(&self) -> bool {
         string(&self.0, "unknown") == Some("keep")
     }
 
-    /// Whether the value must be written: presence `required`.
+    /// Whether this shape proves the key would be rejected as undeclared.
+    pub(super) fn rejects_key(&self, key: &str) -> bool {
+        match self.kind() {
+            "object" => {
+                string(&self.0, "unknown") == Some("error")
+                    && matches!(self.0.get("fields"), Ok(Value::Dict(fields)) if fields.get(key).is_err())
+            }
+            "union" | "variant" => {
+                let branches = self.branches();
+                !branches.is_empty() && branches.iter().all(|branch| branch.rejects_key(key))
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether the described value must be present.
     pub(super) fn is_required(&self) -> bool {
         string(&self.0, "presence") == Some("required")
     }

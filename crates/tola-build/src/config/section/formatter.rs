@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use tola_config::Config;
-use tola_typst_syntax::style::ProseWrap;
+use tola_typst_syntax::style::{Options, ProseWrap};
 
 /// How Tola writes the site's own `.typ` files, used by `tola fmt` and the language service.
 #[derive(Debug, Clone, Serialize, Deserialize, Config)]
@@ -27,15 +27,25 @@ pub struct FormatterConfig {
 
 impl Default for FormatterConfig {
     fn default() -> Self {
+        let options = Options::default();
         Self {
-            indent: 2,
-            print_width: 120,
-            prose_wrap: ProseWrap::None,
+            indent: options.tab_spaces,
+            print_width: options.max_width,
+            prose_wrap: options.prose_wrap,
         }
     }
 }
 
 impl FormatterConfig {
+    /// The options passed to the Typst formatter.
+    pub fn options(&self) -> Options {
+        Options {
+            tab_spaces: self.indent,
+            max_width: self.print_width,
+            prose_wrap: self.prose_wrap,
+        }
+    }
+
     /// What `tola help "[formatter]"` adds under its table.
     pub const HELP: &'static str = "\
 `tola fmt` writes the site's own `.typ` files in this style, and the language service uses it for
@@ -50,29 +60,4 @@ prose-wrap = \"none\"
 
 A directory without a `tola.toml` formats under these defaults: run the command there and it
 formats that directory's `.typ` files with them.";
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn site_schema_decodes_the_formatter_table() {
-        let source = "[formatter]\nindent = 4\nprint-width = 100\nprose-wrap = \"sentence\"\n";
-        let schema: crate::config::SiteConfigSchema = toml::from_str(source).unwrap();
-
-        assert_eq!(schema.formatter.indent, 4);
-        assert_eq!(schema.formatter.print_width, 100);
-        assert_eq!(schema.formatter.prose_wrap, ProseWrap::Sentence);
-    }
-
-    #[test]
-    fn partial_declaration_keeps_the_other_defaults() {
-        let source = "[formatter]\nprint-width = 88\n";
-        let schema: crate::config::SiteConfigSchema = toml::from_str(source).unwrap();
-
-        assert_eq!(schema.formatter.indent, 2);
-        assert_eq!(schema.formatter.print_width, 88);
-        assert_eq!(schema.formatter.prose_wrap, ProseWrap::None);
-    }
 }

@@ -108,7 +108,7 @@ pub(crate) enum SourceJob {
     /// Build the site's selection index for the revision a correction reads, which no check that
     /// revision has completed could return.
     Selection(SelectionRead),
-    /// Let go of the compilation this lane retains, which nothing has read for a while.
+    /// Drop the compilations and query caches this lane retains.
     ReleaseIdle,
 }
 

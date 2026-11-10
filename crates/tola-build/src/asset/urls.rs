@@ -1,12 +1,19 @@
 //! Final browser URLs of the site's declared `assets` entries.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
+use tola_input::FilesystemSourceIdentity;
 use typst::foundations::{Dict, IntoValue};
 
 use crate::config::ResolvedSiteConfig;
+use crate::filesystem::FilesystemSourceKind;
+
+use super::AssetSourceError;
+use super::declarations;
+use super::output::check_paths;
+use super::source::{TREE_MEMBER_LABEL, check_source_boundary, check_tree_overlap, read_source};
 
 /// The site-root URL of one published asset with the deployment mount and identity applied.
 pub(super) fn browser_url(
@@ -62,7 +69,7 @@ pub enum ModuleAssetInput {
 }
 
 impl AssetUrls {
-    /// Read the project declarations’ mounted URLs without rendering their bytes.
+    /// Read the project declarations’ mounted URLs without reading asset bytes.
     pub fn for_check_project(
         config: &ResolvedSiteConfig,
         cancellation: &crate::cancellation::BuildCancellation,
@@ -79,7 +86,59 @@ impl AssetUrls {
         assets: crate::modules::prepared::AppliedAssets<'_>,
         cancellation: &crate::cancellation::BuildCancellation,
     ) -> Result<Self> {
-        super::inventory::check_asset_urls(config, assets, cancellation)
+        let declarations = declarations::collect(config, assets)?;
+        declarations::check_output_overlap(&declarations)?;
+        let mut published = Vec::new();
+        let mut outputs = Vec::new();
+        let mut trees = Vec::new();
+        for declaration in &declarations {
+            cancellation.ensure_active()?;
+            let id = &declaration.source;
+            let mut record = |logical: &Path, relative: &Path| -> Result<()> {
+                let output = declaration.output(relative, logical, config.get_root(), None)?;
+                published.push(declaration.published(config, &output, relative));
+                outputs.push(output);
+                Ok(())
+            };
+            match id.kind {
+                FilesystemSourceKind::File => {
+                    let identity = FilesystemSourceIdentity::from_path(&id.logical_source);
+                    check_source_boundary(config, id, &identity)?;
+                    record(&id.logical_source, Path::new(""))?;
+                }
+                FilesystemSourceKind::Tree => {
+                    let source = match read_source(config, id, cancellation) {
+                        Ok(source) => source,
+                        Err(error)
+                            if matches!(
+                                error.downcast_ref::<AssetSourceError>(),
+                                Some(AssetSourceError::SourceMissing { .. })
+                            ) =>
+                        {
+                            let identity = FilesystemSourceIdentity::from_path(&id.logical_source);
+                            check_source_boundary(config, id, &identity)?;
+                            continue;
+                        }
+                        Err(error) => return Err(error),
+                    };
+                    crate::filesystem::walk_tree_members_selected(
+                        &source.source_identity,
+                        cancellation,
+                        config.get_root(),
+                        TREE_MEMBER_LABEL,
+                        &|relative, directory| {
+                            id.selects_tree_member(&source.source_identity, relative, directory)
+                        },
+                        &|_, _| Ok(()),
+                        &mut record,
+                    )?;
+                    trees.push(source);
+                }
+            }
+        }
+        check_tree_overlap(config, &trees)?;
+        check_paths(outputs.iter(), config.get_root(), cancellation)?;
+        Ok(Self::from_preview(published))
     }
 
     /// The selected module assets and the mounted URLs this build publishes.
@@ -104,7 +163,7 @@ impl AssetUrls {
     }
 
     /// Index unrendered addresses for editor previews.
-    pub(super) fn from_preview(
+    fn from_preview(
         addresses: impl IntoIterator<Item = (String, String, AssetOrigin, Option<ModuleAsset>)>,
     ) -> Self {
         Self {

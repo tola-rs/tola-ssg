@@ -15,6 +15,7 @@ mod input;
 mod interaction;
 pub(crate) mod log;
 pub(crate) mod output;
+mod parse;
 mod run;
 mod usage;
 

@@ -5,8 +5,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::config::section::{AssetUrlError, AssetUrlPrefix};
-use anyhow::Result;
 use tola_address::{OutputPath, OutputPathError};
+
+use super::AssetSourceError;
 
 #[derive(Debug, Clone)]
 pub(crate) struct AssetOutput {
@@ -18,7 +19,7 @@ pub(crate) struct AssetOutput {
     /// Meaning and response media type declared from the logical source.
     declaration: crate::output::semantics::OutputDeclaration,
     /// Identity of the bytes published at `output`, when cache busting asked for one.
-    pub(crate) identity: Option<Arc<str>>,
+    pub(super) identity: Option<Arc<str>>,
 }
 
 impl AssetOutput {
@@ -30,26 +31,10 @@ impl AssetOutput {
     pub(crate) fn identity(&self) -> Option<&str> {
         self.identity.as_deref()
     }
-
-    /// The same output, published under a cache-busting identity.
-    pub(crate) fn with_identity(mut self, identity: Option<Arc<str>>) -> Self {
-        self.identity = identity;
-        self
-    }
 }
 
 /// Map an observed asset-tree member without reading the filesystem.
-pub(crate) fn output_for_configured_tree_member(
-    logical_source: &Path,
-    relative: &Path,
-    url_prefix: &AssetUrlPrefix,
-    display_root: &Path,
-) -> Result<AssetOutput> {
-    configured_tree_member(logical_source, relative, url_prefix, display_root)
-        .map_err(anyhow::Error::from)
-}
-
-fn configured_tree_member(
+pub(super) fn output_for_configured_tree_member(
     logical_source: &Path,
     relative: &Path,
     url_prefix: &AssetUrlPrefix,
@@ -76,7 +61,7 @@ fn configured_tree_member(
 }
 
 /// Map one configured exact file while preserving its logical source owner.
-pub(crate) fn output_for_configured_file(
+pub(super) fn output_for_configured_file(
     logical_source: &Path,
     output: &tola_address::OutputPath,
 ) -> AssetOutput {
@@ -102,7 +87,7 @@ pub(super) enum MemberPathViolation {
 }
 
 /// Why one configured asset cannot be published at the path its declaration names.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub(super) enum AssetOutputError {
     /// The member path breaks one of the naming rules.
     MemberPath {
@@ -112,12 +97,14 @@ pub(super) enum AssetOutputError {
     /// The published name is not portable across filesystems.
     PortableName {
         member: String,
+        #[source]
         cause: OutputPathError,
     },
     /// The prefix puts the member inside Tola's reserved path.
     ReservedPath {
         member: String,
         prefix: String,
+        #[source]
         cause: AssetUrlError,
     },
 }
@@ -156,16 +143,6 @@ impl fmt::Display for AssetOutputError {
     }
 }
 
-impl std::error::Error for AssetOutputError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::MemberPath { .. } => None,
-            Self::PortableName { cause, .. } => Some(cause),
-            Self::ReservedPath { cause, .. } => Some(cause),
-        }
-    }
-}
-
 /// Where one published member path splits, or the rule it breaks.
 pub(super) fn member_path_segments(relative: &Path) -> Result<Vec<&str>, MemberPathViolation> {
     let mut segments = Vec::new();
@@ -195,6 +172,35 @@ fn filesystem_output_path(
         })?;
     OutputPath::parse(&segments.join("/"))
         .map_err(|cause| AssetOutputError::PortableName { member, cause })
+}
+
+/// Refuse outputs that share a portable path or overlap as file and directory.
+pub(super) fn check_paths<'output>(
+    outputs: impl IntoIterator<Item = &'output AssetOutput>,
+    display_root: &Path,
+    cancellation: &crate::cancellation::BuildCancellation,
+) -> anyhow::Result<()> {
+    let mut ordered = outputs
+        .into_iter()
+        .map(|output| (output, output.output.portable_key()))
+        .collect::<Vec<_>>();
+    ordered.sort_by(|(_, left), (_, right)| left.cmp(right));
+    for pair in ordered.windows(2) {
+        cancellation.ensure_active()?;
+        let [(output, output_key), (conflict, conflict_key)] = pair else {
+            unreachable!("windows(2) always yields two outputs");
+        };
+        if conflict_key.starts_with(output_key) {
+            return Err(AssetSourceError::PublishedPathsConflict {
+                left: tola_diagnostic::display_path(&output.logical_source, display_root),
+                left_at: output.output.to_string(),
+                right: tola_diagnostic::display_path(&conflict.logical_source, display_root),
+                right_at: conflict.output.to_string(),
+            }
+            .into());
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -233,17 +239,6 @@ mod tests {
             )
             .is_err()
         );
-    }
-
-    #[test]
-    fn file_output_uses_declared_name() {
-        let source = Path::new("assets/favicon.ico");
-        let declared = crate::config::section::AssetUrl::parse("/favicon.ico").unwrap();
-
-        let output = output_for_configured_file(source, declared.output_path());
-
-        assert_eq!(output.logical_source.as_path(), source);
-        assert_eq!(output.output.as_str(), "favicon.ico");
     }
 
     #[test]

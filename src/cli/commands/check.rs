@@ -63,7 +63,7 @@ fn execute(
     })
     .map_err(|failure| {
         report.failed_candidate(&failure);
-        failure.into_error()
+        anyhow::Error::from(failure)
     })?;
     report.candidate(locked.site());
     locked.ensure_fresh(&cancellation.token())?;

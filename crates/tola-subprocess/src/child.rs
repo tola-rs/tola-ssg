@@ -5,7 +5,7 @@ use std::process::ExitStatus;
 
 use process_wrap::std::ChildWrapper;
 
-use crate::{Captured, Error, Result, sys};
+use crate::{Cancellation, Captured, Error, Result, sys};
 
 /// How a command stopped.
 #[derive(Debug)]
@@ -56,7 +56,7 @@ impl Exit {
 ///
 /// `Terminated` is recorded even when the kill failed, so termination is attempted once.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ChildLifecycle {
+enum ChildLifecycle {
     Running,
     Exited(ExitStatus),
     Terminated(Option<ExitStatus>),
@@ -81,9 +81,27 @@ impl Child {
         self.wrapper.as_mut()
     }
 
+    /// Wait for exit or cancellation, then stop the whole contained process tree.
+    pub(crate) fn wait_for_stop(
+        &mut self,
+        cancellation: &(impl Cancellation + ?Sized),
+        mut between_polls: impl FnMut() -> Result<()>,
+    ) -> Result<Stop> {
+        loop {
+            if cancellation.is_cancelled() {
+                return Ok(Stop::Cancelled(self.terminate()));
+            }
+            if let Some(status) = self.try_wait()? {
+                self.terminate();
+                return Ok(Stop::Exited(status));
+            }
+            between_polls()?;
+        }
+    }
+
     /// Observe the direct child's exit without blocking. The inner child caches
     /// the status it reaped, so later calls report the same one.
-    pub(crate) fn try_wait(&mut self) -> Result<Option<ExitStatus>> {
+    fn try_wait(&mut self) -> Result<Option<ExitStatus>> {
         if let ChildLifecycle::Terminated(status) = self.lifecycle {
             return Ok(status);
         }
@@ -95,7 +113,7 @@ impl Child {
     }
 
     /// Terminate the direct child and the descendants that stayed with it.
-    pub(crate) fn terminate(&mut self) -> Option<ExitStatus> {
+    fn terminate(&mut self) -> Option<ExitStatus> {
         let status = match self.lifecycle {
             ChildLifecycle::Running => sys::terminate(self.wrapper.as_mut()),
             ChildLifecycle::Exited(status) => {

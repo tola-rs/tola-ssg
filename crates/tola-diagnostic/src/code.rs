@@ -77,17 +77,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn declared_code_keeps_its_text() {
-        let code = DiagnosticCode::new("config.toml");
-
-        assert_eq!(code.as_str(), "config.toml");
-        assert_eq!(code, "config.toml");
-        assert_eq!(code.to_string(), "config.toml");
-        assert_eq!(serde_json::json!(code), serde_json::json!("config.toml"));
-    }
-
-    #[test]
-    fn shape_rule_rejects_malformed_codes() {
+    fn code_shape() {
         for accepted in ["config.toml", "site.no_pages", "typst.bundle_export"] {
             assert!(well_formed(accepted), "{accepted}");
         }

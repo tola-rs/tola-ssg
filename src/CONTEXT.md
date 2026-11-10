@@ -7,7 +7,8 @@
 - `cli/` parses arguments and chooses command policy. It owns no build semantics: a command assembles a build request, then hands the result to presentation.
 - `cli/commands/` holds one module per command family; shared argument types live in `cli/args.rs`.
 - `cli/output.rs` owns success output; `cli/log/` owns the JSONL log; `src/codes.rs` binds diagnostic codes.
-- `cli/dispatch.rs` routes a parsed invocation; `cli/run.rs` owns the process lifecycle and exit status.
+- `cli/parse.rs` reads the command and process options with clap. Module prefixes are parsed separately so the module command receives its own arguments intact.
+- `cli/dispatch.rs` routes the parsed command. `cli/run.rs` owns the process lifecycle and exit status.
 
 ## Development
 

@@ -555,7 +555,7 @@ impl Selection<'_> {
         };
         let mut declared_fields = declared
             .as_ref()
-            .map(schema::OutputDescription::fields)
+            .map(schema::SchemaDescription::fields)
             .unwrap_or_default();
         // A member of a value supplies its `self`; a module's or a type's member takes the
         // receiver as its first argument.
@@ -651,11 +651,10 @@ impl Selection<'_> {
             if !name_matches(&name, position.prefix) || key.written.contains(&name) {
                 continue;
             }
-            // One call that neither declares the key nor keeps unknown keys rejects it.
             let rejecting = schemas
                 .shapes
                 .iter()
-                .filter(|schema| !schema.declares(&name) && !schema.accepts_unknown())
+                .filter(|schema| schemas.covered && schema.rejects(&name))
                 .count();
             let required = schemas.shapes.iter().any(|schema| schema.requires(&name));
             if rejecting > 0 && !required {

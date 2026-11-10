@@ -1065,18 +1065,18 @@ Built-in Nu libraries are described in `tola skill scripts libraries`.
 
 ### Queries
 
-A query is a private Typst entry that emits exactly one metadata value under its declared
-label. It can reuse a theme's page selection without rendering the site. Add this to the
-example module's manifest:
+A named query selects a module-relative Typst `entry` and a metadata `label`.
+The official compiler evaluates the entry in the consuming site's source and package
+environment. The label must select exactly one metadata value across the compiled Bundle.
+The entry can use private helpers independently of the site's page template.
 
 ```toml
 [queries.pages]
 entry = "queries/pages.typ"
 label = "page-list"
-returns = "json"
 ```
 
-`theme/queries/pages.typ`:
+`theme/queries/pages.typ` can reuse the example theme's page selection:
 
 ```typst
 #import "../lib.typ": pages
@@ -1089,24 +1089,69 @@ returns = "json"
 ))) <page-list>
 ```
 
-Run `tola query notes.pages --json` from the consumer. `json` is the default return type
-and accepts JSON-compatible scalars, arrays, and dictionaries. Project rich content, native
-paths, and functions to explicit JSON fields. Queries discover the site's sources but run
-no build hooks and publish nothing; prepare any generated inputs before calling them.
+Run `tola query notes.pages --json` from the consumer. Ordinary queries accept scalars,
+arrays, and dictionaries that can be converted to JSON. Native Typst paths are encoded as
+`{ root, path }`, preserving their project or package root. Project content and functions
+to explicit data fields before returning them.
 
-#### Entities
+Queries run with the current source inputs. They discover sources and compile their selected
+entry independently of the site template. Prepare generated inputs before querying them.
+Several queries can select different labels from the same entry. The complete entry is
+compiled before labels are selected, so those queries share its computations and failures.
 
-Use `returns = "entities"` when a query supplies items for author tools or editor semantics.
-Add another declaration:
+#### References and definitions
+
+Declare editor support under the query that supplies the IDs. The following example assumes
+that `lib.typ` exports `page-link(id)`, `page-card(id: ...)`, and `page(..., id: ...)`:
 
 ```toml
+[typst]
+entry = "lib.typ"
+
 [queries.index]
 entry = "queries/index.typ"
 label = "page-index"
-returns = "entities"
+
+[[queries.index.references]]
+export = "page-link"
+parameter = { positional = 0 }
+
+[[queries.index.references]]
+export = "page-card"
+parameter = { named = "id" }
+
+[[queries.index.definitions]]
+export = "page"
+parameter = { named = "id" }
+
+[commands.list-pages]
+query = "index"
 ```
 
-`theme/queries/index.typ`:
+Each array entry selects one public function parameter. Add entries when more functions or
+parameters use the same query. `positional` is zero-based. `named` selects a Typst named
+parameter, so a positional parameter called `id` still uses its positional index.
+Dot-separated exports such as `content.page-link` traverse the public entry's members.
+Query helpers can be imported from private module files; the declared functions must be
+available from `[typst].entry`.
+
+A query with at least one reference or definition must return an array of records with
+these fields:
+
+| Field | Requirement | Meaning |
+| --- | --- | --- |
+| `id` | Nonempty string, unique within this query | The value the public API accepts as a reference |
+| `name` | String | The item's human-readable name |
+| `description` | Optional string or `none` | Explanatory text for completion and hover |
+| `source` | Optional native Typst path or `none` | The source file used for definition lookup |
+| `url` | Optional string or `none` | The item's web address |
+
+Extra fields are rejected. Use an ordinary query for other data shapes. Tola infers record
+validation from the reference and definition declarations, and applies it to CLI and LSP
+calls alike. A query with neither declaration uses ordinary data conversion; tools that
+consume such a query validate their own required fields.
+
+`theme/queries/index.typ` can project the existing page model into these records:
 
 ```typst
 #import "../lib.typ": pages
@@ -1114,30 +1159,41 @@ returns = "entities"
 
 #metadata(pages().map(page => (
   id: page.source.id,
-  label: page.source.meta.title,
+  name: page.source.meta.title,
   source: page.source.file,
   url: output-url(page.output),
 ))) <page-index>
 ```
 
-IDs are unique nonempty strings. `label` is required; `detail` and `url` are optional
-strings. `source` is an optional native Typst path, not a string reconstructed from a URL.
-The CLI represents it as `{ root, path }`. Use an identity that remains stable for the
-operations your tool supports; this example uses the content source path.
+The query generates this list from the site's model. Reuse the ID that the public reference
+function already accepts. An ID belongs to its configured module alias and query name;
+different queries may contain the same ID. This example uses the content source path.
+The query's `label` selects metadata, while each record's `name` supplies display text.
+Keep the native `source` path and the web `url` separate. JSON output represents a source
+as `{ root, path }`.
 
-A public function that references these entities can declare an editor role:
+For `page-link("intro")`, the server uses the declared query to complete IDs and display
+names, descriptions, and URLs. Definition lookup opens the declared source and selects the
+unique matching definition argument when present. References follow actual function values,
+including import aliases, instead of matching function names as text. A declaration of a
+definition identifies the ID's source position; the query still computes which items exist.
 
-```toml
-[[semantics]]
-export = "page-link"
-parameter = { positional = 0 }
-role = "reference"
-query = "index"
-```
+Entity operations select explicit string arguments. Rename requires one writable literal
+definition in the declared source and a complete set of writable references. Proposed edits
+are checked by evaluating the query again and verifying the affected entity identities.
+Computed arguments, shared definitions, or changes to other query identities can prevent a
+rename. Invalid exports, missing parameters, and conflicting declarations identify the
+module and query declaration that needs correction.
 
-This requires an actual `page-link` export from `lib.typ` whose first argument is an
-entity ID. A named argument uses `parameter = { named = "id" }`; a definition uses
-`role = "definition"`. Declare semantics only for APIs that have that meaning.
+The language server keeps one query session per module instance and entry. Labels from the
+same entry share its compilation within an editor revision. Later revisions reuse the
+session's dependency-based source analysis, while answers remain tied to current unsaved
+text. Configuration, module declaration, or input-scope changes replace the sessions.
+
+Migrate old manifests by moving each `[[semantics]]` entry into the corresponding query's
+`references` or `definitions` array. Remove its `role` and `query` fields and the query's
+`returns` field. Rename record fields `label` to `name` and `detail` to `description`.
+Keep the metadata selector `label`. Old field names are rejected.
 
 #### Calling
 
@@ -1168,8 +1224,8 @@ result without opening the browser; leaving the browser writes nothing.
 
 #### Selection
 
-For a module's `index` query with `returns = "entities"`, this `tools/find.nu` keeps each
-entity's complete record through search and selection. Register it with
+For the module's `index` query above, this `tools/find.nu` keeps each
+record through search and selection. Register it with
 `nu = "tools/find.nu"` under `[commands.find]` and run `tola notes find`:
 
 ```nu
@@ -1178,7 +1234,7 @@ use tola [query cli ui get-module get-site]
 def main [] {
   let entities = query $"((get-module).name).index"
   if ($entities | is-empty) { return }
-  let choice = ($entities | ui choose --columns [id label] --search-columns [label] --fuzzy)
+  let choice = ($entities | ui choose --columns [id name] --search-columns [name] --fuzzy)
   if $choice.action != "submit" { return }
   let entity = $choice.selected
   if $entity.source == null or $entity.source.root != "project" {
@@ -1194,12 +1250,12 @@ def main [] {
 The final command returns source text and its current digest as JSON. It takes the project's
 native source path from the entity record, without deriving it from the title or ID. Package
 sources and entities without sources remain separate cases. The original ID, source, URL and
-detail survive the table's display-column selection. For a module action instead, pass
+description survive the table's display-column selection. For a module action instead, pass
 `$entity.id` as one argument to that module's declared command, retaining its configuration
 and scope. Only `submit` may invoke the action; quitting has no side effect.
 
-An entities query uses `id`, `label`, `detail`, `source`, and `url`; `source` is `null` or a
-record with `root` and `path`. An ordinary JSON query defines its own fields and types.
+An editor query uses `id`, `name`, `description`, `source`, and `url`; `source` is `null` or a
+record with `root` and `path`. An ordinary query defines its own fields and types.
 The interactive `find` tool above requires a terminal; keep the plain query available for
 pipelines and output files. Existing project files are read again at action time, so their
 digest is an editing precondition only for that read, not for the earlier query.
@@ -1265,8 +1321,9 @@ once, using `[]` for an empty batch. Embedded Nu submits directly to the host. E
 tools use the file named by `TOLA_REPORT_PATH` and the version 1 JSON batch. Submit issues
 without locations because these commands and hooks have no source snapshot.
 
-An independently run script can write the same report with
-`diagnostic submit --path report.json`.
+For an independent check, pipe the list to `diagnostic render` to print it. A location
+for rendering uses a file `path` and optional one-based `line` and `column`. The script
+chooses its own exit status after rendering.
 
 ### Initializer
 
@@ -1503,16 +1560,18 @@ Built-in libraries use `use tola NAME`. Image operations accept bytes or file pa
 
 ```nu
 use tola image
-image metadata-file photo.png
-image resize-file photo.png thumb.webp --width 640 --op fit-width --format webp
+image metadata photo.png
+image resize photo.png --output thumb.webp --width 640 --format webp
 ```
 
-The file command is `tola nu @tola-scripts/image resize photo.png thumb.webp --width 640 --op fit-width
---format webp`. `image metadata` returns dimensions and format. Raster resize does not provide
+Use `tola nu @tola-scripts/image resize photo.png --output photo.webp --format webp` to keep the
+source dimensions and change the encoding. With no explicit `--op`, one dimension
+preserves the aspect ratio and two dimensions fill the requested rectangle, cropping
+if needed. `image metadata` returns dimensions and format. Raster resize does not provide
 SVG rendering or publish a site asset; use the site's existing output hooks for generated files.
-The destination directory must exist and existing files are not overwritten. `resize-file`
-returns a small metadata record; it does not return the encoded image through Nu. The byte
-pipeline remains available as `open --raw photo.png | image resize --width 640 --op fit-width
+With `--output`, the destination directory must exist, existing files are not overwritten,
+and the command returns a small metadata record. Without `--output`, it returns encoded bytes.
+For example, `open --raw photo.png | image resize --width 640
 | save --raw thumb.webp`. Resizing still holds decoded pixels; choose a modest explicit
 `par-each --threads` value when processing large images concurrently.
 Unknown `@tola-scripts/NAME` entries fail directly. Use `./@file.nu` for an ordinary

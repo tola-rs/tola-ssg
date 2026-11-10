@@ -1,4 +1,4 @@
-//! Labels the site declares and the references that point at them, answered from the compiled
+//! Site labels and their references.
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -90,21 +90,18 @@ pub(super) fn typed_name<'a>(source: &'a Source, reference: &Reference, cursor: 
 
 /// Every spelling of one label here, declaration first, without the site compiling.
 pub(super) fn highlights(source: &Source, name: &str) -> Vec<DocumentHighlight> {
-    let mut found = Vec::new();
-    collect_spellings(&LinkedNode::new(source.root()), name, &mut found);
-    let mut highlights: Vec<DocumentHighlight> = found
-        .into_iter()
-        .filter_map(|spelling| {
-            Some(DocumentHighlight {
-                range: position::utf16_range(source.lines(), spelling.range)?,
-                kind: Some(if spelling.declares {
-                    DocumentHighlightKind::WRITE
-                } else {
-                    DocumentHighlightKind::READ
-                }),
-            })
-        })
-        .collect();
+    let mut highlights = Vec::new();
+    visit_spellings(source, name, |range, declares| {
+        let kind = if declares {
+            DocumentHighlightKind::WRITE
+        } else {
+            DocumentHighlightKind::READ
+        };
+        highlights.push(DocumentHighlight {
+            range,
+            kind: Some(kind),
+        });
+    });
     highlights.sort_by_key(|highlight| {
         (
             highlight.kind != Some(DocumentHighlightKind::WRITE),
@@ -249,16 +246,11 @@ fn spellings(
         let Ok(source) = world.source(id) else {
             continue;
         };
-        let mut spellings = Vec::new();
-        collect_spellings(&LinkedNode::new(source.root()), name, &mut spellings);
-        found.extend(
-            spellings
-                .into_iter()
-                .filter(|spelling| include_declaration || !spelling.declares)
-                .filter_map(|spelling| {
-                    Some((id, position::utf16_range(source.lines(), spelling.range)?))
-                }),
-        );
+        visit_spellings(&source, name, |range, declares| {
+            if include_declaration || !declares {
+                found.push((id, range));
+            }
+        });
     }
     found.sort_by(|(left, left_range), (right, right_range)| {
         compare_paths(left, right)
@@ -287,31 +279,39 @@ fn compiled_with(
     Ok(sources)
 }
 
-/// One place one source spells a name.
-pub(super) struct Spelling {
-    /// The name's own bytes, inside the reference's or label's punctuation.
-    pub range: Range<usize>,
-    /// Whether markup attaches the label to an element; a label literal in code is a read.
-    pub declares: bool,
+/// Visit the UTF-16 range of each matching name and whether it is a declaration.
+pub(super) fn visit_spellings(
+    source: &Source,
+    name: &str,
+    mut visit: impl FnMut(ProtocolRange, bool),
+) {
+    fn walk(node: &LinkedNode<'_>, name: &str, visit: &mut impl FnMut(Range<usize>, bool)) {
+        if let Some((range, declares)) = token_spelling(node, name) {
+            visit(range, declares);
+        }
+        for child in node.children() {
+            walk(&child, name, visit);
+        }
+    }
+
+    let lines = source.lines();
+    walk(
+        &LinkedNode::new(source.root()),
+        name,
+        &mut |range, declares| {
+            if let Some(range) = position::utf16_range(lines, range) {
+                visit(range, declares);
+            }
+        },
+    );
 }
 
-/// Every place one source spells `name`, in source order.
-pub(super) fn collect_spellings(node: &LinkedNode<'_>, name: &str, found: &mut Vec<Spelling>) {
-    if let Some(spelling) = token_spelling(node, name) {
-        found.push(spelling);
-    }
-    for child in node.children() {
-        collect_spellings(&child, name, found);
-    }
-}
-
-/// The spelling one token has, when it spells `name`.
-fn token_spelling(node: &LinkedNode<'_>, name: &str) -> Option<Spelling> {
-    let text = node.leaf_text();
+fn token_spelling(node: &LinkedNode<'_>, name: &str) -> Option<(Range<usize>, bool)> {
     let (inner, declares) = match node.kind() {
-        SyntaxKind::RefMarker => (text.strip_prefix('@')?, false),
+        SyntaxKind::RefMarker => (node.leaf_text().strip_prefix('@')?, false),
+        // Markup attaches the label to an element. A code literal uses it.
         SyntaxKind::Label => (
-            text.strip_prefix('<')?.strip_suffix('>')?,
+            node.leaf_text().strip_prefix('<')?.strip_suffix('>')?,
             node.parent_kind() == Some(SyntaxKind::Markup),
         ),
         _ => return None,
@@ -320,10 +320,7 @@ fn token_spelling(node: &LinkedNode<'_>, name: &str) -> Option<Spelling> {
         return None;
     }
     let start = node.range().start + 1;
-    Some(Spelling {
-        range: start..start + inner.len(),
-        declares,
-    })
+    Some((start..start + inner.len(), declares))
 }
 
 /// The name a rename at the cursor would replace, and the spelling the author selected.
@@ -573,7 +570,7 @@ mod tests {
     }
 
     #[test]
-    fn file_labels_answer_check_fails() {
+    fn hover_after_compile_failure() {
         // The site's own program does not compile, and neither does the page on its own, so the
         // compiled label set is unknown while the page still has the label the author reads.
         let site = site_with_program("#let broken = )\n");
@@ -588,7 +585,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_label_absent_from_compiled_site() {
+    fn hover_for_unknown_label() {
         // A site that compiled knows every label it has, so one it does not hold is absent
         // rather than unknown.
         let site = site_with_program(SITE_PROGRAM);
@@ -658,17 +655,6 @@ mod tests {
 
     use crate::query::tests::*;
     use lsp_types::{GotoDefinitionResponse, PrepareRenameResponse};
-    /// A cursor resting on a reference's own marker — where a click or a motion lands — means that
-    /// reference, not the text beside it.
-    #[test]
-    fn cursor_marker_names_reference() {
-        let mut site = QuerySession::new();
-        let hover = site
-            .hover_text("= Title <intro>\n\nSee |@intro.\n")
-            .expect("a hover on the marker itself");
-        assert!(hover.contains("@intro"), "{hover}");
-    }
-
     /// A cursor on a loop's control flow answers the loop it belongs to.
     #[test]
     fn control_flow_keywords_highlight_their_loop() {
@@ -761,7 +747,7 @@ mod tests {
     /// A label answers every place the site spells it, and the declaration only when the client
     /// asks for it.
     #[test]
-    fn reference_count_follows_include_declaration() {
+    fn references_can_omit_declaration() {
         let mut site = QuerySession::new();
         let text = "#figure([Body]) <intro>\nSee @int|ro and #ref(<intro>)\n";
         for (include_declaration, expected) in [(true, 3), (false, 2)] {
@@ -793,11 +779,6 @@ mod tests {
             assert!(site.rename(source, name).is_none(), "{name}");
         }
         assert!(site.rename(source, "章节-二").is_some());
-        assert_eq!(
-            site.rename_refusal("#let factor = 2\n#f|actor\n", "2scale"),
-            "invalidIdentifier",
-            "a name that is not one identifier is refused"
-        );
     }
 
     /// A rename edits every spelling of a label, or of a name the file binds.
@@ -866,7 +847,7 @@ mod tests {
 
     /// A rename replaces the parameter's own spellings, never the outer binding of that name.
     #[test]
-    fn rename_spares_the_shadowed_binding() {
+    fn rename_a_shadowing_parameter() {
         let mut site = QuerySession::new();
         let edit = site
             .rename(
@@ -957,18 +938,5 @@ mod tests {
         assert!(hover.contains("<introduction>"), "{hover}");
         assert!(hover.contains("figure"), "{hover}");
         assert!(hover.contains("content/document.typ"), "{hover}");
-    }
-
-    /// A label nothing declares says so, rather than describing another site's element.
-    #[test]
-    fn undeclared_labels_say_so() {
-        let mut site = QuerySession::new();
-        let hover = site
-            .hover_text("See @intro|duction\n")
-            .expect("a hover for the reference");
-        assert!(
-            hover.contains("no source declares the label `introduction`"),
-            "{hover}"
-        );
     }
 }

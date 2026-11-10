@@ -20,14 +20,14 @@ pub(super) fn inspect(
     cancellation: &crate::cancellation::BuildCancellation,
 ) -> Result<(Vec<InspectedSource>, Vec<tola_diagnostic::Diagnostic>)> {
     let mut inputs = crate::compiler::BuildInputs::default();
-    let packages = crate::package::prepare_package_inputs(
+    let icons = crate::package::prepare_icons(
         config,
         resources,
         cancellation,
         &mut None,
         &Default::default(),
     )?;
-    let host = host.with_icons(packages.icons.collections());
+    let host = host.with_icons(icons.collections());
     let mut warnings = tola_typst::Diagnostics::new();
     let bindings = crate::package::SiteBindings::from_config(
         config,

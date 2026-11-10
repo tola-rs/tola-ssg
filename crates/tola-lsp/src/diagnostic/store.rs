@@ -7,10 +7,14 @@ use std::sync::Arc;
 
 use lsp_types::{
     Diagnostic as EditorDiagnostic, DocumentDiagnosticReport, FullDocumentDiagnosticReport,
-    NumberOrString, RelatedFullDocumentDiagnosticReport, RelatedUnchangedDocumentDiagnosticReport,
-    UnchangedDocumentDiagnosticReport, Uri,
+    NumberOrString, PreviousResultId, RelatedFullDocumentDiagnosticReport,
+    RelatedUnchangedDocumentDiagnosticReport, UnchangedDocumentDiagnosticReport, Uri,
+    WorkspaceDiagnosticReport, WorkspaceDocumentDiagnosticReport,
+    WorkspaceFullDocumentDiagnosticReport, WorkspaceUnchangedDocumentDiagnosticReport,
 };
 use tola_typst_syntax::names;
+
+use crate::sources::OpenSources;
 
 pub(crate) struct ClientDiagnostics {
     /// The workspace root in both spellings: the path Tola resolves and the one the editor named.
@@ -119,6 +123,60 @@ impl ClientDiagnostics {
                 },
             },
         ))
+    }
+
+    /// The last check's reports, plus empty reports for URIs the client still holds.
+    pub(crate) fn pull_workspace(
+        &self,
+        open: &OpenSources,
+        previous: &[PreviousResultId],
+    ) -> WorkspaceDiagnosticReport {
+        let mut previous: BTreeMap<_, _> = previous
+            .iter()
+            .map(|result| (result.uri.as_str(), result))
+            .collect();
+        let mut items = Vec::with_capacity(self.reports.len());
+        for (uri, report) in &self.reports {
+            let previous = previous.remove(uri.as_str());
+            let synced = open.version(uri);
+            if !report.vouches_for(synced) {
+                continue;
+            }
+            let uri = uri
+                .parse()
+                .expect("the report was stored under a valid URI");
+            let version = synced.map(i64::from);
+            let result_id = report.result_id.clone();
+            let item = if previous.is_some_and(|previous| previous.value == result_id) {
+                WorkspaceUnchangedDocumentDiagnosticReport {
+                    uri,
+                    version,
+                    unchanged_document_diagnostic_report: UnchangedDocumentDiagnosticReport {
+                        result_id,
+                    },
+                }
+                .into()
+            } else {
+                WorkspaceFullDocumentDiagnosticReport {
+                    uri,
+                    version,
+                    full_document_diagnostic_report: FullDocumentDiagnosticReport {
+                        result_id: Some(result_id),
+                        items: report.diagnostics.clone(),
+                    },
+                }
+                .into()
+            };
+            items.push(item);
+        }
+        items.extend(previous.into_values().map(|result| {
+            WorkspaceDocumentDiagnosticReport::Full(WorkspaceFullDocumentDiagnosticReport {
+                uri: result.uri.clone(),
+                version: open.version(result.uri.as_str()).map(i64::from),
+                full_document_diagnostic_report: FullDocumentDiagnosticReport::default(),
+            })
+        }));
+        WorkspaceDiagnosticReport { items }
     }
 
     /// Whether the report the client already holds says what this one would.

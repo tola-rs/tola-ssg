@@ -66,11 +66,10 @@ impl FileSelection {
     /// Whether a strict descendant could match. An excluded path prunes its subtree.
     pub fn could_match_below(&self, path: &Path) -> bool {
         !self.excludes(path)
-            && (self.includes(path)
-                || self
-                    .include
-                    .iter()
-                    .any(|pattern| pattern.could_match_below(path)))
+            && self
+                .include
+                .iter()
+                .any(|pattern| pattern.could_match_below(path))
     }
 
     /// Include patterns with no glob syntax, in declaration order.
@@ -119,10 +118,11 @@ impl Hash for FileSelection {
 }
 
 /// A declared pattern that is invalid or can leave its input directory.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub struct PatternError {
     key: String,
     pattern: String,
+    #[source]
     glob: Option<globset::Error>,
 }
 
@@ -144,12 +144,6 @@ impl fmt::Display for PatternError {
                 "`{key}` pattern `{pattern}` must stay relative to its input directory"
             ),
         }
-    }
-}
-
-impl std::error::Error for PatternError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        self.glob.as_ref().map(|error| error as _)
     }
 }
 
@@ -220,10 +214,10 @@ impl Pattern {
 
     fn could_match_below(&self, path: &Path) -> bool {
         match self {
-            Self::Literal(literal) => literal.starts_with(path) && literal != path,
+            Self::Literal(literal) => literal.starts_with(path) || path.starts_with(literal),
             Self::Glob { prefix, depth, .. } => {
-                (prefix.starts_with(path) || path.starts_with(prefix))
-                    && path.components().count() < *depth
+                let shares_prefix = prefix.starts_with(path) || path.starts_with(prefix);
+                (shares_prefix && path.components().count() < *depth) || self.contains(path)
             }
         }
     }

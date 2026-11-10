@@ -30,12 +30,14 @@ fn classify(error: &anyhow::Error, root: &Path) -> Option<Diagnostic> {
         .chain()
         .find_map(|cause| cause.downcast_ref::<WatchError>())?;
     Some(match watch {
-        WatchError::Create(_) => Diagnostic::new(
-            crate::codes::watch::CREATE,
-            Severity::Error,
-            "Tola could not start watching files for changes",
-        )
-        .with_help("Raise your file-watch limit, then restart `tola dev`"),
+        WatchError::Create(error) => with_watch_help(
+            Diagnostic::new(
+                crate::codes::watch::CREATE,
+                Severity::Error,
+                "Tola could not start watching files for changes",
+            ),
+            error,
+        ),
         WatchError::Event(_) => Diagnostic::new(
             crate::codes::watch::EVENT,
             Severity::Error,
@@ -55,22 +57,41 @@ fn classify(error: &anyhow::Error, root: &Path) -> Option<Diagnostic> {
         )
         .with_help("Check the `[[hooks.before-build]]` commands in the site configuration"),
         WatchError::RerunOn(error) => tola_diagnostic::fallback(crate::codes::watch::ATTACH, error),
-        WatchError::Attach { path, .. } => match watched_path(path, root) {
-            Some(relative) => Diagnostic::at_path(
-                crate::codes::watch::ATTACH,
-                Severity::Error,
-                relative,
-                "Tola could not watch this path for changes",
-            )
-            .with_help("Restart `tola dev` to attach the file watch again"),
-            None => Diagnostic::new(
-                crate::codes::watch::ATTACH,
-                Severity::Error,
-                "Tola could not watch a configured path for changes",
-            )
-            .with_help("Check the `watch` paths declared in the site configuration"),
-        },
+        WatchError::Attach { path, source } => with_watch_help(
+            match watched_path(path, root) {
+                Some(relative) => Diagnostic::at_path(
+                    crate::codes::watch::ATTACH,
+                    Severity::Error,
+                    relative,
+                    "Tola could not watch this path for changes",
+                ),
+                None => {
+                    let shown = tola_diagnostic::display_path(path, root);
+                    Diagnostic::new(
+                        crate::codes::watch::ATTACH,
+                        Severity::Error,
+                        format!("Tola could not watch `{shown}` for changes"),
+                    )
+                }
+            },
+            source,
+        ),
     })
+}
+
+fn with_watch_help(diagnostic: Diagnostic, error: &notify::Error) -> Diagnostic {
+    match &error.kind {
+        notify::ErrorKind::MaxFilesWatch => {
+            diagnostic.with_help("raise your file-watch limit, then restart `tola dev`")
+        }
+        notify::ErrorKind::PathNotFound => {
+            diagnostic.with_help("check that the path still exists, then restart `tola dev`")
+        }
+        notify::ErrorKind::Io(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            diagnostic.with_help("check directory permissions, then restart `tola dev`")
+        }
+        _ => diagnostic,
+    }
 }
 
 /// The site-relative spelling, or `None` for a path outside the site or the site root itself.

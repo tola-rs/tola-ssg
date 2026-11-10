@@ -9,10 +9,13 @@
 // Constants are `none`, booleans, integers, finite floats, decimals, strings, bytes, and
 // datetimes. Types remain distinct (for example `1` and `1.0`); use IDs to join complex
 // values such as content and functions, then look those values up in your own records.
+// Decimals match by numeric value. Returned decimals retain the representation of the
+// value selected by the query.
 
 /// Create a function that constructs atoms of a named relation.
 ///
 /// Relations with the same name in one database or query must have the same arity.
+/// A relation with no facts or rules deriving it has no rows.
 #import "@tola/host:0.0.0": datalog-relation as relation
 
 /// Create a variable. Equal names identify the same variable within one rule or query.
@@ -68,5 +71,6 @@
 /// ```
 ///
 /// `select` contains variables, in output column order. An empty selection returns `((),)`
-/// when the body succeeds, otherwise `()`. Results contain no duplicate rows.
+/// when the body succeeds, otherwise `()`. Results are sorted and contain no duplicate rows.
+/// Positive atoms run in the order written, before any negative atoms.
 #import "@tola/host:0.0.0": datalog-query as query

@@ -404,7 +404,7 @@ fn build_site_once_inner(attempt: BuildAttemptInner<'_>) -> Result<()> {
     let candidate = session
         .prepare(Arc::clone(&config), request)
         .run()
-        .map_err(|failure| failure.into_error())
+        .map_err(anyhow::Error::from)
         .and_then(|build| {
             let counts = build.graph().counts();
             let checked = build

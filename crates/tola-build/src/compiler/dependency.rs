@@ -630,7 +630,7 @@ impl CompilationDependencies {
         let Some(observed) = self.reader_evidence.get(reader) else {
             return;
         };
-        inputs.file_reads_mut().record(
+        inputs.record_disk_reads(
             observed
                 .reads
                 .iter()

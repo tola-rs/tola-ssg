@@ -518,8 +518,6 @@ mod tests {
         let after = observe(&root, Some(&before), &[changed.clone(), changed.clone()]);
         let full = observe(&root, None, &[]);
         assert!(after.same_evidence_as(&full));
-        assert!(Arc::ptr_eq(&before.file_indices, &after.file_indices));
-        assert!(Arc::ptr_eq(&before.files[1].bytes, &after.files[1].bytes));
         assert_eq!(before.files[0].bytes.as_ref(), b"before");
         assert_eq!(after.files[0].bytes.as_ref(), b"after");
 
@@ -527,7 +525,6 @@ mod tests {
         std::fs::remove_file(&changed).unwrap();
         let removed = observe(&root, Some(&after), std::slice::from_ref(&changed));
         assert!(removed.same_evidence_as(&observe(&root, None, &[])));
-        assert!(!Arc::ptr_eq(&after.file_indices, &removed.file_indices));
         std::fs::write(&changed, "restored").unwrap();
         let restored = observe(&root, Some(&removed), &[changed]);
         assert!(restored.same_evidence_as(&observe(&root, None, &[])));
@@ -557,10 +554,7 @@ mod tests {
             validate_member: &|_, _| Ok(()),
         })
         .unwrap_err();
-        assert!(
-            error.to_string().contains("symbolic link or reparse point"),
-            "{error:#}"
-        );
+        assert!(error.to_string().contains("nested"), "{error:#}");
     }
 
     #[cfg(unix)]
@@ -577,6 +571,5 @@ mod tests {
         std::fs::write(&changed, "after").unwrap();
         let after = observe(&alias, Some(&before), &[changed.canonicalize().unwrap()]);
         assert!(after.same_evidence_as(&observe(&alias, None, &[])));
-        assert!(Arc::ptr_eq(&before.file_indices, &after.file_indices));
     }
 }

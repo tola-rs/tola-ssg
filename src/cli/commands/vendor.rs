@@ -62,20 +62,6 @@ pub(in crate::cli) fn run(
     if vendor.dry_run {
         replacement.refuse_unfinished_install()?;
     }
-    // Earlier releases froze host fonts under `fonts/`; Tola reads no vendored fonts now.
-    let legacy = vendor_path.join("fonts");
-    if legacy.is_dir() {
-        let display = tola_diagnostic::display_path(&legacy, config.get_root());
-        if vendor.dry_run {
-            output.status(format!("Would remove the obsolete `{display}`"))?;
-        } else {
-            fs::remove_dir_all(&legacy)
-                .with_context(|| format!("could not remove the obsolete `{display}`"))?;
-            output.status(format!(
-                "Removed the obsolete `{display}`; fonts are site inputs under `[typst.fonts] paths`"
-            ))?;
-        }
-    }
     // Settle what an earlier run left before any build reads the vendored inputs.
     replacement.recover()?;
     let resources = resources.with_input_scope(scope);
@@ -241,7 +227,7 @@ fn build_without_hooks(
     session
         .prepare(config, request)
         .run()
-        .map_err(|failure| failure.into_error())
+        .map_err(anyhow::Error::from)
 }
 
 fn select_inputs(
@@ -249,7 +235,6 @@ fn select_inputs(
     resources: BuildResources,
     cancellation: &BuildCancellation,
 ) -> Result<SelectedInputs> {
-    let mode = resources.input_mode();
     let site = build_without_hooks(Arc::clone(&config), resources, cancellation)?;
     let observation = site.input_observation();
     let mut packages = BTreeMap::new();
@@ -275,25 +260,15 @@ fn select_inputs(
             },
         );
     }
-    let roots = tola_build::inputs::module_roots(
-        config.get_root(),
-        mode,
-        None,
-        config.modules(),
-        cancellation,
-    )?;
     let mut modules = Vec::new();
-    for (alias, declaration) in config.modules() {
+    for (alias, source) in site.module_roots() {
+        let declaration = &config.modules()[alias];
         if matches!(declaration.source, tola_module::ModuleSource::Local { .. }) {
             continue;
         }
-        let source = roots
-            .get(alias)
-            .with_context(|| format!("module `{alias}` has no resolved directory"))?
-            .clone();
         modules.push(SelectedModule {
-            alias: alias.clone(),
-            source,
+            alias: alias.to_owned(),
+            source: source.to_owned(),
         });
     }
     Ok(SelectedInputs {
@@ -684,7 +659,7 @@ impl VendorReplacement {
         self.swap.finish().map_err(|error| self.swap_failure(error))
     }
 
-    /// Replace both vendored trees with the verified ones.
+    /// Replace the vendored trees with the verified ones.
     fn commit(&self, cancellation: &BuildCancellation) -> Result<()> {
         cancellation.ensure_active()?;
         let staged = self.swap.staged(0);
@@ -719,7 +694,7 @@ impl VendorReplacement {
         Ok(())
     }
 
-    /// The vendor root the verification build reads, holding both prepared trees by name.
+    /// The vendor root the verification build reads, holding the prepared trees by name.
     fn candidate_root(&self) -> PathBuf {
         self.swap.workspace().join("candidate")
     }
@@ -828,6 +803,48 @@ impl VendorReplacement {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selection_uses_vendored_modules_without_a_cache() {
+        use tola_input::{InputLock, LockedModule, tree_sha256};
+
+        let site = tempfile::tempdir().unwrap();
+        let root = site.path().canonicalize().unwrap();
+        let frozen = root.join("vendor/modules/theme");
+        fs::create_dir_all(&frozen).unwrap();
+        fs::write(
+            frozen.join("tola-module.toml"),
+            "[typst]\nentry = 'lib.typ'\n",
+        )
+        .unwrap();
+        fs::write(frozen.join("lib.typ"), "#let title = [Theme]").unwrap();
+        let config = crate::dev::tests::write_site(
+            &root,
+            "#document(\"index.html\")[Site]",
+            "[build]\nentry = 'site.typ'\n[vendor]\npath = 'vendor'\n[modules.theme.git]\nurl = 'https://example.com/theme.git'\n",
+        );
+        let mut lock = InputLock::default();
+        lock.modules.insert(
+            "theme".into(),
+            LockedModule::Git {
+                git: "https://example.com/theme.git".into(),
+                revision: None,
+                subdir: PathBuf::new(),
+                commit: "a".repeat(40),
+                tree_sha256: tree_sha256(&frozen).unwrap(),
+            },
+        );
+        lock.commit(&root, &InputLock::default()).unwrap();
+        let selection = select_inputs(
+            config,
+            BuildResources::new().with_input_scope(InputScope::Pure),
+            &BuildCancellation::default(),
+        )
+        .unwrap();
+        assert_eq!(selection.modules.len(), 1);
+        assert_eq!(selection.modules[0].source, frozen);
+        assert!(!tola_input::layout::modules(&root).exists());
+    }
 
     /// The vendor replacement of this site's declared `vendor` directory, workspace claimed.
     fn replacement(site: &Path) -> VendorReplacement {

@@ -536,7 +536,7 @@ fn resolved_reports(root: &Path, diagnostics: &Diagnostics) -> Vec<tola_diagnost
 pub(crate) fn ensure_native_reports_succeed(
     root: &Path,
     diagnostics: &Diagnostics,
-) -> anyhow::Result<()> {
+) -> Result<(), tola_diagnostic::DiagnosticError> {
     tola_diagnostic::ensure_reports_succeed(&resolved_reports(root, diagnostics))
 }
 

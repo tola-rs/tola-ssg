@@ -111,6 +111,11 @@ impl ResolvedSiteConfig {
                 .iter()
                 .map(|path| ("module root", path.as_path())),
         )
+        .chain(
+            self.vendor_workspace
+                .as_deref()
+                .map(|path| ("vendor working directory", path)),
+        )
         .collect()
     }
 

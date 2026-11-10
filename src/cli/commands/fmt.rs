@@ -5,7 +5,7 @@ use std::path::Path;
 use anyhow::Result;
 use tola_build::has_typ_extension;
 use tola_diagnostic::{Diagnostic, DiagnosticError, Severity, line_column};
-use tola_typst_syntax::format::{self, Formatting, Options};
+use tola_typst_syntax::format::{self, Formatting};
 
 use crate::cancellation::Cancellation;
 use crate::cli::output::CommandOutput;
@@ -32,12 +32,7 @@ pub(in crate::cli) fn run(
     )?;
     let config = loaded.config();
     let root = config.get_root();
-    let formatter = config.formatter();
-    let options = Options {
-        tab_spaces: formatter.indent,
-        max_width: formatter.print_width,
-        prose_wrap: formatter.prose_wrap,
-    };
+    let options = config.formatter().options();
     // The sources are formatted in place: every write below carries the bytes this run read, so a
     // file an editor changed meanwhile is never overwritten.
     let files = tola_build::filesystem::owned_files(config, &cancellation.token())?;
@@ -89,7 +84,6 @@ pub(in crate::cli) fn run(
         }
     }
     if !check && reformatted > 0 {
-        writes.check()?;
         writes.apply(&cancellation.token())?;
     }
     if super::holds_error(&diagnostics) {

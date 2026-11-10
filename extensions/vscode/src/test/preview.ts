@@ -11,6 +11,7 @@ import {
   type EditorSite,
   openPublishedPage,
   replace,
+  waitForDiagnostics,
   withPreview,
   withSite,
   withSites,
@@ -596,7 +597,7 @@ export async function runPreviewChecks(): Promise<void> {
     }
   })
 
-  await check('Failed preview keeps published bytes', () =>
+  await check('Failed preview reports build diagnostics and keeps published bytes', () =>
     withPreview((opened) =>
       withSite(async (site) => {
         const source = await vscode.workspace.openTextDocument(site.source)
@@ -609,9 +610,19 @@ export async function runPreviewChecks(): Promise<void> {
         await workbenchText({ error: true, dismiss: true })
         assert.equal(source.isDirty, false)
         assert.equal(opened.length, 1)
+        await waitForDiagnostics(site.source, (reports) =>
+          reports.some((report) =>
+            report.source === 'tola build' && report.severity === vscode.DiagnosticSeverity.Error &&
+            report.message.includes('Preview regression failed') && report.range.start.line === 0
+          ))
         const response = await fetch(previous.url, { signal: AbortSignal.timeout(15_000) })
         assert.equal(response.status, 200)
         assert.match(await response.text(), /Published editor page\./)
+        await replace(source, 'Repaired editor page.\n')
+        const repaired = vscode.commands.executeCommand('tola.openPreview', site.source)
+        await workbenchText({ button: 'Save and Preview' })
+        await within(repaired, 'Repaired preview')
+        await waitForDiagnostics(site.source, (reports) => reports.every((report) => report.source !== 'tola build'))
       })
     ))
 

@@ -67,7 +67,7 @@ pub struct TreeMismatchError {
 #[derive(Debug, thiserror::Error)]
 pub enum PackageLockError {
     #[error(
-        "this build read package `{package}` from {root}, but `tola.lock` records no package `{name}`; run `tola update` to resolve the site's inputs"
+        "this build read package `{package}` from {root}, but `tola.lock` records no package `{name}`; run `tola build` without `--locked` or `--pure` to record package imports"
     )]
     Unlocked {
         package: String,
@@ -214,13 +214,13 @@ pub fn write_package_lock(
         return Ok(false);
     }
     let mut lock = InputLock::read(site_root)?.unwrap_or_default();
+    let original = lock.clone();
     let packages = record_package_reads(reads)?;
     if lock.packages == packages {
         return Ok(false);
     }
     lock.packages = packages;
-    lock.write_atomic(site_root)?;
-    Ok(true)
+    Ok(lock.commit(site_root, &original)?)
 }
 
 /// Verify every package root this build read against the lock.

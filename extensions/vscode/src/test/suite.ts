@@ -1674,6 +1674,28 @@ export async function run(): Promise<void> {
     }
   })
 
+  await check('An unopened external module updates the checked pages', () =>
+    withSite(async (site) => {
+      await vscode.commands.executeCommand('tolaPages.focus')
+      await workbenchText({ pages: '/before/' })
+      await fs.writeFile(
+        path.join(path.dirname(site.root), 'external-theme', 'site.typ'),
+        '#document("after/index.html", format: "html")[After]\n',
+      )
+      await workbenchText({ pages: '/after/' })
+    }, {
+      configuration: '[modules.theme]\npath = "../external-theme"\n[build]\nentry = { module = "theme" }\n',
+      prepare: async (site) => {
+        const module = path.join(path.dirname(site.root), 'external-theme')
+        await fs.mkdir(module)
+        await fs.writeFile(path.join(module, 'tola-module.toml'), '[build]\nentry = "site.typ"\n')
+        await fs.writeFile(
+          path.join(module, 'site.typ'),
+          '#document("before/index.html", format: "html")[Before]\n',
+        )
+      },
+    }))
+
   await check('Configured external roots answer language features', async () => {
     for (const kind of ['site', 'package']) {
       let source: vscode.Uri

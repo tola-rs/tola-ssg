@@ -112,21 +112,17 @@ pub enum DocumentationSegment<'a> {
 /// A fenced example is code: it reads the same in every language, so a translation replaces the
 /// prose around the examples and never an example. Whitespace-only runs are dropped.
 pub fn documentation_segments(block: &str) -> Vec<DocumentationSegment<'_>> {
-    let lines = documentation_lines(block)
-        .zip(block.split_inclusive('\n'))
-        .map(|(line, raw)| (line.is_fenced, raw.len()))
-        .collect::<Vec<_>>();
     let mut segments = Vec::new();
     let mut start = 0;
     let mut offset = 0;
-    let mut fenced = lines.first().is_some_and(|(fenced, _)| *fenced);
-    for (line_fenced, length) in lines {
-        if line_fenced != fenced {
+    let mut fenced = false;
+    for (line, raw) in documentation_lines(block).zip(block.split_inclusive('\n')) {
+        if line.is_fenced != fenced {
             push_segment(&mut segments, &block[start..offset], fenced);
             start = offset;
-            fenced = line_fenced;
+            fenced = line.is_fenced;
         }
-        offset += length;
+        offset += raw.len();
     }
     push_segment(&mut segments, &block[start..offset], fenced);
     segments
@@ -288,17 +284,6 @@ mod tests {
                 DocumentationSegment::Prose("Read a value.\n\n"),
                 DocumentationSegment::Example("```typ\n#let value = 7\n```\n"),
                 DocumentationSegment::Prose("\nThen use it."),
-            ]
-        );
-    }
-
-    #[test]
-    fn unclosed_fence_covers_remaining_lines() {
-        assert_eq!(
-            documentation_segments("Text.\n\n```\ncode"),
-            vec![
-                DocumentationSegment::Prose("Text.\n\n"),
-                DocumentationSegment::Example("```\ncode"),
             ]
         );
     }

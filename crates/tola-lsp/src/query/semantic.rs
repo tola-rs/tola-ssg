@@ -17,11 +17,11 @@ use tola_typst::typst::World;
 use tola_typst::typst::WorldExt;
 use tola_typst::typst::comemo::Track;
 use tola_typst::typst::engine::{Engine, Route, Sink, Traced};
-use tola_typst::typst::foundations::{Func, Repr, Str, Styles, Value};
+use tola_typst::typst::foundations::{Arg, Args, Func, Repr, Str, Styles, Value};
 use tola_typst::typst::introspection::{EmptyIntrospector, Introspector};
 use tola_typst::typst::syntax::ast::AstNode;
 use tola_typst::typst::syntax::{
-    FileId, LinkedNode, RootedPath, Source, Span, SyntaxKind, VirtualRoot, ast,
+    FileId, LinkedNode, RootedPath, Source, Span, Spanned, SyntaxKind, VirtualRoot, ast,
 };
 use tola_typst::typst::utils::Protected;
 use tola_typst_syntax::names::{
@@ -180,8 +180,8 @@ impl<'a> Semantic<'a> {
         imported
     }
 
-    /// The package owns schema semantics; inspection never runs defaults, predicates, or lazy
-    pub(super) fn inspect_schema(&self, declaration: &Value) -> Result<Option<Value>> {
+    /// Read the package's declared input or output shape without evaluating callbacks.
+    pub(super) fn inspect_schema(&self, declaration: &Value, input: bool) -> Result<Option<Value>> {
         self.cancellation.ensure_active()?;
         let world = self.compilation.world();
         let traced = Traced::default();
@@ -204,14 +204,18 @@ impl<'a> Semantic<'a> {
             let Value::Func(inspect) = module.scope().get("inspect")?.read() else {
                 return None;
             };
+            let span = Span::detached();
+            let mut args = Args::new(span, [declaration.clone()]);
+            args.items.push(Arg {
+                span,
+                name: Some("input".into()),
+                value: Spanned::new(Value::Bool(input), span),
+            });
             inspect
                 .call(
                     &mut engine,
                     tola_typst::typst::foundations::Context::none().track(),
-                    tola_typst::typst::foundations::Args::new(
-                        Span::detached(),
-                        [declaration.clone()],
-                    ),
+                    args,
                 )
                 .ok()
         });

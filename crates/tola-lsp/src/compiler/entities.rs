@@ -1,6 +1,6 @@
 //! Model queries retained only for their exact editor inputs and module declarations.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -8,10 +8,15 @@ use anyhow::Result;
 use tola_build::BuildResources;
 use tola_build::cancellation::BuildCancellation;
 use tola_build::config::ResolvedSiteConfig;
-use tola_build::modules::entities::EntityQueryResult;
-use tola_build::modules::query;
+use tola_build::modules::query::{QueryCompilation, QueryEvaluation, QuerySession};
 use tola_input::InputScope;
 use tola_module::module_set::LoadedModule;
+use tola_typst::typst::syntax::FileId;
+
+struct QueryEntry {
+    session: QuerySession,
+    compiled: Option<QueryCompilation>,
+}
 
 #[derive(Default)]
 pub(crate) struct EntityQueries {
@@ -20,7 +25,8 @@ pub(crate) struct EntityQueries {
     scope: Option<InputScope>,
     overlays: Vec<(PathBuf, Arc<str>)>,
     modules: BTreeMap<String, LoadedModule>,
-    queries: Vec<(String, Arc<EntityQueryResult>)>,
+    entries: HashMap<FileId, QueryEntry>,
+    queries: BTreeMap<String, Arc<QueryEvaluation>>,
     observed: BTreeSet<PathBuf>,
 }
 
@@ -33,12 +39,21 @@ impl EntityQueries {
         overlays: &[(PathBuf, Arc<str>)],
         modules: &BTreeMap<String, LoadedModule>,
     ) {
-        if !self.matches(configuration, revision, overlays)
+        let changed = !self
+            .configuration
+            .as_ref()
+            .is_some_and(|active| Arc::ptr_eq(active, configuration))
             || self.scope != Some(scope)
-            || &self.modules != modules
-        {
+            || &self.modules != modules;
+        if changed {
+            self.entries.clear();
+        }
+        if changed || !self.matches(configuration, revision, overlays) {
             self.queries.clear();
             self.observed.clear();
+            for entry in self.entries.values_mut() {
+                entry.compiled = None;
+            }
             self.configuration = Some(Arc::clone(configuration));
             self.revision = revision;
             self.scope = Some(scope);
@@ -53,35 +68,57 @@ impl EntityQueries {
         query_name: &str,
         resources: BuildResources,
         cancellation: &BuildCancellation,
-    ) -> Result<Arc<EntityQueryResult>> {
+    ) -> Result<Arc<QueryEvaluation>> {
         cancellation.ensure_active()?;
         let name = format!("{}.{}", module.name, query_name);
-        if let Some((_, result)) = self.queries.iter().find(|(selected, _)| selected == &name) {
+        if let Some(result) = self.queries.get(&name) {
             return Ok(Arc::clone(result));
         }
         let declaration = &module.queries[query_name];
-        let result = Arc::new(query::run_entities(
-            Arc::clone(
-                self.configuration
-                    .as_ref()
-                    .expect("prepared entity queries"),
-            ),
-            module,
-            declaration,
-            &name,
-            resources,
-            self.overlays.clone(),
-            cancellation,
-        )?);
+        let entry_id =
+            tola_module::prepared::package_path(&module.name, &declaration.entry)?.intern();
+        if let std::collections::hash_map::Entry::Vacant(slot) = self.entries.entry(entry_id) {
+            let session = QuerySession::new(
+                Arc::clone(
+                    self.configuration
+                        .as_ref()
+                        .expect("prepared entity queries"),
+                ),
+                module,
+                declaration,
+                &name,
+                resources,
+                cancellation,
+            )?;
+            slot.insert(QueryEntry {
+                session,
+                compiled: None,
+            });
+        }
+        let entry = self
+            .entries
+            .get_mut(&entry_id)
+            .expect("prepared query entry");
+        if entry.compiled.is_none() {
+            let compiled = entry.session.inspect(self.overlays.clone(), cancellation)?;
+            cancellation.ensure_active()?;
+            entry.compiled = Some(compiled);
+        }
+        let result = Arc::new(
+            entry
+                .compiled
+                .as_ref()
+                .expect("compiled query entry")
+                .read_entities(module, declaration, &name, cancellation)?,
+        );
+        if !result.result.success {
+            entry.compiled = None;
+        }
         cancellation.ensure_active()?;
         self.observe(&result);
         // A failed model may recover when a missing input appears without a usable compilation.
         if result.result.success {
-            // The same upper bound as ordinary revision compilations keeps model worlds finite.
-            if self.queries.len() == 4 {
-                self.queries.remove(0);
-            }
-            self.queries.push((name, Arc::clone(&result)));
+            self.queries.insert(name, Arc::clone(&result));
         }
         Ok(result)
     }
@@ -116,7 +153,7 @@ impl EntityQueries {
         paths
     }
 
-    fn observe(&mut self, result: &EntityQueryResult) {
+    fn observe(&mut self, result: &QueryEvaluation) {
         self.observe_accessed(&result.source_accessed);
         if let Some(revision) = &result.revision {
             self.observed.extend(revision.disk_reads().iter().cloned());
@@ -173,14 +210,15 @@ mod tests {
         let root = directory.path();
         std::fs::create_dir(root.join("content")).unwrap();
         std::fs::create_dir(root.join("theme")).unwrap();
+        std::fs::write(root.join("theme/lib.typ"), "#let link(id) = []").unwrap();
         let manifest = root.join("theme/tola-module.toml");
         std::fs::write(
             &manifest,
-            "\n[queries.nodes]\nentry='model.typ'\nlabel='nodes'\n\nreturns='entities'\n",
+            "\n[typst]\nentry='lib.typ'\n[queries.nodes]\nentry='model.typ'\nlabel='nodes'\n[[queries.nodes.references]]\nexport='link'\nparameter={positional=0}\n",
         )
         .unwrap();
         let model = root.join("theme/model.typ");
-        let first_model = "#metadata(((id: \"ONE\", label: \"One\"),))<nodes>";
+        let first_model = "#metadata(((id: \"ONE\", name: \"One\"),))<nodes>";
         std::fs::write(&model, first_model).unwrap();
         let configuration = site_configuration(root, "[modules.notes]\npath='theme'\n");
         let modules = tola_build::modules::load_modules(
@@ -274,9 +312,10 @@ mod tests {
         let root = directory.path();
         std::fs::create_dir(root.join("content")).unwrap();
         std::fs::create_dir(root.join("theme")).unwrap();
+        std::fs::write(root.join("theme/lib.typ"), "#let link(id) = []").unwrap();
         std::fs::write(
             root.join("theme/tola-module.toml"),
-            "\n[queries.nodes]\nentry='model.typ'\nlabel='nodes'\n\nreturns='entities'\n",
+            "\n[typst]\nentry='lib.typ'\n[queries.nodes]\nentry='model.typ'\nlabel='nodes'\n[[queries.nodes.references]]\nexport='link'\nparameter={positional=0}\n",
         )
         .unwrap();
         std::fs::write(
@@ -317,7 +356,7 @@ mod tests {
                 .observed_paths(&configuration, 1, &[])
                 .contains(&missing)
         );
-        std::fs::write(missing, r#"[{"id":"RECOVERED","label":"Recovered"}]"#).unwrap();
+        std::fs::write(missing, r#"[{"id":"RECOVERED","name":"Recovered"}]"#).unwrap();
         let recovered = cache
             .get(&modules["notes"], "nodes", resources, &cancellation)
             .unwrap();

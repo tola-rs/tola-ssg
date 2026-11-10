@@ -6,7 +6,7 @@
 use crate::relation::RowBuffer;
 use crate::{Atom, Database, Error, ErrorKind, Literal, Location, Relation, Rule, Snapshot, Term};
 use std::borrow::Borrow;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 pub(crate) fn atom<C>(literal: &Literal<C>) -> &Atom<C> {
@@ -104,156 +104,166 @@ impl<'a> DeclaredArities<'a> {
     }
 }
 
+/// Positive literals bind variables regardless of where the literals appear in the body.
+pub(crate) fn bound_variables<C>(body: &[Literal<C>]) -> BTreeSet<&String> {
+    body.iter()
+        .filter_map(|literal| match literal {
+            Literal::Positive(atom) => Some(atom),
+            Literal::Negative(_) => None,
+        })
+        .flat_map(variables)
+        .collect()
+}
+
+fn unbound_variable<'a, C>(atom: &'a Atom<C>, bound: &BTreeSet<&String>) -> Option<&'a String> {
+    variables(atom).find(|name| !bound.contains(*name))
+}
+
 pub(crate) fn validate_body<C>(
     body: &[Literal<C>],
+    bound: &BTreeSet<&String>,
     arities: &mut DeclaredArities<'_>,
     location: impl Fn(usize) -> Location,
-) -> Result<BTreeSet<String>, Error> {
-    let mut bound = BTreeSet::new();
+) -> Result<(), Error> {
     for (index, literal) in body.iter().enumerate() {
         let atom = atom(literal);
         arities.declare(&atom.relation, atom.terms.len(), location(index))?;
-        if matches!(literal, Literal::Positive(_)) {
-            bound.extend(variables(atom).cloned());
+        if matches!(literal, Literal::Negative(_))
+            && let Some(name) = unbound_variable(atom, bound)
+        {
+            return Err(Error {
+                location: location(index),
+                kind: ErrorKind::UnboundVariable(name.clone()),
+            });
         }
     }
-    // A negative atom may name a variable that a later positive atom binds, so binding is
-    // complete before absence is checked.
-    for (index, literal) in body.iter().enumerate() {
-        let Literal::Negative(atom) = literal else {
-            continue;
-        };
-        for name in variables(atom) {
-            if !bound.contains(name) {
-                return Err(Error {
-                    location: location(index),
-                    kind: ErrorKind::UnboundVariable(name.clone()),
-                });
-            }
-        }
-    }
-    Ok(bound)
+    Ok(())
 }
 
-/// Locate a negative atom that closes a dependency cycle, the first one in input order.
-///
-/// Only called once the strata refuse to settle, which needs a cycle through a negative literal:
-/// starting from such an atom, the dependencies lead back to its rule's head.
-fn negative_cycle_location<C>(rules: &[Rule<C>]) -> Location {
-    let mut dependencies = BTreeMap::<&str, Vec<&str>>::new();
-    for rule in rules {
-        dependencies
-            .entry(&rule.head.relation.name)
-            .or_default()
-            .extend(
-                rule.body
-                    .iter()
-                    .map(|literal| atom(literal).relation.name.as_str()),
-            );
-    }
-    for (rule_index, rule) in rules.iter().enumerate() {
-        for (atom_index, literal) in rule.body.iter().enumerate() {
-            let Literal::Negative(target) = literal else {
-                continue;
-            };
-            let mut pending = vec![target.relation.name.as_str()];
-            let mut visited = BTreeSet::new();
-            while let Some(relation) = pending.pop() {
-                if relation == rule.head.relation.name {
-                    return Location::RuleBody {
-                        rule: rule_index,
-                        atom: atom_index,
-                    };
+/// Depth-first finish order along edges from body relations to rule heads.
+fn dependent_postorder(dependents: &[Vec<usize>]) -> Vec<usize> {
+    let mut order = Vec::with_capacity(dependents.len());
+    let mut visited = vec![false; dependents.len()];
+    let mut pending = Vec::new();
+    for root in 0..dependents.len() {
+        if std::mem::replace(&mut visited[root], true) {
+            continue;
+        }
+        pending.push((root, dependents[root].iter()));
+        while let Some((relation, next)) = pending.last_mut() {
+            if let Some(&dependent) = next.next() {
+                if !std::mem::replace(&mut visited[dependent], true) {
+                    pending.push((dependent, dependents[dependent].iter()));
                 }
-                if visited.insert(relation) {
-                    pending.extend(dependencies.get(relation).into_iter().flatten().copied());
-                }
+            } else {
+                order.push(*relation);
+                pending.pop();
             }
         }
     }
-    unreachable!("a negative cycle must contain a negative literal")
+    order
 }
 
 /// The stratum of every declared relation name.
 ///
-/// A stratum is a longest weighted dependency path, shorter than the relation count, so n+1
-/// passes settle the strata unless a cycle through a negative literal keeps feeding them.
-/// Relations downstream of that cycle can grow too, so the reported literal comes from
-/// [`negative_cycle_location`].
+/// A negative edge inside a strongly connected component forms a cycle. Otherwise, each
+/// component takes the highest stratum of its dependencies, adding one for a negative edge.
 fn stratify<C>(
     rules: &[Rule<C>],
     arities: &BTreeMap<String, usize>,
 ) -> Result<BTreeMap<String, usize>, Error> {
-    let mut strata: BTreeMap<String, usize> =
-        arities.keys().map(|name| (name.clone(), 0)).collect();
-    for pass in 0..=arities.len() {
-        let mut grew = false;
-        for rule in rules {
-            for literal in &rule.body {
-                let required = strata[&atom(literal).relation.name]
-                    + usize::from(matches!(literal, Literal::Negative(_)));
-                let head = strata.get_mut(&rule.head.relation.name).unwrap();
-                if *head < required {
-                    if pass == arities.len() {
-                        return Err(Error {
-                            location: negative_cycle_location(rules),
-                            kind: ErrorKind::NegativeCycle,
-                        });
-                    }
-                    *head = required;
-                    grew = true;
+    if rules.is_empty() {
+        return Ok(arities.keys().cloned().map(|name| (name, 0)).collect());
+    }
+
+    let ids: HashMap<_, _> = arities
+        .keys()
+        .map(String::as_str)
+        .zip(0..arities.len())
+        .collect();
+    let mut dependents = vec![Vec::new(); ids.len()];
+    let mut dependencies = vec![Vec::new(); ids.len()];
+    for (rule_index, rule) in rules.iter().enumerate() {
+        let head = ids[rule.head.relation.name.as_str()];
+        for (atom_index, literal) in rule.body.iter().enumerate() {
+            let body = ids[atom(literal).relation.name.as_str()];
+            let negated_at =
+                matches!(literal, Literal::Negative(_)).then_some((rule_index, atom_index));
+            dependents[body].push(head);
+            dependencies[head].push((body, negated_at));
+        }
+    }
+
+    let mut components = vec![None; ids.len()];
+    let mut strata = vec![0; ids.len()];
+    let mut first_cycle = None;
+    let mut pending = Vec::new();
+    // Traversing the reverse finish order along head-to-body edges visits each component
+    // after its dependencies. Any unassigned relation reached here belongs to this component.
+    for root in dependent_postorder(&dependents).into_iter().rev() {
+        if components[root].is_some() {
+            continue;
+        }
+        components[root] = Some(root);
+        pending.push(root);
+        while let Some(head) = pending.pop() {
+            for &(body, negated_at) in &dependencies[head] {
+                let component = *components[body].get_or_insert_with(|| {
+                    pending.push(body);
+                    root
+                });
+                if component != root {
+                    let required = strata[component] + usize::from(negated_at.is_some());
+                    strata[root] = strata[root].max(required);
+                } else if let Some(location) = negated_at
+                    && first_cycle.is_none_or(|first| location < first)
+                {
+                    first_cycle = Some(location);
                 }
             }
         }
-        if !grew {
-            break;
-        }
     }
-    Ok(strata)
+    if let Some((rule, atom)) = first_cycle {
+        return Err(Error {
+            location: Location::RuleBody { rule, atom },
+            kind: ErrorKind::NegativeCycle,
+        });
+    }
+    Ok(arities
+        .keys()
+        .cloned()
+        .zip(
+            components
+                .into_iter()
+                .map(|component| strata[component.unwrap()]),
+        )
+        .collect())
 }
 
 /// Collect rows into their relation buffers and validate them in caller order.
 ///
-/// Grouping by the whole relation keeps two arities of one name apart, so the conflict surfaces at
-/// the first row that uses the later arity. Each source stays alive until its values are pushed.
+/// A buffer is only read after every row passes validation. Each source stays alive while its
+/// values are pushed.
 fn collect_facts<C, I, R, T>(
     rows: I,
     arities: &mut DeclaredArities<'_>,
-) -> Result<Vec<(Relation, RowBuffer<C>)>, Error>
+) -> Result<BTreeMap<String, RowBuffer<C>>, Error>
 where
     I: IntoIterator<Item = (R, T)>,
     R: Borrow<Relation>,
     T: IntoIterator<Item = C>,
 {
-    let mut groups = Vec::<(Relation, RowBuffer<C>)>::new();
-    let mut values_per_group = Vec::<usize>::new();
-    let mut group_of_relation = BTreeMap::<Relation, usize>::new();
-    let rows = rows.into_iter();
-    let mut row_sources = Vec::with_capacity(rows.size_hint().0);
-    for (source, values) in rows {
+    let mut groups = BTreeMap::<String, RowBuffer<C>>::new();
+    for (index, (source, values)) in rows.into_iter().enumerate() {
         let relation = source.borrow();
-        let values = values.into_iter();
-        let values_hint = values.size_hint().0;
-        let group = match group_of_relation.get(relation) {
-            Some(&group) => group,
-            None => {
-                let group = groups.len();
-                group_of_relation.insert(relation.clone(), group);
-                groups.push((relation.clone(), RowBuffer::new(relation.arity)));
-                values_per_group.push(0);
-                group
-            }
+        let actual = if let Some(buffer) = groups.get_mut(&relation.name) {
+            buffer.push_row(values)
+        } else {
+            let mut buffer = RowBuffer::new(relation.arity);
+            let actual = buffer.push_row(values);
+            groups.insert(relation.name.clone(), buffer);
+            actual
         };
-        values_per_group[group] += values_hint;
-        row_sources.push((group, source, values));
-    }
-    row_sources.shrink_to_fit();
-    for ((_, buffer), values) in groups.iter_mut().zip(values_per_group) {
-        buffer.reserve(values);
-    }
-    for (index, (group, _source, values)) in row_sources.into_iter().enumerate() {
-        let (relation, buffer) = &mut groups[group];
-        let actual = buffer.push_row(values);
         arities.declare(relation, actual, Location::Fact(index))?;
     }
     Ok(groups)
@@ -267,17 +277,16 @@ fn declare_rules<C>(rules: &[Rule<C>], arities: &mut DeclaredArities<'_>) -> Res
             rule.head.terms.len(),
             Location::RuleHead(index),
         )?;
-        let bound = validate_body(&rule.body, arities, |atom| Location::RuleBody {
+        let bound = bound_variables(&rule.body);
+        validate_body(&rule.body, &bound, arities, |atom| Location::RuleBody {
             rule: index,
             atom,
         })?;
-        for name in variables(&rule.head) {
-            if !bound.contains(name) {
-                return Err(Error {
-                    location: Location::RuleHead(index),
-                    kind: ErrorKind::UnboundVariable(name.clone()),
-                });
-            }
+        if let Some(name) = unbound_variable(&rule.head, &bound) {
+            return Err(Error {
+                location: Location::RuleHead(index),
+                kind: ErrorKind::UnboundVariable(name.clone()),
+            });
         }
     }
     Ok(())
@@ -286,26 +295,18 @@ fn declare_rules<C>(rules: &[Rule<C>], arities: &mut DeclaredArities<'_>) -> Res
 impl<C: Ord> Database<C> {
     /// Validate ground tuples and rules and build an immutable snapshot.
     ///
-    /// Errors point at the first invalid input in the caller's order: tuples before rules.
+    /// Tuples and then rules are validated in caller order. Within a rule, the head's relation,
+    /// the body atoms, then the head's variable bindings are checked in that order.
     /// Negative dependencies must be stratified, or the clause closing a cycle is reported as
     /// `NegativeCycle` at its negative atom.
     pub fn new(facts: Vec<(Relation, Vec<C>)>, rules: Vec<Rule<C>>) -> Result<Self, Error> {
-        Self::from_row_sources(facts, rules)
+        Self::from_rows(facts, rules)
     }
 
     /// Construct a snapshot from rows whose relation may be borrowed.
     ///
     /// Each row source outlives the values it yields. Errors are located as in [`Database::new`].
-    pub fn from_rows<I, R, T>(rows: I, rules: Vec<Rule<C>>) -> Result<Self, Error>
-    where
-        I: IntoIterator<Item = (R, T)>,
-        R: Borrow<Relation>,
-        T: IntoIterator<Item = C>,
-    {
-        Self::from_row_sources(rows, rules)
-    }
-
-    fn from_row_sources<I, R, T>(rows: I, mut rules: Vec<Rule<C>>) -> Result<Self, Error>
+    pub fn from_rows<I, R, T>(rows: I, mut rules: Vec<Rule<C>>) -> Result<Self, Error>
     where
         I: IntoIterator<Item = (R, T)>,
         R: Borrow<Relation>,
@@ -320,7 +321,7 @@ impl<C: Ord> Database<C> {
         // Canonicalize after validation, so rejected inputs pay no sorting cost.
         let relations = groups
             .into_iter()
-            .map(|(relation, buffer)| (relation.name, buffer.canonicalize()))
+            .map(|(name, buffer)| (name, buffer.canonicalize()))
             .collect();
         rules.sort();
         rules.dedup();

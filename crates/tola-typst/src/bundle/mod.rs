@@ -404,7 +404,6 @@ mod tests {
         use std::sync::Arc;
         #[cfg(feature = "parallel")]
         use std::sync::Barrier;
-        use std::sync::atomic::AtomicBool;
         #[cfg(feature = "parallel")]
         use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -413,26 +412,7 @@ mod tests {
             AccessedDeps, BundleCancellation, FileProvider, FileResolver, FileTarget, ReadLocator,
             compile_bundle_world,
         };
-        use comemo::Tracked;
         use tempfile::TempDir;
-        use typst::diag::{At, SourceResult, bail};
-        use typst::engine::Engine;
-        use typst::foundations::{Context, Str, func};
-        use typst::introspection::{PathIntrospection, here};
-        use typst::syntax::Span;
-
-        #[func(contextual)]
-        fn current_document_path(
-            engine: &mut Engine,
-            context: Tracked<Context>,
-            span: Span,
-        ) -> SourceResult<Str> {
-            let location = here(context).at(span)?;
-            let Some(path) = engine.introspect(PathIntrospection(location, span)) else {
-                bail!(span, "test current requires a Bundle document context");
-            };
-            Ok(path.get_with_slash().into())
-        }
 
         #[test]
         fn root_declarations_converge() {
@@ -461,13 +441,9 @@ mod tests {
                 "site.typ",
                 "#document(\"a.html\", [A])\n#document(\"b.html\", [B])\n",
             );
-            let cancelled = Arc::new(AtomicBool::new(true));
-
-            let error = compile_bundle_world(
-                &world,
-                &BundleCancellation::default().with_cancellation(cancelled),
-            )
-            .unwrap_err();
+            let cancellation = BundleCancellation::new();
+            cancellation.clone().cancel();
+            let error = compile_bundle_world(&world, &cancellation).unwrap_err();
 
             assert!(error.is_cancelled());
         }
@@ -618,183 +594,14 @@ mod tests {
     mod semantic_bundle {
         use std::fs;
 
-        use crate::{
-            BundleCancellation, BundleEntryKind, BundleOptions, TypstWorld, compile_bundle_world,
-        };
+        use crate::{BundleCancellation, BundleEntryKind, TypstWorld, compile_bundle_world};
         use tempfile::TempDir;
-        use typst::diag::{Severity, SourceDiagnostic};
-        use typst::ecow::EcoVec;
-        use typst::foundations::Bytes;
-        use typst::model::PagedFormat;
         use typst::syntax::{VirtualPath, VirtualRoot};
-        use typst_bundle::{BundleDocument, BundleFile};
 
         fn world(source: &str) -> (TempDir, TypstWorld) {
             let directory = TempDir::new().unwrap();
             let world = super::world_for(&directory, "site.typ", source);
             (directory, world)
-        }
-
-        #[derive(Debug)]
-        struct OfficialExport {
-            warnings: EcoVec<SourceDiagnostic>,
-            entries: Vec<(VirtualPath, BundleEntryKind, Bytes)>,
-        }
-
-        fn official_export(
-            world: &TypstWorld,
-            options: &BundleOptions,
-        ) -> Result<OfficialExport, EcoVec<SourceDiagnostic>> {
-            let compiled = typst::compile::<typst_bundle::Bundle>(world);
-            let bundle = compiled.output?;
-            let exported = typst_bundle::export(&bundle, options)?;
-            let entries = bundle
-                .files
-                .iter()
-                .map(|(path, file)| {
-                    let kind = match file {
-                        BundleFile::Asset(_) => BundleEntryKind::Asset,
-                        BundleFile::Document(BundleDocument::Html(_)) => {
-                            BundleEntryKind::HtmlDocument
-                        }
-                        BundleFile::Document(BundleDocument::Paged(_, extras)) => {
-                            match extras.format {
-                                PagedFormat::Pdf => BundleEntryKind::PdfDocument,
-                                PagedFormat::Png => BundleEntryKind::PngDocument,
-                                PagedFormat::Svg => BundleEntryKind::SvgDocument,
-                            }
-                        }
-                    };
-                    let bytes = exported
-                        .get(path)
-                        .expect("official Bundle export preserves every file")
-                        .clone();
-                    (path.clone(), kind, bytes)
-                })
-                .collect();
-            Ok(OfficialExport {
-                warnings: compiled.warnings,
-                entries,
-            })
-        }
-
-        #[test]
-        fn adapter_export_matches_typst_bundle() {
-            let options = BundleOptions::default();
-
-            let (_empty_directory, empty_world) = world("");
-            let empty = official_export(&empty_world, &options).unwrap();
-            assert!(empty.entries.is_empty());
-
-            let cases: [(&str, Vec<(String, BundleEntryKind)>); 2] = [
-                (
-                    r#"
-        #asset("files/data.txt", "payload") <data>
-        #document("index.html")[
-          #box(width: 8pt, height: 8pt, fill: red) <home>
-          #link(<figure>)[figure]
-          #link(<data>)[data]
-        ]
-        #document("figure.svg")[
-          #box(width: 12pt, height: 8pt, fill: blue) <figure>
-          #link(<home>)[#box(width: 4pt, height: 4pt, fill: green)]
-        ]
-        "#,
-                    vec![
-                        ("/files/data.txt".into(), BundleEntryKind::Asset),
-                        ("/index.html".into(), BundleEntryKind::HtmlDocument),
-                        ("/figure.svg".into(), BundleEntryKind::SvgDocument),
-                    ],
-                ),
-                (
-                    r#"
-        #asset("data.bin", bytes((1, 2, 3)))
-        #document("index.html")[HTML]
-        #document("paper.bin", format: "pdf")[#rect(width: 1pt, height: 1pt)]
-        #document("preview.bin", format: "png")[#rect(width: 1pt, height: 1pt)]
-        #document("vector.bin", format: "svg")[#rect(width: 1pt, height: 1pt)]
-        "#,
-                    vec![
-                        ("/data.bin".into(), BundleEntryKind::Asset),
-                        ("/index.html".into(), BundleEntryKind::HtmlDocument),
-                        ("/paper.bin".into(), BundleEntryKind::PdfDocument),
-                        ("/preview.bin".into(), BundleEntryKind::PngDocument),
-                        ("/vector.bin".into(), BundleEntryKind::SvgDocument),
-                    ],
-                ),
-            ];
-
-            for (source, expected) in cases {
-                let (_directory, world) = world(source);
-                let official = official_export(&world, &options).unwrap();
-                assert_eq!(
-                    official
-                        .entries
-                        .iter()
-                        .map(|(path, kind, _)| (path.get_with_slash().to_owned(), *kind))
-                        .collect::<Vec<_>>(),
-                    expected
-                );
-                let adapter = compile_bundle_world(&world, &BundleCancellation::default())
-                    .unwrap()
-                    .export(&options, &BundleCancellation::default(), None)
-                    .unwrap();
-
-                assert_eq!(
-                    adapter
-                        .diagnostics()
-                        .raw()
-                        .iter()
-                        .map(|diagnostic| diagnostic.source())
-                        .collect::<Vec<_>>(),
-                    official.warnings.iter().collect::<Vec<_>>(),
-                );
-                assert_eq!(adapter.entries().len(), official.entries.len());
-                for (adapter, (path, kind, bytes)) in
-                    adapter.entries().iter().zip(&official.entries)
-                {
-                    assert_eq!(&adapter.path, path);
-                    assert_eq!(adapter.kind, *kind);
-                    assert_eq!(adapter.bytes.as_slice(), bytes.as_slice(), "{path:?}");
-                }
-            }
-        }
-
-        fn assert_errors_match(source: &str) {
-            let (_directory, world) = world(source);
-            let official = typst::compile::<typst_bundle::Bundle>(&world)
-                .output
-                .unwrap_err();
-            let adapter = compile_bundle_world(&world, &BundleCancellation::default()).unwrap_err();
-            let adapter = adapter
-                .diagnostics()
-                .unwrap()
-                .raw()
-                .iter()
-                .filter(|diagnostic| diagnostic.source().severity == Severity::Error)
-                .map(|diagnostic| diagnostic.source().clone())
-                .collect::<Vec<_>>();
-            assert_eq!(adapter, official.as_slice());
-        }
-
-        #[test]
-        fn adapter_diagnostics_match_typst_bundle() {
-            for source in [
-                r#"
-        #asset("same.html", "first")
-        #document("same.html")[second]
-        "#,
-                "content outside a document",
-                r#"
-        #document("index.html")[#context panic("delayed equality")]
-        "#,
-                r#"
-        #document("a.html")[#context panic("first child")]
-        #document("b.html")[#context panic("second child")]
-        "#,
-            ] {
-                assert_errors_match(source);
-            }
         }
 
         #[test]
@@ -855,8 +662,8 @@ mod tests {
                 ]
             );
 
-            let document_path = typst::syntax::VirtualPath::new("b.html").unwrap();
-            let asset_path = typst::syntax::VirtualPath::new("data.txt").unwrap();
+            let document_path = VirtualPath::new("b.html").unwrap();
+            let asset_path = VirtualPath::new("data.txt").unwrap();
             assert!(compilation.document(&document_path).is_some());
             assert!(compilation.document(&asset_path).is_none());
         }

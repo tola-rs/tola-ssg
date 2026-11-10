@@ -1,12 +1,13 @@
 //! Watched files and source revisions: what a change to a file costs this connection, and the
 //! watchers that make a file the author never opened start a check.
 
+use std::collections::BTreeSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::Result;
-use lsp_server::Notification;
+use lsp_server::{Notification, RequestId, Response};
 use lsp_types::notification::{self, Notification as LspNotification};
 use lsp_types::request::{self, Request as LspRequest};
 use lsp_types::{
@@ -17,6 +18,7 @@ use tola_build::cancellation::BuildCanceller;
 use tola_build::config::ResolvedSiteConfig;
 use tola_diagnostic::Diagnostic;
 use tola_input::normalize_existing_prefix;
+use tola_typst::PackageLocationSource;
 
 use crate::protocol::{CheckMode, CheckProgress};
 
@@ -24,8 +26,18 @@ use super::replies::REVISION_CHANGED_ERROR;
 use super::scheduling::CHECK_SETTLE_DELAY;
 use super::{Connection, PendingCheck, Phase};
 
-/// The registration id this connection's own file watchers are known by.
-const WATCHED_FILES: &str = "tola-watched-files";
+#[derive(Default)]
+pub(super) struct Watchers {
+    registered: Option<WatchRegistration>,
+    pending: Option<(RequestId, WatchRegistration)>,
+    /// Retry refused paths on a later revision, rather than on every completed query.
+    refused: Option<(u64, Vec<PathBuf>)>,
+}
+
+struct WatchRegistration {
+    id: String,
+    paths: Vec<PathBuf>,
+}
 
 /// The extensions a file can hold and still be read as a source, a configuration file, or a
 /// bibliography with its style sheet: what a check that has not run yet may still read.
@@ -142,14 +154,24 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
         let Phase::Ready(workspace) = &self.phase else {
             return Ok(());
         };
-        if !workspace.features.watched_files_dynamic {
+        if !workspace.features.watched_files_dynamic || self.watchers.pending.is_some() {
             return Ok(());
         }
         let relative = workspace.features.watched_files_relative;
         let client_root = crate::uri::ClientRoot::new(&workspace.root);
         let configuration = self.configuration_path(&self.source_root());
         let paths = self.watch_paths(&configuration);
-        if self.watched_paths == paths {
+        if self
+            .watchers
+            .registered
+            .as_ref()
+            .is_some_and(|watch| watch.paths == paths)
+            || self
+                .watchers
+                .refused
+                .as_ref()
+                .is_some_and(|(revision, refused)| *revision == self.revision && *refused == paths)
+        {
             return Ok(());
         }
         let mut watchers = Vec::with_capacity(paths.len());
@@ -180,12 +202,12 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
                 kind: None,
             });
         }
-        self.unwatch_sources()?;
-        self.send_request(
+        let id = format!("tola-watched-files-{}", self.next_identifier());
+        let request = self.send_request(
             request::RegisterCapability::METHOD,
             RegistrationParams {
                 registrations: vec![Registration {
-                    id: WATCHED_FILES.to_owned(),
+                    id: id.clone(),
                     method: notification::DidChangeWatchedFiles::METHOD.to_owned(),
                     register_options: serde_json::to_value(
                         DidChangeWatchedFilesRegistrationOptions { watchers },
@@ -194,29 +216,55 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
                 }],
             },
         )?;
-        self.watched_paths = paths;
+        self.watchers.pending = Some((request, WatchRegistration { id, paths }));
         Ok(())
+    }
+
+    /// Keep the old watchers until the client accepts their replacement.
+    pub(super) fn watchers_registered(&mut self, response: &Response) -> Result<bool> {
+        let Some((_, registration)) = self.watchers.pending.take_if(|(id, _)| *id == response.id)
+        else {
+            return Ok(false);
+        };
+        if response.response_result.is_ok() {
+            self.watchers.refused = None;
+            if let Some(previous) = self.watchers.registered.replace(registration) {
+                self.unregister_watchers(previous.id)?;
+            }
+        } else {
+            tracing::warn!("the editor refused Tola's file watchers");
+            self.watchers.refused = Some((self.revision, registration.paths));
+        }
+        // A completed check or query may have changed the paths while the client was answering.
+        self.watch_sources()?;
+        Ok(true)
     }
 
     /// Let the client's watchers go, so a restarting server is the one that registers them.
     pub(super) fn unwatch_sources(&mut self) -> Result<()> {
-        if !self.watched_paths.is_empty() {
-            self.send_request(
-                request::UnregisterCapability::METHOD,
-                UnregistrationParams {
-                    unregisterations: vec![Unregistration {
-                        id: WATCHED_FILES.to_owned(),
-                        method: notification::DidChangeWatchedFiles::METHOD.to_owned(),
-                    }],
-                },
-            )?;
-            self.watched_paths.clear();
+        if let Some(watch) = self.watchers.registered.take() {
+            self.unregister_watchers(watch.id)?;
+        }
+        if let Some((_, watch)) = self.watchers.pending.take() {
+            self.unregister_watchers(watch.id)?;
         }
         Ok(())
     }
 
-    /// The site and package directories, plus the configuration file when its physical target
-    /// falls outside those directories.
+    fn unregister_watchers(&mut self, id: String) -> Result<()> {
+        self.send_request(
+            request::UnregisterCapability::METHOD,
+            UnregistrationParams {
+                unregisterations: vec![Unregistration {
+                    id,
+                    method: notification::DidChangeWatchedFiles::METHOD.to_owned(),
+                }],
+            },
+        )?;
+        Ok(())
+    }
+
+    /// The site, package and module directories, plus external configurations and observed inputs.
     fn watch_paths(&self, configuration: &Path) -> Vec<PathBuf> {
         let mut roots = vec![self.source_root()];
         if let Some(locations) = self
@@ -224,9 +272,18 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
             .as_ref()
             .map(|config| config.package_locations())
         {
-            for location in locations.declared() {
+            let declared = locations
+                .declared()
+                .iter()
+                .filter(|location| location.root().is_dir());
+            let explicit = locations
+                .data()
+                .into_iter()
+                .chain(locations.cache())
+                .filter(|location| location.source() == PackageLocationSource::Explicit);
+            for location in declared.chain(explicit) {
                 let root = normalize_existing_prefix(location.root());
-                if root.is_dir() && !roots.iter().any(|watched| root.starts_with(watched)) {
+                if !roots.iter().any(|watched| root.starts_with(watched)) {
                     roots.push(root);
                 }
             }
@@ -250,11 +307,15 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
         if !roots.iter().any(|root| configuration.starts_with(root)) {
             roots.push(configuration.to_path_buf());
         }
-        for input in &self.query_read_paths {
-            // Watch the parent so creating a previously missing input also starts a revision.
-            let Some(parent) = input.parent() else {
-                continue;
-            };
+        // A parent watcher sees both an input's creation and any nested observed inputs.
+        let observed_parents: BTreeSet<_> = self
+            .read_paths
+            .iter()
+            .chain(&self.query_read_paths)
+            .filter_map(|input| input.parent())
+            .filter(|parent| !roots.iter().any(|root| parent.starts_with(root)))
+            .collect();
+        for parent in observed_parents {
             if !roots.iter().any(|root| parent.starts_with(root)) {
                 roots.push(parent.to_path_buf());
             }
@@ -308,6 +369,10 @@ fn escaped_glob_path(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::connection::tests::{messages, ready_at, ready_workspace};
+    use lsp_server::{ErrorCode, Message};
+    #[cfg(unix)]
+    use serde_json::json;
 
     #[test]
     fn watcher_globs_escape_root_metacharacters() {
@@ -318,10 +383,78 @@ mod tests {
         assert_eq!(source_glob(Path::new("/")), "/**/*");
     }
 
-    #[cfg(windows)]
+    #[test]
+    fn observed_source_parent_covers_nested_reads() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let site = root.join("site");
+        let dependency = root.join("dependency");
+        std::fs::create_dir(&site).unwrap();
+        let mut connection = ready_at(Vec::new(), site.clone());
+        connection.read_paths.extend([
+            dependency.join("child/input.typ"),
+            dependency.join("source.typ"),
+        ]);
 
-    /// A file-change notification for generated state must not supersede a query that the site's
-    /// own sources still answer.
+        assert_eq!(
+            connection.watch_paths(&site.join("tola.toml")),
+            [site, dependency]
+        );
+    }
+
+    #[test]
+    fn refused_watchers_leave_the_previous_registration_active() {
+        let directory = tempfile::tempdir().unwrap();
+        let site = directory.path().join("site");
+        std::fs::create_dir(&site).unwrap();
+        let mut connection = ready_at(Vec::new(), site);
+        ready_workspace(&mut connection)
+            .features
+            .watched_files_dynamic = true;
+        let registration = |connection: &mut Connection<Vec<u8>, _>| {
+            let sent = messages(connection);
+            let [Message::Request(request)] = sent.as_slice() else {
+                panic!("expected one registration, received {sent:?}");
+            };
+            assert_eq!(request.method, request::RegisterCapability::METHOD);
+            request.clone()
+        };
+
+        connection.watch_sources().unwrap();
+        let original = registration(&mut connection);
+        connection.named_configuration = Some(directory.path().join("outside.toml"));
+        connection.watch_sources().unwrap();
+        assert!(messages(&mut connection).is_empty());
+        connection
+            .response(Response::new_ok(original.id, ()))
+            .unwrap();
+        let refused = registration(&mut connection);
+        connection
+            .response(Response::new_err(
+                refused.id,
+                ErrorCode::RequestFailed as i32,
+                "registration refused".to_owned(),
+            ))
+            .unwrap();
+        connection.watch_sources().unwrap();
+        assert!(messages(&mut connection).is_empty());
+
+        connection.sources_changed(false).unwrap();
+        connection.watch_sources().unwrap();
+        let replacement = registration(&mut connection);
+        connection
+            .response(Response::new_ok(replacement.id, ()))
+            .unwrap();
+        let sent = messages(&mut connection);
+        let [Message::Request(unregister)] = sent.as_slice() else {
+            panic!("expected one unregistration, received {sent:?}");
+        };
+        assert_eq!(unregister.method, request::UnregisterCapability::METHOD);
+        assert_eq!(
+            unregister.params["unregisterations"][0]["id"],
+            original.params["registrations"][0]["id"]
+        );
+    }
 
     #[cfg(unix)]
     #[test]

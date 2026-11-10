@@ -89,9 +89,10 @@ impl SiteHost {
         cancellation: &BuildCancellation,
     ) -> Result<Self, tola_typst::FontLoadError> {
         let fetch_policy = fetch_policy(resources.network_access());
-        let files = FileResolver::from_package_locations(package_locations.clone(), fetch_policy)
+        let files = FileResolver::from_package_locations(package_locations, fetch_policy)
             .with_provider(TolaPackageFiles)
-            .with_source_boundary(source_boundary.clone());
+            .with_source_boundary(source_boundary.clone())
+            .with_local_packages(local_packages);
         let fonts = Arc::new(FontStore::with_options(
             FontOptions::new()
                 .with_custom_paths(font_dirs)
@@ -100,15 +101,7 @@ impl SiteHost {
         ));
         fonts.load(&cancellation.bundle_cancellation())?;
         Ok(Self {
-            typst: tola_typst::TypstHost::new(tola_typst::TypstHostParts {
-                fonts,
-                files,
-                package_locations,
-                fetch_policy,
-                source_boundary,
-                file_cache: resources.file_cache(),
-            })
-            .with_local_packages(local_packages),
+            typst: tola_typst::TypstHost::new(fonts, files, resources.file_cache()),
             icons: Arc::default(),
         })
     }
@@ -148,7 +141,10 @@ impl SiteHost {
             .custom_paths
             .iter()
             .eq(directories.iter().map(PathBuf::as_path))
-            && self.typst.package_locations() == &resources.package_locations(config)
+            && self
+                .typst
+                .package_locations()
+                .is_ok_and(|locations| locations == &resources.package_locations(config))
             && self.typst.font_options().include_system_fonts
                 == config.system_fonts_allowed(resources)
             && self.typst.fetch_policy() == fetch_policy(resources.network_access())

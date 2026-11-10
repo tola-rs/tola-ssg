@@ -201,8 +201,15 @@ mod tests {
             #document("vector.bin", format: "svg")[#rect(width: 1pt, height: 1pt)]
             "#,
         );
-        for entry in result.entries() {
-            assert_eq!(result.entry(entry.path()), Some(entry));
+        let kinds = [
+            BundleEntryKind::HtmlDocument,
+            BundleEntryKind::PdfDocument,
+            BundleEntryKind::PngDocument,
+            BundleEntryKind::SvgDocument,
+        ];
+        assert_eq!(result.len(), kinds.len());
+        for (entry, kind) in result.iter().zip(kinds) {
+            assert_eq!(entry.kind(), kind);
             assert_eq!(
                 entry.digest(),
                 crate::world::file::ContentDigest::of(entry.bytes().as_slice()),

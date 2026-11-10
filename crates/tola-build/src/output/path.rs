@@ -1,6 +1,21 @@
-//! Prefix collision index for owned logical output paths.
+//! Diagnostics and prefix collision checks for logical output paths.
 
 use std::collections::BTreeMap;
+
+use tola_address::{OutputPathError, PortablePathError};
+
+pub(crate) fn invalid_path_help(error: &OutputPathError) -> Option<&'static str> {
+    match error {
+        OutputPathError::Absolute
+        | OutputPathError::NonPortable(PortablePathError::FilesystemPrefix) => {
+            Some("use a path relative to the publish directory, such as `assets/logo.svg`")
+        }
+        OutputPathError::Backslash => {
+            Some("separate directories with `/`, as in `assets/logo.svg`")
+        }
+        _ => None,
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OutputPathConflict {
@@ -106,13 +121,11 @@ impl OutputPathIndexNode {
     }
 
     fn first_output(&self) -> Option<usize> {
-        let mut pending = vec![self];
-        while let Some(node) = pending.pop() {
-            if let Some(index) = node.output {
-                return Some(index);
-            }
-            pending.extend(node.children.values().rev());
+        let mut node = self;
+        while node.output.is_none() {
+            // Every inserted branch leads to a file, so the first child suffices.
+            node = node.children.first_key_value()?.1;
         }
-        None
+        node.output
     }
 }

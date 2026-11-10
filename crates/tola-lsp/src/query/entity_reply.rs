@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Result, ensure};
 use lsp_types::{
     CompletionItem, CompletionItemKind, CompletionTextEdit, GotoDefinitionResponse, Hover,
     HoverContents, Location, MarkupContent, MarkupKind, PrepareRenameResponse, TextEdit, Uri,
@@ -14,10 +14,10 @@ use tola_build::BuildResources;
 use tola_build::cancellation::BuildCancelled;
 use tola_build::check::SourceCompilation;
 use tola_build::config::ResolvedSiteConfig;
-use tola_build::modules::entities::EntityQueryResult;
+use tola_build::modules::query::QueryEvaluation;
+use tola_module::declaration::Parameter;
 use tola_module::entities::Entity;
 use tola_module::module_set::LoadedModule;
-use tola_module::semantics::{SemanticKind, SemanticParameter};
 use tola_typst::typst::World;
 use tola_typst::typst::foundations::{Repr, Str, Value};
 use tola_typst::typst::syntax::ast::AstNode;
@@ -57,16 +57,9 @@ pub(super) struct EntityQuery<'a> {
 struct EntityScope<'a> {
     module: &'a LoadedModule,
     query_name: &'a str,
-    model: &'a EntityQueryResult,
+    model: &'a QueryEvaluation,
     compilation: &'a SourceCompilation,
     bindings: &'a [EntityBinding],
-}
-
-impl EntityScope<'_> {
-    /// The semantic role the argument's binding proves.
-    fn role(&self, argument: &entities::EntityArgument) -> SemanticKind {
-        self.bindings[argument.binding].role.role
-    }
 }
 
 pub(super) fn respond(mut request: EntityQuery<'_>) -> Result<Option<SourceReply>> {
@@ -99,7 +92,10 @@ pub(super) fn respond(mut request: EntityQuery<'_>) -> Result<Option<SourceReply
         resources.input_mode(),
         &Default::default(),
     )?;
-    if modules.values().all(|module| module.semantics.is_empty()) {
+    if modules
+        .values()
+        .all(|module| module.queries.values().all(|query| !query.has_entities()))
+    {
         return Ok(None);
     }
     request.cache.prepare(
@@ -114,11 +110,10 @@ pub(super) fn respond(mut request: EntityQuery<'_>) -> Result<Option<SourceReply
         let Some(package) = module_package(site.packages, alias)? else {
             continue;
         };
-        let mut by_query = BTreeMap::<&str, Vec<_>>::new();
-        for role in &module.semantics {
-            by_query.entry(&role.query).or_default().push(role);
-        }
-        for (name, roles) in by_query {
+        for (name, declaration) in &module.queries {
+            if !declaration.has_entities() {
+                continue;
+            }
             let model = request
                 .cache
                 .get(module, name, resources.clone(), site.cancellation)?;
@@ -140,7 +135,7 @@ pub(super) fn respond(mut request: EntityQuery<'_>) -> Result<Option<SourceReply
                 return Err(BuildCancelled.into());
             }
             let mut semantics = Semantic::new(compilation, site.cancellation);
-            let bindings = entity_bindings(&mut semantics, package, &roles)?;
+            let bindings = entity_bindings(&mut semantics, package, module, name)?;
             let arguments = entities::argument_at(&prepared, cursor, &mut semantics, &bindings)?;
             request.cache.observe_accessed(semantics.accessed());
             if arguments.is_empty() {
@@ -148,7 +143,14 @@ pub(super) fn respond(mut request: EntityQuery<'_>) -> Result<Option<SourceReply
             }
             answers.argument_named = true;
             if !model.result.success {
-                continue;
+                let message = model
+                    .result
+                    .diagnostics
+                    .iter()
+                    .find(|diagnostic| diagnostic.severity == tola_diagnostic::Severity::Error)
+                    .map(|diagnostic| diagnostic.message.as_str())
+                    .unwrap_or("the query produced no usable result");
+                anyhow::bail!("query `{alias}.{name}` failed: {message}");
             }
             let scope = EntityScope {
                 module,
@@ -184,8 +186,8 @@ struct EntityAnswers {
     completions: Vec<CompletionItem>,
     locations: Vec<Location>,
     replies: Vec<SourceReply>,
-    /// The literals answered already, by value and range.
-    answered: BTreeSet<(String, usize, usize)>,
+    /// The literals answered already, by module, query, ID, and range.
+    answered: BTreeSet<(String, String, String, usize, usize)>,
     argument_named: bool,
 }
 
@@ -240,7 +242,7 @@ fn answer_argument(
     let query = request.query;
     let EntityQuery { source, .. } = *request;
     match query {
-        SourceQuery::Completion(_) if scope.role(&argument) == SemanticKind::Reference => {
+        SourceQuery::Completion(_) if !scope.bindings[argument.binding].definition => {
             let Some(range) = utf16_range(source.lines(), argument.content_range.clone()) else {
                 return Ok(None);
             };
@@ -248,10 +250,13 @@ fn answer_argument(
                 let quoted = Str::from(entity.id.as_str()).repr();
                 answers.completions.push(CompletionItem {
                     label: entity.id.clone(),
-                    detail: Some(entity.label.clone()),
-                    documentation: entity.detail.clone().map(lsp_types::Documentation::String),
+                    detail: Some(entity.name.clone()),
+                    documentation: entity
+                        .description
+                        .clone()
+                        .map(lsp_types::Documentation::String),
                     kind: Some(CompletionItemKind::REFERENCE),
-                    filter_text: Some(format!("{} {}", entity.id, entity.label)),
+                    filter_text: Some(format!("{} {}", entity.id, entity.name)),
                     text_edit: Some(CompletionTextEdit::Edit(TextEdit {
                         range,
                         new_text: quoted[1..quoted.len() - 1].to_owned(),
@@ -292,6 +297,8 @@ fn answer_argument(
                 return Ok(Some(SourceReply::Rename(Some(WorkspaceEdit::default()))));
             }
             if !answers.answered.insert((
+                scope.module.name.clone(),
+                scope.query_name.to_owned(),
                 argument.value.clone(),
                 argument.range.start,
                 argument.range.end,
@@ -344,10 +351,7 @@ fn definition_ranges(
     let mut ranges = entities::scan(source, semantics, bindings)?
         .literals
         .into_iter()
-        .filter(|argument| {
-            bindings[argument.binding].role.role == SemanticKind::Definition
-                && argument.value == entity_id
-        })
+        .filter(|argument| bindings[argument.binding].definition && argument.value == entity_id)
         .map(|argument| argument.range)
         .collect::<Vec<_>>();
     ranges.sort_by_key(|range| (range.start, range.end));
@@ -355,35 +359,75 @@ fn definition_ranges(
     Ok(ranges)
 }
 
-/// The entity bindings one query's roles prove, with the functions they name.
+/// Check each declared function parameter and select this query's bindings.
 fn entity_bindings(
     semantics: &mut Semantic<'_>,
     package: &tola_typst::LocalPackage,
-    roles: &[&tola_module::semantics::SemanticRole],
+    module: &LoadedModule,
+    selected_query: &str,
 ) -> Result<Vec<EntityBinding>> {
-    let mut bindings = Vec::new();
-    for role in roles.iter().copied() {
-        let Some(function) = semantics.public_export(package.entry_id(), &role.export)? else {
-            continue;
-        };
-        let declares_parameter = match &role.parameter {
-            SemanticParameter::Named { named } => function
-                .params()
-                .any(|parameter| parameter.named() && parameter.name() == Some(named.as_str())),
-            SemanticParameter::Positional { positional } => function
-                .params()
-                .filter(|parameter| parameter.positional() && !parameter.variadic())
-                .nth(*positional)
-                .is_some(),
-        };
-        if declares_parameter {
-            bindings.push(EntityBinding {
-                role: role.clone(),
-                function,
-            });
+    let mut bindings: Vec<(&str, String, EntityBinding)> = Vec::new();
+    for (query_name, query) in &module.queries {
+        for (kind, definition, parameters) in [
+            ("references", false, &query.references),
+            ("definitions", true, &query.definitions),
+        ] {
+            for (index, declared) in parameters.iter().enumerate() {
+                let key = format!("queries.{query_name}.{kind}[{index}]");
+                let function = semantics
+                    .public_export(package.entry_id(), &declared.export)?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "module `{}` `{key}.export`: `{}` is not an available public function",
+                            module.name,
+                            declared.export,
+                        )
+                    })?;
+                let declares_parameter = match &declared.parameter {
+                    Parameter::Named { named } => function.params().any(|parameter| {
+                        parameter.named() && parameter.name() == Some(named.as_str())
+                    }),
+                    Parameter::Positional { positional } => function
+                        .params()
+                        .filter(|parameter| parameter.positional() && !parameter.variadic())
+                        .nth(*positional)
+                        .is_some(),
+                };
+                ensure!(
+                    declares_parameter,
+                    "module `{}` `{key}.parameter`: `{}` does not declare this parameter",
+                    module.name,
+                    declared.export,
+                );
+                if let Some((previous_query, previous_key, previous)) =
+                    bindings.iter().find(|(_, _, previous)| {
+                        previous.function == function && previous.parameter == declared.parameter
+                    })
+                {
+                    ensure!(
+                        *previous_query == query_name.as_str() && previous.definition == definition,
+                        "module `{}` `{key}` conflicts with `{previous_key}` for the same function parameter",
+                        module.name,
+                    );
+                    continue;
+                }
+                bindings.push((
+                    query_name,
+                    key,
+                    EntityBinding {
+                        parameter: declared.parameter.clone(),
+                        definition,
+                        function,
+                    },
+                ));
+            }
         }
     }
-    Ok(bindings)
+    Ok(bindings
+        .into_iter()
+        .filter(|(query, _, _)| *query == selected_query)
+        .map(|(_, _, binding)| binding)
+        .collect())
 }
 
 /// A configured module alias that cannot name a package identity.
@@ -407,7 +451,7 @@ fn module_package<'a>(
 }
 
 /// The checked source world one cached model was compiled in.
-fn checked_compilation(model: &EntityQueryResult) -> Option<&SourceCompilation> {
+fn checked_compilation(model: &QueryEvaluation) -> Option<&SourceCompilation> {
     model
         .revision
         .as_ref()
@@ -608,10 +652,10 @@ fn entity_hover(
     } = *scope;
     let mut text = format!(
         "{}\n\nID: {}\nEntity query: {}.{}",
-        entity.label, entity.id, module.name, query_name
+        entity.name, entity.id, module.name, query_name
     );
-    if let Some(detail) = &entity.detail {
-        text.push_str(&format!("\n\n{detail}"));
+    if let Some(description) = &entity.description {
+        text.push_str(&format!("\n\n{description}"));
     }
     if let Some(url) = &entity.url {
         text.push_str(&format!("\n\n{url}"));
@@ -722,7 +766,7 @@ fn entity_references(
     let mut locations = occurrences
         .iter()
         .filter(|occurrence| {
-            include_declaration || scope.role(&occurrence.argument) == SemanticKind::Reference
+            include_declaration || !scope.bindings[occurrence.argument.binding].definition
         })
         .filter_map(|occurrence| {
             Some(Location::new(
@@ -749,7 +793,7 @@ fn entity_definitions<'a>(
 ) -> Vec<&'a Occurrence> {
     let mut definitions = occurrences
         .iter()
-        .filter(|occurrence| scope.role(&occurrence.argument) == SemanticKind::Definition)
+        .filter(|occurrence| scope.bindings[occurrence.argument.binding].definition)
         .collect::<Vec<_>>();
     definitions.sort_by(|left, right| {
         (
@@ -894,14 +938,6 @@ fn entity_sources(
         .collect()
 }
 
-fn query_names(module: &LoadedModule) -> BTreeSet<&str> {
-    module
-        .semantics
-        .iter()
-        .map(|role| role.query.as_str())
-        .collect()
-}
-
 /// Every configured query except the one the editor selected.
 fn other_queries<'a>(
     modules: &'a BTreeMap<String, LoadedModule>,
@@ -909,8 +945,11 @@ fn other_queries<'a>(
     selected_query: &'a str,
 ) -> impl Iterator<Item = (&'a LoadedModule, &'a str)> + 'a {
     modules.values().flat_map(move |module| {
-        query_names(module)
-            .into_iter()
+        module
+            .queries
+            .iter()
+            .filter(|(_, query)| query.has_entities())
+            .map(|(name, _)| name.as_str())
             .filter(move |query| module.name != selected_module || *query != selected_query)
             .map(move |query| (module, query))
     })
@@ -921,7 +960,7 @@ fn proposed_model(
     module: &LoadedModule,
     query: &str,
     proposed: &[(PathBuf, Arc<str>)],
-) -> Result<EntityQueryResult> {
+) -> Result<QueryEvaluation> {
     tola_build::modules::query::run_entities(
         Arc::clone(request.site.configuration),
         module,
@@ -996,14 +1035,9 @@ fn refuse_shared_definition(
         if source.text() != definition.source.text() {
             return Ok(Some(NameQueryError::ConflictingSourceText));
         }
-        let roles: Vec<_> = module
-            .semantics
-            .iter()
-            .filter(|role| role.query == query && role.role == SemanticKind::Definition)
-            .collect();
         let literals = match module_package(packages, &module.name)? {
             Some(package) => {
-                let bindings = entity_bindings(&mut semantics, package, &roles)?;
+                let bindings = entity_bindings(&mut semantics, package, module, query)?;
                 definition_ranges(&source, &mut semantics, &bindings, &entity.id)?
             }
             None => Vec::new(),
@@ -1047,7 +1081,7 @@ mod tests {
     use super::*;
     use crate::query::tests::{QuerySession, marked_cursor};
 
-    const ENTITY_QUERY: &str = "entry=\"model.typ\"\nlabel=\"entities\"\nreturns=\"entities\"\n";
+    const ENTITY_QUERY: &str = "entry=\"model.typ\"\nlabel=\"entities\"\n";
 
     fn configure_modules(site: &mut QuerySession, modules: &str) {
         let config = std::fs::read_to_string(site.site.root().join("tola.toml")).unwrap();
@@ -1065,9 +1099,9 @@ mod tests {
         site.site.write("theme/model.typ", r#"
 #import "@tola/site:0.0.0": project-path
 #metadata((
-  (id: "ROOT", label: "Root page", source: project-path("content/target.typ")),
-  (id: "INLINE", label: "Inline entity", source: project-path("content/target.typ")),
-  (id: "https://foreign.example/ROOT/", label: "Foreign entity", url: "https://foreign.example/ROOT/"),
+  (id: "ROOT", name: "Root page", source: project-path("content/target.typ")),
+  (id: "INLINE", name: "Inline entity", source: project-path("content/target.typ")),
+  (id: "https://foreign.example/ROOT/", name: "Foreign entity", url: "https://foreign.example/ROOT/"),
 ))<entities>
 "#);
         site.site.write(
@@ -1078,16 +1112,12 @@ mod tests {
 [typst]
 entry="lib.typ"
 [queries.entities]
-{ENTITY_QUERY}[[semantics]]
+{ENTITY_QUERY}[[queries.entities.references]]
 export="local"
 parameter={{positional=0}}
-role="reference"
-query="entities"
-[[semantics]]
+[[queries.entities.definitions]]
 export="subtree"
 parameter={{named="address"}}
-role="definition"
-query="entities"
 "#
             ),
         );
@@ -1098,16 +1128,16 @@ query="entities"
 
     fn module_scenario() -> QuerySession {
         let mut site = QuerySession::with_program("#unrelated_broken_page_template()");
-        for (alias, directory, source, label) in [
+        for (alias, directory, source, name) in [
             ("shop", "products", "catalog", "Torque wrench"),
             ("terms", "glossary", "glossary", "Glossary entry"),
         ] {
             site.site.write(&format!("{directory}/lib.typ"),
-                "#let link(code) = []\n#let alias-link = link\n#let define(code, label: \"item\") = (id: code, label: label)\n");
+                "#let link(code) = []\n#let alias-link = link\n#let define(code, name: \"item\") = (id: code, name: name)\n");
             site.site.write(&format!("{directory}/model.typ"), &format!(r#"
 #import "@tola/site:0.0.0": project-path
 #import project-path("content/{source}.typ"): product
-#metadata((product + (detail: "A model-owned description", source: project-path("content/{source}.typ")),))<entities>
+#metadata((product + (description: "A model-owned description", source: project-path("content/{source}.typ")),))<entities>
 "#));
             site.site.write(
                 &format!("{directory}/tola-module.toml"),
@@ -1117,26 +1147,20 @@ query="entities"
 [typst]
 entry="lib.typ"
 [queries.catalog]
-{ENTITY_QUERY}[[semantics]]
+{ENTITY_QUERY}[[queries.catalog.references]]
 export="link"
 parameter={{positional=0}}
-role="reference"
-query="catalog"
-[[semantics]]
+[[queries.catalog.references]]
 export="alias-link"
 parameter={{positional=0}}
-role="reference"
-query="catalog"
-[[semantics]]
+[[queries.catalog.definitions]]
 export="define"
 parameter={{positional=0}}
-role="definition"
-query="catalog"
 "#
                 ),
             );
             site.site.write(&format!("content/{source}.typ"), &format!(
-                "#import \"@tola-modules/{alias}:0.0.0\": define\n#let product = define(\"sku:α-42\", label: \"{label}\")\n"
+                "#import \"@tola-modules/{alias}:0.0.0\": define\n#let product = define(\"sku:α-42\", name: \"{name}\")\n"
             ));
         }
         site.site.write("content/uses.typ", "#import \"@tola-modules/shop:0.0.0\": link as cite\n#cite(\"sku:α-42\")\n#let partial = cite.with(\"sku:α-42\")\n#partial()\n#{ let cite(code) = []; cite(\"sku:α-42\") }\n#import \"@tola-modules/terms:0.0.0\" as glossary\n#glossary.link(\"sku:α-42\")\n");
@@ -1179,6 +1203,42 @@ query="catalog"
             .unwrap();
         assert_eq!(definition.range.start.line, 1);
         assert_eq!(definition.range.start.character, 22);
+    }
+
+    #[test]
+    fn one_function_parameter_cannot_reference_two_queries() {
+        let mut site = module_scenario();
+        let library = std::fs::read_to_string(site.site.root().join("products/lib.typ")).unwrap();
+        site.site.write(
+            "products/lib.typ",
+            &format!("{library}\n#let other-link = link\n"),
+        );
+        let manifest =
+            std::fs::read_to_string(site.site.root().join("products/tola-module.toml")).unwrap();
+        site.site.write(
+            "products/tola-module.toml",
+            &format!(
+                r#"{manifest}
+[queries.other]
+entry = "model.typ"
+label = "entities"
+[[queries.other.references]]
+export = "other-link"
+parameter = {{ positional = 0 }}
+"#
+            ),
+        );
+        site.reload();
+        let error = site
+            .try_reply_with(
+                "textDocument/hover",
+                PRODUCT_REFERENCE,
+                serde_json::json!({}),
+            )
+            .expect_err("one argument cannot select two query namespaces");
+        let message = error.to_string();
+        assert!(message.contains("queries.other.references[0]"));
+        assert!(message.contains("queries.catalog.references[0]"));
     }
 
     #[test]
@@ -1323,7 +1383,7 @@ query="catalog"
         let mut site = QuerySession::with_program("#unrelated_broken_page_template()");
         site.site.write(
             "alpha/lib.typ",
-            "#let define(code, label: \"item\") = (id: code, label: label)\n#let cite(code) = []\n",
+            "#let define(code, name: \"item\") = (id: code, name: name)\n#let cite(code) = []\n",
         );
         site.site.write(
             "alpha/model.typ",
@@ -1341,30 +1401,24 @@ query="catalog"
 [typst]
 entry="lib.typ"
 [queries.nodes]
-{ENTITY_QUERY}[[semantics]]
+{ENTITY_QUERY}[[queries.nodes.references]]
 export="cite"
 parameter={{positional=0}}
-role="reference"
-query="nodes"
-[[semantics]]
+[[queries.nodes.definitions]]
 export="define"
 parameter={{positional=0}}
-role="definition"
-query="nodes"
 "#
             ),
         );
         site.site.write(
             "beta/lib.typ",
-            &format!(
-                "#let nodes{nodes} = items\n#let mark(code) = (id: code, label: \"marked\")\n"
-            ),
+            &format!("#let nodes{nodes} = items\n#let mark(code) = (id: code, name: \"marked\")\n"),
         );
         site.site.write(
             "beta/model.typ",
             r#"
 #import "@tola/site:0.0.0": project-path
-#metadata(((id: "SHARED", label: "Beta", source: project-path("content/shared.typ")),))<entities>
+#metadata(((id: "SHARED", name: "Beta", source: project-path("content/shared.typ")),))<entities>
 "#,
         );
         site.site.write(
@@ -1375,16 +1429,12 @@ query="nodes"
 [typst]
 entry="lib.typ"
 [queries.nodes]
-{ENTITY_QUERY}[[semantics]]
+{ENTITY_QUERY}[[queries.nodes.definitions]]
 export="mark"
 parameter={{positional=0}}
-role="definition"
-query="nodes"
-[[semantics]]
+[[queries.nodes.definitions]]
 export="nodes"
 parameter={{positional=0}}
-role="definition"
-query="nodes"
 "#
             ),
         );
@@ -1392,7 +1442,7 @@ query="nodes"
             "content/shared.typ",
             r#"#import "@tola-modules/alpha:0.0.0": define
 #import "@tola-modules/beta:0.0.0": mark, nodes
-#let entry = define("SHARED", label: "Shared")
+#let entry = define("SHARED", name: "Shared")
 #{ let _ = mark("SHARED"); let _ = nodes("SHARED") }
 "#,
         );
@@ -1406,21 +1456,16 @@ query="nodes"
     const SHARED_REFERENCE: &str =
         "#import \"@tola-modules/alpha:0.0.0\": cite\n😀 #cite(\"SHAR|ED\")";
 
-    /// A role declares a parameter; a variadic tail declares none, so a call written there is not
-    /// that query's definition. A shared source whose only competing declaration sits in a tail is
-    /// therefore renameable, while a declared parameter still blocks the rename.
     #[test]
-    fn shared_counts_only_declared_parameters() {
+    fn shared_definitions_require_declared_parameters() {
         let mut site = shared_definition_scenario("(..items)");
-        let edit = site
-            .rename(SHARED_REFERENCE, "public:β")
-            .expect("the shared source holds no competing definition");
-        let changes = edit.changes.expect("edits by file");
+        let error = site
+            .rename_error(SHARED_REFERENCE, "public:β")
+            .expect("a nonexistent definition parameter must be diagnosed");
         assert!(
-            changes
-                .keys()
-                .any(|uri| uri.as_str().ends_with("content/shared.typ")),
-            "{changes:?}"
+            error
+                .to_string()
+                .contains("queries.nodes.definitions[1].parameter")
         );
 
         let mut site = shared_definition_scenario("(first, ..items)");
@@ -1440,7 +1485,7 @@ query="nodes"
         let caller_path = root.join("content/new-buffer.typ");
         let target_uri = crate::uri::from_file_path(&target_path).unwrap();
         let caller_uri = crate::uri::from_file_path(&caller_path).unwrap();
-        let target = "// Unsaved 😀 heading\n#import \"@tola-modules/shop:0.0.0\": define\n#let note = \"🦊\"; #let product = define(\"draft:雪\", label: \"Unsaved product\")";
+        let target = "// Unsaved 😀 heading\n#import \"@tola-modules/shop:0.0.0\": define\n#let note = \"🦊\"; #let product = define(\"draft:雪\", name: \"Unsaved product\")";
         let (caller, position) =
             marked_cursor("#import \"@tola-modules/shop:0.0.0\": link\n😀 #link(\"draft:|雪\")");
         let mut open = OpenSources::new(root);

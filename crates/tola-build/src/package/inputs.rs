@@ -9,23 +9,6 @@ use crate::icon::IconInventory;
 use crate::cancellation::BuildCancellation;
 use crate::resources::BuildResources;
 
-/// Immutable producer values exposed through package bindings.
-pub(crate) struct PackageInputs {
-    pub(crate) icons: IconInventory,
-}
-
-/// Values accepted after their own successful preparation; not published output.
-pub(crate) fn prepare_package_inputs(
-    config: &ResolvedSiteConfig,
-    resources: &BuildResources,
-    cancellation: &BuildCancellation,
-    retained_icons: &mut Option<IconInventory>,
-    overrides: &SourceOverrides,
-) -> Result<PackageInputs> {
-    let icons = prepare_icons(config, resources, cancellation, retained_icons, overrides)?;
-    Ok(PackageInputs { icons })
-}
-
 pub(crate) fn prepare_icons(
     config: &ResolvedSiteConfig,
     resources: &BuildResources,

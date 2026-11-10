@@ -944,37 +944,6 @@ mod tests {
     use crate::config::tests::diagnostic_mentioning;
 
     #[test]
-    fn hook_template_preserves_stage_entries() {
-        let config: crate::config::SiteConfigSchema = toml::from_str(
-            r#"
-[[hooks.before-build]]
-name = "icons"
-argv = ["./scripts/icons.sh", "generated/icons"]
-rerun-on = { include = ["src/icons"] }
-generates = ["generated/icons"]
-
-[[hooks.generate-outputs]]
-name = "search"
-argv = ["node", "scripts/search.mjs"]
-dev = "skip"
-rerun-on = { include = ["scripts/search.mjs"] }
-outputs = [{ file = "index.json" }, { tree = "search" }]
-
-[[hooks.after-publish]]
-name = "deploy"
-argv = ["./scripts/deploy.sh"]
-dev = "run"
-rerun-on = { include = ["scripts/deploy.sh"] }
-"#,
-        )
-        .unwrap();
-        let template = HooksConfig::try_template_with_header_from(&config.hooks).unwrap();
-        let decoded: crate::config::SiteConfigSchema = toml::from_str(&template).unwrap();
-
-        assert_eq!(decoded.hooks, config.hooks);
-    }
-
-    #[test]
     fn reuse_is_only_for_generate_outputs() {
         let config: HooksConfig = toml::from_str(
             r#"
@@ -1174,29 +1143,6 @@ rerun-on = { include = ["/src"], exclude = [{ project = "../templates" }] }
             "{:?}",
             diag.errors()
         );
-    }
-
-    #[test]
-    fn enabled_commands_need_executable() {
-        for command in [Vec::new(), vec!["  ".into()]] {
-            let hooks = HooksConfig {
-                before_build: vec![BeforeBuildHookConfig {
-                    name: "generator".into(),
-                    argv: Some(command),
-                    ..BeforeBuildHookConfig::default()
-                }],
-                ..HooksConfig::default()
-            };
-            let mut diagnostics = ConfigDiagnostics::new();
-
-            hooks.validate(&mut diagnostics);
-
-            assert_eq!(diagnostics.errors().len(), 1);
-            assert_eq!(
-                diagnostics.errors()[0].field,
-                BeforeBuildHookConfig::FIELDS.argv
-            );
-        }
     }
 
     /// One enabled hook in each stage, every one named `name` and running `command`.

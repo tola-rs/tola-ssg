@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 
 use anyhow::{Result, ensure};
+use tola_build::config::section::IconCollectionSource;
 use tola_build::inputs::refresh_module_roots;
 use tola_input::{InputLock, InputMode, LockedModule, LockedRevision};
 use tola_module::{ModuleDeclaration, ModuleSource, RemoteRevision};
@@ -33,26 +34,41 @@ pub(in crate::cli) fn run(
         cancellation,
     )?;
     let config = loaded.into_config();
+    let token = cancellation.token();
+    let _guard = tola_build::build::SiteBuildLock::acquire(&config, &token, || {
+        let _ = output.waiting_for_build();
+    })?;
     let site_root = config.get_root();
     let vendor = config.vendor().path.as_deref();
     let mut lock = InputLock::read(site_root)?.unwrap_or_default();
     let original = lock.clone();
 
-    let selected = refreshable(config.modules(), &update.names, output)?;
-    refresh_module_roots(
-        site_root,
-        mode,
-        vendor,
-        &selected,
-        &mut lock,
-        &cancellation.token(),
-    )?;
+    for name in &update.names {
+        ensure!(
+            config.modules().contains_key(name) || config.icons().collections.contains_key(name),
+            "`{name}` is not a declared module or icon collection"
+        );
+    }
+    let icons = selected_icons(&config.icons().collections, &update.names)?;
+    let selected = refreshable(config.modules(), &update.names, &original)?;
+    refresh_module_roots(site_root, mode, vendor, &selected, &mut lock, &token)?;
+    let resources = crate::cli::config::build_resources(mode);
+    tola_build::refresh_icon_collections(&config, &icons, &resources, &token, &mut lock)?;
+    token.ensure_active()?;
 
     for alias in selected.keys() {
         let before = original.modules.get(alias);
         let after = lock.modules.get(alias);
         if before != after {
             output.status(format!("module `{alias}`: {}", describe(after)))?;
+        }
+    }
+    for name in &icons {
+        if original.icons.get(name) != lock.icons.get(name) {
+            output.status(format!(
+                "icon collection `{name}` now has SHA-256 {}",
+                lock.icons[name].sha256
+            ))?;
         }
     }
     if lock == original {
@@ -63,7 +79,8 @@ pub(in crate::cli) fn run(
         output.status("`--dry-run` wrote no `tola.lock`")?;
         return Ok(());
     }
-    lock.write_atomic(site_root)?;
+    token.ensure_active()?;
+    lock.commit(site_root, &original)?;
     output.status("`tola.lock` records the refreshed inputs")?;
     output.status("run `tola vendor --refresh` to update the frozen copies")?;
     Ok(())
@@ -73,7 +90,7 @@ pub(in crate::cli) fn run(
 fn refreshable(
     declarations: &BTreeMap<String, ModuleDeclaration>,
     names: &[String],
-    output: &CommandOutput,
+    lock: &InputLock,
 ) -> Result<BTreeMap<String, ModuleDeclaration>> {
     let mut selected = BTreeMap::new();
     for (alias, declaration) in declarations {
@@ -85,23 +102,39 @@ fn refreshable(
                 names.is_empty(),
                 "module `{alias}` is a local directory; it is site source and is never refreshed"
             ),
-            ModuleSource::Git { git } if matches!(git.revision, Some(RemoteRevision::Rev(_))) => {
-                if !names.is_empty() {
-                    output.status(format!(
-                        "module `{alias}` is pinned to a revision; use `git.tag` or `git.branch` to refresh it"
-                    ))?;
-                }
-            }
+            ModuleSource::Git { git } if pinned(git, lock.modules.get(alias)) => {}
             ModuleSource::Git { .. } | ModuleSource::Tarball { .. } => {
                 selected.insert(alias.clone(), declaration.clone());
             }
         }
     }
-    for name in names {
+    Ok(selected)
+}
+
+fn pinned(git: &tola_module::declaration::GitSource, locked: Option<&LockedModule>) -> bool {
+    let Some(RemoteRevision::Rev(rev)) = &git.revision else {
+        return false;
+    };
+    matches!(locked, Some(LockedModule::Git { git: url, revision: Some(LockedRevision::Rev(recorded)), subdir, commit, .. })
+        if url == &git.url && subdir == &git.subdir && recorded == rev && commit == rev)
+}
+
+fn selected_icons(
+    collections: &BTreeMap<String, IconCollectionSource>,
+    names: &[String],
+) -> Result<Vec<String>> {
+    let mut selected = Vec::new();
+    for (name, source) in collections {
+        if !names.is_empty() && !names.contains(name) {
+            continue;
+        }
         ensure!(
-            declarations.contains_key(name),
-            "`{name}` is not a declared module"
+            names.is_empty() || matches!(source, IconCollectionSource::RemoteJson { .. }),
+            "icon collection `{name}` is local site source and is never refreshed"
         );
+        if matches!(source, IconCollectionSource::RemoteJson { .. }) {
+            selected.push(name.clone());
+        }
     }
     Ok(selected)
 }
@@ -125,5 +158,33 @@ fn describe(module: Option<&LockedModule>) -> String {
         }
         Some(LockedModule::Local { .. }) => "recorded as a local directory".to_owned(),
         None => "no longer records a fact".to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tola_input::Sha256Digest;
+    use tola_module::declaration::GitSource;
+
+    #[test]
+    fn fixed_revision_updates_only_when_its_declaration_changes() {
+        let commit = "a".repeat(40);
+        let mut git = GitSource {
+            url: "https://example.com/theme.git".into(),
+            subdir: "theme".into(),
+            revision: Some(RemoteRevision::Rev(commit.clone())),
+        };
+        let locked = LockedModule::Git {
+            git: git.url.clone(),
+            subdir: git.subdir.clone(),
+            revision: Some(LockedRevision::Rev(commit.clone())),
+            commit,
+            tree_sha256: Sha256Digest::of_bytes(b"theme"),
+        };
+        assert!(!pinned(&git, None));
+        assert!(pinned(&git, Some(&locked)));
+        git.revision = Some(RemoteRevision::Rev("b".repeat(40)));
+        assert!(!pinned(&git, Some(&locked)));
     }
 }

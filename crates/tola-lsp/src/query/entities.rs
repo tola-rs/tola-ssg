@@ -1,9 +1,9 @@
-//! Entity roles follow actual public function bindings and explicit string arguments.
+//! Entity references and definitions follow actual functions and explicit string arguments.
 
 use std::ops::Range;
 
 use anyhow::Result;
-use tola_module::semantics::{SemanticKind, SemanticParameter, SemanticRole};
+use tola_module::declaration::Parameter;
 use tola_typst::typst::foundations::{Arg, Args, Func, Str, Value};
 use tola_typst::typst::syntax::ast::AstNode;
 use tola_typst::typst::syntax::{LinkedNode, Side, Source, Span, Spanned, ast};
@@ -12,7 +12,8 @@ use super::inference::{ExpressionResolver, INITIALIZER_DEPTH};
 use super::semantic::Semantic;
 
 pub(super) struct EntityBinding {
-    pub role: SemanticRole,
+    pub parameter: Parameter,
+    pub definition: bool,
     pub function: Func,
 }
 
@@ -107,7 +108,7 @@ fn match_call(
     let mut unresolved = false;
     for (binding, declared) in bindings.iter().enumerate() {
         let Some(mut applied) = call_arguments(node, call, &callee, declared, semantics)? else {
-            if declared.role.role == SemanticKind::Reference
+            if !declared.definition
                 && is_partial_application(&callee, &declared.function, semantics)?
             {
                 unresolved = true;
@@ -124,7 +125,7 @@ fn match_call(
             argument.literal = None;
         }
         applied.extend(written);
-        if let Some(argument) = selected(&applied, &declared.role.parameter) {
+        if let Some(argument) = selected(&applied, &declared.parameter) {
             if let Some((value, range)) = &argument.literal {
                 found.push(EntityArgument {
                     binding,
@@ -143,13 +144,13 @@ fn match_call(
     Ok(unresolved)
 }
 
-fn selected<'a>(arguments: &'a [Argument], parameter: &SemanticParameter) -> Option<&'a Argument> {
+fn selected<'a>(arguments: &'a [Argument], parameter: &Parameter) -> Option<&'a Argument> {
     match parameter {
-        SemanticParameter::Positional { positional } => arguments
+        Parameter::Positional { positional } => arguments
             .iter()
             .filter(|argument| argument.name.is_none())
             .nth(*positional),
-        SemanticParameter::Named { named } => {
+        Parameter::Named { named } => {
             // Typst's last named argument wins, including an explicit override after .with.
             arguments
                 .iter()
@@ -244,7 +245,7 @@ fn call_arguments(
         return Ok(Some(arguments));
     }
     // Pre-binding a definition parameter does not itself construct the declared entity.
-    if binding.role.role == SemanticKind::Definition {
+    if binding.definition {
         return Ok(None);
     }
     // A .with call binds parameters explicitly; confirm the resulting function.
@@ -386,11 +387,11 @@ mod tests {
 
     use crate::query::tests::QuerySession;
 
-    fn matching(program: &str, export: &str, parameter: SemanticParameter) -> Vec<EntityArgument> {
+    fn matching(program: &str, export: &str, parameter: Parameter) -> Vec<EntityArgument> {
         scanning(program, export, parameter).literals
     }
 
-    fn scanning(program: &str, export: &str, parameter: SemanticParameter) -> EntityScan {
+    fn scanning(program: &str, export: &str, parameter: Parameter) -> EntityScan {
         let mut site = QuerySession::new();
         site.site.write(
             "entities.typ",
@@ -427,20 +428,16 @@ mod tests {
             &source,
             &mut semantics,
             &[EntityBinding {
-                role: SemanticRole {
-                    export: export.into(),
-                    parameter,
-                    role: SemanticKind::Reference,
-                    query: "entities".into(),
-                },
+                parameter,
+                definition: false,
                 function,
             }],
         )
         .unwrap()
     }
 
-    fn positional(position: usize) -> SemanticParameter {
-        SemanticParameter::Positional {
+    fn positional(position: usize) -> Parameter {
+        Parameter::Positional {
             positional: position,
         }
     }
@@ -514,7 +511,7 @@ mod tests {
         let found = matching(
             program,
             "subtree",
-            SemanticParameter::Named {
+            Parameter::Named {
                 named: "address".into(),
             },
         );

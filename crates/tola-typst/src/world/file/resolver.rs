@@ -79,6 +79,10 @@ impl FileResolver {
         &self.boundary
     }
 
+    pub(crate) fn package_store(&self) -> &PackageStore {
+        &self.packages
+    }
+
     /// Use a pure provider for root and package file identities.
     pub fn with_provider<P>(self, provider: P) -> Self
     where

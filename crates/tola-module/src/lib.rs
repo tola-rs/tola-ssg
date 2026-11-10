@@ -18,7 +18,6 @@ pub mod pack;
 pub mod prepared;
 pub mod query;
 pub mod remote;
-pub mod semantics;
 pub mod watch;
 
 pub use action::Action;

@@ -1,6 +1,6 @@
 //! Command-line arguments and parsing.
 
-use clap::{ColorChoice, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
+use clap::{ColorChoice, Parser, Subcommand, ValueEnum};
 use std::ffi::OsString;
 use std::path::PathBuf;
 use tola_input::{InputMode, InputScope};
@@ -73,19 +73,6 @@ pub struct InputArgs {
     pub locked: bool,
 }
 
-impl ProcessArgs {
-    pub fn parse_color(value: &str) -> Result<ColorChoice, String> {
-        match value {
-            "auto" => Ok(ColorChoice::Auto),
-            "always" => Ok(ColorChoice::Always),
-            "never" => Ok(ColorChoice::Never),
-            value => Err(format!(
-                "{value} is not a color choice; use auto, always, or never"
-            )),
-        }
-    }
-}
-
 /// The site a command reads: its configuration and the host package roots that override it.
 #[derive(clap::Args, Debug, Clone, Default)]
 pub struct SiteArgs {
@@ -123,22 +110,13 @@ pub struct Cli {
 
     #[command(subcommand)]
     pub command: Commands,
-
-    /// Input options adopted from an extension invocation's prefix.
-    #[arg(skip)]
-    pub extension_input: InputArgs,
 }
 
-impl Cli {
-    fn input(&self) -> &InputArgs {
-        self.command.input().unwrap_or(&self.extension_input)
-    }
-
-    pub fn input_scope(&self) -> InputScope {
-        let input = self.input();
-        if input.pure {
+impl InputArgs {
+    pub(super) fn scope(self) -> InputScope {
+        if self.pure {
             InputScope::Pure
-        } else if input.offline {
+        } else if self.offline {
             InputScope::Offline
         } else {
             InputScope::Online
@@ -146,8 +124,8 @@ impl Cli {
     }
 
     /// What this invocation may write, fetch, and read for its inputs.
-    pub fn input_mode(&self) -> InputMode {
-        InputMode::new(self.input_scope(), self.input().locked)
+    pub(super) fn mode(self) -> InputMode {
+        InputMode::new(self.scope(), self.locked)
     }
 }
 
@@ -373,7 +351,7 @@ pub enum Commands {
     #[command(
         override_usage = "tola nu [OPTIONS] <ENTRY> [ARGS]...\n       tola nu --lsp",
         after_help = "`nu` runs the script directly: `-q`, `-v`, `--color`, `--log-file`, `--no-log-file`, `--lang` and `--no-pager` do not apply. `--pure` and `--offline` still set the script's input scope.",
-        after_long_help = "Examples:\n  tola nu tools/build.nu\n  tola nu @tola-scripts/image metadata photo.png\n  tola nu @tola-scripts/image resize photo.png photo.webp --width 640 --op fit-width --format webp\n  tola nu @tola-modules/catalog --help\n\nIn Nu, `use tola` provides `tola query`; `use tola query` imports\nthe unqualified `query`. Import `use tola cli` for finite `cli capture`\nand `use tola image` for `image metadata-file` and `image resize-file`.\nUse `tola dev --json` as a native external command for continuous JSON lines.\nSite libraries use `use tola-modules catalog` and declare `[nu]` with\n`entry = \"tools/mod.nu\"` in tola-module.toml. Direct module invocations\nrun that entry's exported main command."
+        after_long_help = "Examples:\n  tola nu tools/build.nu\n  tola nu @tola-scripts/image metadata photo.png\n  tola nu @tola-scripts/image resize photo.png --output photo.webp --format webp\n  tola nu @tola-modules/catalog --help\n\nIn Nu, `use tola` provides `tola query`; `use tola query` imports\nthe unqualified `query`. Import `use tola cli` for finite `cli capture`\nand `use tola image` for `image metadata` and `image resize`.\nUse `tola dev --json` as a native external command for continuous JSON lines.\nSite libraries use `use tola-modules catalog` and declare `[nu]` with\n`entry = \"tools/mod.nu\"` in tola-module.toml. Direct module invocations\nrun that entry's exported main command."
     )]
     Nu(NuArgs),
 
@@ -383,7 +361,7 @@ pub enum Commands {
     /// Print the Tola, Typst, and embedded Nu versions.
     Version(VersionArgs),
 
-    /// Render a diagnostic JSON report through the build renderer.
+    /// Display diagnostics from an independent check.
     Diagnostic {
         #[command(subcommand)]
         command: DiagnosticCommand,
@@ -396,14 +374,14 @@ pub enum Commands {
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum DiagnosticCommand {
-    /// Read diagnostic JSON from stdin and print the rendered report.
+    /// Read diagnostic records from stdin and print them. Locations use file paths.
     Render,
 }
 
 /// Options for refreshing the inputs `tola.lock` records.
 #[derive(clap::Args, Debug, Clone)]
 pub struct UpdateArgs {
-    /// Module aliases to refresh; every refreshable module when omitted.
+    /// Module aliases or icon collection names to refresh; all remote inputs when omitted.
     pub names: Vec<String>,
 
     /// Report what would change without writing `tola.lock`.
@@ -603,6 +581,9 @@ pub struct TypstPackageArgs {
 #[derive(clap::Args, Debug, Clone, Default)]
 pub struct BuildOverrideArgs {
     /// Override the configured published directory for this build.
+    ///
+    /// A relative path starts at the site root. Choose a directory inside the site that is empty
+    /// or already owned by Tola for this site.
     #[arg(short = 'o', long, help_heading = "Build options", value_hint = clap::ValueHint::DirPath)]
     pub publish_dir: Option<PathBuf>,
 
@@ -665,7 +646,10 @@ pub enum InspectCommand {
 
 #[derive(clap::Args, Debug, Clone)]
 pub struct QueryArgs {
-    /// Module-qualified query name or an explicit ./path.typ with --label.
+    /// Module query such as notes.nodes, or a Typst file with --label.
+    ///
+    /// Start a relative file path with ./ or ../, or use an absolute path. The file must be inside
+    /// the site. For example, `tola query ./query.typ --label result`.
     #[arg(value_name = "TARGET")]
     pub target: String,
     /// Metadata label to read from an explicit Typst query file.
@@ -803,76 +787,7 @@ pub struct VendorArgs {
     pub dry_run: bool,
 }
 
-impl Cli {
-    pub fn parse_for_process() -> Self {
-        let arguments = std::env::args_os().collect::<Vec<_>>();
-        let color = super::argv::color_hint(&arguments);
-        let stdout_color =
-            if crate::terminal::color::enabled(color, crate::terminal::color::Stream::Stdout) {
-                ColorChoice::Always
-            } else {
-                ColorChoice::Never
-            };
-        let mut command = Self::command().color(stdout_color);
-        let matches = command
-            .try_get_matches_from_mut(arguments)
-            .unwrap_or_else(|error| {
-                if error.use_stderr() {
-                    let stderr_color = if crate::terminal::color::enabled(
-                        color,
-                        crate::terminal::color::Stream::Stderr,
-                    ) {
-                        ColorChoice::Always
-                    } else {
-                        ColorChoice::Never
-                    };
-                    error.with_cmd(&command.color(stderr_color)).exit();
-                }
-                error.exit()
-            });
-        let mut cli = Self::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
-        if let Commands::Extension(arguments) = &mut cli.command {
-            let namespace = arguments.remove(0);
-            let result =
-                super::argv::adopt_prefix(&mut cli.global, &mut cli.extension_input, arguments);
-            arguments.insert(0, namespace);
-            if let Err(error) = result {
-                clap::Error::raw(clap::error::ErrorKind::InvalidValue, error).exit();
-            }
-        }
-        cli
-    }
-}
-
 impl Commands {
-    pub(crate) fn name(&self) -> &'static str {
-        match self {
-            Self::Update { .. } => "update",
-            Self::Init(_) => "init",
-            Self::Module { .. } => "module",
-            Self::Build { .. } => "build",
-            Self::Dev { .. } => "dev",
-            Self::Preview { .. } => "preview",
-            Self::Check { .. } => "check",
-            Self::Fmt { .. } => "fmt",
-            Self::Inspect { .. } => "inspect",
-            Self::Query { .. } => "query",
-            Self::Edit { .. } => "edit",
-            Self::Vendor { .. } => "vendor",
-            Self::Doctor(_) => "doctor",
-            Self::Editor { .. } => "editor",
-            Self::Lsp { .. } => "lsp",
-            Self::Skill(_) => "skill",
-            Self::Completions(_) => "completions",
-            Self::Manpage(_) => "manpage",
-            Self::Nu(_) => "nu",
-            Self::Help(_) => "help",
-            Self::Version(_) => "version",
-            Self::Diagnostic { .. } => "diagnostic",
-            Self::Extension(_) => "extension",
-        }
-    }
-
     /// Input options this command accepts, when it resolves inputs.
     pub(crate) fn input(&self) -> Option<&InputArgs> {
         match self {
@@ -938,6 +853,7 @@ impl Commands {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::CommandFactory;
 
     #[test]
     fn font_options_never_become_source_paths() {
@@ -1018,7 +934,7 @@ mod tests {
     #[test]
     fn input_options_live_on_their_command() {
         let cli = Cli::try_parse_from(["tola", "build", "--locked"]).unwrap();
-        assert!(cli.input_mode().locked());
+        assert!(cli.command.input().unwrap().mode().locked());
         assert!(Cli::try_parse_from(["tola", "--pure", "build"]).is_err());
         assert!(Cli::try_parse_from(["tola", "completions", "--pure", "zsh"]).is_err());
     }

@@ -175,7 +175,6 @@ pub(super) fn register(
     working.add_decl(Box::new(crate::cli::Capture));
     use crate::host::{HostCommand, Operation};
     use nu_protocol::engine::Command;
-    working.add_decl(Box::new(HostCommand(Operation::Submit, host.clone())));
     let mut root = Module::new(b"tola".to_vec());
     for operation in [
         Operation::Site,
@@ -190,7 +189,15 @@ pub(super) fn register(
         root.add_decl(name, declaration);
     }
     for builtin in builtins {
-        let id = parse(&mut working, builtin)?;
+        let mut id = parse(&mut working, builtin)?;
+        if builtin.alias == "diagnostic" {
+            let mut module = working.get_module(id).clone();
+            let comments = working.get_module_comments(id).unwrap_or_default().to_vec();
+            let command = HostCommand(Operation::Submit, host.clone());
+            let name = command.name().as_bytes().to_vec();
+            module.add_decl(name, working.add_decl(Box::new(command)));
+            id = working.add_module(&builtin.alias, module, comments);
+        }
         let main = module_has_main(&working, id);
         root.add_submodule(builtin.alias.as_bytes().to_vec(), id);
         entries.insert(

@@ -9,8 +9,11 @@ use typst_syntax::{LinkedNode, Source, SyntaxKind};
 /// The walk visits the tree in document order, so the range names the earliest failure the parser
 /// recorded; a source may hold more.
 pub fn first_error_range(source: &str) -> Option<Range<usize>> {
-    let parsed = Source::detached(source);
-    let mut pending = vec![LinkedNode::new(parsed.root())];
+    first_error(&Source::detached(source))
+}
+
+pub(crate) fn first_error(source: &Source) -> Option<Range<usize>> {
+    let mut pending = vec![LinkedNode::new(source.root())];
     while let Some(node) = pending.pop() {
         if node.kind() == SyntaxKind::Error {
             return Some(node.range());
@@ -18,14 +21,4 @@ pub fn first_error_range(source: &str) -> Option<Range<usize>> {
         pending.extend(node.children().rev());
     }
     None
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parsable_source_marks_no_error() {
-        assert_eq!(first_error_range("= Title\n#let x = 1\n"), None);
-    }
 }

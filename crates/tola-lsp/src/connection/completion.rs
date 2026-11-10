@@ -17,10 +17,7 @@ use crate::compiler::{
 use crate::diagnostic::{PublishInputs, refine_unread_configuration};
 use crate::protocol::{CheckProgress, SourceReply};
 
-use super::replies::{
-    CANCELLED_ERROR, PANICKED_ERROR, REVISION_CHANGED_ERROR, error_response, failed_response,
-    merge_code_actions,
-};
+use super::replies::{REVISION_CHANGED_ERROR, error_response, failed_response, merge_code_actions};
 use super::{Connection, PendingRequest, Phase};
 
 /// What the author hears when a check's own work failed rather than the site.
@@ -125,7 +122,11 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
                         self.complete_waiting_code_actions(revision)?;
                     }
                     Ok(_) | Err(SourceFailure::Cancelled) => {}
-                    Err(SourceFailure::Failed(_) | SourceFailure::Panicked) => {
+                    Err(
+                        SourceFailure::Failed(_)
+                        | SourceFailure::Panicked
+                        | SourceFailure::InvalidName(_),
+                    ) => {
                         self.fail_waiting_code_actions(revision)?;
                     }
                 }
@@ -219,11 +220,7 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
 
     /// Answer one source failure in the protocol's own shape.
     fn reply_failure(&mut self, id: lsp_server::RequestId, failure: SourceFailure) -> Result<()> {
-        match failure {
-            SourceFailure::Cancelled => self.reply(error_response(id, CANCELLED_ERROR)),
-            SourceFailure::Panicked => self.reply(error_response(id, PANICKED_ERROR)),
-            SourceFailure::Failed(error) => self.reply(failed_response(id, error)),
-        }
+        self.reply(failed_response(id, failure))
     }
 
     /// Answer one query from the reply its job produced.
@@ -611,6 +608,10 @@ mod tests {
             initialized["capabilities"]["diagnosticProvider"]["interFileDependencies"],
             true
         );
+        assert_eq!(
+            initialized["capabilities"]["diagnosticProvider"]["workspaceDiagnostics"],
+            true
+        );
         let _ = connection
             .notification(Notification::new(
                 notification::Initialized::METHOD.into(),
@@ -645,5 +646,42 @@ mod tests {
                         && diagnostic["severity"] == 2
                 )
         );
+
+        let uri = crate::uri::from_file_path(&directory.path().join("site.typ")).unwrap();
+        let pull = |connection: &mut Connection<Vec<u8>, _>, id: i32, previous| {
+            connection
+                .request(Request::new(
+                    id.into(),
+                    request::WorkspaceDiagnosticRequest::METHOD.into(),
+                    json!({"previousResultIds": previous}),
+                ))
+                .unwrap();
+            response(connection).response_result.unwrap()["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|report| report["uri"] == uri.as_str())
+                .unwrap()
+                .clone()
+        };
+        let full = pull(&mut connection, 3, json!([]));
+        assert_eq!(full["items"], report["items"]);
+        let previous = json!([{"uri": uri, "value": full["resultId"]}]);
+        assert_eq!(
+            pull(&mut connection, 4, previous.clone())["kind"],
+            "unchanged"
+        );
+
+        let page = directory.path().join("content/page.typ");
+        std::fs::remove_file(&page).unwrap();
+        let _ = connection
+            .notification(Notification::new(
+                notification::DidChangeWatchedFiles::METHOD.into(),
+                json!({"changes": [{"uri": crate::uri::from_file_path(&page).unwrap(), "type": 3}]}),
+            ))
+            .unwrap();
+        let checked = compiler.compile(connection.next_job(Instant::now()).unwrap());
+        connection.completed(checked).unwrap();
+        assert_eq!(pull(&mut connection, 5, previous)["items"], json!([]));
     }
 }

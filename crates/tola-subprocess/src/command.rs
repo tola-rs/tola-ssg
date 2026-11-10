@@ -149,7 +149,7 @@ impl Command {
             return Ok(Exit::cancelled(None));
         }
         let child = self.spawn()?;
-        self.observe(child, cancellation, observer)
+        Self::observe(child, cancellation, observer)
     }
 
     /// Run with the caller's stdin, stdout, and stderr, without capturing output.
@@ -182,17 +182,10 @@ impl Command {
             let wrapper = sys::wrap(CommandWrap::from(command))
                 .spawn()
                 .map_err(Error::Spawn)?;
-            let mut child = Child::new(wrapper);
-            loop {
-                if cancellation.is_cancelled() {
-                    return Ok(Stop::Cancelled(child.terminate()));
-                }
-                if let Some(status) = child.try_wait()? {
-                    child.terminate();
-                    return Ok(Stop::Exited(status));
-                }
+            Child::new(wrapper).wait_for_stop(cancellation, || {
                 thread::sleep(CHILD_POLL_INTERVAL);
-            }
+                Ok(())
+            })
         })();
         // The child has been stopped before the terminal is reclaimed, including
         // when spawning or waiting failed. Drop repeats a failed restoration.
@@ -201,8 +194,7 @@ impl Command {
     }
 
     /// Capture and await a child this command already started.
-    pub(crate) fn observe(
-        &self,
+    fn observe(
         mut child: Child,
         cancellation: &impl Cancellation,
         observer: &mut impl Observer,
@@ -213,7 +205,7 @@ impl Command {
         relay.spawn(stdout, Stream::Stdout, &events)?;
         relay.spawn(stderr, Stream::Stderr, &events)?;
         drop(events);
-        self.await_stop(&mut child, relay, cancellation, observer)
+        capture_until_exit(&mut child, relay, cancellation, observer)
     }
 
     fn spawn(&self) -> Result<Child> {
@@ -246,34 +238,23 @@ impl Command {
         }
         command
     }
+}
 
-    fn await_stop(
-        &self,
-        child: &mut Child,
-        mut relay: Relay,
-        cancellation: &impl Cancellation,
-        observer: &mut impl Observer,
-    ) -> Result<Exit> {
-        let stop = loop {
-            if cancellation.is_cancelled() {
-                break Stop::Cancelled(child.terminate());
-            }
-            if let Some(status) = child.try_wait()? {
-                // Terminate descendants before draining their pipes, so a reader
-                // never waits on a process that outlived the direct child.
-                child.terminate();
-                break Stop::Exited(status);
-            }
-            // The first observed reader failure ends the run; cancellation wins at each recheck.
-            relay.receive(CHILD_POLL_INTERVAL, observer)?;
-        };
-        let [stdout, stderr] = relay.finish(observer)?;
-        Ok(Exit {
-            stop,
-            stdout,
-            stderr,
-        })
-    }
+fn capture_until_exit(
+    child: &mut Child,
+    mut relay: Relay,
+    cancellation: &impl Cancellation,
+    observer: &mut impl Observer,
+) -> Result<Exit> {
+    let stop = child.wait_for_stop(cancellation, || {
+        relay.receive(CHILD_POLL_INTERVAL, observer)
+    })?;
+    let [stdout, stderr] = relay.finish(observer)?;
+    Ok(Exit {
+        stop,
+        stdout,
+        stderr,
+    })
 }
 
 fn take_pipe<T: Read + Send + 'static>(pipe: Option<T>) -> Result<T> {
@@ -754,13 +735,13 @@ mod tests {
         (command, listener)
     }
 
-    fn ready_child(mode: &str) -> (Command, Child, TcpStream) {
+    fn ready_child(mode: &str) -> (Child, TcpStream) {
         let (command, listener) = child_with_control(mode);
         let child = command.spawn().unwrap();
         let deadline = Instant::now() + CHILD_READY_TIMEOUT;
         loop {
             if let Some((_, peer)) = accept_control(&listener) {
-                return (command, child, peer);
+                return (child, peer);
             }
             assert!(Instant::now() < deadline, "the child did not become ready");
             thread::yield_now();
@@ -1019,7 +1000,7 @@ mod tests {
     fn reader_failure_interrupts_running_child() {
         let mut polls_before_error = Vec::new();
         for panic_reader in [false, true] {
-            let (command, mut child, mut peer) = ready_child("held-streams");
+            let (mut child, mut peer) = ready_child("held-streams");
             let deadline = Instant::now() + CHILD_READY_TIMEOUT;
             let (other, _writer) = io::pipe().unwrap();
             let (mut relay, events) = Relay::new(false);
@@ -1046,17 +1027,16 @@ mod tests {
                 thread::yield_now();
             }
             let polls = std::cell::Cell::new(0);
-            let error = command
-                .await_stop(
-                    &mut child,
-                    relay,
-                    &|| {
-                        polls.set(polls.get() + 1);
-                        polls.get() == 5
-                    },
-                    &mut (),
-                )
-                .unwrap_err();
+            let error = capture_until_exit(
+                &mut child,
+                relay,
+                &|| {
+                    polls.set(polls.get() + 1);
+                    polls.get() == 5
+                },
+                &mut (),
+            )
+            .unwrap_err();
             assert!(matches!(error, Error::Read(_)), "{error:?}");
             if !panic_reader {
                 assert!(
@@ -1084,9 +1064,9 @@ mod tests {
             }
             fn finished(&mut self, _: Stream) {}
         }
-        let (command, child, mut peer) = ready_child("held-streams");
+        let (child, mut peer) = ready_child("held-streams");
         let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            command.observe(child, &NO_CANCELLATION, &mut PanickingObserver)
+            Command::observe(child, &NO_CANCELLATION, &mut PanickingObserver)
         }));
         assert!(panic.is_err());
         assert_control_closed(&mut peer);

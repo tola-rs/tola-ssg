@@ -4,13 +4,15 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 
 use anyhow::{Context, Result, bail, ensure};
-use clap::{CommandFactory, FromArgMatches};
+use clap::{Args, CommandFactory, FromArgMatches, parser::ValueSource};
 use tola_build::report::{REPORT_PATH_ENV, ReportChannel, ReportSources};
 use tola_input::InputMode;
 use tola_module::{Action, CommandAction};
 
 use crate::cancellation::Cancellation;
+use crate::cli::args::{InputArgs, ProcessArgs};
 use crate::cli::output::CommandOutput;
+use crate::cli::usage::{HelpLength, help_flag, observe_help};
 use crate::cli::{Cli, ConfigFileArgs, TypstPackageArgs};
 
 mod argv;
@@ -25,43 +27,104 @@ use help::{
 };
 use init::run_initializer;
 
-struct Invocation {
+pub(in crate::cli) struct ExtensionArgs {
     namespace: String,
-    config: ConfigFileArgs,
-    arguments: Vec<OsString>,
+    pub(in crate::cli) config: ConfigFileArgs,
+    pub(in crate::cli) input: InputArgs,
+    help: Option<HelpLength>,
+    command_args: Vec<OsString>,
 }
 
-impl Invocation {
-    fn parse(mut arguments: Vec<OsString>) -> Result<Self> {
-        ensure!(!arguments.is_empty(), "a module namespace is required");
-        let namespace = arguments
-            .remove(0)
-            .into_string()
-            .map_err(|_| anyhow::anyhow!("module namespaces must be UTF-8"))?;
-        let config = ConfigFileArgs {
-            path: crate::cli::argv::take_config(&mut arguments).map_err(anyhow::Error::msg)?,
-        };
-        Ok(Self {
-            namespace,
+#[derive(Args)]
+struct NamespaceOptions {
+    #[command(flatten)]
+    process: ProcessArgs,
+    #[command(flatten)]
+    input: InputArgs,
+    #[command(flatten)]
+    config: ConfigFileArgs,
+}
+
+fn namespace_options(namespace: &str) -> clap::Command {
+    NamespaceOptions::augment_args(
+        clap::Command::new(namespace.to_owned())
+            .bin_name(format!("tola {namespace}"))
+            .disable_help_subcommand(true),
+    )
+    .about(None)
+    .long_about(None)
+}
+
+impl ExtensionArgs {
+    pub(in crate::cli) fn parse(
+        namespace: &str,
+        arguments: &[OsString],
+        global: &mut ProcessArgs,
+    ) -> Result<Self, clap::Error> {
+        let command = namespace_options(namespace)
+            .color(crate::cli::parse::stream_color(
+                global.color,
+                crate::terminal::color::Stream::Stderr,
+            ))
+            .arg(
+                clap::Arg::new("command_args")
+                    .value_name("COMMAND")
+                    .num_args(1..)
+                    .trailing_var_arg(true)
+                    .value_parser(clap::value_parser!(OsString)),
+            );
+        let mut command = observe_help(command);
+        let mut matches = command.try_get_matches_from_mut(
+            std::iter::once(std::ffi::OsStr::new(namespace))
+                .chain(arguments.iter().map(OsString::as_os_str)),
+        )?;
+        let color_is_explicit = matches.value_source("color") == Some(ValueSource::CommandLine);
+        let NamespaceOptions {
+            process,
+            input,
             config,
-            arguments,
+        } = NamespaceOptions::from_arg_matches(&matches)?;
+        if (global.log_file.is_some() && process.no_log_file)
+            || (global.no_log_file && process.log_file.is_some())
+        {
+            return Err(command.error(
+                clap::error::ErrorKind::ArgumentConflict,
+                "--log-file conflicts with --no-log-file",
+            ));
+        }
+        if color_is_explicit {
+            global.color = process.color;
+        }
+        global.log_file = process.log_file.or(global.log_file.take());
+        global.no_log_file |= process.no_log_file;
+        global.quiet |= process.quiet;
+        global.verbose = global.verbose.saturating_add(process.verbose);
+        Ok(Self {
+            namespace: namespace.to_owned(),
+            config,
+            input,
+            help: help_flag(&matches),
+            command_args: matches
+                .remove_many::<OsString>("command_args")
+                .into_iter()
+                .flatten()
+                .collect(),
         })
     }
 }
 
 pub(in crate::cli) fn run(
-    arguments: Vec<OsString>,
+    args: ExtensionArgs,
     mode: InputMode,
     output: &CommandOutput,
     cancellation: &Cancellation,
 ) -> Result<()> {
-    let invocation = Invocation::parse(arguments)?;
     let resources = crate::cli::config::build_resources_with_fonts(
         mode,
         &crate::cli::CompilerFontArgs::default(),
     )?;
     let loaded = match crate::cli::config::load_optional_config(
-        &invocation.config,
+        &args.config,
         &TypstPackageArgs::default(),
         mode.scope(),
         &crate::config::ConfigOverrides::default(),
@@ -69,7 +132,7 @@ pub(in crate::cli) fn run(
         cancellation,
     ) {
         Ok(Some(loaded)) => loaded,
-        Ok(None) => return Err(unrecognized_subcommand(&invocation.namespace)),
+        Ok(None) => return Err(unrecognized_subcommand(&args.namespace)),
         Err(error) => return Err(error),
     };
     let config = std::sync::Arc::new(loaded.into_config());
@@ -82,9 +145,9 @@ pub(in crate::cli) fn run(
     )?;
     check_namespaces(&modules)?;
     let module = modules
-        .get(&invocation.namespace)
-        .with_context(|| format!("no site module declares `{}`", invocation.namespace))?;
-    if invocation.arguments.is_empty() || is_help(&invocation.arguments) {
+        .get(&args.namespace)
+        .with_context(|| format!("no site module declares `{}`", args.namespace))?;
+    if args.command_args.is_empty() || args.help.is_some() {
         let signatures = command_signatures(
             module,
             module.commands.keys().map(String::as_str),
@@ -96,20 +159,17 @@ pub(in crate::cli) fn run(
             module,
             &signatures,
             output.terminal().stdout_uses_color(),
-            invocation
-                .arguments
-                .first()
-                .is_some_and(|argument| argument == "--help"),
+            args.help == Some(HelpLength::Long),
         ));
     }
-    let name = invocation.arguments[0]
+    let name = args.command_args[0]
         .to_str()
         .context("module command names must be UTF-8")?;
-    let tail = &invocation.arguments[1..];
+    let tail = &args.command_args[1..];
     if name == "init" && module.initializer.is_some() {
         if !is_help(tail)
             && !matches!(
-                config.modules()[&invocation.namespace].source,
+                config.modules()[&args.namespace].source,
                 tola_module::ModuleSource::Local { .. }
             )
         {
@@ -130,7 +190,7 @@ pub(in crate::cli) fn run(
         return Err(error.into());
     };
     let action = declared.action()?;
-    if is_help(tail) {
+    if is_help(tail) && !matches!(&action, CommandAction::Execute(Action::Argv(_))) {
         let color = output.terminal().stdout_uses_color();
         let long = tail[0] == "--help";
         if matches!(&action, CommandAction::Execute(Action::Nu { .. })) {
@@ -205,7 +265,7 @@ pub(in crate::cli) fn run(
                 &cancellation.token(),
             )?;
             let module = modules
-                .get(&invocation.namespace)
+                .get(&args.namespace)
                 .context("module declarations changed; run the command again")?;
             ensure!(
                 module.commands.get(name) == Some(declared),
@@ -271,7 +331,7 @@ fn unrecognized_subcommand(namespace: &str) -> anyhow::Error {
         .into()
 }
 
-pub(super) fn check_namespaces<T>(modules: &BTreeMap<String, T>) -> Result<()> {
+pub(in crate::cli) fn check_namespaces<T>(modules: &BTreeMap<String, T>) -> Result<()> {
     let builtin = Cli::command();
     for command in builtin.get_subcommands() {
         ensure!(

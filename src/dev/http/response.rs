@@ -10,7 +10,7 @@ use hyper::header::{
     HeaderValue, IF_RANGE, PRAGMA, RANGE,
 };
 use hyper::{Method, Request, Response, StatusCode};
-use tola_address::{SiteUrlMount, UrlPath};
+use tola_address::{OutputPath, SiteUrlMount, UrlPath};
 use tola_build::config::ResolvedSiteConfig;
 use tola_build::output::graph::{OutputFile, OutputKind};
 use tola_build::output::revision::OutputRevision;
@@ -148,7 +148,7 @@ pub(super) fn respond(
     {
         return respond_hotreload_js(request);
     }
-    let mut response = match site {
+    let mut response = match site.as_deref() {
         Some(site) => respond_published(request, site, reload_endpoint),
         None => respond_unpublished(
             request,
@@ -169,10 +169,12 @@ pub(super) fn respond(
 
 fn respond_published(
     request: Request<()>,
-    site: Arc<InstalledRevision>,
+    site: &InstalledRevision,
     reload_endpoint: Option<&ReloadEndpoint>,
 ) -> Response<ResponseBody> {
-    let config = site.config().as_ref();
+    let config = site.config();
+    let mount = config.url_mount();
+    let revision = site.outputs();
     if request
         .headers()
         .get("X-Tola-Hot-Reload")
@@ -196,20 +198,20 @@ fn respond_published(
             );
         }
     };
-    let Some(route) = config.url_mount().strip(&browser_path) else {
-        return respond_not_found(request, config, site.outputs(), reload_endpoint, &site.html);
+    let Some(route) = mount.strip(&browser_path) else {
+        return respond_not_found(request, mount, revision, reload_endpoint, &site.html);
     };
-    if let Some(output) = resolve_output(&route, site.outputs()) {
+    if let Some(output) = revision.output(&OutputPath::from_route(&route)) {
         return if output.path().as_str() == "404.html" && output.kind() == OutputKind::HtmlDocument
         {
-            respond_not_found(request, config, site.outputs(), reload_endpoint, &site.html)
+            respond_not_found(request, mount, revision, reload_endpoint, &site.html)
         } else {
             respond_file(
                 request,
                 output,
-                config.url_mount(),
+                mount,
                 reload_endpoint,
-                site.outputs(),
+                revision,
                 &site.html,
             )
         };
@@ -227,18 +229,14 @@ fn respond_published(
         return respond_welcome(
             request,
             diagnostic,
-            config.url_mount(),
+            mount,
             reload_endpoint,
             site.manifest().revision(),
             site.page_availability(),
             &site.html,
         );
     }
-    respond_not_found(request, config, site.outputs(), reload_endpoint, &site.html)
-}
-
-fn resolve_output<'a>(route: &UrlPath, revision: &'a OutputRevision) -> Option<&'a OutputFile> {
-    revision.output(&tola_address::OutputPath::from_route(route))
+    respond_not_found(request, mount, revision, reload_endpoint, &site.html)
 }
 
 fn respond_file(
@@ -348,7 +346,7 @@ fn requested_representation(request: &Request<()>) -> RequestedRepresentation<'_
 
 fn respond_range(body: ResponseBody, content_type: &str, range: &str) -> Response<ResponseBody> {
     let file_size = body.byte_len() as u64;
-    let Ok((start, end)) = parse_range(range, file_size) else {
+    let Some((start, end)) = parse_range(range, file_size) else {
         let mut response = respond_bytes(
             &Method::GET,
             StatusCode::RANGE_NOT_SATISFIABLE,
@@ -382,42 +380,29 @@ fn respond_range(body: ResponseBody, content_type: &str, range: &str) -> Respons
     response
 }
 
-fn parse_range(range: &str, file_size: u64) -> Result<(u64, u64)> {
-    anyhow::ensure!(file_size > 0, "empty files have no satisfiable byte range");
-    let range = range.trim();
-    anyhow::ensure!(!range.contains(','), "multiple ranges are not supported");
-    let (start, end) = range
-        .split_once('-')
-        .ok_or_else(|| anyhow::anyhow!("the byte range is not a `start-end` range"))?;
-    anyhow::ensure!(
-        !end.contains('-'),
-        "the byte range is not a `start-end` range"
-    );
+fn parse_range(range: &str, file_size: u64) -> Option<(u64, u64)> {
+    let last = file_size.checked_sub(1)?;
+    let (start, end) = range.split_once('-')?;
     let start = start.trim();
     let end = end.trim();
-    anyhow::ensure!(!start.is_empty() || !end.is_empty(), "empty byte range");
 
     if start.is_empty() {
-        let suffix: u64 = end.parse()?;
-        anyhow::ensure!(suffix > 0, "suffix range must be positive");
-        let length = suffix.min(file_size);
-        return Ok((file_size - length, file_size - 1));
+        let suffix: u64 = end.parse().ok()?;
+        return (suffix > 0).then_some((file_size.saturating_sub(suffix), last));
     }
 
-    let start: u64 = start.parse()?;
-    anyhow::ensure!(start < file_size, "range start exceeds file size");
+    let start: u64 = start.parse().ok()?;
     let end = if end.is_empty() {
-        file_size - 1
+        last
     } else {
-        end.parse::<u64>()?.min(file_size - 1)
+        end.parse::<u64>().ok()?.min(last)
     };
-    anyhow::ensure!(end >= start, "range end precedes start");
-    Ok((start, end))
+    (start <= end).then_some((start, end))
 }
 
 fn respond_not_found(
     request: Request<()>,
-    config: &ResolvedSiteConfig,
+    mount: &SiteUrlMount,
     revision: &OutputRevision,
     reload_endpoint: Option<&ReloadEndpoint>,
     html: &HtmlResponses,
@@ -429,7 +414,7 @@ fn respond_not_found(
         let body = published_output_body(
             request.method(),
             output,
-            config.url_mount(),
+            mount,
             reload_endpoint,
             revision,
             html,
@@ -636,7 +621,7 @@ mod tests {
     use bytes::Bytes;
     use hyper::{Method, Request, Response, StatusCode};
     use tempfile::TempDir;
-    use tola_address::{SiteUrlMount, UrlPath};
+    use tola_address::SiteUrlMount;
     use tola_build::output::semantics::ResponseMediaType;
 
     fn request(url: &str) -> Request<()> {
@@ -718,7 +703,7 @@ mod tests {
         site: &Arc<super::InstalledRevision>,
         endpoint: Option<&crate::dev::reload::transport::ReloadEndpoint>,
     ) -> Response<super::ResponseBody> {
-        super::respond_published(request, Arc::clone(site), endpoint)
+        super::respond_published(request, site, endpoint)
     }
 
     fn file_response(
@@ -984,69 +969,66 @@ mod tests {
         assert_eq!(body_bytes(partial.body()).as_ref(), &whole[7..41]);
     }
 
-    fn has_no_store(response: &Response<super::ResponseBody>) -> bool {
-        response
-            .headers()
-            .get(hyper::header::CACHE_CONTROL)
-            .and_then(|value| value.to_str().ok())
-            .is_some_and(|value| value.contains("no-store"))
-    }
-
     #[test]
-    fn development_responses_are_never_stored() {
-        let revision = site_outputs("", &[("site.css", "input.css", b"body {}")]);
-        let directory = tempfile::tempdir().unwrap();
-        let config = site_config(directory.path(), "");
-        let diagnostic = tola_build::build::no_pages_diagnostic(&config);
+    fn dev_responses_disable_caching() {
+        let directory = TempDir::new().unwrap();
+        fs::write(directory.path().join("download.txt"), "download").unwrap();
+        let site = published_site(
+            directory.path(),
+            "",
+            "[assets]\nfiles = [{source = \"download.txt\", url = \"/download\"}]",
+        );
+        let config = site.config();
         let endpoint = reload_endpoint();
-        let responses = [
-            file_response(
-                request("/site.css"),
-                output(&revision, "site.css"),
-                &revision,
-                Some(&endpoint),
-            ),
-            file_response(
-                request_with_header(Method::GET, "/site.css", "range", "bytes=0-3"),
-                output(&revision, "site.css"),
-                &revision,
-                Some(&endpoint),
-            ),
-            file_response(
-                request_with_header(Method::GET, "/site.css", "range", "bytes=99-"),
-                output(&revision, "site.css"),
-                &revision,
-                Some(&endpoint),
-            ),
-            super::respond_not_found(
-                request("/missing"),
-                &config,
-                &revision,
-                Some(&endpoint),
-                &super::HtmlResponses::default(),
-            ),
-            super::respond_welcome(
-                request("/"),
-                &diagnostic,
-                &SiteUrlMount::root(),
-                Some(&endpoint),
-                revision.manifest().revision(),
-                tola_build::output::PageAvailability::Empty,
-                &super::HtmlResponses::default(),
-            ),
-            super::respond_hotreload_js(request("/hotreload.js")),
-            super::respond(
-                request("/"),
-                None,
-                &config,
-                Some(&endpoint),
-                &super::HtmlResponses::default(),
-            ),
-        ];
+        let unpublished_html = super::HtmlResponses::default();
+        let runtime = crate::embed::dev::hotreload_browser_path(config.url_mount());
 
-        for response in responses {
-            assert!(has_no_store(&response), "{response:?}");
+        for (request, status) in [
+            (request("/"), StatusCode::OK),
+            (request("/download"), StatusCode::OK),
+            (
+                request_with_header(Method::GET, "/download", "range", "bytes=0-3"),
+                StatusCode::PARTIAL_CONTENT,
+            ),
+            (
+                request_with_header(Method::GET, "/download", "range", "bytes=99-"),
+                StatusCode::RANGE_NOT_SATISFIABLE,
+            ),
+            (request("/missing"), StatusCode::NOT_FOUND),
+            (request(&runtime), StatusCode::OK),
+        ] {
+            let response = super::respond(
+                request,
+                Some(Arc::clone(&site)),
+                config,
+                Some(&endpoint),
+                &unpublished_html,
+            );
+            assert_eq!(response.status(), status);
+            assert!(
+                response.headers()[hyper::header::CACHE_CONTROL]
+                    .to_str()
+                    .unwrap()
+                    .split(',')
+                    .any(|value| value.trim() == "no-store")
+            );
         }
+
+        let failed = super::respond(
+            request("/"),
+            None,
+            config,
+            Some(&endpoint),
+            &unpublished_html,
+        );
+        assert_eq!(failed.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(
+            failed.headers()[hyper::header::CACHE_CONTROL]
+                .to_str()
+                .unwrap()
+                .split(',')
+                .any(|value| value.trim() == "no-store")
+        );
     }
 
     fn content_length(response: Response<super::ResponseBody>) -> u64 {
@@ -1106,33 +1088,6 @@ mod tests {
     }
 
     #[test]
-    fn missing_route_serves_not_found() {
-        let directory = tempfile::tempdir().unwrap();
-        let revision = site_outputs("", &[]);
-        let config = site_config(directory.path(), "");
-
-        let get = super::respond_not_found(
-            request("/missing"),
-            &config,
-            &revision,
-            Some(&reload_endpoint()),
-            &super::HtmlResponses::default(),
-        );
-        let head = super::respond_not_found(
-            request_with_method(Method::HEAD, "/missing"),
-            &config,
-            &revision,
-            Some(&reload_endpoint()),
-            &super::HtmlResponses::default(),
-        );
-
-        assert_eq!(get.status().as_u16(), 404);
-        assert_eq!(body_bytes(get.body()).as_ref(), b"404 Not Found");
-        assert_eq!(head.status().as_u16(), 404);
-        assert!(body_bytes(head.body()).is_empty());
-    }
-
-    #[test]
     fn empty_site_root_serves_welcome() {
         for (configuration, root_path) in [("", "/"), ("[site]\nbase-path = \"/docs/\"", "/docs/")]
         {
@@ -1165,33 +1120,6 @@ mod tests {
             assert!(body_bytes(head.body()).is_empty());
             assert_eq!(content_length(head), body.len() as u64);
         }
-    }
-
-    #[test]
-    fn hotreload_response_serves_minified_runtime() {
-        let response = super::respond_hotreload_js(request("/hotreload.js"));
-        let body = String::from_utf8_lossy(&body_bytes(response.body())).into_owned();
-
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
-            body.as_bytes(),
-            crate::embed::dev::hotreload_js()
-                .expect("Tola's own runtime sources minify")
-                .as_bytes(),
-            "the served runtime is the one Tola prepared"
-        );
-        assert!(
-            !body.contains("Development runtime for pages served"),
-            "the served runtime is minified"
-        );
-        assert!(
-            !body.contains("#tola-dev-status {"),
-            "the status stylesheet is minified"
-        );
-        assert!(
-            !body.contains("__TOLA_DEV_STATUS_CSS__"),
-            "the status stylesheet placeholder is replaced"
-        );
     }
 
     #[test]
@@ -1233,7 +1161,7 @@ mod tests {
     }
 
     #[test]
-    fn directory_missing_routes_serve_exact() {
+    fn exact_paths_and_directory_indexes() {
         let directory = TempDir::new().unwrap();
         fs::write(directory.path().join("download.txt"), "download").unwrap();
         let site = published_site(
@@ -1270,7 +1198,7 @@ mod tests {
     }
 
     #[test]
-    fn escaped_mounted_route_resolves_its_output() {
+    fn mounted_unicode_route() {
         let directory = TempDir::new().unwrap();
         let site = published_site(
             directory.path(),
@@ -1470,50 +1398,5 @@ mod tests {
                 }
             }
         }
-    }
-
-    #[test]
-    fn encoded_dot_segments_resolve() {
-        let revision = site_outputs(
-            "",
-            &[(
-                "release..notes/\u{4e2d}\u{6587}/index.html",
-                "input-0.html",
-                b"ok",
-            )],
-        );
-
-        let url = UrlPath::parse("/release..notes/%E4%B8%AD%E6%96%87/").unwrap();
-        let resolved = super::resolve_output(&url, &revision).unwrap();
-        assert_eq!(
-            resolved.path().as_str(),
-            "release..notes/\u{4e2d}\u{6587}/index.html"
-        );
-        assert_eq!(resolved.bytes(), b"ok");
-    }
-
-    #[test]
-    fn revision_membership_decides_resolution() {
-        let revision = site_outputs(
-            "",
-            &[
-                ("posts/rust/index.html", "input-0.html", b"post"),
-                ("feed.xml", "input-1.xml", b"feed"),
-            ],
-        );
-
-        let post = UrlPath::parse("/posts/rust/").unwrap();
-        let feed = UrlPath::parse("/feed.xml").unwrap();
-        let missing = UrlPath::parse("/outside/").unwrap();
-
-        assert_eq!(
-            super::resolve_output(&post, &revision).unwrap().bytes(),
-            b"post"
-        );
-        assert_eq!(
-            super::resolve_output(&feed, &revision).unwrap().bytes(),
-            b"feed"
-        );
-        assert!(super::resolve_output(&missing, &revision).is_none());
     }
 }

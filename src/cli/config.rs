@@ -123,9 +123,12 @@ pub(super) fn load_optional_config(
         Ok(loaded) => Ok(Some(loaded)),
         Err(error)
             if config_file.path.is_none()
-                && error
-                    .chain()
-                    .any(|cause| cause.is::<tola_build::config::loading::ConfigNotFound>()) =>
+                && error.chain().any(|cause| {
+                    matches!(
+                        cause.downcast_ref::<tola_build::config::ConfigSourceError>(),
+                        Some(tola_build::config::ConfigSourceError::NotFound { .. })
+                    )
+                }) =>
         {
             Ok(None)
         }
@@ -223,7 +226,9 @@ pub(super) fn start_error_log(
 }
 
 pub(crate) fn source_root(config_file: &ConfigFileArgs) -> Result<std::path::PathBuf> {
-    tola_build::config::loading::config_site_root(config_file.path.as_deref())
+    Ok(tola_build::config::loading::config_site_root(
+        config_file.path.as_deref(),
+    )?)
 }
 
 #[cfg(test)]

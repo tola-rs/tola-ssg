@@ -215,6 +215,9 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
 
     /// Apply what the client answered to a request this connection sent.
     pub(super) fn response(&mut self, response: Response) -> Result<()> {
+        if self.watchers_registered(&response)? {
+            return Ok(());
+        }
         if self.semantic_tokens_refreshed(&response)? {
             return Ok(());
         }

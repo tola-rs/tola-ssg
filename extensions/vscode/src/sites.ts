@@ -610,7 +610,6 @@ export class Sites {
   private options(
     selected: ServedWorkspace,
     site: () => WorkspaceClient,
-    sourceWatchers: vscode.FileSystemWatcher[],
   ): LanguageClientOptions {
     return {
       workspaceFolder: selected.folder,
@@ -633,7 +632,7 @@ export class Sites {
       diagnosticCollectionName: `tola:${selected.folder.uri.toString()}`,
       outputChannel: this.output,
       initializationFailedHandler: () => false,
-      synchronize: { fileEvents: sourceWatchers, configurationSection: 'tola' },
+      synchronize: { configurationSection: 'tola' },
       errorHandler: {
         error: () => ({ action: ErrorAction.Shutdown, handled: true }),
         closed: () => ({
@@ -898,32 +897,13 @@ export class Sites {
         }
       })
       const server: ServerOptions = () => Promise.resolve(service.start(cancellation.token))
-      const sourceWatchers: vscode.FileSystemWatcher[] = []
-      for (const root of selected.inputRoots) {
-        const watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(root, '**/*'))
-        sourceWatchers.push(watcher)
-        resources.push(watcher)
-      }
-      if (
-        selected.kind === 'site' &&
-        !selected.inputRoots.some((root) => containsFile(root, selected.configurationFile))
-      ) {
-        const watcher = vscode.workspace.createFileSystemWatcher(
-          new vscode.RelativePattern(
-            path.dirname(selected.configurationFile),
-            path.basename(selected.configurationFile),
-          ),
-        )
-        sourceWatchers.push(watcher)
-        resources.push(watcher)
-      }
       // The client id is the section its own `trace.server` setting is read from, so it stays
       // stable rather than naming the folder.
       const client = new TolaClient(
         'tola',
         `Tola (${selected.folder.name})`,
         server,
-        this.options(selected, () => site!, sourceWatchers),
+        this.options(selected, () => site!),
       )
       // Pull reports live in the library's private collection; push keeps this client's public
       // diagnostic collection authoritative for both Problems and Tola's status counts.

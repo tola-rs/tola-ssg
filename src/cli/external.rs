@@ -7,16 +7,9 @@ use tola_subprocess::{Command, Stop};
 
 use crate::cancellation::Cancellation;
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("command exited with {0}")]
 pub(super) struct CommandExit(pub ExitStatus);
-
-impl std::fmt::Display for CommandExit {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "command exited with {}", self.0)
-    }
-}
-
-impl std::error::Error for CommandExit {}
 
 /// The executable this process runs, which child commands re-invoke.
 pub(super) fn current_executable() -> Result<std::path::PathBuf> {

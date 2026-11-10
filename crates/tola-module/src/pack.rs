@@ -43,7 +43,7 @@ pub fn pack(
         !FilesystemSourceIdentity::from_path(&root.join(MANIFEST)).intersects_path(&target)
             && !target
                 .strip_prefix(root)
-                .is_ok_and(|path| selection::overlaps_target(&selection, path)),
+                .is_ok_and(|path| selection.could_match_below(path)),
         "pack target `{shown}` overlaps the selected source"
     );
 
@@ -88,8 +88,8 @@ pub fn pack(
     }
     cancellation.ensure_active()?;
     ensure!(
-        FilesystemSourceIdentity::from_path(&cwd.join(source)) == loaded.evidence.root,
-        "the module source directory changed while packing"
+        loaded.evidence.is_current(cancellation)?,
+        "`tola-module.toml` or its source directory changed during before-pack hooks"
     );
     ensure!(
         target_path(destination, &shown)? == target,
@@ -293,5 +293,20 @@ mod tests {
         assert!(pack(&source, &target, &cancellation, |_, _, _, _| Ok(())).is_err());
         assert_eq!(tola_input::tree_sha256(&target).unwrap(), digest);
         check::check(&target).unwrap();
+    }
+
+    #[test]
+    fn selected_target_is_refused_before_author_hooks() {
+        let source = tempfile::tempdir().unwrap();
+        fs::write(source.path().join(MANIFEST), "[pack]\ninclude = ['**/*.css']\n[[hooks.before-pack]]\nname = 'compile'\nargv = ['compile']\n").unwrap();
+        let target = source.path().join("release");
+        let cancellation = BundleCancellation::default();
+        assert!(
+            pack(source.path(), &target, &cancellation, |_, _, _, _| {
+                panic!("an overlapping target must be refused before hooks run")
+            })
+            .is_err()
+        );
+        assert!(!target.exists());
     }
 }

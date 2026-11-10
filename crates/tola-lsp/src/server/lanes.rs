@@ -10,6 +10,11 @@ use tola_build::cancellation::BuildCancellation;
 use super::events::{Event, send_event};
 use crate::compiler::{AnalysisRequest, SourceCompilation, SourceFailure, SourceJob};
 
+pub(super) enum AnalysisJob {
+    Request(AnalysisRequest),
+    ReleaseIdle,
+}
+
 /// The panic's own message, for the log.
 fn panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
     payload
@@ -62,8 +67,11 @@ impl JobOwner {
     }
 
     /// The owner of one analysis-lane job.
-    pub(super) fn of_analysis(request: &AnalysisRequest) -> Self {
-        Self::Request(request.id.clone(), request.serial)
+    pub(super) fn of_analysis(job: &AnalysisJob) -> Self {
+        match job {
+            AnalysisJob::Request(request) => Self::Request(request.id.clone(), request.serial),
+            AnalysisJob::ReleaseIdle => Self::Unclaimed,
+        }
     }
 
     /// The completion one job answers with when its work panicked.
@@ -120,13 +128,17 @@ impl LaneJob for SourceJob {
     }
 }
 
-impl LaneJob for AnalysisRequest {
+impl LaneJob for AnalysisJob {
     fn trace(&self) -> JobTrace {
+        let (kind, serial) = match self {
+            Self::Request(request) => (request.kind(), Some(request.serial)),
+            Self::ReleaseIdle => ("release", None),
+        };
         JobTrace {
             lane: "analysis",
-            kind: AnalysisRequest::kind(self),
+            kind,
             checked_revision: None,
-            serial: Some(self.serial),
+            serial,
         }
     }
 }
@@ -191,7 +203,7 @@ fn outcome(completed: &SourceCompilation) -> &'static str {
         None => "completed",
         Some(SourceFailure::Cancelled) => "cancelled",
         Some(SourceFailure::Panicked) => "panicked",
-        Some(SourceFailure::Failed(_)) => "failed",
+        Some(SourceFailure::Failed(_) | SourceFailure::InvalidName(_)) => "failed",
     }
 }
 

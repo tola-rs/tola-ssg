@@ -156,7 +156,6 @@ mod tests {
         let built = crate::BuildSession::new()
             .prepare(std::sync::Arc::new(config), request)
             .run()
-            .map_err(|failure| failure.into_error())
             .unwrap();
 
         let rows = built.report().unwrap().outputs.as_ref().unwrap();

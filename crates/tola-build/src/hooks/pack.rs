@@ -9,7 +9,7 @@ use tola_subprocess::Command;
 use crate::cancellation::BuildCancellation;
 use crate::report::{REPORT_PATH_ENV, ReportChannel, ReportSources};
 
-use super::command::{finish_report, run_observed};
+use super::command::{clear_tola_environment, finish_report, run_observed};
 
 /// Run a module's external before-pack action in the author source directory.
 pub fn run_before_pack(
@@ -43,22 +43,8 @@ pub fn run_before_pack(
         format!("hook:before-pack:{name}"),
         ReportSources::new(),
     )?;
-    let mut command = Command::from_args(arguments).cwd(source);
-    for (key, _) in std::env::vars_os() {
-        let name = key.to_string_lossy();
-        if name.starts_with("TOLA_PROJECT_")
-            || name.starts_with("TOLA_MODULE_")
-            || name.starts_with("TOLA_HOOK_")
-            || name.starts_with("TOLA_INIT_")
-        {
-            command = command.env_remove(key);
-        }
-    }
-    let command = command
-        .env_remove("TOLA_CONFIG_PATH")
-        .env_remove("TOLA_CONTENT_ROOT")
-        .env_remove("TOLA_BUILD_MODE")
-        .env_remove("TOLA_INPUT_SCOPE")
+    let command = clear_tola_environment(Command::from_args(arguments))
+        .cwd(source)
         .env("TOLA_EXECUTABLE", executable)
         .env("TOLA_HOOK_STAGE", "before-pack")
         .env("TOLA_HOOK_NAME", name)

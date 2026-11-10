@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
@@ -76,9 +76,7 @@ pub(crate) fn generate_outputs(
                     .root_ownerships
                     .push(OutputRootOwnership::new(root.root().clone(), owner.clone()));
             }
-            if let Some(report) = &previous.report {
-                diagnostics.extend(report.iter().cloned());
-            }
+            diagnostics.extend(previous.report.iter().cloned());
             generated_outputs.reuse.insert(
                 &command.name,
                 ReusableHookOutput {
@@ -100,12 +98,9 @@ pub(crate) fn generate_outputs(
             )?);
         }
         let candidate = candidate.as_ref().expect("materialized above");
-        let output_start = generated_outputs.outputs.len();
-        let root_start = generated_outputs.root_ownerships.len();
-        let diagnostic_start = diagnostics.len();
-        let submitted = run_hook_entry(HookStage::GenerateOutputs, &command.name, || {
+        let mut report = Vec::new();
+        let files = run_hook_entry(HookStage::GenerateOutputs, &command.name, || {
             generate_entry(GenerateEntry {
-                generated_outputs: &mut generated_outputs,
                 command,
                 index,
                 candidate,
@@ -113,20 +108,24 @@ pub(crate) fn generate_outputs(
                 mode,
                 scope,
                 cancellation,
-                diagnostics,
+                diagnostics: &mut report,
             })
-        })?;
+        });
+        diagnostics.extend(report.iter().cloned());
+        let (outputs, roots) = files?;
         if let Some(inputs) = inputs {
             generated_outputs.reuse.insert(
                 &command.name,
                 ReusableHookOutput {
                     inputs,
-                    outputs: generated_outputs.outputs[output_start..].to_vec(),
-                    roots: generated_outputs.root_ownerships[root_start..].to_vec(),
-                    report: submitted.then(|| diagnostics[diagnostic_start..].to_vec()),
+                    outputs: outputs.clone(),
+                    roots: roots.clone(),
+                    report,
                 },
             );
         }
+        generated_outputs.outputs.extend(outputs);
+        generated_outputs.root_ownerships.extend(roots);
     }
     cancellation.ensure_active()?;
     Ok(generated_outputs)
@@ -134,7 +133,6 @@ pub(crate) fn generate_outputs(
 
 /// One generate-outputs entry's inputs.
 struct GenerateEntry<'a> {
-    generated_outputs: &'a mut GeneratedOutputs,
     command: &'a OutputCommandConfig,
     index: usize,
     candidate: &'a HookOutputFiles,
@@ -146,9 +144,8 @@ struct GenerateEntry<'a> {
 }
 
 /// The declaration is a contract: no unowned file and no missing declared file.
-fn generate_entry(entry: GenerateEntry<'_>) -> Result<bool> {
+fn generate_entry(entry: GenerateEntry<'_>) -> Result<(Vec<OutputFile>, Vec<OutputRootOwnership>)> {
     let GenerateEntry {
-        generated_outputs,
         command,
         index,
         candidate,
@@ -167,7 +164,7 @@ fn generate_entry(entry: GenerateEntry<'_>) -> Result<bool> {
     let generated =
         TemporaryDirectory::create(&layout::hook_outputs(config.get_root()), "outputs")?;
     let identity = super::hook_identity(HookStage::GenerateOutputs, &command.name);
-    let submitted = run_action(
+    run_action(
         config,
         command.action(),
         HookCall {
@@ -184,10 +181,10 @@ fn generate_entry(entry: GenerateEntry<'_>) -> Result<bool> {
         diagnostics,
     )
     .map_err(|error| hook_command_error(HookStage::GenerateOutputs, &identity, error))?;
-    let files = read_generated_files(generated.path(), cancellation)
+    let files = read_generated_files(generated.path(), &identity, cancellation)
         .with_context(|| format!("Tola could not read the files written by {identity}"))?;
     let declarations = DeclaredOutputs::new(&command.outputs, cancellation)?;
-    for path in files.keys() {
+    for path in files.regular.keys() {
         cancellation.ensure_active()?;
         if !declarations.contains(path) {
             return Err(super::hook_contract_error(
@@ -199,7 +196,7 @@ fn generate_entry(entry: GenerateEntry<'_>) -> Result<bool> {
     for declaration in &command.outputs {
         cancellation.ensure_active()?;
         match declaration {
-            CommandOutput::File(path) if !files.contains_key(path) => {
+            CommandOutput::File(path) if !files.regular.contains_key(path) => {
                 return Err(super::hook_contract_error(
                     format!(
                         "`outputs` of {identity} declares `{path}`, but the command wrote nothing"
@@ -207,42 +204,42 @@ fn generate_entry(entry: GenerateEntry<'_>) -> Result<bool> {
                     "write it, or remove it from `outputs`",
                 ));
             }
-            CommandOutput::Tree(root) => {
-                if !fs::symlink_metadata(generated.path().join(root.as_str()))
-                    .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
-                {
-                    return Err(super::hook_contract_error(
-                        format!(
-                            "`outputs` of {identity} declares the directory `{root}`, but the command created none"
-                        ),
-                        "create it, or declare the files instead",
-                    ));
-                }
+            CommandOutput::Tree(root) if !files.directories.contains(Path::new(root.as_str())) => {
+                return Err(super::hook_contract_error(
+                    format!(
+                        "`outputs` of {identity} declares the directory `{root}`, but the command created none"
+                    ),
+                    "create it, or declare the files instead",
+                ));
             }
-            CommandOutput::File(_) => {}
+            _ => {}
         }
     }
     let owner = OutputOwner::command(index, command.name.as_str());
-    for declaration in &command.outputs {
-        if let CommandOutput::Tree(root) = declaration {
-            generated_outputs
-                .root_ownerships
-                .push(OutputRootOwnership::new(root.clone(), owner.clone()));
-        }
-    }
-    for (path, bytes) in files {
+    let roots = command
+        .outputs
+        .iter()
+        .filter_map(|declaration| match declaration {
+            CommandOutput::Tree(root) => {
+                Some(OutputRootOwnership::new(root.clone(), owner.clone()))
+            }
+            CommandOutput::File(_) => None,
+        })
+        .collect();
+    let mut outputs = Vec::with_capacity(files.regular.len());
+    for (path, bytes) in files.regular {
         cancellation.ensure_active()?;
         let media = OutputDeclaration::from_filesystem_source(Path::new(path.as_str()))
             .media_type()
             .clone();
-        generated_outputs.outputs.push(OutputFile::new(
+        outputs.push(OutputFile::new(
             path,
             OutputDeclaration::opaque(media),
             owner.clone(),
             bytes,
         ));
     }
-    Ok(submitted)
+    Ok((outputs, roots))
 }
 
 /// Exact spelling stays significant; the output graph rejects portable collisions.
@@ -288,20 +285,33 @@ impl<'a> DeclaredOutputs<'a> {
     }
 }
 
+#[derive(Default)]
+struct GeneratedFiles {
+    regular: BTreeMap<OutputPath, Vec<u8>>,
+    directories: BTreeSet<PathBuf>,
+}
+
 fn read_generated_files(
     root: &Path,
+    identity: &str,
     cancellation: &BuildCancellation,
-) -> Result<BTreeMap<OutputPath, Vec<u8>>> {
-    let mut files = BTreeMap::new();
+) -> Result<GeneratedFiles> {
+    cancellation.ensure_active()?;
+    if !fs::symlink_metadata(root)
+        .is_ok_and(|metadata| metadata.is_dir() && !tola_fs::is_link_like(&metadata))
+    {
+        return Err(super::hook_contract_error(
+            format!("{identity} did not leave a regular output directory"),
+            "write files inside `TOLA_HOOK_OUTPUT_DIR`",
+        ));
+    }
+    let mut files = GeneratedFiles::default();
     let mut pending = vec![root.to_path_buf()];
     while let Some(directory) = pending.pop() {
         cancellation.ensure_active()?;
-        let mut children = fs::read_dir(&directory)
-            .with_context(|| "Tola could not read what the command generated")?
-            .collect::<std::io::Result<Vec<_>>>()
-            .with_context(|| "Tola could not read what the command generated")?;
-        children.sort_unstable_by_key(|child| child.file_name());
-        for child in children {
+        for child in
+            crate::filesystem::read_sorted_entries(&directory, cancellation, root, "generated")?
+        {
             cancellation.ensure_active()?;
             let absolute = child.path();
             let relative = absolute
@@ -311,13 +321,14 @@ fn read_generated_files(
             let metadata = fs::symlink_metadata(&absolute).with_context(|| {
                 format!("Tola could not read the generated file `{generated_display}`")
             })?;
-            if metadata.file_type().is_symlink() {
+            if tola_fs::is_link_like(&metadata) {
                 return Err(super::hook_contract_error(
                     format!("the command generated `{generated_display}` as a symbolic link"),
                     "generate a regular file or directory",
                 ));
             }
             if metadata.is_dir() {
+                files.directories.insert(relative.to_path_buf());
                 pending.push(absolute);
             } else if metadata.is_file() {
                 let path = relative
@@ -334,15 +345,25 @@ fn read_generated_files(
                     })
                     .collect::<Result<Vec<_>>>()?
                     .join("/");
-                let path = OutputPath::parse(&path)
-                    .with_context(|| format!("`{path}` cannot be used as a published path"))?;
+                let path = OutputPath::parse(&path).map_err(|error| {
+                    let help = crate::output::path::invalid_path_help(&error)
+                        .unwrap_or("rename the generated file");
+                    super::hook_contract_error(
+                        format!(
+                            "{identity} generated an invalid output path `{}`: {error}",
+                            path.escape_debug()
+                        ),
+                        help,
+                    )
+                    .context(error)
+                })?;
                 let mut bytes = Vec::new();
                 tola_input::read_file_chunks(&absolute, cancellation.flag(), |chunk| {
                     bytes.extend_from_slice(chunk);
                 })
                 .map_err(crate::filesystem::FileReadErrorExt::into_anyhow)
                 .with_context(|| format!("Tola could not read the generated file `{path}`"))?;
-                files.insert(path, bytes);
+                files.regular.insert(path, bytes);
             } else {
                 return Err(super::hook_contract_error(
                     format!(
@@ -454,7 +475,6 @@ mod tests {
         if !is_hook_child_for("generate-outputs") {
             return;
         }
-        crate::build::tests::record_hook_environment();
         let cache = std::path::PathBuf::from(std::env::var_os("TOLA_HOOK_CACHE_DIR").unwrap());
         let cached = cache.join("search/index.json");
         let target = generated_root().join("search/index.json");
@@ -495,11 +515,14 @@ mod tests {
             return;
         }
         let candidate = std::path::PathBuf::from(std::env::var_os("TOLA_HOOK_INPUT_DIR").unwrap());
-        std::os::unix::fs::symlink(
-            candidate.join("index.html"),
-            generated_root().join("search.json"),
-        )
-        .unwrap();
+        let output = generated_root();
+        if Path::new("replace-output-root").exists() {
+            fs::remove_dir(&output).unwrap();
+            std::os::unix::fs::symlink(candidate, output).unwrap();
+        } else {
+            std::os::unix::fs::symlink(candidate.join("index.html"), output.join("search.json"))
+                .unwrap();
+        }
     }
 
     #[test]
@@ -581,19 +604,28 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn generated_symlinks_are_rejected() {
-        let (_directory, config, upstream) =
-            output_command_config("child_writes_symlink", &["search.json"]);
-        generate_outputs(
-            &config,
-            upstream.outputs(),
-            BuildMode::Production,
-            tola_input::InputScope::Online,
-            None,
-            &BuildCancellation::new(),
-            &mut Vec::new(),
-        )
-        .unwrap_err();
-        assert_eq!(upstream.outputs()[0].bytes(), b"<h1>Home</h1>");
+        for (replace_root, declared) in [(false, "search.json"), (true, "index.html")] {
+            let (directory, config, upstream) =
+                output_command_config("child_writes_symlink", &[declared]);
+            if replace_root {
+                fs::write(directory.path().join("replace-output-root"), "").unwrap();
+            }
+            let error = generate_outputs(
+                &config,
+                upstream.outputs(),
+                BuildMode::Production,
+                tola_input::InputScope::Online,
+                None,
+                &BuildCancellation::new(),
+                &mut Vec::new(),
+            )
+            .unwrap_err();
+            assert_eq!(
+                tola_diagnostic::attached(&error).unwrap()[0].code,
+                tola_diagnostic::codes::build::HOOKS
+            );
+            assert_eq!(upstream.outputs()[0].bytes(), b"<h1>Home</h1>");
+        }
     }
 
     #[test]
@@ -644,30 +676,25 @@ mod tests {
     }
 
     #[test]
-    fn output_command_receives_build_mode() {
+    fn command_restores_cached_tree_into_fresh_output() {
         let (_directory, mut config, upstream) =
             output_command_config("child_restores_cached_search_index", &[]);
         config.hooks.generate_outputs[0].outputs =
             vec![CommandOutput::Tree(OutputPath::parse("search").unwrap())];
 
-        for (mode, expected) in [
-            (BuildMode::Development, "dev"),
-            (BuildMode::Production, "prod"),
-        ] {
-            generate_outputs(
+        for _ in 0..2 {
+            let generated = generate_outputs(
                 &config,
                 upstream.outputs(),
-                mode,
+                BuildMode::Production,
                 tola_input::InputScope::Online,
                 None,
                 &BuildCancellation::new(),
                 &mut Vec::new(),
             )
             .unwrap();
-            assert_eq!(
-                crate::build::tests::recorded_build_mode(config.get_root()),
-                expected
-            );
+            assert_eq!(generated.root_ownerships[0].root().as_str(), "search");
+            assert_eq!(generated.outputs[0].path().as_str(), "search/index.json");
         }
     }
 

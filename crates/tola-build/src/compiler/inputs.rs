@@ -7,8 +7,8 @@ use tola_typst::sort_package_checks;
 /// Attempt inputs retained for watcher recovery after failure.
 #[derive(Default)]
 pub(crate) struct BuildInputs {
-    file_reads: FileReads,
-    package_checks: PackageChecks,
+    disk_reads: BTreeSet<PathBuf>,
+    package_checks: HashSet<tola_typst::PackageCheck>,
     package_reads: Vec<tola_typst::PackageRead>,
     successful_reads: HashSet<tola_typst::FileRead>,
 }
@@ -16,15 +16,14 @@ pub(crate) struct BuildInputs {
 impl BuildInputs {
     pub(crate) fn record_accessed(&mut self, accessed: &tola_typst::AccessedDeps) {
         self.successful_reads.extend(accessed.reads.iter().cloned());
-        self.file_reads.record(
+        self.record_disk_reads(
             accessed
                 .disk_reads
                 .iter()
                 .cloned()
                 .map(tola_typst::DiskReadPath::into_path),
         );
-        self.package_checks
-            .record(accessed.package_checks.iter().cloned());
+        self.record_package_checks(accessed.package_checks.iter().cloned());
         self.package_reads.extend(accessed.package_reads());
     }
 
@@ -37,57 +36,20 @@ impl BuildInputs {
         self.successful_reads.iter()
     }
 
-    pub(crate) fn file_reads_mut(&mut self) -> &mut FileReads {
-        &mut self.file_reads
+    pub(super) fn record_disk_reads(&mut self, reads: impl IntoIterator<Item = PathBuf>) {
+        self.disk_reads.extend(reads);
     }
 
     pub(crate) fn record_package_checks(
         &mut self,
         checks: impl IntoIterator<Item = tola_typst::PackageCheck>,
     ) {
-        self.package_checks.record(checks);
+        self.package_checks.extend(checks);
     }
 
     pub(crate) fn into_parts(self) -> (Vec<PathBuf>, Vec<tola_typst::PackageCheck>) {
-        let Self {
-            file_reads,
-            package_checks,
-            ..
-        } = self;
-        (file_reads.into_paths(), package_checks.into_checks())
-    }
-}
-
-/// Physical file reads relevant to a failed build attempt.
-#[derive(Default)]
-pub(crate) struct FileReads {
-    reads: BTreeSet<PathBuf>,
-}
-
-impl FileReads {
-    pub(super) fn record(&mut self, reads: impl IntoIterator<Item = PathBuf>) {
-        self.reads.extend(reads);
-    }
-
-    fn into_paths(self) -> Vec<PathBuf> {
-        self.reads.into_iter().collect()
-    }
-}
-
-/// Package-location checks observed by one build attempt.
-#[derive(Default)]
-pub(crate) struct PackageChecks {
-    checks: HashSet<tola_typst::PackageCheck>,
-}
-
-impl PackageChecks {
-    fn record(&mut self, checks: impl IntoIterator<Item = tola_typst::PackageCheck>) {
-        self.checks.extend(checks);
-    }
-
-    fn into_checks(self) -> Vec<tola_typst::PackageCheck> {
-        let mut checks = self.checks.into_iter().collect::<Vec<_>>();
+        let mut checks = self.package_checks.into_iter().collect::<Vec<_>>();
         sort_package_checks(&mut checks);
-        checks
+        (self.disk_reads.into_iter().collect(), checks)
     }
 }

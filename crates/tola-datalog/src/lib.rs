@@ -5,8 +5,10 @@
 //! One fixed arity per relation name. Variables are local to one rule or query.
 //! Every variable in a rule head, negative atom, or query projection must be
 //! bound by a positive atom of the same rule or query; positive atoms are
-//! evaluated in their given order, negative atoms once their dependencies reach
-//! a fixed point. Answers are sorted by `Ord` and duplicate-free.
+//! evaluated in their given order, then negative atoms in their given order.
+//! A negative atom reads only relations whose answers are complete. Relations
+//! without facts or deriving rules are empty. Answers are sorted by `Ord` and
+//! duplicate-free.
 //!
 //! ```
 //! use tola_datalog::{Atom, Database, Literal, Query, Relation, Term};
@@ -49,27 +51,59 @@ pub enum Term<C> {
     Constant(C),
 }
 /// A relation applied to one term per column.
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub struct Atom<C> {
     /// The relation this atom reads.
     pub relation: Relation,
     /// One term per column, in the relation's column order.
     pub terms: Vec<Term<C>>,
 }
+impl<C> Atom<C> {
+    /// Hash the atom using the caller's encoding for constants.
+    pub fn hash_with<H: Hasher>(&self, hasher: &mut H, hash_constant: impl Fn(&C, &mut H)) {
+        self.relation.hash(hasher);
+        self.terms.len().hash(hasher);
+        for term in &self.terms {
+            std::mem::discriminant(term).hash(hasher);
+            match term {
+                Term::Variable(name) => name.hash(hasher),
+                Term::Constant(value) => hash_constant(value, hasher),
+            }
+        }
+    }
+}
+impl<C: Hash> Hash for Atom<C> {
+    fn hash<H: Hasher>(&self, hasher: &mut H) {
+        self.hash_with(hasher, C::hash);
+    }
+}
 /// A positive match or the absence of a fully bound match.
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub enum Literal<C> {
     /// Holds when at least one tuple matches.
     Positive(Atom<C>),
     /// Holds when the ground tuple is absent.
     Negative(Atom<C>),
 }
+impl<C> Literal<C> {
+    fn hash_with<H: Hasher>(&self, hasher: &mut H, hash_constant: impl Fn(&C, &mut H)) {
+        std::mem::discriminant(self).hash(hasher);
+        match self {
+            Self::Positive(atom) | Self::Negative(atom) => atom.hash_with(hasher, hash_constant),
+        }
+    }
+}
+impl<C: Hash> Hash for Literal<C> {
+    fn hash<H: Hasher>(&self, hasher: &mut H) {
+        self.hash_with(hasher, C::hash);
+    }
+}
 /// A rule deriving its head from all literals in its body.
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct Rule<C> {
     /// The atom this rule derives, over the variables its body binds.
     pub head: Atom<C>,
-    /// Literals evaluated in the order given.
+    /// Body literals. Positive literals are evaluated before negative literals.
     pub body: Vec<Literal<C>>,
 }
 /// A conjunctive query with an ordered projection.
@@ -77,7 +111,7 @@ pub struct Rule<C> {
 pub struct Query<C> {
     /// Output variables in column order; repetition is allowed.
     pub select: Vec<String>,
-    /// Literals evaluated in the order given.
+    /// Body literals. Positive literals are evaluated before negative literals.
     pub body: Vec<Literal<C>>,
 }
 
@@ -202,12 +236,29 @@ impl<C: PartialEq> PartialEq for Database<C> {
     }
 }
 impl<C: Eq> Eq for Database<C> {}
+impl<C> Database<C> {
+    /// Hash the stored rows and rules using the caller's encoding for constants.
+    ///
+    /// This can distinguish representations that compare equal during evaluation.
+    pub fn hash_with<H: Hasher>(&self, hasher: &mut H, hash_constant: impl Fn(&C, &mut H)) {
+        self.snapshot.relations.len().hash(hasher);
+        for (name, rows) in &self.snapshot.relations {
+            name.hash(hasher);
+            rows.hash_with(hasher, &hash_constant);
+        }
+        self.snapshot.rules.len().hash(hasher);
+        for compiled in &self.snapshot.rules {
+            compiled.rule.head.hash_with(hasher, &hash_constant);
+            compiled.rule.body.len().hash(hasher);
+            for literal in &compiled.rule.body {
+                literal.hash_with(hasher, &hash_constant);
+            }
+        }
+    }
+}
 impl<C: Hash> Hash for Database<C> {
     fn hash<H: Hasher>(&self, hasher: &mut H) {
-        self.snapshot.relations.hash(hasher);
-        for compiled in &self.snapshot.rules {
-            compiled.rule.hash(hasher);
-        }
+        self.hash_with(hasher, C::hash);
     }
 }
 #[cfg(test)]
@@ -724,6 +775,46 @@ mod tests {
                 .location,
             Location::QuerySelect(0)
         );
+    }
+
+    #[test]
+    fn validation_reports_the_first_invalid_body_atom() {
+        let malformed = Literal::Positive(Atom {
+            relation: relation("wrong", 1),
+            terms: vec![],
+        });
+        let database = new_database(vec![], vec![]);
+        let query = query(&[], vec![negative("q", vec![var("x")]), malformed]);
+        let error = database.query(&query, || false).unwrap_err();
+        assert_eq!(error.location, Location::QueryBody(0));
+        assert_eq!(error.kind, ErrorKind::UnboundVariable("x".into()));
+    }
+
+    #[test]
+    fn existential_join_waits_for_a_matching_tabled_answer() {
+        let mut facts = vec![
+            (relation("pair", 2), vec![1, 2]),
+            (relation("input", 1), vec![10]),
+            (relation("input", 1), vec![20]),
+            (relation("exclude", 1), vec![20]),
+        ];
+        let rules = vec![Rule {
+            head: atom_of("pair", vec![var("y"), var("y")]),
+            body: vec![positive("diagonal", vec![var("y")])],
+        }];
+        let query = query(
+            &["x"],
+            vec![
+                positive("input", vec![var("x")]),
+                positive("pair", vec![var("y"), var("y")]),
+                negative("exclude", vec![var("x")]),
+            ],
+        );
+        let before = new_database(facts.clone(), rules.clone());
+        assert!(answer_rows(&before, &query).is_empty());
+        facts.push((relation("diagonal", 1), vec![3]));
+        let after = new_database(facts, rules);
+        assert_eq!(answer_rows(&after, &query), vec![vec![10]]);
     }
 
     #[test]

@@ -978,8 +978,7 @@ mod tests {
             Err(error) => error,
             Ok(_) => panic!("the build must fail"),
         };
-        let diagnostics =
-            crate::build::error_diagnostics(error.error(), site_config.config.get_root());
+        let diagnostics = error.diagnostics(site_config.config.get_root());
         let [diagnostic] = diagnostics.as_slice() else {
             panic!("expected one diagnostic: {diagnostics:#?}")
         };

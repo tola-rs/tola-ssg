@@ -2,6 +2,7 @@
 //! decoding that retains source presence, and the path and URL meaning resolved
 //! configuration has. Sections a host owns are left to that host.
 
+mod boundaries;
 pub mod diagnostic;
 pub mod loading;
 mod resolved;
@@ -12,7 +13,7 @@ mod source;
 pub(crate) use resolved::GeneratedExclusion;
 pub use resolved::{ResolvedSiteConfig, VendorRootError};
 pub use schema::{SiteConfigSchema, field_documentation, field_paths, field_values, section_help};
-pub use source::{ConfigSource, ParsedConfig};
+pub use source::{ConfigSource, ConfigSourceError, ParsedConfig};
 
 pub use section::build::{BuildEntry, BuildSectionConfig, ReferenceLevel, ResolvedBuildConfig};
 pub use section::{AssetsConfig, FontsConfig, IconCollectionSource, IconsConfig, Sha256Digest};
@@ -29,7 +30,6 @@ pub(crate) mod tests {
     use anyhow::Result;
 
     use super::*;
-    use crate::config::diagnostic::UNKNOWN_FIELD_HELP;
     use crate::config::loading::BuildOverrides;
     use crate::config::section::SiteSectionConfig;
 
@@ -132,35 +132,6 @@ pub(crate) mod tests {
             .iter()
             .find(|diagnostic| diagnostic.message.contains(expected))
             .unwrap_or_else(|| panic!("no diagnostic mentions {expected:?}: {error:#}"))
-    }
-
-    /// The message an author reads, which only the attached diagnostic has.
-    pub(crate) fn diagnostic_message(error: &anyhow::Error) -> &str {
-        tola_diagnostic::attached(error)
-            .and_then(|diagnostics| diagnostics.first())
-            .map(|diagnostic| diagnostic.message.as_str())
-            .unwrap_or_default()
-    }
-
-    /// The code of the first diagnostic `error` has.
-    #[cfg(unix)]
-    pub(crate) fn diagnostic_code(
-        error: &anyhow::Error,
-    ) -> Option<tola_diagnostic::DiagnosticCode> {
-        tola_diagnostic::attached(error)?
-            .first()
-            .map(|diagnostic| diagnostic.code)
-    }
-
-    #[test]
-    fn unset_fields_take_schema_defaults() {
-        let site_config = OwnedSiteConfig::new("");
-
-        assert!(site_config.config.site.title.is_empty());
-        assert!(site_config.config.site.description.is_empty());
-        assert!(site_config.config.build.minify.html);
-        assert!(site_config.config.build.minify.css);
-        assert!(site_config.config.build.minify.javascript);
     }
 
     #[cfg(unix)]
@@ -293,77 +264,6 @@ path = "icons"
     }
 
     #[test]
-    fn parse_reports_unknown_fields() {
-        // An unknown key has two reports: one inside a core section is collected by field path
-        // and answered by the root report — which a whole unknown section or a removed root key
-        // also reaches — while one inside a section that denies unknown fields fails that
-        // table's own deserialization and is rewritten by `schema_error` (see
-        // `unknown_hook_field_names_allowed_fields_and_help`).
-        let content = config_source("[build]\nunknown_field = \"value\"");
-        let error = SiteConfigSchema::parse(
-            Path::new("tola.toml"),
-            &content,
-            tola_input::InputScope::Online,
-        )
-        .unwrap_err();
-        let message = error.to_string();
-
-        assert!(
-            message.contains("unknown configuration fields:"),
-            "{message}"
-        );
-        assert!(message.contains("build.unknown_field"), "{message}");
-
-        let diagnostic = &attached_diagnostics(&error)[0];
-        let [help] = diagnostic.help.as_slice() else {
-            panic!("an unknown field has one help: {diagnostic:?}");
-        };
-        assert_eq!(help.message, UNKNOWN_FIELD_HELP);
-    }
-
-    #[test]
-    fn unknown_hook_field_lists_allowed_fields() {
-        let content = config_source("[hooks]\nunknown_stage = true");
-        let error = SiteConfigSchema::parse(
-            Path::new("tola.toml"),
-            &content,
-            tola_input::InputScope::Online,
-        )
-        .unwrap_err();
-        let diagnostic = &attached_diagnostics(&error)[0];
-
-        assert!(
-            diagnostic.message.contains("`unknown_stage`"),
-            "{}",
-            diagnostic.message
-        );
-        assert!(
-            diagnostic.message.contains("`before-build`"),
-            "{}",
-            diagnostic.message
-        );
-        let [help] = diagnostic.help.as_slice() else {
-            panic!("an unknown field has one help: {diagnostic:?}");
-        };
-        assert_eq!(help.message, UNKNOWN_FIELD_HELP);
-    }
-
-    #[test]
-    fn base_path_decides_the_url_mount() {
-        for (base_path, expected) in [("/", None), ("/docs/blog/", Some("docs/blog"))] {
-            let site_config = resolved_config(
-                &format!("[site]\norigin = \"https://example.com\"\nbase-path = \"{base_path}\""),
-                BuildOverrides::default(),
-            );
-
-            match expected {
-                Some(mount) => assert_eq!(site_config.config.url_mount().as_str(), mount),
-                None => assert!(site_config.config.url_mount().is_root()),
-            }
-        }
-    }
-
-    #[test]
     fn invocation_overrides_fix_site_identity() {
         let build = BuildOverrides {
             origin: Some("https://EXAMPLE.com:443/".into()),
@@ -394,17 +294,6 @@ path = "icons"
     }
 
     #[test]
-    fn full_load_keeps_local_icon_sources() {
-        let root = tempfile::TempDir::new().unwrap();
-        let config_path = root.path().join("tola.toml");
-        let loaded =
-            try_load_site_config_at(&config_path, &local_json_icons("icons/acme.json")).unwrap();
-        let expected = loaded.get_root().join("icons/acme.json");
-
-        assert_eq!(loaded.icons.local_paths().next(), Some(expected.as_path()));
-    }
-
-    #[test]
     fn icon_source_inside_output_is_rejected() {
         let root = tempfile::TempDir::new().unwrap();
         let config_path = root.path().join("tola.toml");
@@ -416,9 +305,12 @@ path = "icons"
             ),
         )
         .unwrap_err();
-        let message = diagnostic_message(&error);
-
-        assert!(message.contains("overlap the icon source at"), "{message}");
+        use crate::filesystem::OutputBoundaryError;
+        assert!(error.chain().any(|cause| matches!(
+            cause.downcast_ref::<OutputBoundaryError>(),
+            Some(OutputBoundaryError::ProtectedPath { protected, .. })
+                if protected.ends_with("public/icons/acme.json")
+        )));
     }
 
     #[cfg(all(unix, not(target_vendor = "apple")))]

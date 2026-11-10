@@ -18,22 +18,11 @@ enum ExpectedContents {
     Exact(Option<Vec<u8>>),
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("file `{}` already exists", display_path(.path))]
 pub(crate) struct ExistingFile {
     pub(crate) path: PathBuf,
 }
-
-impl std::fmt::Display for ExistingFile {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            formatter,
-            "file `{}` already exists",
-            display_path(&self.path)
-        )
-    }
-}
-
-impl std::error::Error for ExistingFile {}
 
 #[derive(Debug)]
 struct FileWrite {

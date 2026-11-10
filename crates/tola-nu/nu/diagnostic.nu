@@ -1,5 +1,5 @@
 # Construct an issue for a Tola diagnostic report.
-# A location refers to a source ID and text snapshot supplied by the host.
+# Omit locations in Nu hooks and module commands. Located reports need a host source snapshot.
 export def issue [
   message: string
   --severity: string = "warning" # error, warning, info, or hint.
@@ -21,13 +21,9 @@ export def issue [
   $issue
 }
 
-# Render issues through the same Rust renderer the build uses.
+# Print issues for an independent check. Locations use a file path.
+# Use submit inside a hook or module command to include issues in the host's result.
 export def render []: list<record> -> nothing {
   let executable = ($env.TOLA_EXECUTABLE? | default "tola")
   $in | to json | ^$executable diagnostic render
-}
-
-# Submit diagnostics to the host.
-export def submit []: list<record> -> nothing {
-  $in | __tola_diagnostic_submit
 }

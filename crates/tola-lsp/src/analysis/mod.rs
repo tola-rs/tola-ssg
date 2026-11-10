@@ -34,7 +34,7 @@ pub(crate) use selection::{site_selected_interfaces, site_sources};
 
 use crate::protocol::{SourceQuery, SourceReply};
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Clone, Debug, thiserror::Error)]
 pub(crate) enum NameQueryError {
     #[error("{0}")]
     Rename(tola_typst_syntax::imports::RenameError),

@@ -26,6 +26,9 @@ pub use lock::{
     LockedRevision, TarballLocation,
 };
 pub use mode::InputMode;
-pub use path::{lexical_path_identity, normalize_existing_prefix, normalize_path};
+pub use path::{
+    RelativePathError, lexical_path_identity, normalize_existing_prefix, normalize_path,
+    validate_relative_path,
+};
 pub use read::{Cancelled, FileReadError, read_chunks, read_file_chunks};
 pub use selection::{FilePatterns, FileSelection, PatternError};

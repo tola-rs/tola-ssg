@@ -4,17 +4,6 @@ use std::path::{Component, Path};
 
 use crate::config::{ConfigDiagnostics, FieldPath};
 
-/// Why `component` may not appear in a path configured relative to the site root.
-///
-/// Absolute roots, Windows prefixes, and `..` would escape the site root once normalized.
-fn forbidden_component_reason(component: Component<'_>) -> Option<&'static str> {
-    match component {
-        Component::ParentDir => Some("it contains `..`"),
-        Component::RootDir | Component::Prefix(_) => Some("it is an absolute path"),
-        _ => None,
-    }
-}
-
 /// Whether `path` enters the reserved `.tola` directory at its first component.
 pub(super) fn enters_internal_directory(path: &Path) -> bool {
     path.components()
@@ -71,8 +60,7 @@ fn portable_path_key(path: &Path) -> Option<Vec<String>> {
 /// Record why `path` cannot be a path configured relative to the site root.
 ///
 /// `key` is the written key, without backticks and with any array index, so one message
-/// names the line the author has to change. The declaration is not resolved against the site
-/// root yet, so the path renders as the author spelled it, through the one path renderer.
+/// names the line the author has to change without repeating an absolute path.
 /// Returns whether the path is a usable declaration, so a caller with a further check about
 /// the same path can stop here.
 pub(super) fn validate_site_relative_path(
@@ -81,27 +69,15 @@ pub(super) fn validate_site_relative_path(
     field: FieldPath,
     diagnostics: &mut ConfigDiagnostics,
 ) -> bool {
-    if path.as_os_str().is_empty() {
-        diagnostics.error_with_help(
-            field,
-            format!("`{key}` is empty"),
-            "write a path relative to the site root",
-        );
-        return false;
-    }
-    if let Some(reason) = path
-        .components()
-        .filter_map(forbidden_component_reason)
-        .next()
-    {
-        diagnostics.error_with_help(
-            field,
-            format!("`{key}` is `{}`: {reason}", declared_path(path)),
-            "write it relative to the site root",
-        );
-        return false;
-    }
-    true
+    let Err(reason) = tola_input::validate_relative_path(path) else {
+        return true;
+    };
+    diagnostics.error_with_help(
+        field,
+        format!("`{key}` {reason}"),
+        "write a path relative to the site root",
+    );
+    false
 }
 
 /// Render one declared path the way every message spells a path inside the site.

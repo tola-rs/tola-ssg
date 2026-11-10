@@ -2,18 +2,32 @@ import { type ChildProcess, spawn } from 'node:child_process'
 import { createInterface } from 'node:readline'
 import * as vscode from 'vscode'
 
+import { type BuildDiagnostic, showBuildDiagnostics } from './build-diagnostics.ts'
 import type { Selection } from './selection.ts'
 
-type BuildStatus = 'starting' | 'building' | 'succeeded' | 'failed' | 'cancelled'
+type BuildOutcome = 'succeeded' | 'failed' | 'cancelled'
+type BuildStatus = 'starting' | 'building' | BuildOutcome
 
-interface DevelopmentEvent {
-  readonly formatVersion: number
-  readonly event: string
-  readonly url?: string
-  readonly revision?: string | null
-  readonly status?: string
-  readonly hook?: string | null
-}
+type DevelopmentEvent = { readonly formatVersion: number } & (
+  | { readonly event: 'server-ready'; readonly url: string; readonly revision: string | null }
+  | { readonly event: 'build-started'; readonly build: number }
+  | {
+    readonly event: 'build-finished'
+    readonly build: number
+    readonly status: BuildOutcome
+    readonly published: boolean
+    readonly revision: string | null
+    readonly diagnostics: readonly BuildDiagnostic[]
+  }
+  | {
+    readonly event: 'hook-finished'
+    readonly hook: string | null
+    readonly revision: string
+    readonly status: BuildOutcome
+    readonly diagnostics: readonly BuildDiagnostic[]
+  }
+  | { readonly event: 'stopped'; readonly diagnostics: readonly BuildDiagnostic[] }
+)
 
 export interface PublishedRoute {
   readonly output: string
@@ -35,14 +49,20 @@ export class PreviewServer {
   private rejectStartup!: (error: Error) => void
   private publishing = 0
   private build: BuildStatus = 'starting'
+  private buildAttempt = 0
   private revision: string | null = null
-  private failedHook: { hook: string | null; revision: string } | undefined
+  private buildReports: readonly BuildDiagnostic[] = []
+  private readonly hooks = new Map<string | null, {
+    readonly status: Exclude<BuildOutcome, 'cancelled'>
+    readonly diagnostics: readonly BuildDiagnostic[]
+  }>()
 
   constructor(
-    selection: Selection,
+    private readonly selection: Selection,
     lifetime: vscode.CancellationToken,
     private readonly output: vscode.OutputChannel,
-    private readonly changed: () => void,
+    private readonly diagnostics: vscode.DiagnosticCollection,
+    private readonly changed: (published?: boolean) => void,
   ) {
     const [subcommand, ...args] = selection.args
     if (subcommand !== 'lsp') {
@@ -66,9 +86,9 @@ export class PreviewServer {
       events.on('line', (line) => {
         if (this.cancellation.signal.aborted) return
         try {
-          this.receive(JSON.parse(line) as DevelopmentEvent)
+          const published = this.receive(JSON.parse(line) as DevelopmentEvent)
           if (this.address) resolve(this.address)
-          changed()
+          changed(published)
         } catch (error) {
           output.appendLine(`Development event could not be read: ${String(error)}`)
           reject(
@@ -116,7 +136,11 @@ export class PreviewServer {
     return !this.cancellation.signal.aborted && this.address !== undefined
   }
 
-  private receive(event: DevelopmentEvent): void {
+  get publishedRevision(): string | null {
+    return this.revision
+  }
+
+  private receive(event: DevelopmentEvent): boolean {
     if (event?.formatVersion !== 1 || typeof event.event !== 'string') {
       throw new Error('Unsupported development event format')
     }
@@ -127,33 +151,38 @@ export class PreviewServer {
         this.setRevision(event.revision)
         break
       case 'build-started':
+        if (event.build <= this.buildAttempt) break
+        this.buildAttempt = event.build
         this.build = 'building'
         break
       case 'build-finished':
-        if (!['succeeded', 'failed', 'cancelled'].includes(event.status ?? '')) {
+        if (event.build !== this.buildAttempt || this.build !== 'building') break
+        if (!['succeeded', 'failed', 'cancelled'].includes(event.status)) {
           throw new Error('The server reported an unknown build outcome')
         }
-        this.build = event.status as BuildStatus
+        this.build = event.status
         this.setRevision(event.revision)
-        break
+        if (event.status !== 'cancelled') this.buildReports = event.diagnostics
+        this.showDiagnostics()
+        return event.published === true
       case 'hook-finished':
         if ((event.hook !== null && typeof event.hook !== 'string') || typeof event.revision !== 'string') {
           throw new Error('The server did not identify the completed publication hook')
         }
         if (event.status === 'failed') {
-          if (event.revision === this.revision) {
-            this.failedHook = { hook: event.hook, revision: event.revision }
-          }
           const action = event.hook === null ? 'After-publish preparation' : `Publication hook ${event.hook}`
           this.output.appendLine(`${action} failed for ${event.revision}`)
-        } else if (
-          event.status === 'succeeded' && this.failedHook?.hook === event.hook &&
-          this.failedHook.revision === event.revision
-        ) {
-          this.failedHook = undefined
         }
+        if (event.revision !== this.revision || event.status === 'cancelled') break
+        this.hooks.set(event.hook, { status: event.status, diagnostics: event.diagnostics })
+        this.showDiagnostics()
         break
       case 'stopped':
+        if (event.diagnostics.length) {
+          this.buildReports = event.diagnostics
+          this.hooks.clear()
+          this.showDiagnostics()
+        }
         this.cancellation.abort()
         this.rejectStartup(
           new Error('Tola stopped before its preview became available. Open Tola output for details'),
@@ -161,14 +190,20 @@ export class PreviewServer {
         this.lifetime.dispose()
         break
     }
+    return false
   }
 
-  private setRevision(revision: string | null | undefined): void {
+  private setRevision(revision: string | null): void {
     if (revision !== null && typeof revision !== 'string') {
       throw new Error('The server reported an invalid publication revision')
     }
-    if (revision !== this.revision) this.failedHook = undefined
+    if (revision !== this.revision) this.hooks.clear()
     this.revision = revision
+  }
+
+  private showDiagnostics(): void {
+    const hooks = Array.from(this.hooks.values(), (hook) => hook.diagnostics)
+    showBuildDiagnostics(this.diagnostics, this.selection, [this.buildReports, ...hooks].flat())
   }
 
   get buildStatus(): BuildStatus {
@@ -191,12 +226,13 @@ export class PreviewServer {
   }
 
   get hookFailure(): string | undefined {
-    const failure = this.failedHook
-    return failure && failure.revision === this.revision
-      ? `${
-        failure.hook === null ? 'After-publish preparation' : `Publication hook ${failure.hook}`
-      } failed; the page remains published.`
-      : undefined
+    for (const [hook, { status }] of this.hooks) {
+      if (status === 'failed') {
+        const action = hook === null ? 'After-publish preparation' : `Publication hook ${hook}`
+        return `${action} failed; the page remains published.`
+      }
+    }
+    return undefined
   }
 
   readPublication(source?: vscode.Uri, revision?: string, fragment?: string): Promise<Publication> {

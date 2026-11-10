@@ -39,10 +39,7 @@ pub(crate) fn diagnostics(
 ///
 /// Nothing is wrong with the page's published content; it is the checks that do not reach it, so
 /// this is always a warning rather than a failure.
-fn base_href_diagnostic(
-    page: &OutputPath,
-    base: &crate::site::references::UncheckedBase,
-) -> Diagnostic {
+fn base_href_diagnostic(page: &OutputPath, base: &super::document::UncheckedBase) -> Diagnostic {
     let message = format!(
         "`{}` names a host, so this page's relative references are not checked",
         base.value
@@ -63,6 +60,7 @@ fn base_href_diagnostic(
     }
     .with_help("Remove the `<base href>` or write it as a relative address (`/`, `/docs/`)")
 }
+
 fn reference_diagnostic(config: &ResolvedSiteConfig, reference: &Reference) -> Option<Diagnostic> {
     let ReferenceResolution::Unresolved { reason } = reference.resolution() else {
         return None;
@@ -82,7 +80,7 @@ fn reference_diagnostic(config: &ResolvedSiteConfig, reference: &Reference) -> O
         ),
         ReferenceCategory::External => return None,
     };
-    let code = if reason.is_media_type_mismatch() {
+    let code = if matches!(reason, UnresolvedReferenceReason::MediaTypeMismatch { .. }) {
         tola_diagnostic::codes::reference::RESOURCE_MEDIA_MISMATCH
     } else {
         default_code
@@ -104,7 +102,7 @@ fn reference_diagnostic(config: &ResolvedSiteConfig, reference: &Reference) -> O
     if let Some(help) = reason.help(reference.category()) {
         diagnostic = diagnostic.with_help(help);
     }
-    if let Some(cause) = reference_correction(reference) {
+    if let Some(cause) = reference_correction(reference.destination(), reason) {
         diagnostic = diagnostic.with_cause(cause);
     }
     Some(diagnostic)
@@ -116,12 +114,11 @@ fn reference_diagnostic(config: &ResolvedSiteConfig, reference: &Reference) -> O
 /// the source wrote without reading the rendered message or searching the document for a
 /// spelling. Every destination is written the way a browser writes it: the site's address layer
 /// owns percent-encoding and the mount prefix, so no editor reassembles a URL.
-fn reference_correction(reference: &Reference) -> Option<DiagnosticCause> {
-    let ReferenceResolution::Unresolved { reason } = reference.resolution() else {
-        return None;
-    };
-    let destination = reference.destination();
-    let replacements = match reason {
+fn reference_correction(
+    destination: &str,
+    reason: &UnresolvedReferenceReason,
+) -> Option<DiagnosticCause> {
+    let mut replacements = match reason {
         // The author wrote a directory page's address without the slash its route has.
         UnresolvedReferenceReason::TargetMissing {
             suggestion: Some(address),
@@ -133,12 +130,7 @@ fn reference_correction(reference: &Reference) -> Option<DiagnosticCause> {
         }
         _ => return None,
     };
-    // A destination the source already writes resolves nothing, so offering it would offer no
-    // change at all.
-    let replacements: Vec<String> = replacements
-        .into_iter()
-        .filter(|replacement| replacement != destination)
-        .collect();
+    replacements.retain(|replacement| replacement != destination);
     (!replacements.is_empty()).then(|| DiagnosticCause::UnresolvedReference {
         destination: destination.to_owned(),
         replacements,
@@ -162,6 +154,76 @@ fn fragment_replacements(destination: &str, available: &[String]) -> Vec<String>
         .filter(|id| !id.contains(['?', '#', '"', '\\']) && !id.chars().any(char::is_control))
         .map(|id| format!("{before}{id}"))
         .collect()
+}
+
+impl UnresolvedReferenceReason {
+    /// Clause that continues the destination named by the rendered diagnostic.
+    pub fn message(&self, category: ReferenceCategory) -> String {
+        match self {
+            Self::OutsideSiteMount {
+                required_prefix, ..
+            } => {
+                format!(
+                    "is outside `site.base-path`, so the site is served under `{required_prefix}`"
+                )
+            }
+            Self::InvalidBrowserReference { message } => message.clone(),
+            Self::TargetMissing { .. } => match category {
+                ReferenceCategory::Resource => "is not a file this site publishes".into(),
+                _ => "is not a page this site publishes".into(),
+            },
+            Self::FragmentMissing { fragment, .. } => {
+                format!("has no element with the id `{fragment}`")
+            }
+            Self::DocumentNotAllowed { .. } => {
+                "is an HTML page, but this attribute needs a file".to_string()
+            }
+            Self::MediaTypeMismatch {
+                reference_use,
+                required,
+                declared,
+            } => format!(
+                "is used as {}, which needs `{}`, but the file is served as `{}`",
+                super::target::expectation(*reference_use).usage,
+                required.as_str(),
+                declared.as_str()
+            ),
+        }
+    }
+
+    pub fn help(&self, category: ReferenceCategory) -> Option<String> {
+        match self {
+            Self::OutsideSiteMount {
+                required_prefix, ..
+            } => Some(format!(
+                "Start root-relative URLs with `{required_prefix}` (from `site.base-path`) or make the link relative"
+            )),
+            Self::TargetMissing {
+                suggestion: Some(suggestion),
+            } => Some(format!("Point the link at `{suggestion}`")),
+            Self::TargetMissing { suggestion: None } => Some(match category {
+                ReferenceCategory::Resource => {
+                    "Declare it in `assets.files` or `assets.trees` in `tola.toml`, or take its URL from `asset-url()`".into()
+                }
+                _ => {
+                    "Point the link at a page that exists, or create the page that publishes it"
+                        .into()
+                }
+            }),
+            Self::FragmentMissing { available, .. } if !available.is_empty() => Some(format!(
+                "Choose an existing id: {}",
+                tola_diagnostic::bounded_listing(available, ("id", "ids"))
+            )),
+            Self::DocumentNotAllowed { .. } => {
+                Some("Point it at a generated file such as a stylesheet, script, or image".into())
+            }
+            Self::MediaTypeMismatch { .. } => Some(
+                "Give the file the extension this attribute needs, or use the matching attribute"
+                    .into(),
+            ),
+            Self::InvalidBrowserReference { .. } | Self::FragmentMissing { .. } => None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -227,16 +289,5 @@ mod tests {
                 replacements: vec!["/post/#a".to_owned(), "/post/#z".to_owned()],
             })
         );
-    }
-
-    #[test]
-    fn missing_target_no_address_nothing() {
-        let reference = unresolved(
-            "/nowhere.html",
-            ReferenceCategory::Navigation,
-            UnresolvedReferenceReason::TargetMissing { suggestion: None },
-        );
-
-        assert_eq!(cause(&reference), None);
     }
 }

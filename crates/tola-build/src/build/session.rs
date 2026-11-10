@@ -37,7 +37,7 @@ pub(crate) struct RetainedProducerCaches {
     pub(crate) dependencies: CompilationDependencies,
     pub(crate) source_analysis: analysis::SourceAnalysisCache,
     pub(crate) site_program: SiteProgramCache,
-    pub(crate) configured_assets: crate::asset::ConfiguredAssetInventory,
+    pub(crate) configured_assets: crate::asset::ConfiguredAssets,
     pub(crate) icons: crate::icon::IconInventory,
     pub(crate) images: std::sync::Arc<crate::image::output::ImageOutputs>,
     pub(crate) seo: std::sync::Arc<crate::seo::SeoCompilation>,
@@ -196,6 +196,8 @@ pub struct BuildAttempt {
 impl BuildAttempt {
     /// Prepare resources and run the build pipeline.
     pub fn run(mut self) -> Result<super::SiteBuild, super::BuildFailure> {
+        super::diagnostic::refuse_incomplete_vendor(&self.config)
+            .map_err(super::BuildFailure::before_attempt)?;
         let mut site = match self.prepared.take() {
             Some(site) => site,
             None => {
@@ -216,9 +218,6 @@ impl BuildAttempt {
             return Err(super::BuildFailure::before_attempt(anyhow::Error::new(
                 AttemptRefusal::ManifestsChangedBeforeBuild,
             )));
-        }
-        if let Err(error) = super::diagnostic::refuse_incomplete_vendor(site.config()) {
-            return Err(super::BuildFailure::before_attempt(error));
         }
         let mut producers = super::pipeline::BuildAttemptProducers {
             resources: self.baseline.resources.clone(),
@@ -258,13 +257,11 @@ impl BuildAttempt {
             Ok(mut built) => {
                 built.cache_update.attribute_to(&self.baseline);
                 let reads = producers.inputs.package_reads().to_vec();
-                if !reads.is_empty()
-                    && let Err(error) = crate::package::write_package_lock(
-                        self.config.get_root(),
-                        &reads,
-                        self.baseline.resources.input_mode(),
-                    )
-                {
+                if let Err(error) = crate::package::write_package_lock(
+                    self.config.get_root(),
+                    &reads,
+                    self.baseline.resources.input_mode(),
+                ) {
                     return Err(super::BuildFailure::new(
                         error.into(),
                         producers.into_inputs(),
@@ -299,14 +296,15 @@ impl BuildAttempt {
         // A before-build hook that wrote exactly what the previous revision already
         // held changes no input, so the event-qualified reuse stays valid. Only a
         // generator whose declared outputs actually differ withdraws it.
-        let hook_outputs_match = self
-            .baseline
-            .hook_outputs_match_accepted(&producers.source_hooks);
-        producers.hook_outputs_unchanged = hooks_executed && hook_outputs_match;
-        let permissions = if host_inputs_match
-            && (!hooks_executed || hook_outputs_match)
-            && matches!(self.request.trigger, BuildTrigger::Paths(_))
-        {
+        let hooks_unchanged = !hooks_executed
+            || self
+                .baseline
+                .hook_outputs_match_accepted(&producers.source_hooks);
+        let event_paths = match &self.request.trigger {
+            BuildTrigger::Paths(paths) if host_inputs_match && hooks_unchanged => Some(paths),
+            _ => None,
+        };
+        let permissions = if event_paths.is_some() {
             self.request.reuse
         } else {
             BuildReuse::default()
@@ -337,12 +335,13 @@ impl BuildAttempt {
         producers.images = accepted.map(|accepted| std::sync::Arc::clone(&accepted.caches.images));
         producers.seo = accepted.map(|accepted| std::sync::Arc::clone(&accepted.caches.seo));
         producers.reference_reuse = accepted.map(|accepted| accepted.references.clone());
-        producers.previous_bundle_entries = self.baseline.bundle_entries();
-        if permissions.configured_assets {
-            producers.configured_assets = self.baseline.configured_assets().cloned();
-            producers.configured_asset_changes = Some(super::AcceptedFileChanges::from_watcher(
-                changed_paths.to_vec(),
-            ));
+        if hooks_unchanged {
+            producers.previous_bundle_entries = self.baseline.bundle_entries();
+        }
+        if let Some(paths) = event_paths.filter(|_| permissions.configured_assets)
+            && let Some(assets) = self.baseline.configured_assets()
+        {
+            producers.asset_reuse = Some((assets.clone(), paths.clone()));
         }
         producers.content_inventory = content_inventory;
         cancellation.ensure_active()?;
@@ -383,8 +382,7 @@ impl BuildSession {
             std::sync::Arc::new(config.clone()),
             request,
             || {},
-        )
-        .map_err(super::BuildFailure::into_error)?;
+        )?;
         self.ensure_cache_origin(&locked.site().cache_update)?;
         let outcome = locked.write_site()?;
         let built = locked.release();
@@ -483,21 +481,11 @@ impl BuildSession {
     }
 
     /// Whether the hooks this attempt ran wrote exactly what the accepted revision holds.
-    pub(crate) fn hook_outputs_match_accepted(
-        &self,
-        produced: &crate::hooks::SourceHookOutputs,
-    ) -> bool {
-        let Some(accepted) = self.accepted_caches() else {
-            return false;
-        };
-        let previous = accepted.hook_outputs.outputs();
-        let current = produced.outputs();
-        !current.is_empty()
-            && current.len() == previous.len()
-            && current
-                .iter()
-                .zip(previous)
-                .all(|(produced, accepted)| produced == accepted)
+    fn hook_outputs_match_accepted(&self, outputs: &crate::hooks::SourceHookOutputs) -> bool {
+        !outputs.outputs().is_empty()
+            && self
+                .accepted_caches()
+                .is_some_and(|accepted| &accepted.hook_outputs == outputs)
     }
 
     pub(crate) fn rebuild_decision(
@@ -605,7 +593,7 @@ impl BuildSession {
         self.accepted = Some(std::sync::Arc::new(committed));
     }
 
-    pub(crate) fn configured_assets(&self) -> Option<&crate::asset::ConfiguredAssetInventory> {
+    pub(crate) fn configured_assets(&self) -> Option<&crate::asset::ConfiguredAssets> {
         self.accepted_caches()
             .map(|caches| &caches.configured_assets)
     }
@@ -614,14 +602,12 @@ impl BuildSession {
 #[cfg(test)]
 mod tests {
     use super::BuildSession;
-    use crate::build::pipeline::BuildAttemptProducers;
     use crate::build::tests::*;
-    use crate::build::*;
     use crate::config::section::build::BeforeBuildHookConfig;
 
     use crate::config::section::{AssetTreeDeclaration, AssetUrlPrefix};
     use std::fs;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
     use tempfile::TempDir;
 
     fn dev_config(root: &Path) -> crate::config::ResolvedSiteConfig {
@@ -658,7 +644,9 @@ mod tests {
     }
 
     /// Every output of one build, keyed by logical output path.
-    fn all_output_bytes(build: &SiteBuild) -> std::collections::BTreeMap<String, Vec<u8>> {
+    fn all_output_bytes(
+        build: &crate::build::SiteBuild,
+    ) -> std::collections::BTreeMap<String, Vec<u8>> {
         build
             .graph()
             .outputs()
@@ -722,20 +710,28 @@ mod tests {
             .prepare(
                 std::sync::Arc::clone(&config),
                 super::BuildRequest {
-                    trigger: super::BuildTrigger::Paths(std::sync::Arc::from(
-                        [changed.clone()].as_slice(),
-                    )),
+                    trigger: super::BuildTrigger::Paths([changed].into()),
                     reuse: super::BuildReuse {
                         content_inventory: true,
                         typst_compilation: true,
                         configured_assets: true,
                     },
-                    ..Default::default()
+                    ..super::BuildRequest::new(super::BuildMode::Development)
                 },
             )
             .run()
             .unwrap();
 
+        let plain = crate::compiler::TypstDependencyReader::ContentSource(
+            tola_input::normalize_path(&config.build.content_dir.join("plain.typ")),
+        );
+        assert!(
+            warm.cache_update
+                .caches()
+                .source_analysis
+                .reused_dependency_readers()
+                .contains(&plain)
+        );
         let cold_again = crate::build::build_site(&config, super::BuildMode::Development).unwrap();
 
         // Cache reuse is an optimization, never a second semantic path: a warm
@@ -817,40 +813,40 @@ mod tests {
             ..BeforeBuildHookConfig::default()
         });
 
-        let mut session = crate::build::BuildSession::new();
-        let host = compiler_host(&config).unwrap();
-        let first = build_site_with_host(
-            &config,
-            &host,
-            BuildMode::Development,
-            &mut BuildAttemptProducers::default(),
-        )
-        .unwrap();
-        install_build(&mut session, first);
+        let config = std::sync::Arc::new(config);
+        let mut session = BuildSession::new();
+        let first = session
+            .prepare(
+                config.clone(),
+                super::BuildRequest::new(super::BuildMode::Development),
+            )
+            .run()
+            .unwrap();
+        accept_build(&mut session, first);
 
-        let changed_paths = vec![root.join("notes/unrelated.txt")];
-        let rebuild = |changed_paths: &[PathBuf]| -> SiteBuild {
-            let content_inventory = session
-                .reusable_content_inventory(&config, changed_paths, true)
-                .expect("published content inventory is reusable before the hook executes");
-            let decision = session.rebuild_decision(changed_paths, false);
-            let reuse = session
-                .reusable_compilation(&decision, true)
-                .expect("published compilation is reusable before the hook executes");
-            let mut producers = BuildAttemptProducers {
-                reuse: Some(reuse),
-                previous_bundle_entries: session.bundle_entries(),
-                configured_assets: session.configured_assets().cloned(),
-                configured_asset_changes: Some(AcceptedFileChanges::from_watcher(
-                    changed_paths.to_vec(),
-                )),
-                content_inventory: Some(content_inventory),
-                ..BuildAttemptProducers::default()
-            };
-            build_site_with_host(&config, &host, BuildMode::Development, &mut producers).unwrap()
+        // The watcher batch does not cover the generated path. The hook's own
+        // output comparison must withdraw permission to reuse the old inputs.
+        let mut rebuild = || {
+            session
+                .prepare(
+                    config.clone(),
+                    super::BuildRequest {
+                        trigger: super::BuildTrigger::Paths(
+                            [root.join("notes/unrelated.txt")].into(),
+                        ),
+                        reuse: super::BuildReuse {
+                            content_inventory: true,
+                            typst_compilation: true,
+                            configured_assets: true,
+                        },
+                        ..super::BuildRequest::new(super::BuildMode::Development)
+                    },
+                )
+                .run()
+                .unwrap()
         };
 
-        let unchanged = rebuild(&changed_paths);
+        let unchanged = rebuild();
         assert_eq!(unchanged.hook_outputs().len(), 1);
         assert!(unchanged.hook_outputs()[0].is_current());
         assert_eq!(output_bytes(&unchanged.graph, "assets/site.css"), b"first");
@@ -859,22 +855,11 @@ mod tests {
         );
 
         fs::write(&trigger, "second").unwrap();
-        let changed = rebuild(&changed_paths);
-
-        let stylesheet = changed
-            .graph
-            .outputs()
-            .iter()
-            .find(|output| output.path().as_str() == "assets/site.css")
-            .expect("configured stylesheet output");
-        let document = changed
-            .graph
-            .outputs()
-            .iter()
-            .find(|output| output.path().as_str() == "index.html")
-            .expect("site document output");
-        assert_eq!(stylesheet.bytes(), b"second");
-        assert!(String::from_utf8_lossy(document.bytes()).contains("second"));
+        let changed = rebuild();
+        assert_eq!(output_bytes(&changed.graph, "assets/site.css"), b"second");
+        assert!(
+            String::from_utf8_lossy(output_bytes(&changed.graph, "index.html")).contains("second")
+        );
         assert_eq!(changed.hook_outputs().len(), 1);
         assert!(changed.hook_outputs()[0].is_current());
     }

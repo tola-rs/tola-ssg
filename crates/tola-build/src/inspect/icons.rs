@@ -20,14 +20,14 @@ pub fn icons(
     cancellation: &BuildCancellation,
     namespace: Option<&str>,
 ) -> anyhow::Result<Value> {
-    let inputs = crate::package::prepare_package_inputs(
+    let icons = crate::package::prepare_icons(
         config,
         resources,
         cancellation,
         &mut None,
         &Default::default(),
     )?;
-    let collections = inputs.icons.collections();
+    let collections = icons.collections();
     let root = config.get_root();
     let mut rows = Vec::new();
     for (name, source) in &config.icons.collections {
@@ -84,6 +84,3 @@ fn source_json(source: &IconCollectionSource, root: &Path) -> Value {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {}

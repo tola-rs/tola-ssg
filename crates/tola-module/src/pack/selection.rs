@@ -4,27 +4,19 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context as _, Result, ensure};
-use tola_input::{FilePatterns, FileSelection};
+use anyhow::{Context as _, ensure};
+use tola_input::{FilePatterns, FileSelection, PatternError};
 use tola_typst::BundleCancellation;
 
 use super::{MANIFEST, Member, file_mode};
 use tola_fs::is_link_like;
 
-pub(crate) fn validate_selection(pack: &FilePatterns) -> Result<()> {
+pub(crate) fn validate_selection(pack: &FilePatterns) -> Result<(), PatternError> {
     compile(pack).map(|_| ())
 }
 
-pub(super) fn compile(pack: &FilePatterns) -> Result<FileSelection> {
-    FileSelection::new(pack).map_err(|error| error.at("pack").into())
-}
-
-pub(super) fn overlaps_target(selection: &FileSelection, path: &Path) -> bool {
-    !selection.excludes(path)
-        && (selection.includes(path)
-            || selection
-                .literal_includes()
-                .any(|literal| literal.starts_with(path) && !selection.excludes(literal)))
+pub(super) fn compile(pack: &FilePatterns) -> Result<FileSelection, PatternError> {
+    FileSelection::new(pack).map_err(|error| error.at("pack"))
 }
 
 pub(super) fn collect(
@@ -32,7 +24,7 @@ pub(super) fn collect(
     root: &Path,
     staging: &Path,
     cancellation: &BundleCancellation,
-) -> Result<BTreeMap<PathBuf, Member>> {
+) -> anyhow::Result<BTreeMap<PathBuf, Member>> {
     let mut walk = Walk {
         selection,
         root,
@@ -63,7 +55,7 @@ struct Walk<'a> {
 }
 
 impl Walk<'_> {
-    fn visit(&mut self, path: &Path) -> Result<bool> {
+    fn visit(&mut self, path: &Path) -> anyhow::Result<bool> {
         self.cancellation.ensure_active()?;
         if self.staging == Some(path)
             || path == Path::new(MANIFEST)

@@ -5,16 +5,15 @@ use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
-use tola_input::{FilePatterns, InputMode, InputScope};
+use tola_input::{FilePatterns, InputMode, InputScope, RelativePathError, validate_relative_path};
 
 use crate::action::Action;
 use crate::declaration::{
     Assets, Command, CommandAction, CommandActionError, Entry, Initializer, ModuleDeclaration,
-    Query, is_relative_path, valid_name,
+    Parameter, Query, valid_name,
 };
 use crate::hooks;
 use crate::module_set::ManifestEvidence;
-use crate::semantics;
 
 /// Declarations in a module's `tola-module.toml`.
 #[derive(Debug, Deserialize)]
@@ -30,8 +29,6 @@ pub struct Manifest {
     pub assets: Option<Assets>,
     #[serde(default)]
     pub queries: BTreeMap<String, Query>,
-    #[serde(default)]
-    pub semantics: Vec<semantics::SemanticRole>,
     #[serde(default)]
     pub commands: BTreeMap<String, Command>,
     #[serde(default)]
@@ -174,17 +171,22 @@ pub enum ManifestError {
         #[source]
         source: anyhow::Error,
     },
-    #[error("`{label}` must be a relative path inside the module")]
-    EntryPath { label: String },
+    #[error("`{label}` in module `{module}` {source}")]
+    EntryPath {
+        module: String,
+        label: String,
+        #[source]
+        source: RelativePathError,
+    },
     #[error("`{query}` is not a usable query name in module `{module}`")]
     QueryName { module: String, query: String },
     #[error("query `{query}` needs a `label`")]
     QueryLabel { query: String },
-    #[error("module `{module}` declares invalid semantics: {source}")]
-    Semantics {
+    #[error("module `{module}` `{key}`: {message}")]
+    QueryParameter {
         module: String,
-        #[source]
-        source: semantics::SemanticsError,
+        key: String,
+        message: String,
     },
     #[error("module `{module}` declares both `[init]` and `[commands.init]`")]
     InitializerDeclaredTwice { module: String },
@@ -304,12 +306,12 @@ pub fn read_one(
             source,
         })?;
     }
-    let relative = |path: &Path, label: String| -> std::result::Result<(), ManifestError> {
-        if is_relative_path(path) {
-            Ok(())
-        } else {
-            Err(ManifestError::EntryPath { label })
-        }
+    let relative = |path: &Path, label: String| {
+        validate_relative_path(path).map_err(|source| ManifestError::EntryPath {
+            module: name.to_owned(),
+            label,
+            source,
+        })
     };
     for (key, entry) in [
         ("typst.entry", manifest.typst.as_ref().map(|v| &v.entry)),
@@ -333,15 +335,7 @@ pub fn read_one(
         }
         relative(&query.entry, format!("query {query_label} entry"))?;
     }
-    semantics::validate(
-        &manifest.semantics,
-        manifest.typst.is_some(),
-        &manifest.queries,
-    )
-    .map_err(|source| ManifestError::Semantics {
-        module: name.to_owned(),
-        source,
-    })?;
+    validate_query_parameters(name, &manifest)?;
     if manifest.init.is_some() && manifest.commands.contains_key("init") {
         return Err(ManifestError::InitializerDeclaredTwice {
             module: name.to_owned(),
@@ -392,6 +386,46 @@ pub fn read_one(
         options: manifest.options.clone(),
         manifest,
     })
+}
+
+fn validate_query_parameters(module: &str, manifest: &Manifest) -> Result<(), ManifestError> {
+    let mut declared = BTreeMap::new();
+    for (query_name, query) in &manifest.queries {
+        for (kind, parameters) in [
+            ("references", &query.references),
+            ("definitions", &query.definitions),
+        ] {
+            for (index, parameter) in parameters.iter().enumerate() {
+                let key = format!("queries.{query_name}.{kind}[{index}]");
+                let invalid = |message: String| ManifestError::QueryParameter {
+                    module: module.to_owned(),
+                    key: key.clone(),
+                    message,
+                };
+                if manifest.typst.is_none() {
+                    return Err(invalid("requires a public `typst.entry`".into()));
+                }
+                if !parameter.export.split('.').all(typst::syntax::is_ident) {
+                    return Err(invalid("`export` must name a public function".into()));
+                }
+                if let Parameter::Named { named } = &parameter.parameter
+                    && !typst::syntax::is_ident(named)
+                {
+                    return Err(invalid(
+                        "`parameter.named` must be a Typst identifier".into(),
+                    ));
+                }
+                if let Some(previous) =
+                    declared.insert((&parameter.export, &parameter.parameter), key.clone())
+                {
+                    return Err(invalid(format!(
+                        "the same function parameter is already declared in `{previous}`"
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(all(test, unix))]

@@ -78,6 +78,31 @@ fn builtins_cannot_be_module_namespaces() {
     assert!(check_namespaces(&BTreeMap::from([("build".into(), module)])).is_err());
 }
 
+#[test]
+fn namespace_options_end_at_the_module_command() {
+    use crate::cli::args::Cli;
+    use clap::Parser;
+
+    let mut process = Cli::try_parse_from(["tola", "-v", "notes"]).unwrap().global;
+    let argv = [
+        "-Csite.toml",
+        "--offline",
+        "-qv",
+        "scan",
+        "--help",
+        "--",
+        "--pure",
+    ];
+    let argv = argv.map(OsString::from);
+    let args = ExtensionArgs::parse("notes", &argv, &mut process).unwrap();
+    assert_eq!(args.config.path.as_deref(), Some(Path::new("site.toml")));
+    assert_eq!(args.input.scope(), InputScope::Offline);
+    assert!(process.quiet);
+    assert_eq!(process.verbose, 2);
+    assert!(args.help.is_none());
+    assert_eq!(args.command_args, argv[3..]);
+}
+
 #[cfg(unix)]
 #[test]
 fn declared_argv_reaches_the_process() {

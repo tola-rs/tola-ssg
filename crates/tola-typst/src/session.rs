@@ -23,7 +23,7 @@ use crate::world::TypstWorld;
 use crate::world::file::{
     DiskReadPath, FileRead, FileView, Loaded, ReadAttempt, ReadLocator, ReadOrigin,
 };
-use crate::world::package::{PackageCheck, PackageRead, sort_package_reads};
+use crate::world::package::{PackageCheck, PackageRead, sort_package_checks, sort_package_reads};
 
 /// File inputs observed during one compilation or scan.
 ///
@@ -600,22 +600,14 @@ impl SessionFiles {
         deps.reads.sort_by_cached_key(|read| {
             (
                 read.evidence().locator().sort_key(),
-                read.evidence().digest().to_hex(),
+                *read.evidence().digest().as_bytes(),
                 read_origin_sort_key(read.origin()),
             )
         });
         deps.reads.dedup();
         deps.disk_reads.sort();
         deps.disk_reads.dedup();
-        deps.package_checks.sort_by_cached_key(|check| {
-            (
-                check.package().to_string(),
-                check.tier() as u8,
-                check.candidate().to_path_buf(),
-                check.availability() as u8,
-                check.was_selected(),
-            )
-        });
+        sort_package_checks(&mut deps.package_checks);
         deps.package_checks.dedup();
         deps
     }

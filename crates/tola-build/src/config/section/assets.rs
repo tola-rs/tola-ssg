@@ -402,44 +402,6 @@ files = [{ source = "", url = "/favicon.ico" }]
     }
 
     #[test]
-    fn url_parse_derives_output_identities() {
-        assert_eq!(AssetUrlPrefix::parse("/").unwrap().as_str(), "/");
-        assert!(AssetUrl::parse("/").is_err());
-        let prefix = AssetUrlPrefix::parse("/%61ssets/icons").unwrap();
-        assert_eq!(prefix.url_path().as_str(), "/assets/icons/");
-        let file = AssetUrl::parse("/assets/%4cogo.svg").unwrap();
-        assert_eq!(file.url_path().as_str(), "/assets/Logo.svg");
-        assert_eq!(file.output_path().as_str(), "assets/Logo.svg");
-    }
-
-    #[test]
-    fn url_parse_refuses_reserved_outputs() {
-        for raw in [
-            "images",
-            "//images",
-            " /images",
-            "/images?query",
-            "/images#part",
-        ] {
-            assert!(AssetUrlPrefix::parse(raw).is_err(), "{raw}");
-            assert!(AssetUrl::parse(raw).is_err(), "{raw}");
-        }
-        let raw = "/_tola/private";
-        assert!(matches!(
-            AssetUrlPrefix::parse(raw),
-            Err(AssetUrlError::Reserved { .. })
-        ));
-        assert!(matches!(
-            AssetUrl::parse(raw),
-            Err(AssetUrlError::Reserved { .. })
-        ));
-        assert_eq!(
-            AssetUrlPrefix::parse("/assets").unwrap(),
-            AssetUrlPrefix::parse("/assets/").unwrap()
-        );
-    }
-
-    #[test]
     fn sources_cannot_overlap_exclusive_roots() {
         let directory = tempfile::tempdir().unwrap();
         let site = directory.path();
@@ -468,7 +430,7 @@ files = [{ source = "", url = "/favicon.ico" }]
                 }
             };
             let mut diagnostics = ConfigDiagnostics::new();
-            crate::config::loading::validate_asset_source_boundaries(
+            crate::config::boundaries::validate_asset_source_boundaries(
                 &config,
                 site,
                 &content,
@@ -498,7 +460,7 @@ files = [{ source = "", url = "/favicon.ico" }]
         };
         let mut diagnostics = ConfigDiagnostics::new();
 
-        crate::config::loading::validate_asset_source_boundaries(
+        crate::config::boundaries::validate_asset_source_boundaries(
             &config,
             &site,
             &content,

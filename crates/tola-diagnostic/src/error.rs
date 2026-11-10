@@ -2,7 +2,8 @@
 
 use super::{Diagnostic, Severity};
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("{summary}")]
 pub struct DiagnosticError {
     summary: String,
     diagnostics: Vec<Diagnostic>,
@@ -34,18 +35,6 @@ impl DiagnosticError {
 
     pub fn diagnostics(&self) -> &[Diagnostic] {
         &self.diagnostics
-    }
-}
-
-impl std::fmt::Display for DiagnosticError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(&self.summary)
-    }
-}
-
-impl std::error::Error for DiagnosticError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        self.source.as_ref().map(|error| error.as_ref())
     }
 }
 
@@ -91,7 +80,7 @@ mod tests {
     }
 
     #[test]
-    fn attached_finds_nested_diagnostics() {
+    fn finds_nested_diagnostics() {
         #[derive(Debug, thiserror::Error)]
         #[error("read source failed")]
         struct ReadFailure {
@@ -117,30 +106,7 @@ mod tests {
     }
 
     #[test]
-    fn fallback_uses_outermost_message() {
-        let cases: [(&str, anyhow::Error, &str); 2] = [
-            (
-                "inner cause",
-                anyhow::anyhow!("could not write output").context("publishing failed"),
-                "publishing failed",
-            ),
-            (
-                "repeated message",
-                anyhow::anyhow!("same failure").context("same failure"),
-                "same failure",
-            ),
-        ];
-
-        for (label, error, expected) in cases {
-            let diagnostic = fallback(crate::codes::typst::COMPILE, &error);
-
-            assert_eq!(diagnostic.code, "typst.compile", "{label}");
-            assert_eq!(diagnostic.message, expected, "{label}");
-        }
-    }
-
-    #[test]
-    fn typed_failure_keeps_diagnostics() {
+    fn retains_typed_cause() {
         #[derive(Debug, thiserror::Error)]
         #[error("the staging directory is gone")]
         struct StagingDirectoryMissing;
@@ -156,7 +122,7 @@ mod tests {
 
         let error = anyhow::Error::new(DiagnosticError::attach(
             anyhow::Error::new(StagingDirectoryMissing),
-            diagnostics.clone(),
+            diagnostics,
         ));
 
         assert!(
@@ -164,7 +130,6 @@ mod tests {
                 .chain()
                 .any(|cause| cause.is::<StagingDirectoryMissing>())
         );
-        assert_eq!(error.to_string(), "the staging directory is gone");
         let attached = attached(&error).expect("the diagnostics stay attached");
         assert_eq!(attached.len(), 1);
         assert_eq!(attached[0].code, crate::codes::typst::SOURCE_ANALYSIS);

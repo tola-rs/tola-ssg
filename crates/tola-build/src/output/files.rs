@@ -10,6 +10,8 @@ use std::sync::Arc;
 use anyhow::Result;
 use rayon::prelude::*;
 
+use super::graph::{OutputFile, OutputGraph};
+use super::revision::OutputRevision;
 use crate::cancellation::{BuildCancellation, OptionalCancellation};
 use crate::filesystem::TemporaryDirectory;
 use tola_input::layout;
@@ -36,9 +38,6 @@ enum StagedOutputError {
         source: std::io::Error,
     },
 }
-
-use super::graph::{OutputFile, OutputGraph};
-use super::revision::OutputRevision;
 
 // Bound work between cancellation checks while writing one staged output.
 const OUTPUT_IO_CHUNK_SIZE: usize = 64 * 1024;
@@ -156,27 +155,24 @@ fn write_outputs(
     Ok(())
 }
 
-/// Create every directory the staged outputs need, exactly once, in path order.
+/// Create the distinct parent directories in path order.
 fn write_output_directories(
     outputs: &[OutputFile],
     root: &Path,
     cancellation: Option<&BuildCancellation>,
 ) -> Result<()> {
-    let mut directories = BTreeSet::new();
-    for output in outputs {
-        if let Some(parent) = root.join(output.path().as_str()).parent() {
-            directories.insert(parent.to_path_buf());
-        }
-    }
+    let directories: BTreeSet<_> = outputs
+        .iter()
+        .filter_map(|output| Path::new(output.path().as_str()).parent())
+        .filter(|directory| !directory.as_os_str().is_empty())
+        .collect();
     for directory in directories {
         cancellation.ensure_active_if_present()?;
-        fs::create_dir_all(&directory).map_err(|source| StagedOutputError::Directory {
-            relative: directory
-                .strip_prefix(root)
-                .unwrap_or(&directory)
-                .display()
-                .to_string(),
-            source,
+        fs::create_dir_all(root.join(directory)).map_err(|source| {
+            StagedOutputError::Directory {
+                relative: directory.display().to_string(),
+                source,
+            }
         })?;
     }
     Ok(())
@@ -209,35 +205,35 @@ fn write_output(
 
 /// The bytes one output publishes: Bundle CSS/JavaScript is minified, everything else is
 /// published as produced. A source that cannot be read as UTF-8 or rewritten keeps its bytes.
-fn minified_output_bytes<'a>(
-    output: &'a OutputFile,
+fn minified_output_bytes(
+    output: &OutputFile,
     languages: tola_minify::MinifiedLanguages,
-) -> Cow<'a, [u8]> {
+) -> Cow<'_, [u8]> {
+    let bytes = output.bytes();
     if !matches!(output.owner(), super::owner::OutputOwner::Bundle { .. }) {
-        return Cow::Borrowed(output.bytes());
+        return Cow::Borrowed(bytes);
     }
     let Some(request) =
         tola_minify::MinifyRequest::for_source(Path::new(output.path().as_str()), languages)
     else {
-        return Cow::Borrowed(output.bytes());
+        return Cow::Borrowed(bytes);
     };
-    let Ok(source) = std::str::from_utf8(output.bytes()) else {
-        return Cow::Borrowed(output.bytes());
+    let Ok(source) = std::str::from_utf8(bytes) else {
+        return Cow::Borrowed(bytes);
     };
     match request.minify(source) {
         Ok(minified) => Cow::Owned(minified.into_bytes()),
-        Err(_) => Cow::Borrowed(output.bytes()),
+        Err(_) => Cow::Borrowed(bytes),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::output::graph::OutputGraphBuilder;
     use crate::output::owner::OutputOwner;
     use crate::output::root::OwnedOutputRoot;
     use crate::output::semantics::OutputDeclaration;
-    use crate::output::tests::{insert_output, output_file, output_graph, site_lock};
+    use crate::output::tests::{output_file, output_graph, site_lock};
 
     /// A publication root with no protected inputs.
     fn output_root(site: &Path, output: &Path) -> OwnedOutputRoot {
@@ -332,9 +328,8 @@ mod tests {
         );
     }
 
-    /// Writing a candidate into the workspace leaves the published tree as it was.
     #[test]
-    fn staging_published_tree_until_commit() {
+    fn staging_keeps_the_old_site_until_publish() {
         let site = tempfile::TempDir::new().unwrap();
         let output = site.path().join("public");
         let destination = output_root(site.path(), &output);
@@ -345,26 +340,29 @@ mod tests {
         published.publish().unwrap();
 
         let writer = output_write(&destination, &lock);
-        let stage = writer.stage().unwrap();
+        let files = [
+            ("posts/rust/index.html", "Rust"),
+            ("posts/typst/index.html", "Typst"),
+            ("guide/index.html", "Guide"),
+        ];
+        let graph = output_graph(files.map(|(path, text)| {
+            output_file(path, OutputDeclaration::html_document(), text.as_bytes())
+        }));
         let staged =
-            StagedBuildFiles::materialize(&graph(), &writer, &BuildCancellation::default())
-                .unwrap();
+            StagedBuildFiles::materialize(&graph, &writer, &BuildCancellation::default()).unwrap();
 
-        assert_eq!(
-            fs::read_to_string(output.join("index.html")).unwrap(),
-            "published"
-        );
-        assert_eq!(
-            fs::read(stage.join("posts/rust/index.html")).unwrap(),
-            b"Rust"
-        );
+        assert_eq!(fs::read(output.join("index.html")).unwrap(), b"published");
+        assert!(!output.join("posts").exists());
 
         staged.commit(writer).unwrap();
         assert!(!output.join("index.html").exists());
-        assert_eq!(
-            fs::read(output.join("posts/rust/index.html")).unwrap(),
-            b"Rust"
-        );
+        for (path, text) in files {
+            assert_eq!(
+                fs::read(output.join(path)).unwrap(),
+                text.as_bytes(),
+                "{path}"
+            );
+        }
     }
 
     #[cfg(unix)]
@@ -388,48 +386,6 @@ mod tests {
         assert!(staged.is_err());
         assert_eq!(fs::read(content.join("page.typ")).unwrap(), b"source");
         assert_eq!(fs::read_dir(&content).unwrap().count(), 1);
-        assert!(!output.exists());
-    }
-
-    #[test]
-    fn staging_writes_every_output() {
-        let site = tempfile::TempDir::new().unwrap();
-        let output = site.path().join("public");
-        let destination = output_root(site.path(), &output);
-        let lock = site_lock(site.path());
-        let writer = output_write(&destination, &lock);
-        let stage = writer.stage().unwrap();
-
-        let mut candidate = OutputGraphBuilder::new();
-        for (path, bytes) in [
-            ("index.html", "home"),
-            ("docs/one/index.html", "one"),
-            ("docs/two/index.html", "two changed"),
-            ("guides/three/index.html", "three"),
-        ] {
-            insert_output(
-                &mut candidate,
-                path,
-                OutputDeclaration::html_document(),
-                bytes.as_bytes(),
-            );
-        }
-
-        StagedBuildFiles::materialize(&candidate.finish(), &writer, &BuildCancellation::default())
-            .unwrap();
-
-        for (path, bytes) in [
-            ("docs/one/index.html", "one"),
-            ("docs/two/index.html", "two changed"),
-            ("guides/three/index.html", "three"),
-            ("index.html", "home"),
-        ] {
-            assert_eq!(
-                fs::read(stage.join(path)).unwrap(),
-                bytes.as_bytes(),
-                "{path}"
-            );
-        }
         assert!(!output.exists());
     }
 

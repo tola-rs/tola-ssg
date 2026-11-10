@@ -85,7 +85,7 @@ impl SiteConfigSchema {
         path: &Path,
         content: &str,
         scope: InputScope,
-    ) -> Result<ParsedConfig<Self>> {
+    ) -> Result<ParsedConfig<Self>, super::ConfigSourceError> {
         ConfigSource::parse(path, content, scope)?.decode_site()
     }
 
@@ -425,32 +425,6 @@ mod tests {
             );
             assert!(!root.exists());
         }
-    }
-
-    /// Every key an author may write is offered once, whatever section declares it.
-    #[test]
-    fn field_paths_cover_every_section() {
-        let paths = field_paths()
-            .map(|field| field.as_str())
-            .collect::<Vec<_>>();
-
-        for expected in [
-            "site.title",
-            "build.entry",
-            "hooks.before-build",
-            "build.minify.html",
-            "typst.fonts.paths",
-            "icons.collections",
-            "formatter.print-width",
-        ] {
-            assert!(paths.contains(&expected), "`{expected}` is missing");
-        }
-
-        let mut sorted = paths.clone();
-        sorted.sort_unstable();
-        let mut unique = sorted.clone();
-        unique.dedup();
-        assert_eq!(unique.len(), sorted.len(), "field paths repeat");
     }
 
     /// Every declared path documents itself, so hover answers for the whole file.

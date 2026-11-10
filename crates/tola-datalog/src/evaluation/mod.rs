@@ -8,11 +8,11 @@ mod program;
 mod tuples;
 
 use self::clause::{Clause, MatchEvidence};
-use self::join::{Rows, candidate_row_ids, join_base, retain_negative};
+use self::join::{Rows, candidate_row_ids, join_base, project_bindings};
 use self::program::Stage;
 pub(crate) use self::program::{Program, RuleProgram};
 use self::tuples::RowBlock;
-use crate::validation::{DeclaredArities, atom, validate_body};
+use crate::validation::{DeclaredArities, atom, bound_variables, validate_body};
 use crate::{Database, Error, ErrorKind, Location, Query};
 use smallvec::SmallVec;
 use std::cmp::Ordering;
@@ -68,7 +68,8 @@ impl<C: Clone + Ord> Database<C> {
         mut is_cancelled: impl FnMut() -> bool,
     ) -> Result<Vec<Vec<C>>, Error> {
         let mut arities = DeclaredArities::extending(&self.snapshot.arities);
-        let bound = validate_body(&query.body, &mut arities, Location::QueryBody)?;
+        let bound = bound_variables(&query.body);
+        validate_body(&query.body, &bound, &mut arities, Location::QueryBody)?;
         for (index, name) in query.select.iter().enumerate() {
             if !bound.contains(name) {
                 return Err(Error {
@@ -99,7 +100,7 @@ impl<C: Clone + Ord> Database<C> {
             }),
         );
         evaluator.complete()?;
-        evaluator.rows.sort_distinct();
+        evaluator.rows.sort_distinct(evaluator.is_cancelled)?;
         let mut rows = Vec::with_capacity(evaluator.rows.len());
         for row in evaluator.rows.iter() {
             ensure_not_cancelled(evaluator.is_cancelled)?;
@@ -150,6 +151,7 @@ impl<'a, C> Continuation<'a, C> {
 struct Consumer<'a, C> {
     continuation: Continuation<'a, C>,
     stratum: usize,
+    reads_tuple: bool,
 }
 impl<'a, C: Ord> Consumer<'a, C> {
     fn resume(
@@ -157,18 +159,33 @@ impl<'a, C: Ord> Consumer<'a, C> {
         batches: &[Rows<'a, C>],
         is_cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Option<Continuation<'a, C>>, Error> {
+        if batches.is_empty() {
+            return Ok(None);
+        }
         let clause = &self.continuation.clause;
         let parameters = &self.continuation.parameters;
         // The consumer resumes the stage whose table it was waiting on.
         let atom = clause.stage(self.continuation.position - 1);
-        let mut rows = Rows::new(atom.width());
-        let matches_all = atom.matches_all(parameters, MatchEvidence::Demand);
-        let identity = matches_all && atom.identity(parameters);
-        if matches_all {
-            let tuples: usize = batches.iter().map(RowBlock::len).sum();
-            ensure_not_cancelled(is_cancelled)?;
-            rows.reserve_rows(self.continuation.rows.len() * tuples);
+        let evidence = MatchEvidence::Demand;
+        let matches_all = atom.matches_all(parameters, evidence);
+        if !self.reads_tuple {
+            // Every binding in this demand has the same bound columns and therefore the same
+            // matches. The first matching tuple is enough to resume all of them.
+            let bindings = &self.continuation.rows;
+            for tuple in batches.iter().flat_map(RowBlock::iter) {
+                ensure_not_cancelled(is_cancelled)?;
+                let value = |column| tuple[column];
+                if matches_all
+                    || atom.matches(clause, bindings.row(0), parameters, evidence, &value)
+                {
+                    let rows = project_bindings(clause, atom, parameters, bindings, is_cancelled)?;
+                    return Ok(Some(self.continuation.with_rows(rows)));
+                }
+            }
+            return Ok(None);
         }
+        let mut rows = Rows::new(atom.width());
+        let identity = matches_all && atom.identity(parameters);
         for bindings in self.continuation.rows.iter() {
             for batch in batches {
                 rows.append_run(atom.preserves_order && batch.is_strictly_sorted(), |rows| {
@@ -180,13 +197,7 @@ impl<'a, C: Ord> Consumer<'a, C> {
                             ensure_not_cancelled(is_cancelled)?;
                             let value = |column| tuple[column];
                             if matches_all
-                                || atom.matches(
-                                    clause,
-                                    bindings,
-                                    parameters,
-                                    MatchEvidence::Demand,
-                                    &value,
-                                )
+                                || atom.matches(clause, bindings, parameters, evidence, &value)
                             {
                                 rows.push(atom.values(clause, bindings, parameters, &value));
                             }
@@ -244,11 +255,13 @@ struct Evaluator<'a, C: Ord, F> {
 fn group_demands<'a, C: Ord>(
     continuation: &Continuation<'a, C>,
     atom: &Stage,
-) -> BTreeMap<BoundColumns<'a, C>, Rows<'a, C>> {
+    is_cancelled: &mut impl FnMut() -> bool,
+) -> Result<BTreeMap<BoundColumns<'a, C>, Rows<'a, C>>, Error> {
     let width = continuation.rows.width();
     let mut columns = BoundColumns::new();
     let mut groups = BTreeMap::<BoundColumns<'a, C>, Rows<'a, C>>::new();
     for row in continuation.rows.iter() {
+        ensure_not_cancelled(is_cancelled)?;
         columns.clear();
         for column in 0..atom.arity() {
             columns.push(atom.bound(&continuation.clause, row, &continuation.parameters, column));
@@ -261,7 +274,7 @@ fn group_demands<'a, C: Ord>(
         bindings.push(row.iter().cloned());
         groups.insert(columns.clone(), bindings);
     }
-    groups
+    Ok(groups)
 }
 impl<'a, C: Clone + Ord, F: FnMut() -> bool> Evaluator<'a, C, F> {
     fn new(database: &'a Database<C>, is_cancelled: &'a mut F, output_width: usize) -> Self {
@@ -412,16 +425,27 @@ impl<'a, C: Clone + Ord, F: FnMut() -> bool> Evaluator<'a, C, F> {
     /// into the table's batch list.
     fn accept_answers(&mut self, table: usize, mut tuples: Rows<'a, C>) -> Result<(), Error> {
         let table = &mut self.tables[table];
-        tuples.retain_unseen(&table.answers);
+        tuples.retain_unseen(&table.answers, self.is_cancelled)?;
         if tuples.is_empty() {
             return Ok(());
         }
-        for consumer in &table.consumers {
+        // Drop completed existence consumers while keeping the others in registration order.
+        let mut waiting = 0;
+        for index in 0..table.consumers.len() {
+            let consumer = &table.consumers[index];
             if let Some(next) = consumer.resume(std::slice::from_ref(&tuples), self.is_cancelled)? {
                 push_continuation(&mut self.queues[consumer.stratum], next);
                 self.level = self.level.min(consumer.stratum);
+                if !consumer.reads_tuple {
+                    continue;
+                }
             }
+            if waiting != index {
+                table.consumers.swap(waiting, index);
+            }
+            waiting += 1;
         }
+        table.consumers.truncate(waiting);
         // Merge smaller older batches into this one: sizes then at least double towards the tail,
         // keeping later dedup and merge passes logarithmic.
         while table
@@ -429,7 +453,11 @@ impl<'a, C: Clone + Ord, F: FnMut() -> bool> Evaluator<'a, C, F> {
             .last()
             .is_some_and(|old| old.len() <= tuples.len() * 2)
         {
-            tuples = table.answers.pop().unwrap().merge_disjoint(tuples);
+            tuples = table
+                .answers
+                .pop()
+                .unwrap()
+                .merge_disjoint(tuples, self.is_cancelled)?;
         }
         table.answers.push(tuples);
         Ok(())
@@ -446,11 +474,11 @@ impl<'a, C: Clone + Ord, F: FnMut() -> bool> Evaluator<'a, C, F> {
         }
         // The stage that demanded this table is the one to keep rows for.
         let atom = continuation.clause.stage(continuation.position - 1);
-        continuation.rows = retain_negative(
+        continuation.rows = project_bindings(
             &continuation.clause,
             atom,
             &continuation.parameters,
-            continuation.rows,
+            &continuation.rows,
             self.is_cancelled,
         )?;
         self.enqueue(level, Work::Advance(continuation));
@@ -475,14 +503,13 @@ impl<'a, C: Clone + Ord, F: FnMut() -> bool> Evaluator<'a, C, F> {
                 .rules_by_head
                 .contains_key(continuation.clause.relation(atom))
             {
-                let width = continuation.rows.width();
                 let rows = join_base(
                     self.database,
                     self.is_cancelled,
                     &continuation.clause,
                     atom,
                     &continuation.parameters,
-                    std::mem::replace(&mut continuation.rows, Rows::new(width)),
+                    &continuation.rows,
                 )?;
                 if rows.is_empty() {
                     return Ok(());
@@ -495,9 +522,7 @@ impl<'a, C: Clone + Ord, F: FnMut() -> bool> Evaluator<'a, C, F> {
     }
     /// Hands a finished clause's rows to its destination.
     fn deliver(&mut self, level: usize, continuation: Continuation<'a, C>) -> Result<(), Error> {
-        for _ in continuation.rows.iter() {
-            ensure_not_cancelled(self.is_cancelled)?;
-        }
+        ensure_not_cancelled(self.is_cancelled)?;
         match continuation.destination {
             Destination::Table(table) => {
                 self.enqueue(level, Work::Answer(table, continuation.rows))
@@ -515,7 +540,8 @@ impl<'a, C: Clone + Ord, F: FnMut() -> bool> Evaluator<'a, C, F> {
         atom: &Stage,
     ) -> Result<(), Error> {
         let relation = continuation.clause.relation(atom);
-        for (columns, bindings) in group_demands(continuation, atom) {
+        let reads_tuple = atom.reads_tuple(&continuation.parameters);
+        for (columns, bindings) in group_demands(continuation, atom, self.is_cancelled)? {
             let table = self.ensure_table(Demand { relation, columns })?;
             let next = continuation.with_rows(bindings);
             if atom.negative {
@@ -526,9 +552,13 @@ impl<'a, C: Clone + Ord, F: FnMut() -> bool> Evaluator<'a, C, F> {
             let consumer = Consumer {
                 continuation: next,
                 stratum: level,
+                reads_tuple,
             };
             if let Some(next) = consumer.resume(&table.answers, self.is_cancelled)? {
                 push_continuation(&mut self.queues[level], next);
+                if !consumer.reads_tuple {
+                    continue;
+                }
             }
             table.consumers.push(consumer);
         }

@@ -299,6 +299,8 @@ fn failure_chain(error: &anyhow::Error) -> String {
         if (cause.is::<tola_diagnostic::DiagnosticError>() && cause.source().is_some())
             || (cause.is::<tola_module::ModuleLoadError>() && cause.source().is_some())
             || (cause.is::<tola_build::modules::query::QueryError>() && cause.source().is_some())
+            || (cause.is::<tola_build::config::ConfigSourceError>() && cause.source().is_some())
+            || cause.is::<tola_build::build::BuildFailure>()
             || cause.is::<tola_typst::BundleCompileFailure>()
             || cause.is::<tola_typst::CompileFailure>()
             || cause.is::<tola_typst::ScanFailure>()

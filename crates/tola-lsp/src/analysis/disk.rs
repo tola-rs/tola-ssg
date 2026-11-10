@@ -4,13 +4,11 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use tola_typst::ContentDigest;
 use tola_typst::typst::syntax::{FileId, Source};
 use tola_typst_syntax::names::SourceNames;
 
-/// Parsed names from the bytes a source walk or import closure last read. Reads revalidate the
-/// bytes; reuse never substitutes a timestamp for the compiler's content identity. A completed
-/// pass drops sources neither the walk nor its import closure reached.
+/// Parsed names from the text a source walk or import closure last read. A completed pass drops
+/// sources neither the walk nor its import closure reached.
 #[derive(Default)]
 pub(crate) struct DiskSources {
     pass: u64,
@@ -22,8 +20,6 @@ pub(crate) struct DiskSources {
 struct ParsedSource {
     /// The pass that last read the file, so a file the walk stopped seeing is dropped.
     pass: u64,
-    /// The digest of the bytes this parse came from.
-    digest: ContentDigest,
     names: Arc<SourceNames>,
     alias: Option<PathBuf>,
 }
@@ -56,11 +52,10 @@ impl DiskSources {
         Some(names)
     }
 
-    /// Reuses the parse of these revalidated bytes, including hidden imports and package sources.
+    /// Reuses the parse when the newly read text matches it, including hidden imports and packages.
     pub(crate) fn names_from_text(&mut self, id: FileId, text: String) -> Arc<SourceNames> {
-        let digest = ContentDigest::of(text.as_bytes());
         if let Some(parsed) = self.parsed.get_mut(&id)
-            && parsed.digest == digest
+            && parsed.names.source().text() == text
         {
             parsed.pass = self.pass;
             return Arc::clone(&parsed.names);
@@ -70,7 +65,6 @@ impl DiskSources {
             id,
             ParsedSource {
                 pass: self.pass,
-                digest,
                 names: Arc::clone(&names),
                 alias: None,
             },

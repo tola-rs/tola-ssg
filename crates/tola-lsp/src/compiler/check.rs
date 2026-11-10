@@ -78,7 +78,7 @@ where
         if let Err(error) = self.prepare(sources) {
             return match SourceFailure::of(error) {
                 SourceFailure::Cancelled => Err(SourceFailure::Cancelled),
-                SourceFailure::Panicked => Err(SourceFailure::Panicked),
+                failure @ (SourceFailure::Panicked | SourceFailure::InvalidName(_)) => Err(failure),
                 SourceFailure::Failed(error) => {
                     // A broken edit retains the last usable workspace configuration.
                     let configuration = self
@@ -243,26 +243,20 @@ fn check_documents(
     view: &SourceView,
     selected: &Arc<SelectedInterfaces>,
 ) -> Result<CheckedSources, SourceFailure> {
-    let overrides = sources.overrides.to_vec();
     let mut diagnostics = Vec::new();
     let mut compiled = true;
     let mut read_paths = Vec::new();
-    for (path, text) in &overrides {
+    let documents = sources.overrides.iter().filter_map(|(path, text)| {
         // A document outside the workspace's own directory belongs to another root, and a vendor
         // file is not the author's document.
-        let Some(relative) = path
-            .strip_prefix(configuration.get_root())
-            .ok()
-            .and_then(Path::to_str)
-        else {
-            continue;
-        };
-        let Some(names) = open_document_names(view, path, text, configuration.get_root()) else {
-            continue;
-        };
-        let revision = session
-            .inspect_source(relative, overrides.clone(), &sources.cancellation)
-            .map_err(SourceFailure::from)?;
+        let relative = path.strip_prefix(configuration.get_root()).ok()?.to_str()?;
+        let names = open_document_names(view, path, text, configuration.get_root())?;
+        Some((relative, (path, names)))
+    });
+    for checked in
+        session.inspect_sources(documents, sources.overrides.to_vec(), &sources.cancellation)
+    {
+        let ((path, names), revision) = checked.map_err(SourceFailure::from)?;
         // File-change filtering may trust the combined reads only when every document compiled.
         compiled &= revision.compiled();
         diagnostics.extend_from_slice(revision.diagnostics());

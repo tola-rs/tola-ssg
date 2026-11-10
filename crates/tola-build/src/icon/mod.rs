@@ -10,11 +10,13 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::BuildResources;
 use crate::cancellation::BuildCancellation;
 use crate::config::ResolvedSiteConfig;
 use crate::config::section::{IconCollectionSource, IconsConfig};
 use crate::filesystem::SourceOverrides;
 use tola_diagnostic::{Diagnostic, Severity};
+use tola_input::{InputLock, LockedIcon};
 
 use input::{IconFileRead, SvgDirectoryRead};
 
@@ -34,7 +36,10 @@ struct ResolvedCollection {
 
 #[derive(Debug)]
 enum CollectionReads {
-    Pinned,
+    Remote {
+        locked: LockedIcon,
+        source: Option<IconFileRead>,
+    },
     Json(IconFileRead),
     SvgDirectory {
         membership: SvgDirectoryRead,
@@ -67,6 +72,7 @@ pub(crate) struct IconInventoryEvidence {
     directories: Arc<[SvgDirectoryRead]>,
     boundary: tola_typst::SourceBoundary,
     vendor_root: Option<PathBuf>,
+    remote: BTreeMap<String, LockedIcon>,
 }
 
 impl IconInventoryEvidence {
@@ -106,6 +112,16 @@ impl IconInventoryEvidence {
         cancellation: &BuildCancellation,
     ) -> anyhow::Result<bool> {
         cancellation.ensure_active()?;
+        if !self.remote.is_empty() {
+            let lock = InputLock::read(config.get_root())?.unwrap_or_default();
+            if self
+                .remote
+                .iter()
+                .any(|(name, entry)| lock.icons.get(name) != Some(entry))
+            {
+                return Ok(false);
+            }
+        }
         if self.vendor_root != config.vendor.path {
             return Ok(false);
         }
@@ -121,11 +137,12 @@ impl IconInventoryEvidence {
     }
 }
 
+/// A remote icon collection did not match its recorded digest or size.
 #[derive(Debug, thiserror::Error)]
 #[error(
     "SHA-256 mismatch for icon collection `{namespace}` from `{url}`: expected {expected}, received {received}"
 )]
-pub(crate) struct IntegrityError {
+pub struct IconIntegrityError {
     pub(crate) namespace: String,
     pub(crate) url: String,
     pub(crate) expected: String,
@@ -135,8 +152,10 @@ pub(crate) struct IntegrityError {
     pub(crate) path: Option<PathBuf>,
 }
 
+/// An icon collection could not be read, checked, or fetched.
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum IconError {
+#[non_exhaustive]
+pub enum IconError {
     #[error("Tola could not read an icon source file")]
     Read {
         path: PathBuf,
@@ -179,7 +198,7 @@ pub(crate) enum IconError {
     )]
     NetworkDenied { namespace: String, url: String },
     #[error(transparent)]
-    Integrity(Box<IntegrityError>),
+    Integrity(Box<IconIntegrityError>),
     /// A configured icon source lies outside what this build may read.
     #[error("Tola may not read icon source `{path}`")]
     Boundary {
@@ -265,6 +284,10 @@ pub(crate) enum IconError {
     /// The declaration names neither a preset nor a URL.
     #[error("icon collection `{namespace}` names neither a preset nor a URL")]
     NotRemote { namespace: String },
+    #[error("refreshing icon collections writes `tola.lock`; run without `--locked` or `--pure`")]
+    RefreshLocked,
+    #[error(transparent)]
+    Lock(#[from] tola_input::LockError),
     #[error("build cancelled")]
     Cancelled(#[from] crate::cancellation::BuildCancelled),
     #[error("Tola could not download the configured icon collections")]
@@ -382,7 +405,7 @@ pub(crate) fn error_diagnostic(error: &anyhow::Error, root: &Path) -> Option<Dia
             "Run `tola vendor` while online, or declare a local icon collection",
         ),
         IconError::Integrity(_) => diagnostic
-            .with_note("update `sha256` only when you intend to publish the bytes it now serves")
+            .with_note("run `tola update` only when you intend to accept changed collection bytes")
             .with_help("Run `tola vendor --refresh` to restore the site's copy"),
         IconError::NetworkRuntime(_) => {
             diagnostic.with_help("Check the connection, then run the build again")
@@ -448,10 +471,14 @@ pub(crate) fn prepare(
     let mut collections = tola_icons::IconCollections::new();
     let mut files = Vec::new();
     let mut directories = Vec::new();
+    let mut remote = BTreeMap::new();
     for (namespace, inventory) in &resolved_collections {
         cancellation.ensure_active()?;
         match &inventory.reads {
-            CollectionReads::Pinned => {}
+            CollectionReads::Remote { locked, source } => {
+                remote.insert(namespace.clone(), locked.clone());
+                files.extend(source.iter().cloned());
+            }
             CollectionReads::Json(read) => files.push(read.clone()),
             CollectionReads::SvgDirectory {
                 membership,
@@ -474,6 +501,7 @@ pub(crate) fn prepare(
         directories: directories.into(),
         boundary,
         vendor_root: config.vendor.path.clone(),
+        remote,
     };
     let collections = Arc::new(collections);
     cancellation.ensure_active()?;
@@ -491,7 +519,8 @@ fn remote_request<'a>(
     cancellation: &'a BuildCancellation,
     resources: &'a crate::resources::BuildResources,
     boundary: &'a tola_typst::SourceBoundary,
-) -> anyhow::Result<remote::RemoteCollection<'a>> {
+    locked: Option<LockedIcon>,
+) -> Result<remote::RemoteCollection<'a>, IconError> {
     let Some(IconCollectionSource::RemoteJson {
         preset,
         version,
@@ -499,16 +528,17 @@ fn remote_request<'a>(
         mirrors,
     }) = config.icons.collections.get(namespace)
     else {
-        anyhow::bail!("`{namespace}` is not a configured remote icon collection");
+        return Err(IconError::NotRemote {
+            namespace: namespace.into(),
+        });
     };
-    let lock = tola_input::InputLock::read(config.get_root())?.unwrap_or_default();
     Ok(remote::RemoteCollection {
         namespace,
         preset: preset.as_deref(),
         version: version.as_deref(),
         url: url.as_deref(),
         mirrors: mirrors.as_deref().unwrap_or_default(),
-        locked: lock.icons.get(namespace).cloned(),
+        locked,
         vendored: config.vendor.icon_collection(namespace),
         cache_root: crate::BuildResources::icon_cache_directory(config.get_root()),
         mode: resources.input_mode(),
@@ -524,11 +554,61 @@ pub fn remote_collection_bytes(
     namespace: &str,
     resources: &crate::resources::BuildResources,
     cancellation: &BuildCancellation,
-) -> anyhow::Result<Vec<u8>> {
+) -> Result<Vec<u8>, IconError> {
     let boundary = resources.source_boundary(config);
-    let request = remote_request(config, namespace, cancellation, resources, &boundary)?;
-    let (_, verified) = remote::load_collection(request)?;
+    let original = InputLock::read(config.get_root())?.unwrap_or_default();
+    let request = remote_request(
+        config,
+        namespace,
+        cancellation,
+        resources,
+        &boundary,
+        original.icons.get(namespace).cloned(),
+    )?;
+    let (_, verified) = load_remote(config, &original, request)?;
     Ok(verified.bytes)
+}
+
+fn load_remote(
+    config: &ResolvedSiteConfig,
+    original: &InputLock,
+    request: remote::RemoteCollection<'_>,
+) -> Result<(tola_icons::IconCollection, remote::CollectionBytes), IconError> {
+    let namespace = request.namespace;
+    let mode = request.mode;
+    let cancellation = request.cancellation;
+    let (collection, verified) = remote::load_collection(request)?;
+    cancellation.ensure_active()?;
+    if mode.may_write_lock() && original.icons.get(namespace) != Some(&verified.locked) {
+        let mut updated = original.clone();
+        updated
+            .icons
+            .insert(namespace.into(), verified.locked.clone());
+        updated.commit(config.get_root(), original)?;
+    }
+    Ok((collection, verified))
+}
+
+/// Fetch and validate selected remote collections, recording entries without writing the lock.
+pub fn refresh_icon_collections(
+    config: &ResolvedSiteConfig,
+    names: &[String],
+    resources: &BuildResources,
+    cancellation: &BuildCancellation,
+    lock: &mut InputLock,
+) -> Result<(), IconError> {
+    if !resources.input_mode().may_write_lock() {
+        return Err(IconError::RefreshLocked);
+    }
+    let boundary = resources.source_boundary(config);
+    for name in names {
+        cancellation.ensure_active()?;
+        let request = remote_request(config, name, cancellation, resources, &boundary, None)?;
+        let (_, verified) = remote::load_collection(request)?;
+        cancellation.ensure_active()?;
+        lock.icons.insert(name.clone(), verified.locked);
+    }
+    Ok(())
 }
 
 /// The site-wide facts every collection in one build shares.
@@ -556,25 +636,38 @@ fn prepare_collection(
     } = *context;
     let (collection, reads) = match &config.icons.collections[namespace] {
         IconCollectionSource::RemoteJson { .. } => {
-            let request = remote_request(config, namespace, cancellation, resources, boundary)?;
+            let original = InputLock::read(config.get_root())?.unwrap_or_default();
+            let request = remote_request(
+                config,
+                namespace,
+                cancellation,
+                resources,
+                boundary,
+                original.icons.get(namespace).cloned(),
+            )?;
             if let Some(previous) = previous {
                 let reusable = match &previous.reads {
-                    CollectionReads::Pinned => {
-                        resources.input_scope() != tola_input::InputScope::Pure
+                    CollectionReads::Remote { locked, source }
+                        if request.locked.as_ref() == Some(locked) =>
+                    {
+                        match source {
+                            Some(read) => read.is_fresh(overrides, cancellation)?,
+                            None => resources.input_scope() != tola_input::InputScope::Pure,
+                        }
                     }
-                    CollectionReads::Json(read) => read.is_fresh(overrides, cancellation)?,
-                    CollectionReads::SvgDirectory { .. } => false,
+                    _ => false,
                 };
                 if reusable {
                     return Ok(Arc::clone(previous));
                 }
             }
-            let (collection, verified) = remote::load_collection(request)?;
+            let (collection, verified) = load_remote(config, &original, request)?;
             (
                 Arc::new(collection),
-                verified
-                    .source
-                    .map_or(CollectionReads::Pinned, CollectionReads::Json),
+                CollectionReads::Remote {
+                    locked: verified.locked,
+                    source: verified.source,
+                },
             )
         }
         IconCollectionSource::LocalJson { path } => {
@@ -710,6 +803,99 @@ pub(crate) fn configured_collection_watch_evidence(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remote_collections_record_locks_and_invalidate_reuse() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use tola_input::{IconSource, InputScope, Sha256Digest};
+
+        let directory = tempfile::tempdir().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/icons.json", listener.local_addr().unwrap());
+        let bytes = br#"{"prefix":"brand","icons":{"mark":{"body":"<path d=\"M0 0h24v24H0z\"/>"}},"width":24,"height":24}"#;
+        let changed = br#"{"prefix":"brand","icons":{"other":{"body":"<path d=\"M0 0h12v12H0z\"/>"}},"width":24,"height":24}"#;
+        let server = std::thread::spawn(move || {
+            for body in [bytes.as_slice(), changed.as_slice()] {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0; 4096];
+                stream.read(&mut request).unwrap();
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .unwrap();
+                stream.write_all(body).unwrap();
+            }
+        });
+        let config = crate::config::tests::load_test_config(
+            directory.path(),
+            &format!(
+                "[vendor]\npath = 'vendor'\n[icons.collections.brand]\nsource-type = 'remote-json'\nurl = '{url}'\n"
+            ),
+        );
+        let cancellation = BuildCancellation::default();
+        let inventory = prepare_icons(&config, &cancellation, None).unwrap();
+        let original = InputLock::read(config.get_root()).unwrap().unwrap();
+        assert_eq!(
+            original.icons["brand"].sha256,
+            Sha256Digest::of_bytes(bytes)
+        );
+        assert_eq!(
+            original.icons["brand"].source,
+            IconSource::Url { url: url.clone() }
+        );
+
+        let offline = BuildResources::new()
+            .with_input_scope(InputScope::Offline)
+            .with_locked(true);
+        assert_eq!(
+            remote_collection_bytes(&config, "brand", &offline, &cancellation).unwrap(),
+            bytes
+        );
+        let frozen = config.vendor.icon_collection("brand").unwrap();
+        std::fs::create_dir_all(frozen.parent().unwrap()).unwrap();
+        std::fs::write(&frozen, bytes).unwrap();
+        let pure = offline.with_input_scope(InputScope::Pure);
+        assert_eq!(
+            remote_collection_bytes(&config, "brand", &pure, &cancellation).unwrap(),
+            bytes
+        );
+
+        let mut updated = original.clone();
+        refresh_icon_collections(
+            &config,
+            &["brand".into()],
+            &BuildResources::new(),
+            &cancellation,
+            &mut updated,
+        )
+        .unwrap();
+        server.join().unwrap();
+        assert_eq!(
+            InputLock::read(config.get_root()).unwrap().unwrap(),
+            original
+        );
+        updated.commit(config.get_root(), &original).unwrap();
+        std::fs::write(&frozen, changed).unwrap();
+        assert!(
+            !inventory
+                .evidence
+                .is_fresh_for(&config, &cancellation)
+                .unwrap()
+        );
+        let next = prepare(
+            &config,
+            &cancellation,
+            Some(&inventory),
+            &pure,
+            &SourceOverrides::default(),
+        )
+        .unwrap();
+        assert!(next.collections.get("brand", "other").is_some());
+        assert!(next.collections.get("brand", "mark").is_none());
+    }
 
     fn brand_icons_config(root: &Path) -> ResolvedSiteConfig {
         crate::config::tests::load_test_config(root, BRAND_COLLECTION_TOML)

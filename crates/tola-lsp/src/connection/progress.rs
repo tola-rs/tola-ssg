@@ -168,7 +168,7 @@ mod tests {
         let workspace = ready_workspace(&mut connection);
         workspace.features.work_done_progress = true;
         connection.begin_progress(Instant::now());
-        connection.run_due_work(Instant::now()).unwrap();
+        connection.run_due_work(Instant::now(), true).unwrap();
         let written = messages(&mut connection);
         assert!(
             written
@@ -193,7 +193,7 @@ mod tests {
         let mut connection = ready(Vec::new());
         ready_workspace(&mut connection).features.work_done_progress = true;
         connection.begin_progress(Instant::now());
-        connection.run_due_work(Instant::now()).unwrap();
+        connection.run_due_work(Instant::now(), true).unwrap();
         let Message::Request(create) = messages(&mut connection).remove(0) else {
             panic!("progress creation request");
         };
@@ -212,7 +212,7 @@ mod tests {
         let workspace = ready_workspace(&mut connection);
         workspace.features.work_done_progress = true;
         connection.begin_progress(Instant::now());
-        connection.run_due_work(Instant::now()).unwrap();
+        connection.run_due_work(Instant::now(), true).unwrap();
         let written = messages(&mut connection);
         let Message::Request(create) = &written[0] else {
             panic!("progress creation request");

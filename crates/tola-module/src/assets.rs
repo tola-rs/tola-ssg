@@ -176,11 +176,8 @@ impl Assets {
                     .map(|entry| (&entry.source, &entry.enabled_by)),
             )
         {
-            anyhow::ensure!(
-                crate::declaration::is_relative_path(source),
-                "asset source `{}` must be relative to the module",
-                source.display()
-            );
+            tola_input::validate_relative_path(source)
+                .map_err(|error| anyhow::anyhow!("an asset's `source` {error}"))?;
             anyhow::ensure!(
                 enabled_by.as_ref().is_none_or(|key| !key.trim().is_empty()),
                 "asset `{}` has an empty `enabled-by` option",

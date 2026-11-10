@@ -607,7 +607,7 @@ mod tests {
     }
 
     #[test]
-    fn html_escaping_is_complete() {
+    fn escapes_link_markup() {
         let source = LinkElem::new(
             LinkTarget::Dest(url("/search?q=\"rust\"&kind=<post>")),
             TextElem::packed("<Rust> & Typst"),
@@ -617,12 +617,16 @@ mod tests {
         let content =
             FeedContent::from_typst(source, "/card/action", &BuildCancellation::default()).unwrap();
 
+        let html = content
+            .to_html_with_links(str::to_owned, &BuildCancellation::default())
+            .unwrap();
+        let document = roxmltree::Document::parse(&html).unwrap();
+        let link = document.root_element();
         assert_eq!(
-            content
-                .to_html_with_links(str::to_owned, &BuildCancellation::default())
-                .unwrap(),
-            "<a href=\"/search?q=&quot;rust&quot;&amp;kind=&lt;post&gt;\">&lt;Rust&gt; &amp; Typst</a>"
+            link.attribute("href"),
+            Some("/search?q=\"rust\"&kind=<post>")
         );
+        assert_eq!(link.text(), Some("<Rust> & Typst"));
     }
 
     #[test]

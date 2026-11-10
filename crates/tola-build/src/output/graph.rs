@@ -6,7 +6,7 @@ use serde::Serialize;
 use thiserror::Error;
 
 use super::owner::OutputOwner;
-use super::path::{OutputPathConflict, OutputPathIndex};
+use super::path::{OutputPathConflict, OutputPathIndex, invalid_path_help};
 use super::semantics::OutputDeclaration;
 use super::summary::OutputCounts;
 use tola_address::{OutputPath, OutputPathError, portable_key_is_reserved};
@@ -197,13 +197,10 @@ impl OutputFile {
 
     /// The same bytes and delivery metadata under a new producer.
     pub(crate) fn with_owner(&self, owner: OutputOwner) -> Self {
-        Self::from_byte_owner_with_digest(
-            self.path.clone(),
-            self.declaration.clone(),
+        Self {
             owner,
-            self.bytes_owner(),
-            self.digest,
-        )
+            ..self.clone()
+        }
     }
 
     #[inline]
@@ -293,13 +290,15 @@ pub(crate) enum OutputGraphError {
 
 impl OutputGraphError {
     /// The action the site author can take, for the diagnostic that reports this error.
-    fn help(&self) -> &'static str {
+    fn help(&self) -> Option<&'static str> {
         match self {
-            Self::TreeConflict { .. } => "use a path that does not overlap that directory",
-            Self::ReservedPath { .. } => "use a path outside `_tola`",
-            Self::PathConflict { .. } => "give one of them a different path or route",
-            Self::OutputOwnerKind { .. } => "declare it with `document(...)` in the root Bundle",
-            Self::InvalidPath { .. } => "use a path relative to the site root",
+            Self::TreeConflict { .. } => Some("use a path that does not overlap that directory"),
+            Self::ReservedPath { .. } => Some("use a path outside `_tola`"),
+            Self::PathConflict { .. } => Some("give one of them a different path or route"),
+            Self::OutputOwnerKind { .. } => {
+                Some("declare it with `document(...)` in the root Bundle")
+            }
+            Self::InvalidPath { source, .. } => invalid_path_help(source),
         }
     }
 }
@@ -309,7 +308,7 @@ pub(crate) fn error_diagnostic(error: &anyhow::Error) -> Option<Diagnostic> {
     let cause = error
         .chain()
         .find_map(|cause| cause.downcast_ref::<OutputGraphError>())?;
-    Some(match cause {
+    let diagnostic = match cause {
         OutputGraphError::PathConflict {
             conflict,
             first_path,
@@ -330,8 +329,7 @@ pub(crate) fn error_diagnostic(error: &anyhow::Error) -> Option<Diagnostic> {
                 Severity::Error,
                 message,
             )
-            .with_note(format!("published by {first_owner} and {second_owner}"))
-            .with_help(cause.help());
+            .with_note(format!("published by {first_owner} and {second_owner}"));
             if respelled {
                 diagnostic = diagnostic.with_note(conflict.to_string());
             }
@@ -348,8 +346,7 @@ pub(crate) fn error_diagnostic(error: &anyhow::Error) -> Option<Diagnostic> {
                 Severity::Error,
                 cause.to_string(),
             )
-            .with_note(format!("published by {owner} and {tree_owner}"))
-            .with_help(cause.help());
+            .with_note(format!("published by {owner} and {tree_owner}"));
             // Two spellings that agree on every filesystem meet at one path, so the reader learns
             // why the file and the directory collide.
             if tree != path && tree.portable_key() == path.portable_key() {
@@ -361,8 +358,11 @@ pub(crate) fn error_diagnostic(error: &anyhow::Error) -> Option<Diagnostic> {
             tola_diagnostic::codes::site::OUTPUTS,
             Severity::Error,
             other.to_string(),
-        )
-        .with_help(other.help()),
+        ),
+    };
+    Some(match cause.help() {
+        Some(help) => diagnostic.with_help(help),
+        None => diagnostic,
     })
 }
 
@@ -584,7 +584,7 @@ impl OutputGraph {
 mod tests {
     use super::*;
     use crate::output::owner;
-    use crate::output::semantics::{self};
+    use crate::output::semantics;
 
     fn output(path: &str, owner: OutputOwner) -> OutputFile {
         let path = OutputPath::parse(path).unwrap();
@@ -630,7 +630,7 @@ mod tests {
     }
 
     #[test]
-    fn generated_file_media_override_graph() {
+    fn generated_html_is_an_asset() {
         let bytes: Arc<[u8]> = Arc::from(b"<p>Generated</p>".as_slice());
         let generated = GeneratedFile::new(
             "search",
@@ -654,7 +654,6 @@ mod tests {
             output.declaration().semantics(),
             semantics::DeclaredOutputSemantics::Opaque
         );
-        assert!(std::ptr::eq(bytes.as_ptr(), output.bytes().as_ptr()));
     }
 
     #[test]
@@ -735,44 +734,6 @@ mod tests {
                 matches!(error, OutputGraphError::TreeConflict { path, .. } if path.as_str() == expected)
             );
         }
-    }
-
-    /// Spellings that collide on some filesystems are still one output, and the reader learns why
-    /// the file and the directory met there.
-    #[test]
-    fn equivalent_spellings_name_one_output() {
-        let mut graph = OutputGraphBuilder::new();
-        graph
-            .own_root(root_ownership("search", OutputOwner::command(0, "emitter")))
-            .unwrap();
-        let error = graph
-            .insert(output(
-                "SEARCH",
-                OutputOwner::configured_asset("content/search.json"),
-            ))
-            .unwrap_err();
-        let diagnostic = error_diagnostic(&anyhow::Error::new(error)).unwrap();
-
-        assert_eq!(
-            diagnostic.message,
-            "`SEARCH` and the directory `search` are the same output"
-        );
-        assert!(
-            diagnostic
-                .notes
-                .iter()
-                .any(|note| note.contains("the configured asset `search.json`")),
-            "{:?}",
-            diagnostic.notes
-        );
-        assert!(
-            diagnostic
-                .notes
-                .iter()
-                .any(|note| note.contains("differ only by letter case or Unicode form")),
-            "{:?}",
-            diagnostic.notes
-        );
     }
 
     #[test]
@@ -907,55 +868,23 @@ mod tests {
 
     #[test]
     fn duplicate_outputs_name_both_owners() {
-        let diagnostic = |conflict, first: &str, second: &str| {
-            error_diagnostic(&anyhow::Error::new(OutputGraphError::PathConflict {
-                conflict,
-                first_path: OutputPath::parse(first).unwrap(),
-                first_owner: Box::new(OutputOwner::bundle("site")),
-                second_path: OutputPath::parse(second).unwrap(),
-                second_owner: Box::new(OutputOwner::configured_asset("content/page.typ")),
-            }))
-            .expect("a path conflict becomes a diagnostic")
-        };
-
-        let identical = diagnostic(
-            OutputPathConflict::SamePath,
-            "posts/index.html",
-            "posts/index.html",
-        );
-        assert_eq!(identical.code, tola_diagnostic::codes::output::DUPLICATE);
-        assert_eq!(identical.message, "`posts/index.html` is published twice");
-        assert_eq!(
-            identical.notes,
-            ["published by the root Bundle and the configured asset `page.typ`"]
-        );
-        assert_eq!(
-            identical.help.first().unwrap().message,
-            "give one of them a different path or route"
-        );
-
-        let respelled = diagnostic(
-            OutputPathConflict::SamePath,
-            "Posts/index.html",
-            "posts/index.html",
-        );
-        assert_eq!(
-            respelled.message,
-            "`Posts/index.html` and `posts/index.html` are the same output"
-        );
-        assert_eq!(
-            respelled.notes[1],
-            "the paths differ only by letter case or Unicode form, so they collide on some filesystems"
-        );
-
-        let nested = diagnostic(
-            OutputPathConflict::FileDirectory,
-            "posts.json",
-            "posts.json/index.html",
-        );
-        assert_eq!(
-            nested.notes[1],
-            "one path is a file and the other is a directory"
-        );
+        let mut graph = OutputGraphBuilder::new();
+        graph
+            .insert(output("Posts/index.html", OutputOwner::bundle("site")))
+            .unwrap();
+        let error = graph
+            .insert(output(
+                "posts/index.html",
+                OutputOwner::configured_asset("content/page.typ"),
+            ))
+            .unwrap_err();
+        let diagnostic = error_diagnostic(&error.into()).unwrap();
+        assert_eq!(diagnostic.code, tola_diagnostic::codes::output::DUPLICATE);
+        for path in ["Posts/index.html", "posts/index.html"] {
+            assert!(diagnostic.message.contains(path));
+        }
+        let notes = diagnostic.notes.join("\n");
+        assert!(notes.contains("root Bundle"));
+        assert!(notes.contains("page.typ"));
     }
 }

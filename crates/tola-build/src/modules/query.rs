@@ -13,18 +13,19 @@ use crate::check::{SourceDiagnosticSession, SourceRevision};
 use crate::config::ResolvedSiteConfig;
 use tola_diagnostic::display_path;
 use tola_diagnostic::{Diagnostic, Severity};
-use tola_module::declaration::{Query, QueryReturns};
+use tola_module::declaration::Query;
+use tola_module::entities::Entity;
 use tola_module::module_set::LoadedModule;
 
 /// A declared generator input; this query did not run or verify its producer.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct GeneratedInput {
     pub producer: String,
     pub path: String,
 }
 
 /// The input policy of a model query, distinct from a published site revision.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Input {
     pub mode: &'static str,
@@ -41,7 +42,7 @@ pub struct Input {
 }
 
 /// The native identity of bytes read by a query, before display formatting.
-#[derive(Debug, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum InputSource {
     File {
@@ -55,7 +56,7 @@ pub enum InputSource {
 }
 
 /// Exact bytes consumed by a successful read; no later filesystem rehash is used.
-#[derive(Debug, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "camelCase")]
 pub struct InputRead {
     #[serde(flatten)]
@@ -118,13 +119,21 @@ impl Input {
 pub struct QueryResult {
     pub format_version: u32,
     pub query: String,
-    pub returns: QueryReturns,
     pub module_manifest: Option<String>,
     pub input: Input,
     pub success: bool,
     pub result_digest: Option<String>,
     pub data: Option<Json>,
     pub diagnostics: Vec<Diagnostic>,
+}
+
+/// A query result and the exact compilation whose world supplied its values and source identities.
+pub struct QueryEvaluation {
+    pub result: QueryResult,
+    pub entities: Vec<Entity>,
+    pub revision: Option<Arc<SourceRevision>>,
+    pub source_reads: Vec<typst::syntax::Source>,
+    pub source_accessed: tola_typst::AccessedDeps,
 }
 
 impl QueryResult {
@@ -213,10 +222,10 @@ pub fn run_entities(
     resources: BuildResources,
     overlays: Vec<(PathBuf, Arc<str>)>,
     cancellation: &BuildCancellation,
-) -> Result<super::entities::EntityQueryResult> {
+) -> Result<QueryEvaluation> {
     ensure!(
-        declaration.returns == QueryReturns::Entities,
-        "query `{name}` does not return entities"
+        declaration.has_entities(),
+        "query `{name}` declares no references or definitions"
     );
     evaluate(
         config,
@@ -244,6 +253,27 @@ enum ModelQuery<'a> {
     },
 }
 
+/// A retained query entry with compiler resources and dependency-based source analysis.
+pub struct QuerySession {
+    site: Arc<super::PreparedSite>,
+    session: SourceDiagnosticSession,
+    generated: Vec<GeneratedInput>,
+}
+
+/// One query entry compiled from an immutable set of disk and unsaved inputs.
+pub struct QueryCompilation {
+    site: Arc<super::PreparedSite>,
+    revision: Arc<SourceRevision>,
+    input: Input,
+}
+
+struct SelectedQuery {
+    name: String,
+    label: String,
+    entities: bool,
+    module_manifest: Option<String>,
+}
+
 fn evaluate(
     config: Arc<ResolvedSiteConfig>,
     query: ModelQuery<'_>,
@@ -251,11 +281,23 @@ fn evaluate(
     overlays: Vec<(PathBuf, Arc<str>)>,
     cancellation: &BuildCancellation,
     materialize: bool,
-) -> Result<super::entities::EntityQueryResult> {
+) -> Result<QueryEvaluation> {
+    let (mut session, selected) = prepare(config, query, resources, cancellation)?;
+    session
+        .inspect(overlays, cancellation)?
+        .read(selected, materialize, cancellation)
+}
+
+fn prepare(
+    config: Arc<ResolvedSiteConfig>,
+    query: ModelQuery<'_>,
+    resources: BuildResources,
+    cancellation: &BuildCancellation,
+) -> Result<(QuerySession, SelectedQuery)> {
     cancellation.ensure_active()?;
     let mut configured =
         crate::modules::prepared::prepare_site(&config, resources.input_mode(), cancellation)?;
-    let (name, label, returns, module_manifest, query_config) = match query {
+    let (name, label, entities, module_manifest, query_config) = match query {
         ModelQuery::Module {
             module,
             declaration,
@@ -306,7 +348,7 @@ fn evaluate(
             (
                 name.to_owned(),
                 selected_query.label.clone(),
-                selected_query.returns,
+                selected_query.has_entities(),
                 Some(display_path(&selected_module.manifest, config.get_root())),
                 tola_module::prepared::select_query(selected_module, selected_query),
             )
@@ -317,26 +359,36 @@ fn evaluate(
             } else {
                 config.get_root().join(entry)
             };
-            let entry = entry.canonicalize().context("read model query file")?;
+            let root = config.get_root();
+            let shown = display_path(&entry, root);
+            let entry = entry.canonicalize().map_err(|error| {
+                let reason = if error.kind() == std::io::ErrorKind::NotFound {
+                    "it does not exist"
+                } else {
+                    crate::filesystem::path_failure_reason(&error)
+                };
+                anyhow::Error::new(error)
+                    .context(format!("could not read query file `{shown}`: {reason}"))
+            })?;
             ensure!(
-                entry.starts_with(config.get_root()) && entry.is_file(),
-                "query file must be inside the site"
+                entry.starts_with(root),
+                "query file `{shown}` points outside the site"
             );
+            ensure!(entry.is_file(), "query path `{shown}` must name a file");
             resources.source_boundary(&config).check(&entry)?;
             (
                 format!("{}#{label}", display_path(&entry, config.get_root())),
                 label.to_owned(),
-                QueryReturns::Json,
+                false,
                 None,
                 tola_module::prepared::select_query_file(&entry),
             )
         }
     };
     configured.select_entry(query_config)?;
-    let query_config = Arc::new(configured);
+    let site = Arc::new(configured);
     ensure!(
-        query_config
-            .prepared()
+        site.prepared()
             .manifests_are_fresh(&cancellation.bundle_cancellation())?,
         "the module changed while Tola was preparing the query `{name}`; run the query again"
     );
@@ -352,7 +404,7 @@ fn evaluate(
             })
         })
         .collect::<Vec<_>>();
-    for module in query_config.prepared().modules.values() {
+    for module in site.prepared().modules.values() {
         generated.extend(tola_module::hooks::declared_generated_inputs(module).map(
             |(producer, path)| GeneratedInput {
                 producer,
@@ -360,106 +412,223 @@ fn evaluate(
             },
         ));
     }
-    let mut input = Input {
-        mode: if overlays.is_empty() {
-            "disk"
-        } else {
-            "overlay"
+    let session = SourceDiagnosticSession::with_prepared_modules(Arc::clone(&site), resources);
+    Ok((
+        QuerySession {
+            site,
+            session,
+            generated,
         },
-        phase: "model",
-        hooks: "skipped",
-        generation_status: if generated.is_empty() {
-            "not-declared"
-        } else {
-            "unverified"
+        SelectedQuery {
+            name,
+            label,
+            entities,
+            module_manifest,
         },
-        generated,
-        read_coverage: "model-and-entity-sources",
-        reads: Vec::new(),
-        disk_read_attempts: Vec::new(),
-    };
-    let mut session =
-        SourceDiagnosticSession::with_prepared_modules(Arc::clone(&query_config), resources);
-    let revision = Arc::new(session.inspect(overlays, cancellation)?);
-    input.record(revision.file_reads(), revision.disk_reads().iter().cloned());
-    // Every early stop hands back the same result with no entities; only success fills them.
-    let no_entities =
-        |result: QueryResult, revision: Arc<SourceRevision>| super::entities::EntityQueryResult {
+    ))
+}
+
+impl QuerySession {
+    /// Prepare a module query entry for repeated editor revisions.
+    pub fn new(
+        config: Arc<ResolvedSiteConfig>,
+        module: &LoadedModule,
+        declaration: &Query,
+        name: &str,
+        resources: BuildResources,
+        cancellation: &BuildCancellation,
+    ) -> Result<Self> {
+        let (session, _) = prepare(
+            config,
+            ModelQuery::Module {
+                module,
+                declaration,
+                name,
+            },
+            resources,
+            cancellation,
+        )?;
+        Ok(session)
+    }
+
+    /// Inspect new source inputs while retaining reusable compiler analysis for this entry.
+    pub fn inspect(
+        &mut self,
+        overlays: Vec<(PathBuf, Arc<str>)>,
+        cancellation: &BuildCancellation,
+    ) -> Result<QueryCompilation> {
+        cancellation.ensure_active()?;
+        ensure!(
+            self.site
+                .prepared()
+                .manifests_are_fresh(&cancellation.bundle_cancellation())?,
+            "a module changed before Tola could evaluate its query; run the query again"
+        );
+        let mut input = Input {
+            mode: if overlays.is_empty() {
+                "disk"
+            } else {
+                "overlay"
+            },
+            phase: "model",
+            hooks: "skipped",
+            generation_status: if self.generated.is_empty() {
+                "not-declared"
+            } else {
+                "unverified"
+            },
+            generated: self.generated.clone(),
+            read_coverage: "model-and-entity-sources",
+            reads: Vec::new(),
+            disk_read_attempts: Vec::new(),
+        };
+        let revision = Arc::new(self.session.inspect(overlays, cancellation)?);
+        input.record(revision.file_reads(), revision.disk_reads().iter().cloned());
+        let compiled = QueryCompilation {
+            site: Arc::clone(&self.site),
+            revision,
+            input,
+        };
+        compiled.ensure_current(cancellation)?;
+        Ok(compiled)
+    }
+}
+
+impl QueryCompilation {
+    /// Read a declared entity query from this entry's compiled metadata.
+    pub fn read_entities(
+        &self,
+        module: &LoadedModule,
+        declaration: &Query,
+        name: &str,
+        cancellation: &BuildCancellation,
+    ) -> Result<QueryEvaluation> {
+        self.ensure_current(cancellation)?;
+        let local = name
+            .strip_prefix(&format!("{}.", module.name))
+            .with_context(|| format!("query `{name}` must belong to module `{}`", module.name))?;
+        ensure!(
+            self.site.prepared().modules.get(&module.name) == Some(module)
+                && module.queries.get(local) == Some(declaration),
+            "the declaration of query `{name}` changed; run the query again"
+        );
+        ensure!(
+            declaration.has_entities(),
+            "query `{name}` declares no references or definitions"
+        );
+        let entry = tola_module::prepared::package_path(&module.name, &declaration.entry)?.intern();
+        ensure!(
+            self.site.entry_file() == Some(entry),
+            "query `{name}` uses a different entry file"
+        );
+        self.read(
+            SelectedQuery {
+                name: name.to_owned(),
+                label: declaration.label.clone(),
+                entities: true,
+                module_manifest: Some(display_path(&module.manifest, self.site.get_root())),
+            },
+            false,
+            cancellation,
+        )
+    }
+
+    fn ensure_current(&self, cancellation: &BuildCancellation) -> Result<()> {
+        cancellation.ensure_active()?;
+        ensure!(
+            self.site
+                .prepared()
+                .manifests_are_fresh(&cancellation.bundle_cancellation())?,
+            "a module changed while Tola was evaluating its query; run the query again"
+        );
+        Ok(())
+    }
+
+    fn read(
+        &self,
+        selected: SelectedQuery,
+        materialize: bool,
+        cancellation: &BuildCancellation,
+    ) -> Result<QueryEvaluation> {
+        self.ensure_current(cancellation)?;
+        let SelectedQuery {
+            name,
+            label,
+            entities,
+            module_manifest,
+        } = selected;
+        let revision = Arc::clone(&self.revision);
+        // Every early stop hands back the same result with no entities; only success fills them.
+        let no_entities = |result: QueryResult, revision: Arc<SourceRevision>| QueryEvaluation {
             result,
             entities: Vec::new(),
             revision: Some(revision),
             source_reads: Vec::new(),
             source_accessed: Default::default(),
         };
-    ensure!(
-        query_config
-            .prepared()
-            .manifests_are_fresh(&cancellation.bundle_cancellation())?,
-        "the module changed while Tola was evaluating the query `{name}`; run the query again"
-    );
-    let mut result = QueryResult {
-        format_version: 1,
-        query: name.clone(),
-        returns,
-        module_manifest,
-        input,
-        success: false,
-        result_digest: None,
-        data: None,
-        diagnostics: revision.diagnostics().to_vec(),
-    };
-    if result
-        .diagnostics
-        .iter()
-        .any(|d| d.severity == Severity::Error)
-    {
-        result.failure("The model entry did not compile".into());
-        return Ok(no_entities(result, revision));
-    }
-    let Some(bundle) = revision.checked().and_then(|checked| checked.bundle()) else {
-        result.failure("The model entry did not compile".into());
-        return Ok(no_entities(result, revision));
-    };
-    let world = revision.checked().expect("a bundle has a world").world();
-    let outcome = tola_module::query::run_query(tola_module::query::QueryRequest {
-        name: &name,
-        label: &label,
-        returns,
-        materialize,
-        world,
-        bundle,
-        cancellation: &cancellation.bundle_cancellation(),
-    })?;
-    result.input.record(
-        &outcome.accessed.reads,
-        outcome
-            .accessed
-            .disk_reads
+        let mut result = QueryResult {
+            format_version: 2,
+            query: name.clone(),
+            module_manifest,
+            input: self.input.clone(),
+            success: false,
+            result_digest: None,
+            data: None,
+            diagnostics: revision.diagnostics().to_vec(),
+        };
+        if result
+            .diagnostics
             .iter()
-            .map(|read| read.as_path().to_path_buf()),
-    );
-    if let Some(failure) = outcome.failure {
-        result.failure(failure);
-        return Ok(no_entities(result, revision));
+            .any(|d| d.severity == Severity::Error)
+        {
+            result.failure("The model entry did not compile".into());
+            return Ok(no_entities(result, revision));
+        }
+        let Some(bundle) = revision.checked().and_then(|checked| checked.bundle()) else {
+            result.failure("The model entry did not compile".into());
+            return Ok(no_entities(result, revision));
+        };
+        let world = revision.checked().expect("a bundle has a world").world();
+        let outcome = tola_module::query::run_query(tola_module::query::QueryRequest {
+            name: &name,
+            label: &label,
+            entities,
+            materialize,
+            world,
+            bundle,
+            cancellation: &cancellation.bundle_cancellation(),
+        })?;
+        result.input.record(
+            &outcome.accessed.reads,
+            outcome
+                .accessed
+                .disk_reads
+                .iter()
+                .map(|read| read.as_path().to_path_buf()),
+        );
+        if let Some(failure) = outcome.failure {
+            result.failure(failure);
+            return Ok(no_entities(result, revision));
+        }
+        if materialize {
+            let data = outcome
+                .data
+                .as_ref()
+                .expect("a materialized query has a value");
+            let bytes = serde_json::to_vec(data)?;
+            result.result_digest = Some(format!("blake3:{}", blake3::hash(&bytes).to_hex()));
+        }
+        result.data = outcome.data;
+        result.success = true;
+        self.ensure_current(cancellation)?;
+        Ok(QueryEvaluation {
+            result,
+            entities: outcome.entities,
+            revision: Some(revision),
+            source_reads: outcome.source_reads,
+            source_accessed: outcome.accessed,
+        })
     }
-    if materialize {
-        let data = outcome
-            .data
-            .as_ref()
-            .expect("a materialized query has a value");
-        let bytes = serde_json::to_vec(data)?;
-        result.result_digest = Some(format!("blake3:{}", blake3::hash(&bytes).to_hex()));
-    }
-    result.data = outcome.data;
-    result.success = true;
-    cancellation.ensure_active()?;
-    Ok(super::entities::EntityQueryResult {
-        result,
-        entities: outcome.entities,
-        revision: Some(revision),
-        source_reads: outcome.source_reads,
-        source_accessed: outcome.accessed,
-    })
 }
 
 #[cfg(test)]
@@ -679,9 +848,10 @@ mod tests {
         let mut site = Site::new("#metadata(())<nodes>");
         let root = site.directory.path();
         fs::write(root.join("content/a.typ"), "saved").unwrap();
+        fs::write(root.join("theme/lib.typ"), "#let link(id) = []").unwrap();
         fs::write(
             root.join("theme/tola-module.toml"),
-            "[queries.nodes]\nentry='model.typ'\nlabel='nodes'\nreturns='entities'\n",
+            "[typst]\nentry='lib.typ'\n[queries.nodes]\nentry='model.typ'\nlabel='nodes'\n[[queries.nodes.references]]\nexport='link'\nparameter={positional=0}\n",
         )
         .unwrap();
         site.module = loaded_modules(
@@ -692,19 +862,20 @@ mod tests {
         .unwrap()
         .remove("forest")
         .unwrap();
-        let model = "#import \"@tola/site:0.0.0\": project-path\n#metadata(((id: \"a\", label: \"Unsaved\", source: project-path(\"content/a.typ\")),))<nodes>";
+        let model = "#import \"@tola/site:0.0.0\": project-path\n#metadata(((id: \"a\", name: \"Unsaved\", source: project-path(\"content/a.typ\")),))<nodes>";
+        let overlays = vec![(root.join("theme/model.typ"), Arc::<str>::from(model))];
         let result = run_entities(
             Arc::clone(&site.config),
             &site.module,
             &site.module.queries["nodes"],
             "forest.nodes",
             BuildResources::new().with_input_scope(InputScope::Offline),
-            vec![(root.join("theme/model.typ"), Arc::from(model))],
+            overlays.clone(),
             &BuildCancellation::default(),
         )
         .unwrap();
         assert!(result.result.success, "{:?}", result.result.diagnostics);
-        assert_eq!(result.entities[0].label, "Unsaved");
+        assert_eq!(result.entities[0].name, "Unsaved");
         assert!(result.revision.as_ref().unwrap().checked().is_some());
         assert_eq!(
             result.entities[0]
@@ -717,6 +888,39 @@ mod tests {
         assert!(result.result.data.is_none());
         assert!(!result.source_accessed.is_empty());
         assert!(!root.join("public").exists());
+        let cli = site.run(overlays);
+        assert!(cli.success, "{:?}", cli.diagnostics);
+        let data = cli.data.unwrap();
+        assert_eq!(data[0]["name"], "Unsaved");
+        assert_eq!(
+            data[0]["source"],
+            serde_json::json!({"root": "project", "path": "content/a.typ"})
+        );
+        let invalid = site.run(vec![(
+            root.join("theme/model.typ"),
+            Arc::from(model.replace("name:", "label:")),
+        )]);
+        assert!(!invalid.success);
+    }
+
+    #[test]
+    fn ordinary_queries_encode_native_paths_without_entity_fields() {
+        let site = Site::new(
+            r#"
+#import "@tola/site:0.0.0": project-path
+#metadata((file: project-path("content/a.typ"), total: 3)) <nodes>
+"#,
+        );
+        fs::write(site.directory.path().join("content/a.typ"), "Body").unwrap();
+        let result = site.run(Vec::new());
+        assert!(result.success, "{:?}", result.diagnostics);
+        assert_eq!(
+            result.data.unwrap(),
+            serde_json::json!({
+                "file": {"root": "project", "path": "content/a.typ"},
+                "total": 3,
+            })
+        );
     }
 
     #[test]

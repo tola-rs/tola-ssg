@@ -40,18 +40,19 @@ pub(super) fn descriptor_type(kind: SourceDescriptorFieldKind) -> &'static str {
 pub(super) fn declared_schema(
     schema: &SourceExpression,
     semantics: &mut Semantic<'_>,
-) -> Result<Option<schema::OutputDescription>> {
+) -> Result<Option<schema::SchemaDescription>> {
     let Some(node) = schema.node() else {
         return Ok(None);
     };
-    declared_schema_at(&node, semantics)
+    declared_schema_at(&node, semantics, false)
 }
 
 /// The declaration one schema argument node resolves, when the world observed exactly one.
-pub(super) fn declared_schema_at(
+fn declared_schema_at(
     schema: &LinkedNode<'_>,
     semantics: &mut Semantic<'_>,
-) -> Result<Option<schema::OutputDescription>> {
+    input: bool,
+) -> Result<Option<schema::SchemaDescription>> {
     let observed = semantics.trace(schema.span())?;
     if !tola_typst::observation_is_complete(&observed) {
         return Ok(None);
@@ -63,14 +64,14 @@ pub(super) fn declared_schema_at(
         return Ok(None);
     }
     Ok(semantics
-        .inspect_schema(declaration)?
-        .and_then(schema::OutputDescription::read))
+        .inspect_schema(declaration, input)?
+        .and_then(schema::SchemaDescription::read))
 }
 /// One metadata shape the site program declares for its sources' `meta` field.
 #[derive(Clone)]
 pub(super) struct SiteSchema {
-    /// The declared shape of one source's metadata.
-    pub(super) shape: schema::OutputDescription,
+    /// The declared shape of one source's metadata before parsing.
+    pub(super) shape: schema::SchemaDescription,
     /// The schema expression, as the site program writes it.
     declared_as: String,
     /// The site program file that declares it, site-root relative.
@@ -85,14 +86,9 @@ impl SiteSchema {
         format!("`{}` in `{}`", self.declared_as, self.site_path)
     }
 
-    /// Whether this declaration declares `key`, whether required or optional.
-    pub(super) fn declares(&self, key: &str) -> bool {
-        self.shape.fields().iter().any(|(field, _)| field == key)
-    }
-
-    /// Whether this declaration accepts keys it does not declare.
-    pub(super) fn accepts_unknown(&self) -> bool {
-        self.shape.accepts_unknown()
+    /// Whether every input alternative rejects this key as undeclared.
+    pub(super) fn rejects(&self, key: &str) -> bool {
+        self.shape.rejects_key(key)
     }
 
     /// Whether this declaration requires `key`, so a dictionary omitting it fails this call.
@@ -236,7 +232,7 @@ pub(super) fn site_schema(
     let Some(schema) = node.find(schema) else {
         return Ok(None);
     };
-    let Some(shape) = declared_schema_at(&schema, semantics)? else {
+    let Some(shape) = declared_schema_at(&schema, semantics, true)? else {
         return Ok(None);
     };
     let Some(records) = node.find(records) else {
@@ -412,7 +408,7 @@ mod tests {
         let mut semantics = Semantic::new(compilation, &cancellation);
         let schemas = site_schemas(compilation, &config, &mut semantics).unwrap();
         assert_eq!(schemas.len(), 1);
-        assert!(schemas[0].declares("category"));
+        assert!(schemas[0].shape.at_path(&["category".into()]).is_some());
         assert!(
             schemas[0]
                 .declaration()

@@ -1,8 +1,7 @@
-//! Resolving one body atom against a relation's rows.
+//! Matching one body atom against a stored relation.
 //!
-//! A positive literal keeps a binding per matching tuple, a negative one keeps the binding itself
-//! when no tuple matches, so the two cannot share a result path: an empty lookup means opposite
-//! things to them.
+//! A positive literal projects matching tuples. A negative literal projects its binding only
+//! when no tuple matches.
 use super::clause::{Clause, MatchEvidence};
 use super::program::Stage;
 use super::tuples::RowBlock;
@@ -57,18 +56,21 @@ pub(super) fn candidate_row_ids<'a, C: Ord>(
     Ok(rows)
 }
 
-pub(super) fn retain_negative<'a, C: Ord>(
+/// Projects rows whose output reads only bindings, parameters, or head constants.
+pub(super) fn project_bindings<'a, C: Ord>(
     clause: &Clause<'a, C>,
     stage: &Stage,
     parameters: &[Option<ConstantRef<'a, C>>],
-    bindings: Rows<'a, C>,
+    bindings: &Rows<'a, C>,
     is_cancelled: &mut impl FnMut() -> bool,
 ) -> Result<Rows<'a, C>, Error> {
     let mut output = Rows::new(stage.width());
     for binding in bindings.iter() {
         ensure_not_cancelled(is_cancelled)?;
-        // Every negative column is bound before the stage runs, so no tuple column is read.
         output.push(stage.values(clause, binding, parameters, &|_| unreachable!()));
+        if stage.width() == 0 {
+            break;
+        }
     }
     Ok(output)
 }
@@ -79,11 +81,11 @@ fn no_match_rows<'a, C: Ord>(
     clause: &Clause<'a, C>,
     stage: &Stage,
     parameters: &[Option<ConstantRef<'a, C>>],
-    bindings: Rows<'a, C>,
+    bindings: &Rows<'a, C>,
     is_cancelled: &mut impl FnMut() -> bool,
 ) -> Result<Rows<'a, C>, Error> {
     if stage.negative {
-        retain_negative(clause, stage, parameters, bindings, is_cancelled)
+        project_bindings(clause, stage, parameters, bindings, is_cancelled)
     } else {
         Ok(Rows::new(stage.width()))
     }
@@ -105,6 +107,7 @@ struct BaseJoin<'a, 'b, C> {
     clause: &'b Clause<'a, C>,
     stage: &'b Stage,
     parameters: &'b [Option<ConstantRef<'a, C>>],
+    reads_tuple: bool,
 }
 
 impl<'a, 'b, C: Ord> BaseJoin<'a, 'b, C> {
@@ -123,14 +126,11 @@ impl<'a, 'b, C: Ord> BaseJoin<'a, 'b, C> {
     ///
     /// `Some` bounds the stage with one prefix lookup: the columns before the join column are
     /// constants, so every binding shares them, and each binding rechecks the columns after it.
-    /// Negative atoms stay on the general path, where a miss keeps their bindings instead of
-    /// dropping them.
     fn fixed_prefix(&self, first_binding: &[ConstantRef<'a, C>]) -> Option<usize> {
         let prefix = (0..self.stage.arity())
             .take_while(|&column| self.bound(first_binding, column).is_some())
             .count();
-        (!self.stage.negative
-            && prefix > 0
+        (prefix > 0
             && (prefix..self.stage.arity())
                 .all(|column| self.bound(first_binding, column).is_none()))
         .then_some(prefix)
@@ -149,11 +149,18 @@ impl<'a, 'b, C: Ord> BaseJoin<'a, 'b, C> {
             })
     }
 
-    /// The join key of every binding, indexed like `bindings`.
-    fn keys(&self, bindings: &Rows<'a, C>, column: usize) -> SmallVec<[&'a C; 4]> {
+    fn keys(
+        &self,
+        bindings: &Rows<'a, C>,
+        column: usize,
+        is_cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<SmallVec<[&'a C; 4]>, Error> {
         bindings
             .iter()
-            .map(|binding| self.key(binding, column))
+            .map(|binding| {
+                ensure_not_cancelled(is_cancelled)?;
+                Ok(self.key(binding, column))
+            })
             .collect()
     }
 
@@ -187,8 +194,8 @@ impl<'a, 'b, C: Ord> BaseJoin<'a, 'b, C> {
         })
     }
 
-    /// The join column ordered over the rows the fixed prefix allows. `None` when that prefix
-    /// matches no row, which only a positive stage can reach.
+    /// The join column ordered over the rows the fixed prefix allows, or `None` when no row
+    /// matches the prefix before the join column.
     fn join_index(
         &self,
         first_binding: &[ConstantRef<'a, C>],
@@ -239,8 +246,7 @@ impl<'a, 'b, C: Ord> BaseJoin<'a, 'b, C> {
         Ok(rows)
     }
 
-    /// Appends what one binding produces: one row per matching tuple, or the binding itself when a
-    /// negative atom has no matching tuple.
+    /// Appends the projected matches, or the projection of the binding after a negative miss.
     fn emit_binding(
         &self,
         binding: &[ConstantRef<'a, C>],
@@ -250,10 +256,6 @@ impl<'a, 'b, C: Ord> BaseJoin<'a, 'b, C> {
         is_cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(), Error> {
         let matches_all = self.stage.matches_all(self.parameters, evidence);
-        if matches_all && !self.stage.negative {
-            ensure_not_cancelled(is_cancelled)?;
-            output.reserve_rows(candidates.len());
-        }
         output.append_run(self.stage.negative || self.stage.preserves_order, |run| {
             let mut present = false;
             for row in candidates.iter() {
@@ -273,6 +275,9 @@ impl<'a, 'b, C: Ord> BaseJoin<'a, 'b, C> {
                         self.stage
                             .values(self.clause, binding, self.parameters, &value),
                     );
+                    if !self.reads_tuple {
+                        break;
+                    }
                 }
             }
             if self.stage.negative && !present {
@@ -288,25 +293,6 @@ impl<'a, 'b, C: Ord> BaseJoin<'a, 'b, C> {
     }
 }
 
-/// Whether the smallest join key lies past the last key the index holds, so no row can match.
-fn keys_past_index<C: Ord>(
-    stage: &Stage,
-    column: usize,
-    keys: &[&C],
-    strictly_sorted: bool,
-    index: &ColumnIndex<'_, C>,
-) -> bool {
-    // A fixed column, or column 0 of a strictly sorted driver, makes the first key minimal.
-    let smallest = if stage.is_fixed_column(column)
-        || (stage.input_column(column) == Some(0) && strictly_sorted)
-    {
-        keys[0]
-    } else {
-        keys.iter().copied().min().unwrap()
-    };
-    smallest > index.last_key()
-}
-
 /// Produces the rows one base atom contributes to `bindings`: joins the stage against the stored
 /// relation, with negative atoms keeping the bindings that have no match.
 pub(super) fn join_base<'a, C: Ord>(
@@ -315,7 +301,7 @@ pub(super) fn join_base<'a, C: Ord>(
     clause: &Clause<'a, C>,
     stage: &Stage,
     parameters: &[Option<ConstantRef<'a, C>>],
-    bindings: Rows<'a, C>,
+    bindings: &Rows<'a, C>,
 ) -> Result<Rows<'a, C>, Error> {
     let Some(relation) = database.snapshot.relations.get(clause.relation(stage)) else {
         return no_match_rows(clause, stage, parameters, bindings, is_cancelled);
@@ -330,6 +316,7 @@ pub(super) fn join_base<'a, C: Ord>(
         clause,
         stage,
         parameters,
+        reads_tuple: stage.reads_tuple(parameters),
     };
     let prefix = join.fixed_prefix(first_binding);
     let column = join.join_column(first_binding);
@@ -341,7 +328,9 @@ pub(super) fn join_base<'a, C: Ord>(
     if matches!(constant_rows, ConstantRun::Empty) {
         return no_match_rows(clause, stage, parameters, bindings, is_cancelled);
     }
-    let keys = column.map(|column| join.keys(&bindings, column));
+    let keys = column
+        .map(|column| join.keys(bindings, column, is_cancelled))
+        .transpose()?;
     let join_index = match column {
         Some(column) => match join.join_index(first_binding, prefix, column, is_cancelled)? {
             Some(index) => Some((column, index)),
@@ -349,16 +338,32 @@ pub(super) fn join_base<'a, C: Ord>(
         },
         None => None,
     };
-    if let (Some((column, index)), Some(keys)) = (&join_index, &keys)
-        && keys_past_index(stage, *column, keys, bindings.is_strictly_sorted(), index)
-    {
-        return no_match_rows(clause, stage, parameters, bindings, is_cancelled);
-    }
-    let order = keys.as_deref().filter(|keys| keys.len() > 1).map(|keys| {
-        let mut order: Vec<usize> = (0..keys.len()).collect();
-        order.sort_unstable_by(|&left, &right| keys[left].cmp(keys[right]));
-        order
+    let keys_sorted = column.is_some_and(|column| {
+        stage.is_fixed_column(column)
+            || (stage.input_column(column) == Some(0) && bindings.is_strictly_sorted())
     });
+    if let (Some((_, index)), Some(keys)) = (&join_index, &keys) {
+        let last = index.last_key();
+        let past_index = if keys_sorted {
+            keys[0] > last
+        } else {
+            keys.iter().all(|&key| key > last)
+        };
+        if past_index {
+            return no_match_rows(clause, stage, parameters, bindings, is_cancelled);
+        }
+    }
+    let order = keys
+        .as_deref()
+        .filter(|keys| !keys_sorted && keys.len() > 1)
+        .map(|keys| {
+            let mut order: Vec<usize> = (0..keys.len()).collect();
+            // Equal keys keep binding arrival order for projected duplicates.
+            order.sort_unstable_by(|&left, &right| {
+                keys[left].cmp(keys[right]).then_with(|| left.cmp(&right))
+            });
+            order
+        });
     // Start at the lowest key so the first lookup does not gallop from row zero.
     let mut cursor = match (&join_index, &keys) {
         (Some((_, index)), Some(keys)) => {
@@ -394,6 +399,9 @@ pub(super) fn join_base<'a, C: Ord>(
             ),
         };
         join.emit_binding(binding, candidates, evidence, &mut output, is_cancelled)?;
+        if stage.width() == 0 && !output.is_empty() {
+            break;
+        }
     }
     Ok(output)
 }

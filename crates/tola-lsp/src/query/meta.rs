@@ -195,9 +195,12 @@ mod tests {
     #[test]
     fn meta_completion_offers_only_accepted_keys() {
         let program = r#"#import "@tola/source:0.0.0": all-sources, parse-sources
-#import "@tola/schema:0.0.0": describe, optional, schema
+#import "@tola/schema:0.0.0": describe, optional, schema, union
 #let strict-schema = schema((title: describe(optional(str), "the page title")), unknown: "error")
-#let open-schema = schema((summary: describe(optional(str), "the page summary")), unknown: "keep")
+#let open-schema = union(
+  schema((summary: describe(optional(str), "the page summary"))),
+  schema((:), unknown: "keep"),
+)
 #let first = parse-sources(all-sources(), strict-schema)
 #let second = parse-sources(all-sources(), open-schema)
 "#;
@@ -208,6 +211,27 @@ mod tests {
         let labels = completion_labels(&items);
         assert!(labels.contains(&"title"), "{labels:?}");
         assert!(!labels.contains(&"summary"), "{labels:?}");
+    }
+
+    #[test]
+    fn meta_completion_describes_input_before_parsing() {
+        let program = parsed_program(&format!("{PAGE_SCHEMA}\n  published: optional(timestamp),"))
+            .replace("describe, optional, schema", "describe, optional, schema, timestamp");
+        let mut site = QuerySession::with_program(&program);
+        let items = site.completion(
+            "#import \"@tola/source:0.0.0\": tola-meta\n#tola-meta((title: \"Page\", |))\n",
+        );
+        let draft = item_labeled(&items, "draft");
+        let documentation = serde_json::to_string(&draft.documentation).unwrap();
+        assert!(documentation.contains("draft?: bool = false"), "{documentation}");
+        let published = item_labeled(&items, "published");
+        assert_eq!(
+            published
+                .label_details
+                .as_ref()
+                .and_then(|details| details.description.as_deref()),
+            Some("datetime | str")
+        );
     }
 
     /// A dictionary offers the keys it can still take: none at its own end, and inside it only the

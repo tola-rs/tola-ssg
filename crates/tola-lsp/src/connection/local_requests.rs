@@ -15,11 +15,14 @@ use lsp_types::{
     CompletionResponse, DiagnosticServerCancellationData, DocumentDiagnosticParams,
     DocumentFormattingParams, DocumentLinkParams, DocumentRangeFormattingParams,
     DocumentSymbolParams, FoldingRangeParams, SelectionRangeParams, SemanticTokensDeltaParams,
-    SemanticTokensParams, SemanticTokensRangeParams, Uri,
+    SemanticTokensParams, SemanticTokensRangeParams, Uri, WorkspaceDiagnosticParams,
 };
-use tola_build::config::ResolvedSiteConfig;
+use tola_build::config::loading::CONFIG_FILE_NAME;
+use tola_build::config::section::FormatterConfig;
+use tola_build::config::{ConfigSource, ResolvedSiteConfig};
 use tola_diagnostic::Diagnostic;
-use tola_typst::typst::syntax::Source;
+use tola_typst::typst::syntax::{Source, VirtualRoot};
+use tola_typst_syntax::style::Options;
 
 use crate::compiler::{AnalysisTask, TokensKind, TokensRead};
 use crate::diagnostic::Pulled;
@@ -71,13 +74,62 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
         self.source(uri).and_then(|source| answer(&source))
     }
 
-    /// The style this connection's formatting answers write in.
-    fn formatter_style(&self) -> tola_typst_syntax::format::Options {
-        crate::formatting::style(
-            self.configuration
-                .as_deref()
-                .map(ResolvedSiteConfig::formatter),
-        )
+    /// Read the current formatter settings, including changes the editor has yet to save.
+    fn formatter_style(&self, path: &Path) -> Result<Options> {
+        let physical = tola_input::normalize_existing_prefix(path);
+        let mut buffers = self
+            .open
+            .overrides()
+            .iter()
+            .filter(|(open, _)| *open == physical);
+        let scope = self.resources.input_scope();
+        let config = if let Some((_, text)) = buffers.next() {
+            anyhow::ensure!(
+                buffers.all(|(_, other)| other == text),
+                "open configuration buffers contain different text",
+            );
+            ConfigSource::parse(path, text, scope)?
+        } else {
+            if self.named_configuration.is_none()
+                && std::fs::symlink_metadata(path)
+                    .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+            {
+                return Ok(FormatterConfig::default().options());
+            }
+            ConfigSource::load(Some(path), scope)?
+        };
+        Ok(config.formatter()?.options())
+    }
+
+    fn formatting_source(&self, uri: &Uri) -> Option<Source> {
+        self.source(uri)
+            .filter(|source| !matches!(source.id().root(), VirtualRoot::Package(_)))
+    }
+
+    fn formatting_reply(
+        &mut self,
+        id: RequestId,
+        edits: impl FnOnce(&Options) -> Option<Vec<lsp_types::TextEdit>>,
+    ) -> Result<()> {
+        let path = self
+            .named_configuration
+            .clone()
+            .unwrap_or_else(|| self.workspace().root.join(CONFIG_FILE_NAME));
+        match self.formatter_style(&path) {
+            Ok(style) => self.reply(Response::new_ok(id, edits(&style))),
+            Err(error) => {
+                tracing::debug!(?error, "could not read formatter settings");
+                let name = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or(CONFIG_FILE_NAME);
+                self.reply(Response::new_err(
+                    id,
+                    ErrorCode::RequestFailed as i32,
+                    format!("Could not read formatter settings in `{name}`"),
+                ))
+            }
+        }
     }
 
     pub(super) fn formatting(
@@ -85,11 +137,13 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
         id: RequestId,
         parameters: DocumentFormattingParams,
     ) -> Result<()> {
-        let style = self.formatter_style();
-        let edits = self.text_request(&parameters.text_document.uri, |source| {
-            crate::formatting::edits(source.text(), &style)
-        });
-        self.reply(Response::new_ok(id, edits))
+        let Some(source) = self.formatting_source(&parameters.text_document.uri) else {
+            return self.reply(Response::new_ok(
+                id,
+                Option::<Vec<lsp_types::TextEdit>>::None,
+            ));
+        };
+        self.formatting_reply(id, |style| crate::formatting::edits(source.text(), style))
     }
 
     /// The edits that format one range of a source, which leaves the rest as the author wrote it.
@@ -109,14 +163,21 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
                 "the formatting range ends before it starts",
             ));
         }
-        let style = self.formatter_style();
-        let edits = self.text_request(&parameters.text_document.uri, |source| {
-            let lines = source.lines();
-            let bytes = crate::position::byte_offset(lines, range.start).ok()?
-                ..crate::position::byte_offset(lines, range.end).ok()?;
-            crate::formatting::range_edits(source.text(), bytes, &style)
-        });
-        self.reply(Response::new_ok(id, edits))
+        let Some(source) = self.formatting_source(&parameters.text_document.uri) else {
+            return self.reply(Response::new_ok(
+                id,
+                Option::<Vec<lsp_types::TextEdit>>::None,
+            ));
+        };
+        let Some(bytes) = crate::position::byte_range(source.lines(), range) else {
+            return self.reply(protocol::invalid_params_response(
+                id,
+                "the formatting range is outside the source or splits a character",
+            ));
+        };
+        self.formatting_reply(id, |style| {
+            crate::formatting::range_edits(source.text(), bytes, style)
+        })
     }
 
     pub(super) fn folding(&mut self, id: RequestId, parameters: FoldingRangeParams) -> Result<()> {
@@ -443,6 +504,18 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
             }
         }
     }
+
+    pub(super) fn workspace_diagnostic(
+        &mut self,
+        id: RequestId,
+        parameters: WorkspaceDiagnosticParams,
+    ) -> Result<()> {
+        let report = self
+            .workspace()
+            .diagnostics
+            .pull_workspace(&self.open, &parameters.previous_result_ids);
+        self.reply(Response::new_ok(id, report))
+    }
 }
 
 #[cfg(test)]
@@ -498,6 +571,24 @@ mod tests {
     }
 
     #[test]
+    fn formatter_style_reads_disk_and_unsaved_configuration_before_a_check() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let path = root.join("custom.toml");
+        let mut connection = ready_at(Vec::new(), root);
+        connection.named_configuration = Some(path.clone());
+        std::fs::write(&path, "[formatter]\nindent = 4\n").unwrap();
+        assert_eq!(connection.formatter_style(&path).unwrap().tab_spaces, 4);
+
+        let uri = crate::uri::from_file_path(&path).unwrap();
+        open_document(&mut connection, &uri, 1, "[formatter]\nindent = 6\n");
+        assert_eq!(connection.formatter_style(&path).unwrap().tab_spaces, 6);
+
+        open_document(&mut connection, &uri, 2, "[formatter]\nindent = 'wide'\n");
+        assert!(connection.formatter_style(&path).is_err());
+    }
+
+    #[test]
     fn package_mirrors_stay_outside_site_sources() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().canonicalize().unwrap();
@@ -518,6 +609,8 @@ mod tests {
         open_document(&mut connection, &uri, 1, &text);
         assert!(connection.open.overrides().is_empty());
         assert_eq!(connection.source(&uri).unwrap().id(), id);
+        assert!(connection.formatting_source(&uri).is_none());
+        assert!(connection.formatting_source(&package).is_none());
         connection
             .request(Request::new(
                 27.into(),

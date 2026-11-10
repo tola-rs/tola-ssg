@@ -1,5 +1,7 @@
 //! Import identities shared by navigation, rename, and name classification.
 
+mod rename;
+
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::Range;
 use std::sync::Arc;
@@ -9,9 +11,7 @@ use typst_library::foundations::{Module, Value};
 use typst_library::math::Mathy;
 use typst_syntax::{FileId, VirtualRoot};
 
-use crate::names::{
-    DeclarationKind, ImportSource, Initializer, NamePath, OccurrenceKind, SourceNames,
-};
+use crate::names::{ImportSource, Initializer, NamePath, OccurrenceKind, SourceNames};
 
 /// A binding index valid only within the [`NameGraph`] instance that produced it.
 pub type BindingId = usize;
@@ -88,45 +88,24 @@ pub struct NameEdit {
 }
 
 /// Rejections that prevent a rename from changing name resolution or immutable packages.
-#[derive(Debug)]
+#[derive(Clone, Debug, thiserror::Error)]
 pub enum RenameError {
     /// The requested spelling is not one identifier in the official code grammar.
+    #[error("`{0}` is not a Typst identifier")]
     InvalidIdentifier(String),
     /// A code identifier would become a different expression at a bare math use.
+    #[error("`{0}` would not resolve as this binding in math")]
     InvalidMathIdentifier(String),
     /// A declaration would collide, or an existing use would resolve to another binding.
+    #[error("renaming to `{0}` would capture or collide with another name")]
     Conflict(String),
     /// An import whose target is not established could spell the name in another file.
+    #[error("Tola could not rename across the import in `{0}`; resolve the import first")]
     UnknownImport(String),
     /// The selected declaration belongs to a package rather than the site's own sources.
+    #[error("package declarations are read-only; rename an imported local binding instead")]
     ReadOnly,
 }
-
-impl std::fmt::Display for RenameError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::InvalidIdentifier(name) => {
-                write!(formatter, "`{name}` is not a Typst identifier")
-            }
-            Self::InvalidMathIdentifier(name) => write!(
-                formatter,
-                "`{name}` would not resolve as this binding in math"
-            ),
-            Self::Conflict(name) => write!(
-                formatter,
-                "renaming to `{name}` would capture or collide with another name"
-            ),
-            Self::UnknownImport(file) => write!(
-                formatter,
-                "Tola could not rename across the import in `{file}`; resolve the import first"
-            ),
-            Self::ReadOnly => formatter.write_str(
-                "package declarations are read-only; rename an imported local binding instead",
-            ),
-        }
-    }
-}
-impl std::error::Error for RenameError {}
 
 #[derive(Clone)]
 enum NameValue {
@@ -232,20 +211,39 @@ impl NameGraph {
             math: library.map(|library| library.math.clone()),
             standard: library.map(|library| library.std.read().clone()),
         };
-        for &file in &graph.files {
-            let source = &graph.sources[&file];
+        graph.index_declarations(&resolve, &check)?;
+        graph.refresh_exports();
+        graph.expand_wildcards(&check)?;
+        graph.values = (0..graph.bindings.len())
+            .map(|id| {
+                check()?;
+                Ok(graph.value(id, &mut BTreeSet::new()))
+            })
+            .collect::<Result<_, E>>()?;
+        graph.resolve_origins(&check)?;
+        graph.index_occurrences(&check)?;
+        Ok(graph)
+    }
+
+    fn index_declarations<E>(
+        &mut self,
+        resolve: &impl Fn(ImportQuery<'_>) -> Option<FileId>,
+        check: &impl Fn() -> Result<(), E>,
+    ) -> Result<(), E> {
+        for &file in &self.files {
+            let source = &self.sources[&file];
             check()?;
             let mut locals = Vec::with_capacity(source.declarations().len());
             for (declaration, name) in source.declarations().iter().enumerate() {
-                locals.push(graph.bindings.len());
-                graph.bindings.push(Binding {
+                locals.push(self.bindings.len());
+                self.bindings.push(Binding {
                     file,
                     declaration: Some(declaration),
                     wildcard: None,
                     name: name.name.clone(),
                 });
             }
-            graph.locals.insert(file, locals);
+            self.locals.insert(file, locals);
             for (import, declaration) in source.imports().iter().enumerate() {
                 let query = match &declaration.source {
                     ImportSource::Path(path) => ImportQuery::Path { file, path },
@@ -255,17 +253,20 @@ impl NameGraph {
                     },
                 };
                 if let Some(target) = resolve(query) {
-                    graph.targets.insert((file, import), target);
+                    self.targets.insert((file, import), target);
                 }
             }
         }
-        graph.refresh_exports();
+        Ok(())
+    }
+
+    fn expand_wildcards<E>(&mut self, check: &impl Fn() -> Result<(), E>) -> Result<(), E> {
         // A wildcard component reaches a fixed point over a finite set of exported spellings.
         loop {
             check()?;
             let mut additions = Vec::new();
-            for &file in &graph.files {
-                let source = &graph.sources[&file];
+            for &file in &self.files {
+                let source = &self.sources[&file];
                 check()?;
                 for (import, _) in source
                     .imports()
@@ -274,7 +275,7 @@ impl NameGraph {
                     .filter(|(_, import)| import.wildcard)
                 {
                     let mut add = |name: &str| {
-                        if !graph
+                        if !self
                             .wildcards
                             .get(&(file, import))
                             .is_some_and(|names| names.contains_key(name))
@@ -282,9 +283,9 @@ impl NameGraph {
                             additions.push((file, import, name.to_owned()));
                         }
                     };
-                    match graph.import_value(file, import, &mut BTreeSet::new()) {
+                    match self.import_value(file, import, &mut BTreeSet::new()) {
                         NameValue::Module(target) => {
-                            if let Some(exports) = graph.exports.get(&target) {
+                            if let Some(exports) = self.exports.get(&target) {
                                 for name in exports.keys() {
                                     add(name);
                                 }
@@ -305,50 +306,41 @@ impl NameGraph {
                 break;
             }
             for (file, import, name) in additions {
-                let id = graph.bindings.len();
-                graph.bindings.push(Binding {
+                let id = self.bindings.len();
+                self.bindings.push(Binding {
                     file,
                     declaration: None,
                     wildcard: Some(import),
                     name: name.clone(),
                 });
-                graph
-                    .wildcards
+                self.wildcards
                     .entry((file, import))
                     .or_default()
                     .insert(name, id);
             }
-            graph.refresh_exports();
+            self.refresh_exports();
         }
-        graph.values = (0..graph.bindings.len())
-            .map(|id| {
-                check()?;
-                Ok(graph.value(id, &mut BTreeSet::new()))
-            })
-            .collect::<Result<_, E>>()?;
-        graph.resolve_origins(&check)?;
-        for &file in &graph.files {
-            let source = &graph.sources[&file];
+        Ok(())
+    }
+
+    fn index_occurrences<E>(&mut self, check: &impl Fn() -> Result<(), E>) -> Result<(), E> {
+        for &file in &self.files {
+            let source = &self.sources[&file];
             check()?;
-            let declared: BTreeMap<usize, usize> = source
-                .declarations()
-                .iter()
-                .enumerate()
-                .map(|(id, declaration)| (declaration.range.start, id))
-                .collect();
             let occurrences = source
                 .occurrences()
                 .iter()
                 .map(|occurrence| {
                     check()?;
+                    let declaration = source.declaration_beginning_at(occurrence.range.start);
                     let (binding, value) = match &occurrence.kind {
                         OccurrenceKind::Declaration(declaration) => {
-                            let binding = graph.locals[&file][*declaration];
-                            (Some(binding), graph.value(binding, &mut BTreeSet::new()))
+                            let binding = self.locals[&file][*declaration];
+                            (Some(binding), self.value(binding, &mut BTreeSet::new()))
                         }
                         OccurrenceKind::Name => {
                             let name = source.text(&occurrence.range);
-                            let binding = graph.resolve(
+                            let binding = self.resolve(
                                 file,
                                 name,
                                 occurrence.scope,
@@ -357,36 +349,35 @@ impl NameGraph {
                                 "",
                             );
                             let value = binding.map_or_else(
-                                || graph.builtin(name, occurrence.math),
-                                |binding| graph.value(binding, &mut BTreeSet::new()),
+                                || self.builtin(name, occurrence.math),
+                                |binding| self.value(binding, &mut BTreeSet::new()),
                             );
                             (binding, value)
                         }
-                        OccurrenceKind::Field(path) => graph.field(
-                            graph.path_value(file, path, &mut BTreeSet::new()),
+                        OccurrenceKind::Field(path) => self.field(
+                            self.path_value(file, path, &mut BTreeSet::new()),
                             source.text(&occurrence.range),
                             &mut BTreeSet::new(),
                         ),
                         OccurrenceKind::Argument(callee) => {
-                            let binding = match graph.path_value(file, callee, &mut BTreeSet::new())
+                            let binding = match self.path_value(file, callee, &mut BTreeSet::new())
                             {
-                                NameValue::Function { file: owner, body } => graph.sources[&owner]
+                                NameValue::Function { file: owner, body } => self.sources[&owner]
                                     .named_parameters()
                                     .get(&body)
                                     .and_then(|parameters| {
                                         parameters.get(source.text(&occurrence.range))
                                     })
-                                    .map(|&declaration| graph.locals[&owner][declaration]),
+                                    .map(|&declaration| self.locals[&owner][declaration]),
                                 _ => None,
                             };
                             (binding, NameValue::Unknown)
                         }
                         OccurrenceKind::Import { import, path } => {
                             let target =
-                                graph.import_path(file, *import, path, &mut BTreeSet::new());
-                            let local = declared.get(&occurrence.range.start).copied();
-                            match local {
-                                Some(local) => (Some(graph.locals[&file][local]), target.1),
+                                self.import_path(file, *import, path, &mut BTreeSet::new());
+                            match declaration {
+                                Some(local) => (Some(self.locals[&file][local]), target.1),
                                 None => target,
                             }
                         }
@@ -396,20 +387,20 @@ impl NameGraph {
                         binding,
                         class: class(&value),
                         declaration: matches!(occurrence.kind, OccurrenceKind::Declaration(_))
-                            || declared.contains_key(&occurrence.range.start),
+                            || declaration.is_some(),
                     })
                 })
                 .collect::<Result<_, E>>()?;
-            graph.occurrences.insert(file, occurrences);
+            self.occurrences.insert(file, occurrences);
         }
-        Ok(graph)
+        Ok(())
     }
 
     fn resolve_origins<E>(&mut self, check: &impl Fn() -> Result<(), E>) -> Result<(), E> {
         self.imported = (0..self.bindings.len())
             .map(|id| {
                 check()?;
-                Ok(self.imported_binding(id))
+                Ok(self.read_imported_binding(id))
             })
             .collect::<Result<_, E>>()?;
         let mut origins = vec![None; self.bindings.len()];
@@ -500,11 +491,7 @@ impl NameGraph {
         mut ensure_active: impl FnMut() -> Result<(), E>,
     ) -> Result<Option<Vec<ModuleExport>>, E> {
         ensure_active()?;
-        self.exports_matching(
-            self.value(binding, &mut BTreeSet::new()),
-            prefix,
-            &mut ensure_active,
-        )
+        self.exports_matching(self.values[binding].clone(), prefix, &mut ensure_active)
     }
 
     fn exports_matching<E>(
@@ -626,8 +613,8 @@ impl NameGraph {
                 declaration,
             });
         }
-        match self.value(binding, &mut BTreeSet::new()) {
-            NameValue::Builtin(value) => Some(NameDefinition::Builtin(value)),
+        match &self.values[binding] {
+            NameValue::Builtin(value) => Some(NameDefinition::Builtin(value.clone())),
             _ => {
                 let (file, range) = self.definition(binding)?;
                 let declaration = self.sources[&file].declared_at(range.start)?;
@@ -662,7 +649,7 @@ impl NameGraph {
         else {
             return None;
         };
-        if path.is_empty() || self.imported_binding(id).is_some() {
+        if path.is_empty() || self.imported[id].is_some() {
             return None;
         }
         Some(PendingImport {
@@ -735,7 +722,7 @@ impl NameGraph {
             // The statement spells this declaration's name as an export it carries, through an
             // item or a module member, and the interface it spells it through is still unknown.
             let carries = self
-                .carried_names(file, statement)
+                .unresolved_import_names(file, statement)
                 .contains(declared.name.as_str());
             // A wildcard statement whose interface the graph never established can carry any
             // export of this file.
@@ -827,193 +814,13 @@ impl NameGraph {
         pending
     }
 
-    /// Renames a local binding or site export while preserving explicit import aliases.
-    ///
-    /// Imported local names gain an alias instead of changing their external export. Invalid
-    /// identifiers, capture, collisions, package declarations, and an export whose consumer
-    /// spellings an unresolved import leaves unknown return [`RenameError`].
-    pub fn rename(&self, binding: BindingId, new_name: &str) -> Result<Vec<NameEdit>, RenameError> {
-        if !valid_identifier(new_name) {
-            return Err(RenameError::InvalidIdentifier(new_name.into()));
-        }
-        let selected = &self.bindings[binding];
-        if !matches!(selected.file.root(), VirtualRoot::Project) {
-            return Err(RenameError::ReadOnly);
-        }
-        if selected.name == new_name {
-            return Ok(Vec::new());
-        }
-        let mut renamed = BTreeSet::from([binding]);
-        loop {
-            let before = renamed.len();
-            for (id, candidate) in self.bindings.iter().enumerate() {
-                if !self.explicit_alias(id)
-                    && self
-                        .imported_binding(id)
-                        .is_some_and(|target| renamed.contains(&target))
-                    && matches!(candidate.file.root(), VirtualRoot::Project)
-                {
-                    renamed.insert(id);
-                }
-            }
-            if before == renamed.len() {
-                break;
-            }
-        }
-        self.reject_capture(&renamed, new_name)?;
-        if let Some(file) = self.unfinished_consumers(&renamed) {
-            return Err(RenameError::UnknownImport(
-                file.vpath().get_without_slash().to_owned(),
-            ));
-        }
-        let mut edits: HashMap<FileId, BTreeMap<(usize, usize), String>> = HashMap::new();
-        for &file in &self.files {
-            let source = &self.sources[&file];
-            if !matches!(file.root(), VirtualRoot::Project) {
-                continue;
-            }
-            for (occurrence, resolved) in source.occurrences().iter().zip(self.occurrences(file)) {
-                let changed = match &occurrence.kind {
-                    OccurrenceKind::Import { import, path } => self
-                        .import_path(file, *import, path, &mut BTreeSet::new())
-                        .0
-                        .is_some_and(|target| renamed.contains(&target)),
-                    _ => resolved
-                        .binding
-                        .is_some_and(|target| renamed.contains(&target)),
-                };
-                if changed {
-                    edits.entry(file).or_default().insert(
-                        (occurrence.range.start, occurrence.range.end),
-                        new_name.into(),
-                    );
-                }
-            }
-        }
-        for &id in &renamed {
-            let candidate = &self.bindings[id];
-            let source = self.source(candidate.file).unwrap();
-            if let Some(declaration) = candidate.declaration {
-                let declaration = &source.declarations()[declaration];
-                let replacement = match declaration.kind {
-                    DeclarationKind::Import {
-                        explicit_alias: false,
-                        implicit: true,
-                        ..
-                    } => {
-                        edits.entry(candidate.file).or_default().insert(
-                            (declaration.range.end, declaration.range.end),
-                            format!(" as {new_name}"),
-                        );
-                        continue;
-                    }
-                    DeclarationKind::Import {
-                        explicit_alias: false,
-                        ..
-                    } if id == binding
-                        && self
-                            .imported_binding(id)
-                            .is_none_or(|target| !renamed.contains(&target)) =>
-                    {
-                        format!("{} as {new_name}", declaration.name)
-                    }
-                    _ => new_name.into(),
-                };
-                edits.entry(candidate.file).or_default().insert(
-                    (declaration.range.start, declaration.range.end),
-                    replacement,
-                );
-            }
-        }
-        // A wildcard has no local spelling to replace; add one explicit alias beside it.
-        if let Some(import) = selected.wildcard {
-            let source = self.source(selected.file).unwrap();
-            let import = &source.imports()[import];
-            let prefix = if source.source().text()[..import.range.start].ends_with('#') {
-                "\n#import "
-            } else {
-                "; import "
-            };
-            let replacement = format!(
-                "{prefix}{}: {} as {new_name}",
-                source.text(&import.source_range),
-                selected.name
-            );
-            edits
-                .entry(selected.file)
-                .or_default()
-                .insert((import.range.end, import.range.end), replacement);
-        }
-        Ok(self
-            .files
-            .iter()
-            .filter_map(|file| edits.remove(file).map(|edits| (*file, edits)))
-            .flat_map(|(file, edits)| {
-                edits
-                    .into_iter()
-                    .map(move |((start, end), replacement)| NameEdit {
-                        file,
-                        range: start..end,
-                        replacement,
-                    })
-            })
-            .collect())
-    }
-
-    /// The first statement whose consumer spelling this rename would have to edit while its
-    /// target stays unknown.
-    ///
-    /// A statement in a renamed binding's own file cannot import that file, and one in a package
-    /// resolves inside its own package or the engine module Tola injects, so only another site
-    /// file's statement leaves the edit set incomplete.
-    fn unfinished_consumers(&self, renamed: &BTreeSet<BindingId>) -> Option<FileId> {
-        for (file, statement) in self.pending_statements() {
-            if !matches!(file.root(), VirtualRoot::Project) {
-                continue;
-            }
-            let source = &self.sources[&file];
-            let mut spelled = self.carried_names(file, statement);
-            if source.imports()[statement].wildcard && !self.interface_established(file, statement)
-            {
-                // A wildcard whose interface the graph never established can bind any name this
-                // file leaves unresolved.
-                spelled.extend(
-                    source
-                        .occurrences()
-                        .iter()
-                        .zip(self.occurrences(file))
-                        .filter(|(_, resolved)| {
-                            resolved.binding.is_none() && resolved.class.is_none()
-                        })
-                        .map(|(occurrence, _)| source.text(&occurrence.range)),
-                );
-            }
-            for name in spelled {
-                let renames_it = renamed.iter().any(|&id| {
-                    let binding = &self.bindings[id];
-                    binding.file != file
-                        && binding.name == name
-                        && self
-                            .exports
-                            .get(&binding.file)
-                            .and_then(|names| names.get(name))
-                            .is_some_and(|export| renamed.contains(export))
-                });
-                if renames_it {
-                    return Some(file);
-                }
-            }
-        }
-        None
-    }
-
     /// The names one pending statement can carry from an interface this graph never established.
     ///
     /// An item the graph could not bind spells every segment of its path, because each one names a
     /// member of the unknown target; a module binding the statement introduces spells the members
     /// its field reads reach, in every file that holds the value. A spelling the graph resolved is
     /// absent: the edit set already addresses the name it resolves.
-    fn carried_names(&self, file: FileId, statement: usize) -> BTreeSet<&str> {
+    fn unresolved_import_names(&self, file: FileId, statement: usize) -> BTreeSet<&str> {
         let source = &self.sources[&file];
         let mut carried = BTreeSet::new();
         for (declaration, spelled) in source.declarations().iter().enumerate() {
@@ -1022,9 +829,7 @@ impl NameGraph {
             };
             if *import == statement
                 && !path.is_empty()
-                && self
-                    .imported_binding(self.locals[&file][declaration])
-                    .is_none()
+                && self.imported[self.locals[&file][declaration]].is_none()
             {
                 carried.extend(path.iter().map(String::as_str));
             }
@@ -1033,15 +838,12 @@ impl NameGraph {
             return carried;
         }
         let module_bindings = self.module_bindings(file, statement);
-        let mut holders: Vec<(FileId, BTreeSet<BindingId>)> = Vec::new();
-        for &binding in &module_bindings {
-            let holder = self.bindings[binding].file;
-            match holders.iter_mut().find(|(file, _)| *file == holder) {
-                Some((_, roots)) => {
-                    roots.insert(binding);
-                }
-                None => holders.push((holder, BTreeSet::from([binding]))),
-            }
+        let mut holders: HashMap<FileId, BTreeSet<BindingId>> = HashMap::new();
+        for binding in module_bindings {
+            holders
+                .entry(self.bindings[binding].file)
+                .or_default()
+                .insert(binding);
         }
         for (holder, holder_bindings) in holders {
             let source = &self.sources[&holder];
@@ -1087,7 +889,7 @@ impl NameGraph {
         // local alias of it. Following these edges reaches the files the value was passed to.
         let mut taken_by: Vec<(BindingId, BindingId)> = Vec::new();
         for (id, binding) in self.bindings.iter().enumerate() {
-            if let Some(target) = self.imported_binding(id) {
+            if let Some(target) = self.imported[id] {
                 taken_by.push((target, id));
             }
             let Some(declaration) = binding.declaration else {
@@ -1137,89 +939,6 @@ impl NameGraph {
             NameValue::Builtin(value) => value.scope().is_some(),
             NameValue::Function { .. } | NameValue::Unknown => false,
         }
-    }
-
-    fn reject_capture(
-        &self,
-        renamed: &BTreeSet<BindingId>,
-        new_name: &str,
-    ) -> Result<(), RenameError> {
-        for &id in renamed {
-            let binding = &self.bindings[id];
-            let (scope, _) = self.visibility(id);
-            for (other, candidate) in self.bindings.iter().enumerate() {
-                if !renamed.contains(&other)
-                    && candidate.file == binding.file
-                    && candidate.name == new_name
-                    && self.visibility(other).0 == scope
-                {
-                    return Err(RenameError::Conflict(new_name.into()));
-                }
-            }
-        }
-        let mut valid_math_name = None;
-        for &file in &self.files {
-            let source = &self.sources[&file];
-            for (occurrence, resolved) in source.occurrences().iter().zip(self.occurrences(file)) {
-                if occurrence.math
-                    && resolved
-                        .binding
-                        .is_some_and(|binding| renamed.contains(&binding))
-                    && !*valid_math_name.get_or_insert_with(|| {
-                        single_identifier(
-                            &typst_syntax::parse_math(new_name),
-                            typst_syntax::SyntaxKind::MathIdent,
-                        )
-                    })
-                {
-                    return Err(RenameError::InvalidMathIdentifier(new_name.into()));
-                }
-                if let OccurrenceKind::Argument(callee) = &occurrence.kind
-                    && resolved.binding.is_some_and(|binding| renamed.contains(&binding))
-                    && source.occurrences().iter().any(|other| {
-                        matches!(&other.kind, OccurrenceKind::Argument(other_callee) if other_callee.at == callee.at)
-                            && other.range != occurrence.range && source.text(&other.range) == new_name
-                    }) {
-                    return Err(RenameError::Conflict(new_name.into()));
-                }
-                if !matches!(occurrence.kind, OccurrenceKind::Name) {
-                    continue;
-                }
-                let name = if resolved
-                    .binding
-                    .is_some_and(|binding| renamed.contains(&binding))
-                {
-                    new_name
-                } else {
-                    source.text(&occurrence.range)
-                };
-                if self.resolve(
-                    file,
-                    name,
-                    occurrence.scope,
-                    occurrence.range.start,
-                    renamed,
-                    new_name,
-                ) != resolved.binding
-                {
-                    return Err(RenameError::Conflict(new_name.into()));
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn explicit_alias(&self, id: BindingId) -> bool {
-        let binding = &self.bindings[id];
-        binding.declaration.is_some_and(|declaration| {
-            matches!(
-                self.sources[&binding.file].declarations()[declaration].kind,
-                DeclarationKind::Import {
-                    explicit_alias: true,
-                    ..
-                }
-            )
-        })
     }
 
     fn visibility(&self, id: BindingId) -> (usize, usize) {
@@ -1314,10 +1033,7 @@ impl NameGraph {
         self.origins[id]
     }
 
-    fn imported_binding(&self, id: BindingId) -> Option<BindingId> {
-        if let Some(binding) = self.imported.get(id) {
-            return *binding;
-        }
+    fn read_imported_binding(&self, id: BindingId) -> Option<BindingId> {
         let binding = &self.bindings[id];
         let source = &self.sources[&binding.file];
         if let Some(declaration) = binding.declaration {
@@ -1518,21 +1234,6 @@ fn class(value: &NameValue) -> Option<NameClass> {
     })
 }
 
-fn valid_identifier(name: &str) -> bool {
-    typst_syntax::is_ident(name)
-        && single_identifier(
-            &typst_syntax::parse_code(name),
-            typst_syntax::SyntaxKind::Ident,
-        )
-}
-
-fn single_identifier(syntax: &typst_syntax::SyntaxNode, kind: typst_syntax::SyntaxKind) -> bool {
-    let mut children = syntax.children();
-    !syntax.diagnosis().errors
-        && children.next().is_some_and(|node| node.kind() == kind)
-        && children.next().is_none()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1618,8 +1319,11 @@ mod tests {
 
     #[test]
     fn export_enumeration_propagates_interruption() {
+        let library: String = (0..32)
+            .map(|index| format!("#let alpha{index} = 1\n"))
+            .collect();
         let graph = graph(&[
-            ("lib.typ", "#let alpha = 1\n#let another = 2\n"),
+            ("lib.typ", &library),
             ("main.typ", "#import \"lib.typ\" as library\n#library"),
         ]);
         let binding = binding_at(&graph, "main.typ", "library");
@@ -1627,7 +1331,7 @@ mod tests {
             let mut checked = 0;
             let mut check = || {
                 checked += 1;
-                if checked == 4 {
+                if checked >= 8 {
                     Err("interrupted")
                 } else {
                     Ok(())
@@ -1660,7 +1364,7 @@ mod tests {
     }
 
     #[test]
-    fn imported_rename_preserves_export() {
+    fn rename_import_as_local_alias() {
         let graph = graph(&[
             ("lib.typ", "#let greet() = [hello]"),
             ("main.typ", "#import \"lib.typ\": greet\n#greet()"),
@@ -1699,7 +1403,7 @@ mod tests {
     }
 
     #[test]
-    fn rename_refuses_conflicting_targets() {
+    fn rename_checks_capture_and_collisions() {
         for (source, marker, name) in [
             ("#let old = 1\n#let taken = 2\n#old", "old", "taken"),
             ("#let old = 1\n#{ let taken = 2; old }", "old", "taken"),
@@ -1783,17 +1487,7 @@ mod tests {
     }
 
     #[test]
-    fn unresolved_import_item_has_no_definition() {
-        let graph = graph(&[(
-            "main.typ",
-            "#let base = \"lib\"\n#import base + \".typ\": greet\n#greet",
-        )]);
-        let binding = binding_at(&graph, "main.typ", "greet");
-        assert!(graph.definition(binding).is_none());
-    }
-
-    #[test]
-    fn unproven_imports_are_reported() {
+    fn unresolved_dynamic_import() {
         let sources = [
             (
                 "main.typ",
@@ -1808,6 +1502,8 @@ mod tests {
             statement: 0,
         };
         let text = sources[0].1;
+        let binding = binding_at(&graph, "main.typ", "greet");
+        assert!(graph.definition(binding).is_none());
         assert_eq!(
             graph.unresolved_imports(main, text.find("greet").unwrap()),
             [statement],
@@ -1836,7 +1532,7 @@ mod tests {
     }
 
     #[test]
-    fn proven_dynamic_imports_share_one_identity() {
+    fn dynamic_imports_after_evaluation() {
         for consumer in [
             "#let base = \"lib\"\n#import base + \".typ\": greet\n#greet",
             "#let base = \"lib\"\n#import base + \".typ\": *\n#greet",

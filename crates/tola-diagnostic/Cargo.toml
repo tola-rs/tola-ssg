@@ -3,7 +3,7 @@ name = "tola-diagnostic"
 version.workspace = true
 edition = "2024"
 rust-version.workspace = true
-description = "Structured diagnostics every Tola producer emits, and the identifiers they carry"
+description = "Tola diagnostic records and codes"
 license = "MIT"
 repository = "https://github.com/tola-rs/tola-ssg"
 documentation = "https://docs.rs/tola-diagnostic"
@@ -11,6 +11,7 @@ documentation = "https://docs.rs/tola-diagnostic"
 [dependencies]
 anyhow = "1.0.104"
 serde = { version = "1.0.229", default-features = false, features = ["derive"] }
+thiserror = "2.0.20"
 tola-input.workspace = true
 tola-typst.workspace = true
 toml_edit = "0.25.13"
@@ -19,7 +20,6 @@ schemars = { version = "1.2.2", optional = true }
 
 [dev-dependencies]
 serde_json = { version = "1.0.151", features = ["preserve_order"] }
-thiserror = "2.0.20"
 
 [features]
 json-schema = ["dep:schemars"]

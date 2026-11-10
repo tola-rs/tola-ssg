@@ -7,7 +7,6 @@ use tola_input::InputMode;
 
 use tola_module::module_set::{self, LoadedModule};
 
-pub mod entities;
 pub mod hooks;
 pub mod manifest;
 pub(crate) mod prepared;
@@ -127,12 +126,11 @@ Queries and commands are named in the manifest:
 [queries.nodes]
 entry = "model.typ"
 label = "notebook-nodes"
-returns = "entities"
 
 [commands.list]
 help = "List notebook entries."
 query = "nodes"
-projection = ["id", "title"]
+projection = ["id", "name"]
 
 [commands.edit]
 help = "Open a notebook entry."
@@ -148,28 +146,40 @@ and comments. Help reads the signature without executing the script. An explicit
 `help` overrides its description. External commands use the declared `help`.
 
 A query entry is relative to its module, including a declared module outside the site root.
-It runs with the site's source discovery and packages, preserving the site root while replacing
-only the query's entry. Its label must identify exactly one metadata value. The default `json`
-format accepts JSON scalars, arrays and dictionaries. Project content, paths and functions need an
-explicit projection. `returns = "entities"` instead accepts an array of
-records with unique string `id`, string `label`, optional string `detail` and `url`, and an optional
-native Typst `source` path. The source and external URL are distinct; the CLI reports a source's
-virtual root and path. Entity queries can support editor semantics through manifest declarations:
+It uses the site's source discovery and packages. Its label selects exactly one metadata value.
+Ordinary queries accept JSON-compatible scalars, arrays, and dictionaries. Native Typst paths
+are converted to records with `root` and `path`; project content and functions need an explicit
+projection. Private query helpers can stay outside the public Typst library.
+
+Declare references and definitions under their query:
 
 ```toml
-[[semantics]]
+[[queries.nodes.references]]
 export = "local"
 parameter = { positional = 0 }
-role = "reference"
-query = "nodes"
+
+[[queries.nodes.definitions]]
+export = "subtree"
+parameter = { named = "address" }
 ```
 
-Each role names an export of `[typst].entry` and an `entities` query. Dot-separated exports
-traverse public members, such as `content.local`, never private module paths. A definition role uses
-`role = "definition"`; named parameters use `parameter = { named = "address" }`.
-Queries run no hooks, export no pages, and publish nothing. Missing generated inputs remain errors:
-prepare them explicitly. Module input declarations are listed regardless of their `enabled-by`
-condition: they describe possible producers, not executed hooks.
+Each entry names a function exported by `[typst].entry` and one of its parameters. Positional
+indices start at zero. Dot-separated exports traverse public members, such as `content.local`.
+Multiple entries let several functions or parameters use the same query. Unknown exports,
+missing parameters, and conflicting assignments are diagnosed when the editor reads them.
+
+A query with references or definitions automatically requires an array of records with unique,
+nonempty string `id`, string `name`, optional string `description` and `url`, and optional native
+Typst `source`. Both CLI and LSP validate this shape. IDs are scoped to the module alias and
+query. The metadata `label` selects the whole result; each record's `name` is display text.
+An ordinary query has its own fields and types. Remove the old `returns`, `semantics`, and
+`role` declarations when migrating; rename record `label` and `detail` to `name` and `description`.
+
+Queries compile their selected entry independently of the site's page template. Prepare
+required generated inputs before calling them. Module input declarations list possible
+producers regardless of their `enabled-by` condition. Queries sharing an entry also share
+its calculations and failures. The LSP retains query sessions across edits and shares one
+entry compilation across its labels within a source revision.
 
 Queries print a human-readable table by default. `--json` returns compact JSON,
 `--json --pretty` indents it, and `--json --output FILE` writes it to a file. `-i`
@@ -224,11 +234,11 @@ native external command and consume its JSON lines, rather than capturing the pr
 
 ```nu
 use tola image
-let source = (image metadata-file photo.png)
-image resize-file photo.png preview.webp --width 640 --op fit-width --format webp
+let source = (image metadata photo.png)
+image resize photo.png --output preview.webp --width 640 --op fit-width --format webp
 ```
 
-`resize-file` returns metadata and requires a new destination in an existing directory.
+`image resize --output` returns metadata and requires a new destination in an existing directory.
 
 A module can also declare its site initializer:
 
@@ -346,7 +356,7 @@ label = "forest-nodes"
 [commands.list]
 help = "List nodes"
 query = "nodes"
-projection = ["id", "title"]
+projection = ["id", "name"]
 [commands.edit]
 help = "Edit a node"
 argv = ["editor", "--wait"]

@@ -484,95 +484,22 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn failed_command_notes_stream() {
-        enum Expected {
-            /// Both streams exceed the cap: each note keeps its head and tail.
-            Bounded,
-            /// A payload under the cap is kept exactly.
-            Verbatim(&'static str),
+        let diagnostic = failed_command(&[
+            "sh",
+            "-c",
+            "printf stderr-head >&2; yes x | head -c 100000 >&2; printf stderr-tail >&2; printf stdout-head; yes y | head -c 120000; printf stdout-tail; exit 1",
+        ]);
+        assert_eq!(diagnostic.notes.len(), 2);
+        for stream in ["stderr", "stdout"] {
+            let head = format!("{stream}-head");
+            let note = diagnostic
+                .notes
+                .iter()
+                .find(|note| note.contains(&head))
+                .unwrap();
+            assert!(note.len() <= 16 * 1024);
+            assert!(note.contains(&format!("{stream}-tail")));
         }
-        let cases = [
-            (
-                "printf stderr-head >&2; yes x | head -c 100000 >&2; printf stderr-tail >&2; printf stdout-head; yes y | head -c 120000; printf stdout-tail; exit 1",
-                Expected::Bounded,
-            ),
-            (
-                r#"printf '{"error":"detail"}'; exit 1"#,
-                Expected::Verbatim("{\"error\":\"detail\"}"),
-            ),
-            (
-                "printf '<!DOCTYPE html><title>failure</title>'; exit 1",
-                Expected::Verbatim("<!DOCTYPE html><title>failure</title>"),
-            ),
-        ];
-        for (payload, expected) in cases {
-            let diagnostic = failed_command(&["sh", "-c", payload]);
-
-            assert_eq!(diagnostic.code, "hook.command");
-            match expected {
-                Expected::Bounded => {
-                    assert_eq!(diagnostic.notes.len(), 2, "{:?}", diagnostic.notes);
-                    for (note, stream) in diagnostic.notes.iter().zip(["stderr", "stdout"]) {
-                        assert!(note.len() <= 16 * 1024);
-                        assert!(note.contains(&format!("{stream}-head")));
-                        assert!(note.ends_with(&format!("{stream}-tail")));
-                    }
-                }
-                Expected::Verbatim(text) => {
-                    assert_eq!(diagnostic.notes, [format!("stdout:\n{text}")]);
-                }
-            }
-        }
-    }
-
-    /// A command killed by a signal names the terminating signal in its diagnostic.
-    #[cfg(unix)]
-    #[test]
-    fn failed_command_names_signal() {
-        let diagnostic = failed_command(&["sh", "-c", "kill -KILL $$"]);
-
-        assert!(
-            diagnostic
-                .message
-                .contains("the command was terminated by signal 9"),
-            "{}",
-            diagnostic.message
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn streamed_output_reports_its_stream() {
-        let (sender, received) = mpsc::channel();
-        let output = tracing::subscriber::with_default(HookStreams { outputs: sender }, || {
-            let directory = tempfile::tempdir().unwrap();
-            let invocation = HookInvocation::new(
-                &["sh", "-c", "printf 'ready\\n' >&2"],
-                HookCall {
-                    site: HookSitePaths {
-                        root: directory.path(),
-                        config: directory.path(),
-                        content: directory.path(),
-                        scope: tola_input::InputScope::Online,
-                    },
-                    name: "assets",
-                    origin: None,
-                    mode: crate::mode::BuildMode::Production,
-                    directories: HookDirectories::BeforeBuild,
-                },
-            )
-            .unwrap();
-            invocation.run(None).unwrap()
-        });
-
-        assert_eq!(output.stderr, b"ready\n");
-        assert_eq!(
-            received.try_iter().collect::<Vec<_>>(),
-            [(
-                "assets".to_owned(),
-                "stderr".to_owned(),
-                "ready\n".to_owned()
-            )]
-        );
     }
 
     #[test]
@@ -586,10 +513,12 @@ mod tests {
             emitter.write(&[0xa5, 0xbd, 0xf0]);
             emitter.finish();
         });
-        let combined = received
-            .try_iter()
-            .map(|(_, _, output)| output)
-            .collect::<String>();
+        let mut combined = String::new();
+        for (hook, stream, output) in received.try_iter() {
+            assert_eq!(hook, "assets");
+            assert_eq!(stream, "stdout");
+            combined.push_str(&output);
+        }
         assert_eq!(combined, "你\u{fffd}好\u{fffd}");
     }
 

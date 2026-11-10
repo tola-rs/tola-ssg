@@ -14,7 +14,7 @@ use tola_input::{IconSource, InputMode, LockedIcon, Sha256Digest};
 
 use super::iconify;
 use super::input::{IconFileRead, MAX_COLLECTION_BYTES, read_bounded, read_file};
-use super::{IconError, IntegrityError};
+use super::{IconError, IconIntegrityError};
 
 /// One remote collection request and the context every read in this build shares.
 pub(super) struct RemoteCollection<'a> {
@@ -35,6 +35,7 @@ pub(super) struct RemoteCollection<'a> {
 
 /// The verified bytes of one remote collection, and where they came from.
 pub(super) struct CollectionBytes {
+    pub(super) locked: LockedIcon,
     pub(super) bytes: Vec<u8>,
     pub(super) read_from: Option<PathBuf>,
     pub(super) source: Option<IconFileRead>,
@@ -77,6 +78,7 @@ fn collection_bytes(request: &RemoteCollection<'_>) -> Result<CollectionBytes, I
                 .may_read_cache()
                 .then(|| cache_entry(&request.cache_root, lock.sha256));
             Ok(CollectionBytes {
+                locked: lock,
                 bytes,
                 read_from: None,
                 source: None,
@@ -104,14 +106,11 @@ fn matched_lock<'a>(
     if declaration_matches(request, locked) {
         return Ok(Some(locked));
     }
-    if request.mode.requires_lock() {
-        return Err(IconError::LockMismatch {
-            namespace: request.namespace.into(),
-            recorded: describe_lock(locked),
-            declared: describe_declaration(request),
-        });
-    }
-    Ok(None)
+    Err(IconError::LockMismatch {
+        namespace: request.namespace.into(),
+        recorded: describe_lock(locked),
+        declared: describe_declaration(request),
+    })
 }
 
 /// Whether the declaration still asks for exactly the input the lock records.
@@ -159,6 +158,7 @@ fn locked_bytes(
     {
         verify_locked(request, locked, &bytes, Some(vendored))?;
         return Ok(CollectionBytes {
+            locked: locked.clone(),
             bytes,
             read_from: Some(vendored.to_path_buf()),
             source: Some(read),
@@ -170,6 +170,7 @@ fn locked_bytes(
         if let Some(bytes) = read_cache(request, &cached)? {
             verify_locked(request, locked, &bytes, Some(&cached))?;
             return Ok(CollectionBytes {
+                locked: locked.clone(),
                 bytes,
                 read_from: Some(cached),
                 source: None,
@@ -186,6 +187,7 @@ fn locked_bytes(
     let bytes = fetch_locked(request, locked)?;
     verify_locked(request, locked, &bytes, None)?;
     Ok(CollectionBytes {
+        locked: locked.clone(),
         bytes,
         read_from: None,
         source: None,
@@ -380,7 +382,7 @@ fn verify_locked(
     if received == locked.sha256 && bytes.len() as u64 == locked.size {
         return Ok(());
     }
-    Err(IconError::Integrity(Box::new(IntegrityError {
+    Err(IconError::Integrity(Box::new(IconIntegrityError {
         namespace: request.namespace.into(),
         url: locked.url.clone(),
         expected: locked.sha256.to_string(),

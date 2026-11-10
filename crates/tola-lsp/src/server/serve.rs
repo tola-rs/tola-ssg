@@ -15,9 +15,9 @@ use tola_build::config::ResolvedSiteConfig;
 use tola_diagnostic::Diagnostic;
 
 use super::events::{Event, WAIT_INTERVAL};
-use super::lanes::{self, JobOwner};
+use super::lanes::{self, AnalysisJob, JobOwner};
 use super::reader::read_messages;
-use crate::compiler::{AnalysisRequest, SourceCompiler, SourceJob};
+use crate::compiler::{SourceCompilation, SourceCompiler, SourceJob};
 use crate::connection::Connection;
 
 const STOPPED: &str = "the language server stopped; restart it from your editor";
@@ -169,7 +169,16 @@ where
                 &analysis_events,
                 &analysis_cancel,
                 JobOwner::of_analysis,
-                |request| crate::compiler::analyze(&mut disk, &mut graphs, request),
+                |job| match job {
+                    AnalysisJob::Request(request) => {
+                        crate::compiler::analyze(&mut disk, &mut graphs, request)
+                    }
+                    AnalysisJob::ReleaseIdle => {
+                        disk = Default::default();
+                        graphs = Default::default();
+                        SourceCompilation::Released
+                    }
+                },
                 Event::Analyzed,
             );
         });
@@ -190,7 +199,7 @@ where
 struct Lanes<'scope> {
     compiler_jobs: Option<Sender<SourceJob>>,
     compiler_thread: ScopedJoinHandle<'scope, ()>,
-    analysis_jobs: Option<Sender<AnalysisRequest>>,
+    analysis_jobs: Option<Sender<AnalysisJob>>,
     analysis_thread: ScopedJoinHandle<'scope, ()>,
 }
 
@@ -203,11 +212,11 @@ impl Lanes<'_> {
             .context("Tola compiler lane has stopped")
     }
 
-    fn dispatch_analysis(&mut self, request: AnalysisRequest) -> Result<()> {
+    fn dispatch_analysis(&mut self, job: AnalysisJob) -> Result<()> {
         self.analysis_jobs
             .as_ref()
             .expect("a serving connection owns the analysis lane")
-            .send(request)
+            .send(job)
             .context("Tola analysis lane has stopped")
     }
 
@@ -246,16 +255,22 @@ where
         if connection.is_shutdown() {
             lanes.close();
         } else {
-            // Owed between jobs: a job in flight is what the report and the idle release wait on.
-            connection.run_due_work(Instant::now())?;
-            // A lane receives another job only after its preceding reply arrives.
-            if !compiling && let Some(job) = connection.next_job(Instant::now()) {
-                lanes.dispatch_compilation(job)?;
+            let now = Instant::now();
+            if connection.run_due_work(now, compiling || analyzing)? {
+                lanes.dispatch_compilation(SourceJob::ReleaseIdle)?;
+                lanes.dispatch_analysis(AnalysisJob::ReleaseIdle)?;
                 compiling = true;
-            }
-            if !analyzing && let Some(request) = connection.next_analysis() {
-                lanes.dispatch_analysis(request)?;
                 analyzing = true;
+            } else {
+                // A lane receives another job only after its preceding reply arrives.
+                if !compiling && let Some(job) = connection.next_job(now) {
+                    lanes.dispatch_compilation(job)?;
+                    compiling = true;
+                }
+                if !analyzing && let Some(request) = connection.next_analysis() {
+                    lanes.dispatch_analysis(AnalysisJob::Request(request))?;
+                    analyzing = true;
+                }
             }
         }
         let event = match events.recv_timeout(WAIT_INTERVAL) {

@@ -9,7 +9,7 @@ use clap::Args;
 use tola_input::InputScope;
 use tola_module::{Action, CommandAction, ModuleCommands};
 
-use crate::cli::args::{ConfigFileArgs, InputArgs, ProcessArgs, SkillArgs};
+use crate::cli::args::SkillArgs;
 
 pub(super) fn is_help(arguments: &[OsString]) -> bool {
     matches!(
@@ -22,10 +22,7 @@ pub(super) fn namespace_command(
     module: &ModuleCommands,
     signatures: &BTreeMap<String, Result<tola_nu::Signature>>,
 ) -> clap::Command {
-    let command = clap::Command::new(module.name.clone())
-        .disable_help_subcommand(true)
-        .subcommand_required(true);
-    let mut command = ConfigFileArgs::augment_args(command);
+    let mut command = super::namespace_options(&module.name).subcommand_required(true);
     if module.initializer.is_some() {
         command =
             command.subcommand(clap::Command::new("init").about("Create a site using this module"));
@@ -41,10 +38,7 @@ pub(super) fn namespace_command(
                 .about(description.lines().next().unwrap_or("").to_owned()),
         );
     }
-    // An `Args` struct's doc comment becomes the command's about when augmented, so the
-    // namespace's own name and summary are applied after the last augmentation.
-    let command = InputArgs::augment_args(ProcessArgs::augment_args(command));
-    command.bin_name(format!("tola {}", module.name))
+    command
 }
 
 pub(super) fn namespace_help(

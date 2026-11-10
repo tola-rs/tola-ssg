@@ -5,31 +5,17 @@
 //! site's.
 
 use lsp_types::TextEdit;
-use tola_build::config::section::FormatterConfig;
 use tola_typst_syntax::edit::Edit;
-use tola_typst_syntax::format::{self, Formatting, Options};
+use tola_typst_syntax::format::{self, Formatting};
+use tola_typst_syntax::style::Options;
 use tola_typst_syntax::typst_syntax::Lines;
 
 use crate::position;
 
-/// The style a formatting answer writes in: the site's `[formatter]` configuration.
-///
-/// A connection that has not resolved a site's configuration yet formats with the same defaults
-/// a site that names no `[formatter]` key gets.
-pub(super) fn style(site: Option<&FormatterConfig>) -> Options {
-    let defaults = FormatterConfig::default();
-    let site = site.unwrap_or(&defaults);
-    Options {
-        tab_spaces: site.indent,
-        max_width: site.print_width,
-        prose_wrap: site.prose_wrap,
-    }
-}
-
 /// The edits that format `source`, or `None` when the editor keeps the text it has.
 pub(super) fn edits(source: &str, options: &Options) -> Option<Vec<TextEdit>> {
     match format::format(source, options) {
-        Formatting::Reformatted(edit) => carried(source, edit),
+        Formatting::Reformatted(edit) => text_edit(source, edit),
         Formatting::Stands | Formatting::Unparsable { .. } | Formatting::Unrenderable => None,
     }
 }
@@ -40,16 +26,18 @@ pub(super) fn range_edits(
     bytes: std::ops::Range<usize>,
     options: &Options,
 ) -> Option<Vec<TextEdit>> {
-    carried(source, format::format_range(source, bytes, options)?)
+    text_edit(source, format::format_range(source, bytes, options)?)
 }
 
 /// One formatting edit, in the protocol's own positions.
-fn carried(source: &str, mut edit: Edit) -> Option<Vec<TextEdit>> {
-    if source
-        .split_once('\n')
-        .is_some_and(|(line, _)| line.ends_with('\r'))
-    {
-        edit.text = edit.text.replace("\r\n", "\n").replace('\n', "\r\n");
+fn text_edit(source: &str, mut edit: Edit) -> Option<Vec<TextEdit>> {
+    if splits_crlf(source, edit.range.start) {
+        edit.range.start -= 1;
+        edit.text.insert(0, '\r');
+    }
+    if splits_crlf(source, edit.range.end) {
+        edit.range.end += 1;
+        edit.text.push('\n');
     }
     let previous = &source[edit.range.clone()];
     if edit.text == previous {
@@ -62,6 +50,9 @@ fn carried(source: &str, mut edit: Edit) -> Option<Vec<TextEdit>> {
         }
         prefix += old.len_utf8();
     }
+    if splits_crlf(source, edit.range.start + prefix) {
+        prefix -= 1;
+    }
     let mut suffix = 0;
     for (old, new) in previous[prefix..]
         .chars()
@@ -73,18 +64,50 @@ fn carried(source: &str, mut edit: Edit) -> Option<Vec<TextEdit>> {
         }
         suffix += old.len_utf8();
     }
-    edit.range.start += prefix;
-    edit.range.end -= suffix;
-    edit.text = edit.text[prefix..edit.text.len() - suffix].to_owned();
+    if splits_crlf(source, edit.range.end - suffix) {
+        suffix -= 1;
+    }
+    let bytes = edit.range.start + prefix..edit.range.end - suffix;
     Some(vec![TextEdit {
-        range: position::utf16_range(&Lines::new(source), edit.range)?,
-        new_text: edit.text,
+        range: position::utf16_range(&Lines::new(source), bytes)?,
+        new_text: edit.text[prefix..edit.text.len() - suffix].to_owned(),
     }])
+}
+
+fn splits_crlf(source: &str, at: usize) -> bool {
+    at > 0 && source.as_bytes().get(at - 1..=at) == Some(b"\r\n")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn formatting_edits_address_whole_crlf_breaks() {
+        let source = "a\nb\r\nc";
+        let lines = Lines::new(source);
+        for (range, replacement, expected) in [
+            (0..source.len(), "a\nb\rc", "a\nb\rc"),
+            (0..source.len(), "a\nb\nc", "a\nb\nc"),
+            (4..4, "x", "a\nb\rx\nc"),
+        ] {
+            let edits = text_edit(
+                source,
+                Edit {
+                    range,
+                    text: replacement.to_owned(),
+                    insertion: None,
+                },
+            )
+            .unwrap();
+            let edit = &edits[0];
+            let bytes = position::byte_range(&lines, edit.range).unwrap();
+            assert_eq!(bytes, 3..5);
+            let mut actual = source.to_owned();
+            actual.replace_range(bytes, &edit.new_text);
+            assert_eq!(actual, expected);
+        }
+    }
 
     #[test]
     fn formatting_edits_only_the_changed_span() {

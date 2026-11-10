@@ -52,18 +52,38 @@ use nu_protocol::{
 /// The embedded Nushell release every nu-* dependency is pinned to.
 pub const NU_VERSION: &str = "0.116.1";
 
-/// Built-in Nu modules and their short descriptions for command discovery.
-pub const BUILTIN_MODULES: &[(&str, &str)] = &[
-    ("cli", "Capture finite CLI output and exit status"),
-    ("image", "Inspect and resize image bytes"),
-    (
-        "diagnostic",
-        "Construct, render, and submit diagnostic reports",
-    ),
-    (
-        "ui",
-        "Interactive tables, confirmations, and syntax highlighting",
-    ),
+/// A built-in Nu library and how it appears in command help.
+pub struct BuiltinModule {
+    /// The name in `use tola NAME`.
+    pub name: &'static str,
+    /// A short description shown in `tola nu --help`.
+    pub summary: &'static str,
+    /// Whether this built-in publishes a runnable `main`.
+    pub executable: bool,
+}
+
+/// Built-in Nu modules available through `use tola`.
+pub const BUILTIN_MODULES: &[BuiltinModule] = &[
+    BuiltinModule {
+        name: "cli",
+        summary: "Capture finite CLI output and exit status",
+        executable: false,
+    },
+    BuiltinModule {
+        name: "image",
+        summary: "Inspect, resize, and convert images",
+        executable: true,
+    },
+    BuiltinModule {
+        name: "diagnostic",
+        summary: "Construct, render, and submit diagnostics",
+        executable: false,
+    },
+    BuiltinModule {
+        name: "ui",
+        summary: "Interactive tables, confirmations, and syntax highlighting",
+        executable: false,
+    },
 ];
 
 /// One prepared Nu environment for CLI evaluation or LSP service.
@@ -148,7 +168,7 @@ impl Runtime {
         let overlay_paths = sources.keys().cloned().collect();
         let builtins = BUILTIN_MODULES
             .iter()
-            .map(|&(name, _)| name)
+            .map(|module| module.name)
             .map(modules::Library::builtin)
             .collect::<Vec<_>>();
         let binding_paths: Vec<_> = modules
@@ -431,8 +451,12 @@ impl Runtime {
             return 1;
         }
         if !entry.has_main {
+            let import = match &entry.origin {
+                Origin::Builtin { name } => format!("use tola {name}"),
+                Origin::Module { alias, .. } => format!("use tola-modules {alias}"),
+            };
             eprintln!(
-                "Nu module {:?} is a library; direct execution requires export def main",
+                "`{}` is a Nu library; import it with `{import}`",
                 entry.locator
             );
             return 1;

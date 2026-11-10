@@ -163,8 +163,7 @@ mod tests {
         let error = crate::build::build_site(&site_config.config, BuildMode::Production)
             .err()
             .expect("an invalid icon prevents compilation");
-        error
-            .error()
+        anyhow::Error::new(error)
             .chain()
             .find_map(|cause| cause.downcast_ref::<tola_typst::CompileError>())
             .and_then(tola_typst::CompileError::diagnostics)

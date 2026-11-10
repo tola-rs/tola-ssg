@@ -68,18 +68,35 @@ pub(crate) fn select_content_sources(
         return Ok(units.iter().map(|unit| unit.source.clone()).collect());
     }
 
-    let mut files = select_content_units_in_scope_for_root(
-        config.get_root(),
-        &config.build.content_dir,
-        scopes,
-        units,
-    )?
-    .into_iter()
-    .map(|unit| unit.source.clone())
-    .collect::<Vec<_>>();
-    files.sort();
-    files.dedup();
-    Ok(files)
+    let site_root = normalize_path(config.get_root());
+    let mut selected = BTreeSet::new();
+    for scope in scopes {
+        let mut matched = false;
+        let mut candidates = BTreeSet::new();
+        if scope.is_absolute() {
+            candidates.insert(normalize_path(scope));
+        } else {
+            if scope.exists() {
+                candidates.insert(normalize_path(scope));
+            }
+            candidates.insert(normalize_path(&site_root.join(scope)));
+            candidates.insert(normalize_path(&config.build.content_dir.join(scope)));
+        }
+
+        for resolved in candidates {
+            for unit in units_named_by(&resolved, units) {
+                matched = true;
+                selected.insert(&unit.source);
+            }
+        }
+
+        if !matched {
+            return Err(ContentDiscoveryError::NoSourceMatches {
+                scope: tola_diagnostic::display_path(scope, &site_root),
+            });
+        }
+    }
+    Ok(selected.into_iter().cloned().collect())
 }
 
 pub(crate) fn discover_content_units_for_config_with_cancellation(
@@ -109,7 +126,7 @@ pub(crate) fn inventory_may_change(
     let known_sources = inventory
         .iter()
         .map(|unit| unit.source.as_path())
-        .collect::<std::collections::HashSet<_>>();
+        .collect::<HashSet<_>>();
     changed_paths.iter().any(|changed| {
         let changed = tola_input::normalize_existing_prefix(changed);
         if !changed.starts_with(&content_root) && !content_root.starts_with(&changed) {
@@ -161,42 +178,6 @@ fn units_named_by<'units>(resolved: &Path, all: &'units [ContentUnit]) -> Vec<&'
     all.iter()
         .filter(|unit| source_candidates.contains(&unit.source))
         .collect()
-}
-
-fn select_content_units_in_scope_for_root<'units>(
-    site_root: &Path,
-    content_root: &Path,
-    scopes: &[PathBuf],
-    all: &'units [ContentUnit],
-) -> Result<Vec<&'units ContentUnit>, ContentDiscoveryError> {
-    let site_root = normalize_path(site_root);
-    let mut selected = Vec::new();
-    for scope in scopes {
-        let mut candidates = BTreeSet::new();
-        if scope.is_absolute() {
-            candidates.insert(normalize_path(scope));
-        } else {
-            if scope.exists() {
-                candidates.insert(normalize_path(scope));
-            }
-            candidates.insert(normalize_path(&site_root.join(scope)));
-            candidates.insert(normalize_path(&content_root.join(scope)));
-        }
-
-        let selected_before = selected.len();
-        for resolved in candidates {
-            selected.extend(units_named_by(&resolved, all));
-        }
-
-        if selected.len() == selected_before {
-            return Err(ContentDiscoveryError::NoSourceMatches {
-                scope: tola_diagnostic::display_path(scope, &site_root),
-            });
-        }
-    }
-    selected.sort_by(|a, b| a.id.cmp(&b.id));
-    selected.dedup_by(|a, b| a.source == b.source);
-    Ok(selected)
 }
 
 fn discover_from_root(
@@ -392,14 +373,6 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn only_lowercase_typ_extension_counts() {
-        assert!(has_typ_extension(Path::new("post.typ")));
-        assert!(!has_typ_extension(Path::new("post.TYP")));
-        assert!(!has_typ_extension(Path::new("image.png")));
-        assert!(!has_typ_extension(Path::new("no-extension")));
-    }
-
-    #[test]
     fn discovery_needs_no_worker() {
         // Discovery must not need a worker from the pool that called it: a walk that
         // waited on one would find none free and report no content at all.
@@ -454,6 +427,7 @@ mod tests {
             "posts/helper.typ",
             "posts/rust/index.typ",
             "posts/rust/helper.typ",
+            "posts/rust/ignored.TYP",
         ] {
             fs::write(d.path().join(source), "").unwrap();
         }
@@ -527,10 +501,10 @@ mod tests {
         config.build.content_dir = missing.clone();
 
         let error = configured_content(&config).unwrap_err();
-        let rendered = error.to_string();
-        assert!(rendered.contains("does not exist"));
-        assert!(rendered.contains("missing-content"));
-        assert!(!rendered.contains(directory.path().to_string_lossy().as_ref()));
+        assert!(matches!(
+            error,
+            ContentDiscoveryError::MissingContentRoot { path } if path == "missing-content"
+        ));
     }
 
     #[test]
@@ -597,20 +571,15 @@ mod tests {
         config.build.content_dir = content;
 
         let discovered = configured_content(&config).unwrap();
-        let units = select_content_units_in_scope_for_root(
-            config.get_root(),
-            &config.build.content_dir,
-            &[PathBuf::from("posts/hello"), PathBuf::from("guides")],
-            &discovered,
-        )
-        .unwrap();
-
+        let scopes = ["posts/hello", "guides", "guides"].map(PathBuf::from);
+        let selected = select_content_sources(&config, &scopes, &discovered).unwrap();
+        let content = normalize_path(&config.build.content_dir);
         assert_eq!(
-            units
-                .iter()
-                .map(|unit| unit.id.to_string())
-                .collect::<Vec<_>>(),
-            vec!["guides/start.typ", "posts/hello.typ"]
+            selected,
+            [
+                content.join("guides/start.typ"),
+                content.join("posts/hello.typ")
+            ]
         );
     }
 
@@ -708,24 +677,22 @@ mod tests {
             fs::write(directory.path().join(source), "").unwrap();
         }
         let discovered = content_units(directory.path()).unwrap();
+        let mut config = crate::config::tests::load_test_config(directory.path(), "");
+        let content = normalize_path(directory.path());
+        config.build.content_dir = content.clone();
         for (scope, expected) in [
             ("a", vec!["a.typ"]),
             ("b", vec!["b/helper.typ", "b/index.typ"]),
             ("b.typ", vec!["b.typ"]),
         ] {
-            let selected = select_content_units_in_scope_for_root(
-                directory.path(),
-                directory.path(),
-                &[PathBuf::from(scope)],
-                &discovered,
-            )
-            .unwrap();
+            let selected =
+                select_content_sources(&config, &[PathBuf::from(scope)], &discovered).unwrap();
             assert_eq!(
-                selected
+                selected,
+                expected
                     .iter()
-                    .map(|unit| unit.id.to_string())
+                    .map(|name| content.join(name))
                     .collect::<Vec<_>>(),
-                expected,
                 "{scope}"
             );
         }

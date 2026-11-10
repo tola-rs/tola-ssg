@@ -1,13 +1,12 @@
 //! Render diagnostic JSON through the renderer builds use.
 //!
-//! The input is the shape scripts write with diagnostic issue: a list of issue records, or a
-//! report object with a diagnostics array. This command does not define a second layout; it
-//! converts the records to the same Diagnostic the build renders and prints the result.
+//! Read a list of diagnostics or an object with a diagnostics array. Locations name files.
 
 use std::io::Read;
 
-use anyhow::{Context, Result};
+use anyhow::Context;
 use serde::Deserialize;
+use serde_json::Value;
 use tola_diagnostic::{
     Diagnostic, DiagnosticCode, DiagnosticProducer, Help, Location, RelatedInformation, Severity,
     SourceRange,
@@ -40,7 +39,7 @@ struct IssueRelated {
 
 #[derive(Deserialize)]
 struct IssueLocation {
-    path: String,
+    path: Option<String>,
     #[serde(default)]
     line: Option<usize>,
     #[serde(default)]
@@ -52,30 +51,44 @@ struct IssueLocation {
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum Input {
-    List(Vec<Issue>),
-    Report { diagnostics: Vec<Issue> },
+    List(Vec<Value>),
+    Object { diagnostics: Vec<Value> },
 }
 
-pub(in crate::cli) fn render(output: &CommandOutput) -> Result<()> {
+#[derive(Debug, thiserror::Error)]
+enum RenderInputError {
+    #[error("expected a JSON array of diagnostics or an object with a `diagnostics` array")]
+    Json(#[source] serde_json::Error),
+    #[error("invalid diagnostic {number}: {source}")]
+    Issue {
+        number: usize,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error(
+        "diagnostic {number} has severity `{severity}`, expected `error`, `warning`, `info`, or `hint`"
+    )]
+    Severity { number: usize, severity: String },
+    #[error(
+        "diagnostic {number} needs a file `path` in `{field}` for rendering, while `source` refers to a host snapshot"
+    )]
+    MissingPath { number: usize, field: String },
+}
+
+pub(in crate::cli) fn render(output: &CommandOutput) -> anyhow::Result<()> {
     let mut input = String::new();
     std::io::stdin()
         .read_to_string(&mut input)
         .context("read diagnostic JSON from stdin")?;
-    let issues = match serde_json::from_str::<Input>(&input).context("parse diagnostic JSON")? {
-        Input::List(issues)
-        | Input::Report {
-            diagnostics: issues,
-        } => issues,
-    };
-    if issues.is_empty() {
+    let diagnostics = parse_diagnostics(&input)?;
+    if diagnostics.is_empty() {
         return Ok(());
     }
     let sources = crate::terminal::SourceFiles::new(
         std::env::current_dir()?,
         tola_typst::PackageLocations::discover(None, None)?,
     );
-    for issue in issues {
-        let diagnostic = into_diagnostic(issue)?;
+    for diagnostic in diagnostics {
         println!(
             "{}",
             crate::terminal::render_diagnostic(
@@ -88,13 +101,37 @@ pub(in crate::cli) fn render(output: &CommandOutput) -> Result<()> {
     Ok(())
 }
 
-fn into_diagnostic(issue: Issue) -> Result<Diagnostic> {
+fn parse_diagnostics(input: &str) -> Result<Vec<Diagnostic>, RenderInputError> {
+    let issues = match serde_json::from_str::<Input>(input).map_err(RenderInputError::Json)? {
+        Input::List(issues)
+        | Input::Object {
+            diagnostics: issues,
+        } => issues,
+    };
+    issues
+        .into_iter()
+        .enumerate()
+        .map(|(index, issue)| {
+            let number = index + 1;
+            let issue = serde_json::from_value(issue)
+                .map_err(|source| RenderInputError::Issue { number, source })?;
+            into_diagnostic(issue, number)
+        })
+        .collect()
+}
+
+fn into_diagnostic(issue: Issue, number: usize) -> Result<Diagnostic, RenderInputError> {
     let severity = match issue.severity.as_str() {
         "error" => Severity::Error,
         "warning" => Severity::Warning,
         "info" => Severity::Info,
         "hint" => Severity::Hint,
-        other => anyhow::bail!("unknown diagnostic severity {other}"),
+        _ => {
+            return Err(RenderInputError::Severity {
+                number,
+                severity: issue.severity,
+            });
+        }
     };
     // The public code is carried by the producer; the static code only satisfies the core type.
     let mut diagnostic = Diagnostic::new(DiagnosticCode::new("nu.issue"), severity, issue.message);
@@ -114,22 +151,65 @@ fn into_diagnostic(issue: Issue) -> Result<Diagnostic> {
     diagnostic.related = issue
         .related
         .into_iter()
-        .map(|related| RelatedInformation {
-            message: related.message,
-            location: related.location.map(into_location),
-            source: None,
+        .enumerate()
+        .map(|(index, related)| {
+            let location = related
+                .location
+                .map(|location| {
+                    into_location(location, number, || format!("related[{index}].location"))
+                })
+                .transpose()?;
+            Ok(RelatedInformation {
+                message: related.message,
+                location,
+                source: None,
+            })
         })
-        .collect();
-    diagnostic.location = issue.location.map(into_location);
+        .collect::<Result<_, RenderInputError>>()?;
+    diagnostic.location = issue
+        .location
+        .map(|location| into_location(location, number, || "location".into()))
+        .transpose()?;
     Ok(diagnostic)
 }
 
-fn into_location(location: IssueLocation) -> Location {
-    Location {
-        path: location.path,
+fn into_location(
+    location: IssueLocation,
+    number: usize,
+    field: impl FnOnce() -> String,
+) -> Result<Location, RenderInputError> {
+    let path = location
+        .path
+        .filter(|path| !path.is_empty())
+        .ok_or_else(|| RenderInputError::MissingPath {
+            number,
+            field: field(),
+        })?;
+    Ok(Location {
+        path,
         line: location.line,
         column: location.column,
         range: location.range,
         source_lines: Vec::new(),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn source_snapshot_location_is_rejected_by_rendering() {
+        let input = r#"[
+            {"severity":"warning","message":"missing summary"},
+            {"severity":"error","message":"missing title","related":[
+                {"message":"declared here","location":{"source":"guide"}}
+            ]}
+        ]"#;
+        assert!(matches!(
+            parse_diagnostics(input),
+            Err(RenderInputError::MissingPath { number: 2, field })
+                if field == "related[0].location"
+        ));
     }
 }

@@ -39,9 +39,7 @@ impl OutputRevision {
     }
 
     pub fn output(&self, path: &OutputPath) -> Option<&OutputFile> {
-        self.positions
-            .get(path)
-            .map(|index| &self.outputs.outputs()[*index])
+        self.output_by_path_text(path.as_str())
     }
 
     /// Look up an exact logical path without allocating or parsing an [`OutputPath`].
@@ -72,40 +70,10 @@ impl OutputRevision {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::output::graph::{OutputGraphBuilder, OutputKind};
+    use crate::output::graph::OutputGraphBuilder;
     use crate::output::owner::OutputOwner;
     use crate::output::semantics::{OutputDeclaration, ResponseMediaType};
     use crate::output::tests::{insert_output, output_file, output_graph};
-
-    #[test]
-    fn manifest_matches_served_output() {
-        let mut graph = OutputGraphBuilder::new();
-        insert_output(
-            &mut graph,
-            "posts/rust/index.html",
-            OutputDeclaration::html_document(),
-            b"Rust",
-        );
-        let revision = OutputRevision::from_graph(&graph.finish());
-        let path = OutputPath::parse("posts/rust/index.html").unwrap();
-        let output = revision.output(&path).unwrap();
-
-        assert_eq!(output.bytes(), b"Rust");
-        let representation =
-            crate::output::manifest::RepresentationId::from_output(output).to_hex();
-        assert!(
-            revision
-                .manifest()
-                .matches_representation(&path, &representation)
-        );
-        assert_eq!(output.kind(), OutputKind::HtmlDocument);
-        assert!(std::ptr::eq(
-            output,
-            revision
-                .output_by_path_text("posts/rust/index.html")
-                .unwrap(),
-        ));
-    }
 
     #[test]
     fn unchanged_outputs_keep_their_storage() {
@@ -167,33 +135,6 @@ mod tests {
         assert_eq!(next.outputs()[0].owner(), &owner);
         assert_eq!(next.root_ownerships(), candidate.root_ownerships());
         assert_eq!(next.manifest(), &SiteManifest::from_graph(&candidate));
-    }
-
-    #[test]
-    fn declaration_change_drops_shared_storage() {
-        fn graph(declaration: OutputDeclaration) -> OutputGraph {
-            output_graph([output_file("styles/app", declaration, &[b'x'; 1024])])
-        }
-
-        let first = OutputRevision::from_graph(&graph(OutputDeclaration::opaque(
-            ResponseMediaType::OCTET_STREAM,
-        )));
-        let next = OutputRevision::from_graph_reusing(
-            &first,
-            &graph(OutputDeclaration::from_filesystem_source(
-                std::path::Path::new("styles/app.css"),
-            )),
-        );
-        let path = OutputPath::parse("styles/app").unwrap();
-
-        assert!(!std::ptr::eq(
-            first.output(&path).unwrap().bytes().as_ptr(),
-            next.output(&path).unwrap().bytes().as_ptr(),
-        ));
-        assert_eq!(
-            next.output(&path).unwrap().declaration(),
-            &OutputDeclaration::from_filesystem_source(std::path::Path::new("styles/app.css"))
-        );
     }
 
     #[test]

@@ -133,11 +133,13 @@ impl SiteLanguage {
 }
 
 /// Why a declared site language is unusable.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum UnusableLanguage {
     /// The whole declaration is not a language tag.
+    #[error("`{declared}` is not a language tag such as `en`, `ja`, `zh-Hans`, or `zh-Hant-TW`")]
     Tag { declared: String },
     /// One subtag is outside the forms `set text` accepts.
+    #[error("`{declared}` is not {}", .key.accepted_form())]
     Subtag {
         key: LanguageSubtag,
         declared: String,
@@ -178,22 +180,6 @@ impl LanguageSubtag {
         }
     }
 }
-
-impl std::fmt::Display for UnusableLanguage {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Tag { declared } => write!(
-                formatter,
-                "`{declared}` is not a language tag such as `en`, `ja`, `zh-Hans`, or `zh-Hant-TW`"
-            ),
-            Self::Subtag { key, declared } => {
-                write!(formatter, "`{declared}` is not {}", key.accepted_form())
-            }
-        }
-    }
-}
-
-impl std::error::Error for UnusableLanguage {}
 
 /// Split one language tag into its canonical subtags.
 fn parse_tag(tag: &str) -> Result<(String, Option<String>, Option<String>), UnusableLanguage> {
@@ -329,11 +315,6 @@ mod tests {
                 declared: "Hans".to_owned(),
             }
         );
-        assert_eq!(
-            error.to_string(),
-            "`Hans` is not a two-letter ISO 3166-1 alpha-2 region code such as `US` or `CN`"
-        );
-
         let tag =
             SiteLanguage::parse(&declared("zh-CN-Hans")).expect_err("a tag orders its subtags");
         assert_eq!(

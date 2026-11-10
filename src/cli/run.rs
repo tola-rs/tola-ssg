@@ -5,9 +5,10 @@ use std::process::ExitCode;
 use serde_json::json;
 use tola_diagnostic::{Diagnostic, Severity};
 
-use super::Cli;
+use super::Commands;
 use super::log::{LogFile, LogOrigin};
 use super::output::{CommandOutput, attached_or_fallback};
+use super::parse::{Command, ParsedCommand};
 use crate::cancellation::Cancellation;
 use crate::terminal::{InputCancelled, PagerCommand, StdoutClosed, Terminal, display_path};
 
@@ -19,15 +20,15 @@ const CANCELLED_EXIT_CODE: u8 = 130;
 /// otherwise records one below the site's reserved `.tola` directory, because the terminal
 /// region shows only the latest round while the log keeps every round. The origin decides who
 /// answers for a log Tola cannot use.
-fn session_log_path(cli: &Cli) -> Option<(std::path::PathBuf, LogOrigin)> {
-    if cli.global.no_log_file {
+fn session_log_path(parsed: &ParsedCommand) -> Option<(std::path::PathBuf, LogOrigin)> {
+    if parsed.process.no_log_file {
         return None;
     }
-    if let Some(path) = &cli.global.log_file {
+    if let Some(path) = &parsed.process.log_file {
         return Some((path.clone(), LogOrigin::Explicit));
     }
-    match &cli.command {
-        super::Commands::Dev { site, .. } => {
+    match &parsed.command {
+        Command::Builtin(Commands::Dev { site, .. }) => {
             default_session_log_path(&site.config).map(|path| (path, LogOrigin::Automatic))
         }
         _ => None,
@@ -41,25 +42,25 @@ fn default_session_log_path(config: &super::ConfigFileArgs) -> Option<std::path:
     Some(directory.join(format!("dev-{}.jsonl", super::log::session_stamp())))
 }
 
-fn hook_nested_build(cli: &Cli) -> Option<String> {
+fn hook_nested_build(parsed: &ParsedCommand) -> Option<String> {
     let stage = std::env::var("TOLA_HOOK_STAGE").ok()?;
-    let blocked = match &cli.command {
-        super::Commands::Build { .. }
-        | super::Commands::Dev { .. }
-        | super::Commands::Preview { .. } => true,
-        super::Commands::Check { no_build, .. } => !no_build,
+    let blocked = match &parsed.command {
+        Command::Builtin(
+            Commands::Build { .. } | Commands::Dev { .. } | Commands::Preview { .. },
+        ) => true,
+        Command::Builtin(Commands::Check { no_build, .. }) => !no_build,
         _ => false,
     };
     blocked.then_some(stage)
 }
 
 pub(crate) fn run() -> ExitCode {
-    if let Some(code) = super::usage::for_process() {
-        return code;
-    }
-    let cli = Cli::parse_for_process();
-    super::color::install(cli.global.color);
-    if let Some(stage) = hook_nested_build(&cli) {
+    let parsed = match ParsedCommand::parse() {
+        Ok(parsed) => parsed,
+        Err(code) => return code,
+    };
+    super::color::install(parsed.process.color);
+    if let Some(stage) = hook_nested_build(&parsed) {
         let diagnostic = Diagnostic::new(
             crate::codes::hook::NESTED_BUILD,
             Severity::Error,
@@ -68,12 +69,12 @@ pub(crate) fn run() -> ExitCode {
         .with_help(
             "Run the build outside the hook; a nested build waits on the same site lock and can re-run this hook.",
         );
-        let terminal = Terminal::new(cli.global.color, cli.global.quiet, None);
+        let terminal = Terminal::new(parsed.process.color, parsed.process.quiet, None);
         let _ = terminal.diagnostic(&diagnostic);
         return ExitCode::FAILURE;
     }
-    if let super::Commands::Nu(args) = &cli.command {
-        let scope = match cli.input_scope() {
+    if let Command::Builtin(Commands::Nu(args)) = &parsed.command {
+        let scope = match args.input.scope() {
             tola_input::InputScope::Pure => Some("pure"),
             tola_input::InputScope::Offline => Some("offline"),
             tola_input::InputScope::Online => None,
@@ -81,18 +82,20 @@ pub(crate) fn run() -> ExitCode {
         return super::commands::nu::run(args, scope);
     }
     let events = crate::dev::events::Events(
-        matches!(&cli.command, super::Commands::Dev { development, .. } if development.json),
+        matches!(&parsed.command, Command::Builtin(Commands::Dev { development, .. }) if development.json),
     );
-    let pages_documentation = matches!(&cli.command, super::Commands::Help(args) if args.format == super::args::HelpFormat::Text);
-    let no_pager = matches!(&cli.command, super::Commands::Help(args) if args.no_pager);
-    let pager = match if no_pager || !pages_documentation {
-        Ok(None)
-    } else {
-        PagerCommand::for_process()
-    } {
+    let pager = match &parsed.command {
+        Command::Builtin(Commands::Help(args))
+            if args.format == super::args::HelpFormat::Text && !args.no_pager =>
+        {
+            PagerCommand::for_process()
+        }
+        _ => Ok(None),
+    };
+    let pager = match pager {
         Ok(pager) => pager,
         Err(error) => {
-            let terminal = Terminal::new(cli.global.color, cli.global.quiet, None);
+            let terminal = Terminal::new(parsed.process.color, parsed.process.quiet, None);
             let _ = terminal.diagnostic(&tola_diagnostic::fallback(
                 crate::codes::terminal::PAGER,
                 &error,
@@ -100,7 +103,7 @@ pub(crate) fn run() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let terminal = Terminal::new(cli.global.color, cli.global.quiet, pager);
+    let terminal = Terminal::new(parsed.process.color, parsed.process.quiet, pager);
     let cancellation = match Cancellation::install() {
         Ok(cancellation) => cancellation,
         Err(error) => {
@@ -111,10 +114,11 @@ pub(crate) fn run() -> ExitCode {
         }
     };
     terminal.sink().set_cancellation(cancellation.token());
-    let failure = super::dispatch::FailureReport::of(&cli);
-    let (output, mut outcome) = match prepare_output(&cli, terminal.clone()) {
+    let failure = super::dispatch::FailureReport::of(&parsed);
+    let (output, mut outcome) = match prepare_output(&parsed, terminal.clone()) {
         Ok(output) => {
-            let outcome = super::dispatch::dispatch(cli, &output, &cancellation, failure);
+            let outcome =
+                super::dispatch::dispatch(parsed.command, &output, &cancellation, failure);
             (output, outcome)
         }
         Err(error) => {
@@ -211,10 +215,10 @@ fn is_command_cancellation(error: &anyhow::Error) -> bool {
         })
 }
 
-fn prepare_output(cli: &Cli, terminal: Terminal) -> anyhow::Result<CommandOutput> {
-    let log_target = session_log_path(cli);
+fn prepare_output(parsed: &ParsedCommand, terminal: Terminal) -> anyhow::Result<CommandOutput> {
+    let log_target = session_log_path(parsed);
     if let Some((log_path, _)) = &log_target
-        && let Some(config) = cli.command.config_file()
+        && let Some(config) = parsed.command.config_file()
     {
         let cwd = std::env::current_dir()?;
         let config_path = config.path.clone().unwrap_or_else(|| {
@@ -247,12 +251,12 @@ fn prepare_output(cli: &Cli, terminal: Terminal) -> anyhow::Result<CommandOutput
             json!({
                 "kind": "command_started", "version": env!("CARGO_PKG_VERSION"),
                 "typst": typst::utils::version().raw(), "os": std::env::consts::OS,
-                "arch": std::env::consts::ARCH, "command": cli.command.name(),
+                "arch": std::env::consts::ARCH, "command": parsed.name,
                 "message": "command started",
             }),
         );
     }
-    super::log::tracing::install(cli.global.verbose, terminal.clone(), log.clone())?;
+    super::log::tracing::install(parsed.process.verbose, terminal.clone(), log.clone())?;
     // The warning the site author reads is already out; the cause chain belongs to explicitly requested
     // verbose output, and this is the subscriber that prints it.
     if let Some((path, error)) = &unavailable {

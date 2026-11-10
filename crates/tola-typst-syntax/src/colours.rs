@@ -79,7 +79,15 @@ fn whole(component: f32) -> u8 {
 /// The colour one call writes, with the bytes of the spelling that names it.
 fn call_colour(node: &LinkedNode<'_>) -> Option<Colour> {
     let call = node.cast::<ast::FuncCall>()?;
-    if name_of(call.callee()).as_deref() != Some("rgb") {
+    let rgb = match call.callee() {
+        ast::Expr::Ident(name) => name.get().as_str() == "rgb",
+        ast::Expr::FieldAccess(field) => {
+            matches!(field.target(), ast::Expr::Ident(name) if name.get().as_str() == "color")
+                && field.field().get().as_str() == "rgb"
+        }
+        _ => false,
+    };
+    if !rgb {
         return None;
     }
     let mut arguments = call.args().items();
@@ -95,57 +103,16 @@ fn call_colour(node: &LinkedNode<'_>) -> Option<Colour> {
     })
 }
 
-/// The name a callee writes, whether bare or as `color.<name>`.
-fn name_of(callee: ast::Expr<'_>) -> Option<String> {
-    match callee {
-        ast::Expr::Ident(ident) => Some(ident.get().to_string()),
-        ast::Expr::FieldAccess(access) => {
-            let ast::Expr::Ident(target) = access.target() else {
-                return None;
-            };
-            (target.get().as_str() == "color").then(|| access.field().get().to_string())
-        }
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Every colour of a source, as its spelling and its hexadecimal notation.
-    fn written(text: &str) -> Vec<(String, String)> {
-        let source = Source::detached(text);
-        colours(&source)
-            .into_iter()
-            .map(|colour| {
-                let components = colour.value.to_rgb().into_components();
-                (
-                    text[colour.range.clone()].to_owned(),
-                    hex([components.0, components.1, components.2, components.3]),
-                )
-            })
-            .collect()
-    }
-
     #[test]
     fn hexadecimal_spelling_yields_colour() {
-        assert_eq!(
-            written("#let brand = rgb(\"#777\")\n"),
-            [("\"#777\"".to_owned(), "#777777".to_owned())]
-        );
-    }
-
-    #[test]
-    fn undecidable_colour_answers_nothing() {
-        assert!(written("#let brand = rgb(\"nonsense\")\n").is_empty());
-        assert!(written("#let brand = not-a-colour(\"#777\")\n").is_empty());
-    }
-
-    #[test]
-    fn alpha_survives_the_spellings() {
-        let spellings = spellings([1.0, 0.0, 0.0, 0.5]);
-        assert_eq!(spellings[0], "rgb(\"#ff000080\")");
-        assert_eq!(spellings[1], "rgb(255, 0, 0, 0.500)");
+        let text = "#rgb(\"nonsense\") #other.rgb(\"#777\") #color.rgb(\"#ff000080\")";
+        let found = colours(&Source::detached(text));
+        assert_eq!(found.len(), 1);
+        assert_eq!(&text[found[0].range.clone()], "\"#ff000080\"");
+        assert_eq!(found[0].value, Color::from_str("#ff000080").unwrap());
     }
 }

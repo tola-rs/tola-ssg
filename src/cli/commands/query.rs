@@ -11,7 +11,7 @@ use serde_json::Value;
 use tola_build::BuildResources;
 use tola_build::config::ResolvedSiteConfig;
 use tola_build::modules::query::QueryResult;
-use tola_diagnostic::DiagnosticError;
+use tola_diagnostic::{Diagnostic, DiagnosticError, Severity};
 use tola_module::{LoadedModule, Query};
 
 use crate::cancellation::Cancellation;
@@ -72,10 +72,11 @@ pub(super) fn evaluate(
         )
         .map_err(Into::into)
     } else {
-        ensure!(
-            label.is_none(),
-            "`--label` applies only to an explicit query file"
-        );
+        if label.is_some() {
+            return Err(query_file_hint(
+                "`--label` applies only to an explicit query file",
+            ));
+        }
         let (namespace, local) = target.split_once('.').context(
             "choose a module-qualified query such as `notes.nodes`, or an explicit `./query.typ` file",
         )?;
@@ -87,13 +88,19 @@ pub(super) fn evaluate(
             cancellation,
         )?;
         super::extensions::check_namespaces(&modules)?;
+        let lookup_error = |message| {
+            if target.ends_with(".typ") {
+                query_file_hint(message)
+            } else {
+                anyhow::Error::msg(message)
+            }
+        };
         let module = modules
             .get(namespace)
-            .with_context(|| format!("no module is named `{namespace}`"))?;
-        let query = module
-            .queries
-            .get(local)
-            .with_context(|| format!("module `{namespace}` declares no query `{local}`"))?;
+            .ok_or_else(|| lookup_error(format!("no module is named `{namespace}`")))?;
+        let query = module.queries.get(local).ok_or_else(|| {
+            lookup_error(format!("module `{namespace}` declares no query `{local}`"))
+        })?;
         tola_build::modules::query::run(
             config,
             module,
@@ -105,6 +112,13 @@ pub(super) fn evaluate(
         )
         .map_err(Into::into)
     }
+}
+
+fn query_file_hint(message: impl Into<String>) -> anyhow::Error {
+    let message = message.into();
+    let diagnostic = Diagnostic::new(crate::codes::command::FAILED, Severity::Error, &message)
+        .with_help("run `tola query ./query.typ --label LABEL` to query a Typst file");
+    DiagnosticError::new(message, vec![diagnostic]).into()
 }
 
 /// A module-declared query's inputs.

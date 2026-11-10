@@ -105,6 +105,9 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
             ClientRequest::TokensRange(parameters) => self.tokens_range(id, parameters),
             ClientRequest::ExecuteCommand(parameters) => self.command(id, parameters),
             ClientRequest::Diagnostic(parameters) => self.diagnostic(id, parameters),
+            ClientRequest::WorkspaceDiagnostic(parameters) => {
+                self.workspace_diagnostic(id, parameters)
+            }
             ClientRequest::PackageSource(parameters) => self.package_source(id, parameters),
             ClientRequest::RouteIndex => self.route_index(id),
             ClientRequest::PrepareCallHierarchy(parameters) => {

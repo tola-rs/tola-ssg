@@ -4,13 +4,14 @@ use crate::cancellation::Cancellation;
 use crate::cli::log::destination;
 use anyhow::Result;
 
-use super::{Cli, Commands, commands};
+use super::parse::{Command, ParsedCommand};
+use super::{Commands, commands};
 use crate::cli::BuildArgs;
 use crate::cli::output::CommandOutput;
 use tola_input::InputScope;
 
-pub(crate) fn dispatch(
-    cli: Cli,
+pub(super) fn dispatch(
+    command: Command,
     output: &CommandOutput,
     cancellation: &Cancellation,
     failure: Option<FailureReport>,
@@ -18,13 +19,17 @@ pub(crate) fn dispatch(
     if let Err(error) = cancellation.token().ensure_active() {
         return report_failure(failure, output, error.into());
     }
-    let mode = cli.input_mode();
+    let mode = command.input_mode();
     let scope = mode.scope();
-    match cli.command {
-        Commands::Nu(_) => unreachable!("script runs before cancellation is installed"),
-        Commands::Extension(arguments) => {
-            commands::extensions::run(arguments, mode, output, cancellation)
+    let command = match command {
+        Command::Builtin(command) => command,
+        Command::Extension(args) => {
+            return commands::extensions::run(args, mode, output, cancellation);
         }
+    };
+    match command {
+        Commands::Nu(_) => unreachable!("script runs before cancellation is installed"),
+        Commands::Extension(_) => unreachable!("extension arguments are parsed before dispatch"),
         Commands::Update {
             input: _,
             site,
@@ -204,7 +209,7 @@ pub(crate) fn dispatch(
     }
 }
 
-/// The machine-readable report a failed invocation produces, for commands that answer in JSON.
+/// The JSON report a build or check can produce even if setup fails.
 #[derive(Clone, Copy)]
 pub(super) struct FailureReport {
     command: &'static str,
@@ -215,13 +220,17 @@ pub(super) struct FailureReport {
 }
 
 impl FailureReport {
-    pub(super) fn of(cli: &Cli) -> Option<Self> {
-        match &cli.command {
+    pub(super) fn of(parsed: &ParsedCommand) -> Option<Self> {
+        let Command::Builtin(command) = &parsed.command else {
+            return None;
+        };
+        let scope = parsed.command.input_mode().scope();
+        match command {
             Commands::Build {
                 json: true, pretty, ..
             } => Some(Self {
                 command: "build",
-                scope: cli.input_scope(),
+                scope,
                 stage: "candidate",
                 hooks: true,
                 pretty: *pretty,
@@ -234,7 +243,7 @@ impl FailureReport {
                 ..
             } => Some(Self {
                 command: "check",
-                scope: cli.input_scope(),
+                scope,
                 stage: if *no_build { "source" } else { "candidate" },
                 hooks: !*no_build && !*no_hooks,
                 pretty: *pretty,

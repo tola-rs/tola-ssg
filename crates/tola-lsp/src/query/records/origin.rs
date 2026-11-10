@@ -617,7 +617,7 @@ impl Selection<'_> {
         names: &Arc<SourceNames>,
         root: LinkedNode<'_>,
         semantics: &mut Semantic<'_>,
-    ) -> Result<Option<schema::OutputDescription>> {
+    ) -> Result<Option<schema::SchemaDescription>> {
         let Some(RecordOrigin::Parsed { schema, .. }) = record_origin(names, root, semantics)?
         else {
             return Ok(None);

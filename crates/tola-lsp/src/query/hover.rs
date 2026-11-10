@@ -710,8 +710,8 @@ impl Selection<'_> {
         let mut described: Vec<schema::DeclaredField> = Vec::new();
         for (value, _) in semantics.known_values(&value)? {
             if let Some(declared) = semantics
-                .inspect_schema(&value)?
-                .and_then(schema::OutputDescription::read)
+                .inspect_schema(&value, false)?
+                .and_then(schema::SchemaDescription::read)
                 .map(|description| description.field(&name))
                 && declared.documentation.is_some()
                 && !described.contains(&declared)
@@ -780,7 +780,7 @@ impl Selection<'_> {
         let rejecting = schemas
             .shapes
             .iter()
-            .filter(|schema| !schema.declares(key) && !schema.accepts_unknown())
+            .filter(|schema| schemas.covered && schema.rejects(key))
             .count();
         if rejecting > 0 {
             let required = schemas.shapes.iter().any(|schema| schema.requires(key));

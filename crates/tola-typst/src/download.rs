@@ -68,29 +68,3 @@ impl Downloader for HttpDownloader {
         ))
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    const ARCHIVE: &str = "https://packages.typst.org/preview/tablex-0.0.8.tar.gz";
-
-    fn downloader() -> HttpDownloader {
-        HttpDownloader::new("tola-typst/test")
-    }
-
-    #[test]
-    #[ignore = "downloads from packages.typst.org"]
-    fn serves_universe_packages() {
-        let bytes = downloader().download(&(), ARCHIVE).unwrap();
-        assert!(bytes.starts_with(&[0x1f, 0x8b]), "expected a gzip stream");
-
-        let error = downloader()
-            .download(
-                &(),
-                "https://packages.typst.org/preview/missing-9.9.9.tar.gz",
-            )
-            .unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::NotFound);
-    }
-}

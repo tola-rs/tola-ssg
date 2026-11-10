@@ -14,9 +14,10 @@
 
 ## Invariants
 
+- Entity query sessions are keyed by module instance and entry. A source revision shares that entry compilation across labels; later revisions retain the session's source analysis.
 - Open buffers own unsaved text; the connection alone commits token history and delta bases after accepting a current response.
 - One site per workspace root. A workspace with no configuration is checked as the documents it holds, one by one.
 - A rename writes a shared physical file once; matching open aliases each receive a buffer edit. Divergent open buffers refuse a name query.
 - Cancelled or superseded requests cannot publish an answer or update watchers; a successful check of the current revision licenses precise watched-file filtering.
 - Ranges and edits are validated against current syntax; UTF-16 edits preserve the document's newline convention.
-- Formatting style comes from the site's `[formatter]` configuration; no client setting carries a style of its own.
+- Formatting reads the current site's `[formatter]`, including an open configuration buffer, without waiting for a site check. The editor projects shared byte edits into UTF-16 positions.

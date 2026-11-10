@@ -106,10 +106,7 @@ pub use swap::{SwapError, SwapMember, TreeSwap, swap_workspace};
 pub use write::atomic_write;
 
 mod fingerprint;
-pub(crate) use fingerprint::{
-    PathContents, PathFingerprint, digest_file, entries_fingerprint, path_contents,
-    path_fingerprint,
-};
+pub(crate) use fingerprint::{PathContents, PathFingerprint, digest_file, path_contents};
 
 mod directory;
 pub(crate) use directory::{TemporaryDirectory, directory_is_empty, read_sorted_entries};

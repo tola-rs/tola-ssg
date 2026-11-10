@@ -1,14 +1,17 @@
 //! Resolving one bundled export's declaration and documentation block from package source.
 
-use anyhow::{Context, Result, bail};
 use tola_typst_syntax::docs::Documentation;
 use typst::foundations::{Func, Scope, Value};
 use typst::syntax::ast::AstNode;
 use typst::syntax::{LinkedNode, Source, SyntaxKind, ast};
 
-use super::RelatedTarget;
 use super::declaration::{ExportDocumentation, Signature};
 use super::related;
+use super::{ExportDocumentationError, RelatedTarget};
+use ExportDocumentationError::{
+    InvalidDeclaration, InvalidImport, MemberOutsideDictionary, MissingBinding, MissingDictionary,
+    MissingMember, MissingSource, UnknownNative,
+};
 
 /// A documentation block and the related targets Tola reads out of it, so a re-export inherits
 /// or replaces both together.
@@ -33,11 +36,11 @@ pub(super) struct Declarations {
 }
 
 impl Declarations {
-    pub(super) fn file(&self, path: &str) -> Result<&FileSource> {
+    pub(super) fn file(&self, path: &str) -> Result<&FileSource, ExportDocumentationError> {
         self.sources
             .iter()
             .find(|(name, _)| *name == path)
-            .with_context(|| format!("builtin source `{path}` is absent"))
+            .ok_or_else(|| MissingSource(path.to_owned()))
     }
 
     pub(super) fn binding<'a>(
@@ -45,7 +48,7 @@ impl Declarations {
         file: &'a FileSource,
         scope: LinkedNode<'a>,
         name: &str,
-    ) -> Result<(Declaration<'a>, Option<DeclaredDocumentation>)> {
+    ) -> Result<(Declaration<'a>, Option<DeclaredDocumentation>), ExportDocumentationError> {
         let mut before = (!matches!(scope.kind(), SyntaxKind::Code | SyntaxKind::Markup))
             .then(|| scope.range().start);
         let mut scope = Some(scope);
@@ -70,11 +73,11 @@ impl Declarations {
                             declared_documentation(&file.1, statement.range().start);
                         let expression = binding
                             .init()
-                            .context("bundled binding has no initializer")?;
+                            .ok_or(InvalidDeclaration("bundled binding has no initializer"))?;
                         let node = file
                             .1
                             .find(expression.span())
-                            .context("bundled initializer has no source")?;
+                            .ok_or(InvalidDeclaration("bundled initializer has no source"))?;
                         let (declaration, inherited) = self.expression(file, node)?;
                         return Ok((declaration, documentation.or(inherited)));
                     }
@@ -91,7 +94,7 @@ impl Declarations {
                         let documentation =
                             declared_documentation(&file.1, statement.range().start);
                         let ast::Expr::Str(path) = import.source() else {
-                            bail!("bundled import is not a literal path")
+                            return Err(InvalidDeclaration("bundled import is not a literal path"));
                         };
                         let path = path.get();
                         let original = item.original_name();
@@ -102,9 +105,7 @@ impl Declarations {
                             let value = self
                                 .natives
                                 .get(original.as_str())
-                                .with_context(|| {
-                                    format!("unknown builtin native `{}`", original.as_str())
-                                })?
+                                .ok_or_else(|| UnknownNative(original.as_str().to_owned()))?
                                 .read();
                             let declaration = match value {
                                 Value::Func(func) => Declaration::Native(func.clone()),
@@ -113,15 +114,16 @@ impl Declarations {
                             return Ok((declaration, documentation));
                         }
                         if path.starts_with("@tola/") {
-                            let spec = path.parse().map_err(|error| {
-                                anyhow::anyhow!("invalid bundled package import: {error}")
-                            })?;
+                            let spec = path
+                                .parse::<tola_typst::PackageSpec>()
+                                .map_err(|error| InvalidImport(error.to_string()))?;
                             let package = crate::builtin_package(&spec)
-                                .context("unknown bundled package import")?;
+                                .ok_or(InvalidDeclaration("unknown bundled package import"))?;
                             let mut exports =
                                 package.export_documentation(&[original.as_str().to_owned()])?;
-                            let export =
-                                exports.pop().context("bundled import has no declaration")?;
+                            let export = exports
+                                .pop()
+                                .ok_or(InvalidDeclaration("bundled import has no declaration"))?;
                             let inherited = DeclaredDocumentation {
                                 documentation: export.documentation.clone(),
                                 related: export.related.clone(),
@@ -137,7 +139,7 @@ impl Declarations {
                         let imported = self.file(
                             base.join(path.as_str())
                                 .to_str()
-                                .context("builtin import path is not UTF-8")?,
+                                .ok_or(InvalidDeclaration("builtin import path is not UTF-8"))?,
                         )?;
                         let (declaration, inherited) = self.binding(
                             imported,
@@ -151,16 +153,18 @@ impl Declarations {
             before = Some(parent.range().start);
             scope = parent.parent().cloned();
         }
-        bail!("bundled declaration `{name}` has no source binding")
+        Err(MissingBinding(name.to_owned()))
     }
 
     fn expression<'a>(
         &'a self,
         file: &'a FileSource,
         node: LinkedNode<'a>,
-    ) -> Result<(Declaration<'a>, Option<DeclaredDocumentation>)> {
+    ) -> Result<(Declaration<'a>, Option<DeclaredDocumentation>), ExportDocumentationError> {
         let Some(expression) = node.cast::<ast::Expr>() else {
-            bail!("bundled declaration is not an expression")
+            return Err(InvalidDeclaration(
+                "bundled declaration is not an expression",
+            ));
         };
         match expression {
             ast::Expr::Ident(ident) => self.binding(file, node.clone(), ident.as_str()),
@@ -168,7 +172,7 @@ impl Declarations {
                 let target = file
                     .1
                     .find(access.target().span())
-                    .context("field target has no source")?;
+                    .ok_or(InvalidDeclaration("field target has no source"))?;
                 let (target, _) = self.expression(file, target)?;
                 self.member(target, access.field().as_str())
             }
@@ -177,19 +181,19 @@ impl Declarations {
                     .body()
                     .exprs()
                     .next_back()
-                    .context("bundled block has no final expression")?;
+                    .ok_or(InvalidDeclaration("bundled block has no final expression"))?;
                 self.expression(
                     file,
                     file.1
                         .find(final_expression.span())
-                        .context("block result has no source")?,
+                        .ok_or(InvalidDeclaration("block result has no source"))?,
                 )
             }
             ast::Expr::Parenthesized(group) => self.expression(
                 file,
                 file.1
                     .find(group.expr().span())
-                    .context("group has no source")?,
+                    .ok_or(InvalidDeclaration("group has no source"))?,
             ),
             _ => Ok((Declaration::Source(file, node), None)),
         }
@@ -199,13 +203,13 @@ impl Declarations {
         &'a self,
         declaration: Declaration<'a>,
         name: &str,
-    ) -> Result<(Declaration<'a>, Option<DeclaredDocumentation>)> {
+    ) -> Result<(Declaration<'a>, Option<DeclaredDocumentation>), ExportDocumentationError> {
         let Declaration::Source(file, node) = declaration else {
-            bail!("bundled member `{name}` has no source dictionary")
+            return Err(MissingDictionary(name.to_owned()));
         };
         let expression = node
             .cast::<ast::Expr>()
-            .context("dictionary is not an expression")?;
+            .ok_or(InvalidDeclaration("dictionary is not an expression"))?;
         match expression {
             ast::Expr::Dict(dictionary) => {
                 for item in dictionary.items().rev() {
@@ -215,14 +219,14 @@ impl Declarations {
                                 file,
                                 file.1
                                     .find(named.expr().span())
-                                    .context("dictionary member has no source")?,
+                                    .ok_or(InvalidDeclaration("dictionary member has no source"))?,
                             );
                         }
                         ast::DictItem::Spread(spread) => {
                             let node = file
                                 .1
                                 .find(spread.expr().span())
-                                .context("spread has no source")?;
+                                .ok_or(InvalidDeclaration("spread has no source"))?;
                             let (spread, _) = self.expression(file, node)?;
                             if let Ok(member) = self.member(spread, name) {
                                 return Ok(member);
@@ -231,30 +235,32 @@ impl Declarations {
                         _ => {}
                     }
                 }
-                bail!("bundled dictionary has no member `{name}`")
+                Err(MissingMember(name.to_owned()))
             }
             ast::Expr::FuncCall(call) => {
                 let (callee, _) = self.expression(
                     file,
                     file.1
                         .find(call.callee().span())
-                        .context("callee has no source")?,
+                        .ok_or(InvalidDeclaration("callee has no source"))?,
                 )?;
                 let Declaration::Source(file, node) = callee else {
-                    bail!("bundled dictionary factory is not a source closure")
+                    return Err(InvalidDeclaration(
+                        "bundled dictionary factory is not a source closure",
+                    ));
                 };
-                let closure = node
-                    .cast::<ast::Closure>()
-                    .context("bundled dictionary factory is not a closure")?;
+                let closure = node.cast::<ast::Closure>().ok_or(InvalidDeclaration(
+                    "bundled dictionary factory is not a closure",
+                ))?;
                 let (returned, _) = self.expression(
                     file,
                     file.1
                         .find(closure.body().span())
-                        .context("factory result has no source")?,
+                        .ok_or(InvalidDeclaration("factory result has no source"))?,
                 )?;
                 self.member(returned, name)
             }
-            _ => bail!("bundled member `{name}` is not declared by a dictionary"),
+            _ => Err(MemberOutsideDictionary(name.to_owned())),
         }
     }
 }
@@ -280,19 +286,19 @@ pub(super) fn source_function(
     file: &FileSource,
     closure: &ast::Closure<'_>,
     documentation: &Documentation,
-) -> Result<Signature> {
+) -> Result<Signature, ExportDocumentationError> {
     let signature = Signature::from_source(name, &file.1, closure, documentation)
-        .context("bundled source is absent")?;
+        .ok_or(InvalidDeclaration("bundled source is absent"))?;
     for documented in &documentation.parameters {
         if !signature
             .parameters
             .iter()
             .any(|parameter| parameter.name == documented.name)
         {
-            bail!(
-                "`{name}` documents parameter `{}`, which the bundled declaration does not have",
-                documented.name
-            );
+            return Err(ExportDocumentationError::UnknownParameter {
+                name: name.to_owned(),
+                parameter: documented.name.clone(),
+            });
         }
     }
     Ok(signature)

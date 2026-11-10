@@ -72,17 +72,6 @@ struct CompletedCheck {
     usable_world: bool,
 }
 
-/// The release of the compiled site an idle connection asked the compiler lane for.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum IdleRelease {
-    /// Nothing was asked for: an idle connection may ask now.
-    Available,
-    /// The next free compiler slot releases the compiled site.
-    Requested,
-    /// The site was just released, so another release waits until a job derives it again.
-    Released,
-}
-
 struct SelectionBuild {
     revision: u64,
     serial: u64,
@@ -147,9 +136,8 @@ pub(super) struct Connection<W, D> {
     /// The configuration sections this host declares, which a `tola.toml` answer reads its keys
     /// from.
     host_sections: HostSections,
-    /// The moment this connection last had work, which an idle interval is measured from.
-    last_work: Instant,
-    idle_release: IdleRelease,
+    /// When a worker last had work, absent before the first job or after idle release.
+    last_work: Option<Instant>,
     /// Whether the author was already told a check's own work failed, so one failing run of checks
     /// announces itself once rather than on every edit.
     announced_panic: bool,
@@ -158,7 +146,7 @@ pub(super) struct Connection<W, D> {
     /// The identifier the next token result has, which a delta request echoes.
     tokens_serial: u64,
     semantic_refresh: refresh::SemanticRefresh,
-    watched_paths: Vec<PathBuf>,
+    watchers: changes::Watchers,
 }
 
 /// One open work-done report.
@@ -220,14 +208,13 @@ impl<W, D> Connection<W, D> {
             named_origin: None,
             default_origin,
             host_sections,
-            last_work: Instant::now(),
-            idle_release: IdleRelease::Available,
+            last_work: None,
             announced_panic: false,
             configuration: None,
             tokens: std::collections::HashMap::new(),
             tokens_serial: 0,
             semantic_refresh: refresh::SemanticRefresh::default(),
-            watched_paths: Vec::new(),
+            watchers: changes::Watchers::default(),
         }
     }
 

@@ -385,13 +385,13 @@ description = "附加到成功值上的文档。"
 
 summary = [
   '''
-只从声明本身推导成功输出值的描述，不运行任何回调。
+只从声明本身推导 schema 的形状，不运行任何回调。
 
 返回树的每个节点都带 `kind`、`presence` 与 `description`。Typst 类型的节点还带 `type`；对象带 `fields` 与 `unknown`；容器带自己的成员；union 与 variant 保留各自的备选。lazy 工厂保持 `kind: "unknown"`。
 
 `presence: "required"` 表示成功的对象字段一定存在；`"optional"` 表示一条已声明的省略路径，更早的 union 分支可能遮蔽它；`"unknown"` 表示无法证明。`default: (value: ...)` 给出原始声明的默认值，包括 `none`，不做校验也不做转换；缺失的默认键保持缺失。容器的位置始终存在。map 与 convert 描述各自的输出形状，同时保留输入的 presence 与 default。输入文档永远不会描述生成的输出。
 
-结果是保守的输出合同：它既不描述输入的接受域，也不是求值得到的样例。
+默认描述成功解析后的值。传入 `input: true` 可查看解析前的形状，此时有默认值的字段可以省略，转换描述的是输入。两种描述都来自声明本身，具体值能否通过校验由解析决定。
 
 Example - 推导输出描述而不运行回调：
 ''',
@@ -400,7 +400,8 @@ Example - 推导输出描述而不运行回调：
 
 [exports.inspect.parameters]
 
-member = "要推导其输出描述的 schema。"
+member = "要描述的 schema。"
+input = "为 true 时描述解析前的值，默认描述成功解析后的值。"
 
 [exports.parse]
 

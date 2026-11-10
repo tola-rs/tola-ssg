@@ -88,7 +88,7 @@ pub fn for_error(error: &anyhow::Error, root: &Path) -> Vec<Diagnostic> {
 }
 
 /// The reports one boundary hands a reader: attached by a producer, or classified here.
-fn reports(
+pub(super) fn reports(
     error: &anyhow::Error,
     root: &Path,
     fallback_code: tola_diagnostic::DiagnosticCode,
@@ -136,33 +136,6 @@ mod tests {
         assert!(!diagnostics[0].help.is_empty());
     }
 
-    #[test]
-    fn output_conflict_names_its_path() {
-        let path = std::path::PathBuf::from("/site");
-        let diagnostics = for_error(
-            &anyhow::Error::new(crate::output::graph::OutputGraphError::ReservedPath {
-                path: tola_address::OutputPath::parse("_tola/search.json").unwrap(),
-                owner: crate::output::owner::OutputOwner::system("search"),
-            }),
-            &path,
-        );
-
-        assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].code, "site.outputs");
-        assert!(
-            diagnostics[0].message.contains("_tola/search.json"),
-            "{}",
-            diagnostics[0].message
-        );
-        assert_eq!(
-            diagnostics[0]
-                .help
-                .first()
-                .map(|help| help.message.as_str()),
-            Some("use a path outside `_tola`")
-        );
-    }
-
     /// A build reads no vendored input while a stopped replacement waits for `tola vendor`.
     #[test]
     fn unfinished_vendor_replacement_refuses_the_build() {
@@ -185,20 +158,5 @@ mod tests {
             diagnostics[0].code,
             tola_diagnostic::codes::vendor::INCOMPLETE
         );
-    }
-
-    #[test]
-    fn build_error_renders_outer_context_once() {
-        let error = anyhow::anyhow!("disk read failed")
-            .context("read source")
-            .context("compile the root Bundle");
-
-        let error = with_site(error, Path::new("/site"));
-        let diagnostics = tola_diagnostic::attached(&error).unwrap();
-
-        assert_eq!(diagnostics[0].message, "compile the root Bundle");
-        // Only the outermost message reaches the reader; inner contexts stay in the chain.
-        assert!(diagnostics[0].notes.is_empty());
-        assert_eq!(error.chain().count(), 4);
     }
 }

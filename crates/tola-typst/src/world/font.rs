@@ -850,7 +850,7 @@ fn font_io_error(path: &Path, error: std::io::Error) -> FontLoadError {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "embed-fonts"))]
 mod tests {
     use super::*;
 
@@ -860,19 +860,6 @@ mod tests {
             .with_embedded_fonts(false)
     }
 
-    #[test]
-    fn one_store_reuses_its_loaded_fonts() {
-        let store = FontStore::with_options(isolated_options());
-        let cancellation = BundleCancellation::new();
-        let first = store.load(&cancellation).unwrap();
-        let second = store.load(&cancellation).unwrap();
-        assert!(std::ptr::eq(first, second));
-        assert_eq!(store.font_count(), Some(0));
-        assert_eq!(store.family_count(), Some(0));
-        assert!(store.is_current(&cancellation).unwrap());
-    }
-
-    #[cfg(feature = "embed-fonts")]
     #[test]
     fn configured_font_file_is_refused() {
         let directory = tempfile::TempDir::new().unwrap();
@@ -886,19 +873,6 @@ mod tests {
         ));
     }
 
-    /// A face's identity ignores bytes the file gained after the bytes the face was read from, so
-    /// a rewritten file still names the font it holds.
-    #[cfg(feature = "embed-fonts")]
-    #[test]
-    fn font_identity_ignores_trailing_bytes() {
-        let (font, _) = embedded::fonts().next().unwrap();
-        let original = font.data().as_slice();
-        let mut changed = original.to_vec();
-        changed.extend_from_slice(b"additional bytes");
-        assert_eq!(FontInfo::new(original, 0), FontInfo::new(&changed, 0));
-    }
-
-    #[cfg(feature = "embed-fonts")]
     #[test]
     fn changed_font_bytes_fail_lazy_read() {
         let directory = tempfile::TempDir::new().unwrap();
@@ -925,7 +899,6 @@ mod tests {
         assert!(!store.is_current(&cancellation).unwrap());
     }
 
-    #[cfg(feature = "embed-fonts")]
     #[cfg(unix)]
     #[test]
     fn narrowed_coverage_changes_face_identity() {

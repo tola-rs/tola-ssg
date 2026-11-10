@@ -1,4 +1,4 @@
-//! Version 1 entity records, retaining native source identities.
+//! Query entity records, retaining native source identities.
 
 use std::collections::HashSet;
 
@@ -11,8 +11,8 @@ use typst::syntax::{FileId, RootedPath, VirtualRoot};
 #[derive(Debug, Clone)]
 pub struct Entity {
     pub id: String,
-    pub label: String,
-    pub detail: Option<String>,
+    pub name: String,
+    pub description: Option<String>,
     pub source: Option<FileId>,
     pub url: Option<String>,
 }
@@ -29,7 +29,7 @@ pub fn parse(value: &Value) -> Result<Vec<Entity>> {
         };
         for (key, _) in fields.iter() {
             ensure!(
-                ["id", "label", "detail", "source", "url"].contains(&key.as_str()),
+                ["id", "name", "description", "source", "url"].contains(&key.as_str()),
                 "entity {index} has the unknown field `{key}`"
             );
         }
@@ -68,8 +68,8 @@ pub fn parse(value: &Value) -> Result<Vec<Entity>> {
         };
         entities.push(Entity {
             id,
-            label: required("label")?,
-            detail: optional("detail")?,
+            name: required("name")?,
+            description: optional("description")?,
             source,
             url: optional("url")?,
         });
@@ -78,21 +78,27 @@ pub fn parse(value: &Value) -> Result<Vec<Entity>> {
 }
 
 /// The CLI representation preserves virtual root identity instead of formatting a Typst value.
-pub fn json(entities: &[Entity]) -> Result<Json> {
+pub fn json(entities: &[Entity]) -> Json {
     let mut records = Vec::with_capacity(entities.len());
     for entity in entities {
-        let source = entity
-            .source
-            .map(|id| {
-                let root = match id.root() {
-                    VirtualRoot::Project => "project".to_owned(),
-                    VirtualRoot::Package(package) => package.to_string(),
-                };
-                let path = id.vpath().get_without_slash();
-                Ok::<_, anyhow::Error>(json!({ "root": root, "path": path }))
-            })
-            .transpose()?;
-        records.push(json!({ "id": entity.id, "label": entity.label, "detail": entity.detail, "source": source, "url": entity.url }));
+        let source = entity.source.map(path_json);
+        records.push(json!({
+            "id": entity.id,
+            "name": entity.name,
+            "description": entity.description,
+            "source": source,
+            "url": entity.url,
+        }));
     }
-    Ok(Json::Array(records))
+    Json::Array(records)
+}
+
+/// Preserve a native path's virtual root when writing a query result as JSON.
+pub(crate) fn path_json(id: FileId) -> Json {
+    let root = match id.root() {
+        VirtualRoot::Project => "project".to_owned(),
+        VirtualRoot::Package(package) => package.to_string(),
+    };
+    let path = id.vpath().get_without_slash();
+    json!({ "root": root, "path": path })
 }

@@ -40,8 +40,10 @@ impl BeforeBuildExecution {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("{error}")]
 pub(crate) struct SourceHookFailure {
+    #[source]
     error: anyhow::Error,
     completed: SourceHookOutputs,
     partial: Option<FailedHookOutputs>,
@@ -81,19 +83,6 @@ impl SourceHookFailure {
     }
 }
 
-impl std::fmt::Display for SourceHookFailure {
-    /// The failing stage wrote the sentence its reader needs; a boundary renders only it.
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "{}", self.error)
-    }
-}
-
-impl std::error::Error for SourceHookFailure {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(self.error.as_ref())
-    }
-}
-
 fn run_before_build_hook(
     hook: &BeforeBuildHookConfig,
     config: &ResolvedSiteConfig,
@@ -128,7 +117,7 @@ fn run_before_build_hook(
         .map_err(|error| hook_command_error(HookStage::BeforeBuild, &identity, error))?;
         let after = declared_output_files(hook, config, cancellation)?;
         for files in &after {
-            if files.entries.is_empty() {
+            if files.contents.is_none() {
                 let declared = tola_diagnostic::display_path(
                     files.source_identity.logical_path(),
                     config.get_root(),

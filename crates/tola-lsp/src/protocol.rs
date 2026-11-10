@@ -25,8 +25,8 @@ use lsp_types::{
     SemanticTokensParams, SemanticTokensRangeParams, SemanticTokensServerCapabilities,
     ServerCapabilities, ServerInfo, SignatureHelp, SignatureHelpOptions,
     TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind,
-    TextDocumentSyncOptions, TextEdit, Uri, WorkDoneProgressOptions, WorkspaceEdit,
-    WorkspaceFileOperationsServerCapabilities, WorkspaceFoldersServerCapabilities,
+    TextDocumentSyncOptions, TextEdit, Uri, WorkDoneProgressOptions, WorkspaceDiagnosticParams,
+    WorkspaceEdit, WorkspaceFileOperationsServerCapabilities, WorkspaceFoldersServerCapabilities,
     WorkspaceServerCapabilities, WorkspaceSymbolOptions, WorkspaceSymbolParams,
     WorkspaceSymbolResponse,
 };
@@ -54,6 +54,7 @@ pub(super) enum ClientRequest {
     /// command is dead in every client that has no extension behind it.
     ExecuteCommand(ExecuteCommandParams),
     Diagnostic(DocumentDiagnosticParams),
+    WorkspaceDiagnostic(WorkspaceDiagnosticParams),
     PackageSource(PackageSourceParams),
     PrepareCallHierarchy(CallHierarchyPrepareParams),
     IncomingCalls(CallHierarchyIncomingCallsParams),
@@ -124,6 +125,10 @@ impl ClientRequest {
             request::DocumentDiagnosticRequest::METHOD => {
                 extract::<request::DocumentDiagnosticRequest>(request)
                     .map(|(id, parameters)| (id, Self::Diagnostic(parameters)))
+            }
+            request::WorkspaceDiagnosticRequest::METHOD => {
+                extract::<request::WorkspaceDiagnosticRequest>(request)
+                    .map(|(id, parameters)| (id, Self::WorkspaceDiagnostic(parameters)))
             }
             RouteRequest::METHOD => extract::<RouteRequest>(request)
                 .map(|(id, parameters)| (id, Self::Route(parameters))),
@@ -303,7 +308,7 @@ fn diagnostics_capability() -> DiagnosticServerCapabilities {
     DiagnosticServerCapabilities::Options(DiagnosticOptions {
         identifier: Some("tola".to_owned()),
         inter_file_dependencies: true,
-        workspace_diagnostics: false,
+        workspace_diagnostics: true,
         work_done_progress_options: WorkDoneProgressOptions::default(),
     })
 }

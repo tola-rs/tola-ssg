@@ -8,9 +8,14 @@ use crate::observation::{InputKind, InputObservation};
 /// A build that produced no complete site, with the inputs it observed before it
 /// stopped. A failure before any attempt ran, such as an unavailable build lock,
 /// reports no observed inputs.
+#[derive(thiserror::Error)]
+#[error("{error}")]
 pub struct BuildFailure {
+    #[source]
     error: anyhow::Error,
     inputs: Box<FailedAttemptInputs>,
+    cancelled: bool,
+    source_hooks_failed: bool,
 }
 
 struct FailedAttemptInputs {
@@ -46,6 +51,10 @@ impl BuildFailure {
         }
         observation.normalize_paths();
         Self {
+            cancelled: crate::cancellation::is_cancelled(&error),
+            source_hooks_failed: error
+                .chain()
+                .any(|cause| cause.is::<crate::hooks::SourceHookFailure>()),
             error,
             inputs: Box::new(FailedAttemptInputs {
                 observation,
@@ -56,15 +65,19 @@ impl BuildFailure {
         }
     }
 
-    pub fn error(&self) -> &anyhow::Error {
-        &self.error
+    /// The diagnostics for the failed attempt, projected relative to the site root.
+    pub fn diagnostics(&self, root: &std::path::Path) -> Vec<tola_diagnostic::Diagnostic> {
+        if self.cancelled {
+            return Vec::new();
+        }
+        super::diagnostic::reports(&self.error, root, tola_diagnostic::codes::build::SITE)
     }
     /// Completed projections, absent when capture was disabled or no attempt began.
     pub fn report(&self) -> Option<&super::BuildReport> {
         self.inputs.report.as_ref()
     }
     pub fn is_cancelled(&self) -> bool {
-        crate::cancellation::is_cancelled(&self.error)
+        self.cancelled
     }
     pub fn input_observation(&self) -> &InputObservation {
         &self.inputs.observation
@@ -78,18 +91,13 @@ impl BuildFailure {
 
     /// Source generation stopped before the candidate's source discovery.
     pub fn source_hooks_failed(&self) -> bool {
-        self.error
-            .chain()
-            .any(|cause| cause.is::<crate::hooks::SourceHookFailure>())
+        self.source_hooks_failed
     }
 
     /// Observed files left by a failed source generator. These can suppress
     /// duplicate filesystem events but never prove successful generation.
     pub fn failed_hook_outputs(&self) -> Option<&crate::hooks::FailedHookOutputs> {
         self.inputs.failed_hook_outputs.as_ref()
-    }
-    pub fn into_error(self) -> anyhow::Error {
-        self.error
     }
 }
 
@@ -100,18 +108,6 @@ impl std::fmt::Debug for BuildFailure {
             .field("error", &self.error)
             .field("observation", &self.inputs.observation)
             .finish()
-    }
-}
-
-impl std::fmt::Display for BuildFailure {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        std::fmt::Display::fmt(&self.error, formatter)
-    }
-}
-
-impl std::error::Error for BuildFailure {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(self.error.as_ref())
     }
 }
 
@@ -179,7 +175,7 @@ pub fn configured_input_observation(config: &ResolvedSiteConfig) -> InputObserva
 pub(super) fn input_observation(
     physical_reads: Vec<std::path::PathBuf>,
     package_checks: Vec<tola_typst::PackageCheck>,
-    configured_assets: Option<&crate::asset::ConfiguredAssetInventory>,
+    configured_assets: Option<&crate::asset::ConfiguredAssets>,
     icons: Option<&crate::icon::IconInventoryEvidence>,
     hook_outputs: &[crate::hooks::HookOutputEvidence],
     font_read_paths: Vec<std::path::PathBuf>,
@@ -209,25 +205,6 @@ pub(super) fn input_observation(
 #[derive(Debug, Clone)]
 pub struct InputFreshness {
     stale_inputs: std::collections::BTreeSet<InputKind>,
-}
-
-/// Paths from a watcher batch with accepted producer coverage. Without this
-/// coverage, producers must rediscover their inputs rather than reuse inventories.
-#[derive(Debug, Clone)]
-pub(crate) struct AcceptedFileChanges {
-    paths: std::sync::Arc<[std::path::PathBuf]>,
-}
-
-impl AcceptedFileChanges {
-    pub(crate) fn from_watcher(paths: Vec<std::path::PathBuf>) -> Self {
-        Self {
-            paths: paths.into(),
-        }
-    }
-
-    pub(crate) fn paths(&self) -> &[std::path::PathBuf] {
-        &self.paths
-    }
 }
 
 impl InputFreshness {

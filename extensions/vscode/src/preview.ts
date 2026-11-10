@@ -1,7 +1,7 @@
 import * as path from 'node:path'
 import * as vscode from 'vscode'
 
-import { PreviewServer, type PublishedRoute } from './preview-server.ts'
+import { type Publication, PreviewServer, type PublishedRoute } from './preview-server.ts'
 import { containsFile } from './selection.ts'
 import type { Selection } from './selection.ts'
 import type { Route, SiteRoute } from './routes.ts'
@@ -28,7 +28,13 @@ export interface PreviewStatus {
 
 export class Preview {
   private readonly servers = new Map<string, PreviewServer>()
+  private readonly buildDiagnostics = new Map<string, vscode.DiagnosticCollection>()
   private readonly children = new Set<PreviewServer>()
+  private readonly statusPublications = new WeakMap<PreviewServer, {
+    source: string
+    revision: string
+    response: Promise<Publication>
+  }>()
   private readonly status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100)
   private statusRequest = 0
   private closing = false
@@ -109,7 +115,12 @@ export class Preview {
       this.showStartAction(document.uri, site)
       return
     }
-    void server.readPublication(document.uri).then((publication) => {
+    const revision = server.publishedRevision
+    if (revision === null) {
+      this.showPublicationUnavailable(site, server)
+      return
+    }
+    void this.readStatusPublication(server, document.uri, revision).then((publication) => {
       if (request !== this.statusRequest || site.lifetime.isCancellationRequested) return
       const [first] = publication.routes
       this.status.text = first
@@ -138,18 +149,41 @@ export class Preview {
           this.showStartAction(document.uri, site)
           return
         }
-        this.status.text = server.buildStatus === 'failed'
-          ? `$(warning) Tola · build failed · No published page`
-          : `$(globe) ${this.checkState(site)} · Preview unavailable`
-        this.status.tooltip = [
-          server.buildDescription,
-          'Run Open Preview or Show Output.',
-          `Site: ${site.selection.folder.name}`,
-        ].join('\n')
-        this.status.command = { title: 'Tola: Show Output', command: 'tola.showLog' }
-        this.status.show()
+        this.showPublicationUnavailable(site, server)
       }
     })
+  }
+
+  private readStatusPublication(server: PreviewServer, uri: vscode.Uri, revision: string): Promise<Publication> {
+    const source = uri.toString()
+    const cached = this.statusPublications.get(server)
+    if (cached?.source === source && cached.revision === revision) return cached.response
+
+    const response = server.readPublication(uri, revision).catch((error: unknown) => {
+      if (this.statusPublications.get(server)?.response === response) this.statusPublications.delete(server)
+      throw error
+    })
+    this.statusPublications.set(server, { source, revision, response })
+    return response
+  }
+
+  private refreshPublishedStatus(server: PreviewServer, published?: boolean): void {
+    // Identical output bytes can have different contributing sources.
+    if (published) this.statusPublications.delete(server)
+    this.refreshStatus()
+  }
+
+  private showPublicationUnavailable(site: PreviewSite, server: PreviewServer): void {
+    this.status.text = server.buildStatus === 'failed'
+      ? '$(warning) Tola · build failed · No published page'
+      : `$(globe) ${this.checkState(site)} · Preview unavailable`
+    this.status.tooltip = [
+      server.buildDescription,
+      'Run Open Preview or Show Output.',
+      `Site: ${site.selection.folder.name}`,
+    ].join('\n')
+    this.status.command = { title: 'Tola: Show Output', command: 'tola.showLog' }
+    this.status.show()
   }
 
   private showStartAction(source: vscode.Uri, site: PreviewSite): void {
@@ -481,7 +515,16 @@ export class Preview {
     const key = this.key(site.selection)
     const existing = this.servers.get(key)
     if (existing?.active) return existing
-    const server = new PreviewServer(site.selection, site.lifetime, this.output, () => this.refreshStatus())
+    const diagnostics = this.buildDiagnostics.get(key) ?? vscode.languages.createDiagnosticCollection()
+    this.buildDiagnostics.set(key, diagnostics)
+    diagnostics.clear()
+    const server = new PreviewServer(
+      site.selection,
+      site.lifetime,
+      this.output,
+      diagnostics,
+      (published) => this.refreshPublishedStatus(server, published),
+    )
     this.servers.set(key, server)
     this.children.add(server)
     void server.exited.then(() => {
@@ -492,7 +535,10 @@ export class Preview {
   }
 
   async stop(selection: Selection): Promise<void> {
-    const server = this.servers.get(this.key(selection))
+    const key = this.key(selection)
+    const server = this.servers.get(key)
+    this.buildDiagnostics.get(key)?.dispose()
+    this.buildDiagnostics.delete(key)
     if (!server) return
     server.stop()
     await server.exited
@@ -503,6 +549,8 @@ export class Preview {
     this.statusRequest += 1
     const servers = [...this.children]
     for (const server of servers) server.stop()
+    for (const diagnostics of this.buildDiagnostics.values()) diagnostics.dispose()
+    this.buildDiagnostics.clear()
     await Promise.all(servers.map((server) => server.exited))
     this.servers.clear()
   }

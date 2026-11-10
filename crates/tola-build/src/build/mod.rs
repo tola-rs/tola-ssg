@@ -15,7 +15,7 @@ pub use crate::hooks::HookExecution;
 pub use crate::mode::BuildMode;
 pub use crate::observation::{InputKind, InputObservation, InputPathScope, ObservedInputPath};
 pub use diagnostic::{for_error as error_diagnostics, no_pages_diagnostic};
-pub(crate) use input::{AcceptedFileChanges, BuildAttemptInputs};
+pub(crate) use input::BuildAttemptInputs;
 pub use input::{BuildFailure, InputFreshness, configured_input_observation};
 pub use lock::{SiteBuildGuard, SiteBuildLock, SiteBuildLockError};
 pub use pipeline::build_site;

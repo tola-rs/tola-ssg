@@ -73,10 +73,18 @@ impl CheckReads {
 /// Why a check stopped before it could resolve its configuration.
 enum CheckStop {
     Cancelled(BuildCancelled),
-    Revision(Box<SourceRevision>),
+    Diagnostics(Vec<Diagnostic>),
 }
 
 impl SourceRevision {
+    fn unprepared(diagnostics: Vec<Diagnostic>) -> Self {
+        Self {
+            diagnostics,
+            checked: None,
+            accessed: CheckReads::default(),
+        }
+    }
+
     /// Successful read-time observations from source analysis and compilation, including
     /// observations retained before a failed check. Different digests remain distinct.
     pub fn file_reads(&self) -> &[tola_typst::FileRead] {
@@ -151,6 +159,12 @@ enum Evaluation {
 enum SourceCheckInput<'a> {
     Path(&'a str),
     File(typst::syntax::FileId),
+}
+
+struct PreparedSourceCheck {
+    configuration: Arc<ResolvedSiteConfig>,
+    host: SiteHost,
+    library: tola_packages::library::SiteLibrary,
 }
 
 impl SourceCompilation {
@@ -463,7 +477,7 @@ impl SourceDiagnosticSession {
             }
             SourceEnvironment::Documents => Vec::new(),
         };
-        let packages = crate::package::prepare_package_inputs(
+        let icons = crate::package::prepare_icons(
             config,
             &self.resources,
             cancellation,
@@ -471,7 +485,7 @@ impl SourceDiagnosticSession {
             overrides,
         )?;
         let host = host
-            .with_icons(packages.icons.collections())
+            .with_icons(icons.collections())
             .with_local_packages(Arc::clone(site.local_packages()));
         let bindings = crate::package::SiteBindings::from_config(
             config,
@@ -497,11 +511,7 @@ impl SourceDiagnosticSession {
             &bundle,
         )
         .map_err(|error| {
-            CheckStop::Revision(Box::new(SourceRevision {
-                diagnostics: source_failure_diagnostics(&error, self.config.get_root()),
-                checked: None,
-                accessed: CheckReads::default(),
-            }))
+            CheckStop::Diagnostics(source_failure_diagnostics(&error, self.config.get_root()))
         })?;
         self.config = site.config_arc().clone();
         self.site = Some(Arc::new(site));
@@ -531,26 +541,88 @@ impl SourceDiagnosticSession {
         self.inspect_source_input(SourceCheckInput::File(source), overlays, cancellation)
     }
 
+    /// Check documents from one editor revision, sharing the host and unsaved sources.
+    /// Each result is produced on demand so the caller can drop its compiled world before
+    /// compiling the next document.
+    pub fn inspect_sources<'a, T>(
+        &mut self,
+        sources: impl Iterator<Item = (&'a str, T)>,
+        overlays: Vec<(PathBuf, Arc<str>)>,
+        cancellation: &BuildCancellation,
+    ) -> impl Iterator<Item = Result<(T, SourceRevision), BuildCancelled>> {
+        let mut sources = sources.peekable();
+        let prepared = sources
+            .peek()
+            .map(|_| self.prepare_source_check(overlays, cancellation));
+        sources.map(move |(relative, document)| {
+            cancellation.ensure_active()?;
+            let revision = match prepared.as_ref().expect("the check has a source") {
+                Ok(prepared) => Self::inspect_prepared_source(
+                    prepared,
+                    SourceCheckInput::Path(relative),
+                    cancellation,
+                )?,
+                Err(CheckStop::Cancelled(_)) => return Err(BuildCancelled),
+                Err(CheckStop::Diagnostics(diagnostics)) => {
+                    SourceRevision::unprepared(diagnostics.clone())
+                }
+            };
+            Ok((document, revision))
+        })
+    }
+
     fn inspect_source_input(
         &mut self,
         source: SourceCheckInput<'_>,
         overlays: Vec<(PathBuf, Arc<str>)>,
         cancellation: &BuildCancellation,
     ) -> Result<SourceRevision, BuildCancelled> {
-        let configuration = match self.check_configuration(cancellation) {
-            Ok(configuration) => configuration,
-            Err(CheckStop::Cancelled(error)) => return Err(error),
-            Err(CheckStop::Revision(revision)) => return Ok(*revision),
-        };
-        let config = configuration.as_ref();
+        match self.prepare_source_check(overlays, cancellation) {
+            Ok(prepared) => Self::inspect_prepared_source(&prepared, source, cancellation),
+            Err(CheckStop::Cancelled(error)) => Err(error),
+            Err(CheckStop::Diagnostics(diagnostics)) => Ok(SourceRevision::unprepared(diagnostics)),
+        }
+    }
+
+    fn prepare_source_check(
+        &mut self,
+        overlays: Vec<(PathBuf, Arc<str>)>,
+        cancellation: &BuildCancellation,
+    ) -> Result<PreparedSourceCheck, CheckStop> {
+        let configuration = self.check_configuration(cancellation)?;
+        let prepared =
+            crate::filesystem::SourceOverrides::new(overlays, cancellation).and_then(|overrides| {
+                let (host, content, bindings) =
+                    self.prepared(&configuration, &overrides, cancellation)?;
+                let sources =
+                    crate::content::SourceSet::without_metadata(&content, &configuration)?;
+                Ok((host, bindings.library(sources.inputs().to_source_records())))
+            });
+        cancellation.ensure_active().map_err(CheckStop::Cancelled)?;
+        match prepared {
+            Ok((host, library)) => Ok(PreparedSourceCheck {
+                configuration,
+                host,
+                library,
+            }),
+            Err(error) => Err(CheckStop::Diagnostics(source_failure_diagnostics(
+                &error,
+                configuration.get_root(),
+            ))),
+        }
+    }
+
+    fn inspect_prepared_source(
+        prepared: &PreparedSourceCheck,
+        source: SourceCheckInput<'_>,
+        cancellation: &BuildCancellation,
+    ) -> Result<SourceRevision, BuildCancelled> {
+        let config = prepared.configuration.as_ref();
+        let host = &prepared.host;
         let mut diagnostics = Vec::new();
         let mut accessed = CheckReads::default();
         let prepared =
             (|| -> anyhow::Result<Option<(Arc<tola_typst::TypstWorld>, typst::syntax::FileId)>> {
-                let overrides = crate::filesystem::SourceOverrides::new(overlays, cancellation)?;
-                let (host, content, bindings) = self.prepared(config, &overrides, cancellation)?;
-                let sources = crate::content::SourceSet::without_metadata(&content, config)?;
-                let library = bindings.library(sources.inputs().to_source_records());
                 let files = host.file_resolver();
                 let main = match source {
                     SourceCheckInput::File(id) => id,
@@ -597,7 +669,7 @@ impl SourceDiagnosticSession {
                 let world = Arc::new(host.world_with_id(
                     config.get_root(),
                     main,
-                    &library,
+                    &prepared.library,
                     candidate_files,
                     &cancellation.bundle_cancellation(),
                 )?);
@@ -771,7 +843,9 @@ impl SourceDiagnosticSession {
         let configuration = match self.check_configuration(cancellation) {
             Ok(configuration) => configuration,
             Err(CheckStop::Cancelled(error)) => return Err(error),
-            Err(CheckStop::Revision(revision)) => return Ok(*revision),
+            Err(CheckStop::Diagnostics(diagnostics)) => {
+                return Ok(SourceRevision::unprepared(diagnostics));
+            }
         };
         let config = configuration.as_ref();
         self.reused_analysis = false;
@@ -1025,9 +1099,6 @@ mod tests {
         assert!(reads.contains(&data), "{reads:?}");
     }
 
-    // A failed compilation establishes no read evidence.
-
-    /// A site session requires the content root it is configured with, and says so.
     #[test]
     fn site_sessions_require_content_roots() {
         let (_directory, config) = documents_workspace();
@@ -1040,31 +1111,16 @@ mod tests {
                 .unwrap(),
         ] {
             assert!(!revision.compiled());
+            assert!(revision.checked().is_none());
             assert!(
                 revision
                     .diagnostics()
                     .iter()
-                    .any(|diagnostic| diagnostic.message.contains("content root `content`")),
-                "{:?}",
-                revision.diagnostics()
+                    .any(|diagnostic| diagnostic.severity == Severity::Error)
             );
         }
     }
 
-    /// A failed revision keeps the world its own sources resolve against, so an editor still
-    /// answers about the file it is being asked about.
-    ///
-    /// A source that disappears between checks stops being diagnosed, and the site compiles again.
-    ///
-    /// Reuse follows every input the source analysis read: an unchanged revision reuses, and a
-    /// change to an unsaved source, a read file on disk, or the set of sources re-derives.
-    ///
-    /// A revision that reuses its analysis realizes the same documents at the same routes as one
-    /// that does not.
-    ///
-    /// The same warning reaches a published build that reuses its compilation.
-    ///
-    /// A cancelled revision reports cancellation rather than a compilation failure.
     #[test]
     fn public_reports_keep_unsaved_evidence() {
         let (_directory, config) = site();

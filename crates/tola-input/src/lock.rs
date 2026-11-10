@@ -6,12 +6,13 @@
 //! read as if it still described this site.
 
 use std::collections::BTreeMap;
-use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
 use super::hash::Sha256Digest;
+
+mod write;
 
 /// The file name of the lock, relative to the site root.
 pub const LOCK_FILE: &str = "tola.lock";
@@ -62,34 +63,12 @@ impl InputLock {
     pub fn to_toml(&self) -> Result<String, LockError> {
         toml::to_string_pretty(self).map_err(|source| LockError::Encode { source })
     }
-
-    /// Replace the lock in `site_root`, leaving the previous file in place on any failure.
-    pub fn write_atomic(&self, site_root: &Path) -> Result<(), LockError> {
-        let text = self.to_toml()?;
-        let path = Self::path(site_root);
-        let mut temporary = tempfile::NamedTempFile::new_in(site_root)
-            .map_err(|source| LockError::Stage { source })?;
-        temporary
-            .write_all(text.as_bytes())
-            .map_err(|source| LockError::Write { source })?;
-        temporary
-            .as_file_mut()
-            .sync_all()
-            .map_err(|source| LockError::Flush { source })?;
-        temporary
-            .persist(&path)
-            .map_err(|error| LockError::Replace {
-                path,
-                source: error.error,
-            })?;
-        Ok(())
-    }
 }
 
 /// The failure of reading, parsing, or writing the lock.
 #[derive(Debug, thiserror::Error)]
 pub enum LockError {
-    #[error("Tola could not read `{path}`")]
+    #[error("could not read `tola.lock`")]
     Read {
         path: PathBuf,
         #[source]
@@ -100,6 +79,10 @@ pub enum LockError {
         #[source]
         source: toml::de::Error,
     },
+    #[error("could not acquire the write lock for `tola.lock`")]
+    Access(#[source] std::io::Error),
+    #[error("`tola.lock` entry `{section}.{name}` changed during this command; run it again")]
+    Conflict { section: &'static str, name: String },
     #[error(
         "`tola.lock` carries a format version; delete it and run `tola update` to resolve the site's inputs again"
     )]
@@ -128,7 +111,7 @@ pub enum LockError {
         #[source]
         source: std::io::Error,
     },
-    #[error("Tola could not replace `{path}`")]
+    #[error("could not replace `tola.lock`")]
     Replace {
         path: PathBuf,
         #[source]

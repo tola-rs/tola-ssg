@@ -2,7 +2,7 @@ import { type ChildProcess, spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { Writable } from 'node:stream'
 import * as vscode from 'vscode'
-import { type InitializeParams, LanguageClient, State, type StreamInfo } from 'vscode-languageclient/node'
+import { LanguageClient, State, type StreamInfo } from 'vscode-languageclient/node'
 import type { ServedWorkspace } from './selection.ts'
 
 export class LanguageService {
@@ -95,13 +95,6 @@ export class LanguageService {
 /** Sites owns failure notifications; the client keeps transport details in the output channel. */
 export class TolaClient extends LanguageClient {
   private starting: Promise<void> | undefined
-
-  protected override fillInitializeParams(params: InitializeParams): void {
-    super.fillInitializeParams(params)
-    // The extension already watches the selected source and package roots.
-    const watches = params.capabilities.workspace?.didChangeWatchedFiles
-    if (watches) watches.dynamicRegistration = false
-  }
 
   override start(): Promise<void> {
     if (this.starting) return this.starting

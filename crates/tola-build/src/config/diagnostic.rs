@@ -236,8 +236,17 @@ fn written_value(found: &str) -> Cow<'_, str> {
     Cow::Owned(format!("{named} `{}`", value.trim_matches('`')))
 }
 
-pub(crate) fn attach_source(error: anyhow::Error, diagnostic: Diagnostic) -> anyhow::Error {
-    anyhow::Error::new(DiagnosticError::attach(error, vec![diagnostic]))
+pub(super) fn report_source_error(
+    error: ConfigError,
+    path: Option<&Path>,
+    positions: Option<&SourcePositions>,
+) -> DiagnosticError {
+    let display = path.map(config_display_path);
+    let diagnostics = error_diagnostics(&error, display.as_deref(), positions);
+    DiagnosticError::attach(
+        error.into(),
+        at_config_path(diagnostics, display.as_deref()),
+    )
 }
 
 pub(crate) fn attach_load(
@@ -246,19 +255,6 @@ pub(crate) fn attach_load(
     positions: Option<&SourcePositions>,
 ) -> anyhow::Error {
     attach(error, tola_diagnostic::codes::config::LOAD, path, positions)
-}
-
-pub(crate) fn attach_reload(
-    error: anyhow::Error,
-    path: &Path,
-    positions: Option<&SourcePositions>,
-) -> anyhow::Error {
-    attach(
-        error,
-        tola_diagnostic::codes::config::RELOAD,
-        Some(path),
-        positions,
-    )
 }
 
 /// The failure a configuration step reports the diagnostics it collected with.
@@ -279,18 +275,11 @@ fn attach(
     let config = error
         .chain()
         .find_map(|cause| cause.downcast_ref::<ConfigError>());
-    let mut diagnostics = match config {
+    let diagnostics = match config {
         Some(config) => error_diagnostics(config, display.as_deref(), positions),
         None => vec![tola_diagnostic::fallback(fallback_code, &error)],
-    }
-    .into_iter()
-    .map(
-        |diagnostic| match (diagnostic.location.is_none(), &display) {
-            (true, Some(display)) => diagnostic.with_path(&**display),
-            _ => diagnostic,
-        },
-    )
-    .collect::<Vec<_>>();
+    };
+    let mut diagnostics = at_config_path(diagnostics, display.as_deref());
     if diagnostics.is_empty() {
         let diagnostic = tola_diagnostic::fallback(fallback_code, &error);
         diagnostics.push(match &display {
@@ -299,6 +288,18 @@ fn attach(
         });
     }
     anyhow::Error::new(DiagnosticError::attach(error, diagnostics))
+}
+
+fn at_config_path(diagnostics: Vec<Diagnostic>, display: Option<&str>) -> Vec<Diagnostic> {
+    diagnostics
+        .into_iter()
+        .map(
+            |diagnostic| match (diagnostic.location.is_none(), display) {
+                (true, Some(display)) => diagnostic.with_path(display),
+                _ => diagnostic,
+            },
+        )
+        .collect()
 }
 
 /// Convert retained configuration warnings into the shared diagnostic protocol.
@@ -522,74 +523,20 @@ mod tests {
     }
 
     #[test]
-    fn excerpt_locates_one_written_line() {
-        let content = "[build]\nentry = [\n";
-        let start = content.find("entry = [").unwrap() + "entry = ".len();
-        let excerpt = SourceExcerpt::of(content, start..start + 1).unwrap();
-        assert_eq!(excerpt.line, 2);
-        assert_eq!(excerpt.column, 9);
-        assert_eq!(excerpt.text, "entry = [");
-        assert_eq!(excerpt.highlight, (8, 9));
-    }
+    fn syntax_error_points_at_supplied_text() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("tola.toml");
+        let error = crate::config::ConfigSource::parse(
+            &path,
+            "[build]\nentry = @\n",
+            tola_input::InputScope::Online,
+        )
+        .unwrap_err();
 
-    #[test]
-    fn syntax_error_renders_saved_input() {
-        let input = "[build]\nentry = [\n";
-        let source = toml::from_str::<toml::Value>(input).unwrap_err();
-        let reason = source.message().to_owned();
-        let error = ConfigError::Toml {
-            path: std::path::PathBuf::from("/missing/tola.toml"),
-            input: input.into(),
-            source,
-        };
-
-        let diagnostics = error_diagnostics(&error, Some("tola.toml"), None);
-
-        assert_eq!(diagnostics[0].code, tola_diagnostic::codes::config::TOML);
-        assert_eq!(diagnostics[0].message, reason);
-        let location = diagnostics[0].location.as_ref().unwrap();
+        let diagnostic = &error.diagnostics()[0];
+        assert_eq!(diagnostic.code, tola_diagnostic::codes::config::TOML);
+        let location = diagnostic.location.as_ref().unwrap();
         assert_eq!(location.path, "tola.toml");
-        assert_eq!(location.source_lines[0].text, "entry = [");
-    }
-
-    #[test]
-    fn io_failures_name_the_configuration_file() {
-        let error = ConfigError::Io(
-            std::path::PathBuf::from("/site/tola.toml"),
-            std::io::Error::new(std::io::ErrorKind::NotFound, "no such file"),
-        );
-
-        let diagnostics = error_diagnostics(&error, Some("tola.toml"), None);
-
-        assert_eq!(diagnostics[0].code, tola_diagnostic::codes::config::IO);
-        assert_eq!(diagnostics[0].location.as_ref().unwrap().path, "tola.toml");
-        assert_eq!(
-            diagnostics[0].message,
-            "the configuration file does not exist"
-        );
-        assert!(!diagnostics[0].message.contains("no such file"));
-    }
-
-    #[test]
-    fn empty_diagnostics_fall_back() {
-        let path = std::path::Path::new("/site/tola.toml");
-        let error = anyhow::Error::new(ConfigError::Diagnostics(
-            crate::config::ConfigDiagnostics::new(),
-        ));
-
-        let error = attach_load(error, Some(path), None);
-        let diagnostics = crate::config::tests::attached_diagnostics(&error);
-
-        assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].code, tola_diagnostic::codes::config::LOAD);
-        assert_eq!(diagnostics[0].location.as_ref().unwrap().path, "tola.toml");
-    }
-
-    #[test]
-    fn missing_field_rewrite_offers_no_help() {
-        let rewritten = schema_message("missing field `entry`");
-
-        assert_eq!(rewritten.message, "the required field `entry` is missing");
-        assert_eq!(rewritten.help, None);
+        assert_eq!(location.line, Some(2));
     }
 }

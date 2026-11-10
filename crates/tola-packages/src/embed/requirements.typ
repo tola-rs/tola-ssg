@@ -344,7 +344,7 @@
     )
     declaration("describe", inner: member, description: description)
   }
-  let output-description(kind, ..properties) = (
+  let shape-node(kind, ..properties) = (
     kind: kind,
     presence: "required",
     description: none,
@@ -362,26 +362,32 @@
     if "default" in metadata { shape.insert("default", metadata.default) }
     shape
   }
-  let inspect(member) = {
+  let describe-shape(member, input) = {
     assert-schema(member, "inspect")
-    if type(member) == type { return output-description("type", type: member) }
-    if member.kind == "any" { return output-description("any") }
+    let inspect(child) = describe-shape(child, input)
+    if type(member) == type { return shape-node("type", type: member) }
+    if member.kind == "any" { return shape-node("any") }
     if member.kind == "lazy" {
-      return (..output-description("unknown"), presence: "unknown")
+      return (..shape-node("unknown"), presence: "unknown")
     }
-    if member.kind == "literal" { return output-description("literal", value: member.value) }
-    if member.kind == "enum" { return output-description("enum", values: member.values) }
+    if member.kind == "literal" { return shape-node("literal", value: member.value) }
+    if member.kind == "enum" { return shape-node("enum", values: member.values) }
     if member.kind == "object" {
       let fields = (:)
       for (key, field) in member.fields { fields.insert(key, inspect(field)) }
-      return output-description("object", fields: fields, unknown: member.unknown)
+      return shape-node("object", fields: fields, unknown: member.unknown)
     }
     if member.kind in ("array", "dictionary", "many") {
       let kind = if member.kind == "dictionary" { "dictionary" } else { "array" }
-      return output-description(kind, element: present-description(inspect(member.inner)))
+      let element = present-description(inspect(member.inner))
+      let container = shape-node(kind, element: element)
+      if input and member.kind == "many" {
+        return shape-node("union", members: (element, container))
+      }
+      return container
     }
     if member.kind == "tuple" {
-      return output-description(
+      return shape-node(
         "tuple",
         members: member.members.map(position => present-description(inspect(position))),
         rest: if member.rest == none { none } else { present-description(inspect(member.rest)) },
@@ -396,10 +402,10 @@
       } else {
         "unknown"
       }
-      return (..output-description("union", members: members), presence: presence)
+      return (..shape-node("union", members: members), presence: presence)
     }
     if member.kind == "variant" {
-      return output-description(
+      return shape-node(
         "variant",
         tag-key: member.tag-key,
         branches: member.branches.map(inspect),
@@ -411,7 +417,8 @@
       inner = present-description(inner)
       if "default" in member.defaults {
         inner.insert("default", (value: member.defaults.default))
-      } else {
+      }
+      if input or "default" not in member.defaults {
         inner.presence = "optional"
       }
       return inner
@@ -419,19 +426,24 @@
     if member.kind == "nullable" {
       let alternative = (..present-description(inner), description: none)
       return copy-metadata(
-        output-description("union", members: (inspect(type(none)), alternative)),
+        shape-node("union", members: (inspect(type(none)), alternative)),
         inner,
       )
     }
     if member.kind == "convert" {
+      if input { return inner }
       let output = inspect(member.output)
       return copy-metadata(output, (..inner, description: output.description))
     }
-    if member.kind == "trim" {
-      return copy-metadata(output-description("type", type: str), inner)
+    if member.kind == "trim" and not input {
+      return copy-metadata(shape-node("type", type: str), inner)
     }
     if member.kind == "describe" { return (..inner, description: member.description) }
     inner
+  }
+  let inspect(member, input: false) = {
+    require(type(input) == bool, message: "inspect: `input` must be a boolean")
+    describe-shape(member, input)
   }
   let accept(value, origins: (), field-pass: none) = (
     ok: true,
@@ -469,12 +481,6 @@
     (..problem, children: problem.children.map(child => apply-origins(child, descendants)))
   }
   let trace-issues(issues, origins) = issues.map(problem => apply-origins(problem, origins))
-  // A wrapper raises its issue against its own inner parse; a successful conversion's
-  // `schema.output` provenance describes the conversion's output schema, not that issue.
-  // An optional default can nest conversion provenance below its own origin.
-  let without-output-origin(origins) = origins
-    .filter(origin => origin.code != "schema.output")
-    .map(origin => (..origin, children: without-output-origin(origin.children)))
   let origin(code, message, children) = (code: code, path: (), message: message, children: children)
   let wrap-issues(issues, code, message) = ((..issue(message, code: code), children: issues),)
   let default-message = "declared default does not satisfy the schema"
@@ -560,7 +566,7 @@
             if not parsed.ok { return parsed }
             return with-issues(
               parsed,
-              trace-issues((type-issue(dictionary, parsed.value),), without-output-origin(parsed.origins)),
+              trace-issues((type-issue(dictionary, parsed.value),), parsed.origins),
             )
           }
           if member.on.any(key => not parsed.field-pass.at(key).ok) { return parsed }
@@ -575,7 +581,7 @@
         assert-issues(found, "check callback")
         return with-issues(
           parsed,
-          parsed.issues + trace-issues(found, without-output-origin(parsed.origins)),
+          parsed.issues + trace-issues(found, parsed.origins),
         )
       }
       if not parsed.ok { return parsed }
@@ -583,7 +589,7 @@
         if type(parsed.value) != str {
           return with-issues(
             parsed,
-            trace-issues((type-issue(str, parsed.value),), without-output-origin(parsed.origins)),
+            trace-issues((type-issue(str, parsed.value),), parsed.origins),
           )
         }
         return (..parsed, value: parsed.value.trim())
@@ -593,7 +599,7 @@
       if not converted.ok {
         return with-issues(
           parsed,
-          trace-issues(converted.issues, without-output-origin(parsed.origins)),
+          trace-issues(converted.issues, parsed.origins),
         )
       }
       let output = evaluate(member.output, (present: true, value: converted.value))
@@ -1248,7 +1254,7 @@
 /// -> dictionary
 #let describe = core.describe
 
-/// Describe successful output values from the declaration alone, without running any callback.
+/// Describe a schema from its declaration alone, without running any callback.
 ///
 /// Each node of the returned tree has `kind`, `presence`, and `description`. A node for a
 /// Typst type also has `type`; an object has `fields` and `unknown`; containers hold
@@ -1262,19 +1268,24 @@
 /// present. `map` and `convert` describe their output shape while keeping their input's presence
 /// and default. Input documentation never describes generated output.
 ///
-/// The result is a conservative output contract: it is neither the input acceptance domain nor a
-/// sample from evaluation.
+/// By default the result describes successful output values. With `input: true`, it describes
+/// values before parsing: fields with defaults can be omitted, and transformations describe
+/// their input. Both views describe declared shapes without proving that any given value passes.
 ///
 /// Example - derive an output description without running callbacks:
 /// ```typst
 /// #import "@tola/schema:0.0.0": schema, optional, inspect
-/// #let profile = inspect(schema((title: str, subtitle: optional(str))))
+/// #let declaration = schema((title: str, subtitle: optional(str), draft: optional(bool, default: false)))
+/// #let profile = inspect(declaration)
 /// #assert.eq(profile.fields.title.presence, "required")
 /// #assert.eq(profile.fields.subtitle.presence, "optional")
+/// #assert.eq(profile.fields.draft.presence, "required")
+/// #assert.eq(inspect(declaration, input: true).fields.draft.presence, "optional")
 /// ```
 ///
 /// Related: describe, map, convert
-/// - member (type | dictionary): the schema whose output description is derived.
+/// - member (type | dictionary): the schema to describe.
+/// - input (bool): describe values before parsing instead of successful output values.
 /// -> dictionary
 #let inspect = core.inspect
 

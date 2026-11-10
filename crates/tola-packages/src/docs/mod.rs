@@ -1,6 +1,5 @@
 //! Bundled declaration documentation, without evaluating package or site code.
 
-use anyhow::Result;
 use tola_typst_syntax::docs::Documentation;
 use typst::foundations::Repr;
 use typst::syntax::{LinkedNode, Source, ast};
@@ -19,9 +18,35 @@ pub enum ExportDocumentationError {
     /// The requested name is not an export of the package.
     #[error("`{name}` is not an export of {package}")]
     NotAnExport { name: String, package: String },
-    /// The bundled source could not be resolved; the message is the resolver's.
-    #[error(transparent)]
-    Resolution(#[from] anyhow::Error),
+    /// An import names a source missing from the bundled files.
+    #[error("builtin source `{0}` is absent")]
+    MissingSource(String),
+    /// An import names a native absent from the host scope.
+    #[error("unknown builtin native `{0}`")]
+    UnknownNative(String),
+    /// A bundled package import contains an invalid package specification.
+    #[error("invalid bundled package import: {0}")]
+    InvalidImport(String),
+    /// A declaration has no binding in its lexical scope.
+    #[error("bundled declaration `{0}` has no source binding")]
+    MissingBinding(String),
+    /// A dictionary does not declare the selected member.
+    #[error("bundled dictionary has no member `{0}`")]
+    MissingMember(String),
+    /// A member selection has no source dictionary.
+    #[error("bundled member `{0}` has no source dictionary")]
+    MissingDictionary(String),
+    /// A selected expression does not declare a member through a dictionary.
+    #[error("bundled member `{0}` is not declared by a dictionary")]
+    MemberOutsideDictionary(String),
+    /// The declaration is missing an expression or uses an unsupported form.
+    #[error("{0}")]
+    InvalidDeclaration(&'static str),
+    /// A documentation block describes a parameter the declaration does not accept.
+    #[error(
+        "`{name}` documents parameter `{parameter}`, which the bundled declaration does not have"
+    )]
+    UnknownParameter { name: String, parameter: String },
 }
 
 pub use declaration::{
@@ -124,8 +149,7 @@ impl BuiltinPackage {
                     declaration,
                 })
             })
-            .collect::<Result<Vec<_>>>()
-            .map_err(ExportDocumentationError::from)
+            .collect()
     }
 }
 

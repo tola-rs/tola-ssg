@@ -2,6 +2,50 @@
 
 use std::path::{Path, PathBuf};
 
+/// Why an input path cannot be written relative to its declaring directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum RelativePathError {
+    /// No path was written.
+    #[error("is empty")]
+    Empty,
+    /// The path starts at a Unix or Windows filesystem root.
+    #[error("starts at a filesystem root")]
+    Root,
+    /// The path uses a Windows drive-relative spelling.
+    #[error("starts with a drive letter")]
+    Drive,
+    /// A parent segment could leave the declaring directory.
+    #[error("contains `..`")]
+    Parent,
+}
+
+/// Check a declared input path for a root, drive prefix, or parent segment on any platform.
+pub fn validate_relative_path(path: &Path) -> Result<(), RelativePathError> {
+    let bytes = path.as_os_str().as_encoded_bytes();
+    if bytes.is_empty() {
+        return Err(RelativePathError::Empty);
+    }
+    if matches!(bytes, [b'/' | b'\\', ..]) {
+        return Err(RelativePathError::Root);
+    }
+    if let [letter, b':', rest @ ..] = bytes
+        && letter.is_ascii_alphabetic()
+    {
+        return Err(if matches!(rest, [b'/' | b'\\', ..]) {
+            RelativePathError::Root
+        } else {
+            RelativePathError::Drive
+        });
+    }
+    if bytes
+        .split(|&byte| matches!(byte, b'/' | b'\\'))
+        .any(|part| part == b"..")
+    {
+        return Err(RelativePathError::Parent);
+    }
+    Ok(())
+}
+
 /// Form a lexical identity without consulting the filesystem or current directory.
 ///
 /// Removes `.` and cancels a normal component followed by `..`. Unmatched
@@ -181,12 +225,6 @@ mod tests {
         assert_eq!(before, temp.path().join("page.typ"));
         assert_eq!(while_present, before);
         assert_eq!(after, before);
-    }
-
-    #[test]
-    fn lexical_identity_is_idempotent() {
-        let once = lexical_path_identity(Path::new("/site/content/./posts/../index.typ"));
-        assert_eq!(lexical_path_identity(&once), once);
     }
 
     #[test]

@@ -9448,7 +9448,6 @@ dependencies = [
  "bytes",
  "comemo",
  "flate2",
- "gix",
  "hex",
  "ignore",
  "image",
@@ -9717,7 +9716,6 @@ dependencies = [
 name = "tola-packages"
 version = "0.8.2-pre.1"
 dependencies = [
- "anyhow",
  "blake3",
  "chrono",
  "comemo",

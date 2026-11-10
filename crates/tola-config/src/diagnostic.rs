@@ -211,7 +211,7 @@ impl fmt::Display for ConfigDiagnostic {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, thiserror::Error)]
 pub struct ConfigDiagnostics {
     errors: Vec<ConfigDiagnostic>,
     /// Fields and sections explicitly configured with experimental status.
@@ -373,8 +373,6 @@ impl fmt::Display for ConfigDiagnostics {
         Ok(())
     }
 }
-
-impl std::error::Error for ConfigDiagnostics {}
 
 #[cfg(test)]
 mod tests {

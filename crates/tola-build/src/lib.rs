@@ -43,6 +43,6 @@ pub use compiler::diagnostic::font_failure;
 pub use content::{
     ContentDiscoveryError, SourceDescriptorField, SourceDescriptorFieldKind, has_typ_extension,
 };
-pub use icon::remote_collection_bytes;
+pub use icon::{IconError, IconIntegrityError, refresh_icon_collections, remote_collection_bytes};
 pub use resources::{BuildResources, HttpDownloadError};
 pub use seo::feed::FeedFormat;

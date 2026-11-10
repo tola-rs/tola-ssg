@@ -16,7 +16,7 @@ use tola_build::cancellation::BuildCancellation;
 use tola_build::check::SourceCompilation;
 use tola_build::config::ResolvedSiteConfig;
 use tola_typst::typst::World;
-use tola_typst::typst::syntax::{FileId, LinkedNode, Source};
+use tola_typst::typst::syntax::{FileId, Source};
 
 /// The hover one citation answers with; a site naming no bibliography leaves `@key` to its labels.
 pub(super) fn hover(
@@ -184,18 +184,14 @@ pub(super) fn references(
 
 /// Every place one source spells `key`, as a location in `uri`.
 fn spellings_in(source: &Source, uri: &Uri, key: &str) -> Vec<Location> {
-    let mut spellings = Vec::new();
-    super::labels::collect_spellings(&LinkedNode::new(source.root()), key, &mut spellings);
-    spellings
-        .into_iter()
-        .filter_map(|spelling| {
-            let range = crate::position::utf16_range(source.lines(), spelling.range)?;
-            Some(Location {
-                uri: uri.clone(),
-                range,
-            })
-        })
-        .collect()
+    let mut locations = Vec::new();
+    super::labels::visit_spellings(source, key, |range, _| {
+        locations.push(Location {
+            uri: uri.clone(),
+            range,
+        });
+    });
+    locations
 }
 
 #[cfg(test)]

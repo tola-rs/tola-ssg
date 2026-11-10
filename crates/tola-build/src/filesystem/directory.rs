@@ -93,7 +93,7 @@ fn set_tree_readonly(
 ) -> Result<()> {
     cancellation.ensure_active_if_present()?;
     let metadata = fs::symlink_metadata(path)?;
-    if metadata.file_type().is_symlink() {
+    if tola_fs::is_link_like(&metadata) {
         return Ok(());
     }
     let set_permissions = || {

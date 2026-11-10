@@ -56,7 +56,10 @@ pub(in crate::cli) fn run(
         crate::cli::input::read_stdin(cancellation)?
     } else {
         destination::check_file(log, &path)?;
-        std::fs::read(&path).with_context(|| format!("read edit batch {}", path.display()))?
+        std::fs::read(&path).with_context(|| {
+            let shown = tola_diagnostic::display_path(&path, &root);
+            format!("could not read edit batch `{shown}`")
+        })?
     };
     let edits: EditBatch =
         serde_json::from_slice(&bytes).context("the edit batch is not valid JSON")?;

@@ -255,6 +255,15 @@ impl Stage {
                 })
     }
 
+    /// Whether the output can distinguish two matching tuples for the same input row.
+    pub(super) fn reads_tuple<C>(&self, parameters: &[Option<ConstantRef<'_, C>>]) -> bool {
+        self.output.iter().any(|column| match *column {
+            Column::Tuple(_) => true,
+            Column::ParameterOrTuple { slot, .. } => parameters[slot].is_none(),
+            Column::Input(_) | Column::HeadConstant(_) => false,
+        })
+    }
+
     /// The output row for one candidate tuple, reading the input, tuple, parameters or head
     /// constants.
     pub(super) fn values<'a, 'b, C>(

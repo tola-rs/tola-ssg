@@ -35,7 +35,8 @@ pub fn module_roots_with_bundle(
         cancellation,
     )?;
     if lock != original && mode.may_write_lock() {
-        lock.write_atomic(&site_root)?;
+        ensure_active(cancellation)?;
+        lock.commit(&site_root, &original)?;
     }
     Ok(roots)
 }
@@ -497,7 +498,12 @@ impl ModuleAcquisition<'_> {
         }
         let root = select_subdir(alias, &staging.source(), subdir)?;
         let digest = tree_digest(alias, &root)?;
-        store(&root, &cache_root(self.site_root, &commit, subdir))?;
+        store_checkout(
+            alias,
+            &root,
+            &cache_root(self.site_root, &commit, subdir),
+            digest,
+        )?;
         Ok((commit, digest))
     }
 }
@@ -641,21 +647,31 @@ fn tarball_cache(site_root: &Path, digest: Sha256Digest) -> PathBuf {
 }
 
 /// Keep only the selected module directory, shared by aliases of this revision and subdirectory.
-fn store(root: &Path, destination: &Path) -> Result<(), ModuleRootError> {
+fn store_checkout(
+    alias: &str,
+    root: &Path,
+    destination: &Path,
+    digest: Sha256Digest,
+) -> Result<(), ModuleRootError> {
     let parent = destination.parent().expect("module cache has a parent");
     std::fs::create_dir_all(parent).map_err(|source| ModuleRootError::Io {
         action: "create the module cache",
         path: parent.to_owned(),
         source,
     })?;
-    if !destination.exists() {
-        std::fs::rename(root, destination).map_err(|source| ModuleRootError::Io {
+    if destination.exists() {
+        return verify_tree(alias, destination, digest);
+    }
+    match std::fs::rename(root, destination) {
+        Ok(()) => Ok(()),
+        // Another acquisition may have published the same commit while this one fetched it.
+        Err(_) if destination.is_dir() => verify_tree(alias, destination, digest),
+        Err(source) => Err(ModuleRootError::Io {
             action: "store",
             path: destination.to_owned(),
             source,
-        })?;
+        }),
     }
-    Ok(())
 }
 
 /// Commit pins Git file modes as well as bytes; the subdirectory key separates module roots.
@@ -906,7 +922,7 @@ mod tests {
         )
         .unwrap();
         assert_ne!(updated, original);
-        updated.write_atomic(site.path()).unwrap();
+        updated.commit(site.path(), &original).unwrap();
         let vendor = site.path().join("vendor");
         let frozen = vendor.join("modules/theme");
         fs::create_dir_all(&frozen).unwrap();
