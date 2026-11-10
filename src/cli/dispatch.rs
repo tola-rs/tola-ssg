@@ -43,7 +43,7 @@ pub(super) fn dispatch(
             cancellation,
         ),
         Commands::Module { command } => commands::module::run(command, output, cancellation),
-        Commands::Init(args) => commands::init::run(&args, scope, output, cancellation),
+        Commands::Init(args) => commands::init::run(&args, mode, output, cancellation),
         Commands::Edit {
             input: _,
             site,

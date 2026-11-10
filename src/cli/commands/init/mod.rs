@@ -2,6 +2,7 @@
 
 mod config;
 mod files;
+mod input;
 mod source;
 mod tree;
 mod validate;
@@ -15,15 +16,28 @@ use crate::cli::output::CommandOutput;
 use crate::terminal::display_path_toward_home;
 use crate::writes::FileWrites;
 use anyhow::{Result, ensure};
+pub(in crate::cli) use input::Source;
 use std::path::Path;
 use tola_build::config::SiteConfigSchema;
 
 pub(in crate::cli) fn run(
     args: &InitArgs,
-    scope: tola_input::InputScope,
+    mode: tola_input::InputMode,
     output: &CommandOutput,
     cancellation: &Cancellation,
 ) -> Result<()> {
+    let source = Source::from_args(args)?;
+    run_with_source(args, source, mode, output, cancellation)
+}
+
+pub(in crate::cli) fn run_with_source(
+    args: &InitArgs,
+    source: Option<Source>,
+    mode: tola_input::InputMode,
+    output: &CommandOutput,
+    cancellation: &Cancellation,
+) -> Result<()> {
+    let scope = mode.scope();
     cancellation.token().ensure_active()?;
     ensure!(
         !args.interactive || crate::cli::interaction::available(),
@@ -41,28 +55,38 @@ pub(in crate::cli) fn run(
     } else {
         validate::preflight(&root, args.force)?;
     }
-    let writes = if let Some(module) = &args.from {
-        source::generate(module, args, &root, scope, output, cancellation)?
-    } else {
-        files::file_writes(&root)?
+    let generated = source
+        .as_ref()
+        .map(|source| source::generate(source, args, &root, mode, cancellation))
+        .transpose()?;
+    let builtin;
+    let writes = match &generated {
+        Some(generated) => &generated.writes,
+        None => {
+            builtin = files::file_writes(&root)?;
+            &builtin
+        }
     };
-    let schema = validate_configuration(&writes, scope)?;
+    let schema = validate_configuration(writes, scope)?;
     validate::checks([
-        validate::scaffold(&writes, args.force),
-        destination::check_writes(output.log().map(LogFile::path), &writes, args.dry_run),
+        validate::scaffold(writes, args.force),
+        destination::check_writes(output.log().map(LogFile::path), writes, args.dry_run),
     ])?;
     if args.dry_run {
-        show_dry_run(&root, &writes, output)?;
+        show_dry_run(&root, writes, output)?;
         return Ok(());
     }
-    if args.interactive && args.from.is_none() && !confirm(&root, &writes, scope, cancellation)? {
+    if args.interactive && args.from.is_none() && !confirm(&root, writes, scope, cancellation)? {
         output.block("Nothing written")?;
         return Ok(());
     }
     start_log(output, &root, &schema, cancellation)?;
     writes.apply(&cancellation.token())?;
+    if let Some(generated) = &generated {
+        generated.install_cache(&root, output, cancellation)?;
+    }
     output.summary(format!("Initialized {}", display_path_toward_home(&root)))?;
-    output.status(tree::render(&writes))?;
+    output.status(tree::render(writes))?;
     let edit = if args.from.is_some() {
         "Edit the site sources."
     } else {

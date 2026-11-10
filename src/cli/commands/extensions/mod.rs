@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use clap::{Args, CommandFactory, FromArgMatches, parser::ValueSource};
 use tola_build::report::{REPORT_PATH_ENV, ReportChannel, ReportSources};
 use tola_input::InputMode;
@@ -167,15 +167,7 @@ pub(in crate::cli) fn run(
         .context("module command names must be UTF-8")?;
     let tail = &args.command_args[1..];
     if name == "init" && module.initializer.is_some() {
-        if !is_help(tail)
-            && !matches!(
-                config.modules()[&args.namespace].source,
-                tola_module::ModuleSource::Local { .. }
-            )
-        {
-            bail!("initialization requires a local module directory; use `tola init --from`");
-        }
-        return run_initializer(module, tail, mode.scope(), output, cancellation);
+        return run_initializer(module, tail, &config, mode, output, cancellation);
     }
     let Some(declared) = module.commands.get(name) else {
         let command =

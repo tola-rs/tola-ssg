@@ -532,9 +532,25 @@ pub struct InitArgs {
     #[arg(long)]
     pub force: bool,
 
-    /// Use the initializer declared by a local module.
-    #[arg(long, value_name = "MODULE", value_hint = clap::ValueHint::DirPath)]
-    pub from: Option<PathBuf>,
+    /// Use an initializer from a directory, Git URL, or tar.gz, tar.zst, or ZIP archive.
+    #[arg(long, value_name = "SOURCE")]
+    pub from: Option<OsString>,
+
+    /// Git branch providing the initializer.
+    #[arg(long, requires = "from", conflicts_with_all = ["tag", "rev"])]
+    pub branch: Option<String>,
+
+    /// Git tag providing the initializer.
+    #[arg(long, requires = "from", conflicts_with_all = ["branch", "rev"])]
+    pub tag: Option<String>,
+
+    /// Full Git commit providing the initializer.
+    #[arg(long, requires = "from", conflicts_with_all = ["branch", "tag"])]
+    pub rev: Option<String>,
+
+    /// Module directory inside the Git repository.
+    #[arg(long, requires = "from")]
+    pub subdir: Option<PathBuf>,
 
     /// Choose the module alias in the new site.
     #[arg(long, value_name = "NAME", requires = "from")]

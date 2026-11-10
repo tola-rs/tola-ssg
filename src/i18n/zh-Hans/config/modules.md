@@ -157,7 +157,13 @@ image resize photo.png --output preview.webp --width 640 --op fit-width --format
 argv = ["{tola}", "nu", "tools/init.nu"]
 ```
 
-站点创建前运行 `tola init notes --from path/to/module -- --title "My notes"`。`--alias forest` 选择别名，省略时使用清单名称；已有站点可运行 `tola forest init notes`。`[init]` 与 `[commands.init]` 不能同时声明。
+站点创建前运行 `tola init notes --from path/to/module --alias forest -- --title "My notes"`。
+`--alias forest` 指定新站点中的模块别名。`--from` 也支持 Git 地址，以及以 `.tar.gz`、
+`.tar.zst`、`.zip` 结尾的 HTTPS 地址或本地归档。Git 可使用 `--subdir theme` 选择模块目录，
+并用 `--branch`、`--tag` 或完整提交 ID 的 `--rev` 选择版本；归档使用完整模块包布局。
+Tola 自动在生成的配置中保留原始来源，解析其余模块依赖并生成 `tola.lock`。
+已有站点可运行 `tola forest init notes`，使用该站点已选定的模块版本。
+`[init]` 与 `[commands.init]` 不能同时声明。
 
 初始化器在空的候选目录运行，`TOLA_INIT_OUTPUT_DIR` 是写入目录，`TOLA_INIT_TARGET_DIR` 是最终目录，`TOLA_INIT_INTERACTIVE` 表示是否请求交互。模块和可执行文件上下文可用，项目、内容和配置环境变量暂缺。生成配置的模块路径须从最终目录解析，并以 `TOLA_MODULE_NAME` 注册当前模块。
 
