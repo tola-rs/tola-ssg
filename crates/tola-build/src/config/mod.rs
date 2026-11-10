@@ -6,6 +6,7 @@ mod boundaries;
 pub mod diagnostic;
 pub mod loading;
 mod resolved;
+pub(crate) use resolved::ModuleFontDirectory;
 mod schema;
 pub mod section;
 mod source;

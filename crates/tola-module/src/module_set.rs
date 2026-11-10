@@ -67,7 +67,7 @@ pub struct LoadedModule {
     pub manifest: PathBuf,
     /// Evidence captured from the exact manifest bytes parsed for this module.
     pub manifest_evidence: Option<ManifestEvidence>,
-    pub typst: Option<Entry>,
+    pub typst: Option<crate::manifest::TypstInputs>,
     pub nu: Option<Entry>,
     pub build: Option<Entry>,
     pub assets: Option<Assets>,

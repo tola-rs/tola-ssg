@@ -20,14 +20,7 @@ const SOURCE_LIST_POLL_INTERVAL: std::time::Duration = std::time::Duration::from
 pub(in crate::cli) fn run(request: super::SiteRequest<'_>, command: InspectCommand) -> Result<()> {
     match command {
         InspectCommand::Fonts(display) => {
-            let value = super::fonts::value(
-                &request.config_file,
-                &request.packages,
-                request.scope(),
-                &request.resources,
-                request.output,
-                request.cancellation,
-            )?;
+            let value = super::fonts::value(&request)?;
             super::read::write(
                 &value,
                 "fonts",

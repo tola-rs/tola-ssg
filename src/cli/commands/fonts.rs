@@ -6,56 +6,49 @@ use anyhow::Result;
 use serde::Serialize;
 use tola_build::font_failure;
 use tola_diagnostic::DiagnosticError;
-use tola_input::InputScope;
 use tola_typst::prelude::{CompilerFont, CompilerFontInput, FontLoadError, FontOptions, FontStore};
 use typst::text::{FontAxis, FontStyle, StandardAxes};
 
-use crate::cancellation::Cancellation;
-use crate::cli::output::CommandOutput;
-use crate::cli::{ConfigFileArgs, TypstPackageArgs};
-
-pub(super) fn value(
-    config_file: &ConfigFileArgs,
-    packages: &TypstPackageArgs,
-    scope: InputScope,
-    resources: &tola_build::BuildResources,
-    output: &CommandOutput,
-    cancellation: &Cancellation,
-) -> Result<serde_json::Value> {
+pub(super) fn value(request: &super::SiteRequest<'_>) -> Result<serde_json::Value> {
     let loaded = crate::cli::config::load_optional_config(
-        config_file,
-        packages,
-        scope,
+        &request.config_file,
+        &request.packages,
+        request.scope(),
         &crate::config::ConfigOverrides::default(),
-        output,
-        cancellation,
+        request.output,
+        request.cancellation,
     )?;
-
-    // Without a site there is nothing to configure, and the host's own fonts are the answer.
-    let site = loaded.as_ref().map(|loaded| loaded.config());
-    let directories = match site {
-        Some(config) => config.compiler_font_directories(resources),
-        None => resources.font_directories().to_vec(),
+    let token = request.cancellation.token();
+    let config = loaded.as_ref().map(|loaded| loaded.config());
+    let prepared = config
+        .filter(|config| !config.fonts().modules.is_empty())
+        .map(|config| {
+            let mode = tola_input::InputMode::new(request.scope(), true);
+            tola_build::modules::prepare_site(config, mode, &token)
+        })
+        .transpose()?;
+    let config = prepared.as_ref().map(|site| site.config()).or(config);
+    let resources = &request.resources;
+    let options = match config {
+        Some(config) => config.compiler_font_options(resources),
+        None => {
+            let directories = resources
+                .font_directories()
+                .iter()
+                .map(PathBuf::as_path)
+                .collect::<Vec<_>>();
+            FontOptions::new()
+                .with_custom_paths(&directories)
+                .with_system_fonts(resources.include_system_fonts())
+        }
     };
-    let system_fonts = match site {
-        Some(config) => config.system_fonts_allowed(resources),
-        None => resources.include_system_fonts(),
-    };
-    let root = site.map(|config| config.get_root());
-
-    let paths: Vec<&Path> = directories.iter().map(PathBuf::as_path).collect();
-    let mut options = FontOptions::new()
-        .with_custom_paths(&paths)
-        .with_system_fonts(system_fonts);
-    if let Some(config) = site {
-        options = options.with_source_boundary(resources.source_boundary(config));
-    }
-    let fonts = match FontStore::with_options(options).preload() {
-        Ok(store) => store.compiler_fonts(),
-        Err(error) => return Err(font_load_error(error, root)),
-    };
-
-    Ok(serde_json::to_value(json_records(&fonts))?)
+    let fonts = FontStore::with_options(options);
+    fonts
+        .load(&tola_typst::BundleCancellation::from_flag(
+            token.signal_flag(),
+        ))
+        .map_err(|error| font_load_error(error, config.map(|config| config.get_root())))?;
+    Ok(serde_json::to_value(json_records(&fonts.compiler_fonts()))?)
 }
 
 /// The failure `tola inspect fonts` reports when the compiler fonts could not be prepared.
@@ -79,6 +72,8 @@ struct FontRecord {
     stretch: String,
     axes: Vec<AxisRecord>,
     file: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    module: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -100,6 +95,10 @@ fn json_records(fonts: &[CompilerFont]) -> Vec<FontRecord> {
             stretch: font.variant.stretch.to_string(),
             axes: axes_records(&font.axes),
             file: face_file(&font.input).map(|file| file.display().to_string()),
+            module: match &font.input {
+                CompilerFontInput::ConfiguredDirectory { label, .. } => label.clone(),
+                _ => None,
+            },
         })
         .collect()
 }
@@ -153,6 +152,7 @@ mod tests {
             axes: Vec::new(),
             input: CompilerFontInput::ConfiguredDirectory {
                 directory: PathBuf::from("/site/fonts"),
+                label: None,
                 file: PathBuf::from(format!("/site/fonts/{file}")),
             },
         }

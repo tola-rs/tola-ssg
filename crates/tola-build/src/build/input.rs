@@ -119,6 +119,16 @@ pub fn configured_input_observation(config: &ResolvedSiteConfig) -> InputObserva
         &crate::icon::configured_collection_watch_evidence(config),
         false,
     );
+    for directory in &config.module_font_directories {
+        let identity = tola_input::FilesystemSourceIdentity::from_path(&directory.path);
+        observation.path_pair(
+            InputKind::FontInventory,
+            crate::observation::InputPathScope::Recursive,
+            false,
+            identity.logical_path(),
+            identity.physical_path(),
+        );
+    }
     let lock = config.get_root().join("tola.lock");
     let identity = tola_input::FilesystemSourceIdentity::from_path(&lock);
     observation.path_pair(

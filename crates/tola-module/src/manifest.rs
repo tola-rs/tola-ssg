@@ -20,7 +20,7 @@ use crate::module_set::ManifestEvidence;
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct Manifest {
     #[serde(default)]
-    pub typst: Option<Entry>,
+    pub typst: Option<TypstInputs>,
     #[serde(default)]
     pub nu: Option<Entry>,
     #[serde(default)]
@@ -38,6 +38,17 @@ pub struct Manifest {
     #[serde(default, deserialize_with = "crate::options::deserialize_options")]
     pub options: toml::Table,
     pub pack: Option<FilePatterns>,
+}
+
+/// Typst library entry and compiler fonts supplied by a module.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TypstInputs {
+    /// Public library entry relative to the module root.
+    pub entry: Option<PathBuf>,
+    /// Compiler font directories relative to the module root.
+    #[serde(default)]
+    pub fonts: Vec<PathBuf>,
 }
 
 /// Statically declared commands, queries, and Nu entry for help discovery.
@@ -314,12 +325,20 @@ pub fn read_one(
         })
     };
     for (key, entry) in [
-        ("typst.entry", manifest.typst.as_ref().map(|v| &v.entry)),
+        (
+            "typst.entry",
+            manifest.typst.as_ref().and_then(|v| v.entry.as_ref()),
+        ),
         ("nu.entry", manifest.nu.as_ref().map(|v| &v.entry)),
         ("build.entry", manifest.build.as_ref().map(|v| &v.entry)),
     ] {
         if let Some(entry) = entry {
             relative(entry, key.to_owned())?;
+        }
+    }
+    if let Some(typst) = &manifest.typst {
+        for (index, directory) in typst.fonts.iter().enumerate() {
+            relative(directory, format!("typst.fonts[{index}]"))?;
         }
     }
     for (query_name, query) in &manifest.queries {
@@ -402,7 +421,12 @@ fn validate_query_parameters(module: &str, manifest: &Manifest) -> Result<(), Ma
                     key: key.clone(),
                     message,
                 };
-                if manifest.typst.is_none() {
+                if manifest
+                    .typst
+                    .as_ref()
+                    .and_then(|v| v.entry.as_ref())
+                    .is_none()
+                {
                     return Err(invalid("requires a public `typst.entry`".into()));
                 }
                 if !parameter.export.split('.').all(typst::syntax::is_ident) {

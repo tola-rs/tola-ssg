@@ -79,50 +79,27 @@ pub struct SiteHost {
 }
 
 impl SiteHost {
-    fn build(
-        font_dirs: &[&Path],
-        package_locations: tola_typst::PackageLocations,
+    pub(crate) fn for_config(
+        config: &ResolvedSiteConfig,
         resources: &BuildResources,
-        system_fonts: bool,
-        source_boundary: tola_typst::SourceBoundary,
         local_packages: Arc<LocalPackages>,
         cancellation: &BuildCancellation,
     ) -> Result<Self, tola_typst::FontLoadError> {
+        let package_locations = resources.package_locations(config);
+        let source_boundary = resources.source_boundary(config);
         let fetch_policy = fetch_policy(resources.network_access());
         let files = FileResolver::from_package_locations(package_locations, fetch_policy)
             .with_provider(TolaPackageFiles)
-            .with_source_boundary(source_boundary.clone())
+            .with_source_boundary(source_boundary)
             .with_local_packages(local_packages);
         let fonts = Arc::new(FontStore::with_options(
-            FontOptions::new()
-                .with_custom_paths(font_dirs)
-                .with_system_fonts(system_fonts)
-                .with_source_boundary(source_boundary.clone()),
+            config.compiler_font_options(resources),
         ));
         fonts.load(&cancellation.bundle_cancellation())?;
         Ok(Self {
             typst: tola_typst::TypstHost::new(fonts, files, resources.file_cache()),
             icons: Arc::default(),
         })
-    }
-
-    pub(crate) fn for_config(
-        config: &ResolvedSiteConfig,
-        resources: &BuildResources,
-        local_packages: Arc<tola_typst::LocalPackages>,
-        cancellation: &BuildCancellation,
-    ) -> Result<Self, tola_typst::FontLoadError> {
-        let directories = config.compiler_font_directories(resources);
-        let font_dirs: Vec<&Path> = directories.iter().map(PathBuf::as_path).collect();
-        Self::build(
-            &font_dirs,
-            resources.package_locations(config),
-            resources,
-            config.system_fonts_allowed(resources),
-            resources.source_boundary(config),
-            local_packages,
-            cancellation,
-        )
     }
 
     /// Refuse a package directory the lock does not describe before any byte is read.
@@ -135,18 +112,11 @@ impl SiteHost {
 
     /// Whether this host may serve one build of `config` with `resources`.
     pub(crate) fn matches(&self, config: &ResolvedSiteConfig, resources: &BuildResources) -> bool {
-        let directories = config.compiler_font_directories(resources);
-        self.typst
-            .font_options()
-            .custom_paths
-            .iter()
-            .eq(directories.iter().map(PathBuf::as_path))
+        self.typst.font_options() == &config.compiler_font_options(resources)
             && self
                 .typst
                 .package_locations()
                 .is_ok_and(|locations| locations == &resources.package_locations(config))
-            && self.typst.font_options().include_system_fonts
-                == config.system_fonts_allowed(resources)
             && self.typst.fetch_policy() == fetch_policy(resources.network_access())
             && self.typst.source_boundary() == &resources.source_boundary(config)
             && Arc::ptr_eq(self.typst.file_cache(), &resources.file_cache())

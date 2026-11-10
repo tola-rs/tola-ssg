@@ -409,6 +409,15 @@ argv = ["editor", "--wait"]
             tola_input::InputLock::read(root).unwrap().unwrap().modules["theme"],
             tola_input::LockedModule::Tarball { .. }
         ));
+        fs::remove_dir_all(tola_input::layout::modules(root)).unwrap();
+        let resources = BuildResources::new().with_input_scope(InputScope::Pure);
+        let prepared = prepare_site(&config, resources.input_mode(), &Default::default()).unwrap();
+        let boundary = resources.source_boundary(prepared.config());
+        assert!(boundary.check(&prepared.build().entry).is_ok());
+        assert!(boundary.check(&root.join(".tola/unrelated.typ")).is_err());
+        BuildSession::with_resources(resources)
+            .build_and_write(&config, crate::build::BuildRequest::default())
+            .unwrap();
     }
 
     #[test]

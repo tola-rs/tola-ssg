@@ -42,6 +42,79 @@ impl PreparedSite {
             });
             apply_entry(Arc::make_mut(&mut config), &entry)?;
         }
+        let mut directories = Vec::new();
+        for selection in &config.fonts().modules {
+            use crate::config::section::typst::fonts::ModuleFonts;
+
+            let (alias, rules) = match selection {
+                ModuleFonts::Alias(alias) => (alias, None),
+                ModuleFonts::Selection { module, rename } => (module, Some(rename)),
+            };
+            let module = contribution.prepared.modules.get(alias).with_context(|| {
+                format!("`typst.fonts.modules` names undeclared module `{alias}`")
+            })?;
+            let fonts = module
+                .typst
+                .as_ref()
+                .map(|typst| typst.fonts.as_slice())
+                .unwrap_or_default();
+            anyhow::ensure!(
+                !fonts.is_empty(),
+                "`typst.fonts.modules` selects module `{alias}`, which declares no `typst.fonts`"
+            );
+            let mut rename = std::collections::BTreeMap::new();
+            for (family, target) in rules.into_iter().flatten() {
+                anyhow::ensure!(
+                    !family.trim().is_empty() && !target.trim().is_empty(),
+                    "`typst.fonts.modules` font rename for `{alias}` needs two nonempty family names"
+                );
+                anyhow::ensure!(
+                    rename
+                        .insert(family.to_lowercase(), target.clone())
+                        .is_none(),
+                    "`typst.fonts.modules` renames font family `{family}` more than once for `{alias}`"
+                );
+            }
+            let rename = Arc::new(rename);
+            for (index, directory) in fonts.iter().enumerate() {
+                tola_module::module_set::validate_module_path(
+                    config.get_root(),
+                    alias,
+                    &module.root,
+                    directory,
+                    true,
+                )
+                .with_context(|| {
+                    format!("`tola-module.toml` `typst.fonts[{index}]` in module `{alias}`")
+                })?;
+                directories.push(crate::config::ModuleFontDirectory {
+                    alias: alias.clone(),
+                    root: module.root.clone(),
+                    path: module.root.join(directory),
+                    rename: rename.clone(),
+                });
+            }
+        }
+        let fresh_archive_roots = if scope == tola_input::InputScope::Pure {
+            contribution
+                .prepared
+                .modules
+                .iter()
+                .filter(|(alias, _)| {
+                    matches!(
+                        &config.modules()[*alias].source,
+                        tola_module::ModuleSource::Tarball { tarball }
+                            if matches!(tarball.location, tola_input::TarballLocation::File { .. })
+                    )
+                })
+                .map(|(_, module)| module.root.clone())
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let applied = Arc::make_mut(&mut config);
+        applied.module_font_directories = directories;
+        applied.fresh_archive_roots = fresh_archive_roots;
         Ok(Self {
             config,
             contribution,

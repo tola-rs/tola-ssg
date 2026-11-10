@@ -22,11 +22,20 @@ pub(crate) fn check_loaded(loaded: &ReadManifest) -> Result<()> {
         crate::pack::validate_selection(pack)?;
     }
     let file = |key: &str, path: &Path| check_path(&loaded.root, key, path, false);
-    for (key, entry) in [
-        ("typst.entry", &manifest.typst),
-        ("nu.entry", &manifest.nu),
-        ("build.entry", &manifest.build),
-    ] {
+    if let Some(typst) = &manifest.typst {
+        if let Some(entry) = &typst.entry {
+            file("typst.entry", entry)?;
+        }
+        for (index, directory) in typst.fonts.iter().enumerate() {
+            check_path(
+                &loaded.root,
+                &format!("typst.fonts[{index}]"),
+                directory,
+                true,
+            )?;
+        }
+    }
+    for (key, entry) in [("nu.entry", &manifest.nu), ("build.entry", &manifest.build)] {
         if let Some(entry) = entry {
             file(key, &entry.entry)?;
         }

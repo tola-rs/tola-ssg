@@ -2,6 +2,7 @@
 
 use crate::config::ConfigDiagnostics;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use tola_config::Config;
 
@@ -15,14 +16,34 @@ pub struct FontsConfig {
     /// Font directories, relative to the site root; searched recursively.
     #[config(collection = inline)]
     pub paths: Vec<PathBuf>,
+    /// Modules whose declared compiler fonts are searched, in order.
+    #[config(collection = inline)]
+    pub modules: Vec<ModuleFonts>,
     /// Use system fonts too. Enabling this can change the result on another machine.
     pub system: bool,
+}
+
+/// One module's compiler fonts, optionally registered under different family names.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged, deny_unknown_fields)]
+pub enum ModuleFonts {
+    /// Load a module's fonts using their original names.
+    Alias(String),
+    /// Load a module's fonts and rename selected families.
+    Selection {
+        /// Alias declared under `[modules]`.
+        module: String,
+        /// Original family name to compiler family name.
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        rename: BTreeMap<String, String>,
+    },
 }
 
 impl Default for FontsConfig {
     fn default() -> Self {
         Self {
             paths: vec![PathBuf::from("static/typst-fonts")],
+            modules: Vec::new(),
             system: false,
         }
     }
@@ -39,6 +60,25 @@ site-relative directories to search recursively. The default is `static/typst-fo
 paths = [\"static/typst-fonts\"]
 system = false
 ```
+
+Use `modules` to select compiler fonts from modules already declared in the site, for example
+`modules = [\"theme\", \"cjk\"]`. A module lists its directories as `fonts = [\"typst-fonts\"]` in
+its `[typst]` table in `tola-module.toml`. Paths are relative to the module root and must ship
+with it. Modules are searched after site paths, in the order listed. The default is an empty
+list. Typst selects the face; search order breaks ties.
+
+Use a table entry to rename a family from one module for this site's compiler:
+
+```toml
+[typst.fonts]
+modules = [
+  \"theme\",
+  { module = \"cjk\", rename = { \"IBM Plex Sans\" = \"CJK Plex Sans\" } },
+]
+```
+
+Matching ignores case and applies to every face of the family in that entry. Refer to
+`CJK Plex Sans` in Typst. `tola inspect fonts --json` shows the resulting names and modules.
 
 Embedded fonts stay available under `--pure`. Host fonts are never vendored, and `system = true`
 combined with `--pure` is an error.

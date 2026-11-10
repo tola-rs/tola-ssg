@@ -205,7 +205,7 @@ pub fn prepare(ctx: &Context<'_>, acquired: &Acquired) -> Result<Contribution> {
         let entry = module
             .typst
             .as_ref()
-            .map(|entry| entry.entry.as_path())
+            .and_then(|typst| typst.entry.as_deref())
             .unwrap_or_else(|| Path::new("__tola_no_public_entry.typ"));
         packages.push(LocalPackage::new(
             package_spec(alias)?,

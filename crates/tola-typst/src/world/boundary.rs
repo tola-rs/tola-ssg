@@ -17,6 +17,7 @@ pub struct SourceBoundary {
 struct SourceLimits {
     root: Option<PathBuf>,
     contained: bool,
+    additional_root: Option<PathBuf>,
     excluded: Vec<GeneratedSourceBoundary>,
 }
 
@@ -42,6 +43,7 @@ impl SourceBoundary {
             limits: Some(Arc::new(SourceLimits {
                 root: Some(super::normalize_path(root)),
                 contained,
+                additional_root: None,
                 excluded: Vec::new(),
             })),
         }
@@ -76,6 +78,12 @@ impl SourceBoundary {
                 directory,
                 candidates: candidates.into_iter().collect(),
             });
+        self
+    }
+
+    /// Also require containment in a specific input root.
+    pub(crate) fn within(mut self, root: PathBuf) -> Self {
+        Arc::make_mut(self.limits.get_or_insert_default()).additional_root = Some(root);
         self
     }
 
@@ -122,6 +130,19 @@ impl SourceBoundary {
         });
         if forbidden {
             return Ok(Some(SourceRefusal::GeneratedState));
+        }
+        if limits
+            .additional_root
+            .as_ref()
+            .is_some_and(|root| !physical.starts_with(root))
+        {
+            return Err(FileError::Other(Some(
+                format!(
+                    "font source {} is outside its declared input root",
+                    shown.display()
+                )
+                .into(),
+            )));
         }
         if limits.contained
             && limits

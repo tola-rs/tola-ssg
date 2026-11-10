@@ -8,6 +8,26 @@ Typst 编译器可以使用的字体。编译器字体不会被发布：网页�
 
 要搜索的字体目录，相对站点根，递归查找。
 
+### `modules`
+
+选择已声明的模块所提供的编译字体，默认为空列表。模块在 `tola-module.toml` 的
+`[typst]` 下声明 `fonts = ["typst-fonts"]`，目录相对模块根，并随模块发布。
+Tola 在站点目录之后按列表顺序搜索模块字体。Typst 决定采用哪款字体，匹配条件相同时按搜索顺序优先。
+
+同名的两个字体版本都要使用时，可以把其中一个模块项写成表：
+
+```toml
+[typst.fonts]
+modules = [
+  "theme",
+  { module = "cjk", rename = { "IBM Plex Sans" = "CJK Plex Sans" } },
+]
+```
+
+原字体族名称按不区分大小写的方式匹配。该模块项中此字体族的所有字重和样式
+都登记在新名称下。在 Typst 中用 `CJK Plex Sans` 选用它，可通过
+`tola inspect fonts --json` 查看名称和来源模块。
+
 ### `system`
 
 是否把宿主机自己的字体也算上。开启后，换一台机器构建可能得到不同的结果。

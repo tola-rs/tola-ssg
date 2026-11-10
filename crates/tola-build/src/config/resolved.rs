@@ -64,6 +64,8 @@ pub struct ResolvedSiteConfig {
     pub(crate) entry_module: Option<String>,
     pub(crate) hook_runner: Option<crate::hooks::HookRunner>,
     pub(crate) entry_file: Option<typst::syntax::FileId>,
+    pub(crate) module_font_directories: Vec<ModuleFontDirectory>,
+    pub(crate) fresh_archive_roots: Vec<PathBuf>,
     // Logical paths are kept so later boundary checks can detect symlink retargets.
     pub(crate) module_roots: Vec<PathBuf>,
 
@@ -71,6 +73,14 @@ pub struct ResolvedSiteConfig {
     pub(crate) vendor_workspace: Option<PathBuf>,
     // Only with_vendor_root grants a candidate; changing a section cannot broaden that grant.
     pub(crate) vendor_candidate: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ModuleFontDirectory {
+    pub(crate) alias: String,
+    pub(crate) root: PathBuf,
+    pub(crate) path: PathBuf,
+    pub(crate) rename: std::sync::Arc<std::collections::BTreeMap<String, String>>,
 }
 
 /// One directory a resolved configuration's own writing produces.
@@ -178,12 +188,31 @@ impl ResolvedSiteConfig {
         self.typst.fonts.system && resources.include_system_fonts()
     }
 
-    /// Every directory the compiler discovers fonts in, in search order: this invocation's
-    /// own directories, then the site's configured paths.
+    /// Invocation and site font directories, in search order.
     pub fn compiler_font_directories(&self, resources: &BuildResources) -> Vec<PathBuf> {
         let mut directories = resources.font_directories().to_vec();
         directories.extend(self.typst.fonts.paths.iter().cloned());
         directories
+    }
+
+    /// Font discovery shared by compilation and inspection of a prepared site.
+    pub fn compiler_font_options(&self, resources: &BuildResources) -> tola_typst::FontOptions {
+        let directories = self.compiler_font_directories(resources);
+        let paths = directories.iter().map(PathBuf::as_path).collect::<Vec<_>>();
+        let mut options = tola_typst::FontOptions::new()
+            .with_custom_paths(&paths)
+            .with_system_fonts(self.system_fonts_allowed(resources))
+            .with_source_boundary(resources.source_boundary(self));
+        for directory in &self.module_font_directories {
+            options = options.add_contained_path(
+                directory.path.clone(),
+                directory.root.clone(),
+                resources.source_boundary(self),
+                directory.alias.clone(),
+                directory.rename.clone(),
+            );
+        }
+        options
     }
 
     pub fn icons(&self) -> &crate::config::section::IconsConfig {

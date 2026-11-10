@@ -191,6 +191,8 @@ fn resolve_schema(
         entry_module,
         hook_runner: None,
         module_roots,
+        module_font_directories: Vec::new(),
+        fresh_archive_roots: Vec::new(),
         entry_file: None,
         vendor_workspace,
         vendor_candidate: None,

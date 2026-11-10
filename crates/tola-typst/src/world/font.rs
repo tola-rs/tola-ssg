@@ -59,8 +59,17 @@ pub struct FontOptions {
     pub include_embedded_fonts: bool,
     /// Custom font directories to search.
     pub custom_paths: Vec<PathBuf>,
+    contained_paths: Vec<ContainedFontPath>,
     /// Physical restrictions applied before discovery and every lazy font read.
     pub source_boundary: crate::world::SourceBoundary,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ContainedFontPath {
+    path: PathBuf,
+    boundary: crate::world::SourceBoundary,
+    label: String,
+    rename: Arc<BTreeMap<String, String>>,
 }
 
 impl FontOptions {
@@ -70,6 +79,7 @@ impl FontOptions {
             include_system_fonts: true,
             include_embedded_fonts: true,
             custom_paths: Vec::new(),
+            contained_paths: Vec::new(),
             source_boundary: crate::world::SourceBoundary::default(),
         }
     }
@@ -97,6 +107,25 @@ impl FontOptions {
     /// Restrict physical font sources without excluding embedded fonts.
     pub fn with_source_boundary(mut self, boundary: crate::world::SourceBoundary) -> Self {
         self.source_boundary = boundary;
+        self
+    }
+
+    /// Search a directory after the custom paths, keeping every font read inside its input root.
+    /// The label identifies the source in the inventory. Rename keys are lowercase family names.
+    pub fn add_contained_path(
+        mut self,
+        path: PathBuf,
+        root: PathBuf,
+        boundary: crate::world::SourceBoundary,
+        label: String,
+        rename: Arc<BTreeMap<String, String>>,
+    ) -> Self {
+        self.contained_paths.push(ContainedFontPath {
+            path,
+            boundary: boundary.within(root),
+            label,
+            rename,
+        });
         self
     }
 
@@ -185,6 +214,8 @@ pub enum CompilerFontInput {
     ConfiguredDirectory {
         /// The configured directory, as the host passed it.
         directory: PathBuf,
+        /// The host's source label for a contained directory.
+        label: Option<String>,
         /// The file inside it the face is read from.
         file: PathBuf,
     },
@@ -285,7 +316,7 @@ impl FontStore {
             &self.options,
             cancellation,
             &fonts.configured.files,
-            |_, _, _| Ok(()),
+            |_, _, _, _, _| Ok(()),
         ) {
             Ok(current) => current,
             Err(FontLoadError::Cancelled) => return Err(FontLoadError::Cancelled),
@@ -614,24 +645,31 @@ fn load_fonts(
         options,
         cancellation,
         &BTreeMap::new(),
-        |directory, path, observed| {
+        |directory, contained, boundary, path, observed| {
             let bytes = observed.bytes.as_slice();
             let digest = observed.digest;
-            let file = font_file_record(&mut files, path, Some(digest), &options.source_boundary);
+            let file = font_file_record(&mut files, path, Some(digest), boundary);
             let faces = ttf_parser::fonts_in_collection(bytes).unwrap_or(1);
             for index in 0..faces {
                 cancellation.ensure_active_as()?;
-                if let Some(info) = FontInfo::new(bytes, index) {
+                if let Some(mut info) = FontInfo::new(bytes, index) {
+                    let face = FaceIdentity::of(&info);
+                    if let Some(name) =
+                        contained.and_then(|source| source.rename.get(&info.family.to_lowercase()))
+                    {
+                        info.family.clone_from(name);
+                    }
                     native.push((
                         FontFileSource {
                             file: Arc::clone(file),
                             index,
-                            face: FaceIdentity::of(&info),
+                            face,
                         },
                         info,
                     ));
                     inputs.push(CompilerFontInput::ConfiguredDirectory {
                         directory: directory.to_path_buf(),
+                        label: contained.map(|source| source.label.clone()),
                         file: path.to_path_buf(),
                     });
                 }
@@ -690,17 +728,35 @@ fn scan_configured_fonts(
     options: &FontOptions,
     cancellation: &BundleCancellation,
     known: &BTreeMap<PathBuf, FontFileIdentity>,
-    mut observe: impl FnMut(&Path, &Path, &FontFileBytes) -> Result<(), FontLoadError>,
+    mut observe: impl FnMut(
+        &Path,
+        Option<&ContainedFontPath>,
+        &crate::world::SourceBoundary,
+        &Path,
+        &FontFileBytes,
+    ) -> Result<(), FontLoadError>,
 ) -> Result<FontInventory, FontLoadError> {
     let mut roots = Vec::new();
     let mut files = BTreeMap::new();
-    for path in &options.custom_paths {
+    let directories = options
+        .custom_paths
+        .iter()
+        .map(|path| (path, None, &options.source_boundary))
+        .chain(
+            options
+                .contained_paths
+                .iter()
+                .map(|source| (&source.path, Some(source), &source.boundary)),
+        );
+    for (path, contained, boundary) in directories {
         cancellation.ensure_active_as()?;
-        check_font_source(&options.source_boundary, path)?;
+        check_font_source(boundary, path)?;
         let logical = std::path::absolute(path).map_err(|error| font_io_error(path, error))?;
         let canonical = match fs::canonicalize(&logical) {
             Ok(canonical) => Some(canonical),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) if contained.is_none() && error.kind() == std::io::ErrorKind::NotFound => {
+                None
+            }
             Err(error) => return Err(font_io_error(&logical, error)),
         };
         if canonical.as_ref().is_some_and(|root| !root.is_dir()) {
@@ -708,26 +764,20 @@ fn scan_configured_fonts(
         }
         if let Some(root) = &canonical {
             let mut visited = BTreeSet::new();
-            walk_font_directory(
-                root,
-                cancellation,
-                &options.source_boundary,
-                &mut visited,
-                &mut |path| {
-                    if let Some(known) = known.get(path).filter(|known| known.describes(path)) {
-                        files.insert(path.to_path_buf(), known.reobserved(path)?);
-                        return Ok(());
-                    }
-                    check_font_source(&options.source_boundary, path)?;
-                    let observed = read_font_bytes(path, Some(cancellation))?;
-                    observe(&logical, path, &observed)?;
-                    files.insert(
-                        path.to_path_buf(),
-                        FontFileIdentity::of(path, observed.digest)?,
-                    );
-                    Ok(())
-                },
-            )?;
+            walk_font_directory(root, cancellation, boundary, &mut visited, &mut |path| {
+                if let Some(known) = known.get(path).filter(|known| known.describes(path)) {
+                    files.insert(path.to_path_buf(), known.reobserved(path)?);
+                    return Ok(());
+                }
+                check_font_source(boundary, path)?;
+                let observed = read_font_bytes(path, Some(cancellation))?;
+                observe(&logical, contained, boundary, path, &observed)?;
+                files.insert(
+                    path.to_path_buf(),
+                    FontFileIdentity::of(path, observed.digest)?,
+                );
+                Ok(())
+            })?;
             if fs::canonicalize(&logical).ok().as_ref() != Some(root) {
                 return Err(FontLoadError::Changed { path: logical });
             }
@@ -871,6 +921,34 @@ mod tests {
             store.load(&BundleCancellation::new()),
             Err(FontLoadError::NotDirectory { .. })
         ));
+    }
+
+    #[test]
+    fn renamed_face_loads_from_the_original_file() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let path = root.join("font.ttf");
+        let (font, info) = embedded::fonts().next().unwrap();
+        fs::write(&path, font.data().as_slice()).unwrap();
+        let options = isolated_options().add_contained_path(
+            root.clone(),
+            root,
+            Default::default(),
+            "theme".into(),
+            Arc::new(BTreeMap::from([(
+                info.family.to_lowercase(),
+                "Theme Font".into(),
+            )])),
+        );
+        let store = FontStore::with_options(options);
+        let loaded = store.load(&BundleCancellation::new()).unwrap();
+        let book = loaded.book();
+        assert!(
+            book.select(&info.family.to_lowercase(), info.variant)
+                .is_none()
+        );
+        let index = book.select("theme font", info.variant).unwrap();
+        assert_eq!(loaded.font(index).unwrap().data(), font.data());
     }
 
     #[test]

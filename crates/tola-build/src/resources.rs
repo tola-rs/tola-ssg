@@ -182,10 +182,18 @@ impl BuildResources {
 /// view that mirrors embedded package sources — because they are copies, never a source of
 /// selection. A pure build also requires every source to resolve inside the site root.
 pub(crate) fn base_source_boundary(root: &Path, scope: InputScope) -> tola_typst::SourceBoundary {
+    source_boundary_with_modules(root, scope, std::iter::empty())
+}
+
+fn source_boundary_with_modules(
+    root: &Path,
+    scope: InputScope,
+    modules: impl IntoIterator<Item = PathBuf>,
+) -> tola_typst::SourceBoundary {
     let boundary = tola_typst::SourceBoundary::new(root, scope == InputScope::Pure);
     let internal = root.join(INTERNAL_DIR);
     let boundary = match scope {
-        InputScope::Pure => boundary.excluding(internal),
+        InputScope::Pure => boundary.excluding_except_many(internal, modules),
         InputScope::Online | InputScope::Offline => boundary.excluding_except_many(
             internal,
             [layout::builtin_packages(root), layout::modules(root)],
@@ -198,7 +206,14 @@ pub(crate) fn source_boundary(
     config: &crate::config::ResolvedSiteConfig,
     scope: InputScope,
 ) -> tola_typst::SourceBoundary {
-    source_boundary_with_exclusions(config.get_root(), scope, config.generated_exclusions())
+    add_source_exclusions(
+        source_boundary_with_modules(
+            config.get_root(),
+            scope,
+            config.fresh_archive_roots.iter().cloned(),
+        ),
+        config.generated_exclusions(),
+    )
 }
 
 pub(crate) fn source_boundary_with_exclusions(
@@ -206,7 +221,13 @@ pub(crate) fn source_boundary_with_exclusions(
     scope: InputScope,
     exclusions: impl IntoIterator<Item = crate::config::GeneratedExclusion>,
 ) -> tola_typst::SourceBoundary {
-    let mut boundary = base_source_boundary(root, scope);
+    add_source_exclusions(base_source_boundary(root, scope), exclusions)
+}
+
+fn add_source_exclusions(
+    mut boundary: tola_typst::SourceBoundary,
+    exclusions: impl IntoIterator<Item = crate::config::GeneratedExclusion>,
+) -> tola_typst::SourceBoundary {
     // The output tree and the publication workspace beside it hold bytes Tola wrote, not inputs: a
     // read that reaches either would compile staged or stale output. Publication still resolves the
     // output root against its protected inputs, because that check owns the output layout rather

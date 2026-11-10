@@ -96,7 +96,8 @@ pub(super) fn value(
                     library: module
                         .typst
                         .as_ref()
-                        .map(|entry| module.root.join(&entry.entry)),
+                        .and_then(|typst| typst.entry.as_ref())
+                        .map(|entry| module.root.join(entry)),
                     build_entry: module
                         .build
                         .as_ref()
