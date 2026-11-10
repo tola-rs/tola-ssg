@@ -98,47 +98,6 @@ pub fn documentation_lines(block: &str) -> impl Iterator<Item = DocumentationLin
     })
 }
 
-/// One run of a documentation block: its prose, or one fenced example.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DocumentationSegment<'a> {
-    /// The prose the block writes outside any fenced example.
-    Prose(&'a str),
-    /// One fenced example, its fence lines included.
-    Example(&'a str),
-}
-
-/// Split `block` into its prose and its fenced examples, in the order it writes them.
-///
-/// A fenced example is code: it reads the same in every language, so a translation replaces the
-/// prose around the examples and never an example. Whitespace-only runs are dropped.
-pub fn documentation_segments(block: &str) -> Vec<DocumentationSegment<'_>> {
-    let mut segments = Vec::new();
-    let mut start = 0;
-    let mut offset = 0;
-    let mut fenced = false;
-    for (line, raw) in documentation_lines(block).zip(block.split_inclusive('\n')) {
-        if line.is_fenced != fenced {
-            push_segment(&mut segments, &block[start..offset], fenced);
-            start = offset;
-            fenced = line.is_fenced;
-        }
-        offset += raw.len();
-    }
-    push_segment(&mut segments, &block[start..offset], fenced);
-    segments
-}
-
-fn push_segment<'a>(segments: &mut Vec<DocumentationSegment<'a>>, text: &'a str, fenced: bool) {
-    if text.trim().is_empty() {
-        return;
-    }
-    segments.push(if fenced {
-        DocumentationSegment::Example(text)
-    } else {
-        DocumentationSegment::Prose(text)
-    });
-}
-
 impl Documentation {
     /// Outside fenced examples, `- name (type): description` describes a Typst parameter and
     /// `-> type` the value the declaration returns, in the shape Tinymist and typlite read. Other
@@ -274,19 +233,6 @@ fn push_line(text: &mut String, line: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn segments_split_prose_from_examples() {
-        let block = "Read a value.\n\n```typ\n#let value = 7\n```\n\nThen use it.";
-        assert_eq!(
-            documentation_segments(block),
-            vec![
-                DocumentationSegment::Prose("Read a value.\n\n"),
-                DocumentationSegment::Example("```typ\n#let value = 7\n```\n"),
-                DocumentationSegment::Prose("\nThen use it."),
-            ]
-        );
-    }
 
     #[test]
     fn separated_comments_are_not_attached() {

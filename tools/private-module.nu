@@ -27,9 +27,7 @@ def main [
   let ssh_key = ($env.TOLA_CI_SSH_KEY? | default "")
   let known_hosts = ($env.TOLA_CI_SSH_KNOWN_HOSTS? | default "")
 
-  let base = ($env.TMPDIR? | default ($env.TEMP? | default "/tmp"))
-  let root = ($base | path join $"tola-private-module-(random uuid)")
-  mkdir $root
+  let root = (mktemp --directory)
   let ctx = {bin: $bin, root: $root, os: $os, token: $token, ssh_key: $ssh_key, known_hosts: $known_hosts}
 
   try {
@@ -87,12 +85,9 @@ def main [
 
     if (($out_path | str length) > 0) { $digests | save --force $out_path }
     print $digests
-  } catch {|err|
-    print $"private-module checks failed: ($err.msg? | default 'unknown error')"
+  } finally {
     rm -rf $root
-    error make { msg: ($err.msg? | default "private-module checks failed") }
   }
-  rm -rf $root
 }
 
 def fail [label, message] {

@@ -163,7 +163,7 @@ impl Command for HostCommand {
                 let submit = host.diagnostic.as_ref().ok_or_else(|| {
                     error("use `diagnostic submit` in a Tola hook or module command".into())
                 })?;
-                let diagnostics = into_json(input.into_value(span)?).map_err(&error)?;
+                let diagnostics = into_json(input.into_value(span)?).map_err(error)?;
                 submit(diagnostics).map_err(error)?;
                 return Ok(PipelineData::empty());
             }

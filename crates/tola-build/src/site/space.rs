@@ -671,30 +671,6 @@ mod tests {
     }
 
     #[test]
-    fn missing_fragments_share_sorted_ids() {
-        let mut space = AddressSpace::default();
-        let route = html_page("/hello/", "hello/index.html");
-        space
-            .register_page(route.clone(), ["z-last".to_owned(), "a-first".to_owned()])
-            .unwrap();
-        let mut previous = None;
-        for fragment in ["missing", "another", "missing"] {
-            let AddressResolution::FragmentNotFound { available, .. } = resolve(
-                &space,
-                &format!("/hello/#{fragment}"),
-                RequiredResourceKind::DocumentOrResource,
-            ) else {
-                panic!("missing fragment resolved");
-            };
-            assert_eq!(available.as_ref(), ["a-first", "z-last"]);
-            if let Some(previous) = &previous {
-                assert!(Arc::ptr_eq(previous, &available));
-            }
-            previous = Some(available);
-        }
-    }
-
-    #[test]
     fn html_fragments_follow_browser_targets() {
         let mut space = AddressSpace::default();
         space

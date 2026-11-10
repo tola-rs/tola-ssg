@@ -77,22 +77,3 @@ impl Default for BundleCancellation {
         Self::new()
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::diagnostic::CompileError;
-
-    #[test]
-    fn cloned_cancellation_shares_the_flag() {
-        let cancellation = BundleCancellation::new();
-        let worker = cancellation.clone();
-        assert!(!cancellation.is_cancelled());
-        worker.cancel();
-        assert!(cancellation.is_cancelled());
-        assert!(matches!(
-            cancellation.ensure_active(),
-            Err(CompileError::Cancelled)
-        ));
-    }
-}

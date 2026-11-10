@@ -99,11 +99,8 @@ def verify-release [directory: path, version: string, targets: list<string>] {
         }
     }
     if $license_required {
-        let listing = (^tar -tzf $license_archive | complete)
-        if $listing.exit_code != 0 {
-            error make { msg: $"($licenses): tar could not list the archive: ($listing.stderr | str trim)" }
-        }
-        let absent = ($LICENSE_FILES | get name | where {|name| $name not-in ($listing.stdout | lines) })
+        let members = (archive-members $license_archive)
+        let absent = ($LICENSE_FILES | get name | where {|name| $name not-in $members })
         if ($absent | is-not-empty) {
             error make { msg: $"($licenses) lacks ($absent | str join ', ')" }
         }
@@ -166,11 +163,7 @@ def "main licenses" [--output: directory = 'release'] {
             }
             cp $source ($members | path join $entry.name)
         }
-        let arguments = (['-czf' $archive '-C' $members] ++ ($LICENSE_FILES | get name))
-        let tar = (^tar ...$arguments | complete)
-        if $tar.exit_code != 0 {
-            error make { msg: $"tar could not write ($archive | path basename): ($tar.stderr | str trim)" }
-        }
+        create-tar-gz $archive $members ($LICENSE_FILES | get name)
     } finally {
         rm --recursive --force $stage
     }

@@ -1,13 +1,20 @@
-overview = "读取项目中导入模块的配置"
+# `@tola/module`
 
-[exports.get-module]
-summary = ['''
+读取项目中导入模块的配置
+
+## `get-module`
+
 返回受管模块的配置记录。
 
 在 `@tola-modules` 包的源文件中，`get-module()` 读取调用表达式所属的模块实例。`get-module("notes")` 读取 `[modules.notes]` 所选的实例，也可在站点代码中调用。项目源码必须提供别名；未知别名会报错。多个别名指向同一目录时，各自有独立的实例。
 
 记录包含 `name`（站点别名）、`options`（有效选项）和 `assets`。`assets.files` 将已选名称映射到原生输入路径，替换项使用项目根。`assets.urls` 将同一组名称映射到最终浏览器 URL，已包含部署前缀与适用的缓存标识。这两张表描述静态发布的模块资源。
-''', '']
 
-[exports.get-module.parameters]
-name = "站点中声明的模块别名。省略参数时使用调用方所属的模块。"
+```typst site
+#import "@tola/module:0.0.0": get-module
+// From a module's own source: #let settings = get-module().options
+```
+
+### `name`
+
+站点中声明的模块别名。省略参数时使用调用方所属的模块。

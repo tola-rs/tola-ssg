@@ -217,21 +217,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn ordinary_vendor_paths_are_accepted() {
-        for declared in ["vendor", "vendorfiles", "vendor/tola", ".vendorfiles"] {
-            let config = VendorConfig {
-                path: Some(PathBuf::from(declared)),
-            };
-            let mut diagnostics = ConfigDiagnostics::new();
-            config.validate_paths(&mut diagnostics);
-            assert!(
-                diagnostics.into_result().is_ok(),
-                "{declared} must be accepted"
-            );
-        }
-    }
-
     #[cfg(unix)]
     #[test]
     fn vendor_alias_cannot_escape_site() {

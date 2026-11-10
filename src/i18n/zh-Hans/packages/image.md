@@ -1,12 +1,9 @@
-# Simplified-Chinese documentation of `@tola/image`. English stays authoritative in the package's
-# own Typst sources; a unit here overrides one of them.
+# `@tola/image`
 
-overview = "图片 metadata、按请求缩放的图片、响应式图片组与响应式 img 元素"
+图片 metadata、按请求缩放的图片、响应式图片组与响应式 img 元素
 
-[exports.resize-image]
+## `resize-image`
 
-summary = [
-  '''
 请求构建发布对应的派生结果，并返回它的 URL 与尺寸。
 
 `source` 指向输入图像：可以是相对本次调用解析的字符串、你已经用 `path()` 解析好的路径，或原始图像字节。字符串要先解析，再传给其他文件或包。即使资产声明发布了这个文件，也要传文件自身的路径；声明给出的 URL 是给浏览器用的。`width` 与 `height` 都是正的像素数。
@@ -33,39 +30,115 @@ summary = [
 构建会把这次求值请求过的派生结果并入站点的输出图：每个都落在 `_tola/images/` 下，名字由源图字节与处理参数共同决定，等价的请求共用同一个输出。链接它通常直接用返回的 `url`；手上只有输出路径时，用 `output-url` 换成浏览器 URL。`tola check --json` 在相应阶段完成后报告这次操作收集的 output，包括它们的生产者与媒体类型。
 
 Example - 缩放到精确的宽高：
-''',
-  'Example - 由宽度推出高度：',
-  'Example - 缩放成固定布局的尺寸：',
-  'Example - 保留源图左边缘填满布局槽位：',
-  'Example - 把透明区域合成到不透明底色上再编码为 JPEG：',
-  'Example - 为需要位图的消费方栅格化 SVG：',
-  '',
+
+```typst site
+#import "@tola/image:0.0.0": resize-image
+#let resized = resize-image("assets/logo.png", width: 4, height: 4)
+#assert.eq(resized.width, 4)
+#assert.eq(resized.height, 4)
+#assert.eq(resized.original-width, 8)
+#assert.eq(resized.original-height, 4)
+```
+
+Example - 由宽度推出高度：
+
+```typst site
+#import "@tola/image:0.0.0": resize-image
+#let resized = resize-image("assets/logo.png", width: 4, op: "fit-width")
+#assert.eq(resized.width, 4)
+#assert.eq(resized.height, 2)
+```
+
+Example - 缩放成固定布局的尺寸：
+
+```typst site
+#import "@tola/image:0.0.0": resize-image
+#let slot = resize-image(
+  "assets/logo.png",
+  width: 4, height: 2, op: "fill", format: "webp",
+)
+#assert.eq(slot.width, 4)
+#assert.eq(slot.height, 2)
+#document("index.html")[
+  #html.img(src: slot.url, width: slot.width, height: slot.height, alt: "Example logo")
 ]
+```
 
-[exports.resize-image.parameters]
+Example - 保留源图左边缘填满布局槽位：
 
-source = "相对本次调用的路径字符串、已解析的路径，或原始图像字节。"
+```typst site
+#import "@tola/image:0.0.0": resize-image
+#let edge = resize-image(
+  "assets/logo.png",
+  width: 2, height: 2, op: "fill", anchor: "left",
+)
+#assert.eq(edge.width, 2)
+#assert.eq(edge.height, 2)
+```
 
-anchor = "裁剪锚点，取 `center`、`top`、`bottom`、`left`、`right`、`top-left`、`top-right`、`bottom-left` 或 `bottom-right`；只对 `op: \"fill\"` 有效。"
+Example - 把透明区域合成到不透明底色上再编码为 JPEG：
 
-background = "不透明的颜色；编码前把透明区域合成到它上面。"
+```typst site
+#import "@tola/image:0.0.0": resize-image
+// This source declares no alpha, so the background changes nothing here; a source with
+// alpha needs one to encode as JPEG.
+#let flat = resize-image(
+  "assets/logo.png",
+  width: 4, height: 2, op: "fit", format: "jpg", background: rgb("#ffffff"),
+)
+#assert.eq(flat.width, 4)
+#assert.eq(flat.height, 2)
+#assert(flat.url.ends-with(".jpg"))
+```
 
-filter = "重采样核，取 `nearest`、`triangle`、`catmull-rom`、`gaussian` 或 `lanczos3`。"
+Example - 为需要位图的消费方栅格化 SVG：
 
-format = "输出格式，取 `auto`、`jpg`（也可写 `jpeg`）、`png` 或 `webp`；SVG 源图必须明确写位图格式。"
+```typst site
+#import "@tola/image:0.0.0": resize-image
+#let mark = resize-image("assets/mark.svg", width: 12, op: "fit-width", format: "png")
+#assert.eq(mark.width, 12)
+#assert.eq(mark.height, 12)
+#assert(mark.url.ends-with(".png"))
+```
 
-height = "输出的高度（像素），为正数；是否需要由 `op` 决定。"
+### `source`
 
-op = "缩放操作，取 `scale`、`fit-width`、`fit-height`、`fit` 或 `fill`。"
+相对本次调用的路径字符串、已解析的路径，或原始图像字节。
 
-quality = "JPEG 质量为 1 到 100，默认 75。WebP 只有在给出 0 到 100 的质量值时才启用有损压缩。PNG 始终无损。"
+### `anchor`
 
-width = "输出的宽度（像素），为正数；是否需要由 `op` 决定。"
+裁剪锚点，取 `center`、`top`、`bottom`、`left`、`right`、`top-left`、`top-right`、`bottom-left` 或 `bottom-right`；只对 `op: "fill"` 有效。
 
-[exports.image-metadata]
+### `background`
 
-summary = [
-  '''
+不透明的颜色；编码前把透明区域合成到它上面。
+
+### `filter`
+
+重采样核，取 `nearest`、`triangle`、`catmull-rom`、`gaussian` 或 `lanczos3`。
+
+### `format`
+
+输出格式，取 `auto`、`jpg`（也可写 `jpeg`）、`png` 或 `webp`；SVG 源图必须明确写位图格式。
+
+### `height`
+
+输出的高度（像素），为正数；是否需要由 `op` 决定。
+
+### `op`
+
+缩放操作，取 `scale`、`fit-width`、`fit-height`、`fit` 或 `fill`。
+
+### `quality`
+
+JPEG 质量为 1 到 100，默认 75。WebP 只有在给出 0 到 100 的质量值时才启用有损压缩。PNG 始终无损。
+
+### `width`
+
+输出的宽度（像素），为正数；是否需要由 `op` 决定。
+
+## `image-metadata`
+
 查看一张图片，读取它的 metadata。
 
 `source` 的行为与 `resize-image` 相同。结果包含 `width`、`height`、`format`、`mime`、`has-alpha` 与 `is-lossy`。尺寸已经把图片的方向考虑在内。`format` 为 `jpg`、`png`、`webp`、`gif`、`bmp` 或 `svg`。尺寸是 CSS 像素；SVG 报告其在 96 DPI 下的固有尺寸，所以以 pt 书写的尺寸要乘以 4/3（`256pt` 报告为 `341`）。没有 `width`/`height` 的矢量图报告其 `viewBox` 尺寸，浏览器则退回 300×150。SVG 算作带 alpha。查看只读取文件对自身的声明，所以未使用的 GIF 透明声明与 GIF 画布上没有被覆盖的部分都算作 alpha。原始文件的 URL 来自它自己的资产声明：需要 URL 时，把这个文件声明为资产。
@@ -73,20 +146,53 @@ summary = [
 结果决定缩放方案时，先读一次再缩放：`has-alpha` 决定 JPEG 用不用得上 `background`，`width` 决定目标尺寸。
 
 Example - 读取一张图片的 metadata：
-''',
-  'Example - 按源图自身的尺寸与 alpha 分支：',
-  'Example - 读取矢量图的固有尺寸：',
-  '',
-]
 
-[exports.image-metadata.parameters]
+```typst site
+#import "@tola/image:0.0.0": image-metadata
+#let metadata = image-metadata("assets/logo.png")
+#assert.eq(metadata.width, 8)
+#assert.eq(metadata.height, 4)
+#assert.eq(metadata.format, "png")
+#assert.eq(metadata.has-alpha, false)
+```
 
-source = "相对本次调用的路径字符串、已解析的路径，或原始图像字节。"
+Example - 按源图自身的尺寸与 alpha 分支：
 
-[exports.image-srcset]
+```typst site
+#import "@tola/image:0.0.0": image-metadata, resize-image
+#let source = "assets/logo.png"
+#let metadata = image-metadata(source)
+// JPEG is the smaller choice, but it holds no alpha; keep PNG when the source declares any,
+// and never scale past the source's own width.
+#let width = if metadata.width > 640 { 640 } else { metadata.width }
+#let preview = resize-image(
+  source,
+  width: width,
+  op: "fit-width",
+  format: if metadata.has-alpha { "png" } else { "jpg" },
+)
+#assert.eq(metadata.has-alpha, false)
+#assert.eq(preview.width, 8)
+#assert(preview.url.ends-with(".jpg"))
+```
 
-summary = [
-  '''
+Example - 读取矢量图的固有尺寸：
+
+```typst site
+#import "@tola/image:0.0.0": image-metadata
+#let mark = image-metadata("assets/mark.svg")
+#assert.eq(mark.format, "svg")
+#assert.eq(mark.width, 24)
+#assert.eq(mark.height, 24)
+#assert.eq(mark.has-alpha, true)
+```
+
+### `source`
+
+相对本次调用的路径字符串、已解析的路径，或原始图像字节。
+
+## `image-srcset`
+
 按多个宽度生成同一张图片的派生结果，并返回响应式 `img` 需要的值。
 
 照片走这个入口：给它布局需要的宽度，它会为每个宽度各请求一次派生结果，方式与 `resize-image` 请求单个宽度时相同。`sizes` 仍由你写——这里无从知道浏览器最终会用的宽度。SVG 源图会被拒绝：矢量没有 `w` 描述符。显示矢量请用 `image()`，需要位图请用带明确位图格式的 `resize-image`。
@@ -100,27 +206,46 @@ summary = [
 每个派生结果各自被请求，所以构建会为每个不同宽度各发布一个输出，落在 `_tola/images/` 下，等价请求共用同一个输出：两次调用若有重叠的宽度，就共用那些派生结果。编辑器检查只报告诊断信息，与 `resize-image` 相同。
 
 Example - 按两个宽度生成派生结果：
-''',
-  'Example - 把最宽的那个派生结果记为页面的社交图片：',
-  '',
+
+```typst site
+#import "@tola/image:0.0.0": image-srcset
+#let photo = image-srcset("assets/logo.png", widths: (2, 4))
+#assert.eq(photo.width, 4)
+#assert(photo.srcset.ends-with(" 4w"))
+```
+
+Example - 把最宽的那个派生结果记为页面的社交图片：
+
+```typst site
+#import "@tola/image:0.0.0": image-srcset
+#let photo = image-srcset("assets/logo.png", widths: (2, 4))
+#document("index.html")[
+  #html.elem("meta", attrs: (property: "og:image", content: photo.url))
 ]
+```
 
-[exports.image-srcset.parameters]
+### `source`
 
-source = "相对本次调用的路径字符串、已解析的路径，或原始图像字节。"
+相对本次调用的路径字符串、已解析的路径，或原始图像字节。
 
-background = "不透明的颜色；编码前把透明区域合成到它上面。"
+### `background`
 
-format = "输出格式，取 `auto`、`jpg`（也可写 `jpeg`）、`png` 或 `webp`；默认 `webp`。"
+不透明的颜色；编码前把透明区域合成到它上面。
 
-quality = "JPEG/WebP 质量为 0 到 100，默认 75；`none` 表示无损 WebP。PNG 忽略它。"
+### `format`
 
-widths = "`auto`（默认，采用源图自身的宽度），或要生成的像素宽度列表；列表按升序排列并去掉重复值。"
+输出格式，取 `auto`、`jpg`（也可写 `jpeg`）、`png` 或 `webp`；默认 `webp`。
 
-[exports.img]
+### `quality`
 
-summary = [
-  '''
+JPEG/WebP 质量为 0 到 100，默认 75；`none` 表示无损 WebP。PNG 忽略它。
+
+### `widths`
+
+`auto`（默认，采用源图自身的宽度），或要生成的像素宽度列表；列表按升序排列并去掉重复值。
+
+## `img`
+
 把一张图片按多个宽度放进页面，生成响应式 `img`。
 
 `source` 的行为与 `resize-image` 相同。`widths` 为 `auto`（默认，采用源图自身宽度），或要生成的像素宽度列表；`sizes` 说明这个元素在页面上占多宽，默认 `100vw`，即浏览器的假设。元素不是通栏时，请传入你布局预留的宽度，例如 `"(max-width: 760px) 100vw, 720px"`。SVG 源图同样会被拒绝；显示矢量请用 `image()`，需要位图请用带明确位图格式的 `resize-image`。
@@ -132,25 +257,55 @@ summary = [
 这个元素只用于 HTML：请从 HTML 文档里调用；分页文档请改用 `image`。
 
 Example - 一张图片给出两个宽度：
-''',
-  'Example - 最多 720 像素宽的布局，首屏图片优先加载：',
-  '',
+
+```typst site
+#import "@tola/image:0.0.0": img
+#document("index.html")[#img("assets/logo.png", widths: (2, 4), alt: "Logo")]
+```
+
+Example - 最多 720 像素宽的布局，首屏图片优先加载：
+
+```typst site
+#import "@tola/image:0.0.0": img
+#document("index.html")[
+  #img(
+    "assets/logo.png",
+    widths: (2, 4),
+    alt: "Logo",
+    sizes: "(max-width: 760px) 100vw, 720px",
+    attrs: (loading: "eager", fetchpriority: "high"),
+  )
 ]
+```
 
-[exports.img.parameters]
+### `alt`
 
-alt = "替代文本；省略即写出空字符串，把图片标记为装饰。"
+替代文本；省略即写出空字符串，把图片标记为装饰。
 
-attrs = "其余原样写出的 HTML 属性；不能包含这个函数独占的属性。"
+### `attrs`
 
-background = "不透明的颜色；编码前把透明区域合成到它上面。"
+其余原样写出的 HTML 属性；不能包含这个函数独占的属性。
 
-format = "输出格式，取 `auto`、`jpg`（也可写 `jpeg`）、`png` 或 `webp`；默认 `webp`。"
+### `background`
 
-source = "相对本次调用的路径字符串、已解析的路径，或原始图像字节。"
+不透明的颜色；编码前把透明区域合成到它上面。
 
-quality = "JPEG/WebP 质量为 0 到 100，默认 75；`none` 表示无损 WebP。PNG 忽略它。"
+### `format`
 
-sizes = "这个元素在页面上占多宽的 CSS 描述，默认 `100vw`。"
+输出格式，取 `auto`、`jpg`（也可写 `jpeg`）、`png` 或 `webp`；默认 `webp`。
 
-widths = "`auto`（默认，采用源图自身的宽度），或要生成的像素宽度列表。"
+### `source`
+
+相对本次调用的路径字符串、已解析的路径，或原始图像字节。
+
+### `quality`
+
+JPEG/WebP 质量为 0 到 100，默认 75；`none` 表示无损 WebP。PNG 忽略它。
+
+### `sizes`
+
+这个元素在页面上占多宽的 CSS 描述，默认 `100vw`。
+
+### `widths`
+
+`auto`（默认，采用源图自身的宽度），或要生成的像素宽度列表。

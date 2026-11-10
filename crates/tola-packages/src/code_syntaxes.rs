@@ -11,6 +11,9 @@ pub(super) fn files() -> Dict {
 
 /// The built-in syntax name for a source-code label.
 #[func]
-pub(super) fn tola_code_language(language: Str) -> Str {
+pub(super) fn tola_code_language(
+    /// The source-code label to look up.
+    language: Str,
+) -> Str {
     tola_highlight::code_language(language.as_str()).into()
 }

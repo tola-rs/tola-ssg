@@ -1,11 +1,27 @@
 # Release archives: one executable at the archive root, extraction, and file digests.
 
-# Run tar and fail with its stderr; both archive directions share this one command.
-def run-tar [arguments: list<string>] {
-    let result = (^tar ...$arguments | complete)
-    if $result.exit_code != 0 {
-        error make { msg: $"tar failed \(($result.exit_code)\): ($result.stderr | str trim)" }
+# ZIP needs bsdtar. Windows ships it, but Git Bash can put GNU tar first on PATH.
+def run-tar [archive: string, flags: string, ...operands: string]: nothing -> string {
+    let tar = if $nu.os-info.name == 'windows' {
+        $env.SystemRoot | path join 'System32' 'tar.exe'
+    } else if ($archive | str ends-with '.zip') {
+        'bsdtar'
+    } else {
+        'tar'
     }
+    let result = (run-external $tar $flags $archive ...$operands | complete)
+    if $result.exit_code != 0 {
+        error make { msg: $"($archive | path basename): tar failed \(($result.exit_code)\): ($result.stderr | str trim)" }
+    }
+    $result.stdout
+}
+
+export def archive-members [archive: string]: nothing -> list<string> {
+    run-tar $archive '-tf' | lines
+}
+
+export def create-tar-gz [archive: string, directory: string, members: list<string>]: nothing -> nothing {
+    run-tar $archive '-czf' '-C' $directory ...$members | ignore
 }
 
 # Write source as the only file in archive, named after the target's binary.
@@ -19,9 +35,9 @@ export def create-archive [source: string, archive: string, target: record] {
         cp $source ($stage | path join $binary)
         if ($target | get system) == 'windows' {
             # bsdtar chooses the zip format from the archive extension.
-            run-tar [-a -cf $archive -C $stage $binary]
+            run-tar $archive '-acf' '-C' $stage $binary | ignore
         } else {
-            run-tar [-czf $archive -C $stage $binary]
+            create-tar-gz $archive $stage [$binary]
         }
     } finally {
         rm --recursive --force $stage
@@ -31,12 +47,11 @@ export def create-archive [source: string, archive: string, target: record] {
 # Extract the target's binary from archive into directory.
 export def extract-archive [archive: string, directory: string, target: record] {
     let binary = ($target | get binary)
-    if not ($directory | path exists) { mkdir $directory }
-    if ($target | get system) == 'windows' {
-        run-tar [-xf $archive -C $directory $binary]
-    } else {
-        run-tar [-xzf $archive -C $directory $binary]
+    if (archive-members $archive) != [$binary] {
+        error make { msg: $"($archive | path basename) must contain only ($binary) at its root" }
     }
+    if not ($directory | path exists) { mkdir $directory }
+    run-tar $archive '-xf' '-C' $directory $binary | ignore
 }
 
 # The SHA-256 digest of one file as lowercase hexadecimal.

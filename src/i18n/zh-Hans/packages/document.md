@@ -1,30 +1,43 @@
-# Simplified-Chinese documentation of `@tola/document`. English stays authoritative in the
-# package's own Typst sources; a unit here overrides one of them.
+# `@tola/document`
 
-overview = '''
 你在构建的这篇文档、它的标题，以及你写下的引用
 
 这个包回答三个问题。`current-document()` 说明一次调用属于哪篇文档，`headings()` 列出该文档的标题，`references()` 列出 Bundle 写下、并真正输出的链接与引用。读取文档需要文档上下文：请在 `document(…)` 正文里的 `context` 中调用。渲染进同一篇文档的多个源共享同一份身份，单个源自身的身份则属于 `@tola/source`。
-'''
 
-[exports.current-document]
+## `current-document`
 
-summary = [
-  '''
 输出中包含这次调用的文档，它的 `output`、`route` 与 `location`。
 
 `output` 是文档在 Bundle 中的输出路径，例如 `notes/index.html`。`route` 是它可达的站点根 route，尚未套用部署路径。`location` 是外层文档元素自身的 location，可以直接交给 `link` 或某个查询。请在 `context` 中调用。在 `document(…)` 正文之外调用会报错。渲染进同一篇文档的两个源得到同一篇文档。
 
 Example - 识别所在的文档：
-''',
-  'Example - 把查询限定到所在的文档：',
-  '',
+
+```typst
+#import "@tola/document:0.0.0": current-document
+#document("index.html")[
+  #context {
+    let document = current-document()
+    assert.eq(document.output, "index.html")
+    assert.eq(document.route, "/")
+  }
 ]
+```
 
-[exports.references]
+Example - 把查询限定到所在的文档：
 
-summary = [
-  '''
+```typst
+#import "@tola/document:0.0.0": current-document
+#document("index.html")[
+  = Intro
+  #context {
+    let sections = query(selector(heading).within(current-document().location))
+    assert.eq(sections.len(), 1)
+  }
+]
+```
+
+## `references`
+
 你在 Bundle 中写下、并真正作为链接输出的引用，按 Bundle 顺序。
 
 请在 `context` 中调用。一条引用是否计入由 show rule 之后的结果决定：被 show rule 换成纯文本或直接写出的 HTML 的链接不计入，由 show rule 产生并真正输出的链接取代它计入。每篇文档提供最外层的这类 `link` 和 `ref`，再对这些引用应用所有传入的过滤条件。指向相同目标的不同引用仍各占一条记录。
@@ -69,25 +82,130 @@ URL 的 `fragment` 经过百分号解码供展示；原生目标的 anchor 保�
 | `ambiguous-label` | 多个元素共用一个 label |
 
 Example - 列出链接到当前页面的来源页面：
-''',
-  'Example - 只对准一个标题，而不是整篇文档：',
-  'Example - 读取写在一篇文档正文里的引用：',
-  'Example - 选取 A 正文中指向 B 章节内部原生目标的引用：',
-  'Example - 选择多个目标，或区域内部的标题：',
-  '',
+
+```typst
+#import "@tola/address:0.0.0": output-url
+#import "@tola/document:0.0.0": references
+
+#let guide-output = "guide/index.html"
+#let install-output = "guide/install/index.html"
+
+#document(guide-output, title: [Guide])[
+  #html.main[#link(output-url(install-output))[Install]] <body>
 ]
 
-[exports.references.parameters]
+#document(install-output, title: [Install])[
+  #html.main[Install] <body>
+  #context {
+    let incoming = references(to: auto, from-within: <body>)
+    assert.eq(incoming.len(), 1)
+    assert.eq(incoming.first().document.output, guide-output)
+    for reference in incoming [
+      #link(reference.document.location)[From #reference.document.route]
+    ]
+  }
+]
+```
 
-from = "选中元素所在的原生文档，或 `none`（默认，所有文档）。"
-from-within = "包含引用出现位置的选中祖先区域，或 `none`（默认，所有区域）。"
-to = "引用指向的选中原生 output 或元素，或 `none`（默认，所有目标）。"
-to-within = "包含已知原生目标的选中祖先区域，或 `none`（默认，所有区域）。"
+Example - 只对准一个标题，而不是整篇文档：
 
-[exports.headings]
+```typst
+#import "@tola/address:0.0.0": output-url
+#import "@tola/document:0.0.0": references
 
-summary = [
-  '''
+#let output = "guide/install/index.html"
+
+#document(output, title: [Install])[
+  #link(<intro>)[Jump to the introduction]
+  #link(output-url(output))[Whole page]
+  = Introduction <intro>
+  #context {
+    let intro = query(<intro>).first().location()
+    assert.eq(references(to: intro).len(), 1)
+    assert.eq(references(to: intro).first().target.fragment, "intro")
+  }
+]
+```
+
+Example - 读取写在一篇文档正文里的引用：
+
+```typst
+#import "@tola/document:0.0.0": references
+
+#document("guide/index.html", title: [Guide])[
+  #html.main[#link("https://typst.app/")[Typst]] <body>
+  #context {
+    let written = references(from: auto, from-within: <body>)
+    assert.eq(written.len(), 1)
+    assert.eq(written.first().resolution, "external")
+  }
+]
+```
+
+Example - 选取 A 正文中指向 B 章节内部原生目标的引用：
+
+```typst
+#import "@tola/document:0.0.0": references
+#document("a.html")[
+  #html.main[
+    #link(<detail>)[Detail]
+    #link(<chapter>)[Chapter]
+  ] <a-body>
+  #context {
+    let found = references(
+      from: <a>, from-within: <a-body>,
+      to: <b>, to-within: <chapter>,
+    )
+    assert.eq(found.len(), 1)
+  }
+] <a>
+#document("b.html")[
+  #html.section[
+    = Detail <detail>
+  ] <chapter>
+] <b>
+```
+
+Example - 选择多个目标，或区域内部的标题：
+
+```typst
+#import "@tola/document:0.0.0": references
+#document("index.html")[
+  #link(<first>)[First]
+  #link(<second>)[Second]
+  #context {
+    let targets = selector(<first>).or(<second>)
+    assert.eq(references(from: auto, to: targets).len(), 2)
+    let topics = selector(heading).within(<topics>)
+    assert.eq(references(from: auto, to: topics).len(), 2)
+  }
+]
+#document("topics.html")[
+  #html.section[
+    = First <first>
+    = Second <second>
+  ] <topics>
+]
+```
+
+### `from`
+
+选中元素所在的原生文档，或 `none`（默认，所有文档）。
+
+### `from-within`
+
+包含引用出现位置的选中祖先区域，或 `none`（默认，所有区域）。
+
+### `to`
+
+引用指向的选中原生 output 或元素，或 `none`（默认，所有目标）。
+
+### `to-within`
+
+包含已知原生目标的选中祖先区域，或 `none`（默认，所有区域）。
+
+## `headings`
+
 当前文档的标题，按文档顺序。
 
 每个标题都会列出，包括 `outlined: false` 排除在 Typst `outline()` 之外的标题。没有任何标题的文档返回空数组。
@@ -112,11 +230,39 @@ summary = [
 `location` 就是传给 `link()` 的值；建立链接会让 Typst 为该标题生成 anchor。带 label 的标题用那个 label 作为 anchor；否则 Typst 生成 `loc-N`。Typst 按需分配 anchor，所以没有任何链接指向的标题，在导出的 HTML 里没有 anchor id。请在 `context` 中调用；返回的每个 location 都属于本次编译。
 
 Example - 链接到第 2 层为止、进入 outline 的标题：
-''',
-  'Example - 看 `nesting` 与 `label` 如何跟随 outline 树：',
-  '',
+
+```typ
+#import "@tola/document:0.0.0": headings
+#document("index.html")[
+  #context {
+    let sections = headings(depth: 2).filter(section => section.outlined)
+    assert.eq(sections.map(section => section.text), ("Introduction", "Details"))
+    for section in sections [#link(section.location, section.text)]
+  }
+  = Introduction
+  == Details
+  === Deep section
+  #heading(outlined: false)[Hidden section]
 ]
+#document("other.html")[= Another document]
+```
 
-[exports.headings.parameters]
+Example - 看 `nesting` 与 `label` 如何跟随 outline 树：
 
-depth = "`none` 列出所有标题，传正整数则只保留解析后 `level` 不超过该值的标题。这里比较的是 `level`，不是声明层级，所以在 `set heading(offset: …)` 下写成 `==` 的标题可能被 `depth: 2` 排除。"
+```typst
+#import "@tola/document:0.0.0": headings
+#document("index.html")[
+  = Intro <intro>
+  #heading(level: 3, outlined: false)[Aside]
+  == Detail
+  #context {
+    let sections = headings()
+    assert.eq(sections.map(section => section.label), (<intro>, none, none))
+    assert.eq(sections.map(section => section.nesting), (1, none, 2))
+  }
+]
+```
+
+### `depth`
+
+`none` 列出所有标题，传正整数则只保留解析后 `level` 不超过该值的标题。这里比较的是 `level`，不是声明层级，所以在 `set heading(offset: …)` 下写成 `==` 的标题可能被 `depth: 2` 排除。

@@ -36,9 +36,6 @@
 ///   #raw("(defun twice (x) (* x 2))", lang: code-language("sbcl"))
 /// ]
 /// ```
-///
-/// - language (str): the source-code label to look up.
-/// -> str
 #import "@tola/host:0.0.0": code-language
 
 /// Render a raw element as code, keeping Typst's own highlighting.

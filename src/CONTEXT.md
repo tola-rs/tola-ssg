@@ -22,7 +22,7 @@
 ## Presentation
 
 - `terminal/` renders diagnostics, progress, the development view, help documents, and pagers. Libraries never write to it directly.
-- `help/` composes `tola help` pages from configuration and package documentation without loading a site; `i18n/` holds the `zh-Hans` translations.
+- `help/` composes `tola help` pages from configuration and package documentation without loading a site; `i18n/` holds Markdown translations by configuration table and package. Help uses declaration names to find translated prose and reads the source documentation for missing entries.
 - `terminal/path.rs` layers invocation-relative display over `tola_diagnostic::display_path`, the one site-path renderer.
 
 ## Configuration and writes

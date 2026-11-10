@@ -48,7 +48,7 @@ def main [
             {
                 name: ($file.name | path basename)
                 path: $file.name
-                size: $file.size
+                size: ($file.size | into int)
                 sha256: (open --raw $file.name | hash sha256)
             }
         }
@@ -80,13 +80,25 @@ def main [
         $existing
     })
 
+    let release_url = $"($base)/releases/($release.id)"
     let remote = (release-assets $base $release.id $token)
+    if $release.target_commitish != $selected {
+        if ($remote | is-not-empty) {
+            fail $"draft ($tag) already has assets for ($release.target_commitish), expected ($selected)"
+        }
+        let updated = (http patch $release_url ({target_commitish: $selected, body: $body} | to json)
+            --headers (github-headers $token) --content-type 'application/json')
+        if $updated.target_commitish != $selected or $updated.draft != true {
+            fail $"could not set draft ($tag) to ($selected)"
+        }
+    }
     for asset in $assets {
         let found = ($remote | where name == $asset.name | get -o 0)
         if $found == null {
-            open --raw $asset.path
-            | http post $"($UPLOADS)/repos/($repository)/releases/($release.id)/assets?name=(url encode $asset.name)" --headers (github-headers $token) --content-type 'application/octet-stream'
-            | ignore
+            let query = ({name: $asset.name} | url build-query)
+            let upload = $"($UPLOADS)/repos/($repository)/releases/($release.id)/assets?($query)"
+            let bytes = (open --raw $asset.path | into binary)
+            http post $upload $bytes --headers (github-headers $token) --content-type 'application/octet-stream' | ignore
         } else if $found.size != $asset.size {
             fail $"remote ($asset.name) is ($found.size) bytes, expected ($asset.size)"
         }
@@ -107,7 +119,7 @@ def main [
     }
 
     let published = (
-        http patch $"($base)/releases/($release.id)" ({draft: false} | to json) --headers (github-headers $token) --content-type 'application/json'
+        http patch $release_url ({draft: false} | to json) --headers (github-headers $token) --content-type 'application/json'
     )
     if $published.draft != false { fail $"release ($tag) is still a draft" }
     print $published.html_url

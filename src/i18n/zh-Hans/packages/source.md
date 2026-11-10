@@ -1,16 +1,11 @@
-# Simplified-Chinese documentation of `@tola/source`. English stays authoritative in the package's
-# own Typst sources; a unit here overrides one of them.
+# `@tola/source`
 
-overview = '''
 发现的内容源、调用所在的源，以及 metadata 声明
 
 发现的源是输入，不等于发布的页面：同一个源可以出现在多篇文档里，也可以不发布。根程序读取稳定后的声明，校验所需 metadata，再决定输出哪些文档。metadata 字段和选择规则属于你的站点；Tola 不为 `title`、`draft` 或 `permalink` 赋予内置含义。
-'''
 
-[exports.all-sources]
+## `all-sources`
 
-summary = [
-  '''
 按完整内容路径的顺序列出构建所发现的全部内容源。
 
 发现会读取 `build.content-dir` 目录，并且只接受扩展名为小写 `.typ` 的文件。隐藏名称（以点开头）、符号链接和站点入口都会跳过。目录索引在这个顺序中也是普通源；需要编辑顺序时请显式排序。
@@ -29,31 +24,35 @@ summary = [
 这些分段只是 route 的建议。用 `@tola/address` 对分段做 slug 并连接起来，而文档实际以哪条 route 可达，由它自己的 output 决定。
 
 Example - 列出空站点的源：
-''',
-  '''
+
+```typst
+#import "@tola/source:0.0.0": all-sources
+#let sources = all-sources()
+#assert.eq(sources.len(), 0)
+```
+
 Example - 按路径选择并发布一个源：
 
 这里的 `content/guide/index.typ` 声明了 `title`，并包含页面正文。
-''',
-  '',
+
+```typst site
+#import "@tola/source:0.0.0": all-sources
+#let guide = all-sources().find(source => source.path == "guide/index.typ")
+#document("guide/index.html", format: "html", title: guide.meta.title)[
+  #include guide.file
 ]
+```
 
-[exports.current-source]
+## `current-source`
 
-summary = [
-  '''
 包含本次调用的源。
 
 记录带有 `id`、`file`、`path`、`filename` 与 `route-segments`，含义与 `all-sources()` 的记录完全相同。它不带 `meta`，并且可以在普通求值期间读取，不需要 `context`。
 
 请在内容源自身中调用它，再把记录传给模板。写在其他文件里的调用命名的是那个文件。在不属于内容源的文件（例如站点入口）中调用会报错。被渲染进另一篇文档的源仍然报告自己；改变的只是包含它的文档。
-''',
-]
 
-[exports.tola-meta]
+## `tola-meta`
 
-summary = [
-  '''
 声明本内容源的 metadata。
 
 这次调用就是声明：传入一个描述该源的字典。在普通求值中调用一次，可以直接调用，也可以通过从其他文件导入的函数调用。延迟到 `context` 或带 selector 的 show rule 中的调用不声明 metadata。作用于全文的 show wrapper 会在后续正文求值完成后运行，因此正文出错可能使其中的声明无法执行。已经执行过的声明会在后续出错时保留；源自身的错误仍会使构建失败，即使你的站点把这个源当作 draft 排除。
@@ -61,23 +60,29 @@ summary = [
 调用返回一个不可见的 `<tola-meta>` 标记，其中含有同一个字典，`query(<tola-meta>)` 能找到它。标记最终放在哪里都不影响结果：声明只来自这次调用。在同一个源里再调用一次会报错，因为一个源只声明一次 metadata。导入的函数为正在求值这次调用的源声明 metadata。被 import 或 include 的文件中的顶层声明仍然属于那些文件自身。
 
 Example - 声明 metadata 并读取它的标记：
-''',
-  '''
+
+```typst site
+#import "@tola/source:0.0.0": tola-meta
+#let marker = tola-meta((title: "Hello"))
+#assert.eq(marker.value, (title: "Hello"))
+#assert.eq(marker.label, <tola-meta>)
+```
+
 Example - 封装具名 metadata 字段：
-''',
-  '''
+
+```typst
+#import "@tola/source:0.0.0": tola-meta
+#let note(..fields) = tola-meta(fields.named())
+```
+
 将这段定义保存到 `site/metadata.typ`。在 `content/post.typ` 中用 `#import "../site/metadata.typ": note` 导入，再用 `#note(title: "Hello")` 声明。
-''',
-]
 
-[exports.tola-meta.parameters]
+### `payload`
 
-payload = "所声明的 metadata：描述该源的字典。"
+所声明的 metadata：描述该源的字典。
 
-[exports.parse-sources]
+## `parse-sources`
 
-summary = [
-  '''
 按 metadata 字段的声明解析源记录。
 
 传入 `all-sources()` 给出的完整记录，或它的子集，再传入一份 `@tola/schema` 声明，说明你期望的 metadata。不同源需要不同声明时，改为传入一个函数：它接收完整源记录，返回该源的声明。这次调用会先解析完全部记录再报告字段问题，包括使用不同声明的源。字段诊断会命名 metadata 校验失败的源；能确定字面量值的位置时指向该值，否则指向实际的 `tola-meta` 声明处，包括导入函数内部。没有声明 metadata 时指向源文件起点。wrapper 参数不会反向追踪到调用者。note 和嵌套原因保留为独立诊断提示。声明格式有误时，在调用处报告预期类型与实际类型；schema 函数返回无效声明时会命名它正在为哪个源选择声明。callback 执行出错时保留其自身位置并停止编译。完整源集合的校验放在根程序中：内容源自身求值时，声明可能还不完整。
@@ -89,12 +94,30 @@ summary = [
 Example - 在根程序中校验、选择并发布源：
 
 这个站点选择 `title` 与 `draft` 作为 metadata 字段，先校验全部源再排除 draft，并将文件布局的各分段做 slug，决定每篇文档的 output。
-''',
-  '',
-]
 
-[exports.parse-sources.parameters]
+```typst site
+#import "@tola/address:0.0.0": join-route, output-of, slugify
+#import "@tola/schema:0.0.0": non-empty, optional, schema, trim
+#import "@tola/source:0.0.0": all-sources, parse-sources
 
-sources = "要解析的记录，来自 `all-sources()` 或它的子集。"
+#let page-schema = schema((
+  title: non-empty(trim(str)),
+  draft: optional(bool, default: false),
+), unknown: "keep")
+#let pages = {
+  parse-sources(all-sources(), page-schema)
+    .filter(source => not source.meta.draft)
+}
+#for page in pages {
+  let output = output-of(join-route(page.route-segments.map(slugify)))
+  document(output, format: "html", title: page.meta.title)[#include page.file]
+}
+```
 
-schema = "metadata 声明，或接收每条完整源记录并返回其声明的函数。"
+### `sources`
+
+要解析的记录，来自 `all-sources()` 或它的子集。
+
+### `schema`
+
+metadata 声明，或接收每条完整源记录并返回其声明的函数。

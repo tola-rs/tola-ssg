@@ -806,7 +806,7 @@ mod tests {
 
     #[test]
     fn remote_collections_record_locks_and_invalidate_reuse() {
-        use std::io::{Read, Write};
+        use std::io::{BufRead, BufReader, Write};
         use std::net::TcpListener;
         use tola_input::{IconSource, InputScope, Sha256Digest};
 
@@ -818,8 +818,11 @@ mod tests {
         let server = std::thread::spawn(move || {
             for body in [bytes.as_slice(), changed.as_slice()] {
                 let (mut stream, _) = listener.accept().unwrap();
-                let mut request = [0; 4096];
-                stream.read(&mut request).unwrap();
+                assert!(
+                    BufReader::new(&stream)
+                        .lines()
+                        .any(|line| line.unwrap().is_empty())
+                );
                 write!(
                     stream,
                     "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",

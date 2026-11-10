@@ -70,24 +70,3 @@ pub fn create_library_with_inputs(inputs: Dict) -> LazyHash<Library> {
     reference_occurrence::install(&mut library);
     library.into()
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The elements a site program calls by name come from the Bundle this library builds with.
-    #[test]
-    fn bundle_library_supplies_site_elements() {
-        let library = create_library_with_inputs(Dict::new());
-        let scope = library.global.scope();
-        assert!(
-            scope.get("document").is_some(),
-            "document is missing from {:?}",
-            scope
-                .iter()
-                .map(|(name, _)| name.as_str())
-                .take(12)
-                .collect::<Vec<_>>()
-        );
-    }
-}

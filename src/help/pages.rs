@@ -16,7 +16,7 @@ use tola_packages::{ExportDeclaration, RelatedTarget, Signature};
 use super::documentation::Documentation;
 use crate::config::{DevConfig, DiagnosticsConfig, ServerConfig};
 use crate::help::model::{Anchor, HelpCategory, HelpPage, LinkTarget, PageId, anchor};
-use crate::i18n::{HelpLanguage, HelpText, PackageTranslations};
+use crate::i18n::{self, CONFIG_KEYS, CONFIG_USAGE, HelpLanguage, Translation};
 
 struct ConfigTable {
     section: &'static str,
@@ -128,8 +128,7 @@ pub(crate) fn render(markdown: &str, columns: Option<usize>, color: bool) -> Str
 
 fn overview_page(language: HelpLanguage) -> HelpPage {
     let id = PageId::Overview;
-    let text = |phrase| crate::i18n::text(language, phrase);
-    let mut markdown = format!("# Tola help\n\n{}\n", text(HelpText::HelpUsage));
+    let mut markdown = format!("# Tola help\n\n{}\n", i18n::overview(language));
     for (title, category) in [
         ("Configuration", HelpCategory::Config),
         ("Packages", HelpCategory::Packages),
@@ -240,16 +239,14 @@ fn table_page(target: &str, language: HelpLanguage) -> Result<HelpPage> {
         section: table.section.to_owned(),
     };
     let mut markdown = format!("# {} - configuration table\n", table.header());
-    let translations = crate::i18n::sections(language);
-    if let Some(documentation) = documented(table.section).map(|english| {
-        translations
-            .and_then(|tables| tables.documentation(table.section))
-            .unwrap_or(english)
-    }) {
+    let translation = i18n::config(language, table.section);
+    if let Some(documentation) = documented(table.section)
+        .map(|english| translation.and_then(Translation::intro).unwrap_or(english))
+    {
         markdown.push_str(&format!("\n{documentation}\n"));
     }
     if has_own_key(table.section) {
-        markdown.push_str(&declared_keys(table.section, translations));
+        markdown.push_str(&declared_keys(table.section, language));
     } else if child_tables(table.section).next().is_some() {
         markdown.push_str("\nConfigure this section through its child tables:\n");
         for child in child_tables(table.section) {
@@ -261,13 +258,13 @@ fn table_page(target: &str, language: HelpLanguage) -> Result<HelpPage> {
             let table = cross_reference(&header, &LinkTarget::Page(child_id));
             markdown.push_str(&format!(
                 "- {table} - {}\n",
-                child_description(child, translations)
+                child_description(child, language)
             ));
         }
     }
     if let Some(english) = section_help(table.section) {
-        let help = translations
-            .and_then(|tables| tables.help(table.section))
+        let help = translation
+            .and_then(|translation| translation.section(CONFIG_USAGE))
             .unwrap_or(english);
         markdown.push_str(&format!("\n{help}\n"));
     }
@@ -331,14 +328,11 @@ fn child_tables(section: &str) -> impl Iterator<Item = &'static ConfigTable> {
 }
 
 /// The one rendered line describing one child table: the documentation its own page opens with.
-fn child_description(
-    child: &ConfigTable,
-    translations: Option<&crate::i18n::SectionTranslations>,
-) -> String {
+fn child_description(child: &ConfigTable, language: HelpLanguage) -> String {
     let english = documented(child.section).expect("every table documents itself");
     one_line(
-        translations
-            .and_then(|tables| tables.documentation(child.section))
+        i18n::config(language, child.section)
+            .and_then(Translation::intro)
             .unwrap_or(english),
     )
 }
@@ -370,7 +364,8 @@ fn sole_child_table(section: &str) -> Option<&'static ConfigTable> {
 ///
 /// The meaning is the declaration's documentation, and one key is one rendered line: the page
 /// wraps it.
-fn declared_keys(section: &str, translations: Option<&crate::i18n::SectionTranslations>) -> String {
+fn declared_keys(section: &str, language: HelpLanguage) -> String {
+    let translation = i18n::config(language, section);
     let mut markdown = String::new();
     for path in documented_fields(section) {
         if let Some(child) = child_table(path) {
@@ -382,18 +377,15 @@ fn declared_keys(section: &str, translations: Option<&crate::i18n::SectionTransl
             );
             markdown.push_str(&format!(
                 "\n- {header} - {}",
-                child_description(child, translations)
+                child_description(child, language)
             ));
             continue;
         }
-        let name = path
-            .strip_prefix(section)
-            .unwrap_or(path)
-            .trim_start_matches('.');
+        let name = path.rsplit_once('.').map_or(path, |(_, name)| name);
         let english = documented(path).expect("the enumeration documents every field");
         let meaning = one_line(
-            translations
-                .and_then(|tables| tables.field(path))
+            translation
+                .and_then(|translation| translation.field(CONFIG_KEYS, name))
                 .unwrap_or(english),
         );
         markdown.push_str(&format!("\n- `{name}` - {meaning}"));
@@ -445,15 +437,15 @@ fn package_page(name: &str, requested: &[String], language: HelpLanguage) -> Res
             exports: names.clone(),
         }
     };
-    let translations = crate::i18n::package(language, &package.spec().name);
+    let translation = i18n::package(language, name);
     let import = format!("#import \"{}\": {imports}", package.spec());
     let mut text = format!(
         "# {target}\n\n## Import in Typst:\n\n{}",
         code_block("typst", &import)
     );
     if whole_package && let Some(overview) = package.overview() {
-        let overview = translations
-            .and_then(|translations| translations.overview())
+        let overview = translation
+            .and_then(Translation::intro)
             .unwrap_or(&overview);
         text.push_str(&format!("\n{overview}\n"));
     }
@@ -461,11 +453,8 @@ fn package_page(name: &str, requested: &[String], language: HelpLanguage) -> Res
     if whole_package {
         text.push_str("\n## Exports:\n\n");
         for export in &exports {
-            let localized = translations
-                .and_then(|translations| translations.summary_prose(&export.name))
-                .map(|prose| crate::i18n::localize_summary(&export.documentation.summary, prose));
-            let summary = localized
-                .as_deref()
+            let summary = translation
+                .and_then(|translation| translation.section(&export.name))
                 .map(summary_lead)
                 .or_else(|| export_summary(export));
             let name = named(
@@ -508,15 +497,13 @@ fn package_page(name: &str, requested: &[String], language: HelpLanguage) -> Res
         ));
         let parameters = match &export.declaration {
             ExportDeclaration::Function(signature) => {
-                parameter_sections(translations, &export.name, signature)
+                parameter_sections(translation, &export.name, signature)
             }
             ExportDeclaration::Value(_) => String::new(),
         };
-        let documentation = &export.documentation;
-        let localized = translations
-            .and_then(|translations| translations.summary_prose(&export.name))
-            .map(|prose| crate::i18n::localize_summary(&export.documentation.summary, prose));
-        let summary = localized.as_deref().unwrap_or(&documentation.summary);
+        let summary = translation
+            .and_then(|translation| translation.section(&export.name))
+            .unwrap_or(&export.documentation.summary);
         text.push_str(&parameters);
         if !summary.is_empty() {
             if !parameters.is_empty() {
@@ -545,7 +532,7 @@ fn declaration(declaration: &ExportDeclaration) -> String {
 /// each parameter named with the type it renders, then what the documentation says about it. The
 /// signature already shows which parameters are optional and which collect arguments.
 fn parameter_sections(
-    translations: Option<&PackageTranslations>,
+    translation: Option<&Translation>,
     export: &str,
     signature: &Signature,
 ) -> String {
@@ -565,8 +552,8 @@ fn parameter_sections(
                 "\n{}\n",
                 code_block("typst-code", &format!("type: {}", parameter.ty_spelling()))
             ));
-            let documentation = translations
-                .and_then(|translations| translations.parameter(export, &parameter.name))
+            let documentation = translation
+                .and_then(|translation| translation.field(export, &parameter.name))
                 .or(parameter.docs.as_deref());
             if let Some(documentation) = documentation {
                 text.push_str(&format!("\n{documentation}\n"));
@@ -784,39 +771,27 @@ mod tests {
     }
 
     #[test]
-    fn section_translations_stay_in_step() {
-        let tables = crate::i18n::sections(HelpLanguage::SimplifiedChinese)
-            .expect("the bundled tables include Simplified Chinese");
-        for table in TABLES {
-            let section = table.section;
-            assert_eq!(
-                documented(section).is_some(),
-                tables.documentation(section).is_some(),
-                "`{section}` documentation and its translation must both exist"
-            );
-            assert_eq!(
-                section_help(section).is_some(),
-                tables.help(section).is_some(),
-                "`{section}` help and its translation must both exist"
-            );
-            for path in documented_fields(section) {
-                if child_table(path).is_some() {
-                    continue;
-                }
-                assert!(tables.field(path).is_some(), "`{path}` has no translation");
-            }
-        }
-        for name in tables.section_names() {
+    fn config_translations_name_existing_tables_and_keys() {
+        for section in i18n::config_names() {
             assert!(
-                TABLES.iter().any(|table| table.section == name),
-                "`{name}` is not a configuration table"
+                TABLES.iter().any(|table| table.section == section),
+                "`{section}` is not a configuration table"
             );
-        }
-        for path in tables.field_paths() {
-            let shown = TABLES
-                .iter()
-                .any(|table| documented_fields(table.section).contains(&path));
-            assert!(shown, "`{path}` is not a key a table page documents");
+            let translation = i18n::config(HelpLanguage::SimplifiedChinese, section).unwrap();
+            for heading in translation.sections() {
+                assert!(
+                    matches!(heading, CONFIG_KEYS | CONFIG_USAGE),
+                    "`{section}` has an unknown translation heading `{heading}`"
+                );
+            }
+            let fields = documented_fields(section);
+            for name in translation.fields(CONFIG_KEYS) {
+                let path = format!("{section}.{name}");
+                assert!(
+                    fields.contains(&path.as_str()) && child_table(&path).is_none(),
+                    "`{path}` is not a key this table documents"
+                );
+            }
         }
     }
 

@@ -1,12 +1,9 @@
-# Simplified-Chinese documentation of `@tola/web`. English stays authoritative in the package's
-# own Typst sources; a unit here overrides one of them.
+# `@tola/web`
 
-overview = "纯文本、head 条目、社交卡片、feed 与 sitemap"
+纯文本、head 条目、社交卡片、feed 与 sitemap
 
-[exports.plain-text]
+## `plain-text`
 
-summary = [
-  '''
 读取字符串或你自己写下的内容里的文本。
 
 文本字符、符号字符、空格、raw 代码和弯引号自带文本。其他元素都取自己内容的文本，所以容器、格式、链接和数学都是透明的。metadata 不产生任何文本。文本取自你写下的内容：不运行 show rule，也不做排版。
@@ -16,60 +13,89 @@ summary = [
 这是通用文本工具。标题、metadata 和模板用它生成标题、描述和标签。这里保留导出是为了兼容；需要纯文本投影而不是 HTML 输出时，优先直接导入 `plain-text`。
 
 Example - 从字符串与内容中读取文本：
-''',
-  'Example - 不带文本的元素不产生文本：',
-  '',
-]
 
-[exports.plain-text.parameters]
+```typst
+#import "@tola/web:0.0.0": plain-text
+#assert.eq(plain-text("Guide"), "Guide")
+#assert.eq(plain-text([Hello, *world*!]), "Hello, world!")
+```
 
-value = "要读取的字符串或 Typst 内容。"
+Example - 不带文本的元素不产生文本：
 
-[exports.head-metadata]
+```typst
+#import "@tola/web:0.0.0": plain-text
+#let image = html.img(src: "/cover.png", alt: "Cover")
+#assert.eq(plain-text(image), "")
+```
 
-summary = [
-  '''
+### `value`
+
+要读取的字符串或 Typst 内容。
+
+## `head-metadata`
+
 文档的 head 条目，作为数组拼进 head。
 
 这些条目是字符集、viewport、标题和描述。head 由你的模板写入：把这些条目拼进 `html.head(...)`，文档自己的 metadata 单独处理。`+` 拼接数组，条目保持扁平且按顺序排列：
-''',
-  'Example - 省略标题与描述条目：',
-  '',
+
+```typst
+#import "@tola/site:0.0.0": site
+#import "@tola/web:0.0.0": canonical, head-metadata
+#let entries = head-metadata(site, title: "Guide") + canonical("https://example.test/guide/")
+#document("guide/index.html")[
+  #html.html[#html.head(entries.join()) #html.body[Guide]]
 ]
+```
 
-[exports.head-metadata.parameters]
+Example - 省略标题与描述条目：
 
-site = "默认值的来源，通常就是 `@tola/site` 提供的字典。"
+```typst
+#import "@tola/site:0.0.0": site
+#import "@tola/web:0.0.0": head-metadata
+#let entries = head-metadata(site, title: none, description: none)
+#assert.eq(entries.len(), 2)
+```
 
-charset = "文档的字符编码；除非你传入 `none`，否则写入该条目。"
+### `site`
 
-description = "`auto` 继承站点描述；`none` 或空字符串则不写入该条目。"
+默认值的来源，通常就是 `@tola/site` 提供的字典。
 
-title = "`auto` 继承站点标题；`none` 或空字符串则不写入该条目。"
+### `charset`
 
-viewport = "viewport meta 的内容；除非你传入 `none`，否则写入该条目。"
+文档的字符编码；除非你传入 `none`，否则写入该条目。
 
-[exports.canonical]
+### `description`
 
-summary = [
-  '''
+`auto` 继承站点描述；`none` 或空字符串则不写入该条目。
+
+### `title`
+
+`auto` 继承站点标题；`none` 或空字符串则不写入该条目。
+
+### `viewport`
+
+viewport meta 的内容；除非你传入 `none`，否则写入该条目。
+
+## `canonical`
+
 页面的 canonical 链接条目，作为数组拼进 head。
 
 一个页面只声明一个 canonical URL，这个条目就是 head 里的 `<link rel="canonical">`。
 
 Example - 声明页面的 canonical URL：
-''',
-  '',
-]
 
-[exports.canonical.parameters]
+```typst
+#import "@tola/web:0.0.0": canonical
+#let entries = canonical("https://example.test/guide/")
+#assert.eq(entries.len(), 1)
+```
 
-href = "页面的绝对 URL，协议必须是 `http` 或 `https`。"
+### `href`
 
-[exports.open-graph]
+页面的绝对 URL，协议必须是 `http` 或 `https`。
 
-summary = [
-  '''
+## `open-graph`
+
 页面的 Open Graph 条目，作为数组拼进 head。
 
 `title` 和 `url` 必填。`kind` 默认 `website`；`images` 可为 `none`，此时输出纯文本卡片，但不含协议要求的 `og:image`，不是完整的 Open Graph 对象。
@@ -77,60 +103,97 @@ summary = [
 可选文本非空时才会写入条目。
 
 Example - 声明页面的 Open Graph 条目：
-''',
-  '''
+
+```typst
+#import "@tola/web:0.0.0": open-graph
+#let entries = open-graph(
+  title: "Guide", kind: "website", url: "https://example.test/guide/",
+  images: ((url: "https://example.test/cover.png", alt: "Cover"),),
+)
+#assert.eq(entries.len(), 5)
+```
+
 Example - 声明纯文本卡片：
-''',
-  '',
-]
 
-[exports.open-graph.parameters]
+```typst
+#import "@tola/web:0.0.0": open-graph
+#let entries = open-graph(
+  title: "Guide", url: "https://example.test/guide/",
+)
+#assert.eq(entries.len(), 3)
+```
 
-title = "页面的标题。"
+### `title`
 
-kind = "页面的 Open Graph 类型，例如 `website` 或 `article`；默认为 `website`。"
+页面的标题。
 
-url = "页面的绝对 URL。"
+### `kind`
 
-images = "`none` 或非空的图片字典数组。`none` 不写入 `og:image`，输出纯文本卡片。每项必填绝对 HTTP(S) `url` 与非空白的 `alt`。可选字段为 `secure-url`（绝对 HTTPS URL）、`media-type`（例如 `image/png` 的字符串）、`width` 与 `height`（正的整数像素数）。可选字段接受 `none`；空白文本不写入条目。每张图片的条目保持在一起，图片按你给出的顺序排列。"
+页面的 Open Graph 类型，例如 `website` 或 `article`；默认为 `website`。
 
-description = "页面的描述；设置后才写入。"
+### `url`
 
-site-name = "站点名称；设置后才写入。"
+页面的绝对 URL。
 
-locale = "页面的 locale；设置后才写入。"
+### `images`
 
-[exports.twitter-card]
+`none` 或非空的图片字典数组。`none` 不写入 `og:image`，输出纯文本卡片。每项必填绝对 HTTP(S) `url` 与非空白的 `alt`。可选字段为 `secure-url`（绝对 HTTPS URL）、`media-type`（例如 `image/png` 的字符串）、`width` 与 `height`（正的整数像素数）。可选字段接受 `none`；空白文本不写入条目。每张图片的条目保持在一起，图片按你给出的顺序排列。
 
-summary = [
-  '''
+### `description`
+
+页面的描述；设置后才写入。
+
+### `site-name`
+
+站点名称；设置后才写入。
+
+### `locale`
+
+页面的 locale；设置后才写入。
+
+## `twitter-card`
+
 页面的 Twitter 卡片条目，作为数组拼进 head。
 
 `card` 和 `title` 总是写入，`summary_large_image` 卡片还需要 `image`。可选文本非空时才会写入条目。
 
 Example - 声明大图卡片：
-''',
-  '',
-]
 
-[exports.twitter-card.parameters]
+```typst
+#import "@tola/web:0.0.0": twitter-card
+#let entries = twitter-card(
+  card: "summary_large_image", title: "Guide",
+  image: (url: "https://example.test/cover.png", alt: "Cover"),
+)
+#assert.eq(entries.len(), 4)
+```
 
-card = "卡片类型：`\"summary\"` 或 `\"summary_large_image\"`。"
+### `card`
 
-title = "页面的标题。"
+卡片类型：`"summary"` 或 `"summary_large_image"`。
 
-image = "大图卡片必填：一个 `(url:, alt:)` 字典。"
+### `title`
 
-description = "页面的描述；设置后才写入。"
+页面的标题。
 
-handle = "站点的 handle；设置后才写入。"
+### `image`
 
-creator = "创作者的 handle；设置后才写入。"
+大图卡片必填：一个 `(url:, alt:)` 字典。
 
-[exports.feed]
+### `description`
 
-summary = [
-  '''
+页面的描述；设置后才写入。
+
+### `handle`
+
+站点的 handle；设置后才写入。
+
+### `creator`
+
+创作者的 handle；设置后才写入。
+
+## `feed`
+
 通过 metadata 声明一个 feed 输出。把返回的内容放进根程序：声明只在根程序里生效。站点需要 `site.origin`，因为 feed 的每个地址都是绝对地址；feed 标题从 `title` 或 `site.title` 取得，并且不能只含空白。
 
 每个条目都需要 `target` 和 `published`，还可以设置 `id`、`title`、`updated`、`summary`、`content` 和 `authors`。`target` 是输出路径、`(output:, fragment:)` 字典、label 或 location；条目会链接到对应文档，并带上 target 所指的 fragment。`id` 为 `auto` 或省略时取解析后的目标 URL，`title` 为 `auto` 或省略时取目标文档自己的标题。
@@ -160,40 +223,101 @@ summary = [
 `published` 和 `updated` 接受含完整日历日期的原生 datetime，或带时区的严格 RFC 3339 字符串，使用与 `@tola/schema` 的 `timestamp` 相同的解析器。原生值按 UTC 解释，只有日期而没有时间时取午夜。纯日期字符串、纯时间值、首尾空白和闰秒都会被拒绝。schema 返回时间戳记录时，传入它的 `.rfc3339`。feed 格式化保留数值时区偏移和至多九位小数；RSS 日期只保留整秒。
 
 Example - 发布只有摘要、没有全文正文的 RSS：
-''',
-  'Example - 发布摘要与 article 的完整 HTML，排除导航：',
-  '''
+
+```typst
+#import "@tola/web:0.0.0": feed
+#document("notes/index.html", title: [A note])[An idea and its explanation.]
+#feed(
+  title: "Notes",
+  entries: ((
+    id: "urn:notes:first",
+    target: "notes/index.html",
+    published: datetime(year: 2026, month: 9, day: 1),
+    summary: "An idea in brief.",
+  ),),
+)
+```
+
+Example - 发布摘要与 article 的完整 HTML，排除导航：
+
+```typst
+#import "@tola/web:0.0.0": feed
+#let output = "notes/index.html"
+#document(output, title: [A note])[
+  #html.html[
+    #html.head(html.title("A note"))
+    #html.body[
+      #html.nav[Site navigation]
+      #html.article(id: "post-body")[
+        #title()
+        = A useful idea
+        Keep this paragraph in the feed.
+      ]
+    ]
+  ]
+]
+#feed(
+  title: "Notes",
+  entries: ((
+    id: "urn:notes:first",
+    target: output,
+    published: datetime(year: 2026, month: 9, day: 1),
+    summary: [A useful idea in brief.],
+    content: (document: output, id: "post-body"),
+  ),),
+)
+```
+
 站点把源 metadata 映射到每个条目：`feed-summary` 对应 `summary`，`feed-content` 对应 `content`。条目没有 `content` 就不发布全文正文，因此只给摘要就是摘要条目；要把整页写进正文，就把文档选择传给 `content`。
 
 Example - 给页面单独编写一个便于 feed 阅读器使用的正文：
 
 把以下声明放在 `content/note.typ` 开头，后面接页面的普通正文。设置 `site.origin` 与 `site.title`，让每个条目都有绝对地址和非空标题。下面的 `feed-content` 只使用支持的文本片段元素。
-''',
-  '',
-]
 
-[exports.feed.parameters]
+```typst site
+#import "@tola/source:0.0.0": tola-meta
+#tola-meta((
+  title: "A note",
+  published: datetime(year: 2026, month: 9, day: 1),
+  feed-summary: [An idea in _brief_.],
+  feed-content: [*The full feed text.* Read #link("https://example.test/more/")[more].],
+))
+```
 
-output = "输出文件，相对站点输出根目录；`auto` 跟随 `format`：`rss` 取 `feed.xml`，`atom` 取 `atom.xml`，`json` 取 `feed.json`。"
+### `output`
 
-format = "feed 格式：`rss`、`atom` 或 `json`。"
+输出文件，相对站点输出根目录；`auto` 跟随 `format`：`rss` 取 `feed.xml`，`atom` 取 `atom.xml`，`json` 取 `feed.json`。
 
-id = "feed 标识符；`auto` 取 feed 自己的绝对 URL。"
+### `format`
 
-title = "feed 标题；`auto` 取站点标题。"
+feed 格式：`rss`、`atom` 或 `json`。
 
-description = "feed 描述；`auto` 取站点描述。"
+### `id`
 
-language = "feed 语言；`auto` 取站点的 language tag。"
+feed 标识符；`auto` 取 feed 自己的绝对 URL。
 
-authors = "feed 作者；`auto` 取站点的作者。"
+### `title`
 
-entries = "要发布的条目，按你给出的顺序。"
+feed 标题；`auto` 取站点标题。
 
-[exports.sitemap]
+### `description`
 
-summary = [
-  '''
+feed 描述；`auto` 取站点描述。
+
+### `language`
+
+feed 语言；`auto` 取站点的 language tag。
+
+### `authors`
+
+feed 作者；`auto` 取站点的作者。
+
+### `entries`
+
+要发布的条目，按你给出的顺序。
+
+## `sitemap`
+
 通过 metadata 声明一个 sitemap 输出。和 `feed` 一样，把返回的内容放进根程序。
 
 每个 target 都指向整篇文档。解析到元素的 target（文档内的 label 或 location，或写有 `fragment` 的字典）会直接报错，同一个 target 出现两次也会报错。列出的 URL 都是绝对 URL，因此站点需要 `site.origin`。
@@ -201,12 +325,21 @@ summary = [
 `lastmod` 接受原生日期、严格的 `YYYY-MM-DD` 字符串，或 `@tola/schema` 接受的时间戳输入。日期保持为纯日期；原生 datetime 按 UTC 解释，时间戳字符串保留数值时区偏移，格式化后至多保留九位小数。date 和 timestamp schema 共用这些校验；解析得到时间戳记录时，传入它的 `.rfc3339`。
 
 Example - 选择整篇文档，并为其中一篇注明日期：
-''',
-  '',
-]
 
-[exports.sitemap.parameters]
+```typst
+#import "@tola/web:0.0.0": sitemap
+#document("index.html")[Home]
+#document("guide/index.html")[Guide]
+#sitemap(targets: (
+  "index.html",
+  (target: "guide/index.html", lastmod: datetime(year: 2026, month: 9, day: 1)),
+))
+```
 
-output = "输出文件，相对站点输出根目录。"
+### `output`
 
-targets = "sitemap 列出的文档，每一项是输出路径、label、location，或为其注明日期的 `(target:, lastmod:)` 字典。"
+输出文件，相对站点输出根目录。
+
+### `targets`
+
+sitemap 列出的文档，每一项是输出路径、label、location，或为其注明日期的 `(target:, lastmod:)` 字典。

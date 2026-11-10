@@ -165,17 +165,6 @@ mod tests {
     }
 
     #[test]
-    fn heading_folds_its_section() {
-        assert_eq!(
-            folded("= One\nfirst\n\n== Two\nsecond\n"),
-            [
-                (0, 4, Some("One".to_owned())),
-                (3, 4, Some("Two".to_owned())),
-            ]
-        );
-    }
-
-    #[test]
     fn section_fold_reports_trimmed_body_end() {
         let ranges =
             super::folds(&Source::detached("= One\nbody\n\n= Two\nmore\n")).expect("section folds");

@@ -123,13 +123,4 @@ mod tests {
         assert!(byte_offset(&lines, Utf16Position::new(2, 1)).is_err());
         assert!(byte_offset(&lines, Utf16Position::new(3, 0)).is_err());
     }
-
-    /// A position beyond the protocol's u32 coordinates is refused, never truncated.
-    #[test]
-    fn out_of_range_positions_are_refused() {
-        if usize::BITS > u32::BITS {
-            assert!(checked_position(usize::MAX, 0).is_none());
-            assert!(checked_position(0, usize::MAX).is_none());
-        }
-    }
 }

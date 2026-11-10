@@ -60,24 +60,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn written_address_reads_back() {
-        let directory = tempfile::tempdir().unwrap();
-        let written = DevServerAddress::write(directory.path(), "http://127.0.0.1:5277").unwrap();
-        assert_eq!(
-            DevServerAddress::read(directory.path()).as_deref(),
-            Some("http://127.0.0.1:5277")
-        );
-        drop(written);
-    }
-
-    #[test]
-    fn drop_withdraws_the_written_address() {
-        let directory = tempfile::tempdir().unwrap();
-        drop(DevServerAddress::write(directory.path(), "http://127.0.0.1:5277").unwrap());
-        assert_eq!(DevServerAddress::read(directory.path()), None);
-    }
-
-    #[test]
     fn later_writer_survives_earlier_drop() {
         let directory = tempfile::tempdir().unwrap();
         let earlier = DevServerAddress::write(directory.path(), "http://127.0.0.1:5277").unwrap();
@@ -88,6 +70,7 @@ mod tests {
             Some("http://127.0.0.1:5278")
         );
         drop(later);
+        assert_eq!(DevServerAddress::read(directory.path()), None);
     }
 
     /// A record another version wrote, or one this version cannot read, names no server.

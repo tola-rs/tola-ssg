@@ -194,39 +194,12 @@ mod tests {
     use std::path::Path;
     use std::sync::Arc;
     use tempfile::TempDir;
-    use typst::diag::{SourceDiagnostic, SourceResult, Tracepoint};
-    use typst::engine::Engine;
-    use typst::foundations::{Str, func};
 
     /// A fontless world with a task-local cache for one test source.
     fn world(root: &Path, file: &Path) -> crate::world::WorldBuilder {
         TypstWorld::builder(file, root)
             .with_local_cache()
             .no_fonts()
-    }
-
-    #[func]
-    fn spanned_diagnostic(engine: &mut Engine, fail: bool) -> SourceResult<Str> {
-        // Construct spans without consulting the World: only diagnostic
-        // resolution may attempt to read these files, including the missing trace source.
-        let span = |path: &str| {
-            typst::syntax::Source::new(file_id(path), "diagnostic only".into())
-                .root()
-                .span()
-        };
-        let diagnostic = if fail {
-            SourceDiagnostic::error(span("primary.typ"), "diagnostic evidence")
-        } else {
-            SourceDiagnostic::warning(span("primary.typ"), "diagnostic evidence")
-        }
-        .with_spanned_hint("related source", span("hint.typ"))
-        .with_tracepoint(Tracepoint::Call(None), span("missing-trace.typ"));
-        if fail {
-            Err(vec![diagnostic].into())
-        } else {
-            engine.sink.warn(diagnostic);
-            Ok(Str::new())
-        }
     }
 
     #[test]

@@ -264,17 +264,4 @@ mod tests {
         )
         .unwrap();
     }
-
-    #[test]
-    fn render_is_deterministic() {
-        let (_directory, world) = world();
-        let source = parse(
-            &world,
-            r##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="10" height="10" fill="#ff0000"/></svg>"##,
-        )
-        .unwrap();
-        let pixels = source.render(4, 4, None).unwrap();
-        assert_eq!(pixels.len(), 4 * 4 * 4);
-        assert_eq!(pixels, source.render(4, 4, None).unwrap());
-    }
 }

@@ -486,7 +486,7 @@ pub(super) fn compile_site_program(
             dependencies,
             source_analysis,
             site_program,
-            configured_assets: configured_assets,
+            configured_assets,
             icons,
             images,
             seo,

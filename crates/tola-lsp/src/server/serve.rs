@@ -171,7 +171,7 @@ where
                 JobOwner::of_analysis,
                 |job| match job {
                     AnalysisJob::Request(request) => {
-                        crate::compiler::analyze(&mut disk, &mut graphs, request)
+                        crate::compiler::analyze(&mut disk, &mut graphs, *request)
                     }
                     AnalysisJob::ReleaseIdle => {
                         disk = Default::default();
@@ -268,7 +268,7 @@ where
                     compiling = true;
                 }
                 if !analyzing && let Some(request) = connection.next_analysis() {
-                    lanes.dispatch_analysis(AnalysisJob::Request(request))?;
+                    lanes.dispatch_analysis(AnalysisJob::Request(Box::new(request)))?;
                     analyzing = true;
                 }
             }

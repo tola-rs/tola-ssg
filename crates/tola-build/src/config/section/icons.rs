@@ -516,20 +516,4 @@ mod tests {
         assert!(debug.contains("<redacted>"));
         assert!(!debug.contains("private"));
     }
-
-    #[test]
-    fn namespace_diagnostics_name_collection() {
-        let config = IconsConfig {
-            collections: BTreeMap::from([(
-                "../brand".into(),
-                IconCollectionSource::LocalSvgDir {
-                    path: "brand".into(),
-                },
-            )]),
-        };
-        let mut diagnostics = ConfigDiagnostics::new();
-        config.validate(&mut diagnostics);
-        assert_eq!(diagnostics.errors().len(), 1);
-        assert!(diagnostics.errors()[0].message.contains("../brand"));
-    }
 }

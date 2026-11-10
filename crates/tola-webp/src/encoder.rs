@@ -494,7 +494,7 @@ fn analyze_strip<S: Simd>(
                 .write(&mut raster, x_start, y);
         }
         for x in x_start..x_end {
-            if x != x_start && (x - x_start) % CANCEL_MACROBLOCKS == 0 {
+            if x != x_start && (x - x_start).is_multiple_of(CANCEL_MACROBLOCKS) {
                 check_cancelled(cancelled)?;
             }
             // The last macroblock of the row is the only one that reads the right strip's

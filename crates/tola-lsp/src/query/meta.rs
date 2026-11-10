@@ -216,14 +216,20 @@ mod tests {
     #[test]
     fn meta_completion_describes_input_before_parsing() {
         let program = parsed_program(&format!("{PAGE_SCHEMA}\n  published: optional(timestamp),"))
-            .replace("describe, optional, schema", "describe, optional, schema, timestamp");
+            .replace(
+                "describe, optional, schema",
+                "describe, optional, schema, timestamp",
+            );
         let mut site = QuerySession::with_program(&program);
         let items = site.completion(
             "#import \"@tola/source:0.0.0\": tola-meta\n#tola-meta((title: \"Page\", |))\n",
         );
         let draft = item_labeled(&items, "draft");
         let documentation = serde_json::to_string(&draft.documentation).unwrap();
-        assert!(documentation.contains("draft?: bool = false"), "{documentation}");
+        assert!(
+            documentation.contains("draft?: bool = false"),
+            "{documentation}"
+        );
         let published = item_labeled(&items, "published");
         assert_eq!(
             published

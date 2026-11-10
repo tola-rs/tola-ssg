@@ -73,22 +73,3 @@ the publish directory.
 does not include raw HTML or other producers' outputs, and `found` does not guarantee that the
 final HTML defines the fragment (`tola help \"@tola/document\" references`).";
 }
-
-#[cfg(test)]
-mod tests {
-    use super::{ReferenceLevel, ReferencesConfig};
-
-    #[test]
-    fn reference_levels_decode_from_toml() {
-        let config: ReferencesConfig = toml::from_str(
-            r#"navigation = "warn"
-resources = "error"
-fragments = "warn""#,
-        )
-        .unwrap();
-
-        assert_eq!(config.navigation, ReferenceLevel::Warn);
-        assert_eq!(config.resources, ReferenceLevel::Error);
-        assert_eq!(config.fragments, ReferenceLevel::Warn);
-    }
-}

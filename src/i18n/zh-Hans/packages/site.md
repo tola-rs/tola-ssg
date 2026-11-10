@@ -1,22 +1,24 @@
-# Simplified-Chinese documentation of `@tola/site`. English stays authoritative in the package's
-# own Typst sources; a unit here overrides one of them.
+# `@tola/site`
 
-overview = "本站的配置值，解析自 `tola.toml`"
+本站的配置值，解析自 `tola.toml`
 
-[exports.project-path]
-summary = ['''
+## `project-path`
+
 构造以站点根目录为根的原生路径，在主题包中调用也相同。
 
 用于读取主题已知位置的用户数据或生成输入。这里只创建路径，不读取或生成文件；实际读取仍遵守本次调用的输入边界。
-''', '']
 
-[exports.project-path.parameters]
-path = "相对于站点根目录的路径。"
+```typst site
+#import "@tola/site:0.0.0": project-path
+#let data = project-path("generated/catalog.json")
+```
 
-[exports.site]
+### `path`
 
-summary = [
-  '''
+相对于站点根目录的路径。
+
+## `site`
+
 本站的配置值，解析自 `tola.toml`。
 
 `site` 为每项 `[site]` 设置提供一个条目，另外还有派生出来的 `url`：`origin`、`base-path`、`url`、`title`、`authors`、`description`、`language` 和 `languages`。顶层 `[options]` 表通过 `site.options` 读取，默认为空字典 `(:)`。
@@ -28,7 +30,19 @@ summary = [
 `languages` 是配置中的所有语言，保持配置顺序，默认为 `()`；非空数组必须包含 `language`。`language` 和 `languages` 都是模板的输入：语言的路由、配对与切换由站点本身决定。
 
 Example - 读取默认站点的配置值：
-''',
-  'Example - 读取已配置站点的配置值：',
-  '',
-]
+
+```typst
+#import "@tola/site:0.0.0": site
+#assert.eq(site.base-path, "/")
+#assert.eq(site.url, none)
+#assert.eq(site.language.tag, "en")
+#assert.eq(site.languages, ())
+```
+
+Example - 读取已配置站点的配置值：
+
+```typst site
+#import "@tola/site:0.0.0": site
+#assert.eq(site.title, "Example site")
+#assert.eq(site.base-path, "/")
+```

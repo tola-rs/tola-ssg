@@ -10,7 +10,7 @@ use super::pager::PagerCommand;
 use super::sink::OutputSink;
 use super::source;
 use super::style::Palette;
-use super::{color, limits, progress, session, text};
+use super::{color, limits, progress, session};
 use crate::dev::round::Completion;
 
 fn terminal_columns() -> Option<usize> {

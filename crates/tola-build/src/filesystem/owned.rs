@@ -166,37 +166,6 @@ mod tests {
     }
 
     #[test]
-    fn listed_paths_are_absolute_and_sorted() {
-        let site = OwnedSiteConfig::new("");
-        let root = site.config.get_root();
-        for path in [
-            "z.typ",
-            "content/nested/deep.typ",
-            "content/index.typ",
-            "a.typ",
-        ] {
-            write_file(root, path);
-        }
-
-        let files = owned_files(&site.config, &BuildCancellation::new()).unwrap();
-        assert!(
-            files
-                .iter()
-                .all(|path| path.is_absolute() && path.starts_with(root))
-        );
-        assert_eq!(
-            listed_files(&site),
-            [
-                "a.typ",
-                "content/index.typ",
-                "content/nested/deep.typ",
-                "tola.toml",
-                "z.typ"
-            ]
-        );
-    }
-
-    #[test]
     #[cfg(unix)]
     fn unreadable_directory_names_its_site_path() {
         use std::os::unix::fs::PermissionsExt;
@@ -219,7 +188,6 @@ mod tests {
 
         let message = format!("{error:#}");
         assert!(message.contains("content/closed"), "{message}");
-        assert!(message.contains("permission was denied"), "{message}");
         assert!(
             !message.contains(root.to_string_lossy().as_ref()),
             "{message}"

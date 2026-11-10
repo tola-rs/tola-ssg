@@ -49,17 +49,8 @@ def check-source [root: string, tag: string, commit: string] {
 
 def check-packages [root: string, version: string] {
   check-registry $root $version
-  let target = (mktemp -d)
-  try {
-    let result = (with-env { CARGO_TARGET_DIR: $target, CARGO_BUILD_BUILD_DIR: $target } {
-      ^cargo package --workspace --locked --all-features --registry crates-io | complete
-    })
-    if $result.exit_code != 0 {
-      error make { msg: $"cargo package failed: ($result.stderr | str trim)" }
-    }
-  } finally {
-    rm -rf $target
-  }
+  cd $root
+  ^cargo package --workspace --locked --all-features --registry crates-io
   print $"Workspace packages for ($version) passed Cargo packaging; nothing was uploaded."
 }
 

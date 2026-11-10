@@ -54,7 +54,6 @@ pub use declaration::{
     type_spelling,
 };
 pub use related::RelatedTarget;
-pub use tola_typst_syntax::docs::{DocumentationSegment, documentation_segments};
 
 impl BuiltinPackage {
     /// The entrypoint's opening `//` block, without its repeated package identity.

@@ -66,7 +66,7 @@ export def check-tag [root: string, tag: string, commit?: string]: nothing -> st
   $head
 }
 
-# Workspace members as Cargo reports them, with the lockfile proven current.
+# Workspace members as Cargo reports them, without resolving third-party dependencies.
 export def workspace-packages [root: string]: nothing -> list<record> {
   let result = (^cargo metadata --locked --no-deps --format-version 1
     --manifest-path ($root | path join $MANIFEST) | complete)
@@ -76,13 +76,18 @@ export def workspace-packages [root: string]: nothing -> list<record> {
   $result.stdout | from json | get packages
 }
 
-# Every member, internal dependency, and the lockfile agree on one version.
+def lock-packages [root: string]: nothing -> list<record> {
+  open --raw ($root | path join $LOCKFILE) | from toml | get package
+}
+
+# Every member, internal dependency, and workspace entry in the lock agree on one version.
 export def check-version [root: string]: nothing -> record {
   let version = (workspace-version $root)
   let packages = (workspace-packages $root)
   let manifest = (open ($root | path join $MANIFEST))
   let dependencies = ($manifest | get --optional workspace | default {}
     | get --optional dependencies | default {})
+  let locked = (lock-packages $root | where {|entry| $entry.source? == null })
   for package in $packages {
     let relative = ($package.manifest_path | path relative-to $root)
     if $package.version != $version {
@@ -95,6 +100,11 @@ export def check-version [root: string]: nothing -> record {
     }
     if ($declared | get --optional workspace | default false) != true {
       error make { msg: $"($relative): package.version must inherit workspace.version" }
+    }
+    let versions = ($locked | where name == $package.name | each {|entry| $entry.version })
+    if $versions != [$version] {
+      let found = if ($versions | is-empty) { 'missing' } else { $versions | str join ', ' }
+      error make { msg: $"Cargo.lock: ($package.name) should be locked at ($version), found ($found)" }
     }
   }
   let members = ($packages | get name)
@@ -114,9 +124,8 @@ export def check-version [root: string]: nothing -> record {
 
 # Third-party resolution, which a version bump must never change.
 export def lock-external [root: string]: nothing -> list<record> {
-  let lock = (open --raw ($root | path join $LOCKFILE) | from toml)
-  $lock.package
-  | where { |entry| ($entry | get --optional source | default '') != '' }
+  lock-packages $root
+  | where {|entry| $entry.source? != null }
   | select name version source
   | sort-by name version source
 }

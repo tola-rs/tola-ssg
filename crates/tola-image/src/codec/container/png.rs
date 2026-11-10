@@ -58,13 +58,13 @@ pub(in crate::codec) fn scan_png<'a>(
                 return Err(ImageError::unreadable(DAMAGED));
             }
         }
-        if matches!(
-            &header[4..8],
-            b"PLTE" | b"iCCP" | b"sRGB" | b"gAMA" | b"cHRM" | b"cICP"
-        ) {
-            if seen_pixels {
-                return Err(ImageError::unreadable(DAMAGED));
-            }
+        if seen_pixels
+            && matches!(
+                &header[4..8],
+                b"PLTE" | b"iCCP" | b"sRGB" | b"gAMA" | b"cHRM" | b"cICP"
+            )
+        {
+            return Err(ImageError::unreadable(DAMAGED));
         }
         match &header[4..8] {
             b"IHDR" => {

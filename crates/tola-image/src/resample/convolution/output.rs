@@ -16,14 +16,13 @@ pub(super) fn write_opaque_vertical(
 ) {
     let width = row.len() / 4;
     let lanes = samples.as_flattened();
-    let mut blocks = row.chunks_exact_mut(PIXELS_PER_BLOCK * 4);
+    let (blocks, tail) = row.as_chunks_mut::<{ PIXELS_PER_BLOCK * 4 }>();
     dispatch!(level, simd => {
-        for (index, block) in (&mut blocks).enumerate() {
+        for (index, block) in blocks.iter_mut().enumerate() {
             let first = index * PIXELS_PER_BLOCK * 4;
             block_simd(simd, &lanes[first..], weights, width * 4, block);
         }
     });
-    let tail = blocks.into_remainder();
     let first = width - tail.len() / 4;
     for (offset, pixel) in tail.as_chunks_mut::<4>().0.iter_mut().enumerate() {
         let x = first + offset;

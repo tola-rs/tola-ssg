@@ -54,9 +54,8 @@ pub use code_themes::{
 };
 pub use diagnostic::{DECLARATION_PROTOCOL_ORIGIN, SOURCE_ISSUE_ORIGIN};
 pub use docs::{
-    DocumentationSegment, ExportDeclaration, ExportDocumentation, ExportDocumentationError,
-    Parameter, ParameterKind, RelatedTarget, Signature, cast_spelling, documentation_segments,
-    type_spelling,
+    ExportDeclaration, ExportDocumentation, ExportDocumentationError, Parameter, ParameterKind,
+    RelatedTarget, Signature, cast_spelling, type_spelling,
 };
 pub use icons::{
     PublishedIcon, collection_of_icon_file, icon_collection_names_bytes, icon_file_bytes,

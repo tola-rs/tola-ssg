@@ -12,27 +12,25 @@ const USAGE = 'usage: nu tools/release/version.nu preview VERSION
 def rewrite-manifest [source: string, version: string, members: list<string>]: nothing -> string {
   mut lines = []
   mut section = ''
-  for line in ($source | lines) {
-    let heading = ($line | parse --regex '^\[(?<name>[^\]]+)\]$' | first)
-    if not ($heading | is-empty) {
-      $section = $heading.name
-      $lines = ($lines | append $line)
-      continue
+  let replacement = ('${1}"' + $version + '"')
+  for line in ($source | split row (char lf)) {
+    let heading = ($line | parse --regex '^\s*\[(?<name>[^\[\]]+)\]\s*(?:#.*)?$' | get -o 0.name)
+    let rewritten = if $heading != null {
+      $section = $heading
+      $line
+    } else if $section == 'workspace.package' {
+      $line | str replace --regex '^(\s*version\s*=\s*)"[^"]*"' $replacement
+    } else if $section == 'workspace.dependencies' {
+      let alias = ($line | parse --regex '^\s*(?<alias>tola-[A-Za-z0-9_-]+)\s*=\s*\{' | get -o 0.alias)
+      if $alias in $members {
+        $line | str replace --regex '(\bversion\s*=\s*)"[^"]*"' $replacement
+      } else { $line }
+    } else {
+      $line
     }
-    if $section == 'workspace.package' and ($line | parse --regex '^\s*(?<key>version)\s*=' | is-not-empty) {
-      $lines = ($lines | append $"version = \"($version)\"")
-      continue
-    }
-    if $section == 'workspace.dependencies' {
-      let dependency = ($line | parse --regex '^(?<alias>tola-[A-Za-z0-9_-]+)\s*=\s*\{' | first)
-      if (not ($dependency | is-empty)) and ($dependency.alias in $members) {
-        $lines = ($lines | append ($line | str replace --regex 'version\s*=\s*"[^"]*"' $"version = \"($version)\""))
-        continue
-      }
-    }
-    $lines = ($lines | append $line)
+    $lines = ($lines | append $rewritten)
   }
-  $lines | str join (char newline)
+  $lines | str join (char lf)
 }
 
 # Print only the lines a preview would change.
@@ -55,7 +53,6 @@ def show-change [before: string, after: string] {
 
 def plan [root: string, version: string]: nothing -> record {
   let current = (workspace-version $root)
-  parse-version $version | ignore
   if (compare-versions (parse-version $version) (parse-version $current)) < 0 {
     error make { msg: $"refusing version downgrade from ($current) to ($version)" }
   }
@@ -79,22 +76,22 @@ def apply [root: string, version: string] {
   let lockfile = ($root | path join 'Cargo.lock')
   let original_lock = (open --raw $lockfile)
   let before = (lock-external $root)
-  $prepared.rewritten | save --force $manifest
-  let result = (^cargo metadata --offline --all-features --format-version 1
-    --manifest-path $manifest | complete)
-  let restore = {
+  try {
+    $prepared.rewritten | save --force $manifest
+    let result = (^cargo metadata --offline --all-features --format-version 1
+      --manifest-path $manifest | complete)
+    if $result.exit_code != 0 {
+      error make { msg: $"cargo metadata --offline failed: ($result.stderr | str trim)" }
+    }
+    if $before != (lock-external $root) {
+      error make { msg: 'version update would change third-party dependency resolution' }
+    }
+    check-version $root | ignore
+  } catch {|failure|
     $prepared.source | save --force $manifest
     $original_lock | save --force $lockfile
+    error make { msg: $"version update rolled back: ($failure.msg)" }
   }
-  if $result.exit_code != 0 {
-    do $restore
-    error make { msg: $"cargo metadata --offline failed; nothing was applied: ($result.stderr | str trim)" }
-  }
-  if ($before | to json) != ((lock-external $root) | to json) {
-    do $restore
-    error make { msg: 'version update would change third-party dependency resolution; nothing was applied' }
-  }
-  check-version $root | ignore
   show-change $prepared.source $prepared.rewritten
   print $"Workspace version ($version) prepared. No commit, tag, push, or publication was performed."
 }

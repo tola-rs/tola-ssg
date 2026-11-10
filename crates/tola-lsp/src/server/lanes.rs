@@ -11,7 +11,7 @@ use super::events::{Event, send_event};
 use crate::compiler::{AnalysisRequest, SourceCompilation, SourceFailure, SourceJob};
 
 pub(super) enum AnalysisJob {
-    Request(AnalysisRequest),
+    Request(Box<AnalysisRequest>),
     ReleaseIdle,
 }
 

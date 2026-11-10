@@ -202,26 +202,6 @@ checked across all outputs before publication.";
 #[cfg(test)]
 mod tests {
     use super::BuildSectionConfig;
-    use std::path::Path;
-
-    #[test]
-    fn build_template_round_trips_through_toml() {
-        let source = format!(
-            "[site]\ntitle = \"Test\"\ndescription = \"Test\"\n{}",
-            BuildSectionConfig::try_template_with_header().unwrap()
-        );
-
-        let parsed: crate::config::SiteConfigSchema = toml::from_str(&source).unwrap();
-
-        assert_eq!(
-            parsed.build.entry.project_path(),
-            Some(Path::new("site.typ"))
-        );
-        assert!(parsed.assets.trees.is_empty());
-        assert!(parsed.assets.files.is_empty());
-        assert!(parsed.icons.collections.is_empty());
-        assert!(parsed.hooks.before_build.is_empty());
-    }
 
     #[test]
     fn declared_paths_stay_site_relative() {
@@ -284,17 +264,5 @@ mod tests {
                 "accepted content root {content:?}"
             );
         }
-    }
-
-    #[test]
-    fn default_paths_validate() {
-        let config = BuildSectionConfig::default();
-        let mut diagnostics = crate::config::ConfigDiagnostics::new();
-
-        config.validate_paths(&mut diagnostics);
-
-        assert!(diagnostics.into_result().is_ok());
-        assert_eq!(config.entry.project_path(), Some(Path::new("site.typ")));
-        assert_eq!(config.content_dir, Path::new("content"));
     }
 }

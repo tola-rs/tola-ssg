@@ -1,18 +1,11 @@
-//! The language `tola help` writes its pages in, and the packaged translations of those pages.
-//!
-//! The documentation's own spelling is English: a bundled package's overview and export
-//! documentation come from its Typst sources, and the index prose is written in the help page builders. A
-//! translation overrides one unit of that spelling; a unit without one reads English, so a
-//! partially translated page stays readable. Configuration and package identifiers stay unchanged.
-//! Nothing outside `tola help` follows this language: commands, their help, and diagnostics stay
-//! English.
+//! Markdown prose for `tola help`. The config schema and package declarations supply the
+//! identifiers and the English fallback.
 
 use std::collections::BTreeMap;
 use std::sync::LazyLock;
 
-use serde::Deserialize;
+use pulldown_cmark::{Event, HeadingLevel, Parser, Tag};
 
-/// The language `tola help` writes its pages in.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum HelpLanguage {
     #[default]
@@ -21,11 +14,7 @@ pub(crate) enum HelpLanguage {
 }
 
 impl HelpLanguage {
-    /// The language one `--lang` value names, when it names one Tola writes.
-    ///
-    /// A tag is lowercased and stripped of its codeset and modifier, so `zh_CN.UTF-8` and
-    /// `zh-Hans-CN` both read `zh`. `C` and `POSIX` name English. Every `zh` variant currently
-    /// reads the Simplified catalog; Traditional Chinese waits for its own.
+    /// Accept locale spellings such as `zh_CN.UTF-8` and `zh-Hans-CN` as well as `en` and `zh`.
     pub(crate) fn parse(tag: &str) -> Option<Self> {
         let tag = tag.trim();
         let tag = tag.split(['.', '@']).next().unwrap_or(tag);
@@ -43,424 +32,208 @@ impl HelpLanguage {
     }
 }
 
-/// One phrase a `tola help` page writes, translated where the language carries one.
-///
-/// Only the page's own prose is here; the names it prints — table headers, keys, package and
-/// export names, the `Tola help pages:` `Configuration tables:` and `Bundled packages:` labels —
-/// stay English in both languages, because they are what the reader types.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum HelpText {
-    HelpUsage,
-}
-
-impl HelpText {
-    /// The asset key this phrase is translated under.
-    fn key(self) -> &'static str {
-        match self {
-            Self::HelpUsage => "help-usage",
-        }
+pub(crate) fn overview(language: HelpLanguage) -> &'static str {
+    match language {
+        HelpLanguage::English => include_str!("en/overview.md"),
+        HelpLanguage::SimplifiedChinese => include_str!("zh-Hans/overview.md"),
     }
-
-    /// The phrase itself, which is what a page without a translation reads.
-    fn english(self) -> &'static str {
-        match self {
-            Self::HelpUsage => {
-                "For command options, use `tola <command> --help`.\n\n\
-                 `tola help` provides Tola's bundled offline documentation: `tola.toml` settings \
-                 (`tola help \"[build]\"`) and the bundled `@tola/xxx` packages (`tola help \
-                 \"@tola/address\" slugify`). Add `-i` or `--interactive` to browse: filter the \
-                 section and link list, press Enter to open a choice, or select Back to return. \
-                 Esc finishes browsing. Documentation is in English \
-                 by default; use \
-                 `--lang zh` for Simplified Chinese.\n\n\
-                 `tola skill` introduces the task-focused authoring guide. Use `tola skill writing math` \
-                 or `tola skill modules create` to read only what the task needs. `--list` shows \
-                 the heading tree; `--all` includes the selected topic’s subsections."
-            }
-        }
-    }
+    .trim()
 }
 
-/// The text of one phrase in `language`, reading English where no translation exists.
-pub(crate) fn text(language: HelpLanguage, phrase: HelpText) -> &'static str {
-    if language == HelpLanguage::SimplifiedChinese
-        && let Some(translated) = TEXT.get(phrase.key())
-    {
-        return translated;
-    }
-    phrase.english()
+pub(crate) const CONFIG_KEYS: &str = "配置项";
+pub(crate) const CONFIG_USAGE: &str = "用法";
+
+type Catalog = BTreeMap<&'static str, Translation>;
+type Sections<'a> = BTreeMap<&'a str, &'a str>;
+
+/// A Markdown page starts with its title and introduction. Level-two headings name exports or
+/// parts of a configuration page. Level-three headings name parameters or configuration keys.
+pub(crate) struct Translation {
+    intro: &'static str,
+    sections: BTreeMap<&'static str, Section>,
 }
 
-/// The translated documentation of one bundled package.
-pub(crate) struct PackageTranslations {
-    overview: Option<String>,
-    exports: BTreeMap<String, ExportTranslations>,
+struct Section {
+    body: &'static str,
+    fields: Sections<'static>,
 }
 
-struct ExportTranslations {
-    /// The prose between one export's fenced examples, in order.
-    summary: Option<Vec<String>>,
-    parameters: BTreeMap<String, String>,
-}
-
-impl PackageTranslations {
-    /// The package's translated overview, when one exists.
-    pub(crate) fn overview(&self) -> Option<&str> {
-        self.overview.as_deref()
-    }
-
-    /// One export's translated summary prose, when one exists.
-    pub(crate) fn summary_prose(&self, export: &str) -> Option<&[String]> {
-        self.exports.get(export)?.summary.as_deref()
-    }
-
-    /// One parameter's translated description, when one exists.
-    pub(crate) fn parameter(&self, export: &str, parameter: &str) -> Option<&str> {
-        self.exports
-            .get(export)?
-            .parameters
-            .get(parameter)
-            .map(String::as_str)
-    }
-
-    /// Read one package's asset.
-    fn parse(asset: &str) -> Self {
-        let asset: PackageAsset =
-            toml::from_str(asset).expect("the bundled `tola help` translations must parse");
-        Self {
-            overview: normalized(asset.overview),
-            exports: asset
-                .exports
-                .into_iter()
-                .map(|(name, export)| {
-                    let parameters = export
-                        .parameters
-                        .into_iter()
-                        .filter_map(|(name, description)| {
-                            Some((name, normalized(Some(description))?))
-                        })
-                        .collect();
-                    (
-                        name,
-                        ExportTranslations {
-                            summary: translated_parts(export.summary),
-                            parameters,
-                        },
-                    )
-                })
-                .collect(),
-        }
-    }
-}
-
-/// The translated documentation of `name` in `language`, when that language carries one.
-pub(crate) fn package(language: HelpLanguage, name: &str) -> Option<&'static PackageTranslations> {
-    if language != HelpLanguage::SimplifiedChinese {
-        return None;
-    }
-    PACKAGES.get(name)
-}
-
-/// The translated prose of the configuration tables, keyed by the unit the schema spells.
-///
-/// A section carries its own documentation and the help its page ends with; every declared field
-/// carries its meaning, keyed by its full path (`build.entry`).
-pub(crate) struct SectionTranslations {
-    sections: BTreeMap<String, SectionProse>,
-    fields: BTreeMap<String, String>,
-}
-
-struct SectionProse {
-    documentation: Option<String>,
-    help: Option<String>,
-}
-
-impl SectionTranslations {
-    /// One section's own documentation, translated.
-    pub(crate) fn documentation(&self, section: &str) -> Option<&str> {
-        self.sections.get(section)?.documentation.as_deref()
-    }
-
-    /// The help one section's page ends with, translated.
-    pub(crate) fn help(&self, section: &str) -> Option<&str> {
-        self.sections.get(section)?.help.as_deref()
-    }
-
-    /// One field's meaning, keyed by its full path.
-    pub(crate) fn field(&self, path: &str) -> Option<&str> {
-        self.fields.get(path).map(String::as_str)
-    }
-}
-
-/// The configuration tables `language` translates, when that language carries them.
-pub(crate) fn sections(language: HelpLanguage) -> Option<&'static SectionTranslations> {
-    if language != HelpLanguage::SimplifiedChinese {
-        return None;
-    }
-    Some(&SECTIONS)
-}
-
-/// Trim an authored unit; an empty one is no translation.
-fn normalized(text: Option<String>) -> Option<String> {
-    text.map(|text| text.trim().to_owned())
-        .filter(|text| !text.is_empty())
-}
-
-/// Keep the authored summary prose, dropping nothing else.
-fn translated_parts(parts: Option<Vec<String>>) -> Option<Vec<String>> {
-    let parts = parts?
-        .into_iter()
-        .map(|part| part.trim().to_owned())
-        .collect::<Vec<_>>();
-    parts.iter().any(|part| !part.is_empty()).then_some(parts)
-}
-
-/// One export's documentation in `prose`, around the fenced examples `english` writes.
-///
-/// A fenced example is code, so it reads the same in every language: a translation carries the
-/// prose and the source carries the examples. Parts that do not line up with the source's
-/// examples read English.
-pub(crate) fn localize_summary(english: &str, prose: &[String]) -> String {
-    use tola_packages::{DocumentationSegment, documentation_segments};
-
-    let segments = documentation_segments(english);
-    let examples = segments
-        .iter()
-        .filter(|segment| matches!(segment, DocumentationSegment::Example(_)))
-        .count();
-    if prose.len() != examples + 1 {
-        return english.to_owned();
-    }
-    let mut text = String::new();
-    let mut next = 0;
-    for segment in &segments {
-        match segment {
-            DocumentationSegment::Prose(_) => {
-                text.push_str(prose[next].trim());
-                next += 1;
-            }
-            DocumentationSegment::Example(example) => text.push_str(example.trim_end()),
-        }
-        text.push_str("\n\n");
-    }
-    let end = text.trim_end().len();
-    text.truncate(end);
-    text
-}
-
-/// The phrases one `tola help` asset translates, keyed by [`HelpText::key`].
-#[derive(Deserialize)]
-struct TextAsset {
-    text: BTreeMap<String, String>,
-}
-
-#[derive(Deserialize)]
-struct PackageAsset {
-    overview: Option<String>,
-    #[serde(default)]
-    exports: BTreeMap<String, ExportAsset>,
-}
-
-#[derive(Deserialize)]
-struct ExportAsset {
-    summary: Option<Vec<String>>,
-    #[serde(default)]
-    parameters: BTreeMap<String, String>,
-}
-
-/// The configuration tables one `tola help` asset translates.
-#[derive(Deserialize)]
-struct SectionsAsset {
-    #[serde(default)]
-    sections: BTreeMap<String, SectionAsset>,
-    #[serde(default)]
-    fields: BTreeMap<String, String>,
-}
-
-#[derive(Deserialize)]
-struct SectionAsset {
-    documentation: Option<String>,
-    help: Option<String>,
-}
-
-static TEXT: LazyLock<BTreeMap<String, String>> = LazyLock::new(|| {
-    let asset: TextAsset = toml::from_str(include_str!("zh-Hans/text.toml"))
-        .expect("the bundled `tola help` translations must parse");
-    asset.text
-});
-
-static PACKAGES: LazyLock<BTreeMap<&'static str, PackageTranslations>> = LazyLock::new(|| {
-    [
-        ("site", include_str!("zh-Hans/packages/site.toml")),
-        ("module", include_str!("zh-Hans/packages/module.toml")),
-        ("address", include_str!("zh-Hans/packages/address.toml")),
-        ("icon", include_str!("zh-Hans/packages/icon.toml")),
-        ("image", include_str!("zh-Hans/packages/image.toml")),
-        ("source", include_str!("zh-Hans/packages/source.toml")),
-        (
-            "collection",
-            include_str!("zh-Hans/packages/collection.toml"),
-        ),
-        ("datalog", include_str!("zh-Hans/packages/datalog.toml")),
-        ("schema", include_str!("zh-Hans/packages/schema.toml")),
-        ("document", include_str!("zh-Hans/packages/document.toml")),
-        ("code", include_str!("zh-Hans/packages/code.toml")),
-        ("web", include_str!("zh-Hans/packages/web.toml")),
-        ("hash", include_str!("zh-Hans/packages/hash.toml")),
-        ("uuid", include_str!("zh-Hans/packages/uuid.toml")),
-        (
-            "diagnostic",
-            include_str!("zh-Hans/packages/diagnostic.toml"),
-        ),
-    ]
-    .into_iter()
-    .map(|(name, asset)| (name, PackageTranslations::parse(asset)))
-    .collect()
-});
-
-static SECTIONS: LazyLock<SectionTranslations> = LazyLock::new(|| {
-    let asset: SectionsAsset = toml::from_str(include_str!("zh-Hans/sections.toml"))
-        .expect("the bundled `tola help` translations must parse");
-    SectionTranslations {
-        sections: asset
-            .sections
+impl Translation {
+    fn parse(markdown: &'static str) -> Self {
+        let (title, body) = markdown.split_once('\n').expect("a help page has a title");
+        assert!(title.starts_with("# "), "invalid help title `{title}`");
+        let (intro, sections) = split_sections(body, HeadingLevel::H2);
+        let sections = sections
             .into_iter()
-            .map(|(name, section)| {
-                (
-                    name,
-                    SectionProse {
-                        documentation: normalized(section.documentation),
-                        help: normalized(section.help),
-                    },
-                )
+            .map(|(name, markdown)| {
+                let (body, fields) = split_sections(markdown, HeadingLevel::H3);
+                (name, Section { body, fields })
             })
-            .collect(),
-        fields: asset
-            .fields
-            .into_iter()
-            .filter_map(|(path, meaning)| Some((path, normalized(Some(meaning))?)))
-            .collect(),
+            .collect();
+        Self { intro, sections }
     }
+
+    pub(crate) fn intro(&self) -> Option<&str> {
+        nonempty(self.intro)
+    }
+
+    pub(crate) fn section(&self, name: &str) -> Option<&str> {
+        nonempty(self.sections.get(name)?.body)
+    }
+
+    pub(crate) fn field(&self, section: &str, name: &str) -> Option<&str> {
+        nonempty(self.sections.get(section)?.fields.get(name)?)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn sections(&self) -> impl Iterator<Item = &str> {
+        self.sections.keys().copied()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fields(&self, section: &str) -> impl Iterator<Item = &str> {
+        self.sections
+            .get(section)
+            .into_iter()
+            .flat_map(|section| section.fields.keys().copied())
+    }
+}
+
+fn nonempty(text: &str) -> Option<&str> {
+    (!text.is_empty()).then_some(text)
+}
+
+/// Use Markdown offsets so headings inside fenced examples stay in the example.
+fn split_sections(markdown: &str, level: HeadingLevel) -> (&str, Sections<'_>) {
+    let mut headings = Parser::new(markdown)
+        .into_offset_iter()
+        .filter_map(|(event, range)| match event {
+            Event::Start(Tag::Heading { level: heading, .. }) if heading == level => {
+                let title = markdown[range.clone()].lines().next()?;
+                title.starts_with('#').then_some((title, range))
+            }
+            _ => None,
+        })
+        .peekable();
+    let intro = markdown[..headings
+        .peek()
+        .map_or(markdown.len(), |(_, range)| range.start)]
+        .trim();
+    let mut sections = BTreeMap::new();
+    while let Some((title, range)) = headings.next() {
+        let name = title.trim_start_matches('#').trim().trim_matches('`');
+        let end = headings
+            .peek()
+            .map_or(markdown.len(), |(_, next)| next.start);
+        let body = markdown[range.end..end].trim();
+        assert!(
+            sections.insert(name, body).is_none(),
+            "duplicate help heading `{name}`"
+        );
+    }
+    (intro, sections)
+}
+
+macro_rules! catalog {
+    ($directory:literal, $($name:literal),+ $(,)?) => {
+        [$(($name, include_str!(concat!("zh-Hans/", $directory, "/", $name, ".md")))),+]
+            .into_iter()
+            .map(|(name, markdown)| (name, Translation::parse(markdown)))
+            .collect()
+    };
+}
+
+static PACKAGES: LazyLock<Catalog> = LazyLock::new(|| {
+    catalog!(
+        "packages",
+        "address",
+        "code",
+        "collection",
+        "datalog",
+        "diagnostic",
+        "document",
+        "hash",
+        "icon",
+        "image",
+        "module",
+        "schema",
+        "site",
+        "source",
+        "uuid",
+        "web",
+    )
 });
 
-/// Catalog keys the translation guard reads; the renderer walks the schema instead.
-#[cfg(test)]
-pub(crate) mod testing {
-    use super::SectionTranslations;
+static CONFIG: LazyLock<Catalog> = LazyLock::new(|| {
+    catalog!(
+        "config",
+        "assets",
+        "build",
+        "build.minify",
+        "build.references",
+        "dev",
+        "diagnostics",
+        "formatter",
+        "hooks",
+        "hooks.after-publish",
+        "hooks.before-build",
+        "hooks.generate-outputs",
+        "icons",
+        "modules",
+        "options",
+        "server",
+        "site",
+        "typst",
+        "typst.fonts",
+        "vendor",
+    )
+});
 
-    impl SectionTranslations {
-        pub(crate) fn section_names(&self) -> impl Iterator<Item = &str> {
-            self.sections.keys().map(String::as_str)
-        }
-
-        pub(crate) fn field_paths(&self) -> impl Iterator<Item = &str> {
-            self.fields.keys().map(String::as_str)
-        }
+pub(crate) fn package(language: HelpLanguage, name: &str) -> Option<&'static Translation> {
+    match language {
+        HelpLanguage::English => None,
+        HelpLanguage::SimplifiedChinese => PACKAGES.get(name),
     }
+}
+
+pub(crate) fn config(language: HelpLanguage, section: &str) -> Option<&'static Translation> {
+    match language {
+        HelpLanguage::English => None,
+        HelpLanguage::SimplifiedChinese => CONFIG.get(section),
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn config_names() -> impl Iterator<Item = &'static str> {
+    CONFIG.keys().copied()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tola_packages::{DocumentationSegment, documentation_segments};
+    use tola_packages::ExportDeclaration;
 
     #[test]
-    // Exhaustive on purpose: a new phrase stops this test compiling until it is listed.
-    fn phrases_have_translations() {
-        let phrase = HelpText::HelpUsage;
-        match phrase {
-            HelpText::HelpUsage => {}
-        }
-        let translated = text(HelpLanguage::SimplifiedChinese, phrase);
-        assert_ne!(translated, phrase.english(), "{:?}", phrase.key());
-    }
-
-    /// Every bundled package carries a translation, every translated unit names a real export or
-    /// parameter, every documented unit carries one, and a translated summary supplies exactly the
-    /// prose around the source's examples — the examples themselves come from the source.
-    #[test]
-    fn translations_and_packages_stay_in_step() {
-        for (name, translations) in PACKAGES.iter() {
-            let name: &str = name;
+    fn package_translations_name_existing_exports_and_parameters() {
+        for (name, translation) in PACKAGES.iter() {
             let package = tola_packages::builtin_packages()
-                .find(|package| package.spec().name.as_str() == name)
+                .find(|package| package.spec().name.as_str() == *name)
                 .unwrap_or_else(|| panic!("`{name}` is not a bundled package"));
-            let overview = package.overview();
-            match (overview.as_deref(), translations.overview()) {
-                (Some(_), None) => panic!("`{name}` overview has no translation"),
-                (None, Some(_)) => panic!("`{name}` overview translates nothing"),
-                _ => {}
-            }
-            let names = package.exports().map(str::to_owned).collect::<Vec<_>>();
+            let names = translation
+                .sections()
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
             let exports = package.export_documentation(&names).unwrap();
-            for export_name in translations.exports.keys() {
-                assert!(
-                    names.contains(export_name),
-                    "`{name}` translates no export named `{export_name}`"
-                );
-            }
-            for export in &exports {
-                match translations.summary_prose(&export.name) {
-                    Some(prose) => {
-                        assert!(
-                            !export.documentation.summary.is_empty(),
-                            "`{name}` export `{}` translates nothing",
-                            export.name
-                        );
-                        let examples = documentation_segments(&export.documentation.summary)
-                            .iter()
-                            .filter(|segment| matches!(segment, DocumentationSegment::Example(_)))
-                            .count();
-                        assert_eq!(
-                            prose.len(),
-                            examples + 1,
-                            "`{name}.{}` writes one prose part per example, with one more at the end",
-                            export.name
-                        );
-                    }
-                    None => panic!(
-                        "`{name}` export `{}` has no translated summary",
-                        export.name
-                    ),
-                }
-                let documented = match &export.declaration {
-                    tola_packages::ExportDeclaration::Function(signature) => signature
-                        .parameters
-                        .iter()
-                        .filter_map(|parameter| {
-                            Some((parameter.name.as_str(), parameter.docs.as_deref()?))
-                        })
-                        .collect::<Vec<_>>(),
-                    tola_packages::ExportDeclaration::Value(_) => Vec::new(),
-                };
-                for (parameter, docs) in &documented {
-                    assert!(!docs.trim().is_empty());
+            for export in exports {
+                for field in translation.fields(&export.name) {
                     assert!(
-                        translations.parameter(&export.name, parameter).is_some(),
-                        "`{name}.{}` parameter `{parameter}` has no translation",
-                        export.name
+                        matches!(&export.declaration, ExportDeclaration::Function(signature)
+                            if signature.parameters.iter().any(|parameter| parameter.name == field)),
+                        "`{name}.{}` has no parameter named `{field}`",
+                        export.name,
                     );
                 }
-                if let Some(translated) = translations.exports.get(&export.name) {
-                    for parameter in translated.parameters.keys() {
-                        assert!(
-                            documented
-                                .iter()
-                                .any(|(name, _)| *name == parameter.as_str()),
-                            "`{name}.{}` translates no parameter named `{parameter}`",
-                            export.name
-                        );
-                    }
-                }
             }
-        }
-        for package in tola_packages::builtin_packages() {
-            let spec = package.spec();
-            let name = spec.name.as_str();
-            assert!(
-                PACKAGES.contains_key(name),
-                "`{name}` is a bundled package with no translated documentation"
-            );
         }
     }
 }

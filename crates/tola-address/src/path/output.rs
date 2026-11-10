@@ -13,9 +13,7 @@ use super::{PortablePathError, UrlPath, portable_collision_key};
 
 /// The one segment Tola reserves at the top of every published output root.
 ///
-/// `OutputPath` rejects a non-system output that begins with this segment, and
-/// system assets publish beneath it. The build engine names the same directory
-/// for producers.
+/// The build engine reserves this segment for system assets.
 pub const RESERVED_ROOT: &str = "_tola";
 
 /// A portable, non-empty file path relative to the site output root.
@@ -97,15 +95,14 @@ impl OutputPath {
     /// a file exactly as spelled. `/` is the root directory, so it publishes `index.html`. The
     /// route is already validated, so this cannot fail.
     pub fn from_route(route: &UrlPath) -> Self {
-        let path = route.as_str();
-        let relative = if path == "/" {
-            "index.html".to_owned()
-        } else if let Some(directory) = path.strip_suffix('/') {
-            format!("{}/index.html", directory.trim_start_matches('/'))
+        let relative = &route.as_str()[1..];
+        if relative.is_empty() {
+            Self(Arc::from("index.html"))
+        } else if relative.ends_with('/') {
+            Self(Arc::from(format!("{relative}index.html")))
         } else {
-            path.trim_start_matches('/').to_owned()
-        };
-        Self(Arc::from(relative))
+            Self(Arc::from(relative))
+        }
     }
 
     #[inline]
@@ -141,15 +138,7 @@ impl OutputPath {
 /// `/x/`), and every other file keeps its path under `/`. The output is already validated, so
 /// this cannot fail.
 pub fn route_for_output(output: &OutputPath) -> UrlPath {
-    let path = output.as_str();
-    let route = if path == "index.html" {
-        "/".to_owned()
-    } else if let Some(directory) = path.strip_suffix("/index.html") {
-        format!("/{directory}/")
-    } else {
-        format!("/{path}")
-    };
-    UrlPath::from_validated_decoded(route)
+    asset_directory_index_alias(output).unwrap_or_else(|| asset_url_from_output(output))
 }
 
 /// The exact file URL one logical output is served at.
@@ -175,9 +164,11 @@ pub fn asset_output_from_url(url: &UrlPath) -> Result<OutputPath, OutputPathErro
 /// `x/index.html` yields `/x/` and `index.html` yields `/`, while every other output yields
 /// `None`.
 pub fn asset_directory_index_alias(output: &OutputPath) -> Option<UrlPath> {
-    let exact = asset_url_from_output(output);
-    let route = route_for_output(output);
-    (route != exact).then_some(route)
+    let route = match output.as_str() {
+        "index.html" => "/".to_owned(),
+        path => format!("/{}/", path.strip_suffix("/index.html")?),
+    };
+    Some(UrlPath::from_validated_decoded(route))
 }
 
 /// Whether a portable collision key names a path in the namespace Tola reserves.
@@ -215,15 +206,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rooted_paths_are_refused() {
+    fn invalid_output_paths() {
         assert_eq!(
             OutputPath::parse("/tags/rust/index.html"),
             Err(OutputPathError::Absolute)
         );
-    }
-
-    #[test]
-    fn ambiguous_output_paths_are_refused() {
         for path in [
             "",
             "a/",
@@ -238,6 +225,7 @@ mod tests {
             assert!(OutputPath::parse(path).is_err(), "accepted {path:?}");
         }
     }
+
     #[test]
     fn routes_name_directory_indexes() {
         for (route, output) in [
@@ -253,6 +241,7 @@ mod tests {
             );
         }
     }
+
     #[test]
     fn route_and_output_round_trip() {
         // `parse` reads the browser spelling, where the filename's literal `%` is escaped.
