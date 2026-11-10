@@ -407,6 +407,15 @@ impl ModuleAcquisition<'_> {
             TarballLocation::File { path } => {
                 let path = self.site_root.join(path);
                 if self.mode.scope() == InputScope::Pure {
+                    if tola_input::FilesystemSourceIdentity::from_path(&path).intersects(
+                        &tola_input::FilesystemSourceIdentity::from_path(
+                            &self.site_root.join(INTERNAL_DIR),
+                        ),
+                    ) {
+                        return Err(ModuleRootError::InternalArchive {
+                            alias: alias.to_owned(),
+                        });
+                    }
                     let canonical =
                         path.canonicalize()
                             .map_err(|source| ModuleRootError::Root {
@@ -745,6 +754,10 @@ fn locked_revision(revision: Option<&RemoteRevision>) -> Option<LockedRevision> 
 /// Why one declared module has no readable directory.
 #[derive(Debug, thiserror::Error)]
 pub enum ModuleRootError {
+    #[error(
+        "module `{alias}` cannot read its archive from `.tola` under `--pure`; keep the archive in the site's source tree"
+    )]
+    InternalArchive { alias: String },
     #[error("Tola could not obtain the tarball for module `{alias}`: {source}")]
     Tarball {
         alias: String,
