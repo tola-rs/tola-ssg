@@ -564,8 +564,23 @@ not bundle JavaScript or rewrite CSS resource references. See `tola help "[asset
 Compiler fonts and browser fonts are separate inputs. `[typst.fonts]` supplies Typst;
 `tola inspect fonts` lists its fonts. Browsers need published font files loaded through CSS
 `@font-face`. A Typst font setting alone does not load a web font.
-Keep compiler fonts in the site's configured paths for pure builds; host system fonts
-cannot be used with `--pure`.
+For pure builds, keep compiler fonts in configured site paths or available module inputs.
+Host system fonts cannot be used with `--pure`.
+
+Modules can declare compiler font directories with `fonts = ["typst-fonts"]` in the
+`[typst]` table of `tola-module.toml`. Select their aliases in `[typst.fonts].modules`.
+To use two versions of the same family, give one module's family a new compiler name.
+
+```toml
+[typst.fonts]
+modules = [
+  "theme",
+  { module = "cjk", rename = { "IBM Plex Sans" = "CJK Plex Sans" } },
+]
+```
+
+All matching faces from `cjk` in this entry move to `CJK Plex Sans`. Use that name in
+Typst and check the registered names and module aliases with `tola inspect fonts --json`.
 
 #### Images
 
@@ -667,6 +682,16 @@ Supported archives are tar.gz, tar.zst, and ZIP, with one outer directory contai
 `tola-module.toml` directly inside it. Use the author's prepared release, since downloading
 does not run author build tools. For a private release, download it separately or use Git.
 
+A GitHub branch archive also works when the repository root contains the complete module.
+
+```toml
+[modules.notes]
+tarball = { url = "https://github.com/example/notebook/archive/refs/heads/preview.tar.gz" }
+```
+
+This expects `notebook-preview/tola-module.toml` inside the archive. For a module under
+`theme/`, use `git.subdir` or publish a separate archive of the module directory.
+
 #### Git
 
 Use Git when the selected directory already contains the module's runtime files:
@@ -681,11 +706,20 @@ root. Choose one of `tag`, `branch`, or a full-commit `rev`; omitting all three 
 the default branch. HTTPS uses your Git credential helper. SSH URLs and `git@host:path`
 use your SSH configuration and agent.
 
+To follow `preview` when the module lives in `theme/`, use this declaration.
+
+```toml
+[modules.notes]
+git = { url = "https://github.com/example/notebook", branch = "preview", subdir = "theme" }
+```
+
 #### Updates
 
-Change the Git selector or archive location, then run `tola update notes` and check the
-site. Existing lock entries are reused until explicitly updated. If the site uses vendor
-copies, run `tola vendor --refresh` after updating.
+Ordinary builds reuse the lock entry. Run `tola update notes` to refresh a branch or
+archive, even if its name or URL is unchanged. To switch to another version, edit the
+selector or URL first. If you follow a moving archive, omit `sha256` so the update can
+record the new digest in `tola.lock`. If you set `sha256`, update it to match the new archive.
+Check the site after updating. If it uses vendor copies, run `tola vendor --refresh`.
 
 | Build option | Use it when |
 | --- | --- |
@@ -1256,9 +1290,43 @@ dry-run, validates the candidate, and applies its proposed files to the target.
 Write only to `(get-init).output-dir`. `target-dir` is the final destination for calculating
 relative paths, not the directory to populate during generation.
 
-The generated configuration must register the source module under the selected alias.
-This example records its absolute source path for local development; it does not copy or
-vendor the module. A relative registration must be correct from the final target.
+Tola registers the initializer's original source under the selected alias, preserving that
+module's generated options and other settings. A local initializer becomes a local `path`;
+a remote initializer retains its Git selector or archive location. Temporary download
+directories are used only while running and validating the initializer.
+
+Git initializers accept the same selectors as Git modules. For a module in `theme/` on
+the `preview` branch, initialize a site with:
+
+```sh
+tola init my-site --from https://github.com/example/notebook --branch preview --subdir theme --alias notes
+```
+
+Choose at most one of `--branch`, `--tag`, and `--rev`; `--rev` requires a full commit ID.
+Omitting all three selects the default branch. HTTPS and SSH use the same authentication
+as ordinary Git modules.
+
+An HTTPS URL or local file ending in `.tar.gz`, `.tar.zst`, or `.zip` selects a module
+archive. It must contain one outer directory with `tola-module.toml` directly inside.
+Git-specific flags, including `--subdir`, apply only to Git initializers.
+
+```sh
+tola init my-site --from https://example.com/theme-v1.tar.zst --alias notes
+tola init my-site --from ./theme-v1.zip --alias notes
+```
+
+The generated configuration can also declare other Git, tarball, or local modules.
+Initialization resolves and validates these inputs before writing the site, records them
+in `tola.lock`, and retains downloaded module snapshots in the new site's cache. The
+initializer's own lock entry identifies the exact snapshot that ran, even if its branch
+advances during initialization. `--dry-run` performs preparation in temporary storage and
+shows the proposed site without writing it. Input restrictions such as `--offline` and
+`--locked` also apply during preparation.
+
+From an existing site, `tola notes init new-site` uses the selected `notes` module and its
+locked snapshot. To change the new site's source later, edit its module declaration and
+run `tola update notes`.
+
 `get-site` and `get-module` are unavailable here; use `(get-init).module` for source details.
 An unattended initializer must not prompt; `(get-init).interactive` indicates explicit
 interactive use.
