@@ -575,6 +575,9 @@ fn initialize_engine(
             .map(Into::into)
             .collect(),
     );
+    // `rustls-tls` reads its provider from this static, not from rustls's process default;
+    // without it every `http` command fails, plain HTTP included.
+    nu_command::tls::CRYPTO_PROVIDER.default();
 
     let mut stack = Stack::new();
     if initialize_environment(&mut engine, &mut stack, context).is_err() {
