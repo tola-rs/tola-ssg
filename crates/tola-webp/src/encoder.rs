@@ -3,7 +3,7 @@
 use std::ops::Range;
 
 use crate::EncodeOptions;
-use crate::color::{RgbaFrame, YUV_BYTES_PER_MACROBLOCK, YuvRow};
+use crate::color::{RgbaFrame, YUV_BYTES_PER_MACROBLOCK, YuvRow, transparent};
 use crate::container;
 use crate::macroblock::{CHROMA_SIDE, CoefficientSpool, Luma, MACROBLOCK_SIDE, Macroblock};
 use crate::partitions::encode_frame;
@@ -52,24 +52,46 @@ pub(crate) fn estimated_scratch_bytes(
     let pixels = u64::from(width) * u64::from(height);
     let columns = u64::from(width.div_ceil(MACROBLOCK_SIDE as u32));
     let blocks = columns * u64::from(height.div_ceil(MACROBLOCK_SIDE as u32));
+    #[cfg(not(target_arch = "wasm32"))]
+    let alpha_overlaps = workers > 1 && pixels >= PARALLEL_MIN_PIXELS as u64;
+    #[cfg(target_arch = "wasm32")]
+    let alpha_overlaps = false;
+    // A source with an alpha channel can turn out to be opaque after resampling. Count
+    // strips using the full worker budget to cover that case as well.
     let strips = strip_count(width as usize, height as usize, workers.max(1)) as u64;
     let modes = blocks * size_of::<Macroblock>() as u64;
     let coefficients = CoefficientSpool::estimated_bytes(blocks, strips);
     let yuv = columns * YUV_BYTES_PER_MACROBLOCK as u64;
-    let row_rings = u64::from(width) * 48;
-    let analysis = yuv + row_rings + trellis::restricted_scratch_bytes(strips) + modes;
-    // Partition lengths depend on image content. Allow two RGBA-sized buffers for writes and
-    // the temporary comparison of entropy coding choices.
-    let partitions = modes.saturating_add(pixels.saturating_mul(8));
-    // Mixed alpha can hold the residual plane, VP8L's expansion and frame, and the ALPH chunk.
-    let alpha = if has_transparency {
-        pixels.saturating_mul(9)
+    let previous_edge = u64::from(height > MACROBLOCK_SIDE as u32);
+    let luma_width = columns * MACROBLOCK_SIDE as u64 + strips.saturating_sub(1) * 5 + 4;
+    let chroma_width = columns * CHROMA_SIDE as u64 + strips.saturating_sub(1);
+    let row_rings = luma_width * (MACROBLOCK_SIDE as u64 + previous_edge)
+        + 2 * chroma_width * (CHROMA_SIDE as u64 + previous_edge);
+    let filled = if has_transparency {
+        transparent::scratch_bytes(pixels)
     } else {
         0
     };
-    coefficients
-        .saturating_add(analysis.max(partitions))
-        .saturating_add(alpha)
+    let analysis = yuv + row_rings + trellis::restricted_scratch_bytes(strips) + modes + filled;
+    // Partition lengths depend on image content. Allow two RGBA-sized buffers for writes and
+    // the temporary comparison of entropy coding choices.
+    let partition_buffers = pixels.saturating_mul(8);
+    let partitions = modes.saturating_add(partition_buffers);
+    let frame = coefficients.saturating_add(analysis.max(partitions));
+    if !has_transparency {
+        return frame;
+    }
+    // Mixed alpha can hold its residual plane, the best earlier payload and VP8L's
+    // expanded pixels and compressed frame at once.
+    // The indexed candidate is capped at one megapixel. Its half-size residual,
+    // bounded match table and compact copies fit inside the same alpha allowance.
+    let alpha = pixels.saturating_mul(9).saturating_add(128 * 1024);
+    if alpha_overlaps {
+        frame.saturating_add(alpha)
+    } else {
+        // The coefficient spool and the analysis planes are gone when alpha starts.
+        frame.max(partition_buffers.saturating_add(alpha))
+    }
 }
 
 /// Why an input could not be encoded.
@@ -123,6 +145,18 @@ fn encode_with_simd<S: Simd>(
     cancelled: &(dyn Fn() -> bool + Sync),
 ) -> Result<container::WebP, Error> {
     let (pixel_width, pixel_height) = (width as usize, height as usize);
+    let check_opacity = options.quality == 84;
+    #[cfg(not(target_arch = "wasm32"))]
+    let check_opacity =
+        check_opacity || (options.workers > 1 && pixel_width * pixel_height >= PARALLEL_MIN_PIXELS);
+    let options = if options.has_transparency.is_none() && check_opacity {
+        EncodeOptions {
+            has_transparency: Some(crate::alpha::has_transparency(rgba, cancelled)?),
+            ..options
+        }
+    } else {
+        options
+    };
     let alpha = || {
         crate::alpha::encode(
             rgba,
@@ -205,16 +239,28 @@ fn encode_frame_from_rgba<S: Simd>(
         workers,
         ..
     } = options;
-    let source = RgbaFrame::new(rgba, width, height);
-    let (quantizer, lambda) = quantize::frame_quantizer(quality);
-    let search = Quantizer::new(simd, quantize::factors(quantizer), lambda, trellis);
+    let (quantizer, mut lambda) = quantize::frame_quantizer(quality);
+    if quality == 84 && options.has_transparency == Some(false) {
+        lambda = lambda * 112 / 100;
+    }
     let filter_level = (quantizer / 2).min(63);
+    let filled = if options.has_transparency == Some(false) {
+        None
+    } else {
+        transparent::extend(rgba, width, height, cancelled)?
+    };
+    let weighted_chroma = options.has_transparency != Some(false)
+        && crate::color::prefers_weighted_chroma(rgba, width, height);
+    let source = RgbaFrame::new(filled.as_deref().unwrap_or(rgba), width, height)
+        .with_weighted_chroma(weighted_chroma);
+    let search = Quantizer::new(simd, quantize::factors(quantizer), lambda, trellis);
     let intra4_first = prefers_intra4(simd, source);
     #[cfg(not(target_arch = "wasm32"))]
     let strips = strip_count(width, height, workers);
     #[cfg(not(target_arch = "wasm32"))]
     if strips > 1 {
         let strips = analyze_strips(source, search, strips, intra4_first, cancelled)?;
+        drop(filled);
         return encode_frame(
             width,
             height,
@@ -226,6 +272,7 @@ fn encode_frame_from_rgba<S: Simd>(
         );
     }
     let strip = analyze_rows(source, search, intra4_first, cancelled)?;
+    drop(filled);
     encode_frame(
         width,
         height,
@@ -636,9 +683,11 @@ mod tests {
                         {
                             for row in 0..side {
                                 let start = (y * side + row) * plane.frame_stride() + x * side;
-                                pixels[start..start + side].copy_from_slice(
-                                    &plane.row(y * side + row)[x * side..(x + 1) * side],
-                                );
+                                pixels[start..start + side].copy_from_slice(plane.slice(
+                                    x * side,
+                                    y * side + row,
+                                    side,
+                                ));
                             }
                         }
                     }

@@ -47,7 +47,7 @@ pub use resample::ResampledPixels;
 /// a dependency, feature, or native compiler option that carries one. Every derivative name and
 /// every request descriptor carries this revision, so a derivative rendered under another revision
 /// is never reused as if it were this one.
-pub const IMAGE_PIPELINE_REVISION: u32 = 12;
+pub const IMAGE_PIPELINE_REVISION: u32 = 27;
 
 /// The container an image's own bytes are in.
 ///

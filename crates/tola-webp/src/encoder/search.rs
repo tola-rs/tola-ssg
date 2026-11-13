@@ -312,6 +312,7 @@ pub(super) fn search_macroblock<S: Simd>(
     commit_pixels(&mut reconstructed.v, position, CHROMA_SIDE, &v.pixels);
     DenseMacroblock {
         luma: luma.mode,
+        y2: luma.y2,
         y: luma.levels,
         chroma_mode,
         u: u.levels,
@@ -327,6 +328,7 @@ struct MacroblockSearch<'a, S> {
 
 struct LumaChoice {
     mode: Luma,
+    y2: [i16; 16],
     pixels: [u8; 256],
     levels: [[i16; 16]; 16],
 }
@@ -435,15 +437,14 @@ impl<S: Simd> MacroblockSearch<'_, S> {
                 mode: Luma::Intra4 {
                     modes: intra4.modes,
                 },
+                y2: [0; 16],
                 pixels: intra4.pixels,
                 levels: intra4.levels,
             };
         }
         LumaChoice {
-            mode: Luma::Intra16 {
-                mode: luma_mode,
-                dc: best_luma.dc,
-            },
+            mode: Luma::Intra16 { mode: luma_mode },
+            y2: best_luma.dc,
             pixels: best_luma.pixels,
             levels: best_luma.ac,
         }

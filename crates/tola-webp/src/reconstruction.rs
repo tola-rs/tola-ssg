@@ -34,7 +34,7 @@ impl Reconstruction {
     }
 }
 
-/// Global rows remain readable until the following macroblock row finishes.
+/// The current macroblock row and the preceding row's bottom edge.
 pub(crate) struct Plane {
     samples: Vec<u8>,
     /// Local row width, including the strip halos.
@@ -49,11 +49,11 @@ pub(crate) struct Plane {
 
 impl Plane {
     pub(crate) fn luma(stride: usize, macroblock_rows: usize) -> Self {
-        Self::new(stride, 16 * macroblock_rows.min(2), stride, 0, 0)
+        Self::new(stride, 16, macroblock_rows, stride, 0, 0)
     }
 
     pub(crate) fn chroma(stride: usize, macroblock_rows: usize) -> Self {
-        Self::new(stride, 8 * macroblock_rows.min(2), stride, 0, 0)
+        Self::new(stride, 8, macroblock_rows, stride, 0, 0)
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -66,7 +66,8 @@ impl Plane {
         let left_halo = usize::from(x_start > 0);
         Self::new(
             (x_end - x_start) * 16 + left_halo + 4,
-            16 * macroblock_rows.min(2),
+            16,
+            macroblock_rows,
             frame_stride,
             x_start * 16,
             left_halo,
@@ -83,7 +84,8 @@ impl Plane {
         let left_halo = usize::from(x_start > 0);
         Self::new(
             (x_end - x_start) * 8 + left_halo,
-            8 * macroblock_rows.min(2),
+            8,
+            macroblock_rows,
             frame_stride,
             x_start * 8,
             left_halo,
@@ -92,21 +94,21 @@ impl Plane {
 
     fn new(
         stride: usize,
-        rows: usize,
+        side: usize,
+        macroblock_rows: usize,
         frame_stride: usize,
         x_base: usize,
         left_halo: usize,
     ) -> Self {
-        // Masking replaces a modulo; the retained row counts are 8, 16, or 32.
-        debug_assert!(rows.is_power_of_two());
+        debug_assert!(side.is_power_of_two());
         debug_assert!(left_halo <= 1);
         Self {
-            samples: vec![128; stride * rows],
+            samples: vec![128; stride * (side + usize::from(macroblock_rows > 1))],
             stride,
             frame_stride,
             x_base,
             left_halo,
-            row_mask: rows - 1,
+            row_mask: side - 1,
         }
     }
 
@@ -120,13 +122,20 @@ impl Plane {
         self.frame_stride
     }
 
-    pub(crate) fn row(&self, y: usize) -> &[u8] {
-        let start = (y & self.row_mask) * self.stride;
+    fn row_start(&self, y: usize) -> usize {
+        let line = y & self.row_mask;
+        // Consecutive bottom edges must coexist as the current row advances across the frame.
+        let odd_bottom = line == self.row_mask && y & (self.row_mask + 1) != 0;
+        (line + usize::from(odd_bottom)) * self.stride
+    }
+
+    fn row(&self, y: usize) -> &[u8] {
+        let start = self.row_start(y);
         &self.samples[start..start + self.stride]
     }
 
     pub(crate) fn row_mut(&mut self, y: usize) -> &mut [u8] {
-        let start = (y & self.row_mask) * self.stride;
+        let start = self.row_start(y);
         &mut self.samples[start..start + self.stride]
     }
 

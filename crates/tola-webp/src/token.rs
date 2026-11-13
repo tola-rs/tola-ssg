@@ -27,11 +27,9 @@ pub(crate) const MAGNITUDES: usize = 2048;
 /// Largest magnitude served by the small-coefficient table.
 pub(crate) const SMALL_MAGNITUDES: usize = 128;
 /// Largest magnitude the six-bit pair table covers.
-pub(crate) const PAIR_MAGNITUDES: usize = 64;
+pub(crate) const PAIR_MAGNITUDES: usize = 32;
 /// Packed pair-table entries (two six-bit magnitudes).
 pub(crate) const PAIR_ENTRIES: usize = PAIR_MAGNITUDES * PAIR_MAGNITUDES;
-/// Rows in the pair table: the 96 entries rounded up so the row mask is a power of two.
-const PAIR_ROWS: usize = ENTRIES.next_power_of_two();
 
 /// RFC 6386 §13.2: the coefficient token tree.
 const COEFF_TREE: [i8; 22] = [
@@ -189,7 +187,7 @@ pub(crate) struct TokenCosts {
     magnitudes: &'static [u16; MAGNITUDES],
     small_coefficients: Arc<[[u16; SMALL_MAGNITUDES]; ENTRIES]>,
     // Masked to 127 in the hot loop, so every lookup is bounds-check free.
-    coefficient_pairs6: Arc<[[u16; PAIR_ENTRIES]; PAIR_ROWS]>,
+    coefficient_pairs: Arc<[[u16; PAIR_ENTRIES]; ENTRIES]>,
 }
 
 static MAGNITUDE_COSTS: LazyLock<[u16; MAGNITUDES]> = LazyLock::new(|| {
@@ -253,11 +251,8 @@ impl TokenCosts {
                         + magnitudes[magnitude]
                 })
             }));
-        let pairs: Arc<[[u16; PAIR_ENTRIES]]> = (0..PAIR_ROWS)
+        let pairs: Arc<[[u16; PAIR_ENTRIES]]> = (0..ENTRIES)
             .map(|entry| {
-                if entry >= ENTRIES {
-                    return [0; PAIR_ENTRIES];
-                }
                 let context = entry % CONTEXTS;
                 let group = entry / CONTEXTS % BANDS;
                 let plane = entry / (CONTEXTS * BANDS);
@@ -282,7 +277,7 @@ impl TokenCosts {
                 })
             })
             .collect();
-        let coefficient_pairs6 = pairs
+        let coefficient_pairs = pairs
             .try_into()
             .expect("the pair table has a fixed row count");
         Self {
@@ -290,7 +285,7 @@ impl TokenCosts {
             roots,
             magnitudes,
             small_coefficients,
-            coefficient_pairs6,
+            coefficient_pairs,
         }
     }
 
@@ -368,7 +363,7 @@ impl TokenCosts {
             }
             let first_magnitude = levels[usize::from(offsets & 15)].unsigned_abs();
             let second_magnitude = levels[usize::from(offsets >> 4)].unsigned_abs();
-            if (first_magnitude | second_magnitude) >= 64 {
+            if usize::from(first_magnitude | second_magnitude) >= PAIR_MAGNITUDES {
                 return self.block_rate_wide(WideScan {
                     levels,
                     plane,
@@ -379,10 +374,10 @@ impl TokenCosts {
                     last,
                 });
             }
-            let packed = usize::from(first_magnitude | (second_magnitude << 6)) & 0xfff;
-            rate += u64::from(
-                self.coefficient_pairs6[(pair_entry + context) & (PAIR_ROWS - 1)][packed],
-            );
+            let packed = (usize::from(first_magnitude)
+                | (usize::from(second_magnitude) << PAIR_MAGNITUDES.trailing_zeros()))
+                & (PAIR_ENTRIES - 1);
+            rate += u64::from(self.coefficient_pairs[pair_entry + context][packed]);
             pair_entry += CONTEXTS;
             position += 2;
             context = usize::from(second_magnitude.min(2));
@@ -400,7 +395,7 @@ impl TokenCosts {
         (rate, true)
     }
 
-    /// Continue from the first pair carrying a magnitude of 64 or more.
+    /// Continue from the first pair whose magnitudes exceed the pair table.
     #[inline(never)]
     fn block_rate_wide(&self, scan: WideScan<'_>) -> (u64, bool) {
         let WideScan {
@@ -754,19 +749,19 @@ impl TokenContexts {
     pub(crate) fn advance(&mut self, macroblock_x: usize, macroblock: &Macroblock) {
         let mut neighbors = self.contexts(macroblock_x);
         let first = match &macroblock.luma {
-            Luma::Intra16 { dc, .. } => {
-                neighbors.set_y2(dc.iter().any(|level| *level != 0));
+            Luma::Intra16 { .. } => {
+                neighbors.set_y2(macroblock.lengths[0] != 0);
                 1
             }
             Luma::Intra4 { .. } => 0,
         };
-        for (index, &length) in macroblock.lengths[..16].iter().enumerate() {
+        for (index, &length) in macroblock.lengths[1..17].iter().enumerate() {
             neighbors.set_y(index, usize::from(length) > first);
         }
-        for (index, &length) in macroblock.lengths[16..20].iter().enumerate() {
+        for (index, &length) in macroblock.lengths[17..21].iter().enumerate() {
             neighbors.set_u(index, length != 0);
         }
-        for (index, &length) in macroblock.lengths[20..].iter().enumerate() {
+        for (index, &length) in macroblock.lengths[21..].iter().enumerate() {
             neighbors.set_v(index, length != 0);
         }
         self.commit(macroblock_x, neighbors);
@@ -815,27 +810,12 @@ impl TokenWriter {
         spool: &CoefficientSpool,
     ) {
         let mut neighbors = self.contexts.contexts(macroblock_x);
-        let plane = match &macroblock.luma {
-            Luma::Intra4 { .. } => CoefficientPlane::Luma,
-            Luma::Intra16 { dc, .. } => {
-                let (prefix, length) = scan_prefix(dc);
-                let nonzero = write_block(
-                    writer,
-                    &prefix[..length],
-                    CoefficientPlane::LumaDc,
-                    neighbors.y2(),
-                    &self.probs,
-                );
-                neighbors.set_y2(nonzero);
-                CoefficientPlane::LumaAc
-            }
-        };
         match spool.levels(macroblock) {
             PackedLevels::Narrow(levels) => {
-                self.write_blocks(writer, levels, macroblock, plane, &mut neighbors);
+                self.write_blocks(writer, levels, macroblock, &mut neighbors);
             }
             PackedLevels::Wide(levels) => {
-                self.write_blocks(writer, levels, macroblock, plane, &mut neighbors);
+                self.write_blocks(writer, levels, macroblock, &mut neighbors);
             }
         }
         self.contexts.commit(macroblock_x, neighbors);
@@ -846,19 +826,34 @@ impl TokenWriter {
         writer: &mut W,
         mut levels: &[C],
         macroblock: &Macroblock,
-        plane: CoefficientPlane,
         neighbors: &mut MacroblockContexts,
     ) {
         let lengths = &macroblock.lengths;
-        for (index, &length) in lengths[..16].iter().enumerate() {
+        let plane = match macroblock.luma {
+            Luma::Intra4 { .. } => CoefficientPlane::Luma,
+            Luma::Intra16 { .. } => {
+                let (y2, rest) = levels.split_at(usize::from(lengths[0]));
+                levels = rest;
+                let nonzero = write_block(
+                    writer,
+                    y2,
+                    CoefficientPlane::LumaDc,
+                    neighbors.y2(),
+                    &self.probs,
+                );
+                neighbors.set_y2(nonzero);
+                CoefficientPlane::LumaAc
+            }
+        };
+        for (index, &length) in lengths[1..17].iter().enumerate() {
             let (block, rest) = levels.split_at(usize::from(length));
             levels = rest;
             let nonzero = write_block(writer, block, plane, neighbors.y(index), &self.probs);
             neighbors.set_y(index, nonzero);
         }
         for (base, above, left) in [
-            (16, &mut neighbors.above.u, &mut neighbors.left.u),
-            (20, &mut neighbors.above.v, &mut neighbors.left.v),
+            (17, &mut neighbors.above.u, &mut neighbors.left.u),
+            (21, &mut neighbors.above.v, &mut neighbors.left.v),
         ] {
             for (index, &length) in lengths[base..base + 4].iter().enumerate() {
                 let column = index % 2;
@@ -884,7 +879,7 @@ impl TokenWriter {
 ///
 /// Descending groups let the common short block skip most of a linear fifteen-step scan.
 #[inline]
-fn last_nonzero(levels: &[i16; 16], first: usize) -> Option<usize> {
+pub(crate) fn last_nonzero(levels: &[i16; 16], first: usize) -> Option<usize> {
     let at = |position: usize| levels[ZIGZAG[position]];
     if at(8) | at(9) | at(10) | at(11) | at(12) | at(13) | at(14) | at(15) != 0 {
         return (8..16).rev().find(|&position| at(position) != 0);
@@ -899,13 +894,6 @@ fn last_nonzero(levels: &[i16; 16], first: usize) -> Option<usize> {
         return Some(1);
     }
     (first == 0 && at(0) != 0).then_some(0)
-}
-
-/// The dense block's scan-order prefix and its length.
-fn scan_prefix(levels: &[i16; 16]) -> ([i16; 16], usize) {
-    let length = last_nonzero(levels, 0).map_or(0, |last| last + 1);
-    let prefix = std::array::from_fn(|position| levels[ZIGZAG[position]]);
-    (prefix, length)
 }
 
 /// Write one block from its scan-order prefix and return whether it carries a coefficient at or
@@ -1246,10 +1234,10 @@ mod tests {
                 }
                 for context in 0..3 {
                     let pair_context = (plane.index() * 8 + group) * 3 + context;
-                    for (packed, &rate) in costs.coefficient_pairs6[pair_context].iter().enumerate()
+                    for (packed, &rate) in costs.coefficient_pairs[pair_context].iter().enumerate()
                     {
-                        let first = (packed & 63) as u16;
-                        let second = (packed >> 6) as u16;
+                        let first = (packed & (PAIR_MAGNITUDES - 1)) as u16;
+                        let second = (packed >> PAIR_MAGNITUDES.trailing_zeros()) as u16;
                         rows.push((
                             format!(
                                 "pair {} {position}/{context} {first}+{second}",
@@ -1329,10 +1317,8 @@ mod tests {
 
     fn zero_macroblock() -> DenseMacroblock {
         DenseMacroblock {
-            luma: Luma::Intra16 {
-                mode: 0,
-                dc: [0; 16],
-            },
+            luma: Luma::Intra16 { mode: 0 },
+            y2: [0; 16],
             y: [[0; 16]; 16],
             chroma_mode: 0,
             u: [[0; 16]; 4],
@@ -1341,15 +1327,16 @@ mod tests {
     }
 
     fn dense_macroblock(round: usize) -> DenseMacroblock {
-        let luma = if round.is_multiple_of(3) {
-            Luma::Intra4 { modes: [0; 16] }
+        let (luma, y2) = if round.is_multiple_of(3) {
+            (Luma::Intra4 { modes: [0; 16] }, [0; 16])
         } else {
             let mut dc = [0; 16];
             dc[0] = 7;
-            Luma::Intra16 { mode: 0, dc }
+            (Luma::Intra16 { mode: 0 }, dc)
         };
         let mut macroblock = DenseMacroblock {
             luma,
+            y2,
             ..zero_macroblock()
         };
         for (index, block) in macroblock.y.iter_mut().enumerate() {
@@ -1381,6 +1368,7 @@ mod tests {
             let (zero_luma, zero_chroma) = neighbors.empty_rates(&costs);
             let luma_only = DenseMacroblock {
                 luma: dense.luma,
+                y2: dense.y2,
                 y: dense.y,
                 ..zero_macroblock()
             };
@@ -1390,7 +1378,7 @@ mod tests {
                 ..zero_macroblock()
             };
             let luma_dc = match &dense.luma {
-                Luma::Intra16 { dc, .. } => Some(dc),
+                Luma::Intra16 { .. } => Some(&dense.y2),
                 Luma::Intra4 { .. } => None,
             };
             let mut luma_neighbors = neighbors;

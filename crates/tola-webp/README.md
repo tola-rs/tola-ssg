@@ -11,6 +11,9 @@ Takes straight-alpha RGBA8; dimensions `1..=16383`; the buffer must be exactly
 lossy WebP. `encode_rgba_to` writes to a caller-supplied destination and accepts a cancellation
 callback and a worker limit.
 
+For small transparent artwork with a limited opaque palette, the encoder extends nearby colours
+into fully transparent pixels before chroma subsampling. The alpha plane remains exact.
+
 ```sh
 cargo test --locked -p tola-webp
 ```

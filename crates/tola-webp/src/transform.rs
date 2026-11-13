@@ -55,6 +55,10 @@ fn forward_finish<S: Simd>(simd: S, [d0, d1, d2, d3]: [i32x4<S>; 4]) -> [i32x4<S
 
 #[inline(always)]
 pub(crate) fn inverse_dct<S: Simd>(simd: S, input: &[i32; 16]) -> [i32; 16] {
+    // With no AC terms both passes leave the DC term in every lane.
+    if input[1..].iter().all(|&value| value == 0) {
+        return [(input[0] + 4) >> 3; 16];
+    }
     let rows = std::array::from_fn(|row| i32x4::from_slice(simd, &input[row * 4..row * 4 + 4]));
     let columns = transpose(inverse_pass(rows));
     let rows = inverse_pass(columns).map(|column| (column + 4) >> 3u32);
