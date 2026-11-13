@@ -9,12 +9,11 @@ use tola_typst::{
 };
 use typst::foundations::Dict;
 
+use super::target::resolve_target;
 use crate::cancellation::{BuildCancellation, BuildCancelled};
 use crate::config::ResolvedSiteConfig;
 use crate::seo::RenderError;
-use crate::seo::declaration::{
-    ResolvedDocumentTarget, SeoDeclaration, SeoDeclarationError, field_path, resolve_target,
-};
+use crate::seo::declaration::{DocumentTarget, SeoDeclaration, SeoDeclarationError, field_path};
 use tola_address::OutputPath;
 
 /// One rendering pass shares an exported selection across entries and feed formats.
@@ -68,14 +67,8 @@ impl<'a> DocumentContents<'a> {
             return Ok(Arc::clone(html));
         }
         let base = self.document_base(&target, cancellation)?;
-        let path =
-            typst::syntax::VirtualPath::new(target.output.as_str()).expect("validated output path");
-        let document = self
-            .compilation
-            .document(&path)
-            .expect("resolved Bundle target exists");
         let bundle_cancellation = cancellation.bundle_cancellation();
-        let fragment = document.html_fragment_with_links(
+        let fragment = target.document.html_fragment_with_links(
             &key.1,
             &HtmlFragmentOptions { preserve_ancestors: true, ..Default::default() },
             &bundle_cancellation,
@@ -119,7 +112,7 @@ impl<'a> DocumentContents<'a> {
 impl DocumentContents<'_> {
     fn document_base(
         &mut self,
-        target: &ResolvedDocumentTarget,
+        target: &DocumentTarget<'_>,
         cancellation: &BuildCancellation,
     ) -> Result<url::Url, RenderError> {
         if let Some(base) = self.bases.get(&target.output) {
@@ -128,13 +121,8 @@ impl DocumentContents<'_> {
         let mut canonical = target.url.clone();
         canonical.set_fragment(None);
         canonical.set_query(None);
-        let path =
-            typst::syntax::VirtualPath::new(target.output.as_str()).expect("validated output path");
-        let document = self
-            .compilation
-            .document(&path)
-            .expect("resolved Bundle target exists");
-        let base = document
+        let base = target
+            .document
             .html_inventory(&cancellation.bundle_cancellation())?
             .and_then(|inventory| inventory.base_href().map(|base| base.value().to_owned()))
             .and_then(|base| canonical.join(&base).ok())

@@ -1,9 +1,8 @@
 // @tola/source:0.0.0 - discovered content sources, the source a call runs in, and metadata declarations
 //
-// A discovered source is an input, not a published page: one source can appear in several
-// documents, or none. The root program reads the settled declarations, validates the metadata
-// it needs, and chooses which documents to emit. Metadata fields and selection rules belong to
-// your site; Tola gives no built-in meaning to `title`, `draft`, or `permalink`.
+// The entry file decides which pages to build from the discovered sources. It may use one
+// source in several pages. The site defines fields such as `title`, `draft`, and `permalink`
+// and decides how to use them.
 
 /// Every content source the build discovered, ordered by its complete content path.
 ///
@@ -14,8 +13,9 @@
 ///
 /// Each record carries:
 ///
-/// - `id` and `path`: the complete path of the source below `build.content-dir`, extension included,
-///   such as `posts/deep.typ`. The directory index of `about` is `about/index.typ`.
+/// - `id` and `path`: the same path string relative to `build.content-dir`, including the
+///   extension, such as `posts/deep.typ` or `about/index.typ`. Both change when the source is
+///   renamed or moved within the content tree.
 /// - `file`: a Typst `path` value addressing the same file from the site root. Pass it directly to
 ///   `include` or `read`; it is an input path, never a browser URL.
 /// - `filename`: the last component of `path`, such as `deep.typ`.
@@ -25,6 +25,9 @@
 /// - `meta`: the metadata the source declares, as this evaluation round sees it. A source whose
 ///   metadata reads other sources settles over several rounds, so its value can differ from one
 ///   round to the next. The root program receives the settled values.
+///
+/// For a feed entry that should keep its identity when a page moves, store a fixed ID in your
+/// site's metadata and pass it explicitly as the entry's `id` in `@tola/feed`.
 ///
 /// `tola inspect sources` lists discovered file paths without evaluating metadata.
 /// Use a model query to return the metadata your site needs as JSON.
@@ -42,12 +45,13 @@
 ///
 /// Example - publish a source selected by its path:
 ///
-/// Here `content/guide/index.typ` declares a `title` and contains the page's body.
+/// Create `content/guide/index.typ` with `= Guide` as its body. Save this example as
+/// `site.typ` in a new site and run `tola build`. The default output is `public/guide/index.html`.
 ///
 /// ```typst site
 /// #import "@tola/source:0.0.0": all-sources
 /// #let guide = all-sources().find(source => source.path == "guide/index.typ")
-/// #document("guide/index.html", format: "html", title: guide.meta.title)[
+/// #document("guide/index.html", format: "html", title: "Guide")[
 ///   #include guide.file
 /// ]
 /// ```

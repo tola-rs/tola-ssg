@@ -13,7 +13,8 @@ use std::path::{Path, PathBuf};
 
 use tola_input::normalize_path;
 
-/// Complete content-root-relative filename identity for a content source.
+/// Path identifying a source relative to `build.content-dir`, including its extension.
+/// Renaming the file or moving it within the content tree changes this ID.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ContentId(PathBuf);
 

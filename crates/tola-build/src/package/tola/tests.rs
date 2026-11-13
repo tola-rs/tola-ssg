@@ -228,7 +228,7 @@ const EXAMPLE_CONTENT: [(&str, &str); 7] = [
 /// - `brand` is an icon collection with the icons `brand:mark` and `brand:logo`.
 /// - `site.base-path` is `/` and `site.title` is `Example site`.
 /// - The world has Tola's embedded fonts and no system fonts, so an example that lays
-///   content out — a math frame from `@tola/web`, for instance — renders offline.
+///   content out — a math frame in a feed, for instance — renders offline.
 ///
 /// `source` becomes the site root's `main.typ`, so a relative path such as `assets/logo.png`
 /// reads from the site root. The example's own file is not a content source, so
@@ -644,17 +644,17 @@ fn qualified_imports_reach_package() {
     let (directory, world) = world_from_default_config(
         r#"
 #import "@tola/source:0.0.0"
-#import "@tola/web:0.0.0"
+#import "@tola/head:0.0.0" as page-head
 #import "@tola/document:0.0.0" as doc
 #let document-source = source.all-sources().first()
 #assert.eq(document-source.filename, "document.typ")
-#assert.eq(web.plain-text([Native *title*]), "Native title")
-#assert.eq(web.head-metadata((:)).len(), 2)
+#assert.eq(doc.plain-text([Native *title*]), "Native title")
+#assert.eq(page-head.head-metadata((:)).len(), 2)
 #document("first/index.html")[#include document-source.file]
 #document("second.html")[#include document-source.file]
 #document("native.html")[
   #html.html[
-    #html.head(web.head-metadata((title: "Native title")).join())
+    #html.head(page-head.head-metadata((title: [Native *title*])).join())
     #html.body[#context assert.eq(doc.current-document().output, "native.html")]
   ]
 ]

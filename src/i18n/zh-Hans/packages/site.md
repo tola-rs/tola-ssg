@@ -4,7 +4,7 @@
 
 ## `project-path`
 
-构造以站点根目录为根的原生路径，在主题包中调用也相同。
+返回相对于站点根目录的 Typst `path`。在主题包中调用时，仍以站点根目录为准。
 
 用于读取主题已知位置的用户数据或生成输入。这里只创建路径，不读取或生成文件；实际读取仍遵守本次调用的输入边界。
 
@@ -19,7 +19,7 @@
 
 ## `site`
 
-本站的配置值，解析自 `tola.toml`。
+在 Typst 中读取 `tola.toml` 的 `[site]` 和 `[options]` 设置。
 
 `site` 为每项 `[site]` 设置提供一个条目，另外还有派生出来的 `url`：`origin`、`base-path`、`url`、`title`、`authors`、`description`、`language` 和 `languages`。顶层 `[options]` 表通过 `site.options` 读取，默认为空字典 `(:)`。
 
@@ -29,7 +29,7 @@
 
 `languages` 是配置中的所有语言，保持配置顺序，默认为 `()`；非空数组必须包含 `language`。`language` 和 `languages` 都是模板的输入：语言的路由、配对与切换由站点本身决定。
 
-Example - 读取默认站点的配置值：
+使用默认 `tola.toml` 配置时，在 `site.typ` 中可以读到以下值。
 
 ```typst
 #import "@tola/site:0.0.0": site
@@ -39,7 +39,7 @@ Example - 读取默认站点的配置值：
 #assert.eq(site.languages, ())
 ```
 
-Example - 读取已配置站点的配置值：
+在 `tola.toml` 的 `[site]` 下设置 `title = "Example site"` 后，Typst 可以读到这个标题。
 
 ```typst site
 #import "@tola/site:0.0.0": site

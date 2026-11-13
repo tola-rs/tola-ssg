@@ -152,15 +152,17 @@ static PACKAGES: LazyLock<Catalog> = LazyLock::new(|| {
         "datalog",
         "diagnostic",
         "document",
+        "feed",
         "hash",
+        "head",
         "icon",
         "image",
         "module",
         "schema",
         "site",
+        "sitemap",
         "source",
         "uuid",
-        "web",
     )
 });
 

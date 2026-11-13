@@ -7,7 +7,7 @@ use typst::foundations::Value;
 use crate::cancellation::BuildCancellation;
 use crate::config::ResolvedSiteConfig;
 use crate::seo::RenderError;
-use crate::seo::declaration::{SeoDeclaration, index_path, resolve_target};
+use crate::seo::declaration::{SeoDeclaration, TargetAnchor, index_path, resolve_document};
 
 /// The not-found page the site check requires. It answers missing URLs, so no crawlable address
 /// names it.
@@ -45,32 +45,35 @@ pub(super) fn render_outputs(
                 }
                 target => (target, None),
             };
-            let target = resolve_target(
+            let (target, anchor) = resolve_document(
                 &declaration,
                 target,
                 &field,
-                &output,
                 config,
                 compilation,
                 cancellation,
             )?;
+            let whole_document = match anchor {
+                None => true,
+                Some(TargetAnchor::Fragment(_)) => false,
+                Some(TargetAnchor::Location(location)) => {
+                    compilation.introspector().document(location) == Some(location)
+                }
+            };
+            if !whole_document {
+                return Err(declaration
+                    .invalid(
+                        &field,
+                        "sitemap target names an element, not a complete document",
+                    )
+                    .with_help("Name the whole document by its output path")
+                    .into());
+            }
             if target.output.as_str() == NOT_FOUND_OUTPUT {
                 warnings.push(declaration.reference_warning(
                     &field,
                     "a sitemap lists the not-found page, which search engines never index",
                 ));
-            }
-            if target.url.fragment().is_some() {
-                return Err(declaration
-                    .invalid(
-                        &field,
-                        format!(
-                            "sitemap target `{}` names an element, not a complete document",
-                            target.url
-                        ),
-                    )
-                    .with_help("Name the whole document by its output path")
-                    .into());
             }
             if !urls.insert(target.url.clone()) {
                 return Err(declaration

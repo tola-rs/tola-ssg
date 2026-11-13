@@ -8,12 +8,13 @@ use super::{
     FeedFormat,
     content::{FeedContent, FeedContentError},
     document::DocumentContents,
+    target::resolve_target,
 };
 use crate::cancellation::{BuildCancellation, BuildCancelled};
 use crate::config::ResolvedSiteConfig;
 use crate::seo::RenderError;
 use crate::seo::declaration::{
-    SeoDeclaration, SeoDeclarationError, field_path, index_path, published_date, resolve_target,
+    SeoDeclaration, SeoDeclarationError, field_path, index_path, published_date,
 };
 use tola_address::OutputPath;
 
@@ -179,7 +180,7 @@ impl Feed {
                 declaration,
                 fields,
                 &entry_path,
-                target.title.as_deref(),
+                target.document.info().title.as_deref(),
                 &target.output,
             )?;
             let published = published_date(

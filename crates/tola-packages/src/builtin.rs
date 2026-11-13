@@ -171,7 +171,7 @@ fn spelling(
 }
 
 /// Holds exactly one row per variant, in the order [`TolaPackage::all`] lists them.
-const PACKAGE_DEFINITIONS: [PackageDefinition; 16] = [
+const PACKAGE_DEFINITIONS: [PackageDefinition; TolaPackage::all().len()] = [
     PackageDefinition {
         name: "host",
         sources: PackageSources::Fixed(&[PackageSource::new(
@@ -261,11 +261,25 @@ const PACKAGE_DEFINITIONS: [PackageDefinition; 16] = [
         ]),
     },
     PackageDefinition {
-        name: "web",
+        name: "head",
         sources: PackageSources::Fixed(&[
-            PackageSource::new("lib.typ", include_str!("embed/web.typ")),
-            PackageSource::new("web-fields.typ", include_str!("embed/web-fields.typ")),
+            PackageSource::new("lib.typ", include_str!("embed/head.typ")),
+            PackageSource::new("head-fields.typ", include_str!("embed/head-fields.typ")),
         ]),
+    },
+    PackageDefinition {
+        name: "feed",
+        sources: PackageSources::Fixed(&[PackageSource::new(
+            "lib.typ",
+            include_str!("embed/feed.typ"),
+        )]),
+    },
+    PackageDefinition {
+        name: "sitemap",
+        sources: PackageSources::Fixed(&[PackageSource::new(
+            "lib.typ",
+            include_str!("embed/sitemap.typ"),
+        )]),
     },
     PackageDefinition {
         name: "hash",
@@ -314,7 +328,9 @@ pub enum TolaPackage {
     Schema,
     Document,
     Code,
-    Web,
+    Head,
+    Feed,
+    Sitemap,
     Hash,
     Uuid,
     Diagnostic,
@@ -352,7 +368,9 @@ impl TolaPackage {
             Self::Schema,
             Self::Document,
             Self::Code,
-            Self::Web,
+            Self::Head,
+            Self::Feed,
+            Self::Sitemap,
             Self::Hash,
             Self::Uuid,
             Self::Diagnostic,
@@ -397,7 +415,9 @@ impl TolaPackage {
             | Self::Schema
             | Self::Document
             | Self::Code
-            | Self::Web
+            | Self::Head
+            | Self::Feed
+            | Self::Sitemap
             | Self::Hash
             | Self::Uuid
             | Self::Diagnostic => false,

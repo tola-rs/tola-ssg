@@ -42,7 +42,7 @@ struct SourceInput {
 /// One field of a source descriptor the site program reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceDescriptorField {
-    /// The identity the source is looked up by: its complete path below `build.content-dir`.
+    /// The same path string as `path`. It changes when the source is renamed or moved.
     Id,
     /// The source file addressed from the site root, the input `include` and `read` accept.
     File,

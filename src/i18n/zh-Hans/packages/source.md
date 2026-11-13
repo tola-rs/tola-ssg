@@ -2,7 +2,7 @@
 
 发现的内容源、调用所在的源，以及 metadata 声明
 
-发现的源是输入，不等于发布的页面：同一个源可以出现在多篇文档里，也可以不发布。根程序读取稳定后的声明，校验所需 metadata，再决定输出哪些文档。metadata 字段和选择规则属于你的站点；Tola 不为 `title`、`draft` 或 `permalink` 赋予内置含义。
+入口文件决定在哪些页面使用源文件。同一个源可以出现在多个页面里。站点自行定义 `title`、`draft`、`permalink` 等 metadata 字段及其规则。
 
 ## `all-sources`
 
@@ -12,11 +12,13 @@
 
 每条记录包含：
 
-- `id` 与 `path`：内容源在 `build.content-dir` 下的完整路径，含扩展名，例如 `posts/deep.typ`；`about` 的目录索引是 `about/index.typ`。
+- `id` 与 `path` 是同一个路径字符串，相对于 `build.content-dir`，包含扩展名，例如 `posts/deep.typ` 或 `about/index.typ`。源文件改名或在内容目录内移动时，两个值都会改变。
 - `file`：从站点根出发、指向同一个文件的 Typst `path` 值。直接传给 `include` 或 `read`；它是输入路径，绝不是浏览器 URL。
 - `filename`：`path` 的最后一段，例如 `deep.typ`。
 - `route-segments`：文件布局赋予该源的身份分段：根索引为 `()`，`about.typ` 与 `about/index.typ` 都是 `("about",)`，`posts/deep.typ` 是 `("posts", "deep")`。
 - `meta`：该源在本轮求值中被看到的 metadata。若它的 metadata 会读取其他源，就要经过多轮才能收敛，因此记录在这几轮之间可能变化。根程序拿到的是稳定后的值。
+
+如果页面搬迁后订阅条目需要保留原来的身份，请在站点的 metadata 中保存固定 ID，并把它显式传给 `@tola/feed` 条目的 `id`。
 
 `tola inspect sources` 列出发现的文件路径，不求值 metadata。
 用模型查询把站点需要的 metadata 返回为 JSON。
@@ -33,12 +35,12 @@ Example - 列出空站点的源：
 
 Example - 按路径选择并发布一个源：
 
-这里的 `content/guide/index.typ` 声明了 `title`，并包含页面正文。
+在 `content/guide/index.typ` 写入 `= Guide`。在新站点中将这段代码保存为 `site.typ`，再运行 `tola build`。默认输出为 `public/guide/index.html`。
 
 ```typst site
 #import "@tola/source:0.0.0": all-sources
 #let guide = all-sources().find(source => source.path == "guide/index.typ")
-#document("guide/index.html", format: "html", title: guide.meta.title)[
+#document("guide/index.html", format: "html", title: "Guide")[
   #include guide.file
 ]
 ```

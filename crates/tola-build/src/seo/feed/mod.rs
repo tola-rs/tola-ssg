@@ -7,6 +7,7 @@ mod document;
 mod html;
 mod json;
 mod rss;
+mod target;
 pub(super) use content::FeedContentViolation;
 
 use crate::cancellation::{BuildCancellation, BuildCancelled};

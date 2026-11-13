@@ -1,11 +1,37 @@
 // @tola/document:0.0.0 - the document you are in, its headings, and the references you wrote
 //
-// This package answers three questions about a page you are building. `current-document()` says
-// which document a call belongs to, `headings()` lists that document's headings, and
-// `references()` lists the links and refs your Bundle wrote that reached their pages. Reading a
-// document needs document context, so call these inside `context`, in a `document(…)` body.
-// Sources rendered into one document share that identity, while the identity of a single source
-// lives in `@tola/source`.
+// Call `current-document()`, `headings()`, and `references()` in `context` inside a
+// `document(…)` body. Sources rendered in the same document read the same document. To read
+// a source file’s own identity, use `@tola/source`.
+
+/// Read the text of a string or of your content.
+///
+/// Text characters, symbol characters, spaces, raw code, and smart quotes contribute their own
+/// text. Every other element contributes the text of its content, so containers, formatting,
+/// links, and mathematics are transparent. Metadata contributes nothing. The text comes from what
+/// you wrote: no show rule runs, and nothing is laid out.
+///
+/// Reading a string or content always succeeds. An element that carries neither text nor content
+/// of its own contributes nothing, and a warning names it where you wrote it.
+///
+/// Example - read text from a string and from content:
+///
+/// ```typst
+/// #import "@tola/document:0.0.0": plain-text
+/// #assert.eq(plain-text("Guide"), "Guide")
+/// #assert.eq(plain-text([Hello, *world*!]), "Hello, world!")
+/// ```
+///
+/// Example - an element that carries no text contributes nothing:
+///
+/// ```typst
+/// #import "@tola/document:0.0.0": plain-text
+/// #let image = html.img(src: "/cover.png", alt: "Cover")
+/// #assert.eq(plain-text(image), "")
+/// ```
+///
+/// Related: headings, @tola/head
+#import "@tola/host:0.0.0": plain-text
 
 /// The document whose output contains this call: its `output`, `route`, and `location`.
 ///
@@ -259,7 +285,8 @@
 /// in the exported HTML. Call it inside `context`; every location it returns belongs to this
 /// compilation.
 ///
-/// Example - link the outlined headings down to level 2:
+/// Save this as `site.typ` in a new site and run `tola build`. The home page links to
+/// “Introduction” and “Details”. Level 3 and headings with `outlined: false` are omitted.
 ///
 /// ```typ
 /// #import "@tola/document:0.0.0": headings
@@ -299,8 +326,6 @@
 ///   so under `set heading(offset: …)` a heading written `==` may be excluded by `depth: 2`.
 /// -> array
 #let headings = {
-  import "@tola/host:0.0.0": plain-text
-
   // Bound outside the loop below, whose `heading` would shadow the element function.
   let heading-counter = counter(heading)
 

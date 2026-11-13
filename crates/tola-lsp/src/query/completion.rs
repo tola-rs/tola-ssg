@@ -1202,12 +1202,12 @@ mod tests {
     /// An import item list answers only the module's exports, narrowed by what the author typed.
     #[test]
     fn import_items_only_module_exports() {
-        let package = tola_packages::builtin_package(&tola_packages::TolaPackage::Web.spec())
-            .expect("the web package");
+        let package = tola_packages::builtin_package(&tola_packages::TolaPackage::Document.spec())
+            .expect("the document package");
         let mut site = QuerySession::with_program(FAILED_PROGRAM);
         for marked in [
-            "#import \"@tola/web:0.0.0\": p|",
-            "#import \"@tola/web:0.0.0\": pl|",
+            "#import \"@tola/document:0.0.0\": p|",
+            "#import \"@tola/document:0.0.0\": pl|",
         ] {
             let items = site.completion(marked);
             let labels = completion_labels(&items);
@@ -1219,13 +1219,13 @@ mod tests {
                 "{marked:?}: {labels:?}"
             );
         }
-        let items = site.completion("#import \"@tola/web:0.0.0\": plain-t|");
+        let items = site.completion("#import \"@tola/document:0.0.0\": plain-t|");
         assert_eq!(completion_labels(&items), ["plain-text"]);
         for marked in [
-            "#import \"@tola/web:0.0.0\":|",
-            "#import \"@tola/web:0.0.0\": |",
-            "#import \"@tola/web:0.0.0\": pl |",
-            "#import \"@tola/web:0.0.0\": pl, |",
+            "#import \"@tola/document:0.0.0\":|",
+            "#import \"@tola/document:0.0.0\": |",
+            "#import \"@tola/document:0.0.0\": pl |",
+            "#import \"@tola/document:0.0.0\": pl, |",
         ] {
             let items = site.completion(marked);
             let labels = completion_labels(&items);

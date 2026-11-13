@@ -145,7 +145,9 @@ fn overview_page(language: HelpLanguage) -> HelpPage {
         ),
         ("document", &["headings", "references"][..]),
         ("diagnostic", &["report"][..]),
-        ("web", &["feed", "sitemap"][..]),
+        ("head", &["head-metadata", "canonical"][..]),
+        ("feed", &["feed"][..]),
+        ("sitemap", &["sitemap"][..]),
     ] {
         let command = format!("tola help \"@tola/{name}\" {}", exports.join(" "));
         markdown.push_str(&format!(

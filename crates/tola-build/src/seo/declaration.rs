@@ -9,14 +9,6 @@ use crate::cancellation::BuildCancellation;
 use crate::config::ResolvedSiteConfig;
 use tola_address::OutputPath;
 
-const FRAGMENT_ENCODE_SET: &percent_encoding::AsciiSet = &percent_encoding::CONTROLS
-    .add(b'%')
-    .add(b' ')
-    .add(b'"')
-    .add(b'<')
-    .add(b'>')
-    .add(b'`');
-
 #[derive(Debug, thiserror::Error)]
 #[error(
     "invalid <{}> declaration{}: {}",
@@ -337,23 +329,27 @@ fn holding_entry(pointer: &str) -> String {
     holders.join(" in ")
 }
 
-pub(super) struct ResolvedDocumentTarget {
+pub(super) struct DocumentTarget<'a> {
     pub(super) output: OutputPath,
     pub(super) url: url::Url,
-    pub(super) title: Option<String>,
+    pub(super) document: tola_typst::CompiledBundleDocument<'a>,
 }
 
-pub(super) fn resolve_target(
+pub(super) enum TargetAnchor {
+    Fragment(String),
+    Location(Location),
+}
+
+pub(super) fn resolve_document<'a>(
     declaration: &SeoDeclaration,
     value: &Value,
     field: &str,
-    output: &OutputPath,
     config: &ResolvedSiteConfig,
-    compilation: &tola_typst::BundleCompilation,
+    compilation: &'a tola_typst::BundleCompilation,
     cancellation: &BuildCancellation,
-) -> Result<ResolvedDocumentTarget, RenderError> {
+) -> Result<(DocumentTarget<'a>, Option<TargetAnchor>), RenderError> {
     cancellation.ensure_active()?;
-    let (path, fragment, location) = target_source(declaration, value, field, compilation)?;
+    let (path, anchor) = target_source(declaration, value, field, compilation)?;
     let document = compilation.document(&path).ok_or_else(|| {
         declaration
             .invalid(
@@ -365,47 +361,17 @@ pub(super) fn resolve_target(
     let target_output = OutputPath::parse(path.get_without_slash())
         .map_err(|_| declaration.invalid(field, "the target output path is not valid"))?;
     let route = tola_address::route_for_output(&target_output);
-    let mut target_url = url::Url::parse(&config.canonical_url(&route))
+    let target_url = url::Url::parse(&config.canonical_url(&route))
         .map_err(|_| declaration.invalid(field, "the target URL is not valid"))?;
-    if let Some(fragment) = fragment {
-        if let Some(html) = document.html_inventory(&cancellation.bundle_cancellation())? {
-            let mut found = false;
-            for anchor in html.fragments() {
-                cancellation.ensure_active()?;
-                if anchor.value() == fragment {
-                    found = true;
-                    break;
-                }
-            }
-            if !found {
-                return Err(declaration
-                    .invalid(
-                        field,
-                        format!(
-                            "target document `{target_output}` has no exported anchor `{fragment}`"
-                        ),
-                    )
-                    .with_help(
-                        "Name an anchor the document exports, or drop `fragment` to target the whole document",
-                    )
-                    .into());
-            }
-        }
-        let fragment =
-            percent_encoding::utf8_percent_encode(&fragment, FRAGMENT_ENCODE_SET).to_string();
-        target_url.set_fragment(Some(&fragment));
-    }
-    if let Some(location) = location {
-        let fragment =
-            location_fragment(declaration, field, location, output, config, compilation)?;
-        target_url.set_fragment(fragment.as_deref());
-    }
     cancellation.ensure_active()?;
-    Ok(ResolvedDocumentTarget {
-        output: target_output,
-        url: target_url,
-        title: document.info().title.as_ref().map(ToString::to_string),
-    })
+    Ok((
+        DocumentTarget {
+            output: target_output,
+            url: target_url,
+            document,
+        },
+        anchor,
+    ))
 }
 
 fn target_source(
@@ -413,14 +379,10 @@ fn target_source(
     value: &Value,
     field: &str,
     compilation: &tola_typst::BundleCompilation,
-) -> Result<(VirtualPath, Option<String>, Option<Location>), SeoDeclarationError> {
+) -> Result<(VirtualPath, Option<TargetAnchor>), SeoDeclarationError> {
     let introspector = compilation.introspector();
     Ok(match value {
-        Value::Str(path) => (
-            parse_target_path(declaration, path.as_str(), field)?,
-            None,
-            None,
-        ),
+        Value::Str(path) => (parse_target_path(declaration, path.as_str(), field)?, None),
         Value::Dict(fields) => {
             declaration.check_fields(fields, &["output", "fragment"], field)?;
             let path_field = field_path(field, "output");
@@ -429,8 +391,7 @@ fn target_source(
             let fragment = declaration.optional_string(fields, "fragment", field)?;
             (
                 parse_target_path(declaration, &raw, &path_field)?,
-                fragment,
-                None,
+                fragment.map(TargetAnchor::Fragment),
             )
         }
         Value::Label(label) => {
@@ -445,7 +406,7 @@ fn target_source(
             let path = introspector
                 .path(location)
                 .ok_or_else(|| outside_document(declaration, field, "label", "label"))?;
-            (path.clone(), None, Some(location))
+            (path.clone(), Some(TargetAnchor::Location(location)))
         }
         Value::Dyn(dynamic) if dynamic.is::<Location>() => {
             let location = value
@@ -455,7 +416,7 @@ fn target_source(
             let path = introspector
                 .path(location)
                 .ok_or_else(|| outside_document(declaration, field, "location", "target"))?;
-            (path.clone(), None, Some(location))
+            (path.clone(), Some(TargetAnchor::Location(location)))
         }
         _ => {
             return Err(declaration.expected(
@@ -482,36 +443,6 @@ fn outside_document(
         .with_help(format!(
             "Place the {placement} inside a `#document(...)` body"
         ))
-}
-
-fn location_fragment(
-    declaration: &SeoDeclaration,
-    field: &str,
-    location: Location,
-    output: &OutputPath,
-    config: &ResolvedSiteConfig,
-    compilation: &tola_typst::BundleCompilation,
-) -> Result<Option<String>, SeoDeclarationError> {
-    let introspector = compilation.introspector();
-    let base_path = VirtualPath::new(output.as_str()).expect("validated output path");
-    let resolved = typst::model::LateLinkResolver::new(Some(&base_path), introspector)
-        .resolve(location)
-        .ok_or_else(|| {
-            declaration
-                .invalid(field, "target element has no exported anchor")
-                .with_help("Target the document's output path, or an element the site links to")
-        })?
-        .into_relative_uri()
-        .map_err(|_| {
-            declaration.invalid(field, "the target link cannot be built from this location")
-        })?;
-    let output_url = tola_address::asset_url_from_output(output);
-    let resolved_url = url::Url::parse(&config.canonical_url(&output_url))
-        .and_then(|base| base.join(&resolved))
-        .map_err(|_| {
-            declaration.invalid(field, "the target link cannot be built from this location")
-        })?;
-    Ok(resolved_url.fragment().map(str::to_owned))
 }
 
 fn parse_target_path(

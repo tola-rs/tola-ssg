@@ -1,8 +1,8 @@
 # `@tola/document`
 
-你在构建的这篇文档、它的标题，以及你写下的引用
+当前文档、标题和原生 Typst 引用
 
-这个包回答三个问题。`current-document()` 说明一次调用属于哪篇文档，`headings()` 列出该文档的标题，`references()` 列出 Bundle 写下、并真正输出的链接与引用。读取文档需要文档上下文：请在 `document(…)` 正文里的 `context` 中调用。渲染进同一篇文档的多个源共享同一份身份，单个源自身的身份则属于 `@tola/source`。
+在 `document(…)` 正文的 `context` 中调用 `current-document()`、`headings()` 或 `references()`。同一文档中的多个源会读到同一个文档。要读取源文件本身的信息，用 `@tola/source`。
 
 ## `current-document`
 
@@ -229,7 +229,7 @@ Example - 选择多个目标，或区域内部的标题：
 
 `location` 就是传给 `link()` 的值；建立链接会让 Typst 为该标题生成 anchor。带 label 的标题用那个 label 作为 anchor；否则 Typst 生成 `loc-N`。Typst 按需分配 anchor，所以没有任何链接指向的标题，在导出的 HTML 里没有 anchor id。请在 `context` 中调用；返回的每个 location 都属于本次编译。
 
-Example - 链接到第 2 层为止、进入 outline 的标题：
+将下面的代码保存为新站点的 `site.typ`，然后运行 `tola build`。首页会链接到 Introduction 和 Details。三级标题和 `outlined: false` 的标题会被跳过。
 
 ```typ
 #import "@tola/document:0.0.0": headings
@@ -266,3 +266,31 @@ Example - 看 `nesting` 与 `label` 如何跟随 outline 树：
 ### `depth`
 
 `none` 列出所有标题，传正整数则只保留解析后 `level` 不超过该值的标题。这里比较的是 `level`，不是声明层级，所以在 `set heading(offset: …)` 下写成 `==` 的标题可能被 `depth: 2` 排除。
+
+## `plain-text`
+
+读取字符串或你自己写下的内容里的文本。
+
+文本字符、符号字符、空格、raw 代码和弯引号自带文本。其他元素都取自己内容的文本，所以容器、格式、链接和数学都是透明的。metadata 不产生任何文本。文本取自你写下的内容：不运行 show rule，也不做排版。
+
+读取字符串或内容总是成功。元素自身既没有文本也没有内容时，它不产生任何文本，并有一条警告指出你写下它的位置。
+
+Example - 从字符串与内容中读取文本：
+
+```typst
+#import "@tola/document:0.0.0": plain-text
+#assert.eq(plain-text("Guide"), "Guide")
+#assert.eq(plain-text([Hello, *world*!]), "Hello, world!")
+```
+
+Example - 不带文本的元素不产生文本：
+
+```typst
+#import "@tola/document:0.0.0": plain-text
+#let image = html.img(src: "/cover.png", alt: "Cover")
+#assert.eq(plain-text(image), "")
+```
+
+### `value`
+
+要读取的字符串或 Typst 内容。

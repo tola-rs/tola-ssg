@@ -1,6 +1,6 @@
 // @tola/site:0.0.0 - the site's configuration values, resolved from `tola.toml`
 
-/// The site's configuration values, resolved from `tola.toml`.
+/// Read the resolved `[site]` settings and `[options]` from Typst.
 ///
 /// `site` carries one entry for each `[site]` setting, plus the derived `url`: `origin`,
 /// `base-path`, `url`, `title`, `authors`, `description`, `language`, and `languages`.
@@ -21,7 +21,7 @@
 /// nonempty array must contain `language`. Both are template inputs: the site itself decides how to
 /// route, pair, and switch between languages.
 ///
-/// Example - read the values of a default site:
+/// With the default `tola.toml` settings, these are the values available in `site.typ`.
 ///
 /// ```typst
 /// #import "@tola/site:0.0.0": site
@@ -31,14 +31,14 @@
 /// #assert.eq(site.languages, ())
 /// ```
 ///
-/// Example - read the values of a configured site:
+/// Set `title = "Example site"` in `[site]` in `tola.toml` to read it in Typst.
 ///
 /// ```typst site
 /// #import "@tola/site:0.0.0": site
 /// #assert.eq(site.title, "Example site")
 /// #assert.eq(site.base-path, "/")
 /// ```
-/// Related: @tola/web
+/// Related: @tola/head
 #import "@tola/host:0.0.0": site
 
 /// A native path rooted in the site, including when called from a theme package.

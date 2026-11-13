@@ -5,7 +5,8 @@ manifest is generated from the identity, so a package cannot disagree with the s
 is resolved by.
 
 Authors import `@tola/site`, `@tola/address`, `@tola/source`, `@tola/collection`,
-`@tola/schema`, `@tola/document`, `@tola/web`, `@tola/icon`, `@tola/code`, and `@tola/image`;
+`@tola/schema`, `@tola/document`, `@tola/head`, `@tola/feed`, `@tola/sitemap`, `@tola/icon`,
+`@tola/code`, and `@tola/image`;
 `@tola/host` is internal. Imports use the fixed version `0.0.0`; the implementation ships with
 Tola.
 

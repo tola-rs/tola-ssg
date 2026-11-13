@@ -164,7 +164,7 @@ mod tests {
         let main = directory.path().join("site.typ");
         std::fs::write(
             &main,
-            format!("#import \"@tola/web:0.0.0\": feed, sitemap\n{source}"),
+            format!("#import \"@tola/feed:0.0.0\": feed\n#import \"@tola/sitemap:0.0.0\": sitemap\n{source}"),
         )
         .unwrap();
         let config = crate::config::tests::load_test_config(directory.path(), settings);
@@ -728,10 +728,10 @@ authors = [{ name = "Alice", email = "alice@example.com", url = "https://example
     fn each_sitemap_keeps_its_own_entries() {
         let outputs = render(
             r#"
-#document("a/index.html")[A]
-#document("b/index.html")[B]
+#document("a/index.html")[A] <a>
+#document("b/index.html")[B] <b>
 #document("c/index.html")[C]
-#sitemap(output: "first.xml", targets: ((target: "b/index.html", lastmod: datetime(year: 2026, month: 9, day: 1)), "a/index.html"))
+#context sitemap(output: "first.xml", targets: ((target: locate(<b>), lastmod: datetime(year: 2026, month: 9, day: 1)), <a>))
 #sitemap(output: "second.xml", targets: ("c/index.html",))
 "#,
         );
@@ -753,6 +753,23 @@ authors = [{ name = "Alice", email = "alice@example.com", url = "https://example
         assert!(xml.contains("<lastmod>2026-09-01</lastmod>"));
         let second = std::str::from_utf8(output(&outputs, "/second.xml")).unwrap();
         assert!(second.contains("https://example.com/blog/c/"));
+    }
+
+    #[test]
+    fn sitemap_rejects_elements_without_resolving_anchors() {
+        for target in [
+            "<part>",
+            "locate(<part>)",
+            "(output: \"index.html\", fragment: \"absent\")",
+        ] {
+            let error = declaration_error(
+                &format!(
+                    "#document(\"index.html\")[= Part <part>]\n#context sitemap(targets: ((target: {target}),))"
+                ),
+                "[site]\norigin = \"https://example.com\"",
+            );
+            assert!(error.to_string().contains("complete document"), "{error}");
+        }
     }
 
     #[test]

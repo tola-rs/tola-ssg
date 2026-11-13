@@ -135,7 +135,7 @@ mod tests {
 
     #[test]
     fn organize_imports_removes_the_dead_import() {
-        let text = "#import \"@tola/host:0.0.0\": link\n#import \"@tola/web:0.0.0\": sitemap\n\n#link(\"/x\")[X]\n";
+        let text = "#import \"@tola/host:0.0.0\": link\n#import \"@tola/sitemap:0.0.0\": sitemap\n\n#link(\"/x\")[X]\n";
         let actions = actions_for(
             text,
             vec![serde_json::json!({
@@ -160,11 +160,11 @@ mod tests {
     fn import_removal_spares_line_mates() {
         for (text, expected) in [
             (
-                "#import \"@tola/web:0.0.0\": sitemap; Hello there\n",
-                Range::new(Position::new(0, 0), Position::new(0, 35)),
+                "#import \"@tola/sitemap:0.0.0\": sitemap; Hello there\n",
+                Range::new(Position::new(0, 0), Position::new(0, 39)),
             ),
             (
-                "#import \"@tola/web:0.0.0\": sitemap\nHello there\n",
+                "#import \"@tola/sitemap:0.0.0\": sitemap\nHello there\n",
                 Range::new(Position::new(0, 0), Position::new(1, 0)),
             ),
         ] {

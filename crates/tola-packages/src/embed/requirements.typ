@@ -1738,7 +1738,7 @@
 /// #let checked = try-parse((published: "2026-10-14"), schema((published: timestamp)))
 /// #assert.eq(checked.issues.first().path, ("published",))
 /// ```
-/// Related: date, parse, try-parse, @tola/web
+/// Related: date, parse, try-parse, @tola/feed, @tola/sitemap
 #let timestamp = convert(
   union(datetime, str),
   value => {

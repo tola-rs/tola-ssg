@@ -416,7 +416,7 @@ mod tests {
 
     #[test]
     fn only_selects_the_kind_it_names() {
-        let text = "#import \"@tola/web:0.0.0\": sitemap\n";
+        let text = "#import \"@tola/sitemap:0.0.0\": sitemap\n";
         let cause = serde_json::json!({
             "kind": "unread-import",
             "names": ["sitemap"],
