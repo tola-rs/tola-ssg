@@ -55,26 +55,6 @@ impl<'a, C> Clause<'a, C> {
             _ => unreachable!("the program records a head constant only where the term is one"),
         }
     }
-    /// The one row a clause starts from: its head constants when it has no body, otherwise an
-    /// empty binding.
-    pub(super) fn initial(&self) -> Vec<ConstantRef<'a, C>> {
-        if self.len() == 0 {
-            self.program
-                .head
-                .iter()
-                .map(|term| match term {
-                    Argument::Constant(column) => ConstantRef(self.head_constant(*column)),
-                    Argument::Slot(_) => {
-                        unreachable!(
-                            "a body-less rule binds no slot, and validation rejects a head variable"
-                        )
-                    }
-                })
-                .collect()
-        } else {
-            Vec::new()
-        }
-    }
 }
 impl<'a, C: Ord> Clause<'a, C> {
     /// Turns the demand's bound head columns into per-slot parameters.
@@ -113,11 +93,22 @@ pub(super) enum MatchEvidence {
     None,
     /// The rows were selected by this column's index.
     Column(usize),
+    /// The rows were selected by all the columns before this position.
+    Prefix(usize),
     /// Table answers satisfy every bound column of their demand.
     Demand,
 }
 
 impl MatchEvidence {
+    /// Whether an index selected rows using this column.
+    pub(super) fn includes(self, column: usize) -> bool {
+        match self {
+            Self::Column(proven) => proven == column,
+            Self::Prefix(end) => column < end,
+            Self::None | Self::Demand => false,
+        }
+    }
+
     fn covers<C>(
         self,
         column: usize,
@@ -125,14 +116,13 @@ impl MatchEvidence {
         parameters: &[Option<ConstantRef<'_, C>>],
     ) -> bool {
         match self {
-            Self::None => false,
-            Self::Column(proven) => proven == column,
             Self::Demand => match constraint {
                 Constraint::Repeated { parameter, .. } => {
                     parameter.is_some_and(|slot| parameters[slot].is_some())
                 }
                 _ => true,
             },
+            _ => self.includes(column),
         }
     }
 }
@@ -147,25 +137,18 @@ impl Stage {
         self.output.len()
     }
 
-    /// Whether the constraint supplies the column's value from the clause, not from the candidate
-    /// tuple.
-    pub(super) fn is_fixed_column(&self, column: usize) -> bool {
-        matches!(
-            self.arguments[column],
-            Constraint::Constant
-                | Constraint::Parameter(_)
-                | Constraint::Repeated {
-                    parameter: Some(_),
-                    ..
-                }
-        )
-    }
     /// The input slot this column repeats, when an earlier stage bound it.
     pub(super) fn input_column(&self, column: usize) -> Option<usize> {
         match self.arguments[column] {
             Constraint::Input(index) => Some(index),
             _ => None,
         }
+    }
+    /// Whether changing the binding can change the demand's key.
+    pub(super) fn reads_input(&self) -> bool {
+        self.arguments
+            .iter()
+            .any(|argument| matches!(argument, Constraint::Input(_)))
     }
     /// Whether the column is a constant of the clause.
     pub(super) fn is_constant_column(&self, column: usize) -> bool {

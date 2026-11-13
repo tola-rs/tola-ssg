@@ -70,8 +70,10 @@ impl<C: Ord> RowBuffer<C> {
         if self.arity == 0 {
             self.len = usize::from(self.len != 0);
         } else if self.len > 1 {
-            let row_order = self.row_order();
-            self.apply_row_order(row_order);
+            if !(1..self.len).all(|index| self.row(index - 1) <= self.row(index)) {
+                let row_order = self.row_order();
+                self.apply_row_order(row_order);
+            }
             self.keep_first_of_each_run();
         }
         RelationRows {
@@ -211,13 +213,11 @@ impl<C: PartialEq> PartialEq for RelationRows<C> {
     }
 }
 impl<C: Eq> Eq for RelationRows<C> {}
-impl<C> RelationRows<C> {
-    pub(crate) fn hash_with<H: Hasher>(&self, hasher: &mut H, hash_constant: impl Fn(&C, &mut H)) {
+impl<C: Hash> Hash for RelationRows<C> {
+    fn hash<H: Hasher>(&self, hasher: &mut H) {
         self.arity.hash(hasher);
         self.len.hash(hasher);
-        for value in &self.values {
-            hash_constant(value, hasher);
-        }
+        self.values.hash(hasher);
     }
 }
 impl<C: std::fmt::Debug> std::fmt::Debug for RelationRows<C> {

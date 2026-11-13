@@ -9,7 +9,6 @@ use super::{ConstantRef, ensure_not_cancelled};
 use crate::index::{ColumnIndex, RowIds};
 use crate::relation::RelationRows;
 use crate::{Database, Error};
-use smallvec::SmallVec;
 
 pub(super) type Rows<'a, C> = RowBlock<ConstantRef<'a, C>>;
 
@@ -24,13 +23,13 @@ fn column_index<'a, C: Ord>(
     Ok(index)
 }
 
-/// The rows of the narrowest single indexed lookup among the demand's bound columns; the demand's
-/// other bound columns are compared by the caller.
+/// The rows selected by the demand's bound prefix or narrowest indexed column, and the columns
+/// the caller can skip comparing.
 pub(super) fn candidate_row_ids<'a, C: Ord>(
     relation: &'a RelationRows<C>,
     columns: &[Option<ConstantRef<'_, C>>],
     is_cancelled: &mut impl FnMut() -> bool,
-) -> Result<RowIds<'a>, Error> {
+) -> Result<(RowIds<'a>, MatchEvidence), Error> {
     let prefix = columns.iter().take_while(|value| value.is_some()).count();
     if prefix > 0 && columns[prefix..].iter().all(Option::is_none) {
         ensure_not_cancelled(is_cancelled)?;
@@ -38,22 +37,24 @@ pub(super) fn candidate_row_ids<'a, C: Ord>(
             columns[column].unwrap().0
         });
         ensure_not_cancelled(is_cancelled)?;
-        return Ok(rows);
+        return Ok((rows, MatchEvidence::Prefix(prefix)));
     }
     let mut rows = relation.row_ids();
+    let mut evidence = MatchEvidence::None;
     for (column, value) in columns.iter().enumerate() {
         if let Some(value) = value {
             let index = column_index(relation, column, is_cancelled)?;
             let candidates = index.lookup(value.0);
             if candidates.is_empty() {
-                return Ok(candidates);
+                return Ok((candidates, MatchEvidence::Column(column)));
             }
             if candidates.len() < rows.len() {
                 rows = candidates;
+                evidence = MatchEvidence::Column(column);
             }
         }
     }
-    Ok(rows)
+    Ok((rows, evidence))
 }
 
 /// Projects rows whose output reads only bindings, parameters, or head constants.
@@ -122,7 +123,32 @@ impl<'a, 'b, C: Ord> BaseJoin<'a, 'b, C> {
         self.bound(binding, column).unwrap().0
     }
 
-    /// The leading run of columns `first_binding` has bound, when every later column is unbound.
+    /// A permutation for bindings whose keys do not already follow the index order.
+    fn binding_order(
+        &self,
+        bindings: &Rows<'a, C>,
+        column: usize,
+        is_cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Option<Vec<usize>>, Error> {
+        let Some(input) = self.stage.input_column(column) else {
+            return Ok(None);
+        };
+        if bindings.len() <= 1 || (input == 0 && bindings.is_strictly_sorted()) {
+            return Ok(None);
+        }
+        ensure_not_cancelled(is_cancelled)?;
+        let mut order: Vec<usize> = (0..bindings.len()).collect();
+        // Equal keys keep binding arrival order for projected duplicates.
+        order.sort_unstable_by(|&left, &right| {
+            bindings.row(left)[input]
+                .cmp(&bindings.row(right)[input])
+                .then_with(|| left.cmp(&right))
+        });
+        ensure_not_cancelled(is_cancelled)?;
+        Ok(Some(order))
+    }
+
+    /// The leading run of bound columns, when every later column is unbound.
     ///
     /// `Some` bounds the stage with one prefix lookup: the columns before the join column are
     /// constants, so every binding shares them, and each binding rechecks the columns after it.
@@ -147,21 +173,6 @@ impl<'a, 'b, C: Ord> BaseJoin<'a, 'b, C> {
             .or_else(|| {
                 (0..self.stage.arity()).find(|&column| self.stage.is_constant_column(column))
             })
-    }
-
-    fn keys(
-        &self,
-        bindings: &Rows<'a, C>,
-        column: usize,
-        is_cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<SmallVec<[&'a C; 4]>, Error> {
-        bindings
-            .iter()
-            .map(|binding| {
-                ensure_not_cancelled(is_cancelled)?;
-                Ok(self.key(binding, column))
-            })
-            .collect()
     }
 
     /// The constant column with the shortest run: every constant column must match, so the
@@ -257,6 +268,17 @@ impl<'a, 'b, C: Ord> BaseJoin<'a, 'b, C> {
     ) -> Result<(), Error> {
         let matches_all = self.stage.matches_all(self.parameters, evidence);
         output.append_run(self.stage.negative || self.stage.preserves_order, |run| {
+            if matches_all && !self.reads_tuple {
+                if candidates.is_empty() == self.stage.negative {
+                    run.push(self.stage.values(
+                        self.clause,
+                        binding,
+                        self.parameters,
+                        &|_| unreachable!(),
+                    ));
+                }
+                return Ok(());
+            }
             let mut present = false;
             for row in candidates.iter() {
                 ensure_not_cancelled(is_cancelled)?;
@@ -328,9 +350,6 @@ pub(super) fn join_base<'a, C: Ord>(
     if matches!(constant_rows, ConstantRun::Empty) {
         return no_match_rows(clause, stage, parameters, bindings, is_cancelled);
     }
-    let keys = column
-        .map(|column| join.keys(bindings, column, is_cancelled))
-        .transpose()?;
     let join_index = match column {
         Some(column) => match join.join_index(first_binding, prefix, column, is_cancelled)? {
             Some(index) => Some((column, index)),
@@ -338,49 +357,45 @@ pub(super) fn join_base<'a, C: Ord>(
         },
         None => None,
     };
-    let keys_sorted = column.is_some_and(|column| {
-        stage.is_fixed_column(column)
-            || (stage.input_column(column) == Some(0) && bindings.is_strictly_sorted())
-    });
-    if let (Some((_, index)), Some(keys)) = (&join_index, &keys) {
+    let (order, mut cursor) = if let Some((column, index)) = &join_index {
         let last = index.last_key();
-        let past_index = if keys_sorted {
-            keys[0] > last
-        } else {
-            keys.iter().all(|&key| key > last)
-        };
-        if past_index {
+        let mut can_match = join.key(first_binding, *column) <= last;
+        if !can_match
+            && let Some(input) = stage.input_column(*column)
+            && (input != 0 || !bindings.is_strictly_sorted())
+        {
+            for binding in bindings.iter().skip(1) {
+                ensure_not_cancelled(is_cancelled)?;
+                if join.key(binding, *column) <= last {
+                    can_match = true;
+                    break;
+                }
+            }
+        }
+        if !can_match {
             return no_match_rows(clause, stage, parameters, bindings, is_cancelled);
         }
-    }
-    let order = keys
-        .as_deref()
-        .filter(|keys| !keys_sorted && keys.len() > 1)
-        .map(|keys| {
-            let mut order: Vec<usize> = (0..keys.len()).collect();
-            // Equal keys keep binding arrival order for projected duplicates.
-            order.sort_unstable_by(|&left, &right| {
-                keys[left].cmp(keys[right]).then_with(|| left.cmp(&right))
-            });
-            order
-        });
-    // Start at the lowest key so the first lookup does not gallop from row zero.
-    let mut cursor = match (&join_index, &keys) {
-        (Some((_, index)), Some(keys)) => {
-            let row = order.as_ref().map_or(0, |order| order[0]);
-            let first = index.lower_bound(keys[row]);
-            first..first
-        }
-        _ => 0..0,
+        let order = join.binding_order(bindings, *column, is_cancelled)?;
+        let first_binding = order.as_ref().map_or(0, |order| order[0]);
+        let first_key = join.key(bindings.row(first_binding), *column);
+        let first = index.lower_bound(first_key);
+        (order, first..first)
+    } else {
+        (None, 0..0)
+    };
+    let indexed_columns = match (prefix, column) {
+        (Some(prefix), _) => MatchEvidence::Prefix(prefix),
+        (_, Some(column)) => MatchEvidence::Column(column),
+        _ => MatchEvidence::None,
     };
     let mut output = Rows::new(stage.width());
     for position in 0..bindings.len() {
         let binding_index = order.as_ref().map_or(position, |order| order[position]);
         let binding = bindings.row(binding_index);
         ensure_not_cancelled(is_cancelled)?;
-        let candidates = match (&join_index, &keys) {
-            (Some((_, index)), Some(keys)) => index.matching(&mut cursor, keys[binding_index]),
-            _ => relation.row_ids(),
+        let candidates = match &join_index {
+            Some((column, index)) => index.matching(&mut cursor, join.key(binding, *column)),
+            None => relation.row_ids(),
         };
         let candidates = match (prefix, &join_index) {
             (Some(prefix), Some((column, _))) => {
@@ -393,10 +408,7 @@ pub(super) fn join_base<'a, C: Ord>(
                 column: constant_column,
                 rows,
             } if rows.len() < candidates.len() => (rows, MatchEvidence::Column(*constant_column)),
-            _ => (
-                &candidates,
-                column.map_or(MatchEvidence::None, MatchEvidence::Column),
-            ),
+            _ => (&candidates, indexed_columns),
         };
         join.emit_binding(binding, candidates, evidence, &mut output, is_cancelled)?;
         if stage.width() == 0 && !output.is_empty() {

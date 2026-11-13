@@ -2,10 +2,9 @@
 #![warn(missing_docs)]
 //! In-memory Datalog with demand-driven evaluation and stratified negation.
 //!
-//! One fixed arity per relation name. Variables are local to one rule or query.
+//! Every relation is declared with a fixed arity. Variables are local to one rule or query.
 //! Every variable in a rule head, negative atom, or query projection must be
-//! bound by a positive atom of the same rule or query; positive atoms are
-//! evaluated in their given order, then negative atoms in their given order.
+//! bound by a positive atom of the same rule or query.
 //! A negative atom reads only relations whose answers are complete. Relations
 //! without facts or deriving rules are empty. Answers are sorted by `Ord` and
 //! duplicate-free.
@@ -13,7 +12,7 @@
 //! ```
 //! use tola_datalog::{Atom, Database, Literal, Query, Relation, Term};
 //! let edge = Relation { name: "edge".into(), arity: 2 };
-//! let db = Database::new(vec![(edge.clone(), vec![1, 2])], vec![])?;
+//! let db = Database::new(vec![edge.clone()], vec![(edge.clone(), vec![1, 2])], vec![])?;
 //! let query = Query {
 //!     select: vec!["target".into()],
 //!     body: vec![Literal::Positive(Atom {
@@ -51,59 +50,27 @@ pub enum Term<C> {
     Constant(C),
 }
 /// A relation applied to one term per column.
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct Atom<C> {
-    /// The relation this atom reads.
+    /// The relation this atom refers to.
     pub relation: Relation,
     /// One term per column, in the relation's column order.
     pub terms: Vec<Term<C>>,
 }
-impl<C> Atom<C> {
-    /// Hash the atom using the caller's encoding for constants.
-    pub fn hash_with<H: Hasher>(&self, hasher: &mut H, hash_constant: impl Fn(&C, &mut H)) {
-        self.relation.hash(hasher);
-        self.terms.len().hash(hasher);
-        for term in &self.terms {
-            std::mem::discriminant(term).hash(hasher);
-            match term {
-                Term::Variable(name) => name.hash(hasher),
-                Term::Constant(value) => hash_constant(value, hasher),
-            }
-        }
-    }
-}
-impl<C: Hash> Hash for Atom<C> {
-    fn hash<H: Hasher>(&self, hasher: &mut H) {
-        self.hash_with(hasher, C::hash);
-    }
-}
 /// A positive match or the absence of a fully bound match.
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum Literal<C> {
     /// Holds when at least one tuple matches.
     Positive(Atom<C>),
     /// Holds when the ground tuple is absent.
     Negative(Atom<C>),
 }
-impl<C> Literal<C> {
-    fn hash_with<H: Hasher>(&self, hasher: &mut H, hash_constant: impl Fn(&C, &mut H)) {
-        std::mem::discriminant(self).hash(hasher);
-        match self {
-            Self::Positive(atom) | Self::Negative(atom) => atom.hash_with(hasher, hash_constant),
-        }
-    }
-}
-impl<C: Hash> Hash for Literal<C> {
-    fn hash<H: Hasher>(&self, hasher: &mut H) {
-        self.hash_with(hasher, C::hash);
-    }
-}
 /// A rule deriving its head from all literals in its body.
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct Rule<C> {
     /// The atom this rule derives, over the variables its body binds.
     pub head: Atom<C>,
-    /// Body literals. Positive literals are evaluated before negative literals.
+    /// Body literals; all must hold.
     pub body: Vec<Literal<C>>,
 }
 /// A conjunctive query with an ordered projection.
@@ -111,7 +78,7 @@ pub struct Rule<C> {
 pub struct Query<C> {
     /// Output variables in column order; repetition is allowed.
     pub select: Vec<String>,
-    /// Body literals. Positive literals are evaluated before negative literals.
+    /// Body literals; all must hold.
     pub body: Vec<Literal<C>>,
 }
 
@@ -119,7 +86,9 @@ pub struct Query<C> {
 /// canonical ordering; `Database` is the exception, recording that no single position applies.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Location {
-    /// Row of `Database::new` or `from_rows`, counted across all relations.
+    /// Entry in the relation declarations.
+    Relation(usize),
+    /// Input fact, counted across all relations.
     Fact(usize),
     /// Clause in the `rules` argument.
     RuleHead(usize),
@@ -147,7 +116,7 @@ pub enum ErrorKind {
         /// The number of terms this use supplied.
         actual: usize,
     },
-    /// One name was used with two arities; reported at the later use.
+    /// A relation use disagrees with the declaration's arity.
     RelationArity {
         /// The relation name.
         name: String,
@@ -156,6 +125,14 @@ pub enum ErrorKind {
         /// The arity this use supplied.
         actual: usize,
     },
+    /// The same relation name was declared more than once.
+    DuplicateRelation(String),
+    /// No declaration matches this relation name.
+    UnknownRelation(String),
+    /// A rule has no body literals.
+    EmptyBody,
+    /// Variable names must not be empty.
+    EmptyVariable,
     /// No positive atom in the clause binds this variable.
     UnboundVariable(String),
     /// Relation names must not be empty.
@@ -187,6 +164,10 @@ fn kind_message(kind: &ErrorKind) -> String {
             expected,
             actual,
         } => format!("relation `{name}` has arity {actual}, expected {expected}"),
+        ErrorKind::DuplicateRelation(name) => format!("relation `{name}` is already declared"),
+        ErrorKind::UnknownRelation(name) => format!("relation `{name}` is not declared"),
+        ErrorKind::EmptyBody => "a rule needs at least one body literal".to_owned(),
+        ErrorKind::EmptyVariable => "variable name must not be empty".to_owned(),
         ErrorKind::UnboundVariable(name) => format!("variable `{name}` has no positive binding"),
         ErrorKind::EmptyRelation => "relation name must not be empty".to_owned(),
         ErrorKind::NegativeCycle => "negation creates a recursive dependency".to_owned(),
@@ -213,7 +194,7 @@ impl<C> Clone for Database<C> {
 pub(crate) struct Snapshot<C> {
     /// Canonical rule order; `rules_by_head` indexes into it.
     pub(crate) rules: Vec<evaluation::RuleProgram<C>>,
-    /// One arity per relation name mentioned by a fact or clause.
+    /// One arity per declared relation name.
     pub(crate) arities: BTreeMap<String, usize>,
     /// Stratum of every name in `arities`.
     pub(crate) strata: BTreeMap<String, usize>,
@@ -222,11 +203,11 @@ pub(crate) struct Snapshot<C> {
     /// Rule indexes deriving each relation name.
     pub(crate) rules_by_head: BTreeMap<String, Vec<usize>>,
 }
-// Equality and hashing cover exactly the inputs a snapshot was built from; arities, strata,
-// programs and row indexes are derived from them and ignored.
+// Strata, compiled rules, and indexes are derived from the declarations, facts, and rules.
 impl<C: PartialEq> PartialEq for Database<C> {
     fn eq(&self, other: &Self) -> bool {
-        self.snapshot.relations == other.snapshot.relations
+        self.snapshot.arities == other.snapshot.arities
+            && self.snapshot.relations == other.snapshot.relations
             && self
                 .snapshot
                 .rules
@@ -236,29 +217,14 @@ impl<C: PartialEq> PartialEq for Database<C> {
     }
 }
 impl<C: Eq> Eq for Database<C> {}
-impl<C> Database<C> {
-    /// Hash the stored rows and rules using the caller's encoding for constants.
-    ///
-    /// This can distinguish representations that compare equal during evaluation.
-    pub fn hash_with<H: Hasher>(&self, hasher: &mut H, hash_constant: impl Fn(&C, &mut H)) {
-        self.snapshot.relations.len().hash(hasher);
-        for (name, rows) in &self.snapshot.relations {
-            name.hash(hasher);
-            rows.hash_with(hasher, &hash_constant);
-        }
-        self.snapshot.rules.len().hash(hasher);
-        for compiled in &self.snapshot.rules {
-            compiled.rule.head.hash_with(hasher, &hash_constant);
-            compiled.rule.body.len().hash(hasher);
-            for literal in &compiled.rule.body {
-                literal.hash_with(hasher, &hash_constant);
-            }
-        }
-    }
-}
 impl<C: Hash> Hash for Database<C> {
     fn hash<H: Hasher>(&self, hasher: &mut H) {
-        self.hash_with(hasher, C::hash);
+        self.snapshot.arities.hash(hasher);
+        self.snapshot.relations.hash(hasher);
+        self.snapshot.rules.len().hash(hasher);
+        for compiled in &self.snapshot.rules {
+            compiled.rule.hash(hasher);
+        }
     }
 }
 #[cfg(test)]
@@ -328,7 +294,16 @@ mod tests {
         database.query(query, || false).unwrap()
     }
     fn new_database<C: Ord>(facts: Vec<(Relation, Vec<C>)>, rules: Vec<Rule<C>>) -> Database<C> {
-        Database::new(facts, rules).unwrap()
+        let relations = facts
+            .iter()
+            .map(|(relation, _)| relation)
+            .chain(rules.iter().flat_map(|rule| {
+                std::iter::once(&rule.head.relation)
+                    .chain(rule.body.iter().map(|literal| &atom(literal).relation))
+            }))
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        Database::from_rows(relations, facts, rules).unwrap()
     }
 
     // Enumerate ground substitutions independently of the tabled evaluator.
@@ -612,25 +587,21 @@ mod tests {
 
     #[test]
     fn nullary_relations_project_empty_rows() {
-        let rules = vec![
-            Rule {
-                head: atom_of("seed", vec![constant(7)]),
-                body: vec![],
-            },
-            Rule {
-                head: atom_of("enabled", vec![]),
-                body: vec![],
-            },
-            Rule {
-                head: atom_of("ready", vec![]),
-                body: vec![
-                    positive("seed", vec![constant(7)]),
-                    positive("enabled", vec![]),
-                    negative("missing", vec![]),
-                ],
-            },
-        ];
-        let database = new_database(vec![], rules);
+        let rules = vec![Rule {
+            head: atom_of("ready", vec![]),
+            body: vec![
+                positive("seed", vec![constant(7)]),
+                positive("enabled", vec![]),
+                negative("missing", vec![]),
+            ],
+        }];
+        let database = new_database(
+            vec![
+                (relation("seed", 1), vec![7]),
+                (relation("enabled", 0), vec![]),
+            ],
+            rules,
+        );
         assert_eq!(
             answer_rows(&database, &query(&[], vec![positive("ready", vec![])])),
             vec![vec![]]
@@ -685,7 +656,7 @@ mod tests {
     #[test]
     fn from_rows_rejects_wrong_arity() {
         let relation = relation("value", usize::MAX);
-        let error = Database::<i32>::from_rows([(&relation, [])], vec![]).unwrap_err();
+        let error = Database::<i32>::from_rows([&relation], [(&relation, [])], vec![]).unwrap_err();
         assert_eq!(
             error,
             Error {
@@ -704,9 +675,12 @@ mod tests {
         let first: Arc<str> = Arc::from("same");
         let duplicate: Arc<str> = Arc::from("same");
         let rows = [Arc::from("later"), first.clone(), duplicate];
-        let database =
-            Database::from_rows(rows.into_iter().map(|value| (&relation, [value])), vec![])
-                .unwrap();
+        let database = Database::from_rows(
+            [&relation],
+            rows.into_iter().map(|value| (&relation, [value])),
+            vec![],
+        )
+        .unwrap();
         let query = one_atom_query(&["x"], &relation, vec![var("x")]);
         let rows = database.query(&query, || false).unwrap();
         assert_eq!(rows.len(), 2);
@@ -726,6 +700,7 @@ mod tests {
     #[test]
     fn validation_errors_locate_the_invalid_input() {
         let error = Database::new(
+            vec![relation("edge", 2)],
             vec![edge(1, 2)],
             vec![Rule {
                 head: atom_of("edge", vec![var("x")]),
@@ -745,6 +720,7 @@ mod tests {
             }
         );
         let error = Database::<i32>::new(
+            vec![relation("p", 1), relation("q", 1)],
             vec![],
             vec![Rule {
                 head: atom_of("p", vec![var("x")]),
@@ -759,11 +735,11 @@ mod tests {
                 kind: ErrorKind::UnboundVariable("x".into())
             }
         );
-        let error = Database::<i32>::new(vec![(relation("", 0), vec![])], vec![]).unwrap_err();
+        let error = Database::<i32>::new(vec![relation("", 0)], vec![], vec![]).unwrap_err();
         assert_eq!(
             error,
             Error {
-                location: Location::Fact(0),
+                location: Location::Relation(0),
                 kind: ErrorKind::EmptyRelation
             }
         );
@@ -783,7 +759,7 @@ mod tests {
             relation: relation("wrong", 1),
             terms: vec![],
         });
-        let database = new_database(vec![], vec![]);
+        let database = Database::<i32>::new(vec![relation("q", 1)], vec![], vec![]).unwrap();
         let query = query(&[], vec![negative("q", vec![var("x")]), malformed]);
         let error = database.query(&query, || false).unwrap_err();
         assert_eq!(error.location, Location::QueryBody(0));
@@ -845,7 +821,7 @@ mod tests {
             dropped: dropped.clone(),
         };
         let values = std::iter::once_with(move || if observed.get() { 2 } else { 1 });
-        let database = Database::from_rows([(source, values)], vec![]).unwrap();
+        let database = Database::from_rows([&relation], [(source, values)], vec![]).unwrap();
         assert!(dropped.get());
         let query = one_atom_query(&["x"], &relation, vec![var("x")]);
         assert_eq!(answer_rows(&database, &query), vec![vec![1]]);
@@ -882,7 +858,7 @@ mod tests {
         ];
         for (rows, location, kind) in cases {
             assert_eq!(
-                Database::new(rows, vec![]).unwrap_err(),
+                Database::new(vec![relation("p", 2)], rows, vec![]).unwrap_err(),
                 Error { location, kind }
             );
         }
@@ -930,7 +906,16 @@ mod tests {
                         .position(|rule| rule.head.relation.name == "p")
                         .unwrap();
                     assert_eq!(
-                        Database::<i32>::new(vec![], rules).unwrap_err(),
+                        Database::<i32>::new(
+                            rules
+                                .iter()
+                                .map(|rule| rule.head.relation.clone())
+                                .chain([relation("domain", 1)])
+                                .collect(),
+                            vec![],
+                            rules,
+                        )
+                        .unwrap_err(),
                         Error {
                             location: Location::RuleBody { rule, atom: 1 },
                             kind: ErrorKind::NegativeCycle,

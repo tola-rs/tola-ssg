@@ -6,6 +6,7 @@
 use super::ensure_not_cancelled;
 use crate::Error;
 use crate::index::gallop;
+use std::ops::Range;
 
 /// Rows of one clause stage as they accumulate; `strictly_sorted` is a conservative proof that
 /// turns false whenever an append cannot show the new tail sorts above the old.
@@ -88,9 +89,9 @@ impl<C: Ord + Copy> RowBlock<C> {
             self.strictly_sorted = previous;
             return Ok(());
         }
-        let appended_sorted = run_sorted || self.len == start + 1;
-        let seam_sorted = start == 0 || self.row(start - 1) < self.row(start);
-        self.strictly_sorted = previous && appended_sorted && seam_sorted;
+        self.strictly_sorted = previous
+            && (run_sorted || self.len == start + 1)
+            && (start == 0 || self.row(start - 1) < self.row(start));
         Ok(())
     }
     pub(super) fn extend(&mut self, other: Self) {
@@ -159,26 +160,17 @@ impl<C: Ord + Copy> RowBlock<C> {
             self.strictly_sorted = true;
             return Ok(());
         }
-        let sorted = self.is_strictly_increasing(is_cancelled)?;
-        if sorted && known.is_empty() {
-            self.strictly_sorted = true;
-            return Ok(());
+        if self.is_strictly_increasing(is_cancelled)? {
+            return self.remove_known_rows(known, is_cancelled);
         }
-        // `order` lists the rows in ascending row order, so one cursor walks each known block.
-        let mut order = if sorted {
-            (0..self.len).collect()
-        } else {
-            self.sorted_order(is_cancelled)?
-        };
+        let mut order = self.sorted_order(is_cancelled)?;
         for batch in known {
             let mut cursor = 0;
             let mut kept = 0;
             for position in 0..order.len() {
                 ensure_not_cancelled(is_cancelled)?;
                 let index = order[position];
-                let target = self.row(index);
-                cursor = batch.lower_bound(cursor, target);
-                if cursor == batch.len || batch.row(cursor) != target {
+                if !batch.contains_from(&mut cursor, self.row(index)) {
                     order[kept] = index;
                     kept += 1;
                 }
@@ -186,6 +178,59 @@ impl<C: Ord + Copy> RowBlock<C> {
             order.truncate(kept);
         }
         self.reorder_sorted(order, is_cancelled)
+    }
+
+    /// Compacts an already sorted block in place. Only overlapping key ranges need a search.
+    fn remove_known_rows(
+        &mut self,
+        known: &[Self],
+        is_cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), Error> {
+        let original_len = self.len;
+        for batch in known {
+            if self.is_empty() {
+                break;
+            }
+            if self.row(self.len - 1) < batch.row(0) || batch.row(batch.len - 1) < self.row(0) {
+                continue;
+            }
+            let start = self.lower_bound(0, batch.row(0));
+            let mut cursor = 0;
+            let mut kept = start;
+            for index in start..self.len {
+                ensure_not_cancelled(is_cancelled)?;
+                if cursor == batch.len {
+                    self.copy_rows(index..self.len, kept);
+                    kept += self.len - index;
+                    break;
+                }
+                if !batch.contains_from(&mut cursor, self.row(index)) {
+                    self.copy_rows(index..index + 1, kept);
+                    kept += 1;
+                }
+            }
+            self.len = kept;
+            self.values.truncate(kept * self.width);
+        }
+        if self.len != 0 && self.len < original_len / 2 {
+            self.values.shrink_to_fit();
+        }
+        self.strictly_sorted = true;
+        Ok(())
+    }
+
+    fn contains_from(&self, cursor: &mut usize, row: &[C]) -> bool {
+        *cursor = self.lower_bound(*cursor, row);
+        *cursor < self.len && self.row(*cursor) == row
+    }
+
+    fn copy_rows(&mut self, rows: Range<usize>, to: usize) {
+        if rows.start != to {
+            self.values.copy_within(
+                rows.start * self.width..rows.end * self.width,
+                to * self.width,
+            );
+        }
     }
     /// Sorts the rows and drops duplicates, leaving the block strictly increasing.
     pub(super) fn sort_distinct(

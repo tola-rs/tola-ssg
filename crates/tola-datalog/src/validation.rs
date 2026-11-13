@@ -1,8 +1,7 @@
-//! Arity, binding, and stratification checks over the rows and rules a caller supplies.
+//! Relation declarations, arity, variable binding, and stratification checks.
 //!
-//! Reporting follows the caller's own order — tuples before rules, and within a clause the atom
-//! as written — so every `Location` maps back to what the caller passed. Nothing here evaluates
-//! a rule.
+//! Reporting follows the caller's order: declarations, facts, then rules. Within a clause, atoms
+//! retain their written order.
 use crate::relation::RowBuffer;
 use crate::{Atom, Database, Error, ErrorKind, Literal, Location, Relation, Rule, Snapshot, Term};
 use std::borrow::Borrow;
@@ -32,76 +31,68 @@ fn arity_error(location: Location, arity: usize, actual: usize) -> Error {
     }
 }
 
-/// The relation arities accepted so far, optionally seeded with a snapshot's table.
-pub(crate) struct DeclaredArities<'a> {
-    known: Option<&'a BTreeMap<String, usize>>,
-    declared: BTreeMap<String, usize>,
-}
-
-impl<'a> DeclaredArities<'a> {
-    /// For building a snapshot: no arity is declared yet.
-    pub(crate) fn declared() -> Self {
-        Self {
-            known: None,
-            declared: BTreeMap::new(),
-        }
-    }
-
-    /// For checking a query against a snapshot, whose table is only read.
-    pub(crate) fn extending(known: &'a BTreeMap<String, usize>) -> Self {
-        Self {
-            known: Some(known),
-            declared: BTreeMap::new(),
-        }
-    }
-
-    fn arity(&self, name: &str) -> Option<usize> {
-        self.declared
-            .get(name)
-            .or_else(|| self.known.and_then(|known| known.get(name)))
-            .copied()
-    }
-
-    /// Record one use of `relation`, which supplied `actual` columns.
-    ///
-    /// The use is checked against the relation's own arity before any earlier declaration, so a
-    /// malformed atom is reported as `Arity` rather than as a conflict with other clauses.
-    pub(crate) fn declare(
-        &mut self,
-        relation: &Relation,
-        actual: usize,
-        location: Location,
-    ) -> Result<(), Error> {
+fn declare_relations(
+    relations: impl IntoIterator<Item = impl Borrow<Relation>>,
+) -> Result<BTreeMap<String, usize>, Error> {
+    let mut arities = BTreeMap::new();
+    for (index, relation) in relations.into_iter().enumerate() {
+        let relation = relation.borrow();
+        let location = Location::Relation(index);
         if relation.name.is_empty() {
             return Err(Error {
                 location,
                 kind: ErrorKind::EmptyRelation,
             });
         }
-        if relation.arity != actual {
-            return Err(arity_error(location, relation.arity, actual));
-        }
-        match self.arity(&relation.name) {
-            Some(expected) if expected != relation.arity => Err(Error {
+        if arities
+            .insert(relation.name.clone(), relation.arity)
+            .is_some()
+        {
+            return Err(Error {
                 location,
-                kind: ErrorKind::RelationArity {
-                    name: relation.name.clone(),
-                    expected,
-                    actual: relation.arity,
-                },
-            }),
-            Some(_) => Ok(()),
-            None => {
-                self.declared.insert(relation.name.clone(), relation.arity);
-                Ok(())
-            }
+                kind: ErrorKind::DuplicateRelation(relation.name.clone()),
+            });
         }
     }
+    Ok(arities)
+}
 
-    /// The arities declared while building a snapshot.
-    pub(crate) fn into_declared(self) -> BTreeMap<String, usize> {
-        self.declared
+fn validate_relation(
+    arities: &BTreeMap<String, usize>,
+    relation: &Relation,
+    actual: usize,
+    location: Location,
+) -> Result<(), Error> {
+    if relation.arity != actual {
+        return Err(arity_error(location, relation.arity, actual));
     }
+    let Some(&expected) = arities.get(&relation.name) else {
+        return Err(Error {
+            location,
+            kind: ErrorKind::UnknownRelation(relation.name.clone()),
+        });
+    };
+    if expected != relation.arity {
+        return Err(Error {
+            location,
+            kind: ErrorKind::RelationArity {
+                name: relation.name.clone(),
+                expected,
+                actual: relation.arity,
+            },
+        });
+    }
+    Ok(())
+}
+
+fn validate_variables<C>(atom: &Atom<C>, location: Location) -> Result<(), Error> {
+    if variables(atom).any(String::is_empty) {
+        return Err(Error {
+            location,
+            kind: ErrorKind::EmptyVariable,
+        });
+    }
+    Ok(())
 }
 
 /// Positive literals bind variables regardless of where the literals appear in the body.
@@ -122,12 +113,13 @@ fn unbound_variable<'a, C>(atom: &'a Atom<C>, bound: &BTreeSet<&String>) -> Opti
 pub(crate) fn validate_body<C>(
     body: &[Literal<C>],
     bound: &BTreeSet<&String>,
-    arities: &mut DeclaredArities<'_>,
+    arities: &BTreeMap<String, usize>,
     location: impl Fn(usize) -> Location,
 ) -> Result<(), Error> {
     for (index, literal) in body.iter().enumerate() {
         let atom = atom(literal);
-        arities.declare(&atom.relation, atom.terms.len(), location(index))?;
+        validate_relation(arities, &atom.relation, atom.terms.len(), location(index))?;
+        validate_variables(atom, location(index))?;
         if matches!(literal, Literal::Negative(_))
             && let Some(name) = unbound_variable(atom, bound)
         {
@@ -246,7 +238,7 @@ fn stratify<C>(
 /// values are pushed.
 fn collect_facts<C, I, R, T>(
     rows: I,
-    arities: &mut DeclaredArities<'_>,
+    arities: &BTreeMap<String, usize>,
 ) -> Result<BTreeMap<String, RowBuffer<C>>, Error>
 where
     I: IntoIterator<Item = (R, T)>,
@@ -264,19 +256,27 @@ where
             groups.insert(relation.name.clone(), buffer);
             actual
         };
-        arities.declare(relation, actual, Location::Fact(index))?;
+        validate_relation(arities, relation, actual, Location::Fact(index))?;
     }
     Ok(groups)
 }
 
-/// Declare rule heads and validate their bodies, in input order.
-fn declare_rules<C>(rules: &[Rule<C>], arities: &mut DeclaredArities<'_>) -> Result<(), Error> {
+fn validate_rules<C>(rules: &[Rule<C>], arities: &BTreeMap<String, usize>) -> Result<(), Error> {
     for (index, rule) in rules.iter().enumerate() {
-        arities.declare(
+        let head = Location::RuleHead(index);
+        validate_relation(
+            arities,
             &rule.head.relation,
             rule.head.terms.len(),
-            Location::RuleHead(index),
+            head.clone(),
         )?;
+        if rule.body.is_empty() {
+            return Err(Error {
+                location: head,
+                kind: ErrorKind::EmptyBody,
+            });
+        }
+        validate_variables(&rule.head, head)?;
         let bound = bound_variables(&rule.body);
         validate_body(&rule.body, &bound, arities, |atom| Location::RuleBody {
             rule: index,
@@ -293,29 +293,32 @@ fn declare_rules<C>(rules: &[Rule<C>], arities: &mut DeclaredArities<'_>) -> Res
 }
 
 impl<C: Ord> Database<C> {
-    /// Validate ground tuples and rules and build an immutable snapshot.
-    ///
-    /// Tuples and then rules are validated in caller order. Within a rule, the head's relation,
-    /// the body atoms, then the head's variable bindings are checked in that order.
-    /// Negative dependencies must be stratified, or the clause closing a cycle is reported as
-    /// `NegativeCycle` at its negative atom.
-    pub fn new(facts: Vec<(Relation, Vec<C>)>, rules: Vec<Rule<C>>) -> Result<Self, Error> {
-        Self::from_rows(facts, rules)
+    /// Validate relation declarations, ground tuples, and rules and build a snapshot.
+    pub fn new(
+        relations: Vec<Relation>,
+        facts: Vec<(Relation, Vec<C>)>,
+        rules: Vec<Rule<C>>,
+    ) -> Result<Self, Error> {
+        Self::from_rows(relations, facts, rules)
     }
 
-    /// Construct a snapshot from rows whose relation may be borrowed.
+    /// Build a snapshot from declarations and rows whose relations may be borrowed.
     ///
-    /// Each row source outlives the values it yields. Errors are located as in [`Database::new`].
-    pub fn from_rows<I, R, T>(rows: I, mut rules: Vec<Rule<C>>) -> Result<Self, Error>
+    /// Declarations, facts, and rules are validated in that order. Each row source
+    /// stays alive while its values are read.
+    pub fn from_rows<I, R, T>(
+        relations: impl IntoIterator<Item = impl Borrow<Relation>>,
+        rows: I,
+        mut rules: Vec<Rule<C>>,
+    ) -> Result<Self, Error>
     where
         I: IntoIterator<Item = (R, T)>,
         R: Borrow<Relation>,
         T: IntoIterator<Item = C>,
     {
-        let mut arities = DeclaredArities::declared();
-        let groups = collect_facts(rows, &mut arities)?;
-        declare_rules(&rules, &mut arities)?;
-        let arities = arities.into_declared();
+        let arities = declare_relations(relations)?;
+        let groups = collect_facts(rows, &arities)?;
+        validate_rules(&rules, &arities)?;
         let strata = stratify(&rules, &arities)?;
 
         // Canonicalize after validation, so rejected inputs pay no sorting cost.

@@ -154,6 +154,27 @@ mod tests {
         }
     }
     #[test]
+    fn datalog_query_requires_named_arrays() {
+        let signature = signature_of(
+            "#import \"@tola/datalog:0.0.0\": database\n#let db = database(())\n#db.query(|)",
+        );
+        let query = &signature.signatures[0];
+        assert!(
+            query
+                .label
+                .ends_with("query(select: array, where: array) -> array")
+        );
+        let parameters = query.parameters.as_ref().unwrap();
+        for parameter in parameters {
+            let Some(lsp_types::Documentation::MarkupContent(docs)) = &parameter.documentation
+            else {
+                panic!("query parameter has no documentation");
+            };
+            assert!(docs.value.contains("Required."));
+        }
+    }
+
+    #[test]
     fn positional_arguments_skip_named_arguments() {
         for (source, expected) in [
             ("#text(size: 10pt, |\"hello\")\n", "text:"),

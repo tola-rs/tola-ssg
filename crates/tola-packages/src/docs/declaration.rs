@@ -19,6 +19,8 @@ pub struct ExportDocumentation {
     pub related: Vec<RelatedTarget>,
     /// What the declaration exposes to a caller.
     pub declaration: ExportDeclaration,
+    /// Methods on the value returned by this constructor.
+    pub methods: Vec<Signature>,
 }
 /// What an export declares, as bundled source and static natives expose it.
 #[derive(Debug)]
@@ -55,6 +57,8 @@ pub struct Parameter {
     /// The values the parameter accepts, in Typst's code spelling, when a declaration or a
     /// checked observation names them.
     pub ty: Option<String>,
+    /// Whether the caller must supply this parameter.
+    pub required: bool,
     /// The declared default, written as the declaration spells it.
     pub default: Option<String>,
     /// What the documentation says about the parameter.
@@ -157,6 +161,7 @@ impl Signature {
                     ty: (kind != ParameterKind::Rest)
                         .then(|| documented.and_then(|parameter| parameter.ty.clone()))
                         .flatten(),
+                    required: kind == ParameterKind::Positional,
                     default,
                     docs: documented
                         .map(|parameter| parameter.description.clone())
@@ -177,6 +182,28 @@ impl Signature {
     /// name is left out, as Tinymist leaves it. No fence, no indentation, no trailing newline.
     pub fn code(&self) -> String {
         let mut block = format!("let {}(", self.name);
+        self.write_parameters(&mut block);
+        let returns = self.returns.as_deref().unwrap_or("any");
+        if returns != self.name {
+            block.push_str(" = ");
+            block.push_str(returns);
+        }
+        block.push(';');
+        block
+    }
+
+    /// A method signature with the receiver omitted.
+    pub fn method_code(&self) -> String {
+        let mut block = format!("{}(", self.name);
+        self.write_parameters(&mut block);
+        if let Some(returns) = &self.returns {
+            block.push_str(" -> ");
+            block.push_str(returns);
+        }
+        block
+    }
+
+    fn write_parameters(&self, block: &mut String) {
         let mut parameters = self.positional();
         parameters.extend(self.rest());
         parameters.extend(self.named());
@@ -198,13 +225,6 @@ impl Signature {
             block.push('\n');
         }
         block.push(')');
-        let returns = self.returns.as_deref().unwrap_or("any");
-        if returns != self.name {
-            block.push_str(" = ");
-            block.push_str(returns);
-        }
-        block.push(';');
-        block
     }
 
     /// The positional parameters, in declaration order.
@@ -296,6 +316,7 @@ fn parameter_of(param: ParamInfo) -> Parameter {
         return Parameter {
             name: param.name().unwrap_or("_").to_owned(),
             ty: None,
+            required: param.required(),
             default: param.default().map(|default| default.repr().to_string()),
             docs: None,
             kind,
@@ -304,6 +325,7 @@ fn parameter_of(param: ParamInfo) -> Parameter {
     Parameter {
         name: native.name.to_owned(),
         ty: Some(cast_spelling(&native.input)),
+        required: native.required,
         default: native.default.map(|default| default().repr().to_string()),
         docs: (!native.docs.is_empty()).then(|| native.docs.to_owned()),
         kind,
@@ -332,6 +354,7 @@ mod tests {
     fn undeclared_parameter(name: &str, kind: ParameterKind) -> Parameter {
         Parameter {
             name: name.to_owned(),
+            required: kind == ParameterKind::Positional,
             ty: None,
             default: None,
             docs: None,

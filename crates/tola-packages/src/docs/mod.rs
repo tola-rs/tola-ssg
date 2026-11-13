@@ -1,7 +1,7 @@
 //! Bundled declaration documentation, without evaluating package or site code.
 
 use tola_typst_syntax::docs::Documentation;
-use typst::foundations::Repr;
+use typst::foundations::{CastInfo, Repr};
 use typst::syntax::{LinkedNode, Source, ast};
 
 use crate::BuiltinPackage;
@@ -116,6 +116,20 @@ impl BuiltinPackage {
                     documentation: Documentation::parse(""),
                     related: Vec::new(),
                 });
+                let methods = match &kind {
+                    Declaration::Native(func) => match func.returns() {
+                        Some(CastInfo::Type(ty)) => crate::datalog::methods(*ty)
+                            .map(|(name, func)| {
+                                let mut signature = Signature::of(&format!(".{name}"), func);
+                                signature.parameters.remove(0);
+                                signature
+                            })
+                            .collect(),
+                        _ => Vec::new(),
+                    },
+                    Declaration::Export(export) => export.methods.clone(),
+                    _ => Vec::new(),
+                };
                 let declaration = match kind {
                     Declaration::Native(func) => {
                         ExportDeclaration::Function(Signature::of(name, &func))
@@ -146,6 +160,7 @@ impl BuiltinPackage {
                     documentation: declared.documentation,
                     related: declared.related,
                     declaration,
+                    methods,
                 })
             })
             .collect()

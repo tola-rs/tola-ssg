@@ -12,7 +12,7 @@ use self::join::{Rows, candidate_row_ids, join_base, project_bindings};
 use self::program::Stage;
 pub(crate) use self::program::{Program, RuleProgram};
 use self::tuples::RowBlock;
-use crate::validation::{DeclaredArities, atom, bound_variables, validate_body};
+use crate::validation::{atom, bound_variables, validate_body};
 use crate::{Database, Error, ErrorKind, Location, Query};
 use smallvec::SmallVec;
 use std::cmp::Ordering;
@@ -67,10 +67,20 @@ impl<C: Clone + Ord> Database<C> {
         query: &Query<C>,
         mut is_cancelled: impl FnMut() -> bool,
     ) -> Result<Vec<Vec<C>>, Error> {
-        let mut arities = DeclaredArities::extending(&self.snapshot.arities);
         let bound = bound_variables(&query.body);
-        validate_body(&query.body, &bound, &mut arities, Location::QueryBody)?;
+        validate_body(
+            &query.body,
+            &bound,
+            &self.snapshot.arities,
+            Location::QueryBody,
+        )?;
         for (index, name) in query.select.iter().enumerate() {
+            if name.is_empty() {
+                return Err(Error {
+                    location: Location::QuerySelect(index),
+                    kind: ErrorKind::EmptyVariable,
+                });
+            }
             if !bound.contains(name) {
                 return Err(Error {
                     location: Location::QuerySelect(index),
@@ -79,16 +89,16 @@ impl<C: Clone + Ord> Database<C> {
             }
         }
         let program = Program::query(query);
-        let mut evaluator = Evaluator::new(self, &mut is_cancelled, query.select.len());
         let level = query
             .body
             .iter()
-            .map(|literal| evaluator.stratum(&atom(literal).relation.name))
+            .map(|literal| self.snapshot.strata[&atom(literal).relation.name])
             .max()
             .unwrap_or(0)
             + 1;
+        let mut evaluator = Evaluator::new(self, &mut is_cancelled, level, query.select.len());
         let clause = Rc::new(Clause::query(query, &program));
-        let rows = Rows::single_row(clause.initial());
+        let rows = Rows::single_row(Vec::new());
         evaluator.enqueue(
             level,
             Work::Advance(Continuation {
@@ -114,7 +124,7 @@ impl<C: Clone + Ord> Database<C> {
 /// The columns a demand binds, in column order.
 type BoundColumns<'a, C> = SmallVec<[Option<ConstantRef<'a, C>>; 2]>;
 /// Memo-table key: a relation and the values its demand binds.
-#[derive(Clone, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Eq, PartialEq, Ord, PartialOrd)]
 struct Demand<'a, C: Ord> {
     relation: &'a str,
     columns: BoundColumns<'a, C>,
@@ -241,7 +251,7 @@ fn push_continuation<'a, C: Ord>(queue: &mut VecDeque<Work<'a, C>>, next: Contin
 struct Evaluator<'a, C: Ord, F> {
     database: &'a Database<C>,
     is_cancelled: &'a mut F,
-    rule_clauses: Vec<Option<Rc<Clause<'a, C>>>>,
+    rule_clauses: BTreeMap<usize, Rc<Clause<'a, C>>>,
     table_ids: BTreeMap<Demand<'a, C>, usize>,
     tables: Vec<Table<'a, C>>,
     queues: Vec<VecDeque<Work<'a, C>>>,
@@ -255,47 +265,51 @@ struct Evaluator<'a, C: Ord, F> {
 fn group_demands<'a, C: Ord>(
     continuation: &Continuation<'a, C>,
     atom: &Stage,
+    rows: Rows<'a, C>,
     is_cancelled: &mut impl FnMut() -> bool,
 ) -> Result<BTreeMap<BoundColumns<'a, C>, Rows<'a, C>>, Error> {
-    let width = continuation.rows.width();
     let mut columns = BoundColumns::new();
     let mut groups = BTreeMap::<BoundColumns<'a, C>, Rows<'a, C>>::new();
-    for row in continuation.rows.iter() {
+    for row in rows.iter() {
         ensure_not_cancelled(is_cancelled)?;
         columns.clear();
-        for column in 0..atom.arity() {
-            columns.push(atom.bound(&continuation.clause, row, &continuation.parameters, column));
-        }
+        columns.extend(demand_columns(continuation, atom, row));
         if let Some(bindings) = groups.get_mut(columns.as_slice()) {
-            bindings.push(row.iter().cloned());
+            bindings.push(row.iter().copied());
             continue;
         }
-        let mut bindings = Rows::new(width);
-        bindings.push(row.iter().cloned());
+        let mut bindings = Rows::new(rows.width());
+        bindings.push(row.iter().copied());
         groups.insert(columns.clone(), bindings);
     }
     Ok(groups)
 }
+
+fn demand_columns<'a, 'b, C>(
+    continuation: &'b Continuation<'a, C>,
+    atom: &'b Stage,
+    row: &'b [ConstantRef<'a, C>],
+) -> impl ExactSizeIterator<Item = Option<ConstantRef<'a, C>>> + 'b {
+    (0..atom.arity())
+        .map(move |column| atom.bound(&continuation.clause, row, &continuation.parameters, column))
+}
+
 impl<'a, C: Clone + Ord, F: FnMut() -> bool> Evaluator<'a, C, F> {
-    fn new(database: &'a Database<C>, is_cancelled: &'a mut F, output_width: usize) -> Self {
+    fn new(
+        database: &'a Database<C>,
+        is_cancelled: &'a mut F,
+        query_level: usize,
+        output_width: usize,
+    ) -> Self {
         Self {
             database,
             is_cancelled,
-            rule_clauses: (0..database.snapshot.rules.len()).map(|_| None).collect(),
+            rule_clauses: BTreeMap::new(),
             table_ids: BTreeMap::new(),
             tables: Vec::new(),
-            // One queue per stratum plus one for query output, which runs after every stratum.
-            queues: (0..=database
-                .snapshot
-                .strata
-                .values()
-                .copied()
-                .max()
-                .unwrap_or(0)
-                + 1)
-                .map(|_| VecDeque::new())
-                .collect(),
-            level: 0,
+            // A rule never depends on a higher stratum, so the query bounds the queue levels.
+            queues: (0..=query_level).map(|_| VecDeque::new()).collect(),
+            level: query_level,
             rows: RowBlock::new(output_width),
         }
     }
@@ -304,20 +318,13 @@ impl<'a, C: Clone + Ord, F: FnMut() -> bool> Evaluator<'a, C, F> {
         self.level = self.level.min(level);
     }
     fn stratum(&self, name: &str) -> usize {
-        // Only a relation introduced by a query body is absent; nothing derives from it.
-        self.database
-            .snapshot
-            .strata
-            .get(name)
-            .copied()
-            .unwrap_or(0)
+        self.database.snapshot.strata[name]
     }
     fn ensure_table(&mut self, demand: Demand<'a, C>) -> Result<usize, Error> {
         if let Some(&table) = self.table_ids.get(&demand) {
             return Ok(table);
         }
         let table = self.tables.len();
-        self.table_ids.insert(demand.clone(), table);
         let level = self.stratum(demand.relation);
         self.tables.push(Table {
             answers: Vec::new(),
@@ -325,6 +332,7 @@ impl<'a, C: Clone + Ord, F: FnMut() -> bool> Evaluator<'a, C, F> {
         });
         self.seed_base_answers(table, &demand, level)?;
         self.start_rule_consumers(table, &demand, level)?;
+        self.table_ids.insert(demand, table);
         Ok(table)
     }
     /// Queues the base relation's rows the demand matches at the table's stratum, so every consumer
@@ -337,16 +345,25 @@ impl<'a, C: Clone + Ord, F: FnMut() -> bool> Evaluator<'a, C, F> {
     ) -> Result<(), Error> {
         let mut tuples = RowBlock::new(demand.columns.len());
         if let Some(relation) = self.database.snapshot.relations.get(demand.relation) {
-            let candidates = candidate_row_ids(relation, &demand.columns, self.is_cancelled)?;
+            let (candidates, matched) =
+                candidate_row_ids(relation, &demand.columns, self.is_cancelled)?;
+            let remaining: SmallVec<[_; 4]> = demand
+                .columns
+                .iter()
+                .enumerate()
+                .filter_map(|(column, &value)| {
+                    value
+                        .filter(|_| !matched.includes(column))
+                        .map(|value| (column, value))
+                })
+                .collect();
             tuples.append_run(true, |tuples| {
                 for row in candidates.iter() {
                     ensure_not_cancelled(self.is_cancelled)?;
                     let tuple = relation.row(row);
-                    if demand
-                        .columns
+                    if remaining
                         .iter()
-                        .zip(tuple)
-                        .all(|(bound, value)| bound.is_none_or(|bound| bound == ConstantRef(value)))
+                        .all(|&(column, bound)| bound == ConstantRef(&tuple[column]))
                     {
                         tuples.push(tuple.iter().map(ConstantRef));
                     }
@@ -376,13 +393,15 @@ impl<'a, C: Clone + Ord, F: FnMut() -> bool> Evaluator<'a, C, F> {
             .flatten()
         {
             ensure_not_cancelled(self.is_cancelled)?;
-            let clause = self.rule_clauses[index]
-                .get_or_insert_with(|| Rc::new(Clause::rule(&self.database.snapshot.rules[index])))
+            let clause = self
+                .rule_clauses
+                .entry(index)
+                .or_insert_with(|| Rc::new(Clause::rule(&self.database.snapshot.rules[index])))
                 .clone();
             let Some(parameters) = clause.parameters(demand.columns.iter().copied()) else {
                 continue;
             };
-            let rows = Rows::single_row(clause.initial());
+            let rows = Rows::single_row(Vec::new());
             self.enqueue(
                 level,
                 Work::Advance(Continuation {
@@ -517,7 +536,7 @@ impl<'a, C: Clone + Ord, F: FnMut() -> bool> Evaluator<'a, C, F> {
                 continuation.rows = rows;
                 continue;
             }
-            return self.dispatch_tabled_stage(level, &continuation, atom);
+            return self.dispatch_tabled_stage(level, continuation);
         }
     }
     /// Hands a finished clause's rows to its destination.
@@ -536,32 +555,46 @@ impl<'a, C: Clone + Ord, F: FnMut() -> bool> Evaluator<'a, C, F> {
     fn dispatch_tabled_stage(
         &mut self,
         level: usize,
-        continuation: &Continuation<'a, C>,
-        atom: &Stage,
+        mut continuation: Continuation<'a, C>,
     ) -> Result<(), Error> {
-        let relation = continuation.clause.relation(atom);
-        let reads_tuple = atom.reads_tuple(&continuation.parameters);
-        for (columns, bindings) in group_demands(continuation, atom, self.is_cancelled)? {
-            let table = self.ensure_table(Demand { relation, columns })?;
-            let next = continuation.with_rows(bindings);
-            if atom.negative {
-                self.enqueue(level, Work::CheckNegative(table, next));
-                continue;
-            }
-            let table = &mut self.tables[table];
-            let consumer = Consumer {
-                continuation: next,
-                stratum: level,
-                reads_tuple,
-            };
-            if let Some(next) = consumer.resume(&table.answers, self.is_cancelled)? {
-                push_continuation(&mut self.queues[level], next);
-                if !consumer.reads_tuple {
-                    continue;
-                }
-            }
-            table.consumers.push(consumer);
+        let atom = continuation.clause.stage(continuation.position - 1);
+        if continuation.rows.len() == 1 || !atom.reads_input() {
+            let columns = demand_columns(&continuation, atom, continuation.rows.row(0)).collect();
+            return self.dispatch_demand(level, columns, continuation);
         }
+        let rows = std::mem::replace(&mut continuation.rows, Rows::new(0));
+        for (columns, bindings) in group_demands(&continuation, atom, rows, self.is_cancelled)? {
+            self.dispatch_demand(level, columns, continuation.with_rows(bindings))?;
+        }
+        Ok(())
+    }
+
+    fn dispatch_demand(
+        &mut self,
+        level: usize,
+        columns: BoundColumns<'a, C>,
+        continuation: Continuation<'a, C>,
+    ) -> Result<(), Error> {
+        let atom = continuation.clause.stage(continuation.position - 1);
+        let relation = continuation.clause.relation(atom);
+        let table = self.ensure_table(Demand { relation, columns })?;
+        if atom.negative {
+            self.enqueue(level, Work::CheckNegative(table, continuation));
+            return Ok(());
+        }
+        let table = &mut self.tables[table];
+        let consumer = Consumer {
+            reads_tuple: atom.reads_tuple(&continuation.parameters),
+            continuation,
+            stratum: level,
+        };
+        if let Some(next) = consumer.resume(&table.answers, self.is_cancelled)? {
+            push_continuation(&mut self.queues[level], next);
+            if !consumer.reads_tuple {
+                return Ok(());
+            }
+        }
+        table.consumers.push(consumer);
         Ok(())
     }
 }

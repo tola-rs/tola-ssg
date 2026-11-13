@@ -1166,7 +1166,19 @@ fn signature_information(
         .iter()
         .map(|parameter| ParameterInformation {
             label: ParameterLabel::Simple(format!("{}:", parameter.name)),
-            documentation: parameter.docs.as_deref().map(super::markdown_documentation),
+            documentation: match (
+                parameter.kind,
+                parameter.required,
+                parameter.docs.as_deref(),
+            ) {
+                (ParameterKind::Named, true, Some(docs)) => {
+                    Some(super::markdown_documentation(&format!("Required. {docs}")))
+                }
+                (ParameterKind::Named, true, None) => {
+                    Some(super::markdown_documentation("Required."))
+                }
+                (_, _, docs) => docs.map(super::markdown_documentation),
+            },
         })
         .collect::<Vec<_>>();
     (
@@ -1348,7 +1360,19 @@ pub(super) fn parameter_completions(
                     detail: None,
                     description: Some(parameter.ty_spelling().to_owned()),
                 }),
-                documentation: parameter.docs.as_deref().map(super::markdown_documentation),
+                documentation: match (
+                    parameter.kind,
+                    parameter.required,
+                    parameter.docs.as_deref(),
+                ) {
+                    (ParameterKind::Named, true, Some(docs)) => {
+                        Some(super::markdown_documentation(&format!("Required. {docs}")))
+                    }
+                    (ParameterKind::Named, true, None) => {
+                        Some(super::markdown_documentation("Required."))
+                    }
+                    (_, _, docs) => docs.map(super::markdown_documentation),
+                },
                 text_edit: Some(CompletionTextEdit::Edit(TextEdit {
                     range,
                     new_text: crate::completion::typst_snippet(&format!("{name}: ${{}}")),

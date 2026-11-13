@@ -689,50 +689,56 @@ fn datalog_scalars_keep_types() {
         r##"
 #let keyed = relation("keyed", 2)
 #let value = var("value")
-#let db = database(facts: (
-  keyed(1, "integer"), keyed(1.0, "float"), keyed(decimal("1"), "decimal"),
-  keyed("1", "string"), keyed(false, "boolean"), keyed(none, "none"),
+#let db = database((keyed,), facts: (
+  keyed.atom(1, "integer"), keyed.atom(1.0, "float"), keyed.atom(decimal("1"), "decimal"),
+  keyed.atom("1", "string"), keyed.atom(false, "boolean"), keyed.atom(none, "none"),
 ))
-#assert.eq(query(db, select: (value,), where: (keyed(1, value),)), (("integer",),))
-#assert.eq(query(db, select: (value,), where: (keyed(1.0, value),)), (("float",),))
-#assert.eq(query(db, select: (value,), where: (keyed(decimal("1"), value),)), (("decimal",),))
+#assert.eq(db.query(select: (value,), where: (keyed.atom(1, value),)), (("integer",),))
+#assert.eq(db.query(select: (value,), where: (keyed.atom(1.0, value),)), (("float",),))
+#assert.eq(db.query(select: (value,), where: (keyed.atom(decimal("1"), value),)), (("decimal",),))
 #let scalar = relation("scalar", 1)
 #let values = (none, true, 7, -2.5, decimal("1.25"), "hello", bytes((0, 255)),
   datetime(year: 2026, month: 11, day: 1), datetime(hour: 12, minute: 30, second: 0))
-#let scalars = database(facts: values.map(scalar))
-#let rows = query(scalars, select: (value,), where: (scalar(value),))
+#let scalars = database((scalar,), facts: values.map(it => scalar.atom(it)))
+#let rows = scalars.query(select: (value,), where: (scalar.atom(value),))
 #assert.eq(rows.len(), values.len())
 #for expected in values { assert(rows.contains((expected,))) }
-#let zero = database(facts: (scalar(-0.0), scalar(0.0)))
-#assert.eq(query(zero, select: (value,), where: (scalar(value),)), ((0.0,),))
+#let zero = database((scalar,), facts: (scalar.atom(-0.0), scalar.atom(0.0)))
+#assert.eq(zero.query(select: (value,), where: (scalar.atom(value),)), ((0.0,),))
 "##,
     );
 }
 
 #[test]
-fn datalog_cached_decimals_keep_scale() {
+fn datalog_normalizes_decimals() {
     assert_package(
         "datalog",
         r##"
 #let scalar = relation("scalar", 1)
 #let value = var("value")
-#for amount in (decimal("1.0"), decimal("1.00")) {
-  let db = database(facts: (scalar(amount),))
-  let rows = query(db, select: (value,), where: (scalar(value),))
-  assert.eq(repr(rows.at(0).at(0)), repr(amount))
+#for (amount, canonical) in (
+  (decimal("1.0"), decimal("1")),
+  (decimal("1.00"), decimal("1")),
+  (decimal("-8.700"), decimal("-8.7")),
+  (decimal("0.00"), decimal("0")),
+) {
+  let db = database((scalar,), facts: (scalar.atom(amount),))
+  let rows = db.query(select: (value,), where: (scalar.atom(value),))
+  assert.eq(repr(rows.at(0).at(0)), repr(canonical))
 }
 #let first = decimal("1.0")
 #let second = decimal("1.00")
-#let db = database(facts: (scalar(first), scalar(second)))
-#assert.eq(query(db, select: (), where: (scalar(second),)), ((),))
-#let rows = query(db, select: (value,), where: (scalar(value),))
+#let db = database((scalar,), facts: (scalar.atom(first), scalar.atom(second)))
+#assert.eq(db, database((scalar,), facts: (scalar.atom(second), scalar.atom(first))))
+#assert.eq(db.query(select: (), where: (scalar.atom(second),)), ((),))
+#let rows = db.query(select: (value,), where: (scalar.atom(value),))
 #assert.eq(rows.len(), 1)
-#assert.eq(repr(rows.at(0).at(0)), repr(first))
+#assert.eq(repr(rows.at(0).at(0)), repr(decimal("1")))
 #let pair = relation("pair", 2)
-#let db = database(facts: (scalar(first),), rules: (rule(pair(value, value), scalar(value)),))
+#let db = database((scalar, pair), facts: (scalar.atom(first),), rules: (rule(pair.atom(value, value), scalar.atom(value)),))
 #for amount in (first, second) {
-  let rows = query(db, select: (value,), where: (pair(amount, value),))
-  assert.eq(repr(rows.at(0).at(0)), repr(amount))
+  let rows = db.query(select: (value,), where: (pair.atom(amount, value),))
+  assert.eq(repr(rows.at(0).at(0)), repr(decimal("1")))
 }
 "##,
     );
@@ -746,12 +752,12 @@ fn datalog_snapshots_canonicalize_rows() {
 #let p = relation("p", 1)
 #let x = var("x")
 #for (left, right, same-left) in ((1, 2, 1), (bytes("a"), bytes("b"), bytes((97,)))) {
-  let one = p(left)
-  let two = p(right)
-  let db = database(facts: (one, two))
-  assert.eq(db, database(facts: (two, one, p(same-left))))
-  assert.eq(db, database(facts: (p(left), p(right))))
-  assert.eq(query(db, select: (x,), where: (p(x),)), ((left,), (right,)))
+  let one = p.atom(left)
+  let two = p.atom(right)
+  let db = database((p,), facts: (one, two))
+  assert.eq(db, database((p,), facts: (two, one, p.atom(same-left))))
+  assert.eq(db, database((p,), facts: (p.atom(left), p.atom(right))))
+  assert.eq(db.query(select: (x,), where: (p.atom(x),)), ((left,), (right,)))
 }
 "##,
     );
@@ -767,18 +773,22 @@ fn datalog_queries_use_their_snapshot() {
 #let x = var("x")
 #let y = var("y")
 #let z = var("z")
-#let rules = (rule(reach(x, y), link(x, y)), rule(reach(x, z), reach(x, y), link(y, z)))
-#let before = database(facts: (link("a", "b"), link("b", "c")), rules: rules)
-#let after = database(facts: (link("a", "b"),), rules: rules)
-#let ask(db) = query(db, select: (z,), where: (reach("a", z),))
+#let rules = (rule(reach.atom(x, y), link.atom(x, y)), rule(reach.atom(x, z), reach.atom(x, y), link.atom(y, z)))
+#let before = database((link, reach), facts: (link.atom("a", "b"), link.atom("b", "c")), rules: rules)
+#let after = database((link, reach), facts: (link.atom("a", "b"),), rules: rules)
+#let ask(db) = db.query(select: (z,), where: (reach.atom("a", z),))
 #assert.eq(ask(before), (("b",), ("c",)))
 #assert.eq(ask(after), (("b",),))
 #assert.eq(ask(before), (("b",), ("c",)))
 #let changed = ask(before)
 #{ changed.at(0).at(0) = "changed" }
 #assert.eq(ask(before), (("b",), ("c",)))
-#assert.eq(query(after, select: (), where: (reach("a", "b"),)), ((),))
-#assert.eq(query(after, select: (), where: (reach("a", "c"),)), ())
+#assert.eq(after.query(select: (), where: (reach.atom("a", "b"),)), ((),))
+#assert.eq(after.query(select: (), where: (reach.atom("a", "c"),)), ())
+#assert.eq(after.query(select: (), where: ()), ((),))
+#assert(database(()) != database((link,)))
+#let empty-link = relation("link", 2)
+#assert.eq(database((link,)).query(select: (), where: (negate(empty-link.atom("a", "b")),)), ((),))
 "##,
     );
 }
@@ -788,21 +798,21 @@ fn cached_errors_keep_location() {
     for (declarations, clauses, line) in [
         (
             "#let p = d.relation(\"p\", 1)\n#let x = d.var(\"x\")\n",
-            "#let r = d.rule(p(x))\n#let db = d.database(rules: (r,))\n",
+            "#let r = d.rule(p.atom(x), p.atom(1))\n#let db = d.database((p,), rules: (r,))\n",
             3,
         ),
         (
             "#let downstream = d.relation(\"downstream\", 0)\n\
              #let cycle = d.relation(\"cycle\", 0)\n",
-            "#let dependent = d.rule(downstream(), cycle())\n\
-             #let recursive = d.rule(cycle(), d.negate(cycle()))\n\
-             #let db = d.database(rules: (dependent, recursive))\n",
+            "#let dependent = d.rule(downstream.atom(), cycle.atom())\n\
+             #let recursive = d.rule(cycle.atom(), d.negate(cycle.atom()))\n\
+             #let db = d.database((downstream, cycle), rules: (dependent, recursive))\n",
             4,
         ),
         (
             "#let p = d.relation(\"p\", 1)\n",
             "#let x = d.var(\"x\")\n\
-             #let rows = d.query(d.database(), select: (x,), where: ())\n",
+             #let rows = d.database((p,)).query(select: (x,), where: ())\n",
             2,
         ),
     ] {
@@ -826,18 +836,26 @@ fn datalog_rejects_invalid_clauses() {
     for expression in [
         r#"relation("", 1)"#,
         r#"relation("p", -1)"#,
-        r#"relation("p", 2)(1)"#,
-        r#"relation("p", 1)([content])"#,
-        r#"relation("p", 1)(float("inf"))"#,
-        r#"database(facts: (relation("p", 1)(var("x")),))"#,
-        r#"database(facts: (1,))"#,
-        r#"database(rules: (1,))"#,
-        r#"database(facts: (relation("p", 1)(1), relation("p", 2)(1, 2)))"#,
-        r#"database(rules: (rule(relation("p", 1)(var("x"))),))"#,
-        r#"query(database(), select: (var("x"),), where: ())"#,
-        r#"query(database(), select: (1,), where: ())"#,
-        r#"query(database(), select: (), where: (1,))"#,
-        r#"query(database(), select: (), where: (negate(relation("p", 1)(var("x"))),))"#,
+        r#"var("")"#,
+        r#"relation("p", 2).atom(1)"#,
+        r#"relation("p", 1).atom([content])"#,
+        r#"relation("p", 1).atom(float("inf"))"#,
+        r#"database((1,))"#,
+        r#"database((relation("p", 1), relation("p", 1)))"#,
+        r#"database((relation("p", 1),), facts: (relation("p", 1).atom(var("x")),))"#,
+        r#"database((), facts: (1,))"#,
+        r#"database((), rules: (1,))"#,
+        r#"database((relation("p", 1),), facts: (relation("p", 2).atom(1, 2),))"#,
+        r#"rule(relation("p", 0).atom())"#,
+        r#"database((relation("p", 0),), rules: (rule(relation("p", 0).atom(), negate(relation("missing", 0).atom())),))"#,
+        r#"database(()).query(where: ())"#,
+        r#"database(()).query(select: ())"#,
+        r#"database(()).query(select: none, where: ())"#,
+        r#"database(()).query(select: (var("x"),), where: ())"#,
+        r#"database(()).query(select: (1,), where: ())"#,
+        r#"database(()).query(select: (), where: (1,))"#,
+        r#"database((relation("p", 1),)).query(select: (), where: (negate(relation("p", 1).atom(var("x"))),))"#,
+        r#"database(()).query(select: (), where: (negate(relation("missing", 0).atom()),))"#,
     ] {
         reject_package("datalog", &format!("#let value = {expression}"));
     }

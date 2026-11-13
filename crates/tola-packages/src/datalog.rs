@@ -2,19 +2,20 @@
 
 use std::cmp::Ordering;
 use std::hash::{Hash, Hasher};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use tola_datalog::{
     Atom, Database, Error, ErrorKind, Literal, Location, Query, Relation, Rule, Term,
 };
-use typst::diag::{SourceResult, bail};
-use typst::ecow::EcoString;
+use typst::diag::{SourceResult, bail, error};
+use typst::ecow::{EcoString, eco_vec};
 use typst::foundations::{
-    Args, Array, Bytes, Datetime, Decimal, Func, IntoValue, NativeFunc, Repr, Scope, Str, Value,
-    func, ty,
+    Args, Array, Bytes, Datetime, Decimal, Func, IntoValue, NativeFunc, NativeFuncData,
+    NativeFuncPtr, NativeParamInfo, NativeScope, NativeType, Reflect, Repr, Scope, Str, Type,
+    Value, func, repr, scope, ty,
 };
 use typst::syntax::{Span, Spanned};
-use typst::utils::LazyHash;
+use typst::utils::{DefSite, LazyHash};
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 enum Constant {
@@ -85,9 +86,8 @@ fn date_kind(value: Datetime) -> u8 {
         Datetime::Datetime(_) => 2,
     }
 }
-impl Constant {
-    // Joins compare decimals numerically. Cached Typst values also retain their scale.
-    fn hash_repr<H: Hasher>(&self, hasher: &mut H) {
+impl Hash for Constant {
+    fn hash<H: Hasher>(&self, hasher: &mut H) {
         std::mem::discriminant(self).hash(hasher);
         match self {
             Self::None => {}
@@ -100,7 +100,9 @@ impl Constant {
             Self::Date(v) => v.0.hash(hasher),
         }
     }
+}
 
+impl Constant {
     fn from_value(value: &Value, span: Span) -> SourceResult<Self> {
         Ok(match value {
             Value::None => Self::None,
@@ -112,7 +114,7 @@ impl Constant {
             Value::Float(_) => {
                 bail!(span, "Datalog float terms must be finite"; hint: "use a finite number")
             }
-            Value::Decimal(v) => Self::Decimal(*v),
+            Value::Decimal(v) => Self::Decimal(normalize_decimal(*v)),
             Value::Str(v) => Self::Str(v.clone()),
             Value::Bytes(v) => Self::Bytes(BytesValue(v.clone())),
             Value::Datetime(v) => Self::Date(DateValue(*v)),
@@ -135,28 +137,38 @@ impl Constant {
     }
 }
 
+fn normalize_decimal(value: Decimal) -> Decimal {
+    if value.is_zero() {
+        return Decimal::ZERO;
+    }
+    // Typst exposes exact decimal text, but no scale-normalization API.
+    let text = value.to_string();
+    let trimmed = if text.contains('.') {
+        text.trim_end_matches('0').trim_end_matches('.')
+    } else {
+        &text
+    };
+    trimmed
+        .replace(repr::MINUS_SIGN, "-")
+        .parse()
+        .expect("exact decimal")
+}
+
 #[derive(Clone, Debug, Hash, PartialEq)]
 struct LocatedAtom {
-    key: Arc<LazyHash<AtomKey>>,
+    key: Arc<LazyHash<Atom<Constant>>>,
     span: Span,
 }
 impl LocatedAtom {
     fn new(atom: Atom<Constant>, span: Span) -> Self {
         Self {
-            key: Arc::new(LazyHash::new(AtomKey(atom))),
+            key: Arc::new(LazyHash::new(atom)),
             span,
         }
     }
 
     fn as_atom(&self) -> &Atom<Constant> {
-        &self.key.0
-    }
-}
-#[derive(Debug)]
-struct AtomKey(Atom<Constant>);
-impl Hash for AtomKey {
-    fn hash<H: Hasher>(&self, hasher: &mut H) {
-        self.0.hash_with(hasher, Constant::hash_repr);
+        &self.key
     }
 }
 #[derive(Clone, Debug, Hash, PartialEq)]
@@ -180,12 +192,17 @@ struct LocatedRule {
     body: Vec<LocatedLiteral>,
 }
 struct DatabaseClauses<'a> {
+    relations: &'a [LocatedRelation],
     atoms: &'a [&'a LocatedAtom],
     rules: &'a [&'a LocatedRule],
 }
 impl Hash for DatabaseClauses<'_> {
     fn hash<H: Hasher>(&self, hasher: &mut H) {
         // Cached errors use input positions; keys preserve clause order and omit spans.
+        self.relations.len().hash(hasher);
+        for relation in self.relations {
+            relation.relation.hash(hasher);
+        }
         self.atoms.len().hash(hasher);
         for atom in self.atoms {
             atom.key.hash(hasher);
@@ -195,13 +212,6 @@ impl Hash for DatabaseClauses<'_> {
             rule.head.key.hash(hasher);
             hash_body(&rule.body, hasher);
         }
-    }
-}
-#[derive(Debug)]
-struct Snapshot(Database<Constant>);
-impl Hash for Snapshot {
-    fn hash<H: Hasher>(&self, hasher: &mut H) {
-        self.0.hash_with(hasher, Constant::hash_repr);
     }
 }
 struct QueryClauses<'a> {
@@ -229,7 +239,6 @@ enum DatalogValue {
     Atom(LocatedAtom),
     Literal(LocatedLiteral),
     Rule(LocatedRule),
-    Database(Arc<LazyHash<Snapshot>>),
 }
 impl Repr for DatalogValue {
     fn repr(&self) -> EcoString {
@@ -240,7 +249,6 @@ impl Repr for DatalogValue {
             Self::Atom(atom) => atom_repr("atom", &atom.as_atom().relation),
             Self::Literal(literal) => atom_repr("negated atom", &literal.atom.as_atom().relation),
             Self::Rule(rule) => atom_repr("rule for", &rule.head.as_atom().relation),
-            Self::Database(_) => "<datalog database>".into(),
         }
     }
 }
@@ -267,7 +275,7 @@ fn get_atom(value: &Value, span: Span) -> SourceResult<&LocatedAtom> {
         _ => bail!(span, "expected a Datalog atom"),
     }
 }
-fn literal(value: &Value, span: Span) -> SourceResult<LocatedLiteral> {
+fn body_literal(value: &Value, span: Span) -> SourceResult<LocatedLiteral> {
     match datalog(value) {
         Some(DatalogValue::Atom(v)) => Ok(LocatedLiteral {
             atom: v.clone(),
@@ -278,73 +286,96 @@ fn literal(value: &Value, span: Span) -> SourceResult<LocatedLiteral> {
     }
 }
 
+/// A declaration of a Datalog relation.
+#[ty(scope, name = "datalog-relation")]
+#[derive(Clone, Debug, Hash, PartialEq)]
+struct LocatedRelation {
+    relation: Relation,
+    span: Span,
+}
+
+impl Repr for LocatedRelation {
+    fn repr(&self) -> EcoString {
+        atom_repr("relation", &self.relation)
+    }
+}
+
 #[func]
 fn datalog_relation(
+    span: Span,
     /// Exact nonempty relation name.
     name: Spanned<Str>,
-    /// Number of terms, at least zero.
+    /// The nonnegative number of terms in an atom of this relation.
     arity: Spanned<i64>,
-) -> SourceResult<Func> {
+) -> SourceResult<LocatedRelation> {
     if name.v.is_empty() {
         bail!(name.span, "relation name must not be empty")
     }
     let Ok(arity_value) = usize::try_from(arity.v) else {
-        bail!(arity.span, "relation arity must be nonnegative")
+        bail!(arity.span, "relation arity is out of range"; hint: "use a nonnegative integer")
     };
-    let mut args = Args::new(
-        arity.span,
-        [name.v.into_value(), (arity_value as i64).into_value()],
-    );
-    Ok(Func::from(datalog_atom::data()).with(&mut args))
-}
-#[func]
-fn datalog_atom(
-    args: &mut Args,
-    /// Terms in the relation.
-    #[external]
-    #[variadic]
-    terms: Vec<Value>,
-) -> SourceResult<Value> {
-    let span = args.span;
-    let name: Str = args.expect("name")?;
-    let arity: i64 = args.expect("arity")?;
-    let terms: Vec<Spanned<Value>> = args.all()?;
-    if terms.len() != arity as usize {
-        bail!(
-            span,
-            "relation `{name}` expects {arity} terms, found {}",
-            terms.len()
-        );
-    }
-    let terms = terms
-        .into_iter()
-        .map(|term| {
-            if let Some(DatalogValue::Variable(name, _)) = datalog(&term.v) {
-                Ok(Term::Variable(name.clone()))
-            } else {
-                Constant::from_value(&term.v, term.span).map(Term::Constant)
-            }
-        })
-        .collect::<SourceResult<Vec<_>>>()?;
-    Ok(wrapped(DatalogValue::Atom(LocatedAtom::new(
-        Atom {
-            relation: Relation {
-                name: name.to_string(),
-                arity: arity as usize,
-            },
-            terms,
+    Ok(LocatedRelation {
+        relation: Relation {
+            name: name.v.to_string(),
+            arity: arity_value,
         },
         span,
-    ))))
+    })
 }
+
+#[scope]
+impl LocatedRelation {
+    /// Construct an atom of this relation.
+    #[func]
+    fn atom(
+        self,
+        span: Span,
+        /// One constant or variable per column.
+        #[variadic]
+        terms: Vec<Spanned<Value>>,
+    ) -> SourceResult<Value> {
+        let Relation { name, arity } = &self.relation;
+        if terms.len() != *arity {
+            bail!(
+                span,
+                "relation `{name}` expects {arity} terms, found {}",
+                terms.len()
+            );
+        }
+        let terms = terms
+            .into_iter()
+            .map(|term| {
+                if let Some(DatalogValue::Variable(name, _)) = datalog(&term.v) {
+                    Ok(Term::Variable(name.clone()))
+                } else {
+                    Constant::from_value(&term.v, term.span).map(Term::Constant)
+                }
+            })
+            .collect::<SourceResult<Vec<_>>>()?;
+        Ok(wrapped(DatalogValue::Atom(LocatedAtom::new(
+            Atom {
+                relation: self.relation,
+                terms,
+            },
+            span,
+        ))))
+    }
+}
+
 #[func]
 fn datalog_var(
-    span: Span,
-    /// Exact variable name.
-    name: Str,
-) -> Value {
-    wrapped(DatalogValue::Variable(name.to_string(), span))
+    /// Exact nonempty variable name.
+    name: Spanned<Str>,
+) -> SourceResult<Value> {
+    if name.v.is_empty() {
+        bail!(name.span, "variable name must not be empty")
+    }
+    Ok(wrapped(DatalogValue::Variable(
+        name.v.to_string(),
+        name.span,
+    )))
 }
+
 #[func]
 fn datalog_negate(
     /// Atom that must have no matching row.
@@ -360,20 +391,24 @@ fn datalog_negate(
 fn datalog_rule(
     /// Atom to derive.
     head: Spanned<Value>,
-    /// Body literals, passed as positional arguments.
+    /// First body literal.
+    literal: Spanned<Value>,
+    /// Further body literals.
     #[variadic]
-    body: Vec<Spanned<Value>>,
+    rest: Vec<Spanned<Value>>,
 ) -> SourceResult<Value> {
     let head = get_atom(&head.v, head.span)?.clone();
-    let body = body
-        .iter()
-        .map(|v| literal(&v.v, v.span))
+    let body = std::iter::once(literal)
+        .chain(rest)
+        .map(|v| body_literal(&v.v, v.span))
         .collect::<SourceResult<Vec<_>>>()?;
     Ok(wrapped(DatalogValue::Rule(LocatedRule { head, body })))
 }
 #[func]
 fn datalog_database(
     span: Span,
+    /// Relation declarations, including relations with no facts or rules.
+    relations: Spanned<Array>,
     /// Ground atoms, default `()`.
     #[named]
     #[default(Spanned::detached(Array::new()))]
@@ -382,7 +417,25 @@ fn datalog_database(
     #[named]
     #[default(Spanned::detached(Array::new()))]
     rules: Spanned<Array>,
-) -> SourceResult<Value> {
+) -> SourceResult<DatalogDatabase> {
+    let declarations = relations
+        .v
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            match value {
+                Value::Dyn(value) => value.downcast::<LocatedRelation>().cloned(),
+                _ => None,
+            }
+            .ok_or_else(|| {
+                eco_vec![error!(
+                    relations.span,
+                    "entry {} in `relations` must be a Datalog relation",
+                    index + 1
+                )]
+            })
+        })
+        .collect::<SourceResult<Vec<_>>>()?;
     let mut atoms = Vec::with_capacity(facts.v.len());
     for (index, value) in facts.v.iter().enumerate() {
         let Some(DatalogValue::Atom(atom)) = datalog(value) else {
@@ -414,16 +467,27 @@ fn datalog_database(
         definitions.push(rule);
     }
     let clauses = DatabaseClauses {
+        relations: &declarations,
         atoms: &atoms,
         rules: &definitions,
     };
-    let database = database_snapshot(clauses)
-        .map_err(|e| diagnostic(e, &atoms, &definitions, &[], &[], span))?;
-    Ok(wrapped(DatalogValue::Database(database)))
+    let database = database_snapshot(clauses).map_err(|e| {
+        diagnostic(e, span, |location| match location {
+            Location::Relation(i) => declarations.get(i).map(|v| v.span),
+            Location::Fact(i) => atoms.get(i).map(|v| v.span),
+            Location::RuleHead(i) => definitions.get(i).map(|v| v.head.span),
+            Location::RuleBody { rule, atom } => definitions
+                .get(rule)
+                .and_then(|rule| rule.body.get(atom))
+                .map(|literal| literal.atom.span),
+            _ => None,
+        })
+    })?;
+    Ok(database)
 }
 
 #[comemo::memoize]
-fn database_snapshot(clauses: DatabaseClauses<'_>) -> Result<Arc<LazyHash<Snapshot>>, Error> {
+fn database_snapshot(clauses: DatabaseClauses<'_>) -> Result<DatalogDatabase, Error> {
     let rows = clauses.atoms.iter().map(|atom| {
         let atom = atom.as_atom();
         let values = atom.terms.iter().map(|term| match term {
@@ -440,35 +504,91 @@ fn database_snapshot(clauses: DatabaseClauses<'_>) -> Result<Arc<LazyHash<Snapsh
             body: rule.body.iter().map(LocatedLiteral::to_literal).collect(),
         })
         .collect();
-    Database::from_rows(rows, rules).map(|database| Arc::new(LazyHash::new(Snapshot(database))))
+    let relations = clauses.relations.iter().map(|relation| &relation.relation);
+    Database::from_rows(relations, rows, rules)
+        .map(|database| DatalogDatabase(Arc::new(LazyHash::new(database))))
 }
 
-#[func]
-fn datalog_query(
-    span: Span,
-    /// Database to query.
-    database: Spanned<Value>,
-    /// Variables in output column order.
-    #[named]
-    #[default(Spanned::detached(None))]
-    select: Spanned<Option<Array>>,
-    /// Body literals to match.
-    #[named]
-    #[default(Spanned::detached(None))]
-    where_: Spanned<Option<Array>>,
-) -> SourceResult<Array> {
-    let Some(DatalogValue::Database(db)) = datalog(&database.v) else {
-        bail!(database.span, "expected a Datalog database")
-    };
-    let Some(selection) = select.v else {
-        bail!(span, "query requires `select`")
-    };
-    let Some(literals) = where_.v else {
-        bail!(span, "query requires `where`")
-    };
-    let mut names = Vec::with_capacity(selection.len());
-    let mut select_spans = Vec::with_capacity(selection.len());
-    for (index, value) in selection.iter().enumerate() {
+/// An immutable Datalog database.
+#[ty(scope)]
+#[derive(Clone, Debug, Hash, PartialEq)]
+struct DatalogDatabase(Arc<LazyHash<Database<Constant>>>);
+
+impl Repr for DatalogDatabase {
+    fn repr(&self) -> EcoString {
+        "<datalog database>".into()
+    }
+}
+
+impl NativeScope for DatalogDatabase {
+    fn scope() -> Scope {
+        let mut scope = Scope::new();
+        scope.define_func_with_data(&QUERY);
+        scope
+    }
+
+    fn constructor() -> Option<&'static NativeFuncData> {
+        None
+    }
+}
+
+static QUERY: NativeFuncData = NativeFuncData {
+    function: NativeFuncPtr(&|_, _, args| query(args).map(IntoValue::into_value)),
+    name: "query",
+    title: "Query",
+    docs: "Return the distinct rows matching the conditions in this database.",
+    def_site: Some(DefSite {
+        path: file!(),
+        key: "query",
+    }),
+    keywords: &[],
+    contextual: false,
+    scope: LazyLock::new(&Scope::new),
+    params: LazyLock::new(&|| {
+        let parameter = |name, docs, input, named| NativeParamInfo {
+            name,
+            docs,
+            input,
+            named,
+            positional: !named,
+            required: true,
+            default: None,
+            def_site: None,
+            variadic: false,
+            settable: false,
+        };
+        vec![
+            parameter("self", "", DatalogDatabase::input(), false),
+            parameter(
+                "select",
+                "Variables in output column order.",
+                Array::input(),
+                true,
+            ),
+            parameter(
+                "where",
+                "Atoms and negated atoms that must hold.",
+                Array::input(),
+                true,
+            ),
+        ]
+    }),
+    returns: LazyLock::new(&Array::output),
+};
+
+fn query(args: &mut Args) -> SourceResult<Array> {
+    let span = args.span;
+    let database: DatalogDatabase = args.expect("self")?;
+    let select: Spanned<Array> = args
+        .named("select")?
+        .ok_or_else(|| eco_vec![error!(span, "query requires `select`")])?;
+    let where_: Spanned<Array> = args
+        .named("where")?
+        .ok_or_else(|| eco_vec![error!(span, "query requires `where`")])?;
+    args.take().finish()?;
+    let mut names = Vec::with_capacity(select.v.len());
+    let mut select_spans = Vec::with_capacity(select.v.len());
+    for (index, value) in select.v.iter().enumerate() {
         let Some(DatalogValue::Variable(name, span)) = datalog(value) else {
             bail!(
                 select.span,
@@ -479,19 +599,41 @@ fn datalog_query(
         names.push(name.clone());
         select_spans.push(*span);
     }
-    let body = literals
+    let body = where_
+        .v
         .iter()
-        .map(|v| literal(v, where_.span))
+        .map(|v| body_literal(v, where_.span))
         .collect::<SourceResult<Vec<_>>>()?;
     let clauses = QueryClauses {
         select: names,
         body: &body,
     };
-    query_rows(db, clauses).map_err(|e| diagnostic(e, &[], &[], &body, &select_spans, span))
+    query_rows(&database.0, clauses).map_err(|e| {
+        diagnostic(e, span, |location| match location {
+            Location::QueryBody(i) => body.get(i).map(|v| v.atom.span),
+            Location::QuerySelect(i) => select_spans.get(i).copied(),
+            _ => None,
+        })
+    })
 }
+
+pub(crate) fn methods(ty: Type) -> impl Iterator<Item = (&'static str, &'static Func)> {
+    let scope = (ty == DatalogDatabase::ty() || ty == LocatedRelation::ty()).then(|| ty.scope());
+    scope
+        .into_iter()
+        .flat_map(Scope::iter)
+        .filter_map(|(name, binding)| match binding.read() {
+            Value::Func(func) => Some((name.as_str(), func)),
+            _ => None,
+        })
+}
+
 // The compile boundary handles cancellation so Typst cannot cache a cancelled query.
 #[comemo::memoize]
-fn query_rows(database: &LazyHash<Snapshot>, clauses: QueryClauses<'_>) -> Result<Array, Error> {
+fn query_rows(
+    database: &LazyHash<Database<Constant>>,
+    clauses: QueryClauses<'_>,
+) -> Result<Array, Error> {
     let query = Query {
         select: clauses.select,
         body: clauses
@@ -500,7 +642,7 @@ fn query_rows(database: &LazyHash<Snapshot>, clauses: QueryClauses<'_>) -> Resul
             .map(LocatedLiteral::to_literal)
             .collect(),
     };
-    let rows = database.0.query(&query, || false)?;
+    let rows = database.query(&query, || false)?;
     Ok(rows
         .into_iter()
         .map(|row| {
@@ -514,24 +656,10 @@ fn query_rows(database: &LazyHash<Snapshot>, clauses: QueryClauses<'_>) -> Resul
 
 fn diagnostic(
     error: Error,
-    facts: &[&LocatedAtom],
-    rules: &[&LocatedRule],
-    body: &[LocatedLiteral],
-    select: &[Span],
     fallback: Span,
+    locate: impl FnOnce(Location) -> Option<Span>,
 ) -> typst::ecow::EcoVec<typst::diag::SourceDiagnostic> {
-    let span = match error.location {
-        Location::Fact(i) => facts.get(i).map(|v| v.span),
-        Location::RuleHead(i) => rules.get(i).map(|v| v.head.span),
-        Location::RuleBody { rule, atom } => rules
-            .get(rule)
-            .and_then(|r| r.body.get(atom))
-            .map(|v| v.atom.span),
-        Location::QueryBody(i) => body.get(i).map(|v| v.atom.span),
-        Location::QuerySelect(i) => select.get(i).copied(),
-        _ => None,
-    }
-    .unwrap_or(fallback);
+    let span = locate(error.location).unwrap_or(fallback);
     let negative_cycle = matches!(error.kind, ErrorKind::NegativeCycle);
     let message = match error.kind {
         ErrorKind::Arity { expected, actual } => {
@@ -545,21 +673,12 @@ fn diagnostic(
         ErrorKind::UnboundVariable(name) => {
             format!("variable `{name}` must occur in a positive body atom")
         }
+        ErrorKind::DuplicateRelation(name) => format!("relation `{name}` is already declared"),
+        ErrorKind::UnknownRelation(name) => format!("relation `{name}` is not declared"),
         ErrorKind::EmptyRelation => "relation name must not be empty".to_owned(),
-        ErrorKind::NegativeCycle => match error.location {
-            Location::RuleBody { rule, atom } => rules
-                .get(rule)
-                .and_then(|r| r.body.get(atom).map(|body| (r, body)))
-                .map(|(r, body)| {
-                    let relation = &body.atom.as_atom().relation.name;
-                    format!(
-                        "rule for `{}` has a cycle through negation involving `{relation}`",
-                        r.head.as_atom().relation.name
-                    )
-                })
-                .unwrap_or_else(|| "rules contain a cycle through negation".to_owned()),
-            _ => "rules contain a cycle through negation".to_owned(),
-        },
+        ErrorKind::EmptyVariable => "variable name must not be empty".to_owned(),
+        ErrorKind::EmptyBody => "a rule needs at least one body literal".to_owned(),
+        ErrorKind::NegativeCycle => "rules contain a cycle through negation".to_owned(),
         ErrorKind::Cancelled => "Datalog query was cancelled".to_owned(),
     };
     let mut diagnostic = typst::diag::SourceDiagnostic::error(span, message);
@@ -575,7 +694,6 @@ pub(crate) fn define(scope: &mut Scope) {
     scope.define("datalog-rule", Func::from(datalog_rule::data()));
     scope.define("datalog-negate", Func::from(datalog_negate::data()));
     scope.define("datalog-database", Func::from(datalog_database::data()));
-    scope.define("datalog-query", Func::from(datalog_query::data()));
 }
 
 #[cfg(test)]
@@ -583,12 +701,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn relation_constructor_exposes_only_terms() {
-        let relation =
-            datalog_relation(Spanned::detached("edge".into()), Spanned::detached(2)).unwrap();
-        let parameters = relation.params().collect::<Vec<_>>();
-        assert_eq!(parameters.len(), 1);
-        assert_eq!(parameters[0].name(), Some("terms"));
-        assert!(parameters[0].variadic());
+    fn query_signature_requires_named_arrays() {
+        let query = Func::from(&QUERY);
+        let parameters = query.params().skip(1).collect::<Vec<_>>();
+        assert_eq!(parameters.len(), 2);
+        for (parameter, name) in parameters.into_iter().zip(["select", "where"]) {
+            let parameter = parameter.to_native().unwrap();
+            assert_eq!(parameter.name, name);
+            assert!(parameter.named && parameter.required);
+            assert_eq!(parameter.input, Array::input());
+            assert!(parameter.default.is_none());
+        }
     }
 }

@@ -1,76 +1,65 @@
 // @tola/datalog:0.0.0 - relations, recursive rules, and queries
 //
-// Relations have a nonempty name and fixed arity. Strings are constants; use `var` for variables.
-// Facts are ground atoms. Rules and queries use set semantics, so duplicate rows occur once.
-// Variables in a rule or query must occur in a positive body atom to be used
-// in a head, selection, or negative atom. Negation must be stratified: no dependency cycle
-// may contain a negative edge. Results are arrays of tuples.
+// Declare every relation in the database, including empty relations. An unknown
+// relation is an error in facts, rules, and queries. A name identifies a relation
+// within the database and has one arity.
 //
-// Constants are `none`, booleans, integers, finite floats, decimals, strings, bytes, and
-// datetimes. Types remain distinct (for example `1` and `1.0`); use IDs to join complex
-// values such as content and functions, then look those values up in your own records.
-// Decimals match by numeric value. Returned decimals retain the representation of the
-// value selected by the query.
+// Facts are ground atoms. Variables in a rule head, query selection, or negated
+// atom must appear in a positive atom of the same rule or query. A dependency
+// cycle cannot pass through negation.
+//
+// Constants of different types are distinct. Their order is none, bool, int,
+// finite float, decimal, str, bytes, datetime. Within each type, booleans and
+// numbers use value order, strings and bytes use lexicographic order, and
+// datetimes order dates before times before date-times, each chronologically.
+// Decimal values lose trailing fractional zeros. Both float and decimal zeros
+// have one representation.
 
-/// Create a function that constructs atoms of a named relation.
-///
-/// Relations with the same name in one database or query must have the same arity.
-/// A relation with no facts or rules deriving it has no rows.
+/// Declare a relation by name and arity. Use `.atom(..terms)` to construct an atom.
+/// Arity can be zero.
 #import "@tola/host:0.0.0": datalog-relation as relation
 
-/// Create a variable. Equal names identify the same variable within one rule or query.
+/// Create a nonempty variable name. Equal names identify the same variable within one rule or query.
 #import "@tola/host:0.0.0": datalog-var as var
 
-/// Create a rule from a head atom and zero or more positive or negative body literals.
+/// Derive the head atom when all body conditions hold. Pass at least one condition.
 #import "@tola/host:0.0.0": datalog-rule as rule
 
-/// Make a negative body literal from an atom.
+/// Construct a literal that holds when the atom has no matching row for the current binding.
 #import "@tola/host:0.0.0": datalog-negate as negate
 
-/// Build an immutable database from ground atoms and rules.
+/// Build an immutable database from relation declarations, ground atoms, and rules.
+/// Each name must be declared exactly once. A relation may have facts and deriving rules.
+/// Database equality compares declarations, facts, and the structure of rules.
 ///
-/// Database equality uses stored rows, rules, and scalar representations;
-/// source locations do not participate.
+/// `.query(select: ..., where: ...)` requires two arrays. The selection lists variables in
+/// output column order and may repeat a variable. The conditions form a conjunction.
+/// The result is an array of rows, sorted lexicographically and deduplicated using Datalog
+/// constant equality. Typst's equality can compare values of different numeric types as equal.
 ///
-/// Example - compute reachability through a recursive rule:
+/// An empty selection returns `((),)` when the conditions hold and `()` otherwise.
+/// Empty conditions hold.
+///
+/// This example finds nodes reachable from `a` and excludes those in `hidden`. The two rows
+/// are `("b",)` and `("c",)`.
 ///
 /// ```typst
-/// #import "@tola/datalog:0.0.0": relation, var, rule, database, query
+/// #import "@tola/datalog:0.0.0": relation, var, rule, negate, database
 /// #let edge = relation("edge", 2)
 /// #let reach = relation("reach", 2)
+/// #let hidden = relation("hidden", 1)
 /// #let x = var("x")
 /// #let y = var("y")
 /// #let z = var("z")
-/// #let db = database(facts: (edge("a", "b"), edge("b", "c")), rules: (
-///   rule(reach(x, y), edge(x, y)),
-///   rule(reach(x, z), reach(x, y), edge(y, z)),
-/// ))
-/// #assert(query(db, select: (z,), where: (reach("a", z),)).contains(("c",)))
+/// #let db = database((edge, reach, hidden),
+///   facts: (edge.atom("a", "b"), edge.atom("b", "c")),
+///   rules: (
+///     rule(reach.atom(x, y), edge.atom(x, y)),
+///     rule(reach.atom(x, z), reach.atom(x, y), edge.atom(y, z)),
+///   ),
+/// )
+/// #assert.eq(db.query(select: (z,), where: (
+///   reach.atom("a", z), negate(hidden.atom(z)),
+/// )), (("b",), ("c",)))
 /// ```
-///
 #import "@tola/host:0.0.0": datalog-database as database
-
-/// Query a database using positive and negative literals.
-///
-/// Example - join references to records and exclude withdrawn references:
-///
-/// ```typst
-/// #import "@tola/datalog:0.0.0": relation, var, negate, database, query
-/// #let cites = relation("cites", 2)
-/// #let title = relation("title", 2)
-/// #let withdrawn = relation("withdrawn", 1)
-/// #let id = var("id")
-/// #let name = var("name")
-/// #let db = database(facts: (
-///   cites("essay", "r1"), cites("essay", "r2"),
-///   title("r1", "Logic"), title("r2", "Old"), withdrawn("r2"),
-/// ))
-/// #assert.eq(query(db, select: (name,), where: (
-///   cites("essay", id), title(id, name), negate(withdrawn(id)),
-/// )), (("Logic",),))
-/// ```
-///
-/// `select` contains variables, in output column order. An empty selection returns `((),)`
-/// when the body succeeds, otherwise `()`. Results are sorted and contain no duplicate rows.
-/// Positive atoms run in the order written, before any negative atoms.
-#import "@tola/host:0.0.0": datalog-query as query
