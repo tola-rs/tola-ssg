@@ -362,6 +362,32 @@ export async function run(): Promise<void> {
       }
     }))
 
+  await check('Tola Nushell answers for site scripts', () =>
+    withSite(async (site) => {
+      const started = waitForOutput(`Started Tola Nushell language service for ${site.name}.`)
+      const script = vscode.Uri.file(path.join(site.root, 'site.nu'))
+      await fs.writeFile(script.fsPath, 'use tola get-site\nget-site\n')
+      await vscode.workspace.getConfiguration('tola', script).update(
+        'nu.enabled',
+        true,
+        vscode.ConfigurationTarget.WorkspaceFolder,
+      )
+      await started
+      const document = await vscode.workspace.openTextDocument(script)
+      await vscode.window.showTextDocument(document)
+      const hover = await vscode.commands.executeCommand<vscode.Hover[]>(
+        'vscode.executeHoverProvider',
+        script,
+        new vscode.Position(1, 3),
+      )
+      assert.match(
+        hover.flatMap((answer) =>
+          answer.contents.map((content) => typeof content === 'string' ? content : content.value)
+        ).join('\n'),
+        /get-site/,
+      )
+    }))
+
   await check('Documents folders answer language requests', () =>
     withSite(async (workspace) => {
       const { document, position } = await openMarked(workspace.source, '#let value = 42\n#va|lue\n')

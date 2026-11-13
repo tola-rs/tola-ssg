@@ -314,6 +314,12 @@
           "scope": "resource",
           "description": "Tola executable. Relative paths use the workspace folder."
         },
+        "tola.nu.enabled": {
+          "type": "boolean",
+          "default": false,
+          "scope": "resource",
+          "description": "Use Tola's Nushell language service for this site's .nu files."
+        },
         "tola.checkMode": {
           "type": "string",
           "enum": [

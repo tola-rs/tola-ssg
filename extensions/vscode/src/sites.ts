@@ -65,6 +65,7 @@ interface WorkspaceClient extends SiteClient {
   readonly untitledDocuments: Set<string>
   readonly service: LanguageService
   readonly synchronization: SourceSynchronization
+  nu?: { client: TolaClient; service: LanguageService; started: Promise<void> }
   sourceCheck: SourceCheckStatus
 }
 
@@ -160,7 +161,7 @@ export class Sites {
       vscode.workspace.onDidChangeWorkspaceFolders(() => this.refreshInBackground()),
       vscode.workspace.onDidChangeConfiguration((event) => {
         if (
-          !['enabled', 'serverPath', 'configPath', 'packagePath', 'packageCachePath'].some((setting) =>
+          !['enabled', 'serverPath', 'configPath', 'packagePath', 'packageCachePath', 'nu.enabled'].some((setting) =>
             event.affectsConfiguration(`tola.${setting}`)
           )
         ) return
@@ -868,6 +869,7 @@ export class Sites {
     try {
       const stopped = await Promise.allSettled([
         site.client.dispose(),
+        this.stopNushell(site),
         site.selection.kind === 'site' ? this.stopPreview(site.selection) : Promise.resolve(),
       ])
       const failed = stopped.find((completion) => completion.status === 'rejected')
@@ -877,6 +879,61 @@ export class Sites {
       site.extraDocuments.clear()
       site.untitledDocuments.clear()
     }
+  }
+
+  private async stopNushell(site: WorkspaceClient): Promise<void> {
+    const nu = site.nu
+    if (!nu) return
+    await nu.started
+    try {
+      await nu.client.dispose()
+    } finally {
+      await nu.service.close()
+    }
+  }
+
+  private startNushell(site: WorkspaceClient, selected: Selection): void {
+    const { folder, command, config, inputRoots } = selected
+    const service = new LanguageService(
+      { folder, command, args: ['nu', '--lsp', '--config', config.fsPath] },
+      this.output,
+      () => {
+        if (!site.lifetime.isCancellationRequested) {
+          this.report(
+            new Error(`Tola Nushell language service stopped for ${folder.name}.`),
+            () => this.refresh(true),
+          )
+        }
+      },
+    )
+    const client = new TolaClient(
+      'tola.nu',
+      `Tola Nushell (${folder.name})`,
+      () => service.start(site.lifetime),
+      {
+        workspaceFolder: folder,
+        documentSelector: [{ scheme: 'file', pattern: `${escapeGlob(inputRoots[0])}/**/*.nu` }],
+        outputChannel: this.output,
+        diagnosticCollectionName: `tola-nu:${folder.uri.toString()}`,
+        errorHandler: {
+          error: () => ({ action: ErrorAction.Continue }),
+          closed: () => ({ action: CloseAction.DoNotRestart }),
+        },
+      },
+    )
+    const started = client.start().then(() => {
+      if (site.lifetime.isCancellationRequested) return
+      service.ready()
+      this.output.appendLine(`Started Tola Nushell language service for ${folder.name}.`)
+    }).catch((error) => {
+      if (!site.lifetime.isCancellationRequested) {
+        this.report(
+          new Error(`Tola could not start its Nushell language service for ${folder.name}: ${String(error)}`),
+          () => this.refresh(true),
+        )
+      }
+    })
+    site.nu = { client, service, started }
   }
 
   private async start(selected: ServedWorkspace): Promise<void> {
@@ -976,6 +1033,7 @@ export class Sites {
       this.virtual.ready(site)
       this.settled.fire(key)
       this.output.appendLine(`Started Tola language service for ${selected.folder.name}.`)
+      if (selected.kind === 'site' && selected.nuEnabled) this.startNushell(site, selected)
     } catch (error) {
       const cancelled = this.closing || site?.service.stopRequested
       this.workspaces.delete(key)

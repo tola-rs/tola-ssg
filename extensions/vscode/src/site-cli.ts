@@ -132,16 +132,20 @@ export class SiteCli {
     )
   }
 
-  /** `tola editor setup vscode`: regenerates this editor's package mirror and merges its settings. */
+  /** Merge workspace settings and optionally configure the official Nushell extension. */
   async editorSetup(selection: Selection): Promise<void> {
-    if (
-      !await this.confirm(
-        `Set up the editor integration for ${selection.folder.name}?`,
-        'Tola writes its package mirror for editors and merges the workspace settings the integration needs.',
-        'Set Up Integration',
-      )
-    ) return
+    const nushell = 'Set Up with Nushell'
+    const options = process.platform !== 'win32' && vscode.workspace.workspaceFolders?.length === 1
+      ? ['Set Up Integration', nushell]
+      : ['Set Up Integration']
+    const selected = await vscode.window.showWarningMessage(
+      `Set up the editor integration for ${selection.folder.name}?`,
+      { detail: 'Tola updates workspace settings and package sources. Choose Set Up with Nushell to have the Nushell extension use Tola for language features.' },
+      ...options,
+    )
+    if (!selected) return
     const args = ['editor', ...siteArguments(selection, 'setup'), 'vscode']
+    if (selected === nushell) args.push('--nu')
     await this.run(selection.command, args, selection.folder.uri.fsPath, 'Set Up Editor Integration')
   }
 

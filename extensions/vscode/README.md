@@ -16,6 +16,7 @@ Build the extension and Tola executable from the same checkout when using a deve
 | Setting                 | Meaning                                                                                                                                       |
 | ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
 | `tola.enabled`          | Enable Tola diagnostics and language features in this workspace folder.                                                                       |
+| `tola.nu.enabled`       | Enable Tola's Nushell language service for this site's `.nu` files. Defaults to off.                                                           |
 | `tola.serverPath`       | Tola executable. Relative paths use the workspace folder.                                                                                     |
 | `tola.configPath`       | Site configuration file, absolute or relative to the workspace folder. An explicitly selected file never falls back to another configuration. |
 | `tola.packagePath`      | Directory of local Typst packages. Leave empty for Typst's default directory.                                                                 |
@@ -24,6 +25,20 @@ Build the extension and Tola executable from the same checkout when using a deve
 | `tola.onEnter`          | Continue lists, comments and equations when pressing Enter.                                                                                   |
 | `tola.assetDirectory`   | Directory for dropped or pasted files, relative to the site root.                                                                             |
 | `tola.trace.server`     | Trace the messages the client and its language server exchange.                                                                               |
+
+## Nushell
+
+- **Use the Nushell extension.** In a single-site window on macOS or Linux, run
+  `tola editor setup vscode --nu` or pick **Set Up with Nushell** in **Tola: Set Up Editor Integration**.
+  Setup fills `nushellLanguageServer.nushellExecutablePath` with the absolute path to
+  `.tola/editor/nu-launcher`. Reload the window. The launcher starts Tola for language features
+  and runs ordinary `nu` for terminal and debugger calls.
+- **Let the Tola extension start the service.** Set `tola.nu.enabled` to `true`. If the Nushell
+  extension is running, use **Nushell: Stop Language Server** to keep syntax highlighting and
+  leave diagnostics, hover and completion to Tola.
+
+If you move the site, remove its old `nushellLanguageServer.nushellExecutablePath` workspace setting
+and rerun setup. Rerun setup after moving the Tola executable.
 
 ## Commands
 

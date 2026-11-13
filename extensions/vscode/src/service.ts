@@ -3,7 +3,6 @@ import { once } from 'node:events'
 import { Writable } from 'node:stream'
 import * as vscode from 'vscode'
 import { LanguageClient, State, type StreamInfo } from 'vscode-languageclient/node'
-import type { ServedWorkspace } from './selection.ts'
 
 export class LanguageService {
   private child: ChildProcess | undefined
@@ -13,7 +12,7 @@ export class LanguageService {
   private exited: Promise<void> = Promise.resolve()
 
   constructor(
-    private readonly selected: ServedWorkspace,
+    private readonly selected: { folder: vscode.WorkspaceFolder; command: string; args: string[] },
     private readonly output: vscode.OutputChannel,
     private readonly failed: () => void,
   ) {}

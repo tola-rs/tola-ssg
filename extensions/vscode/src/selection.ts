@@ -19,6 +19,7 @@ export interface Selection extends WorkspaceSelection {
   kind: 'site'
   config: vscode.Uri
   configurationFile: string
+  nuEnabled: boolean
 }
 
 export interface DocumentsSelection extends WorkspaceSelection {
@@ -113,6 +114,7 @@ export async function selectSite(
     kind: 'site',
     config,
     configurationFile,
+    nuEnabled: vscode.workspace.getConfiguration('tola', folder.uri).get('nu.enabled', false),
   }
 }
 
@@ -164,7 +166,8 @@ export function serverCommand(resource: vscode.Uri, label: string): string {
 
 export function sameSelection(left: ServedWorkspace, right: ServedWorkspace): boolean {
   return left.kind === right.kind && left.command === right.command &&
-    (left.kind !== 'site' || right.kind === 'site' && left.configurationFile === right.configurationFile) &&
+    (left.kind !== 'site' || right.kind === 'site' &&
+      left.configurationFile === right.configurationFile && left.nuEnabled === right.nuEnabled) &&
     left.args.length === right.args.length &&
     left.args.every((argument, index) => argument === right.args[index])
 }
