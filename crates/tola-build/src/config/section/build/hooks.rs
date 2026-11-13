@@ -13,6 +13,7 @@ use tola_module::hooks::RerunSelection;
 pub use tola_module::hooks::{
     CommandOutput, DevParticipation, HookStage, ModuleHookOrigin, RerunOn,
 };
+use tola_module::options::OptionPath;
 
 /// Run scripts before compilation, while generating files, or after publication.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, Config)]
@@ -189,25 +190,19 @@ impl HooksConfig {
     pub(crate) fn apply_site_options(&mut self, options: &toml::Table) -> anyhow::Result<()> {
         fn select(
             enable: &mut bool,
-            key: Option<&str>,
+            key: Option<&OptionPath>,
             options: &toml::Table,
             stage: HookStage,
             name: &str,
         ) -> anyhow::Result<()> {
-            if let (true, Some(key)) = (*enable, key) {
-                let identity = hook_identity(stage, name);
-                *enable = match options.get(key) {
-                    Some(toml::Value::Boolean(value)) => *value,
-                    Some(_) => anyhow::bail!("{identity}: option `{key}` must be a boolean"),
-                    None => anyhow::bail!("{identity} is enabled by unset option `{key}`"),
-                };
-            }
+            *enable = tola_module::options::enabled_by(*enable, key, options)
+                .map_err(|message| anyhow::anyhow!("{}: {message}", hook_identity(stage, name)))?;
             Ok(())
         }
         for hook in &mut self.before_build {
             select(
                 &mut hook.enable,
-                hook.enabled_by.as_deref(),
+                hook.enabled_by.as_ref(),
                 options,
                 HookStage::BeforeBuild,
                 &hook.name,
@@ -216,7 +211,7 @@ impl HooksConfig {
         for hook in &mut self.generate_outputs {
             select(
                 &mut hook.enable,
-                hook.enabled_by.as_deref(),
+                hook.enabled_by.as_ref(),
                 options,
                 HookStage::GenerateOutputs,
                 &hook.name,
@@ -225,7 +220,7 @@ impl HooksConfig {
         for hook in &mut self.after_publish {
             select(
                 &mut hook.enable,
-                hook.enabled_by.as_deref(),
+                hook.enabled_by.as_ref(),
                 options,
                 HookStage::AfterPublish,
                 &hook.name,
@@ -242,7 +237,6 @@ impl HooksConfig {
                 validate_command(
                     &hook.name,
                     hook.action(),
-                    hook.enabled_by.as_deref(),
                     &hook.rerun_on,
                     index,
                     fields,
@@ -270,7 +264,6 @@ impl HooksConfig {
                 validate_command(
                     &command.name,
                     command.action(),
-                    command.enabled_by.as_deref(),
                     &command.rerun_on,
                     index,
                     fields,
@@ -312,7 +305,6 @@ impl HooksConfig {
                 validate_command(
                     &hook.name,
                     hook.action(),
-                    hook.enabled_by.as_deref(),
                     &hook.rerun_on,
                     index,
                     fields,
@@ -333,7 +325,6 @@ impl HooksConfig {
 struct HookEntryFields {
     name: FieldPath,
     argv: FieldPath,
-    enabled_by: FieldPath,
     dev: FieldPath,
     rerun_on: FieldPath,
 }
@@ -342,7 +333,6 @@ impl HookEntryFields {
     const BEFORE_BUILD: Self = Self {
         name: BeforeBuildHookConfig::FIELDS.name,
         argv: BeforeBuildHookConfig::FIELDS.argv,
-        enabled_by: BeforeBuildHookConfig::FIELDS.enabled_by,
         dev: BeforeBuildHookConfig::FIELDS.dev,
         rerun_on: BeforeBuildHookConfig::FIELDS.rerun_on,
     };
@@ -350,7 +340,6 @@ impl HookEntryFields {
     const GENERATE_OUTPUTS: Self = Self {
         name: OutputCommandConfig::FIELDS.name,
         argv: OutputCommandConfig::FIELDS.argv,
-        enabled_by: OutputCommandConfig::FIELDS.enabled_by,
         dev: OutputCommandConfig::FIELDS.dev,
         rerun_on: OutputCommandConfig::FIELDS.rerun_on,
     };
@@ -358,7 +347,6 @@ impl HookEntryFields {
     const AFTER_PUBLISH: Self = Self {
         name: AfterPublishHookConfig::FIELDS.name,
         argv: AfterPublishHookConfig::FIELDS.argv,
-        enabled_by: AfterPublishHookConfig::FIELDS.enabled_by,
         dev: AfterPublishHookConfig::FIELDS.dev,
         rerun_on: AfterPublishHookConfig::FIELDS.rerun_on,
     };
@@ -404,7 +392,7 @@ pub struct BeforeBuildHookConfig {
     /// Run only when this `[options]` key is `true`, for example `images.enable`.
     /// Omit this setting to run without checking an option.
     #[serde(rename = "enabled-by", skip_serializing_if = "Option::is_none")]
-    pub enabled_by: Option<String>,
+    pub enabled_by: Option<OptionPath>,
     /// If omitted or set to `"run"`, `tola dev` runs the hook on each build. Use `"skip"`
     /// to skip it during development.
     #[config(values = DevParticipation::VALUES)]
@@ -547,7 +535,7 @@ pub struct OutputCommandConfig {
     /// Run only when this `[options]` key is `true`, for example `images.enable`.
     /// Omit this setting to run without checking an option.
     #[serde(rename = "enabled-by", skip_serializing_if = "Option::is_none")]
-    pub enabled_by: Option<String>,
+    pub enabled_by: Option<OptionPath>,
     /// If omitted or set to `"run"`, `tola dev` runs the hook on each build. Use `"reuse"`
     /// to use the last successful outputs when the inputs are unchanged, or `"skip"`
     /// to skip the hook during development.
@@ -700,7 +688,7 @@ pub struct AfterPublishHookConfig {
     /// Run only when this `[options]` key is `true`, for example `images.enable`.
     /// Omit this setting to run without checking an option.
     #[serde(rename = "enabled-by", skip_serializing_if = "Option::is_none")]
-    pub enabled_by: Option<String>,
+    pub enabled_by: Option<OptionPath>,
     /// If omitted or set to `"skip"`, `tola dev` skips the hook. Use `"run"` to run it
     /// after a successful development build.
     #[config(values = DevParticipation::VALUES)]
@@ -875,7 +863,6 @@ hook_actions!(
 fn validate_command(
     name: &str,
     action: Result<Action, String>,
-    enabled_by: Option<&str>,
     rerun_on: &RerunOn,
     index: usize,
     fields: HookEntryFields,
@@ -887,15 +874,6 @@ fn validate_command(
             fields.argv,
             format!("`{key}`: {reason}"),
             "provide a `nu` script or an `argv` array",
-        );
-    }
-    if enabled_by.is_some_and(|key| key.trim().is_empty()) {
-        let field = fields.enabled_by;
-        let key = message_key(field, index);
-        diag.error_with_help(
-            field,
-            format!("`{key}` is blank"),
-            "name a boolean site option",
         );
     }
     validate_name(name, index, fields.name, diag);

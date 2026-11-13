@@ -21,6 +21,7 @@ thiserror = "2.0.20"
 tempfile = "3.27.0"
 tar = "0.4.46"
 toml = "1.1.4"
+toml_edit = "0.25.13"
 tola-address.workspace = true
 tola-diagnostic.workspace = true
 tola-input.workspace = true

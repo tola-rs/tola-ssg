@@ -1,9 +1,10 @@
 //! Module hook declarations and the build hooks selected for each instance.
 
+use crate::options::OptionPath;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 
-use anyhow::{Context as _, Result, bail, ensure};
+use anyhow::{Context as _, Result, ensure};
 use serde::{Deserialize, Serialize};
 use tola_input::{FilePatterns, FileSelection};
 
@@ -32,7 +33,7 @@ macro_rules! build_hook {
             nu: Option<PathBuf>,
             argv: Option<Vec<String>>,
             args: Option<Vec<String>>,
-            enabled_by: Option<String>,
+            enabled_by: Option<OptionPath>,
             dev: Option<DevParticipation>,
             #[serde(default)]
             rerun_on: RerunOn,
@@ -48,7 +49,7 @@ macro_rules! build_hook {
                     nu: &self.nu,
                     argv: &self.argv,
                     args: &self.args,
-                    enabled_by: self.enabled_by.as_deref(),
+                    enabled_by: self.enabled_by.as_ref(),
                     dev: self.dev.unwrap_or(match HookStage::$stage {
                         HookStage::AfterPublish => DevParticipation::Skip,
                         _ => DevParticipation::Run,
@@ -97,7 +98,7 @@ struct Hook<'a> {
     nu: &'a Option<PathBuf>,
     argv: &'a Option<Vec<String>>,
     args: &'a Option<Vec<String>>,
-    enabled_by: Option<&'a str>,
+    enabled_by: Option<&'a OptionPath>,
     dev: DevParticipation,
     rerun_on: &'a RerunOn,
     generates: &'a [PathBuf],
@@ -348,8 +349,6 @@ pub enum HookDeclarationError {
     DuplicateName { name: String },
     #[error("hook `{hook}`: {reason}")]
     Action { hook: String, reason: String },
-    #[error("hook `{hook}` names no option for `enabled-by`")]
-    EmptyEnabledBy { hook: String },
     #[error("hook `{hook}` can reuse its previous run only in `generate-outputs`")]
     ReuseNeedsGenerateOutputs { hook: String },
     #[error("`{label}` only accepts the `{{name}}` substitution")]
@@ -442,14 +441,6 @@ pub fn validate_declarations(hooks: &ModuleHooks) -> std::result::Result<(), Hoo
                 hook: hook.name.into(),
                 reason,
             })?;
-        if hook
-            .enabled_by
-            .is_some_and(|option| option.trim().is_empty())
-        {
-            return Err(HookDeclarationError::EmptyEnabledBy {
-                hook: hook.name.into(),
-            });
-        }
         if hook.dev == DevParticipation::Reuse && hook.stage != HookStage::GenerateOutputs {
             return Err(HookDeclarationError::ReuseNeedsGenerateOutputs {
                 hook: hook.name.into(),
@@ -549,13 +540,11 @@ pub fn hook_stages(
     for (alias, module) in modules {
         for hook in module.hooks.build_hooks().filter(|hook| hook.enable) {
             let name = format!("@module/{alias}/{}", hook.name);
-            if let Some(key) = hook.enabled_by {
-                match module.options.get(key) {
-                    Some(toml::Value::Boolean(false)) => continue,
-                    Some(toml::Value::Boolean(true)) => {}
-                    Some(_) => bail!("hook `{name}`: option `{key}` must be a boolean"),
-                    None => bail!("hook `{name}` is enabled by unset option `{key}`"),
-                }
+            if !crate::options::enabled_by(hook.enable, hook.enabled_by, &module.options)
+                .map_err(anyhow::Error::msg)
+                .with_context(|| format!("module `{alias}` hook `{}`", hook.name))?
+            {
+                continue;
             }
             let origin = ModuleHookOrigin {
                 name: alias.clone(),

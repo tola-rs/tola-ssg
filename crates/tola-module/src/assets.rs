@@ -1,5 +1,6 @@
 //! Asset URL, prefix, selection, and declaration values shared by modules and site config.
 
+use crate::options::OptionPath;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -166,23 +167,14 @@ pub struct Assets {
 impl Assets {
     /// Check declarations without inspecting sources that a hook may generate.
     pub fn validate(&self) -> anyhow::Result<()> {
-        for (source, enabled_by) in self
+        for source in self
             .trees
             .iter()
-            .map(|entry| (&entry.source, &entry.enabled_by))
-            .chain(
-                self.files
-                    .iter()
-                    .map(|entry| (&entry.source, &entry.enabled_by)),
-            )
+            .map(|entry| &entry.source)
+            .chain(self.files.iter().map(|entry| &entry.source))
         {
             tola_input::validate_relative_path(source)
                 .map_err(|error| anyhow::anyhow!("an asset's `source` {error}"))?;
-            anyhow::ensure!(
-                enabled_by.as_ref().is_none_or(|key| !key.trim().is_empty()),
-                "asset `{}` has an empty `enabled-by` option",
-                source.display()
-            );
         }
         Ok(())
     }
@@ -191,7 +183,7 @@ impl Assets {
 /// Whether the declaration publishes under its owner's effective options.
 pub fn is_enabled(
     enable: bool,
-    enabled_by: Option<&str>,
+    enabled_by: Option<&OptionPath>,
     options: &toml::Table,
     owner: &str,
     source: &Path,
@@ -217,9 +209,9 @@ pub struct AssetTreeDeclaration {
     pub url_prefix: AssetUrlPrefix,
     /// Whether this declaration may publish.
     pub enable: bool,
-    /// Boolean option required for this declaration to publish.
+    /// TOML key path to a boolean in the owner's options.
     #[serde(rename = "enabled-by", skip_serializing_if = "Option::is_none")]
-    pub enabled_by: Option<String>,
+    pub enabled_by: Option<OptionPath>,
     /// Whether the site may minify the published bytes.
     pub minify: bool,
     #[serde(flatten, serialize_with = "serialize_tree_patterns")]
@@ -235,7 +227,7 @@ struct AssetTreeFields {
     #[serde(default = "enabled")]
     enable: bool,
     #[serde(default, rename = "enabled-by")]
-    enabled_by: Option<String>,
+    enabled_by: Option<OptionPath>,
     #[serde(default = "enabled")]
     minify: bool,
     #[serde(default = "whole_tree_include")]
@@ -323,13 +315,13 @@ pub struct AssetFileDeclaration {
     /// Whether this declaration may publish.
     #[serde(default = "enabled")]
     pub enable: bool,
-    /// Boolean option required for this declaration to publish.
+    /// TOML key path to a boolean in the owner's options.
     #[serde(
         default,
         rename = "enabled-by",
         skip_serializing_if = "Option::is_none"
     )]
-    pub enabled_by: Option<String>,
+    pub enabled_by: Option<OptionPath>,
     /// Whether the site may minify the published bytes.
     #[serde(default = "enabled")]
     pub minify: bool,

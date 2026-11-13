@@ -218,7 +218,7 @@ fn append_declarations(
             );
             let active = is_enabled(
                 tree.enable,
-                tree.enabled_by.as_deref(),
+                tree.enabled_by.as_ref(),
                 options,
                 &label,
                 &source_prefix,
@@ -263,7 +263,7 @@ fn append_declarations(
         exact_names.insert(output.as_str());
         if is_enabled(
             file.enable,
-            file.enabled_by.as_deref(),
+            file.enabled_by.as_ref(),
             options,
             &label,
             file.source().strip_prefix(root).unwrap_or(file.source()),
