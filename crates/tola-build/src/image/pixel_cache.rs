@@ -21,7 +21,7 @@ const LARGEST_RETAINED_BYTES: usize = 64 * 1024 * 1024;
 /// Clones of one [`BuildResources`](crate::BuildResources) share the same retention, so an
 /// author tuning one image reuses every plane the earlier requests already computed.
 pub(crate) struct PixelCache {
-    retained: Mutex<Retained>,
+    retained: Option<Mutex<Retained>>,
 }
 
 impl Default for PixelCache {
@@ -31,14 +31,19 @@ impl Default for PixelCache {
 }
 
 impl PixelCache {
+    /// A cache that keeps no pixel planes between requests.
+    pub(crate) fn without_retention() -> Self {
+        Self { retained: None }
+    }
+
     /// A cache retaining at most `budget` bytes of planes.
     fn with_budget(budget: usize) -> Self {
         Self {
-            retained: Mutex::new(Retained {
+            retained: Some(Mutex::new(Retained {
                 budget,
                 planes: VecDeque::new(),
                 bytes: 0,
-            }),
+            })),
         }
     }
 }
@@ -66,7 +71,7 @@ enum RetainedPlane {
 impl PixelCache {
     /// The retained decode of one source, when this process already decoded those bytes.
     pub(crate) fn decoded(&self, source: ContentDigest) -> Option<Arc<DecodedSource>> {
-        self.lock().reuse(|plane| match plane {
+        self.lock()?.reuse(|plane| match plane {
             RetainedPlane::Decoded { source: key, plane } if *key == source => {
                 Some(Arc::clone(plane))
             }
@@ -85,7 +90,7 @@ impl PixelCache {
         source: ContentDigest,
         pixels: PixelRecipe,
     ) -> Option<Arc<ResampledPixels>> {
-        self.lock().reuse(|plane| match plane {
+        self.lock()?.reuse(|plane| match plane {
             RetainedPlane::Resampled {
                 source: key,
                 pixels: held,
@@ -110,8 +115,10 @@ impl PixelCache {
     }
 
     fn retain(&self, plane: RetainedPlane) {
+        let Some(mut retained) = self.lock() else {
+            return;
+        };
         let bytes = plane.bytes();
-        let mut retained = self.lock();
         if bytes > LARGEST_RETAINED_BYTES.min(retained.budget) {
             return;
         }
@@ -132,10 +139,13 @@ impl PixelCache {
         retained.planes.push_back(plane);
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, Retained> {
-        self.retained
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    fn lock(&self) -> Option<std::sync::MutexGuard<'_, Retained>> {
+        Some(
+            self.retained
+                .as_ref()?
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
     }
 }
 

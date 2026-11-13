@@ -24,18 +24,24 @@ impl VariantCache {
     }
 
     /// The stored bytes of one requested variant, when a verified copy is present.
-    pub(crate) fn read(&self, key: ContentDigest) -> Option<Arc<[u8]>> {
+    pub(crate) fn read(&self, key: ContentDigest) -> Option<(Arc<[u8]>, ContentDigest)> {
         let digest = fs::read_to_string(self.directory.join(key.to_hex())).ok()?;
         let digest = digest.trim();
         if !is_digest_hex(digest) {
             return None;
         }
         let bytes = fs::read(self.directory.join(digest)).ok()?;
-        (ContentDigest::of(&bytes).to_hex() == digest).then(|| Arc::from(bytes))
+        let content = ContentDigest::of(&bytes);
+        (content.to_hex() == digest).then(|| (Arc::from(bytes), content))
     }
 
-    pub(crate) fn store(&self, key: ContentDigest, bytes: &[u8]) -> Result<()> {
-        let content = ContentDigest::of(bytes).to_hex();
+    pub(crate) fn store(
+        &self,
+        key: ContentDigest,
+        bytes: &[u8],
+        digest: ContentDigest,
+    ) -> Result<()> {
+        let content = digest.to_hex();
         // The bytes land first, so a recorded pointer never names a missing file.
         atomic_write(&self.directory.join(&content), bytes).with_context(|| {
             "Tola could not store a resized image; check that the site's `.tola` directory can be written"
@@ -70,12 +76,15 @@ mod tests {
     fn stored_variant_survives_lookup() {
         let (_directory, cache) = cache();
         let key = ContentDigest::of(b"request");
-        cache.store(key, b"encoded").unwrap();
+        let digest = ContentDigest::of(b"encoded");
+        cache.store(key, b"encoded", digest).unwrap();
+        let (bytes, restored_digest) = cache.read(key).unwrap();
         assert_eq!(
-            cache.read(key).as_deref(),
-            Some(b"encoded".as_slice()),
+            bytes.as_ref(),
+            b"encoded",
             "a stored variant survives a fresh lookup"
         );
+        assert_eq!(restored_digest, digest);
     }
 
     #[test]
@@ -88,7 +97,9 @@ mod tests {
     fn damaged_bytes_miss() {
         let (_directory, cache) = cache();
         let key = ContentDigest::of(b"request");
-        cache.store(key, b"encoded").unwrap();
+        cache
+            .store(key, b"encoded", ContentDigest::of(b"encoded"))
+            .unwrap();
         let pointer = std::fs::read_to_string(_directory.path().join(key.to_hex())).unwrap();
         std::fs::write(_directory.path().join(pointer.trim()), b"damaged").unwrap();
         assert!(cache.read(key).is_none());

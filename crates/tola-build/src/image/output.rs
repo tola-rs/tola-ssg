@@ -1,5 +1,6 @@
 //! Complete image outputs derived from replayable native request observations.
 
+use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::Arc;
@@ -13,9 +14,10 @@ use typst::foundations::Bytes;
 use typst::loading::DataSource;
 use typst::syntax::FileId;
 
-use crate::cancellation::BuildCancellation;
+use crate::cancellation::{BuildCancellation, BuildCancelled};
 use crate::compiler::BuildInputs;
-use crate::output::graph::OutputGraphBuilder;
+use crate::output::graph::{OutputFile, OutputGraphBuilder};
+use crate::output::owner::OutputOwner;
 use crate::output::semantics::{OutputDeclaration, ResponseMediaType};
 use tola_address::OutputPath;
 use tola_diagnostic::{Diagnostic, Severity, collapse_whitespace};
@@ -68,6 +70,7 @@ struct EncodedVariant {
     source_digest: ContentDigest,
     recipe: ImageRecipe,
     bytes: Arc<[u8]>,
+    digest: ContentDigest,
 }
 
 struct SourceImage {
@@ -88,11 +91,12 @@ struct VariantClaim {
 
 impl VariantClaim {
     /// The published variant these bytes make.
-    fn encoded(&self, bytes: Arc<[u8]>) -> EncodedVariant {
+    fn encoded(&self, bytes: Arc<[u8]>, digest: ContentDigest) -> EncodedVariant {
         EncodedVariant {
             source_digest: self.source_digest,
             recipe: self.recipe.clone(),
             bytes,
+            digest,
         }
     }
 }
@@ -117,7 +121,7 @@ struct RenderGeometry {
     renders: Vec<usize>,
 }
 
-/// A claimed variant whose bytes this attempt still has to render.
+/// A claimed variant that needs a disk lookup or a render.
 struct PendingRender {
     output: OutputPath,
     claim: usize,
@@ -526,6 +530,70 @@ fn render_pending_variants(
         let source_workers = cpu_threads.min(MAX_SOURCE_WORKERS);
         let workers = image_workers(source_workers, cancellation)?;
         workers.install(|| -> Result<()> {
+            let mut sizes = groups
+                .iter()
+                .map(|group| group.admission_bytes(&sources[group.source], pending, claims, 1))
+                .collect::<Vec<_>>();
+            sizes.sort_unstable_by(|left, right| right.cmp(left));
+            // Only use independent source lanes when any simultaneous set fits. A lane
+            // runs one source at a time even when its resampling enters Rayon.
+            let lanes = source_workers > 1
+                && cpu_threads == source_workers
+                && sizes
+                    .iter()
+                    .take(source_workers)
+                    .copied()
+                    .fold(0u64, u64::saturating_add)
+                    <= SOURCE_BATCH_BYTES;
+            let mut record = |outcome: RenderOutcome| match outcome.bytes {
+                Ok(bytes) => rendered_bytes[outcome.index] = Some(bytes),
+                Err(error) => {
+                    if failure
+                        .as_ref()
+                        .is_none_or(|(index, _)| outcome.index < *index)
+                    {
+                        failure = Some((outcome.index, error));
+                    }
+                }
+            };
+            if lanes {
+                // Start larger sources first so their last variants can overlap other work.
+                groups.sort_by_cached_key(|group| {
+                    let source = &sources[group.source];
+                    let decoded = if source.svg.is_some() {
+                        0
+                    } else {
+                        u64::from(source.metadata.width) * u64::from(source.metadata.height)
+                    };
+                    let work = group.geometries.iter().fold(decoded, |work, geometry| {
+                        let pixels = u64::from(geometry.pixels.width())
+                            * u64::from(geometry.pixels.height());
+                        work.saturating_add(pixels.saturating_mul(geometry.renders.len() as u64))
+                    });
+                    Reverse(work)
+                });
+                let next = std::sync::atomic::AtomicUsize::new(0);
+                let outcomes = workers.broadcast(|_| {
+                    let mut outcomes = Vec::new();
+                    while !cancellation.is_cancelled() {
+                        let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some(group) = groups.get(index) else {
+                            break;
+                        };
+                        outcomes.extend(group.render(
+                            &sources[group.source],
+                            pending,
+                            claims,
+                            pixel_cache,
+                            cancellation,
+                            1,
+                        ));
+                    }
+                    outcomes
+                });
+                outcomes.into_iter().flatten().for_each(record);
+                return Ok(());
+            }
             let mut remaining = groups.as_slice();
             while !remaining.is_empty() {
                 cancellation.ensure_active()?;
@@ -554,19 +622,7 @@ fn render_pending_variants(
                         )
                     })
                     .collect::<Vec<_>>();
-                for outcome in outcomes.into_iter().flatten() {
-                    match outcome.bytes {
-                        Ok(bytes) => rendered_bytes[outcome.index] = Some(bytes),
-                        Err(error) => {
-                            if failure
-                                .as_ref()
-                                .is_none_or(|(index, _)| outcome.index < *index)
-                            {
-                                failure = Some((outcome.index, error));
-                            }
-                        }
-                    }
-                }
+                outcomes.into_iter().flatten().for_each(&mut record);
                 remaining = next;
             }
             Ok(())
@@ -727,38 +783,54 @@ impl ImageOutputs {
                 .filter(|cached| {
                     cached.source_digest == source.digest && cached.recipe == *request.recipe()
                 })
-                .map(|cached| Arc::clone(&cached.bytes));
-            if let Some(bytes) = retained {
+                .map(|cached| (Arc::clone(&cached.bytes), cached.digest));
+            if let Some((bytes, digest)) = retained {
                 reused += 1;
-                variants.insert(output.clone(), claim.encoded(bytes));
+                variants.insert(output.clone(), claim.encoded(bytes, digest));
             } else {
-                let key = request.key();
-                if let Some(bytes) = variant_cache.read(key) {
-                    restored += 1;
-                    variants.insert(output.clone(), claim.encoded(bytes));
-                } else {
-                    pending.push(PendingRender {
-                        output: output.clone(),
-                        claim: claims.len(),
-                        source: source_index,
-                        source_id,
-                        key,
-                    });
-                }
+                pending.push(PendingRender {
+                    output: output.clone(),
+                    claim: claims.len(),
+                    source: source_index,
+                    source_id,
+                    key: request.key(),
+                });
             }
             claims_by_output.insert(output, claims.len());
             claims.push(claim);
         }
 
+        // Lookups do not depend on one another. Keep misses in claim order for render diagnostics.
+        let cached = pending
+            .par_iter()
+            .map(|job| {
+                cancellation.ensure_active()?;
+                Ok(variant_cache.read(job.key))
+            })
+            .collect::<Result<Vec<_>, BuildCancelled>>()?;
+        let pending: Vec<_> = pending
+            .into_iter()
+            .zip(cached)
+            .filter_map(|(job, cached)| match cached {
+                Some((bytes, digest)) => {
+                    restored += 1;
+                    variants.insert(job.output, claims[job.claim].encoded(bytes, digest));
+                    None
+                }
+                None => Some(job),
+            })
+            .collect();
+
         let encoded =
             render_pending_variants(&pending, &claims, &sources, &pixel_cache, cancellation)?;
         for (job, bytes) in pending.iter().zip(encoded) {
             let claim = &claims[job.claim];
-            if let Err(error) = variant_cache.store(job.key, &bytes) {
+            let digest = ContentDigest::of(&bytes);
+            if let Err(error) = variant_cache.store(job.key, &bytes, digest) {
                 unwritable += 1;
                 tracing::debug!(target: "tola::compile", %error, "image variant not stored");
             }
-            variants.insert(job.output.clone(), claim.encoded(bytes));
+            variants.insert(job.output.clone(), claim.encoded(bytes, digest));
         }
         cancellation.ensure_active()?;
         tracing::debug!(target: "tola::compile",
@@ -773,15 +845,17 @@ impl ImageOutputs {
         outputs: &mut OutputGraphBuilder,
         cancellation: &BuildCancellation,
     ) -> Result<()> {
+        let owner = OutputOwner::system("image");
         for (path, variant) in &self.variants {
             cancellation.ensure_active()?;
             let media = response_media_type(variant.recipe.format());
-            outputs.insert_system(
-                "image",
-                path.as_str(),
+            outputs.insert(OutputFile::from_byte_owner_with_digest(
+                path.clone(),
                 OutputDeclaration::image(media),
+                owner.clone(),
                 Arc::clone(&variant.bytes),
-            )?;
+                variant.digest,
+            ))?;
         }
         Ok(())
     }

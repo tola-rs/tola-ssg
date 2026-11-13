@@ -95,6 +95,13 @@ impl BuildResources {
         self
     }
 
+    /// Release decoded and resampled pixel planes after use when the host runs one build.
+    /// Encoded variants still use the site's image cache.
+    pub fn without_retained_pixels(mut self) -> Self {
+        self.pixels = Arc::new(PixelCache::without_retention());
+        self
+    }
+
     /// Effective network access; a restrictive scope cannot be loosened by another builder.
     pub fn network_access(&self) -> NetworkAccess {
         match self.scope {

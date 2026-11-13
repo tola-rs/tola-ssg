@@ -34,7 +34,8 @@ fn execute(
         crate::terminal::EVERY_STAGE,
     )?;
     let started = Instant::now();
-    let mut session = tola_build::BuildSession::with_resources(request.resources);
+    let mut session =
+        tola_build::BuildSession::with_resources(request.resources.without_retained_pixels());
     let mut build = tola_build::build::BuildRequest::new(tola_build::build::BuildMode::Production);
     build.cancellation = cancellation.token();
     build.capture_report = json;
