@@ -1,17 +1,16 @@
-// @tola/diagnostic:0.0.0 - structured reports from code already running in Typst
+// @tola/diagnostic:0.0.0 - report warnings and errors from Typst
 
 /// Report an issue without stopping Typst evaluation.
 ///
-/// The default location is this function's actual call. Pass content as `at` to use that
-/// content's native source span, or `none` for an issue without a source location. Generated
-/// or transformed content can have no span; no source location is guessed in that case.
-/// A layout location, string path, or dictionary cannot stand in for source content.
+/// To point to a specific heading or link, pass that content as `at`.
+/// Generated content may have no source location.
 ///
-/// Tola collects error, warning, info, and hint reports. An error prevents a successful check
-/// or publication after evaluation; use Typst's native error path to stop evaluation immediately.
-/// The calling project or package owns the report and its optional rule code.
+/// An `error` fails the check or build. A `warning` highlights a problem while letting it
+/// finish. To stop Typst immediately, use `panic`. Use `code` to name your rule.
 ///
-/// Example - report about authored content, add a hint, and relate another source value:
+///
+/// Add this to `content/index.typ` in a site created with `tola init`. Run `tola check` to
+/// see a warning at `value`, with a hint and a reference to `original`.
 ///
 /// ```typst
 /// #import "@tola/diagnostic:0.0.0": report
@@ -23,10 +22,11 @@
 /// ```
 ///
 /// - message (str): The explanation of the issue.
-/// - severity (str): `"error"`, `"warning"`, `"info"`, or `"hint"`; defaults to `"warning"`.
-/// - code (str | none): An optional nonempty rule code owned by the caller.
-/// - at (auto | content | none): The call, a content value's native span, or no location.
-/// - hints (array): Explanatory strings.
+/// - severity (str): Use `"warning"` if omitted. Other choices are `"error"`, `"info"`, and `"hint"`.
+/// - code (str | none): An optional nonempty name for the rule.
+/// - at (auto | content | none): If omitted or `auto`, point to the call. Pass content to point to its source,
+///   or `none` to omit the location.
+/// - hints (array): Optional hints for the site author, such as ways to fix the issue.
 /// - related (array): Dictionaries with exactly `message` (str) and `at` (content or none).
 /// -> none
 #import "@tola/host:0.0.0": report

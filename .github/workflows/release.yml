@@ -47,7 +47,7 @@ jobs:
           persist-credentials: false
       - uses: hustcer/setup-nu@eacad52a4634c4f8d17a94916f93be6856861b9c # v3.29
         with:
-          version: 0.116.1
+          version: 0.117.0
       - uses: ./.github/actions/setup-rust
       - name: Check requested tag at the invocation commit
         id: selection
@@ -80,7 +80,7 @@ jobs:
           persist-credentials: false
       - uses: hustcer/setup-nu@eacad52a4634c4f8d17a94916f93be6856861b9c # v3.29
         with:
-          version: 0.116.1
+          version: 0.117.0
       - uses: ./.github/actions/setup-rust
         with:
           cache-key: release-packages
@@ -152,7 +152,7 @@ jobs:
           persist-credentials: false
       - uses: hustcer/setup-nu@eacad52a4634c4f8d17a94916f93be6856861b9c # v3.29
         with:
-          version: 0.116.1
+          version: 0.117.0
       - uses: ./.github/actions/setup-rust
         with:
           target: ${{ matrix.target }}
@@ -222,7 +222,7 @@ jobs:
           persist-credentials: false
       - uses: hustcer/setup-nu@eacad52a4634c4f8d17a94916f93be6856861b9c # v3.29
         with:
-          version: 0.116.1
+          version: 0.117.0
       - uses: ./.github/actions/setup-rust
       - name: Download verified build artifacts outside the checkout
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1

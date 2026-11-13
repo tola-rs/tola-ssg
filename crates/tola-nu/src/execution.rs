@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use nu_protocol::{
-    PipelineData, ShellError, Span, Spanned, Value,
+    DeclId, PipelineData, ShellError, Span, Spanned, Value,
     ast::Block,
     debugger::WithoutDebug,
     engine::{EngineState, Stack, StateWorkingSet},
@@ -55,6 +55,31 @@ pub(super) fn check_errors(working: &StateWorkingSet) -> Result<()> {
         });
     }
     Ok(())
+}
+
+/// Find the `main` commands defined in this script, excluding imported declarations.
+pub(super) fn main_declarations(
+    working: &StateWorkingSet,
+    filename: &str,
+) -> Result<Vec<(Vec<u8>, DeclId)>> {
+    let script_span = working
+        .get_span_for_filename(filename)
+        .ok_or(NuError::ModuleSourceUnloaded)?;
+    Ok(working
+        .last_overlay()
+        .decls
+        .iter()
+        .filter(|(name, _)| name.as_slice() == b"main" || name.starts_with(b"main "))
+        .filter(|(_, id)| {
+            working.get_decl(**id).block_id().is_some_and(|block_id| {
+                working
+                    .get_block(block_id)
+                    .span
+                    .is_some_and(|span| script_span.contains_span(span))
+            })
+        })
+        .map(|(name, id)| (name.clone(), *id))
+        .collect())
 }
 
 /// Parse one command with argv boundaries fixed before the Nu parser sees it.
@@ -132,26 +157,7 @@ fn evaluate_source(
         report_parse_warning(Some(stack), &working, warning);
     }
     let script_name = filename.file_name().unwrap().to_string_lossy();
-    let script_span = working
-        .get_span_for_filename(name)
-        .ok_or(NuError::ModuleSourceUnloaded)?;
-    // Only declarations whose block belongs to this script are its entry points. A `use` of a
-    // module that exports main must not make this file look like a script with its own main.
-    let declarations: Vec<_> = working
-        .last_overlay()
-        .decls
-        .iter()
-        .filter(|(name, _)| name.as_slice() == b"main" || name.starts_with(b"main "))
-        .filter(|(_, id)| {
-            working.get_decl(**id).block_id().is_some_and(|block_id| {
-                working
-                    .get_block(block_id)
-                    .span
-                    .is_some_and(|span| script_span.contains_span(span))
-            })
-        })
-        .map(|(name, id)| (name.clone(), *id))
-        .collect();
+    let declarations = main_declarations(&working, name)?;
     let has_main = !declarations.is_empty();
     let mut aliases = Vec::new();
     for (name, id) in declarations {

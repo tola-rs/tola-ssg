@@ -8,7 +8,7 @@ use nu_engine::CallExt;
 use nu_protocol::{
     ByteStream, Category, IntoPipelineData, PipelineData, PipelineMetadata, Record, ShellError,
     Signature, Span, SyntaxShape, Type, Value,
-    engine::{Call, Command, EngineState, Stack},
+    engine::{Call, Command, CommandType, EngineState, Stack},
     record,
     shell_error::generic::GenericError,
 };
@@ -25,8 +25,12 @@ pub(crate) fn declarations() -> Vec<Box<dyn Command>> {
 struct Metadata;
 
 impl Command for Metadata {
+    fn command_type(&self) -> CommandType {
+        CommandType::Custom
+    }
+
     fn name(&self) -> &str {
-        "__tola_image_metadata"
+        "inspect-image"
     }
     fn description(&self) -> &str {
         "Inspect image metadata from a path or pipeline bytes."
@@ -61,8 +65,12 @@ impl Command for Metadata {
 struct Resize;
 
 impl Command for Resize {
+    fn command_type(&self) -> CommandType {
+        CommandType::Custom
+    }
+
     fn name(&self) -> &str {
-        "__tola_image_resize"
+        "resize-image"
     }
     fn description(&self) -> &str {
         "Resize a raster image from a path or pipeline bytes."
@@ -465,43 +473,12 @@ mod tests {
     ];
 
     fn parsed(command: &str, signals: Signals) -> (EngineState, Arc<nu_protocol::ast::Block>) {
-        let engine = nu_cmd_lang::add_default_context(EngineState::new());
-        let mut engine = nu_command::add_shell_command_context(engine);
+        let mut engine = crate::Runtime::new(Vec::new(), Vec::new()).unwrap().engine;
         engine.set_signals(signals);
         let mut working = StateWorkingSet::new(&engine);
-        working.enter_scope();
-        for command in declarations() {
-            working.add_decl(command);
-        }
-        let core = format!("use '{}/nu/image_core.nu'", env!("CARGO_MANIFEST_DIR"));
-        nu_parser::parse(
-            &mut working,
-            Some("image-core-test.nu"),
-            core.as_bytes(),
-            false,
-        );
-        assert!(
-            working.parse_errors.is_empty(),
-            "{:?}",
-            working.parse_errors
-        );
-        working.exit_scope();
-        let source = format!(
-            "use '{}/nu/image.nu'\n{}",
-            env!("CARGO_MANIFEST_DIR"),
-            command
-        );
-        let block = nu_parser::parse(
-            &mut working,
-            Some("image-test.nu"),
-            source.as_bytes(),
-            false,
-        );
-        assert!(
-            working.parse_errors.is_empty(),
-            "{:?}",
-            working.parse_errors
-        );
+        let source = format!("use tola image\n{command}");
+        let block =
+            crate::execution::parse(&mut working, "image-test.nu", source.as_bytes()).unwrap();
         engine.merge_delta(working.render()).unwrap();
         (engine, block)
     }
@@ -762,12 +739,5 @@ mod tests {
             .collect();
         names.sort_unstable();
         assert_eq!(names, ["image metadata", "image resize"]);
-        assert!(
-            !value(
-                "scope commands | any {|command| $command.name | str starts-with '__tola_image_' }"
-            )
-            .as_bool()
-            .unwrap()
-        );
     }
 }

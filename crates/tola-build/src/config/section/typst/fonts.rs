@@ -13,13 +13,14 @@ use tola_config::Config;
 #[serde(default)]
 #[config(section = "typst.fonts")]
 pub struct FontsConfig {
-    /// Font directories, relative to the site root; searched recursively.
+    /// Directories to search for fonts, including subdirectories. Paths start at the site root.
+    /// If omitted, search `static/typst-fonts/`.
     #[config(collection = inline)]
     pub paths: Vec<PathBuf>,
-    /// Modules whose declared compiler fonts are searched, in order.
+    /// Module aliases to search for compiler fonts, in the order listed. If omitted, skip module fonts.
     #[config(collection = inline)]
     pub modules: Vec<ModuleFonts>,
-    /// Use system fonts too. Enabling this can change the result on another machine.
+    /// Set `true` to search system fonts too. If omitted, skip system fonts.
     pub system: bool,
 }
 
@@ -52,14 +53,27 @@ impl Default for FontsConfig {
 impl FontsConfig {
     /// What `tola help "[typst.fonts]"` adds under its table.
     pub const HELP: &'static str = "\
-Compiler fonts lay out and export Typst content; their files are not published. `paths` lists
-site-relative directories to search recursively. The default is `static/typst-fonts`:
+Tola searches `static/typst-fonts/` by default. To use another directory, put the font
+files there and set `paths` in `tola.toml`. For example, use `static/print-fonts/`:
 
 ```toml
 [typst.fonts]
-paths = [\"static/typst-fonts\"]
+paths = [\"static/print-fonts\"]
 system = false
 ```
+
+Run `tola inspect fonts` from the site root to see the available families. Use the family
+name in a Typst file, for example `#set text(font: \"IBM Plex Sans\")`.
+
+Site Nu hooks use the same fonts to resize SVGs that contain text. Set the SVG's
+`font-family` to a name shown by `tola inspect fonts`. To use site fonts from the
+standalone image script, put `wordmark.svg` next to `tola.toml` and run:
+
+```sh
+tola nu --config tola.toml @tola-scripts/image resize wordmark.svg --width 240 --format png --output wordmark.png
+```
+
+The command saves a 240-pixel-wide PNG as `wordmark.png`. Choose a new output filename.
 
 Use `modules` to select compiler fonts from modules already declared in the site, for example
 `modules = [\"theme\", \"cjk\"]`. A module lists its directories as `fonts = [\"typst-fonts\"]` in
@@ -83,16 +97,42 @@ Matching ignores case and applies to every face of the family in that entry. Ref
 Embedded fonts stay available under `--pure`. Host fonts are never vendored, and `system = true`
 combined with `--pure` is an error.
 
-`--font-path` is invocation-only and refused under `--pure`; `--ignore-system-fonts` narrows one
-invocation.
+Use `--font-path DIR` to search an extra directory first for one command.
+Use `--ignore-system-fonts` to skip system fonts for that run. `--pure` rejects `--font-path`.
 
-Browser fonts are separate: publish them through `[assets]` and load them with CSS `@font-face`.
-A Typst font setting does not install a browser font:
+### Load a font in the browser
+
+Put a web font at `static/web-fonts/notes.woff2`. Save this as
+`static/web-fonts/fonts.css`, next to the font.
+
+```css
+@font-face {
+  font-family: Notes;
+  src: url(\"./notes.woff2\") format(\"woff2\");
+  font-display: swap;
+}
+body { font-family: Notes, sans-serif; }
+```
+
+Add both files to the site by putting this in `tola.toml`.
 
 ```toml
 [assets]
 trees = [{ source = \"static/web-fonts\", url-prefix = \"/fonts\" }]
-```";
+```
+
+In a site created with `tola init`, add this to `content/index.typ`.
+
+```typst
+#import \"@tola/address:0.0.0\": asset-url
+#html.link(rel: \"stylesheet\", href: asset-url(\"/fonts/fonts.css\"))
+= Font preview
+```
+
+Run `tola build` from the site root. With the default output directory, both files appear
+under `public/fonts/`. Run `tola dev` and open the printed URL to see the font in use.
+`asset-url` includes the site's deployment prefix. The font URL inside the CSS resolves
+relative to the stylesheet.";
 
     /// Validate the paths before site-root normalization.
     pub fn validate_paths(&self, diag: &mut ConfigDiagnostics) {

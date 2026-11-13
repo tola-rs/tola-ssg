@@ -1,6 +1,6 @@
 // @tola/uuid:0.0.0 - deterministic UUID operations
 
-/// Convert a UUID string to lowercase, hyphenated form.
+/// Convert a UUID to lowercase with hyphens.
 ///
 /// Accepts 32 hexadecimal digits, a hyphenated UUID, or a hyphenated UUID wrapped in braces
 /// or prefixed with `urn:uuid:`. Invalid values are errors; whitespace is not trimmed.
@@ -8,13 +8,20 @@
 
 /// Compute the deterministic version 5 UUID for a namespace and name.
 ///
-/// The namespace is a UUID string. A string name is encoded as UTF-8 without Unicode
+/// Pass a UUID string as the namespace, in any format accepted by `normalize`. A string name is encoded as UTF-8 without Unicode
 /// normalization; a bytes name is used as-is. The result is lowercase and hyphenated.
-/// Changing either input changes the identity. Persist an ID when its name or path may change.
+/// The same namespace and name always produce the same UUID. Save the generated UUID
+/// if it needs to stay the same after renaming or moving a page.
+///
+///
+/// In a new site, replace `site.typ` with this code and run `tola build` from the site root.
+/// With the default publish directory, `public/index.html` displays
+/// `2ed6657d-e927-568b-95e1-2665a8aea6a2`.
 ///
 /// ```typst
 /// #import "@tola/uuid:0.0.0": namespace, v5
-/// #assert.eq(v5(namespace.dns, "www.example.com"), "2ed6657d-e927-568b-95e1-2665a8aea6a2")
+/// #let id = v5(namespace.dns, "www.example.com")
+/// #document("index.html")[#id]
 /// ```
 #import "@tola/host:0.0.0": uuid-v5 as v5
 

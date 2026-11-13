@@ -1110,7 +1110,7 @@ impl RebuildLoop {
         {
             "Restart required; the current site is unchanged"
         } else if self.sites.revision().is_some() {
-            "Build failed; still serving the previous site"
+            "Build failed. Still serving the last successful build."
         } else {
             "Build failed; fix the errors and save to rebuild"
         };

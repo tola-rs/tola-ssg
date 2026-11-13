@@ -11,6 +11,7 @@ use crate::config::ConfigOverrides;
 pub(in crate::cli) fn run(
     request: super::SiteRequest<'_>,
     development: DevelopmentArgs,
+    events: crate::dev::events::Events,
 ) -> Result<()> {
     let overrides = ConfigOverrides {
         server: crate::cli::config::server_overrides(&development.server),
@@ -26,7 +27,7 @@ pub(in crate::cli) fn run(
             resources: request.resources,
             output: request.output.clone(),
             shutdown: request.cancellation.clone(),
-            events: crate::dev::events::Events(development.json),
+            events,
         },
         dev,
         development.no_reuse,

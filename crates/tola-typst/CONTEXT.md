@@ -17,6 +17,6 @@
 
 - The official Typst compiler and exporter are the semantic authority; do not re-implement or approximate their meaning.
 - `FileView` lifetimes are input semantics, not interchangeable performance settings: local worlds keep observations, shared worlds observe fresh files per compilation, external views stay fixed.
-- Cancellation passed to `WorldBuilder::build` covers font preparation; system-font discovery and synchronous compilation remain indivisible boundaries.
+- Cancellation passed to `WorldBuilder::build` covers font preparation and file access. Package downloads can stop while waiting for HTTP. A cancelled observation never fills a shared file-view cell. System-font discovery and synchronous Typst computation remain indivisible boundaries.
 - Native diagnostics transport producer identity and ordered evidence without interpreting it.
 - Feature boundaries (`embed-fonts`, `network`, `scan`, `parallel`) stay valid for library consumers; keep `forbid(unsafe_code)`.

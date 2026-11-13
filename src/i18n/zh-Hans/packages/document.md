@@ -1,16 +1,18 @@
 # `@tola/document`
 
-当前文档、标题和原生 Typst 引用
+查看当前文档、列出标题和查找 Typst 链接。
 
-在 `document(…)` 正文的 `context` 中调用 `current-document()`、`headings()` 或 `references()`。同一文档中的多个源会读到同一个文档。要读取源文件本身的信息，用 `@tola/source`。
+在 `document(…)` 正文的 `context` 里调用这些函数。要查某个 Typst 源文件的路径或元数据，用 `@tola/source`。
 
 ## `current-document`
 
-输出中包含这次调用的文档，它的 `output`、`route` 与 `location`。
+返回当前文档。在 `document(…)` 正文的 `context` 里调用。
 
-`output` 是文档在 Bundle 中的输出路径，例如 `notes/index.html`。`route` 是它可达的站点根 route，尚未套用部署路径。`location` 是外层文档元素自身的 location，可以直接交给 `link` 或某个查询。请在 `context` 中调用。在 `document(…)` 正文之外调用会报错。渲染进同一篇文档的两个源得到同一篇文档。
+- `output`：输出文件路径，例如 `notes/index.html`。
+- `route`：站内路由，例如 `/notes/`，不带部署前缀。
+- `location`：文档在 Typst 中的位置，可传给 `link` 或 `query`。
 
-Example - 识别所在的文档：
+示例：读取当前文档的输出路径和路由：
 
 ```typst
 #import "@tola/document:0.0.0": current-document
@@ -23,7 +25,7 @@ Example - 识别所在的文档：
 ]
 ```
 
-Example - 把查询限定到所在的文档：
+示例：只查询当前文档的标题：
 
 ```typst
 #import "@tola/document:0.0.0": current-document
@@ -38,50 +40,50 @@ Example - 把查询限定到所在的文档：
 
 ## `references`
 
-你在 Bundle 中写下、并真正作为链接输出的引用，按 Bundle 顺序。
+按文档顺序查找 Typst 的 `link` 和 `ref`。例如，可以找出哪些页面链接到了当前页。
 
-请在 `context` 中调用。一条引用是否计入由 show rule 之后的结果决定：被 show rule 换成纯文本或直接写出的 HTML 的链接不计入，由 show rule 产生并真正输出的链接取代它计入。每篇文档提供最外层的这类 `link` 和 `ref`，再对这些引用应用所有传入的过滤条件。指向相同目标的不同引用仍各占一条记录。
+在 `context` 中调用。结果包含 show rule 执行后仍是 Typst `link` 或 `ref` 的最外层链接。链接被换成普通文字或手写 HTML 时会跳过。多处出现的同一个链接会各占一条记录。
 
 | 参数 | 选取 |
 | --- | --- |
 | `from` | 选中元素所在的文档 |
-| `from-within` | 包含引用出现位置的祖先区域 |
-| `to` | 原生文档或资产的 output，或精确的原生目标元素 |
-| `to-within` | 包含已知原生目标的祖先区域 |
+| `from-within` | 只查在该范围内出现的链接 |
+| `to` | 目标文档、资源或具体的 Typst 元素 |
+| `to-within` | 只匹配指向该范围内 Typst 元素的链接 |
 
-四个参数都接受 `none`（默认，不限制）、label、location、可定位的元素函数，或原生可定位 selector。用 `selector(...).or(...)` 或 `.and(...)` 组合选择。label 会选中所有匹配元素；没有匹配元素时返回空数组。一条引用匹配多个选择时，只出现一次。
+四个参数都可以传 label、location、可定位的元素函数或 selector。默认 `none`，不按该条件筛选。用 `selector(...).or(...)` 或 `.and(...)` 组合选择。label 会选中所有匹配元素，找不到时返回空数组。同一个链接只记录一次。
 
-`from` 选中每个匹配元素所在的文档；选中资产或不属于任何文档的内容会报错。`to` 按 output 匹配文档和资产目标，按精确的原生 location 匹配其他元素。`from` 和 `to` 还接受 `auto`，表示当前文档，需要在文档正文里调用。
+`from` 找到所选元素所在的文档，选中资源或文档外的内容会报错。`to` 按输出路径匹配文档和资源，按 location 匹配其他 Typst 元素。要选当前文档，在正文里传 `from: auto` 或 `to: auto`。
 
-两个区域过滤条件都只选严格后代，不含区域自身。标题的 label 选中标题元素，不代表它后面的章节正文；要选正文，请给包含它的元素（例如 `html.section`）加 label。每条返回的引用必须满足所有传入的条件。
+`from-within` 和 `to-within` 只查所选元素里面的内容。标题的 label 只选中标题本身。要选中整个章节，给包住正文的元素加 label，例如 `html.section`。有多个筛选条件时，链接必须全部满足。
 
-每条记录描述一条已输出的引用，因此 show rule 决定报告什么：`ref` 报告它指名的 label，`link` 报告它此时拼写的目标；show rule 写出的链接（包括顶替某个 `ref` 写出的那个）按该链接报告，而不是按那个 `ref`。原生引用的目标必须唯一。写明自身 scheme 与 host 的目标是 `external`，写的是 `site.origin` 也一样。未限制目标时，也会返回 external 和 unresolved 引用。
+`ref` 的目标是 label，`link` 的目标是链接地址。查询以 show rule 执行后的元素为准。Typst 引用必须指向唯一目标。带协议和主机的 URL 会标为 `external`，即使主机是本站。想同时查外链和找不到目标的链接，省略目标条件。
 
 | 字段 | 含义 |
 | --- | --- |
-| `element` | 到达输出的原生 `link` 或 `ref` 元素（show rule 之后） |
+| `element` | show rule 执行后的 `link` 或 `ref` 元素 |
 | `document` | 来源文档的 `output`、`route` 与 `location` |
-| `destination` | 该元素此时携带的目标（show rule 之后） |
+| `destination` | 该元素的链接目标 |
 | `resolution` | `found`、`external` 或 `unresolved` |
-| `reason` | 没能解析的原因，以字典给出；解析成功时为 `none` |
-| `target` | 已知 output 或地址时的目标字典，否则为 `none` |
+| `reason` | 未找到目标的原因。仅当 `resolution` 为 `unresolved` 时提供 |
+| `target` | 查到的目标信息。无可用信息时为 `none` |
 
-目标带有 `kind`、`output`、`route`、`query`、`fragment` 与 `location`，取不到的值是 `none`。原生文档或资产的 `kind` 是 `output`，其他原生目标是 `element`，URL 目标是 `url`。只有原生目标带有其真实 location。URL 目标只有 output 和地址信息，没有 location：它们可以匹配 `to` 的文档或资产选择，但不匹配元素选择或 `to-within`。
+目标字典有 `kind`、`output`、`route`、`query`、`fragment` 和 `location`。取不到的字段是 `none`。`kind` 为 `output` 时，指向 Typst 文档或资源。为 `element` 时，指向 Typst 元素。为 `url` 时，目标来自 URL。通过 URL 写的链接仍能用 `to` 按文档或资源筛选。按元素筛选或使用 `to-within` 时，需要目标有 Typst location。
 
-URL 的 `fragment` 经过百分号解码供展示；原生目标的 anchor 保留分配时的原值。原生整篇文档和资产目标没有 fragment。`found` 表示存在原生 Bundle 输出，与导出的 HTML 是否包含该 fragment 无关。直接写出的 HTML 链接和其他生产者的输出由最终 HTML 校验处理，不属于这条查询。把查询派生出的列表放在 `from-within` 读取的区域之外，避免列表加入自己的查询。
+URL 中的 `fragment` 会解码，Typst 生成的锚点按原样返回。链接指向整个文档或资源时，`fragment` 为 `none`。要检查最终 HTML 中的链接和锚点，包括手写 HTML，用 `tola check`。如果用查询结果生成新链接，把它们放在 `from-within` 所选范围外。
 
-`reason` 带有稳定的 `tag` 供分支判断，另有 `message` 与指出修法的 `help`：
+用 `reason.tag` 判断原因，显示问题时用 `reason.message`，用 `reason.help` 提供修复建议。
 
 | tag | 含义 |
 | --- | --- |
 | `outside-mount` | 目标落在 `site.base-path` 之外 |
 | `invalid-destination` | 目标不是本站能读取的 URL |
-| `no-such-target` | 本次构建没有任何输出回应这个目标 |
-| `positional-destination` | 元素目标没有指出站内目标 |
-| `label-has-no-location` | 该 label 的内容在本次构建中没有 location |
+| `no-such-target` | 本次构建没有与目标匹配的输出文件 |
+| `positional-destination` | 链接指向页内坐标。改用 URL、label 或元素的 location |
+| `label-has-no-location` | 该 label 对应的内容在本次构建中没有可链接的位置 |
 | `ambiguous-label` | 多个元素共用一个 label |
 
-Example - 列出链接到当前页面的来源页面：
+示例：查找哪些文档链接到了当前文档：
 
 ```typst
 #import "@tola/address:0.0.0": output-url
@@ -107,7 +109,7 @@ Example - 列出链接到当前页面的来源页面：
 ]
 ```
 
-Example - 只对准一个标题，而不是整篇文档：
+示例：查找指向指定标题的引用：
 
 ```typst
 #import "@tola/address:0.0.0": output-url
@@ -127,7 +129,7 @@ Example - 只对准一个标题，而不是整篇文档：
 ]
 ```
 
-Example - 读取写在一篇文档正文里的引用：
+示例：查找从指定文档发出的链接：
 
 ```typst
 #import "@tola/document:0.0.0": references
@@ -142,7 +144,7 @@ Example - 读取写在一篇文档正文里的引用：
 ]
 ```
 
-Example - 选取 A 正文中指向 B 章节内部原生目标的引用：
+示例：查找指向另一篇文档中某个章节的链接：
 
 ```typst
 #import "@tola/document:0.0.0": references
@@ -166,7 +168,7 @@ Example - 选取 A 正文中指向 B 章节内部原生目标的引用：
 ] <b>
 ```
 
-Example - 选择多个目标，或区域内部的标题：
+示例：按多个目标或某个章节筛选：
 
 ```typst
 #import "@tola/document:0.0.0": references
@@ -190,19 +192,19 @@ Example - 选择多个目标，或区域内部的标题：
 
 ### `from`
 
-选中元素所在的原生文档，或 `none`（默认，所有文档）。
+只查所选元素所在文档里的链接。默认 `none`，查所有文档。
 
 ### `from-within`
 
-包含引用出现位置的选中祖先区域，或 `none`（默认，所有区域）。
+只查出现在所选元素里的链接。默认 `none`，不限制出现位置。
 
 ### `to`
 
-引用指向的选中原生 output 或元素，或 `none`（默认，所有目标）。
+只查指向所选文档、资源或元素的链接。默认 `none`，不限制目标。
 
 ### `to-within`
 
-包含已知原生目标的选中祖先区域，或 `none`（默认，所有区域）。
+只查指向所选元素内部的链接。默认 `none`，不限制目标所在范围。
 
 ## `headings`
 
@@ -212,22 +214,24 @@ Example - 选择多个目标，或区域内部的标题：
 
 | 字段 | 含义 |
 | --- | --- |
-| `level` | 标题解析后的层级：声明层级加上生效中的 `offset` |
-| `nesting` | 在 outline 树中的深度；未进入 outline 时为 `none` |
-| `number` | 渲染出的编号：模式生成的字符串、回调的结果，或 `none` |
+| `level` | 加上 `offset` 后的标题层级 |
+| `nesting` | 标题在大纲中的层级，不参与大纲时为 `none` |
+| `number` | 标题编号，可以是模式生成的字符串、回调返回值或 `none` |
 | `body` | show rule 生效前的标题源内容 |
 | `text` | show rule 生效前的标题纯文本 |
-| `label` | 你写下的 label，或 `none` |
-| `location` | 传给 `link` 的原生 location |
-| `outlined` | 该标题是否参与 outline |
+| `label` | 标题的标签，没有时为 `none` |
+| `location` | 标题的位置，可传给 `link` |
+| `outlined` | 标题是否参与大纲 |
 
-`outlined` 是原生标题标志；`nesting` 是 outline 树深度。两者一致：`outlined` 为 `false` 时，`nesting` 必为 `none`。
+要让目录和 Typst 的 `outline()` 一致，按 `outlined` 筛选。
 
-`level` 是解析值，不是声明值：在 `set heading(offset: 2)` 下，写成 `==` 的标题报告 `level` 4。没有任何字段保存声明层级。
+例如，设了 `set heading(offset: 2)` 后，写成 `==` 的标题的 `level` 为 4。
 
-这条查询只针对当前文档，结果里不会混进其他页面的标题。裸写 `query(selector(heading))` 不受此限制：在 Bundle 中它会读到构建里的每一篇文档。其他 selector 也照此收窄：`query(selector(…).within(current-document().location))`。
+`headings()` 只查当前文档。`query(selector(heading))` 默认查整个 Bundle。要把其他查询也限定在当前文档，用 `query(selector(…).within(current-document().location))`。
 
-`location` 就是传给 `link()` 的值；建立链接会让 Typst 为该标题生成 anchor。带 label 的标题用那个 label 作为 anchor；否则 Typst 生成 `loc-N`。Typst 按需分配 anchor，所以没有任何链接指向的标题，在导出的 HTML 里没有 anchor id。请在 `context` 中调用；返回的每个 location 都属于本次编译。
+在 `context` 中调用。把 `location` 传给 `link()` 后，Typst 会为标题生成锚点。带 label 的标题用 label 作锚点，其余用 `loc-N`。没人链接到的标题，在导出的 HTML 里没有锚点。
+
+示例：为当前文档生成目录：
 
 将下面的代码保存为新站点的 `site.typ`，然后运行 `tola build`。首页会链接到 Introduction 和 Details。三级标题和 `outlined: false` 的标题会被跳过。
 
@@ -247,7 +251,7 @@ Example - 选择多个目标，或区域内部的标题：
 #document("other.html")[= Another document]
 ```
 
-Example - 看 `nesting` 与 `label` 如何跟随 outline 树：
+示例：查看大纲中的 `nesting` 和 `label`：
 
 ```typst
 #import "@tola/document:0.0.0": headings
@@ -265,17 +269,17 @@ Example - 看 `nesting` 与 `label` 如何跟随 outline 树：
 
 ### `depth`
 
-`none` 列出所有标题，传正整数则只保留解析后 `level` 不超过该值的标题。这里比较的是 `level`，不是声明层级，所以在 `set heading(offset: …)` 下写成 `==` 的标题可能被 `depth: 2` 排除。
+省略或传 `none` 时列出所有标题。传正整数时，只保留实际 `level` 不超过该值的标题。例如，`==` 标题在 `offset: 1` 下是三级，`depth: 2` 会略过它。
 
 ## `plain-text`
 
-读取字符串或你自己写下的内容里的文本。
+从字符串或 Typst 内容中提取纯文本。
 
-文本字符、符号字符、空格、raw 代码和弯引号自带文本。其他元素都取自己内容的文本，所以容器、格式、链接和数学都是透明的。metadata 不产生任何文本。文本取自你写下的内容：不运行 show rule，也不做排版。
+文本、符号、空格、代码和弯引号按原样读取。格式、链接和数学元素只取里面的文本，metadata 跳过。返回的是原文，不执行 show rule 或排版。
 
-读取字符串或内容总是成功。元素自身既没有文本也没有内容时，它不产生任何文本，并有一条警告指出你写下它的位置。
+遇到无法提取文本的空元素时会跳过，并提示对应位置。
 
-Example - 从字符串与内容中读取文本：
+示例：从字符串与内容中读取文本：
 
 ```typst
 #import "@tola/document:0.0.0": plain-text
@@ -283,7 +287,7 @@ Example - 从字符串与内容中读取文本：
 #assert.eq(plain-text([Hello, *world*!]), "Hello, world!")
 ```
 
-Example - 不带文本的元素不产生文本：
+示例：从 HTML 图片元素中提取文本：
 
 ```typst
 #import "@tola/document:0.0.0": plain-text

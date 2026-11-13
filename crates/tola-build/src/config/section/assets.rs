@@ -11,94 +11,120 @@ pub use tola_module::assets::{
     AssetFileDeclaration, AssetTreeDeclaration, AssetUrl, AssetUrlError, AssetUrlPrefix,
 };
 
-/// Publish declared files and directories at the site-root URLs they name.
+/// Publish images, stylesheets, and other static files at the URLs you choose.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, Config)]
 #[serde(default)]
 #[config(section = "assets")]
 pub struct AssetsConfig {
-    /// Give changed published bytes a new `?h=...` in URLs returned by `asset-url`.
-    /// Published paths are not renamed. Off by default.
+    /// Set `true` to add `?h=...` to URLs from `asset-url`, so a changed file gets a new URL.
+    /// The published filename stays the same. Omit this setting to leave the query off.
     #[serde(rename = "cache-busting")]
     #[config(name = "cache-busting")]
     pub cache_busting: bool,
 
-    /// Selected members of source directories published below a URL prefix, each written as
-    /// `{ source = "static/icons", url-prefix = "/icons" }`.
+    /// Publish files from a directory below a URL prefix. For example,
+    /// `{ source = "static/icons", url-prefix = "/icons" }`. Use `include` and `exclude`
+    /// to choose which files to publish. Set `follow-file-symlinks = true` on a tree
+    /// to publish the files its selected symbolic links point to.
     #[config(collection = inline)]
     pub trees: Vec<AssetTreeDeclaration>,
 
-    /// Single source files published at the exact URL they name, each written as
-    /// `{ source = "static/robots.txt", url = "/robots.txt" }`. A file inside a
-    /// declared tree is published here instead.
+    /// Set the URL for each source file, for example
+    /// `{ source = "static/robots.txt", url = "/robots.txt" }`. `source` is relative to the
+    /// site root. `url` starts with `/`. For a file also matched by `trees`, `files` takes priority.
     #[config(collection = inline)]
     pub files: Vec<AssetFileDeclaration>,
 }
 
 impl AssetsConfig {
     /// What `tola help "[assets]"` adds under its table.
-    pub const HELP: &'static str = "\
-A declared source is published whether or not a document references or reads it. A directory
-publishes its members below a URL prefix; an exact file declaration gives one source its own URL:
+    pub const HELP: &'static str = r#"
+### Publish a logo
+
+Put a PNG at `static/logo.png` and add this to `tola.toml`.
 
 ```toml
 [assets]
-cache-busting = true
-trees = [{ source = \"static/web-assets\", url-prefix = \"/assets\" }]
-files = [{ source = \"static/web-assets/tailwind-output/site.css\", url = \"/assets/css/site.css\" }]
+files = [{ source = "static/logo.png", url = "/assets/logo.png" }]
 ```
 
-Here `files` takes over the generated stylesheet from the tree: it publishes at `/assets/css/site.css`,
-not `/assets/tailwind-output/site.css`. The tree still publishes its other members. `source` is a
-path relative to the site root; `url` and `url-prefix` are site-root URL paths, before `site.base-path`.
-Set `include` and `exclude` on a tree to select members using case-sensitive paths and globs
-relative to the declaring site or module root. For the tree above,
-`include = [\"static/web-assets/**/*.svg\"]` selects its SVG files at any depth and
-`exclude = [\"static/web-assets/drafts\"]` skips its `drafts` directory. A matched directory
-selects its descendants within the tree. Omitting `include` selects the whole tree, while
-`include = []` selects no files. `exclude` defaults to an empty list and applies only to that tree.
-Use `enable = false` to disable a declaration or `enabled-by` to require a boolean site option.
-A disabled exact file still takes over its tree member. Set `minify = false` to preserve bytes.
-A `before-build` hook can write that source; a `generate-outputs` hook adds its outputs directly
-and needs no `[assets]` entry.
-
-Link a published declaration with `asset-url`, passing its declared URL rather than its source
-path. With `cache-busting = true`, the result carries `?h=...` identifying the published bytes;
-changed bytes give a new URL while the output filename stays the same. The result already includes
-`site.base-path`, so use it directly:
+Add this to a page such as `content/index.typ` in a site created with `tola init`.
 
 ```typst
-#import \"@tola/address:0.0.0\": asset-url
-
-#let style = asset-url(\"/assets/css/site.css\")   // /assets/css/site.css (or /assets/css/site.css?h=... with cache-busting)
-#let script = asset-url(\"/assets/app.js\")        // /assets/app.js (or /assets/app.js?h=... with cache-busting)
-
+#import "@tola/address:0.0.0": asset-url
+#html.img(src: asset-url("/assets/logo.png"), alt: "Site logo")
 ```
 
-One producer per output path: the Bundle's compiled result, an `[assets]` declaration, or a hook.
-One hard rule governs declarations: **no two declarations may claim the same output path.**
+Run `tola build` from the site directory. With the defaults, the file is written to
+`public/assets/logo.png` and the page refers to `/assets/logo.png`. With
+`site.base-path = "/docs/"`, the link becomes `/docs/assets/logo.png` and the file path stays
+the same. Turn on `cache-busting` to add `?h=...` to the link. The hash changes when the
+published bytes change.
 
-Two `trees` sources cannot nest. A second tree inside the first fails the build:
+### Publish a directory
+
+When you split site configuration with [`include`](tola-help://config/include), asset
+declarations from the files are combined. Use different output paths for each declaration.
+
+Use `trees = [{ source = "static/icons", url-prefix = "/icons" }]` to publish the files
+under `static/icons/` at `/icons/`. Paths under `source` are preserved.
+By default, all files in the directory are included. For example,
+`include = ["static/icons/**/*.svg"]` selects SVGs and `exclude = ["static/icons/drafts"]`
+omits that directory. Patterns are case-sensitive and relative to the site root, or to the
+module root for a module declaration. `include = []` selects nothing.
+
+An exact `files` declaration takes precedence over `trees` for the same source, even if
+that file declaration is disabled. Keep tree source directories from nesting and use distinct,
+non-overlapping URL prefixes. Each output path must be unique across pages, assets, and hooks.
+
+Use `enable = false` to disable a declaration or `enabled-by = "images.enable"` to read a
+boolean option. Quote segments that contain a literal dot. Use `minify = false` to preserve
+the source bytes.
+
+Tola publishes enabled assets even when no page links to them. A `before-build` hook can
+create asset sources. Declare files from a `generate-outputs` hook in its own `outputs` list.
+
+### Publish a file through a symbolic link
+
+From the root of a site created with `tola init`, run these commands to create a file and
+link to it from `static/downloads/`.
+
+```sh
+mkdir -p shared static/downloads
+printf '%s\n' 'Project notes' > shared/notes.txt
+ln -s ../../shared/notes.txt static/downloads/guide.txt
+```
+
+Add this tree to the site's `tola.toml`.
 
 ```toml
-[assets]
-trees = [
-  { source = \"static/assets\", url-prefix = \"/assets\" },
-  { source = \"static/assets/css\", url-prefix = \"/css\" },
-]
+[[assets.trees]]
+source = "static/downloads"
+url-prefix = "/downloads"
+follow-file-symlinks = true
 ```
 
-Two declarations claiming one output path fail the same way — two `files` writing to one `url`:
+Run `tola build` from the site root. With the default publish directory, Tola writes
+`public/downloads/guide.txt` as a regular file containing `Project notes`. The published
+path uses the link's name, and the content comes from `shared/notes.txt`. To link to the file
+from a page, add this to `content/index.typ` and rebuild. The link points to
+`/downloads/guide.txt` with the default `site.base-path`.
 
-```toml
-files = [
-  { source = \"static/a.css\", url = \"/app.css\" },
-  { source = \"static/b.css\", url = \"/app.css\" },
-]
+```typst
+#import "@tola/address:0.0.0": asset-url
+#link(asset-url("/downloads/guide.txt"))[Download the notes]
 ```
 
-One exception: a `files` declaration may take a member over from a tree (the stylesheet above) —
-that member is then published by the declaration, and the tree publishes the rest. Before
-publishing, Tola checks these rules across `[assets]`, the Bundle, and hook outputs at once.";
+`follow-file-symlinks` defaults to `false` and applies only to members of this tree.
+Tola checks `include` and `exclude` against the link's path. A selected symbolic link
+fails the build if the setting is off. With it on, the link must point to a readable
+regular file. A broken link or a link to a directory still fails the build. Use
+`exclude` to skip such a link. To publish the contents of a linked directory, exclude
+the link and declare the target directory as a separate tree.
+
+The target may be outside `source`, as in the example. A module's links must stay
+inside that module. With `--pure`, the target must also be inside the site. As with
+other assets, keep the target outside `build.content-dir` and `build.publish-dir`."#;
 
     pub fn tree_sources(&self) -> impl Iterator<Item = &Path> {
         self.trees.iter().map(AssetTreeDeclaration::source)

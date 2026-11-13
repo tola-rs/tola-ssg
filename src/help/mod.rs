@@ -5,4 +5,6 @@ pub(crate) mod data;
 pub(crate) mod documentation;
 pub(crate) mod model;
 pub(crate) mod pages;
+mod scripts;
+pub(crate) mod search;
 mod target;

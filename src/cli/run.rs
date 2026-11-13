@@ -21,16 +21,15 @@ const CANCELLED_EXIT_CODE: u8 = 130;
 /// region shows only the latest round while the log keeps every round. The origin decides who
 /// answers for a log Tola cannot use.
 fn session_log_path(parsed: &ParsedCommand) -> Option<(std::path::PathBuf, LogOrigin)> {
-    if parsed.process.no_log_file {
-        return None;
-    }
     if let Some(path) = &parsed.process.log_file {
         return Some((path.clone(), LogOrigin::Explicit));
     }
     match &parsed.command {
-        Command::Builtin(Commands::Dev { site, .. }) => {
-            default_session_log_path(&site.config).map(|path| (path, LogOrigin::Automatic))
-        }
+        Command::Builtin(Commands::Dev {
+            site,
+            no_log_file: false,
+            ..
+        }) => default_session_log_path(&site.config).map(|path| (path, LogOrigin::Automatic)),
         _ => None,
     }
 }
@@ -81,14 +80,15 @@ pub(crate) fn run() -> ExitCode {
         };
         return super::commands::nu::run(args, scope);
     }
-    let events = crate::dev::events::Events(
-        matches!(&parsed.command, Command::Builtin(Commands::Dev { development, .. }) if development.json),
-    );
+    let events = crate::dev::events::Events(matches!(
+        &parsed.command,
+        Command::Builtin(Commands::Dev { json: true, .. })
+    ));
     let pager = match &parsed.command {
         Command::Builtin(Commands::Help(args))
             if args.format == super::args::HelpFormat::Text && !args.no_pager =>
         {
-            PagerCommand::for_process()
+            PagerCommand::for_process(args.interactive)
         }
         _ => Ok(None),
     };

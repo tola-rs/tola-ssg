@@ -67,8 +67,8 @@ fn run_nu(
         environment: super::nu::environment(tola_input::InputScope::Online),
     };
     let (submit, diagnostics) =
-        super::nu::diagnostic_collector(format!("before-pack hook `{name}`"), ReportSources::new());
-    let runtime = tola_nu::Runtime::for_invocation(vec![], vec![], invocation)?
+        super::nu::diagnostic::collector(format!("before-pack hook `{name}`"), ReportSources::new());
+    let runtime = super::nu::prepare_runtime(vec![], vec![], invocation, vec![])?
         .with_cancellation(cancelled.signal_flag())
         .with_host(tola_nu::Host {
             hook: Some(json!({
@@ -80,12 +80,16 @@ fn run_nu(
                 "cache-dir": null,
                 "temp-dir": temp,
             })),
-            diagnostic: Some(submit),
-            ..Default::default()
+            submit_diagnostics: Some(submit),
+            ..super::nu::host()
         })?;
     let status = runtime.run_embedded(&source.join(path), args)?;
     cancelled.ensure_active()?;
-    let diagnostics = std::mem::take(&mut *diagnostics.lock().expect("diagnostic collector"));
+    let diagnostics = diagnostics
+        .lock()
+        .expect("diagnostic collector")
+        .take()
+        .unwrap_or_default();
     if status != 0 {
         return Err(DiagnosticError::new(
             format!("before-pack hook `{name}` exited with status {status}"),

@@ -1,67 +1,83 @@
 # `[assets]`
 
-把声明的文件与目录发布到它们自己写明的站点根 URL 上。
+发布图片、样式表和其他静态文件。
 
 ## 配置项
 
 ### `cache-busting`
 
-让内容变过的已发布字节在 `asset-url` 返回的 URL 里获得新的 `?h=...`。已发布的路径本身不改名。默认关闭。
+开启后，`asset-url` 会在 URL 末尾加上 `?h=...`。文件内容变了，链接里的哈希就会变，发布文件名照旧。默认关闭。
 
 ### `trees`
 
-发布在某个 URL prefix 之下的源目录。`include` 与 `exclude` 从站点根匹配，只选择 `source` 内的成员。省略 `include` 选择整棵源树。
+把整个目录发布到指定的 URL 前缀下。用 `include` 和 `exclude` 选文件。要发布指向普通文件的符号链接，在对应的目录声明中设 `follow-file-symlinks = true`。
 
 ### `files`
 
-按自己写明的 URL 发布的单个源文件，每项写成 `{ source = "static/robots.txt", url = "/robots.txt" }`。落在已声明树里的文件在这里发布，而不是在树里。
+给单个文件指定 URL。`source` 相对于站点根目录，`url` 以 `/` 开头。同一个文件也被 `trees` 匹配时，以 `files` 为准。
 
 ## 用法
 
-声明的源无论有没有文档引用或读取它，都会被发布。目录把成员发布到一个 URL prefix 之下；精确的文件声明则给某个源自己的 URL：
+### 发布一张图片
+
+将图片放在 `static/logo.png`，在 `tola.toml` 中加入以下配置。
 
 ```toml
 [assets]
-cache-busting = true
-trees = [{ source = "static/web-assets", url-prefix = "/assets" }]
-files = [{ source = "static/web-assets/tailwind-output/site.css", url = "/assets/css/site.css" }]
+files = [{ source = "static/logo.png", url = "/assets/logo.png" }]
 ```
 
-这里 `files` 从树中接管生成的样式表：它发布在 `/assets/css/site.css`，不再发布在 `/assets/tailwind-output/site.css`。树仍然发布其余成员。`source` 是相对站点根的路径；`url` 与 `url-prefix` 是尚未加上 `site.base-path` 的站点根 URL 路径。`before-build` hook 可以写这个源；`generate-outputs` hook 直接添加自己的 output，无需 `[assets]` 条目。
-
-每棵树可以用 `include` 和 `exclude` 选择成员，模式相对于声明者根。站点树以站点根为基准，模块树以模块根为基准。`source` 限定可发布的子树，文件在其中的相对路径附加到 `url-prefix`。例如 `{ source = "static", url-prefix = "/assets", include = ["static/**/*.css"], exclude = ["static/drafts"] }` 选择 `static` 内的 CSS 并排除 `static/drafts`。省略 `include` 等价于 `["."]`，覆盖整棵源树；`include = []` 不选任何成员，`exclude` 默认为空。目录和文件声明均可用 `minify = false` 保留源字节，或用 `enabled-by` 引用所属 options 表中的顶层布尔键来控制发布。精确文件声明在判断启用条件之前接管对应源，树的过滤只影响自己的成员。启用的文件和树在 before-build 完成后读取。
-
-用 `asset-url` 链接声明发布的文件，传入声明的 URL，而非源路径。`cache-busting = true` 时，结果带有标识发布字节的 `?h=...`；字节变化就得到新 URL，output 文件名保持不变。结果已包含 `site.base-path`，直接使用即可：
+在用 `tola init` 创建的站点里，把下面的代码加到 `content/index.typ`。
 
 ```typst
 #import "@tola/address:0.0.0": asset-url
-
-#let style = asset-url("/assets/css/site.css")   // /assets/css/site.css (or /assets/css/site.css?h=... with cache-busting)
-#let script = asset-url("/assets/app.js")        // /assets/app.js (or /assets/app.js?h=... with cache-busting)
-
-#html.link(rel: "stylesheet", href: style)       // link it in the head
-#html.script(src: script)                        // add the script in the head
+#html.img(src: asset-url("/assets/logo.png"), alt: "站点标志")
 ```
 
-每个 output 路径只能有一个生产者——它要么来自 Bundle 的编译结果，要么来自 `[assets]` 声明，要么来自 hook。声明之间有一条硬规则：**同一条 output 路径不能被两个声明认领**。
+运行 `tola build`。默认会生成 `public/assets/logo.png`，页面引用 `/assets/logo.png`。如果 `site.base-path = "/docs/"`，页面会引用 `/docs/assets/logo.png`。
 
-两张 `trees` 的源路径不能互相嵌套。像下面这样第二棵树套在第一棵里面，构建会报错：
+### 发布一个目录
+
+用 [`include`](tola-help://config/include) 拆分配置时，各文件的资源声明会汇总。每个文件都要有独立的输出路径。
+
+用 `trees = [{ source = "static/icons", url-prefix = "/icons" }]` 把 `static/icons/` 下的文件发布到 `/icons/`，保留文件在源目录中的相对路径。
+
+默认选中目录中的所有文件。用 `include = ["static/icons/**/*.svg"]` 选 SVG，用 `exclude = ["static/icons/drafts"]` 排除草稿目录。模式区分大小写，站点里的模式从站点根目录算起，模块里的从模块根目录算起。`include = []` 不选任何文件。
+
+同一个源文件同时被 `files` 和 `trees` 选中时，以 `files` 为准，即使那条单文件声明已禁用。`trees` 的源目录不能嵌套，URL 前缀也不能重复或互相包含。页面、静态文件和 hook 产物各用独立的输出路径。
+
+用 `enable = false` 禁用声明，或用 `enabled-by = "images.enable"` 读取布尔选项。键名含点号时，要给该段加引号。用 `minify = false` 保留源文件字节。
+
+启用的静态文件即使没有被页面引用也会发布。`before-build` hook 可以生成这些源文件。`generate-outputs` 的文件直接声明在该 hook 的 `outputs` 中。
+
+### 发布符号链接指向的文件
+
+在用 `tola init` 创建的站点根目录运行以下命令，在 `static/downloads/` 中创建一个指向共享文件的符号链接。
+
+```sh
+mkdir -p shared static/downloads
+printf '%s\n' 'Project notes' > shared/notes.txt
+ln -s ../../shared/notes.txt static/downloads/guide.txt
+```
+
+在站点的 `tola.toml` 中加入这条声明。
 
 ```toml
-[assets]
-trees = [
-  { source = "static/assets", url-prefix = "/assets" },
-  { source = "static/assets/css", url-prefix = "/css" },
-]
+[[assets.trees]]
+source = "static/downloads"
+url-prefix = "/downloads"
+follow-file-symlinks = true
 ```
 
-两个声明认领同一条 output 路径也一样会报错——比如两个 `files` 写到同一个 `url`：
+从站点根目录运行 `tola build`。使用默认发布目录时，`public/downloads/guide.txt` 是一个普通文件，内容是 `Project notes`。发布路径用链接的名字，文件内容取自 `shared/notes.txt`。
 
-```toml
-files = [
-  { source = "static/a.css", url = "/app.css" },
-  { source = "static/b.css", url = "/app.css" },
-]
+要在首页链接到这个文件，把下面两行放进 `content/index.typ`，再运行 `tola build`。使用默认 `site.base-path` 时，首页链接指向 `/downloads/guide.txt`。
+
+```typst
+#import "@tola/address:0.0.0": asset-url
+#link(asset-url("/downloads/guide.txt"))[下载笔记]
 ```
 
-例外只有一种：`files` 可以从树里接管某个成员（就是上面那张样式表）——被接管的成员改由 `files` 声明发布，树发布其余成员。发布之前，Tola 把 `[assets]`、Bundle 与 hook 的 output 放在一起检查这些规则。
+`follow-file-symlinks` 默认关闭，只影响这一条目录声明。`include` 和 `exclude` 按链接自身的路径匹配。默认选中符号链接就会报错。开启后，链接必须指向可读的普通文件。遇到断链或目录链接，可以用 `exclude` 跳过。要发布目录链接里的文件，直接为目标目录写一条 `trees` 声明。
+
+目标可以在 `source` 目录之外，例如上面的 `shared/notes.txt`。模块里的链接必须指向该模块内的文件。用 `--pure` 构建时，目标还必须位于站点内。和其他资源一样，目标应放在 `build.content-dir` 与 `build.publish-dir` 之外。

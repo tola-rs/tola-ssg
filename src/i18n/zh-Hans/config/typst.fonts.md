@@ -1,20 +1,20 @@
 # `[typst.fonts]`
 
-Typst 编译器可以使用的字体。编译器字体不会被发布：网页字体请在 `[assets]` 下声明。
+在这里设置 Typst 编译用的字体。给浏览器加载的字体写在 `[assets]` 下。
 
 ## 配置项
 
 ### `paths`
 
-要搜索的字体目录，相对站点根，递归查找。
+要搜索的字体目录，默认是 `static/typst-fonts/`。路径相对于站点根目录，子目录也会搜索。
 
 ### `modules`
 
-选择已声明的模块所提供的编译字体，默认为空列表。模块在 `tola-module.toml` 的
-`[typst]` 下声明 `fonts = ["typst-fonts"]`，目录相对模块根，并随模块发布。
-Tola 在站点目录之后按列表顺序搜索模块字体。Typst 决定采用哪款字体，匹配条件相同时按搜索顺序优先。
+用这些模块里附带的字体，默认为空列表。模块要在 `tola-module.toml` 的
+`[typst]` 下声明字体目录，例如 `fonts = ["typst-fonts"]`，路径相对于模块根目录。
+Tola 先搜 `paths`，再按 `modules` 的顺序搜模块字体。Typst 按字体匹配规则选择，匹配条件相同时优先用先搜到的字体。
 
-同名的两个字体版本都要使用时，可以把其中一个模块项写成表：
+要同时用两个同名字体，可以给其中一个模块提供的字体换个名字：
 
 ```toml
 [typst.fonts]
@@ -30,25 +30,58 @@ modules = [
 
 ### `system`
 
-是否把宿主机自己的字体也算上。开启后，换一台机器构建可能得到不同的结果。
+设为 `true` 时也搜索系统字体。省略时跳过系统字体。
 
 ## 用法
 
-编译器字体用于 Typst 内容的排版与导出，字体文件本身不会被发布。`paths` 列出相对站点根的目录，递归查找字体。默认值是 `static/typst-fonts`：
+默认搜索 `static/typst-fonts/`。要改用其他目录，把字体放到新目录，再在 `tola.toml` 里设置 `paths`。例如，改用 `static/print-fonts/`：
 
 ```toml
 [typst.fonts]
-paths = ["static/typst-fonts"]
+paths = ["static/print-fonts"]
 system = false
 ```
 
-vendored 字体与这些目录一起加载，均先于系统字体发现。Tola 也自带嵌入字体，`--pure` 下仍然可用。调用允许时，`system = true` 加上宿主字体；`--pure` 即使在这个设置开启时也排除它们。需要另一台机器使用相同字体输入构建时，保持关闭。
+从站点根目录运行 `tola inspect fonts` 查看可用的字体族。在 Typst 中按字体族名称选择，例如 `#set text(font: "IBM Plex Sans")`。
 
-命令行的 `--font-path DIR` 为这一次调用额外加入一个宿主机目录，排在 `paths` 之前；`--ignore-system-fonts` 同样只收窄这一次调用。
+站点的 Nu hook 缩放带文字的 SVG 时也用这套字体。在 SVG 的 `font-family` 里填 `tola inspect fonts` 列出的字体族名称。单独运行图片脚本时，把 `wordmark.svg` 和 `tola.toml` 放在一起，再运行：
 
-浏览器字体是另一回事：通过 `[assets]` 发布，再用 CSS `@font-face` 加载。Typst 字体设置不会为浏览器安装字体：
+```sh
+tola nu --config tola.toml @tola-scripts/image resize wordmark.svg --width 240 --format png --output wordmark.png
+```
+
+命令会生成宽 240 像素的 `wordmark.png`。再次运行时换一个输出文件名。
+
+`--pure` 下仍可用 Tola 内置字体。`system = true` 与 `--pure` 一起使用会报错。`tola vendor` 不复制编译器字体。
+
+`--font-path DIR` 为本次调用添加优先搜索的目录，`--pure` 下不可用。`--ignore-system-fonts` 为本次调用排除系统字体。
+
+### 给网页加载字体
+
+把网页字体放到 `static/web-fonts/notes.woff2`，在同一目录下创建 `fonts.css`。
+
+```css
+@font-face {
+  font-family: Notes;
+  src: url("./notes.woff2") format("woff2");
+  font-display: swap;
+}
+body { font-family: Notes, sans-serif; }
+```
+
+在 `tola.toml` 里用 `[assets]` 发布这两个文件。
 
 ```toml
 [assets]
 trees = [{ source = "static/web-fonts", url-prefix = "/fonts" }]
 ```
+
+在用 `tola init` 创建的站点里，把这段放进 `content/index.typ`。
+
+```typst
+#import "@tola/address:0.0.0": asset-url
+#html.link(rel: "stylesheet", href: asset-url("/fonts/fonts.css"))
+= Font preview
+```
+
+从站点根目录运行 `tola build`，默认会在 `public/fonts/` 下写出字体和样式表。运行 `tola dev` 并打开打印的地址，首页会使用该字体。`asset-url` 会加上站点的部署前缀，CSS 中的字体路径相对于样式表。

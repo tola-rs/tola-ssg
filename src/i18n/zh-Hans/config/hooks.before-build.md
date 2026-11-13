@@ -1,107 +1,126 @@
 # `[[hooks.before-build]]`
 
-在发现源文件之前运行，先把站点随后要读的文件写好：Typst 的输入、`[assets]` 声明的文件。
+在 Tola 开始查找内容文件前运行。可以生成 Typst 页面、模板、数据或静态文件。
 
 ## 配置项
 
 ### `enable`
 
-是否运行该 hook。
+默认启用。设为 `false` 跳过这个 hook。
 
 ### `name`
 
-该 hook 的名字，出现在状态行与诊断里。必须是一个不含空白的词，且在本阶段内唯一：为空、含空白、或在本阶段内重名都会报错。
+状态和错误消息里显示的名称。同一阶段内不能重名，名称不能为空或包含空白。
+
+### `order`
+
+非负整数，省略时为 `0`。同一站点或模块的 `before-build` hook 按此数值从小到大执行。同序号的 hook 可以并行。
 
 ### `argv`
 
-运行的命令，从站点根执行，不经过隐式 shell。这个阶段不设置 `TOLA_HOOK_INPUT_DIR`、`TOLA_HOOK_OUTPUT_DIR`（`generate-outputs` 才有）：命令直接生成站点要读的输入，没有构建目录可读。
+从站点根目录运行的命令及参数。`argv` 和 `nu` 二选一。需要 shell 时，在 `argv` 里指定。将生成的文件写到站点会读取的位置。
 
 ### `nu`
 
-嵌入式 Nu 脚本，相对于站点根。
+要运行的 Nu 脚本，路径相对于站点根目录。`nu` 和 `argv` 二选一。
 
 ### `args`
 
-传给 Nu 脚本的字面参数。
+传给 `nu` 脚本的参数，可省略。
 
 ### `enabled-by`
 
-启用该 hook 的站点顶层布尔选项。
+例如填 `"images.enable"`，只在 `[options.images]` 的 `enable` 为 `true` 时运行。省略时不检查选项。
 
 ### `dev`
 
-`tola dev` 是否运行这一条：`"run"`（默认）或 `"skip"`。
+省略或设为 `"run"` 时，`tola dev` 每次构建都运行。设为 `"skip"` 时，开发构建会跳过。
 
 ### `rerun-on`
 
-额外观察的站点相对模式，使用必填的 `include` 与可选的 `exclude`。所选输入变化触发一次完整的 `tola dev` 构建。
+让额外输入的变化触发重建，例如 `{ include = ["data/**/*.json"] }`。指定后须填 `include`，可省略 `exclude`。Tola 已自动监听 `nu` 指定的入口脚本。
 
 ### `generates`
 
-该 hook 执行命令后生成的文件或目录，相对站点根；不可位于 `build.publish-dir` 与 `.tola` 中。Tola 在 hook 的命令执行后，会检查这些声明的路径是否存在——这是 hook 需要显式传给 Tola 的信息：Tola 不打算推断命令本身生成了哪些内容。声明它并不会发布它：要发布，就用 `[assets]` 或 Bundle 的 `asset(...)`；也可以让 Typst 读它，产出文档或其他 output。
+生成的文件或目录，路径相对于站点根。Tola 在命令结束后检查这些路径。路径必须位于 `build.publish-dir` 和 `.tola` 之外。
 
 ## 用法
 
-这个阶段生成 Typst 与 `[assets]` 随后要读的文件。
+### 生成其他输入
 
-下面用 Tailwind CSS 举一个完整例子：`just` 跑 task，Deno 执行 `@tailwindcss/cli` 生成样式表；`before-build` hook 在发现源文件之前运行它，`[assets]` 把 `static/web-assets/tailwind-output` 映射到 `/assets/tailwind-output`。处理前与处理后的资产在路径上分开：输入是 `static/tailwind-sources/site.css`（不发布），产物是 `static/web-assets/tailwind-output/site.css`（随树发布，URL 为 `/assets/tailwind-output/site.css`）。
+把模板、数据或静态文件写到它们的源路径。例如，生成 `static/site.css` 后用 `[assets]` 发布。用 `generates` 列出生成的文件或目录。Tola 在命令结束后检查这些路径，开发时也会监听它们。
 
-`justfile`：
+每次构建都会运行 hook。把下次还能用的文件放进 `hook.cacheDir`，只用一次的文件放进 `hook.tempDir`。需要参与构建的文件直接写到站点读取它们的位置。
 
-```just
-css:
-    deno task css
+示例：生成 `content/releases.typ`：
+
+在用 `tola init` 创建的站点根目录，把下面的代码存为 `write-release-notes.nu`。脚本从上下文读取站点配置的内容目录。
+
+```nu
+use tola get-context
+
+let content = get-context | get site.contentRoot
+"= Release notes\n" | save --force ($content | path join "releases.typ")
 ```
 
-`deno.json`：
-
-```json
-{
-  "imports": {
-    "@tailwindcss/cli": "npm:@tailwindcss/cli@4.3.3",
-    "tailwindcss": "npm:tailwindcss@4.3.3"
-  },
-  "tasks": {
-    "css": "deno run -A npm:@tailwindcss/cli@4.3.3 -i static/tailwind-sources/site.css -o static/web-assets/tailwind-output/site.css --minify"
-  }
-}
-```
-
-`tola.toml`：
+在 `tola.toml` 中加入以下配置。
 
 ```toml
 [[hooks.before-build]]
-name = "tailwind"
-argv = ["just", "css"]
-generates = ["static/web-assets/tailwind-output/site.css"]
-rerun-on = { include = ["static/tailwind-sources", "deno.json", "deno.lock", "justfile"] }
+name = "release-notes"
+nu = "write-release-notes.nu"
+generates = ["content/releases.typ"]
 ```
 
-文件要让浏览器读到，得先发布出去：下面的 `[assets]` 把 `static/web-assets` 整棵树映射到 `/assets`，产物因此随树发布在 `/assets/tailwind-output/site.css`。生成的数据也可以不发布，只给 Typst 读：页面 import 它，用来产出文档或其他 output。
+从站点根目录运行 `tola build`。hook 先写入 `content/releases.typ`，默认的 `site.typ` 再把它发布到 `public/releases/index.html`。如果改过 `build.content-dir`，也要把 `generates` 中的路径改成对应位置。
 
-`tola.toml`：
+示例：安排不同配置文件里的 hook 先后运行：
+
+在用 `tola init` 创建的站点根目录下建好 `config/`、`data/` 和 `tools/`。把下面的内容存为 `data/release.json`：
+
+```json
+{"title": "Atlas 2.0"}
+```
+
+把数据脚本存为 `tools/read-release.nu`：
+
+```nu
+mkdir generated
+open data/release.json | get title | save --force generated/release.txt
+```
+
+把生成页面的脚本存为 `tools/write-upcoming.nu`：
+
+```nu
+let title = open --raw generated/release.txt
+$"= ($title)\n" | save --force content/upcoming.typ
+```
+
+把这一行加到 `tola.toml` 的最前面：
 
 ```toml
-[assets]
-trees = [{ source = "static/web-assets", url-prefix = "/assets" }]
+include = ["config/release.toml"]
 ```
 
-页面模板的 head 里链接它（`site.typ` 或页面模板）：
+将页面 hook 存为 `config/release.toml`：
 
-```typst
-#html.link(rel: "stylesheet", href: asset-url("/assets/tailwind-output/site.css"))
+```toml
+[[hooks.before-build]]
+name = "upcoming-page"
+order = 10
+nu = "tools/write-upcoming.nu"
+generates = ["content/upcoming.typ"]
 ```
 
-Tailwind 的输入 CSS 要写明扫描哪些内容与模板文件。hooks 面向单次运行的命令：Tola 目前没有支持 watch 这类长驻命令的打算——那会给开发、构建流程、hook 机制与分析带来极大的复杂性。开发监听由 Tola 负责，hooks 机制只提供必要的基础设施：命令自己的增量编译、缓存与持久化由生产者自己编写，`TOLA_HOOK_CACHE_DIR`、`TOLA_HOOK_TEMP_DIR` 等环境变量是 Tola 提供的接口。
+把数据 hook 加到 `tola.toml`：
 
-`generates` 声明命令会写出哪些文件：Tola 在命令结束后检查这些路径是否存在，开发期间生成路径会从触发该生产者的监听输入中排除。站点自身的 hook 可以在站点内本地模块的子路径生成文件；模块根目录、清单与远程或 vendored 输入受保护。
+```toml
+[[hooks.before-build]]
+name = "release-data"
+order = 0
+nu = "tools/read-release.nu"
+rerun-on = { include = ["data/release.json"] }
+generates = ["generated/release.txt"]
+```
 
-它们是站点的输入，不是输出：等本阶段的 hook 全部跑完，Tola 才开始构建——按 `content-dir` 发现源、编译 Bundle、收集 `[assets]` 声明的文件，然后检查引用、发布。
-
-本阶段的命令环境：
-- `TOLA_HOOK_STAGE`：每次调用都是 `before-build`。
-- `TOLA_BUILD_MODE`：`prod`（`build`、`check`、`preview`、`vendor`）或 `dev`（`tola dev`）。
-- `TOLA_HOOK_CACHE_DIR`：跨次运行保留在 `.tola/hooks/before-build/<条目名>`；内容归命令、Tola 只创建目录——增量产物放这里，例如 `"$TOLA_HOOK_CACHE_DIR"/tailwind`。
-- `TOLA_HOOK_TEMP_DIR`：本次调用独有的临时目录，结束即删；`TMPDIR`、`TMP`、`TEMP` 也指向它。
-
-没有 `TOLA_HOOK_INPUT_DIR` 与 `TOLA_HOOK_OUTPUT_DIR`：命令直接写站点根下的输入文件。
+运行 `tola build`。`release-data` 的 `order` 更小，所以它先运行，即使 Tola 先读到 `config/release.toml`。按默认设置，打开 `public/upcoming/index.html` 可以看到 Atlas 2.0。用 `tola dev` 时，修改 `data/release.json` 也会重建这页。`tools/write-upcoming.nu` 仍从站点根目录找。

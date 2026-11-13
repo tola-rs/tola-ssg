@@ -43,7 +43,7 @@ pub(super) fn run_initializer(
     ];
     let matches = command.try_get_matches_from(arguments.iter().chain(tail))?;
     let args = crate::cli::args::InitArgs::from_arg_matches(&matches)?;
-    let scope = match (mode.scope(), args.input.scope()) {
+    let scope = match (mode.scope(), args.input.mode().scope()) {
         (tola_input::InputScope::Pure, _) | (_, tola_input::InputScope::Pure) => {
             tola_input::InputScope::Pure
         }

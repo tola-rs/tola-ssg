@@ -5,10 +5,6 @@ use std::io::{self, IsTerminal, Write};
 use std::path::Path;
 use std::process::{Child, ChildStdin, Command, Stdio};
 
-/// Flags a bare `less` receives: `-F` quits when one screen shows everything, `-R` passes ANSI
-/// sequences through, `-X` keeps the screen on exit, `-K` quits on Ctrl+C.
-const LESS_ARGUMENTS: &[&str] = &["-FRXK"];
-
 /// A pager documentation can be written through.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PagerCommand {
@@ -21,7 +17,7 @@ impl PagerCommand {
     ///
     /// `None` when stdout is not a terminal or `TERM` is unset or `dumb`; a `less` that cannot
     /// drive the terminal stops at its own warning instead of showing the documentation.
-    pub(crate) fn for_process() -> anyhow::Result<Option<Self>> {
+    pub(crate) fn for_process(interactive: bool) -> anyhow::Result<Option<Self>> {
         if !io::stdout().is_terminal() {
             return Ok(None);
         }
@@ -34,6 +30,7 @@ impl PagerCommand {
             std::env::var_os("TOLA_PAGER").as_deref(),
             std::env::var_os("PAGER").as_deref(),
             less.as_deref(),
+            interactive,
         )
     }
 
@@ -88,6 +85,7 @@ fn resolve(
     tola_pager: Option<&OsStr>,
     pager: Option<&OsStr>,
     less: Option<&Path>,
+    interactive: bool,
 ) -> anyhow::Result<Option<PagerCommand>> {
     let (program, arguments): (OsString, Vec<OsString>) = match tola_pager.or(pager) {
         Some(configured) => {
@@ -110,7 +108,9 @@ fn resolve(
     };
     let arguments =
         if arguments.is_empty() && Path::new(&program).file_stem() == Some(OsStr::new("less")) {
-            LESS_ARGUMENTS.iter().copied().map(OsString::from).collect()
+            // Picker readers wait for q and restore the screen on exit. Direct help
+            // leaves the page visible and lets one-screen pages finish immediately.
+            vec![if interactive { "-RK" } else { "-FRXK" }.into()]
         } else {
             arguments
         };

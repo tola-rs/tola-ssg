@@ -149,7 +149,7 @@ impl Documentation {
             CodeBlockKind::Indented => "",
         };
         let theme = if self.color {
-            tola_highlight::ThemeChoice::Dark
+            tola_highlight::ThemeChoice::Terminal
         } else {
             tola_highlight::ThemeChoice::Plain
         };

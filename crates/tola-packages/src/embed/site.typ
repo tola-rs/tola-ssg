@@ -2,13 +2,12 @@
 
 /// Read the resolved `[site]` settings and `[options]` from Typst.
 ///
-/// `site` carries one entry for each `[site]` setting, plus the derived `url`: `origin`,
+/// Read the `[site]` settings by name, including the derived `url`: `origin`,
 /// `base-path`, `url`, `title`, `authors`, `description`, `language`, and `languages`.
 /// `site.options` is the dictionary from the top-level `[options]` table. It defaults to `(:)`.
 ///
-/// `base-path` is the deployment path below the host root, `/` by default. `url` joins
-/// `origin` and `base-path` into the site's canonical address. A site that declares no
-/// `site.origin` publishes relative addresses only, so its `url` is `none`.
+/// `base-path` is the path where you deploy the site, `/` by default. `url` joins
+/// `origin` and `base-path` into the site's canonical address. Without `site.origin`, `site.url` is `none`.
 ///
 /// `title` and `description` hold the text you configured in `tola.toml`; each
 /// stays empty when the setting is absent. `authors` holds one `(name:, email:, url:)` record per
@@ -21,6 +20,8 @@
 /// nonempty array must contain `language`. Both are template inputs: the site itself decides how to
 /// route, pair, and switch between languages.
 ///
+/// Example: Read default settings:
+///
 /// With the default `tola.toml` settings, these are the values available in `site.typ`.
 ///
 /// ```typst
@@ -30,6 +31,8 @@
 /// #assert.eq(site.language.tag, "en")
 /// #assert.eq(site.languages, ())
 /// ```
+///
+/// Example: Read a configured title:
 ///
 /// Set `title = "Example site"` in `[site]` in `tola.toml` to read it in Typst.
 ///
@@ -43,11 +46,22 @@
 
 /// A native path rooted in the site, including when called from a theme package.
 ///
-/// Use this for project data or generated inputs whose location the theme knows.
-/// It creates a path without reading the file; normal input boundaries still apply.
+/// Use this to locate a site file from a theme, such as JSON written by a hook.
+/// Pass the returned path to `read` or `json` to open the file.
+///
+///
+/// Create `data/catalog.json` in the site root.
+///
+/// ```json data/catalog.json
+/// {"title": "Field notes"}
+/// ```
+///
+/// Replace `site.typ` with the following code. Run `tola build` from the site root.
+/// With the default publish directory, `public/index.html` displays “Field notes”.
 ///
 /// ```typst site
 /// #import "@tola/site:0.0.0": project-path
-/// #let data = project-path("generated/catalog.json")
+/// #let catalog = json(project-path("data/catalog.json"))
+/// #document("index.html")[#catalog.title]
 /// ```
 #import "@tola/host:0.0.0": project-path

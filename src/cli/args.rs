@@ -8,69 +8,88 @@ use tola_input::{InputMode, InputScope};
 use crate::editor::Editor;
 use crate::i18n::HelpLanguage;
 
-// Headings are set per argument: `next_help_heading` on a flattened struct is a command
-// setting, so it leaks into arguments the caller adds after the flatten (clap 4.0, #4222).
-#[derive(clap::Args, Debug, Clone)]
+#[derive(clap::Args, Debug, Clone, Default)]
 pub struct ProcessArgs {
-    /// Choose when to use colored output.
+    /// Hide progress. Keep warnings and errors.
+    #[arg(short, long, help_heading = "Output", display_order = 80)]
+    pub quiet: bool,
+
+    /// Show debug logs with `-v` or trace logs with `-vv`.
+    #[arg(short, long, action = clap::ArgAction::Count, help_heading = "Output", display_order = 81)]
+    pub verbose: u8,
+
+    /// Use `always` or `never` to force color on or off. `auto` follows the terminal.
     #[arg(
         long,
-        global = true,
-        help_heading = "Global options",
         default_value = "auto",
-        display_order = 100
+        value_name = "WHEN",
+        help_heading = "Output",
+        display_order = 82
     )]
     pub color: ColorChoice,
 
-    /// Show debug events; repeat for trace events.
-    #[arg(short = 'v', long, global = true, help_heading = "Global options", action = clap::ArgAction::Count, display_order = 101)]
-    pub verbose: u8,
-
-    /// Hide progress, but keep warnings and errors.
-    #[arg(
-        short = 'q',
-        long,
-        global = true,
-        help_heading = "Global options",
-        display_order = 102
-    )]
-    pub quiet: bool,
-
-    /// Append detailed logs to a file
-    #[arg(long, global = true, help_heading = "Global options", value_hint = clap::ValueHint::FilePath, display_order = 103)]
+    /// Append this run's log to `FILE`.
+    #[arg(long, value_name = "FILE", value_hint = clap::ValueHint::FilePath, help_heading = "Output", display_order = 83)]
     pub log_file: Option<PathBuf>,
-
-    /// Do not record a detailed session log.
-    #[arg(
-        long,
-        global = true,
-        help_heading = "Global options",
-        conflicts_with = "log_file",
-        display_order = 104
-    )]
-    pub no_log_file: bool,
 }
 
-/// The input scope and lock policy one command runs under.
+#[derive(clap::Args, Debug, Clone, Copy, Default)]
+pub struct OfflineArgs {
+    /// Use local files and cached dependencies. Without this flag, Tola can download missing dependencies.
+    #[arg(long, display_order = 40)]
+    pub offline: bool,
+}
+
+impl OfflineArgs {
+    pub(super) fn scope(self) -> InputScope {
+        if self.offline {
+            InputScope::Offline
+        } else {
+            InputScope::Online
+        }
+    }
+}
+
+#[derive(clap::Args, Debug, Clone, Copy, Default)]
+pub struct ScopeArgs {
+    #[command(flatten)]
+    pub offline: OfflineArgs,
+
+    /// Use the site's files, vendored dependencies, and Tola's built-ins.
+    ///
+    /// Requires matching entries in `tola.lock`. Tola skips external package directories,
+    /// caches, and system fonts. Hooks still run with their usual access.
+    #[arg(long, display_order = 41)]
+    pub pure: bool,
+}
+
+impl ScopeArgs {
+    pub(super) fn scope(self) -> InputScope {
+        if self.pure {
+            InputScope::Pure
+        } else {
+            self.offline.scope()
+        }
+    }
+}
+
 #[derive(clap::Args, Debug, Clone, Copy, Default)]
 pub struct InputArgs {
-    /// Use no network; packages, icons, and fonts already on this machine still apply.
-    #[arg(long, help_heading = "Input options", display_order = 105)]
-    pub offline: bool,
+    #[command(flatten)]
+    pub scope: ScopeArgs,
 
-    /// Build only from the site's own sources and its `[vendor]` inputs.
+    /// Require `tola.lock` to match the configuration. Leave the lock file unchanged.
     ///
-    /// Also refuses host package roots, host caches, system fonts, and source files outside the
-    /// site. This is the check CI runs: freeze the site's external inputs with `tola vendor` on a
-    /// machine with network access, commit them, then `tola build --pure` there.
-    #[arg(long, help_heading = "Input options", display_order = 106)]
-    pub pure: bool,
-
-    /// Refuse to write `tola.lock`; fail when a declaration no longer matches it.
-    ///
-    /// `--pure` implies this.
-    #[arg(long, help_heading = "Input options", display_order = 107)]
+    /// Tola can still download missing dependencies at their locked versions. `--pure` also
+    /// requires a matching lock file.
+    #[arg(long, help_heading = "Build", display_order = 42)]
     pub locked: bool,
+}
+
+impl InputArgs {
+    pub(super) fn mode(self) -> InputMode {
+        InputMode::new(self.scope.scope(), self.locked)
+    }
 }
 
 /// The site a command reads: its configuration and the host package roots that override it.
@@ -103,30 +122,12 @@ impl BuildArgs {
 }
 
 #[derive(Parser, Debug, Clone)]
-#[command(version = version_text(), about, long_about = None, disable_help_subcommand = true)]
+#[command(version = version_text(), about, long_about = None, disable_help_subcommand = true,
+    after_help = "Run 'tola <command> --help' for options and examples. Use 'tola help -i' to browse the reference."
+)]
 pub struct Cli {
-    #[command(flatten)]
-    pub global: ProcessArgs,
-
     #[command(subcommand)]
     pub command: Commands,
-}
-
-impl InputArgs {
-    pub(super) fn scope(self) -> InputScope {
-        if self.pure {
-            InputScope::Pure
-        } else if self.offline {
-            InputScope::Offline
-        } else {
-            InputScope::Online
-        }
-    }
-
-    /// What this invocation may write, fetch, and read for its inputs.
-    pub(super) fn mode(self) -> InputMode {
-        InputMode::new(self.scope(), self.locked)
-    }
 }
 
 /// The `--version` text: the Tola release that wrote this executable, the Typst
@@ -150,18 +151,21 @@ fn parse_help_language(value: &str) -> Result<HelpLanguage, String> {
 #[derive(Subcommand, Debug, Clone)]
 pub enum ModuleCommand {
     /// Check the manifest and declared files without running any code.
+    #[command(after_long_help = "Run tola module check ./theme from the parent directory, or tola module check\nfrom the directory containing tola-module.toml. Tola checks the manifest and its declared\npaths, such as library entries, scripts, assets, and font directories.\nTo compile the module and run its build hooks, use it in a site and run tola check there.")]
     Check {
-        /// Module directory.
+        /// Directory containing `tola-module.toml`. If omitted, use the current directory.
         #[arg(default_value = ".", value_hint = clap::ValueHint::DirPath)]
         directory: PathBuf,
     },
-    /// Run hooks.before-pack and write a checked release directory.
+    /// Run `before-pack` hooks and write the files to ship.
+    #[command(after_long_help = "In theme/tola-module.toml, declare the files to ship. For a module with a lib.typ file:\n  [pack]\n  include = [\"lib.typ\"]\n\nFrom the directory containing theme/, run:\n  mkdir -p dist\n  tola module pack theme --output dist/theme\n\nTola checks the release before replacing dist/theme. It contains lib.typ and\ntola-module.toml. For an example that generates a file before packing, see tola help \"[modules]\".")]
     Pack {
-        /// Source module directory.
+        /// Directory containing `tola-module.toml`. If omitted, use the current directory.
         #[arg(default_value = ".", value_hint = clap::ValueHint::DirPath)]
         source: PathBuf,
 
-        /// Replace this directory with the complete release.
+        /// Write the release files to `DIR`. Its parent directory must exist.
+        /// A successful pack replaces the previous release there.
         #[arg(long, value_name = "DIR", value_hint = clap::ValueHint::DirPath)]
         output: PathBuf,
     },
@@ -169,27 +173,57 @@ pub enum ModuleCommand {
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum Commands {
-    /// Refresh the inputs `tola.lock` records.
-    Update {
+    /// Create a new Tola site.
+    #[command(after_long_help = "From the directory that should contain the new site, run tola init my-site.\nTola creates my-site/tola.toml, site.typ, ignore files, and an empty content/ directory.\nUse tola init my-site --dry-run to see the planned files first.\n\nTo initialize from a module in ./theme, run:\n  tola init my-site --from ./theme --alias notes\nThe module must declare an initializer. Pass its own arguments after --.\nRun tola help \"[modules]\" for a complete initializer example.")]
+    Init {
         #[command(flatten)]
-        input: InputArgs,
+        process: ProcessArgs,
+        #[command(flatten)]
+        args: InitArgs,
+    },
+
+    /// Serve the site locally and rebuild when files change.
+    #[command(
+        after_long_help = "From the site root, run tola dev --port 3000 and open the URL it prints.\nWith file watching enabled, saving a change to a page rebuilds the site and refreshes the browser.\nPress Ctrl+C to stop."
+    )]
+    Dev {
+        #[command(flatten)]
+        development: DevelopmentArgs,
         #[command(flatten)]
         site: SiteArgs,
         #[command(flatten)]
-        update: UpdateArgs,
+        build: BuildArgs,
+        #[command(flatten)]
+        input: InputArgs,
+        #[command(flatten)]
+        process: ProcessArgs,
+
+        /// Stream development events as JSON lines on stdout.
+        ///
+        /// Writes one event per line to stdout; logs and hook output go to stderr.
+        /// Events report server readiness, builds, after-publish hooks, and shutdown.
+        #[arg(long, help_heading = "Output", display_order = 79)]
+        json: bool,
+
+        /// Skip the session log that `tola dev` normally saves in `.tola/state/logs/`.
+        #[arg(
+            long,
+            conflicts_with = "log_file",
+            help_heading = "Output",
+            display_order = 84
+        )]
+        no_log_file: bool,
     },
 
-    /// Create a new Tola site.
-    Init(InitArgs),
-
-    /// Check or package a standalone module directory.
-    Module {
-        #[command(subcommand)]
-        command: ModuleCommand,
-    },
-
-    /// Build the site and write its output files.
+    /// Build the site and write it to the publish directory.
+    ///
+    /// A successful build replaces the contents of the publish directory (public/ by default).
+    #[command(
+        after_long_help = "From the site root, run tola build --publish-dir dist.\nWith the default starter site and a content/index.typ file, the build writes dist/index.html."
+    )]
     Build {
+        #[command(flatten)]
+        process: ProcessArgs,
         #[command(flatten)]
         input: InputArgs,
         #[command(flatten)]
@@ -199,27 +233,54 @@ pub enum Commands {
         /// Print this build's result and diagnostics as JSON.
         #[arg(long)]
         json: bool,
-        /// Indent the JSON result. Requires --json.
+        /// Indent the JSON result for reading. Requires `--json`. Without it, JSON is compact.
         #[arg(long, requires = "json")]
         pretty: bool,
     },
 
-    /// Build and serve the site, rebuilding when files change.
-    Dev {
+    /// Build and check the site without writing the publish directory.
+    ///
+    /// Runs `before-build` and `generate-outputs` hooks. If a hook writes a Typst source,
+    /// the check compiles it. Use `--no-hooks` to skip both hook stages.
+    #[command(
+        after_long_help = "From the site root, run tola check --json --pretty to print the build result and diagnostics as JSON.\nUse tola check --no-build to check only the syntax of the site's Typst sources."
+    )]
+    Check {
+        #[command(flatten)]
+        process: ProcessArgs,
         #[command(flatten)]
         input: InputArgs,
         #[command(flatten)]
         site: SiteArgs,
         #[command(flatten)]
         build: BuildArgs,
-        #[command(flatten)]
-        development: DevelopmentArgs,
+
+        /// Parse the site's Typst sources to check their syntax.
+        ///
+        /// Run `tola check` without this flag to compile the site and check its output.
+        #[arg(long, conflicts_with_all = ["locked", "font_paths", "ignore_system", "minify", "origin", "base_path"])]
+        no_build: bool,
+        /// Skip before-build and generate-outputs hooks.
+        #[arg(long, conflicts_with = "no_build")]
+        no_hooks: bool,
+        /// Print this check's result and diagnostics as JSON.
+        #[arg(long)]
+        json: bool,
+        /// Indent the JSON result for reading. Requires `--json`. Without it, JSON is compact.
+        #[arg(long, requires = "json")]
+        pretty: bool,
     },
 
-    /// Build once and serve a local preview.
+    /// Build once with production settings and serve the result locally.
     ///
-    /// Uses production build settings without running after-publish commands.
+    /// The preview stays in memory. Run the command again to preview later edits.
+    /// Runs before-build and generate-outputs hooks.
+    #[command(
+        after_long_help = "From the site root, run tola preview --port 0 and open the printed URL.\nTola picks a free port and serves one production build. Press Ctrl+C to stop."
+    )]
     Preview {
+        #[command(flatten)]
+        process: ProcessArgs,
         #[command(flatten)]
         input: InputArgs,
         #[command(flatten)]
@@ -230,83 +291,44 @@ pub enum Commands {
         server: ServerArgs,
     },
 
-    /// Build and check the complete site without committing output files.
-    ///
-    /// Runs hooks.before-build and hooks.generate-outputs. These trusted
-    /// hook scripts may generate source files. Does not run after-publish commands.
-    Check {
-        #[command(flatten)]
-        input: InputArgs,
-        #[command(flatten)]
-        site: SiteArgs,
-        #[command(flatten)]
-        build: BuildArgs,
-
-        /// Analyze the site's own sources without building anything.
-        ///
-        /// Every `.typ` file the site owns is parsed, and the sources that do not parse are
-        /// reported. It compiles nothing, so it proves only that the sources parse — not imports,
-        /// evaluation, routes, or output.
-        #[arg(long)]
-        no_build: bool,
-        /// Skip build hooks when examining a candidate site.
-        #[arg(long, conflicts_with = "no_build")]
-        no_hooks: bool,
-        /// Print this check's result and diagnostics as JSON.
-        #[arg(long)]
-        json: bool,
-        /// Indent the JSON result. Requires --json.
-        #[arg(long, requires = "json")]
-        pretty: bool,
-    },
-
     /// Format the site's Typst sources.
+    #[command(after_long_help = "From the site root, run tola fmt --check to see which .typ files need formatting.\nRun tola fmt to apply the changes. With no site configuration, Tola formats .typ files\nunder the current directory with its default settings.")]
     Fmt {
         #[command(flatten)]
-        input: InputArgs,
+        process: ProcessArgs,
+        #[command(flatten)]
+        input: ScopeArgs,
         #[command(flatten)]
         site: SiteArgs,
-        /// Report the sources that are not formatted, without writing them.
+        /// Report files that need formatting and exit with an error if any need changes. Omit this flag to write the formatted files.
         #[arg(long)]
         check: bool,
     },
 
-    /// Inspect source files, resources, and resolved configuration.
-    Inspect {
+    /// Check site configuration, source paths, and local tools.
+    #[command(after_long_help = "From the site root, run tola doctor --json --pretty to print the environment and diagnostic report as JSON.")]
+    Doctor(DoctorArgs),
+
+    /// Refresh locked dependencies in `tola.lock`.
+    #[command(after_long_help = "From the site root, run tola update --dry-run to see what would change in tola.lock.\nTo update just a configured collection named lucide, run tola update lucide.")]
+    Update {
         #[command(flatten)]
-        input: InputArgs,
+        process: ProcessArgs,
+        #[command(flatten)]
+        input: OfflineArgs,
         #[command(flatten)]
         site: SiteArgs,
         #[command(flatten)]
-        fonts: CompilerFontArgs,
-        #[command(subcommand)]
-        command: InspectCommand,
+        update: UpdateArgs,
     },
 
-    /// Evaluate a model query declared by a module or an explicit Typst file.
-    Query {
-        #[command(flatten)]
-        input: InputArgs,
-        #[command(flatten)]
-        site: SiteArgs,
-        #[command(flatten)]
-        fonts: CompilerFontArgs,
-        #[command(flatten)]
-        query: QueryArgs,
-    },
-
-    /// Read project text and check or apply changes with explicit input digests.
-    Edit {
-        #[command(flatten)]
-        input: InputArgs,
-        #[command(flatten)]
-        site: SiteArgs,
-        #[command(subcommand)]
-        command: super::commands::edit::EditCommand,
-    },
-
-    /// Freeze the packages this site's build used into its own vendor directory.
+    /// Copy locked remote modules, Typst packages, and remote icon collections into the site.
+    #[command(
+        after_long_help = "In tola.toml, set path = \"vendor\" under [vendor]. Run tola vendor from the site root.\nIt prepares vendor/modules/, vendor/typst-packages/, and vendor/icons/ for tola build --pure.\nConfiguration examples: tola help \"[vendor]\" or tola help --lang zh \"[vendor]\"."
+    )]
     Vendor {
+        #[command(flatten)]
+        process: ProcessArgs,
         #[command(flatten)]
         input: InputArgs,
         #[command(flatten)]
@@ -317,10 +339,51 @@ pub enum Commands {
         fonts: CompilerFontArgs,
     },
 
-    /// Check site configuration, source paths, and local tools.
-    Doctor(DoctorArgs),
+    /// Check or package a standalone module directory.
+    #[command(after_long_help = "From a directory containing theme/tola-module.toml, run tola module check theme\nto check the manifest and declared files. See tola module pack --help for a release example.")]
+    Module {
+        #[command(flatten)]
+        process: ProcessArgs,
+        #[command(subcommand)]
+        command: ModuleCommand,
+    },
+
+    /// Inspect site inputs and the settings Tola uses.
+    #[command(after_long_help = "From the site root, run tola inspect config to read the settings Tola will use,\nor tola inspect sources to list the content files it finds.")]
+    Inspect {
+        #[command(flatten)]
+        process: ProcessArgs,
+        #[command(flatten)]
+        config: ConfigFileArgs,
+        #[command(subcommand)]
+        command: InspectCommand,
+    },
+
+    /// Run a module query or read a labeled metadata value from a Typst file.
+    #[command(after_long_help = "In the site root, create query.typ containing this line:\n  #metadata((title: \"Field notes\")) <result>\n\nRun tola query ./query.typ --label result --json from the same directory.\nIt prints {\"title\":\"Field notes\"}.")]
+    Query {
+        #[command(flatten)]
+        process: ProcessArgs,
+        #[command(flatten)]
+        input: InputArgs,
+        #[command(flatten)]
+        site: SiteArgs,
+        #[command(flatten)]
+        fonts: CompilerFontArgs,
+        #[command(flatten)]
+        query: QueryArgs,
+    },
+
+    /// Run a Nushell script or start the Nushell language server.
+    #[command(
+        override_usage = "tola nu [OPTIONS] <ENTRY> [ARGS]...\n       tola nu [OPTIONS] --lsp",
+        after_help = "Everything after <ENTRY> goes to the script, including --help.",
+        after_long_help = "Everything after <ENTRY> goes to the script, including --help.\n\nFrom a directory containing photo.png, run:\n  tola nu @tola-scripts/image metadata photo.png\nThis prints JSON with the image dimensions and format.\n\nFrom the site root, run this to see the options for tools/report.nu:\n  tola nu tools/report.nu --help"
+    )]
+    Nu(NuArgs),
 
     /// Configure or display editor integration.
+    #[command(after_long_help = "From the site root, run tola editor setup vscode --dry-run to see the files\nTola would write. Run it without --dry-run to apply those changes.")]
     Editor {
         #[command(subcommand)]
         command: EditorCommand,
@@ -328,8 +391,11 @@ pub enum Commands {
 
     /// Provide Tola source diagnostics and language queries over stdio.
     ///
-    /// A workspace that holds no `tola.toml` is served as the documents it holds.
+    /// If the workspace has no `tola.toml`, the server uses the default settings.
+    #[command(after_long_help = "Start tola lsp as a stdio language server in your editor's site workspace.\nFor example, run tola editor template helix to print the client settings for Helix.")]
     Lsp {
+        #[command(flatten)]
+        process: ProcessArgs,
         #[command(flatten)]
         input: InputArgs,
         #[command(flatten)]
@@ -338,53 +404,43 @@ pub enum Commands {
         fonts: CompilerFontArgs,
     },
 
+    /// Read configuration, package, and built-in script documentation.
+    #[command(after_long_help = "You can read the built-in reference from any directory.\nRun tola help \"[assets]\" for static-file settings, or\n  tola help \"@tola/image\" resize-image\nfor the function's signature and examples.")]
+    Help(HelpArgs),
+
     /// Print or export the Tola site authoring skill.
-    Skill(SkillArgs),
+    #[command(after_long_help = "Run these commands from any directory:\n  tola skill --list\n  tola skill site assets files\n  tola skill site assets --all -o assets-guide.md\nThe first lists sections, the second reads one section, and the third exports a section\nwith its subsections to assets-guide.md in the current directory.\nFor a module's own guide command, see tola help \"[modules]\".")]
+    Skill {
+        #[command(flatten)]
+        process: ProcessArgs,
+        #[command(flatten)]
+        args: SkillArgs,
+    },
 
     /// Write a shell completion script to stdout.
+    #[command(after_long_help = "From any directory, run tola completions zsh > _tola to write the Zsh completion script\nto _tola in the current directory.")]
     Completions(CompletionsArgs),
 
     /// Generate a roff manual page.
+    #[command(after_long_help = "From any directory, run tola manpage --output tola.1 to write a manual page in the current directory.\nRun man ./tola.1 to read it.")]
     Manpage(ManpageArgs),
 
-    /// Run the embedded Nushell runtime or its language server.
-    #[command(
-        override_usage = "tola nu [OPTIONS] <ENTRY> [ARGS]...\n       tola nu --lsp",
-        after_help = "`nu` runs the script directly: `-q`, `-v`, `--color`, `--log-file`, `--no-log-file`, `--lang` and `--no-pager` do not apply. `--pure` and `--offline` still set the script's input scope.",
-        after_long_help = "Examples:\n  tola nu tools/build.nu\n  tola nu @tola-scripts/image metadata photo.png\n  tola nu @tola-scripts/image resize photo.png --output photo.webp --format webp\n  tola nu @tola-modules/catalog --help\n\nIn Nu, `use tola` provides `tola query`; `use tola query` imports\nthe unqualified `query`. Import `use tola cli` for finite `cli capture`\nand `use tola image` for `image metadata` and `image resize`.\nUse `tola dev --json` as a native external command for continuous JSON lines.\nSite libraries use `use tola-modules catalog` and declare `[nu]` with\n`entry = \"tools/mod.nu\"` in tola-module.toml. Direct module invocations\nrun that entry's exported main command."
-    )]
-    Nu(NuArgs),
-
-    /// Read configuration and package documentation.
-    Help(HelpArgs),
-
     /// Print the Tola, Typst, and embedded Nu versions.
+    #[command(after_long_help = "From any directory, run tola version --json --pretty to print the three version numbers as indented JSON.")]
     Version(VersionArgs),
-
-    /// Display diagnostics from an independent check.
-    Diagnostic {
-        #[command(subcommand)]
-        command: DiagnosticCommand,
-    },
 
     /// Run a command declared by one of this site’s modules.
     #[command(external_subcommand)]
     Extension(Vec<OsString>),
 }
 
-#[derive(Subcommand, Debug, Clone)]
-pub enum DiagnosticCommand {
-    /// Read diagnostic records from stdin and print them. Locations use file paths.
-    Render,
-}
-
 /// Options for refreshing the inputs `tola.lock` records.
 #[derive(clap::Args, Debug, Clone)]
 pub struct UpdateArgs {
-    /// Module aliases or icon collection names to refresh; all remote inputs when omitted.
+    /// Module aliases or icon collection names to update. Omit the names to check all configured remote modules and icon collections.
     pub names: Vec<String>,
 
-    /// Report what would change without writing `tola.lock`.
+    /// Show what would change without writing `tola.lock`. May download inputs to the local cache.
     #[arg(long)]
     pub dry_run: bool,
 }
@@ -392,13 +448,13 @@ pub struct UpdateArgs {
 #[derive(clap::Args, Debug, Clone)]
 pub struct NuArgs {
     #[command(flatten)]
-    pub input: InputArgs,
+    pub input: ScopeArgs,
 
     #[command(flatten)]
     pub config: ConfigFileArgs,
 
-    /// Serve the Nushell language server over standard input and output.
-    #[arg(long, conflicts_with_all = ["stdin", "invocation", "lsp_worker", "lsp_snapshot"])]
+    /// Start the Nushell language server over stdio.
+    #[arg(long, display_order = 43, conflicts_with_all = ["stdin", "invocation", "lsp_worker", "lsp_snapshot"])]
     pub lsp: bool,
 
     #[arg(long, hide = true, requires = "lsp_snapshot", conflicts_with_all = ["stdin", "invocation", "lsp"])]
@@ -410,11 +466,11 @@ pub struct NuArgs {
     #[arg(long, hide = true, conflicts_with_all = ["path", "lsp", "lsp_worker", "lsp_snapshot"])]
     pub no_site: bool,
 
-    /// Pass standard input to the script.
-    #[arg(long)]
+    /// Pass stdin to the script. Put this flag before the script name.
+    #[arg(long, display_order = 39)]
     pub stdin: bool,
 
-    /// Script file or @tola-scripts/NAME / @tola-modules/ALIAS, followed by its arguments.
+    /// A .nu file, @tola-scripts/<NAME>, or @tola-modules/<ALIAS>, followed by script arguments.
     #[arg(value_name = "ENTRY", num_args = 1.., trailing_var_arg = true, required_unless_present_any = ["lsp", "lsp_worker"])]
     pub invocation: Vec<OsString>,
 }
@@ -422,17 +478,21 @@ pub struct NuArgs {
 #[derive(clap::Args, Debug, Clone, Default)]
 pub struct HelpArgs {
     #[command(flatten)]
-    pub input: InputArgs,
+    pub process: ProcessArgs,
 
-    /// `"[TABLE]"`, `"@tola-scripts/NAME" [EXPORT...]`, or a `tola-help://` address.
+    #[command(flatten)]
+    pub input: ScopeArgs,
+
+    /// A config table, `"@tola/NAME" [EXPORT...]`, `"@tola-scripts/NAME" [COMMAND...]`,
+    /// or a `tola-help://` address. Omit the target to open the help overview.
     #[arg(value_name = "TARGET", num_args = 0..)]
     pub targets: Vec<String>,
 
-    /// Browse documentation and source files in the terminal.
-    #[arg(short = 'i', long)]
+    /// Browse configuration, packages, and built-in scripts in the terminal.
+    #[arg(short = 'i', long, conflicts_with = "targets")]
     pub interactive: bool,
 
-    /// Output a readable page, its original Markdown, or structured JSON.
+    /// Print the help page as terminal text, Markdown, or JSON.
     #[arg(
         long,
         value_enum,
@@ -445,7 +505,7 @@ pub struct HelpArgs {
     #[arg(long, value_name = "LANGUAGE", value_parser = parse_help_language)]
     pub lang: Option<HelpLanguage>,
 
-    /// Do not page `tola help` documentation.
+    /// Print directly instead of opening the pager.
     #[arg(long)]
     pub no_pager: bool,
 }
@@ -455,7 +515,7 @@ pub struct VersionArgs {
     /// Print the versions as JSON.
     #[arg(long)]
     pub json: bool,
-    /// Indent the JSON output. Requires --json.
+    /// Indent the JSON output for reading. Requires `--json`. Without it, JSON is compact.
     #[arg(long, requires = "json")]
     pub pretty: bool,
 }
@@ -470,6 +530,9 @@ pub enum HelpFormat {
 
 #[derive(clap::Args, Debug, Clone)]
 pub struct CompletionsArgs {
+    #[command(flatten)]
+    pub process: ProcessArgs,
+
     /// Shell to generate completions for.
     #[arg(value_enum)]
     pub shell: CompletionShell,
@@ -488,6 +551,9 @@ pub enum CompletionShell {
 
 #[derive(clap::Args, Debug, Clone, Default)]
 pub struct ManpageArgs {
+    #[command(flatten)]
+    pub process: ProcessArgs,
+
     /// Write the generated roff document to a file instead of stdout.
     #[arg(short, long, value_hint = clap::ValueHint::FilePath)]
     pub output: Option<PathBuf>,
@@ -499,7 +565,7 @@ pub struct SkillArgs {
     #[arg(value_name = "SECTION", num_args = 0..)]
     pub sections: Vec<String>,
 
-    /// List the selected topic and its heading paths without loading their bodies.
+    /// List the section names in a topic.
     #[arg(long, conflicts_with = "all")]
     pub list: bool,
 
@@ -520,43 +586,43 @@ pub struct InitArgs {
     #[command(flatten)]
     pub input: InputArgs,
 
-    /// Site directory; omit to initialize the current directory.
+    /// Directory to create or initialize. If omitted, use the current directory.
     #[arg(value_hint = clap::ValueHint::DirPath)]
     pub path: Option<PathBuf>,
 
-    /// Preview the site files and configuration without creating them.
+    /// Show the files and configuration that would be written. With `--from`, Tola runs the initializer to prepare this preview.
     #[arg(long)]
     pub dry_run: bool,
 
-    /// Allow a non-empty directory; existing files are never overwritten.
+    /// Allow a non-empty directory. Tola keeps existing files and rejects name conflicts.
     #[arg(long)]
     pub force: bool,
 
-    /// Use an initializer from a directory, Git URL, or tar.gz, tar.zst, or ZIP archive.
+    /// Use an initializer from a local directory, Git URL, or archive (`.tar.gz`, `.tar.zst`, `.zip`). Supply `--alias NAME`. If omitted, use Tola's starter files.
     #[arg(long, value_name = "SOURCE")]
     pub from: Option<OsString>,
 
-    /// Git branch providing the initializer.
+    /// Use the initializer from this Git branch.
     #[arg(long, requires = "from", conflicts_with_all = ["tag", "rev"])]
     pub branch: Option<String>,
 
-    /// Git tag providing the initializer.
+    /// Use the initializer at this Git tag.
     #[arg(long, requires = "from", conflicts_with_all = ["branch", "rev"])]
     pub tag: Option<String>,
 
-    /// Full Git commit providing the initializer.
+    /// Use the initializer at this full Git commit hash.
     #[arg(long, requires = "from", conflicts_with_all = ["branch", "tag"])]
     pub rev: Option<String>,
 
-    /// Module directory inside the Git repository.
+    /// Module directory inside the Git repository. If omitted, look at the repository root.
     #[arg(long, requires = "from")]
     pub subdir: Option<PathBuf>,
 
-    /// Choose the module alias in the new site.
+    /// Module alias to write in the new site. Required when you use `--from`.
     #[arg(long, value_name = "NAME", requires = "from")]
     pub alias: Option<String>,
 
-    /// Confirm the files to write or enable the module's interactive setup.
+    /// Review the starter files before writing. With `--from`, let the initializer prompt for input. Omit this flag to run without prompts.
     #[arg(short = 'i', long)]
     pub interactive: bool,
 
@@ -567,14 +633,14 @@ pub struct InitArgs {
 
 #[derive(clap::Args, Debug, Clone, Default)]
 pub struct ConfigFileArgs {
-    /// Site configuration file.
+    /// Path to the site's TOML configuration.
     ///
     /// Without this option, commands search the current and parent directories for `tola.toml`.
     /// The Typst language server instead checks only the client's workspace root.
     #[arg(
         short = 'C',
         long = "config",
-        help_heading = "Site options",
+        value_name = "FILE",
         value_hint = clap::ValueHint::FilePath
     )]
     pub path: Option<PathBuf>,
@@ -582,48 +648,51 @@ pub struct ConfigFileArgs {
 
 #[derive(clap::Args, Debug, Clone, Default)]
 pub struct TypstPackageArgs {
-    /// Local Typst package directory on this host, searched after the site's vendored packages.
+    /// Search this local Typst package directory. Omit it to use Typst's normal local directory.
     ///
-    /// It cannot replace what `{vendor}/typst-packages` already carries; `tola vendor --refresh`
-    /// re-selects without reading that copy.
-    #[arg(long, help_heading = "Site options", value_hint = clap::ValueHint::DirPath)]
+    /// Packages in `{vendor}/typst-packages` take priority. Use `tola vendor --refresh`
+    /// to refresh them from their sources.
+    #[arg(long, help_heading = "Build", value_name = "DIR", value_hint = clap::ValueHint::DirPath)]
     pub package_path: Option<PathBuf>,
 
-    /// Typst package cache directory on this host, searched after the local package directory.
-    #[arg(long, help_heading = "Site options", value_hint = clap::ValueHint::DirPath)]
+    /// Use this Typst package cache. If omitted, use Typst's configured or system cache directory.
+    ///
+    /// Tola searches the local package directory first.
+    #[arg(long, help_heading = "Build", value_name = "DIR", value_hint = clap::ValueHint::DirPath)]
     pub package_cache_path: Option<PathBuf>,
 }
 
 #[derive(clap::Args, Debug, Clone, Default)]
 pub struct BuildOverrideArgs {
-    /// Override the configured published directory for this build.
+    /// Set where Tola writes the built site.
     ///
-    /// A relative path starts at the site root. Choose a directory inside the site that is empty
-    /// or already owned by Tola for this site.
-    #[arg(short = 'o', long, help_heading = "Build options", value_hint = clap::ValueHint::DirPath)]
+    /// Relative paths start at the site root. Omit this flag to use `build.publish-dir` (`public/`
+    /// by default). Use an empty directory or one where Tola has published this site before.
+    #[arg(short = 'o', long, help_heading = "Build", value_name = "DIR", value_hint = clap::ValueHint::DirPath)]
     pub publish_dir: Option<PathBuf>,
 
-    /// Enable or disable HTML, CSS, and JavaScript minification; omit the value for true.
-    #[arg(short, long, help_heading = "Build options", num_args = 0..=1, default_missing_value = "true")]
+    /// Use `--minify=false` to turn off HTML, CSS, and JavaScript minification for this run.
+    /// Pass `--minify` alone to turn all three on. Omit it to use `[build.minify]`.
+    #[arg(short, long, help_heading = "Build", value_name = "BOOL", num_args = 0..=1, default_missing_value = "true")]
     pub minify: Option<bool>,
 
-    /// Override the site origin, such as <https://example.com> (no path).
-    #[arg(long, help_heading = "Build options", value_hint = clap::ValueHint::Url)]
+    /// Use an origin such as `https://example.com` for this run. Omit it to use `site.origin`.
+    #[arg(long, help_heading = "Build", value_name = "URL", value_hint = clap::ValueHint::Url)]
     pub origin: Option<String>,
 
-    /// Override the deployment URL path, such as /docs/.
-    #[arg(long = "base-path", help_heading = "Build options")]
+    /// Use a deployment path such as `/docs/` for this run. Omit it to use `site.base-path` (`/` by default).
+    #[arg(long = "base-path", help_heading = "Build")]
     pub base_path: Option<String>,
 }
 
 #[derive(clap::Args, Debug, Clone, Default)]
 pub struct ServerArgs {
-    /// IP address to bind, such as 127.0.0.1 or 0.0.0.0.
-    #[arg(short, long)]
+    /// Listen on this IP address. If omitted, use `[server] interface` (`127.0.0.1` by default). Use `0.0.0.0` to accept connections from other machines.
+    #[arg(short, long, value_name = "IP", help_heading = "Server and rebuilds")]
     pub interface: Option<std::net::IpAddr>,
 
-    /// HTTP port; use 0 to let the operating system choose.
-    #[arg(short, long)]
+    /// Listen on this port. Use `0` to pick a free port. If omitted, use `[server] port` (`5277` by default).
+    #[arg(short, long, help_heading = "Server and rebuilds")]
     pub port: Option<u16>,
 }
 
@@ -632,31 +701,38 @@ pub struct DevelopmentArgs {
     #[command(flatten)]
     pub server: ServerArgs,
 
-    /// Enable or disable automatic rebuilds; omit the value for true.
-    #[arg(short, long, num_args = 0..=1, default_missing_value = "true")]
+    /// Use `--watch=false` to turn off file watching for this run. `--watch` turns it on. If omitted, use `[dev] watch` (on by default).
+    #[arg(short, long, value_name = "BOOL", num_args = 0..=1, default_missing_value = "true", help_heading = "Server and rebuilds")]
     pub watch: Option<bool>,
 
-    /// Run every reusable generator on each rebuild; disable `dev = "reuse"` for this session.
-    #[arg(long)]
+    /// Run `generate-outputs` hooks on every rebuild even if they use `dev = "reuse"`.
+    #[arg(long, help_heading = "Server and rebuilds")]
     pub no_reuse: bool,
-
-    /// Print development events as JSON lines.
-    ///
-    /// Writes one event per line to stdout; logs and hook output go to stderr.
-    /// Events report server readiness, builds, after-publish hooks, and shutdown.
-    #[arg(long)]
-    pub json: bool,
 }
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum InspectCommand {
-    /// List discovered content source files without evaluating their metadata.
+    /// List the site's content source files.
+    #[command(override_usage = "tola inspect [-C <FILE>] sources [OPTIONS] [PATH]...")]
+    #[command(after_long_help = "From the site root, run tola inspect sources content/guide.typ to check whether that file\nis selected as a content source. Omit the path to list all sources.")]
     Sources(SourceInspectArgs),
     /// List configured icon collections or the names in one collection.
+    #[command(after_long_help = "From the site root, run tola inspect icons brand to list icons in the site's brand collection.\nUse tola inspect icons brand --module notes to read the collection from the notes module.")]
     Icons(IconInspectArgs),
-    /// List the fonts available to the Typst compiler, independently of browser CSS fonts.
-    Fonts(OutputArgs),
-    /// Show resolved configuration, module choices, and site paths.
+    /// List the fonts available when Typst compiles the site.
+    #[command(after_long_help = "From the site root, run tola inspect fonts --json to list the fonts available to the Typst compiler.")]
+    Fonts {
+        #[command(flatten)]
+        input: ScopeArgs,
+        #[command(flatten)]
+        packages: TypstPackageArgs,
+        #[command(flatten)]
+        fonts: CompilerFontArgs,
+        #[command(flatten)]
+        display: OutputArgs,
+    },
+    /// Show the settings, modules, and paths Tola uses for this site.
+    #[command(after_long_help = "From the site root, run tola inspect config --mode dev --json --pretty.\nLook in hooks.stages for the hook order and skip reasons. If you use include,\nconfig_sources lists the loaded files and field_origins shows where each setting came from.\nInspection never runs hooks.")]
     Config(InspectConfigArgs),
 }
 
@@ -668,7 +744,7 @@ pub struct QueryArgs {
     /// the site. For example, `tola query ./query.typ --label result`.
     #[arg(value_name = "TARGET")]
     pub target: String,
-    /// Metadata label to read from an explicit Typst query file.
+    /// Label to read from a Typst query file. For `<result>`, pass `--label result`. Module queries already declare their label.
     #[arg(long, value_name = "LABEL")]
     pub label: Option<String>,
     #[command(flatten)]
@@ -677,22 +753,28 @@ pub struct QueryArgs {
 
 #[derive(clap::Args, Debug, Clone, Default)]
 pub struct OutputArgs {
-    /// Write the machine-readable result as compact JSON.
+    /// Print the result as JSON.
     #[arg(long)]
     pub json: bool,
-    /// Indent the JSON output. Requires --json.
+    /// Indent the JSON output for reading. Requires `--json`. Without it, JSON is compact.
     #[arg(long, requires = "json")]
     pub pretty: bool,
-    /// Write the machine-readable result to this file. Requires --json.
-    #[arg(long, requires = "json", value_hint = clap::ValueHint::FilePath)]
+    /// Write JSON to `FILE`. Requires `--json`. If omitted, JSON goes to stdout.
+    #[arg(long, requires = "json", value_name = "FILE", value_hint = clap::ValueHint::FilePath)]
     pub output: Option<PathBuf>,
-    /// Browse the result in a terminal; Enter returns the selected value, q closes.
-    #[arg(short = 'i', long, conflicts_with_all = ["json", "output"])]
+    /// Browse and select results in the terminal.
+    ///
+    /// Press Enter to return the selected value, or q to close.
+    #[arg(short = 'i', long, conflicts_with = "json")]
     pub interactive: bool,
 }
 
 #[derive(clap::Args, Debug, Clone, Default)]
 pub struct InspectConfigArgs {
+    #[command(flatten)]
+    pub input: ScopeArgs,
+    #[command(flatten)]
+    pub packages: TypstPackageArgs,
     #[command(flatten)]
     pub build: BuildOverrideArgs,
     #[command(flatten)]
@@ -701,7 +783,9 @@ pub struct InspectConfigArgs {
 
 #[derive(clap::Args, Debug, Clone, Default)]
 pub struct IconInspectArgs {
-    /// Configured namespace whose icon names should be listed.
+    #[command(flatten)]
+    pub input: InputArgs,
+    /// Collection name from `icons.collections`. Omit it to list configured collections.
     #[arg(value_name = "NAMESPACE")]
     pub namespace: Option<String>,
     #[command(flatten)]
@@ -710,8 +794,14 @@ pub struct IconInspectArgs {
 
 #[derive(clap::Args, Debug, Clone, Default)]
 pub struct SourceInspectArgs {
-    /// Content source files or directories; use - to read paths from stdin.
-    #[arg(value_hint = clap::ValueHint::AnyPath)]
+    /// Require content sources to stay inside the site.
+    #[arg(long)]
+    pub pure: bool,
+
+    /// Files or directories. Use '-' to read paths from stdin.
+    ///
+    /// Omit paths to list all sources. Pass '-' alone to read one path per line.
+    #[arg(value_name = "PATH", value_hint = clap::ValueHint::AnyPath)]
     pub paths: Vec<PathBuf>,
     #[command(flatten)]
     pub display: OutputArgs,
@@ -720,7 +810,10 @@ pub struct SourceInspectArgs {
 #[derive(clap::Args, Debug, Clone, Default)]
 pub struct DoctorArgs {
     #[command(flatten)]
-    pub input: InputArgs,
+    pub process: ProcessArgs,
+
+    #[command(flatten)]
+    pub input: ScopeArgs,
 
     #[command(flatten)]
     pub site: SiteArgs,
@@ -728,7 +821,7 @@ pub struct DoctorArgs {
     /// Print environment and diagnostics as JSON for issue reports.
     #[arg(long)]
     pub json: bool,
-    /// Indent the JSON output. Requires --json.
+    /// Indent the JSON output for reading. Requires `--json`. Without it, JSON is compact.
     #[arg(long, requires = "json")]
     pub pretty: bool,
 }
@@ -736,30 +829,34 @@ pub struct DoctorArgs {
 /// The compiler font inputs one invocation overrides.
 #[derive(clap::Args, Debug, Clone, Default)]
 pub struct CompilerFontArgs {
-    /// Extra compiler font directories for this invocation, searched before `[typst.fonts] paths`.
+    /// Add a directory to search for Typst fonts. Repeat for each directory.
     ///
-    /// Repeat the flag for more than one directory. A relative path resolves against the
-    /// invocation directory. `--pure` refuses these.
+    /// Tola searches these directories before `[typst.fonts] paths`. Relative paths
+    /// start in the directory where you run the command. Unavailable with `--pure`.
     #[arg(
         id = "font_paths",
         long = "font-path",
-        help_heading = "Font options",
+        help_heading = "Build",
         value_name = "DIR",
         value_hint = clap::ValueHint::DirPath
     )]
     pub paths: Vec<PathBuf>,
 
-    /// Do not use system fonts, even when `[typst.fonts] system` is on.
-    #[arg(long = "ignore-system-fonts", help_heading = "Font options")]
+    /// Skip system fonts for this run. If omitted, follow `[typst.fonts] system`.
+    #[arg(long = "ignore-system-fonts", help_heading = "Build")]
     pub ignore_system: bool,
 }
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum EditorCommand {
     /// Regenerate editor packages and merge workspace settings.
+    #[command(after_long_help = "From the site root, run tola editor setup helix --dry-run to preview the Helix setup.\nOmit --dry-run to write the files.")]
     Setup {
         #[command(flatten)]
-        input: InputArgs,
+        process: ProcessArgs,
+
+        #[command(flatten)]
+        input: ScopeArgs,
         #[command(flatten)]
         site: SiteArgs,
 
@@ -769,20 +866,28 @@ pub enum EditorCommand {
         /// Print the editors Tola configures and the settings any other LSP client needs, then stop.
         #[arg(long)]
         list: bool,
-        /// Report the editor files, package inputs, and removals this setup would apply without writing them.
+        /// List the files this setup would write or remove. Omit this flag to apply the changes.
         #[arg(long)]
         dry_run: bool,
     },
     /// Regenerate editor packages without changing editor settings.
+    #[command(after_long_help = "From the site root, run tola editor packages after updating a module to refresh the Typst packages used by your editor.")]
     Packages {
         #[command(flatten)]
-        input: InputArgs,
+        process: ProcessArgs,
+
+        #[command(flatten)]
+        input: ScopeArgs,
         #[command(flatten)]
         site: SiteArgs,
     },
     /// Print one editor's configuration and where it belongs, without writing files.
+    #[command(after_long_help = "From any directory, run tola editor template helix to print the configuration for .helix/languages.toml.")]
     Template {
-        /// Editor configuration to print.
+        #[command(flatten)]
+        process: ProcessArgs,
+
+        /// Editor whose settings to print.
         #[arg(value_enum)]
         editor: Editor,
     },
@@ -790,56 +895,79 @@ pub enum EditorCommand {
 
 #[derive(clap::Args, Debug, Clone, Default)]
 pub struct VendorArgs {
-    /// Resolve without the existing vendor copy, then replace it after validation.
+    /// Select dependencies again from their configured sources. If omitted, Tola can use the existing vendor copy.
     #[arg(long)]
     pub refresh: bool,
 
-    /// Prepare and validate without replacing vendor; may fetch, cache, and acquire the site lock.
+    /// Check what would go into vendor without replacing it.
     ///
-    /// A replacement interrupted before it finished refuses this dry run and leaves the vendor
-    /// trees and the working files unchanged; run `tola vendor` to complete the replacement.
-    /// Vendoring runs no hooks and does not publish site output.
+    /// This may fetch dependencies and update the cache. If a previous replacement was
+    /// interrupted, run `tola vendor` to finish it before using `--dry-run`.
     #[arg(long)]
     pub dry_run: bool,
 }
 
 impl Commands {
-    /// Input options this command accepts, when it resolves inputs.
-    pub(crate) fn input(&self) -> Option<&InputArgs> {
+    pub(super) fn process(&self) -> ProcessArgs {
         match self {
-            Self::Update { input, .. }
-            | Self::Build { input, .. }
-            | Self::Dev { input, .. }
-            | Self::Preview { input, .. }
-            | Self::Check { input, .. }
-            | Self::Fmt { input, .. }
-            | Self::Inspect { input, .. }
-            | Self::Query { input, .. }
-            | Self::Edit { input, .. }
-            | Self::Vendor { input, .. }
-            | Self::Lsp { input, .. } => Some(input),
-            Self::Init(args) => Some(&args.input),
-            Self::Doctor(args) => Some(&args.input),
-            Self::Nu(args) => Some(&args.input),
-            Self::Help(args) => Some(&args.input),
-            Self::Editor { command } => match command {
-                EditorCommand::Setup { input, .. } | EditorCommand::Packages { input, .. } => {
-                    Some(input)
-                }
-                EditorCommand::Template { .. } => None,
-            },
-            Self::Module { .. }
-            | Self::Skill(_)
-            | Self::Version(_)
-            | Self::Completions(_)
-            | Self::Manpage(_)
-            | Self::Diagnostic { .. } => None,
-            Self::Extension(_) => None,
+            Self::Init { process, .. }
+            | Self::Skill { process, .. }
+            | Self::Update { process, .. }
+            | Self::Module { process, .. }
+            | Self::Build { process, .. }
+            | Self::Dev { process, .. }
+            | Self::Preview { process, .. }
+            | Self::Check { process, .. }
+            | Self::Fmt { process, .. }
+            | Self::Inspect { process, .. }
+            | Self::Query { process, .. }
+            | Self::Vendor { process, .. }
+            | Self::Lsp { process, .. }
+            | Self::Editor {
+                command:
+                    EditorCommand::Setup { process, .. }
+                    | EditorCommand::Packages { process, .. }
+                    | EditorCommand::Template { process, .. },
+            } => process.clone(),
+            Self::Help(args) => args.process.clone(),
+            Self::Doctor(args) => args.process.clone(),
+            Self::Manpage(args) => args.process.clone(),
+            Self::Completions(args) => args.process.clone(),
+            Self::Nu(_) | Self::Version(_) | Self::Extension(_) => ProcessArgs::default(),
         }
     }
 
-    /// Site inputs this command reads, when it reads a site.
-    pub(crate) fn site(&self) -> Option<&SiteArgs> {
+    pub(super) fn input_mode(&self) -> InputMode {
+        let scope = match self {
+            Self::Build { input, .. }
+            | Self::Dev { input, .. }
+            | Self::Preview { input, .. }
+            | Self::Check { input, .. }
+            | Self::Query { input, .. }
+            | Self::Vendor { input, .. }
+            | Self::Lsp { input, .. } => return input.mode(),
+            Self::Init { args, .. } => return args.input.mode(),
+            Self::Update { input, .. } => input.scope(),
+            Self::Fmt { input, .. }
+            | Self::Editor {
+                command: EditorCommand::Setup { input, .. } | EditorCommand::Packages { input, .. },
+            } => input.scope(),
+            Self::Inspect { command, .. } => match command {
+                InspectCommand::Icons(args) => return args.input.mode(),
+                InspectCommand::Config(args) => args.input.scope(),
+                InspectCommand::Fonts { input, .. } => input.scope(),
+                InspectCommand::Sources(args) if args.pure => InputScope::Pure,
+                InspectCommand::Sources(_) => InputScope::Online,
+            },
+            Self::Doctor(args) => args.input.scope(),
+            Self::Nu(args) => args.input.scope(),
+            Self::Help(args) => args.input.scope(),
+            _ => InputScope::Online,
+        };
+        InputMode::new(scope, false)
+    }
+
+    pub(super) fn config_file(&self) -> Option<&ConfigFileArgs> {
         match self {
             Self::Update { site, .. }
             | Self::Build { site, .. }
@@ -848,21 +976,15 @@ impl Commands {
             | Self::Vendor { site, .. }
             | Self::Dev { site, .. }
             | Self::Preview { site, .. }
-            | Self::Inspect { site, .. }
-            | Self::Edit { site, .. }
             | Self::Lsp { site, .. }
             | Self::Query { site, .. }
             | Self::Editor {
                 command: EditorCommand::Setup { site, .. } | EditorCommand::Packages { site, .. },
-            } => Some(site),
-            Self::Doctor(args) => Some(&args.site),
+            } => Some(&site.config),
+            Self::Inspect { config, .. } => Some(config),
+            Self::Doctor(args) => Some(&args.site.config),
             _ => None,
         }
-    }
-
-    /// Site configuration this command loads, when it loads one.
-    pub(crate) fn config_file(&self) -> Option<&ConfigFileArgs> {
-        self.site().map(|site| &site.config)
     }
 }
 
@@ -872,25 +994,16 @@ mod tests {
     use clap::CommandFactory;
 
     #[test]
-    fn font_options_never_become_source_paths() {
-        let cli = Cli::try_parse_from([
-            "tola",
-            "inspect",
-            "--font-path",
-            "fonts",
-            "sources",
-            "content/QHXS.typ",
-        ])
-        .unwrap();
+    fn font_options_belong_to_font_inspection() {
+        let cli =
+            Cli::try_parse_from(["tola", "inspect", "fonts", "--font-path", "fonts"]).unwrap();
         let Commands::Inspect {
-            command: InspectCommand::Sources(sources),
-            fonts,
+            command: InspectCommand::Fonts { fonts, .. },
             ..
         } = cli.command
         else {
-            panic!("expected source inspection");
+            panic!("expected font inspection");
         };
-        assert_eq!(sources.paths, [PathBuf::from("content/QHXS.typ")]);
         assert_eq!(fonts.paths, [PathBuf::from("fonts")]);
     }
 
@@ -913,15 +1026,15 @@ mod tests {
 
     #[test]
     fn verbosity_counts_repeated_flags() {
-        let cli = Cli::try_parse_from(["tola", "-vv", "build"]).unwrap();
-        assert_eq!(cli.global.verbose, 2);
+        let cli = Cli::try_parse_from(["tola", "build", "-vv"]).unwrap();
+        assert_eq!(cli.command.process().verbose, 2);
     }
 
     #[test]
     fn init_forwards_arguments_after_separator() {
         let cli = Cli::try_parse_from(["tola", "init", "site", "--from", "theme", "--", "--force"])
             .unwrap();
-        let Commands::Init(args) = cli.command else {
+        let Commands::Init { args, .. } = cli.command else {
             panic!("expected init");
         };
         assert_eq!(args.args, [OsString::from("--force")]);
@@ -950,7 +1063,7 @@ mod tests {
     #[test]
     fn input_options_live_on_their_command() {
         let cli = Cli::try_parse_from(["tola", "build", "--locked"]).unwrap();
-        assert!(cli.command.input().unwrap().mode().locked());
+        assert!(cli.command.input_mode().locked());
         assert!(Cli::try_parse_from(["tola", "--pure", "build"]).is_err());
         assert!(Cli::try_parse_from(["tola", "completions", "--pure", "zsh"]).is_err());
     }
@@ -974,6 +1087,13 @@ mod tests {
         for argv in [
             &["tola", "fmt", "--font-path", "f"][..],
             &["tola", "inspect", "sources", "-C", "x.toml"][..],
+            &["tola", "inspect", "sources", "--font-path", "fonts"][..],
+            &["tola", "check", "--no-build", "--font-path", "fonts"][..],
+            &["tola", "update", "--locked"][..],
+            &["tola", "update", "--pure"][..],
+            &["tola", "nu", "--log-file", "trace", "script.nu"][..],
+            &["tola", "build", "--no-log-file"][..],
+            &["tola", "-v", "build"][..],
             &["tola", "build", "--interface", "127.0.0.1"][..],
         ] {
             assert!(!parses(argv), "{argv:?} must be refused");

@@ -3,19 +3,18 @@
 use serde::{Deserialize, Serialize};
 use tola_config::Config;
 
-/// The diagnostic level of the check for a link, resource, or fragment in a published page that
-/// points at nothing (the check itself always runs).
+/// Choose whether a broken link, resource, or fragment is an error or a warning.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, Config)]
 #[serde(default)]
 #[config(section = "build.references")]
 pub struct ReferencesConfig {
-    /// A link to another page of the site, such as `<a href="/missing/">`.
+    /// Use `warn` to report a missing page as a warning. If omitted, a missing page is an error.
     pub navigation: ReferenceLevel,
 
-    /// A subresource a page loads, such as `<img src="/assets/missing.png">`.
+    /// Use `warn` for a missing file or a media type mismatch. If omitted, both are errors.
     pub resources: ReferenceLevel,
 
-    /// A fragment a link names, such as `<a href="/page/#missing">`.
+    /// Use `warn` when the anchor after `#` is missing. If omitted, a missing anchor is an error.
     pub fragments: ReferenceLevel,
 }
 
@@ -30,46 +29,49 @@ pub enum ReferenceLevel {
 impl ReferencesConfig {
     /// What `tola help "[build.references]"` adds under its table.
     pub const HELP: &'static str = "\
-Only two kinds of destination are checked: a relative one (such as `guide/` or `../guide/`,
-resolved against the page's URL) and a site-root one (such as `/guide/`, resolved against the site
-root). A destination naming a scheme or host is an external link, which this build cannot check —
-`https://example.com/guide/`.
+Missing links, resources, and fragments default to `error`. To report missing pages as warnings,
+add this to `tola.toml`.
 
-The check reads URL attributes (`href`, `src`, and the like) in the final HTML, hand-written HTML
-included. It resolves them the way a browser does: a relative destination resolves against the
-page's own URL, or against the page's first `<base href>` when it declares one. A `<base href>`
-naming another origin points every relative destination of the page at that site: Tola does not
-check them, and a warning (`reference.base_href_external_origin`) says the page was left unchecked.
-Remove the `<base href>`, or write it as a relative address (`/`, or `/docs/` under a
-`site.base-path`).
+```toml
+[build.references]
+navigation = \"warn\"
+```
 
-Each unresolved reference is reported under its category's diagnostic, at that field's level:
+In a site created with `tola init`, write this in `content/index.typ`. Leave `/missing/` unpublished.
 
-- `navigation`: a linked page missing from the output, such as `<a href=\"/missing/\">`, reports
-  `reference.navigation_missing`
-- `resources`: a resource the page loads missing from the output, such as
-  `<img src=\"/assets/missing.png\">`, reports `reference.resource_missing`; a target whose media
-  type does not match, such as `<script src=\"/assets/site.css\">`, reports
-  `reference.resource_media_mismatch`
-- `fragments`: a fragment the link names missing from the target page, such as
-  `<a href=\"/guide/#missing\">`, reports `reference.fragment_missing`; when the target page
-  itself is missing, the whole reference reports as `navigation`, and the fragment is not reported
-  on its own
+```typst
+#link(\"/missing/\")[Read the guide]
+```
 
-`#top` is built into browsers: the part of a URL after `#` is its fragment, and the fragment `top`
-goes to the top of the page, so the page needs no `id=\"top\"`. A browser text fragment such as
-`#:~:text=words`, and a fragment into a non-HTML file such as `/data.json#missing`, are never
-reported as `reference.fragment_missing`.
+Run `tola check` from the site root. The terminal reports a `reference.navigation_missing`
+warning for `/missing/`.
 
-The checks run after every output exists and before anything is published to `publish-dir`,
-against this build's complete output: the HTML pages the Typst Bundle compiles, the files
-`[assets]` declares, and the files a `generate-outputs` hook writes — a link to a file a hook
-writes is valid, and is not reported as missing.
+Tola checks `href`, `src`, and other URL attributes in the final HTML, including
+handwritten HTML. It checks site links such as `../guide/` and `/guide/`, and skips
+URLs with a scheme or host, such as `https://example.com/guide/`.
 
-`tola check` runs the same check as `tola build`, `tola dev`, and `tola preview`, without replacing
-the publish directory.
+Relative links use the page's URL or the first `<base href>` on the page. If that
+`<base href>` points to another origin, Tola skips the page's relative links and
+reports `reference.base_href_external_origin`. To check those links, remove the
+`<base href>` or set it to a path on the site, such as `/` or `/docs/` for a site
+deployed under `/docs/`.
 
-`references()` from `@tola/document` is a separate query over native Bundle links and refs. It
-does not include raw HTML or other producers' outputs, and `found` does not guarantee that the
-final HTML defines the fragment (`tola help \"@tola/document\" references`).";
+| Setting | Problem | Diagnostic code |
+| --- | --- | --- |
+| `navigation` | The destination page is missing | `reference.navigation_missing` |
+| `resources` | The resource file is missing | `reference.resource_missing` |
+| `resources` | The media type does not match, as in `<script src=\"/assets/site.css\">` | `reference.resource_media_mismatch` |
+| `fragments` | The page exists but the linked anchor is missing | `reference.fragment_missing` |
+
+If the page itself is missing, Tola reports only the navigation error or warning.
+It skips fragments that browsers handle directly, such as `#top` and `#:~:text=words`.
+It also skips fragments in files other than HTML, such as `/data.json#missing`.
+
+Tola checks all outputs before publishing. Links may point to pages generated by
+Typst, files listed in `[assets]`, and files written by `generate-outputs` hooks.
+`tola check`, `tola build`, `tola dev`, and `tola preview` all run the check. Use
+`tola check` to check the site while keeping the existing published files.
+
+To query Typst `link` and `ref` elements from a template, use `references()` from
+`@tola/document`. To check the final HTML, use `tola check`.";
 }

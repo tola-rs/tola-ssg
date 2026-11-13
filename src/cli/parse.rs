@@ -2,12 +2,15 @@
 
 use std::process::ExitCode;
 
-use clap::{ColorChoice, CommandFactory, FromArgMatches, error::ErrorKind};
+use clap::{
+    CommandFactory, FromArgMatches,
+    builder::StyledStr,
+    error::{ContextKind, ContextValue, ErrorKind},
+};
 use tola_input::InputMode;
 
 use super::args::{Cli, Commands, ConfigFileArgs, ProcessArgs};
 use super::commands::extensions;
-use crate::terminal::color::{Stream, enabled};
 
 pub(super) struct ParsedCommand {
     pub name: String,
@@ -23,7 +26,7 @@ pub(super) enum Command {
 impl Command {
     pub fn input_mode(&self) -> InputMode {
         match self {
-            Self::Builtin(command) => command.input().copied().unwrap_or_default().mode(),
+            Self::Builtin(command) => command.input_mode(),
             Self::Extension(args) => args.input.mode(),
         }
     }
@@ -39,47 +42,55 @@ impl Command {
 impl ParsedCommand {
     pub fn parse() -> Result<Self, ExitCode> {
         let arguments = std::env::args_os().collect::<Vec<_>>();
-        let color = super::argv::color_hint(&arguments);
-        let mut command = Cli::command().color(stream_color(color, Stream::Stdout));
+        let mut command = Cli::command();
         if arguments.len() == 1 {
-            return Err(super::usage::root(command.render_help(), color));
+            return Err(super::usage::root(command.render_help()));
         }
         let matches = match command.try_get_matches_from_mut(&arguments) {
             Ok(matches) => matches,
             Err(error) if error.kind() == ErrorKind::DisplayHelp => {
                 return Err(super::usage::render(&arguments, error));
             }
-            Err(error) if error.use_stderr() => {
-                error
-                    .with_cmd(&command.color(stream_color(color, Stream::Stderr)))
-                    .exit();
+            Err(mut error) => {
+                add_placement_hint(&mut error, &arguments);
+                error.exit();
             }
-            Err(error) => error.exit(),
         };
         let name = matches.subcommand_name().expect("clap requires a command");
-        let Cli {
-            mut global,
-            command,
-        } = Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
-        let command = match command {
-            Commands::Extension(arguments) => Command::Extension(
-                extensions::ExtensionArgs::parse(name, &arguments[1..], &mut global)
-                    .unwrap_or_else(|error| error.exit()),
-            ),
-            command => Command::Builtin(command),
+        let Cli { command } = Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
+        let (command, process) = match command {
+            Commands::Extension(arguments) => {
+                let (args, process) = extensions::ExtensionArgs::parse(name, &arguments[1..])
+                    .unwrap_or_else(|error| error.exit());
+                (Command::Extension(args), process)
+            }
+            command => {
+                let process = command.process();
+                (Command::Builtin(command), process)
+            }
         };
         Ok(Self {
             name: name.to_owned(),
-            process: global,
+            process,
             command,
         })
     }
 }
 
-pub(super) fn stream_color(color: ColorChoice, stream: Stream) -> ColorChoice {
-    if enabled(color, stream) {
-        ColorChoice::Always
-    } else {
-        ColorChoice::Never
+fn add_placement_hint(error: &mut clap::Error, arguments: &[std::ffi::OsString]) {
+    if error.kind() != ErrorKind::UnknownArgument
+        || arguments.get(1).and_then(|arg| arg.to_str()) != Some("inspect")
+        || !matches!(
+            error.get(ContextKind::InvalidArg),
+            Some(ContextValue::String(arg)) if matches!(arg.as_str(), "-C" | "--config")
+        )
+    {
+        return;
     }
+    let mut suggestion = StyledStr::new();
+    suggestion.push_str("Place --config <FILE> after 'inspect', before the inspection command");
+    error.insert(
+        ContextKind::Suggested,
+        ContextValue::StyledStrs(vec![suggestion]),
+    );
 }

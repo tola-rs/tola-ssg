@@ -160,105 +160,118 @@ impl IconsConfig {
     }
 
     /// What `tola help "[icons]"` adds under its table.
-    pub const HELP: &'static str = "\
-Each entry under `[icons.collections]` is one namespace, and the namespace is the first half of
-every `\"namespace:name\"` id you write in Typst: `brand:mark` names `mark` in the namespace
-`brand`. Ids are case-sensitive. `icon()` checks the id when called, including when its returned
-content is unused. A missing name may suggest a close match from that configured collection.
+    pub const HELP: &'static str = r#"
+### Use an Iconify collection
 
-A directory of SVG files you own, and a collection published on the npm registry:
-
-```toml
-# SVG files you own: icons/brand/mark.svg becomes brand:mark.
-[icons.collections.brand]
-source-type = \"local-svg-dir\"     # or \"local-json\" for one IconifyJSON file
-path = \"icons/brand\"
-
-[icons.collections.lucide]
-source-type = \"remote-json\"
-preset = \"lucide\"                  # the newest release of @iconify-json/lucide
-```
-
-A preset names an `@iconify-json` package, such as `lucide`, `mdi`, `tabler`, or `simple-icons`. Tola
-resolves it through the npm registry: it reads the release's `dist.integrity`, downloads that
-tarball, verifies the bytes it received, and takes the collection file the tarball carries. Write
-`version = \"0.468.0\"` beside the preset to pin the release instead of following the registry's
-latest; that version is Iconify's packaging number for the collection, not the icon set's own
-release.
-
-Resolution happens when you build, run `tola dev`, or run `tola update`; its result goes to
-`tola.lock`: the resolved version, the tarball address, and the SHA-256 of the collection bytes.
-The lock, not the configuration, holds integrity. `tola vendor` freezes the locked bytes into
-`vendor/icons/<namespace>.json`, and a pure build reads them from there.
-
-`mirrors` lists other addresses tried when the registry's tarball cannot be downloaded, in the
-order written. `{name}` and `{version}` come from the preset:
+Add Lucide to `tola.toml`.
 
 ```toml
 [icons.collections.lucide]
-source-type = \"remote-json\"
-preset = \"lucide\"
-mirrors = [\"https://registry.npmmirror.com/@iconify-json/{name}/-/{name}-{version}.tgz\"]
+source-type = "remote-json"
+preset = "lucide"
 ```
 
-A mirror must serve the same tarball the registry published, because that release's integrity pins
-its bytes.
+From the site root, run `tola update lucide` to fetch and lock the collection. Run
+`tola inspect icons lucide --interactive` to browse its names. The table name `lucide`
+supplies the prefix in `lucide:rocket`.
 
-Write `url` when no registry package carries the collection you want:
-
-```toml
-[icons.collections.brand-remote]
-source-type = \"remote-json\"
-url = \"https://cdn.example.com/brand/1.0.0/icons.json\"
-```
-
-The two remote forms are exclusive: `version` belongs with `preset`. A `url` collection has no
-published integrity, so its first download is trusted and recorded in `tola.lock`; every later
-build verifies the same bytes. A `mirrors` list beside a `url` must write each address out.
-
-Draw a configured icon in a page, and publish one as a file of its own:
+In a site created with `tola init`, add this to `content/index.typ`.
 
 ```typst
-#import \"@tola/icon:0.0.0\": icon, icon-url
-#document(\"index.html\")[
-  #icon(\"lucide:rocket\")
-  #html.img(src: icon-url(\"brand:mark\"), alt: \"Brand mark\")
-]
+#import "@tola/icon:0.0.0": icon
+#icon("lucide:rocket") Launch notes
 ```
 
-Export your own icons as self-contained SVG: convert text to paths, bring external symbols into
-this file, and keep references within it. Give the root a `viewBox` with positive width and height,
-or positive `width` and `height` in absolute units. Any explicit dimensions must use absolute
-units, even with a `viewBox`; percentages and `em` are refused. For example, `icons/brand/mark.svg`
-can contain:
+Run `tola dev` and open the printed URL. The home page shows a rocket next to “Launch notes”.
+Run `tola help "@tola/icon" icon-url` to use a separate SVG file in an image element.
+
+To use the prefix `ui`, name the table `[icons.collections.ui]` and keep
+`preset = "lucide"`. Run `tola update ui` and change the Typst call to `icon("ui:rocket")`.
+
+A preset names an `@iconify-json` package. Omit `version` to select the latest release
+on first resolution, or set `version` to pin the package version. Tola verifies the registry
+tarball with its published integrity. Optional `mirrors` are tried in order if the registry
+tarball cannot be downloaded. A mirror must serve identical bytes and can use `{name}` and
+`{version}` in its URL.
+
+For a collection outside the registry, write its JSON `url` instead of `preset` and `version`.
+Write each mirror URL in full. The first download is recorded in `tola.lock` and subsequent
+builds verify it. Commit `tola.lock` with the site.
+
+Run `tola vendor` to copy remote collections to `icons/<namespace>.json` under the
+configured vendor directory. A `--pure`
+build reads those copies.
+
+### Module collections
+
+A module declares its own `[icons.collections]` in `tola-module.toml`. Local paths
+start at the module root. Pass `module:` to `icon`, `icon-bytes`, or `icon-url` to use
+that instance's collection. Inside a module, use `icon.with(module: get-module().name)`.
+
+Example: display an icon from a local module:
+
+Copy the `mark.svg` from the local SVG example below to `theme/icons/brand/mark.svg`.
+Save this as `theme/tola-module.toml`:
+
+```toml
+[icons.collections.brand]
+source-type = "local-svg-dir"
+path = "icons/brand"
+```
+
+Add the module to the site's `tola.toml`:
+
+```toml
+[modules.notes]
+path = "theme"
+```
+
+From the site root, run `tola inspect icons brand --module notes`. The collection
+contains `mark`. Put this in `content/index.typ` and run `tola build` to see it on
+the home page:
+
+```typst
+#import "@tola/icon:0.0.0": icon
+#icon("brand:mark", module: "notes")
+```
+
+To replace the collection, put a full source record under
+`[modules.notes.icons.collections.brand]` in the site's configuration. A replacement's
+local path starts at the site root. To update a remote collection for this module,
+run `tola update modules/notes/brand`.
+
+### Use a local SVG
+
+Save this file as `icons/brand/mark.svg` in the site root.
 
 ```svg
-<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\">
-  <path fill=\"currentColor\" d=\"M12 2 22 22H2Z\"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+  <path fill="currentColor" d="M12 2 22 22H2Z"/>
 </svg>
 ```
 
-An icon keeps the colors its own SVG draws. Artwork painted with `currentColor` follows the `color`
-of the page around it, so a theme or a CSS class recolors it; artwork with fixed fills and strokes
-keeps them whatever the page does. Every `lucide` icon is painted with `currentColor`, which is why
-that collection suits a themed site. A published file such as `icon-url(\"brand:mark\")` inherits
-nothing, so reach for `icon()` when the artwork should follow the theme.
+Add the directory to `tola.toml`.
 
-See what a site can use:
-
-```sh
-tola inspect icons                       # every namespace, its source, and its icon count
-tola inspect icons lucide                # one namespace/name row per icon or alias
-tola inspect icons lucide --interactive  # browse those names in a table
+```toml
+[icons.collections.brand]
+source-type = "local-svg-dir"
+path = "icons/brand"
 ```
 
-Without a namespace, the JSON array has one row per collection: its namespace, resolved source,
-own icon prefix, and icon count. Naming a namespace returns one `namespace`/`name` row per icon
-or alias, in lexical order. Interactive selection returns the selected row.
+In a site created with `tola init`, put this in `content/index.typ`.
 
-`tola inspect icons` reads the locked inputs; run `tola update` first when a remote collection has
-not been resolved yet. `tola vendor` freezes a site's remote collections into its own
-`icons/<namespace>.json`, so another machine builds offline.";
+```typst
+#import "@tola/icon:0.0.0": icon
+#icon("brand:mark")
+```
+
+Run `tola dev` and open the printed URL. The home page contains an inline SVG. Its
+`currentColor` follows the surrounding text. Use `icon-url` to publish a standalone SVG.
+
+An ID has the form `namespace:name`, with case-sensitive names. Run `tola inspect icons brand`
+to list the names in `brand`. Use `source-type = "local-json"` for a local IconifyJSON file.
+Local SVGs must be self-contained. Give the root a positive `viewBox` size or positive
+absolute dimensions. Explicit dimensions must use absolute units. Convert text to paths."#;
 
     pub(crate) fn local_paths(&self) -> impl Iterator<Item = &Path> {
         self.collections.values().filter_map(|source| match source {

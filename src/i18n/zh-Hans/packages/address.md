@@ -1,47 +1,20 @@
 # `@tola/address`
 
-slugs、route、output 路径与浏览器 URL
+生成 slug，在站点路由、输出路径和浏览器 URL 之间转换。
 
-为文档选择 route，把它转成传给 `#document` 的 output，再把 output 转成链接使用的浏览器 URL。这三个值描述同一份文件发布时的不同方面：
-
-| 值 | 含义 | 示例 |
-| --- | --- | --- |
-| route | 从站点根开始的解码后逻辑地址；以 `/` 开头 | `/Hello World/` |
-| output | 写入 `build.publish-dir` 下的文件路径；不带前导 `/` 或部署前缀 | `Hello World/index.html` |
-| 浏览器 URL | 链接使用的地址；经过百分号编码，带部署前缀，还可以带 origin | `/docs/Hello%20World/` |
-
-route 的前导 `/` 表示本站的根。末尾的 `/` 区分目录与文件：`/guide/` 对应 `guide/index.html`，`/guide` 则对应文件 `guide`。`output-of` 完成这一步转换；`route-of` 返回 output 的规范 route，所以 `guide/index.html` 变成 `/guide/`。显式 route `/guide/index.html` 与 `/guide/` 命名同一份 output，也会规范化为 `/guide/`。
-
-源路径命名输入文件，例如 `content/hello.typ`，与这三种地址分开。传给 `#document` 的 output 决定该文档发布在哪里。用 `join-route` 组合解码后的 route 分段；需要 slug 时先调用 `slugify`（`slugify("Hello World")` 得到 `"hello-world"`）。
-
-这里 route 与 output 都保留空格，只有浏览器 URL 对空格编码并加上 `/docs/`：
-
-```typst
-#import "@tola/address:0.0.0": output-of, route-of, output-url, route-url
-#let route = "/Hello World/"
-#let output = output-of(route)
-#let url = output-url(output, base-path: "/docs/")
-#assert.eq(output, "Hello World/index.html")
-#assert.eq(route-of(output), route)
-#assert.eq(url, "/docs/Hello%20World/")
-#assert.eq(route-url(route, base-path: "/docs/"), url)
-```
-
-`[site]` 的 `base-path` 指定发布目录对外提供服务的位置：`base-path = "/docs/"` 时，`Hello World/index.html` 仍直接写到 `build.publish-dir` 下，不会额外添加 `docs/` 目录。`output-url` 与 `route-url` 默认使用该配置；传 `origin: site.origin` 可得到绝对 URL。直接使用返回值，再加 `/docs/` 会重复前缀。手写站点根 URL 时要自己带上前缀，Tola 不会改写链接字符串。
-
-route 与 output 都是解码后的文本，`%` 和 `#` 是字面的文件名字符。浏览器 URL 把它们编码为 `%25` 和 `%23`；文件名中的字面 `%20` 会变成 `%2520`。已编码且不带部署前缀的 URL 路径，先用 `decode-url-path` 恰好解码一次，再作为 route 使用。URL 的 query 与 fragment 是独立后缀：链接到章节时，在完整 URL 后追加 `#intro`；解码后 route 内部的 `#` 则命名文件名中的字符。
-
-用 `asset-url` 解析 `[assets]` 声明的不带部署前缀的 URL，例如 `/assets/logo.png`。输入遵循 URL 路径语法：字面 `%` 和 `#` 要转义为 `%25` 和 `%23`，不能带 query 或 fragment。它会校验声明，保留精确文件名，应用 `base-path`，并在开启 cache-busting 时添加 `?h=<asset hash>`。`output-url` 则接受任意 output 路径，不检查文件是否存在，包括 `generate-outputs` hook 通过 `TOLA_HOOK_OUTPUT_DIR` 写出的文件。文档导出、原生 `asset()` 文件、hook output 都位于 `build.publish-dir` 下，不带部署前缀。
+用 `output-of` 得到传给 `#document` 的输出路径，用 `output-url` 生成链接。
 
 ## `slugify`
 
-纯函数：把文本变成一个 slug，一个可以直接放进 URL 或文件名的字符串。
+把标题或其他文本转成可用于 URL 或文件名的 slug。
 
-slug 里保留字母、标记、数字，以及 URL 和文件名安全的标点：`slugify("Deep Notes")` 得到 `"deep-notes"`；其余字符都用来分隔单词，结果会做 NFC 规范化。
+例如，`slugify("Deep Notes")` 返回 `"deep-notes"`。结果保留字母、组合标记、数字和可用于文件名与 URL 的标点。其他字符用来分隔单词。结果采用 Unicode NFC。
 
-约束：文本里没有任何能构成 slug 的内容时报错；`mode`、`case`、`separator` 只接受各自列出的取值；`mode: "ascii"` 下读音随 `language`：只有主 `ja` 子 tag 按日语读汉字，其他任何 tag（包括 `en`）都按中文读。
+文本里没有可用的字符时会报错。用 `mode: "ascii"` 转写汉字时，`ja` 按日语读，其他语言标签按中文读。
 
-Example - 先用默认设置，再带选项，把标题变成 slug：
+汉字按词读音，多音字的读音由所在词决定。
+
+示例：用默认设置和自定义选项生成 slug：
 
 ```typst
 #import "@tola/address:0.0.0": slugify
@@ -49,7 +22,7 @@ Example - 先用默认设置，再带选项，把标题变成 slug：
 #assert.eq(slugify("Deep Notes", case: "upper", separator: "_"), "DEEP_NOTES")
 ```
 
-Example - 把汉字与带重音的文本转写成 ASCII；汉字按词读音，多音字跟随它所在的词：
+示例：把汉字与带重音的文本转写成 ASCII：
 
 ```typst
 #import "@tola/address:0.0.0": slugify
@@ -63,7 +36,7 @@ Example - 把汉字与带重音的文本转写成 ASCII；汉字按词读音，�
 
 ### `case`
 
-slug 采用的字母大小写：`lower`、`upper`、`capitalize` 或 `preserve`。
+字母大小写。省略时用 `lower`，也可选 `upper`、`capitalize` 或 `preserve`。
 
 ### `language`
 
@@ -75,17 +48,17 @@ slug 采用的字母大小写：`lower`、`upper`、`capitalize` 或 `preserve`�
 
 ### `separator`
 
-单词之间的分隔符：`-` 或 `_`。
+单词之间的分隔符。省略时用 `-`，也可传 `_`。
 
 ## `join-route`
 
-纯函数：把 `segments`（一个数组）拼接为一条解码后的站点根 route。
+把 `segments` 里的各段拼成一条路由。
 
-每个分段都按原样保留，所以想要 slug、其他大小写或转写时，先对分段调用 `slugify`。内容源的 `route-segments` 只是文件布局给出的默认 route；文档实际以哪条 route 可达，由它自己的 output 决定。
+每一段都保留原样。要转写或改变大小写，先对各段调用 `slugify`。
 
-约束：结果总是以 `/` 开头、以 `/` 结尾，不传分段就得到站点根 `/`；分段为空、为 `.`、为 `..`，或者包含 `/`、`\`，或者包含已发布文件名无法承载的字符时报错。
+结果以 `/` 开头和结尾，空数组返回 `/`。每一段都要是有效的文件名，不能留空、写成 `.` 或 `..`，或包含斜杠和反斜杠。
 
-Example - 保留分段原样，再逐个 slug 后发布：
+示例：用标题生成文章的路由：
 
 ```typ
 #import "@tola/address:0.0.0": join-route, output-of, slugify
@@ -94,7 +67,7 @@ Example - 保留分段原样，再逐个 slug 后发布：
 #document(output-of(route), title: [Deep Notes])[Body]
 ```
 
-Example - 取文件布局给出的默认 route：
+示例：根据源文件路径生成路由：
 
 ```typst site
 #import "@tola/address:0.0.0": join-route
@@ -113,13 +86,13 @@ Example - 取文件布局给出的默认 route：
 
 ## `output-of`
 
-纯函数：把解码后的站点根 route 转成其 output 文件路径。
+根据路由得到输出文件路径，可传给 `#document`。
 
-route 是站点内部的逻辑地址，不带 `base-path` 或 `origin`；`%` 和 `#` 是字面的文件名字符。以 `/` 结尾时，route 指向一个目录，该目录按自己的 `index.html` 发布：`/` 是 `index.html`，`/guide/` 是 `guide/index.html`；不带结尾 `/` 时，route 按字面指向文件：`/guide` 是 `guide`，`/manual.pdf` 是 `manual.pdf`。
+以 `/` 结尾时，返回该目录下的 `index.html`。例如，`/` 返回 `index.html`，`/guide/` 返回 `guide/index.html`。其余路由保留文件名，例如 `/manual.pdf` 返回 `manual.pdf`。`%` 和 `#` 都是文件名字符。
 
-约束：route 按原样取用，百分号编码的 URL 路径要先用 `decode-url-path` 解码，而且只解码一次。
+输入不带部署前缀。手上的路径如果已经做过百分号编码，先用 `decode-url-path` 解码一次。
 
-Example - 由 route 得到输出文件：
+示例：由 route 得到输出文件：
 
 ```typst
 #import "@tola/address:0.0.0": output-of
@@ -128,7 +101,7 @@ Example - 由 route 得到输出文件：
 #assert.eq(output-of("/manual.pdf"), "manual.pdf")
 ```
 
-Example - 把字面 `%` 或 `#` 保留为文件名字符：
+示例：把字面 `%` 或 `#` 保留为文件名字符：
 
 ```typst
 #import "@tola/address:0.0.0": output-of
@@ -138,13 +111,13 @@ Example - 把字面 `%` 或 `#` 保留为文件名字符：
 
 ## `route-of`
 
-纯函数：把 output 文件路径转成其规范的解码后站点根 route。
+根据输出文件路径得到路由。
 
-文件名恰为 `index.html` 时，取包含它的目录地址：`index.html` 是 `/`，`guide/index.html` 是 `/guide/`。其他文件名原样保留在 `/` 下：`404.html` 是 `/404.html`，`about` 是 `/about`。
+目录首页用目录路径。例如，`index.html` 返回 `/`，`guide/index.html` 返回 `/guide/`。其他文件保留文件名，例如 `404.html` 返回 `/404.html`。
 
 结果不带部署前缀、origin 或百分号编码。`output-of(route-of(output))` 能把 output 还原；把 `/guide/index.html` 先转成输出再转回来，得到的是规范 route `/guide/`。
 
-Example - 由输出文件还原 route：
+示例：由输出文件还原 route：
 
 ```typst
 #import "@tola/address:0.0.0": route-of
@@ -155,19 +128,19 @@ Example - 由输出文件还原 route：
 
 ## `output-url`
 
-依赖站点配置（`[site]` 的 `base-path`）：输出文件对外提供服务的浏览器 URL。
+把输出路径转成浏览器 URL，默认加上 `site.base-path`。
 
-传入 `build.publish-dir` 下解码后的 output 路径，不带前导 `/` 或部署前缀，例如 `guide/index.html`：它可以是文档自己的 output，也可以是 `output-of` 的结果。返回的 URL 前面会加上 `[site]` 的 `base-path`（默认 `/`）；传 `base-path: "/"` 覆盖为根部署，传 `origin` 得到绝对 URL（`origin: site.origin` 用站点自己的 origin）。
+传入相对于 `build.publish-dir` 的输出路径，例如 `guide/index.html`。默认加上 `site.base-path`，传 `base-path: "/"` 可省略部署前缀。要生成完整 URL，传 `origin: site.origin` 或指定其他 origin。
 
 文件名恰为 `index.html` 时使用目录 URL：`guide/index.html` 变成 `/guide/`。`asset-url` 则保留声明中的精确文件名，包括 `index.html`。
 
-约束：`base-path` 必须以 `/` 开头、以 `/` 结尾，其中的转义只解码一次；`origin` 是一个绝对的 `http`/`https` origin，其中不能有部署路径、凭据、query 或 fragment；输出名只编码一次，所以字面 `%20` 会变成 `%2520`。
+`base-path` 必须以 `/` 开头和结尾。`origin` 只写 HTTP(S) 协议、主机和可选端口，例如 `https://example.test:8080`。输出名里的 `%` 会编码成 `%25`。
 
-任何输出路径都能在这里解析，包括 hook 产出的：这里不检查是否已发布，因为地址只是一个名字，不承诺文件存在。`[assets]` 声明拼写的 URL 不是输出路径——那类由 `asset-url` 解析，并带上它们的字节身份。
+可以传入 hook 稍后才会生成的文件路径。构建时，Tola 会检查写到 HTML 里的链接。
 
-文档 output 不加部署前缀；返回的 URL 直接用于链接。最终 reference 检查会校验链接指向的 output 是否存在。
+示例：为站内链接应用部署前缀：
 
-Example - 发布一个页面，并从另一篇文档链接到它：
+在新站点中将这段代码保存为 `site.typ`，再运行 `tola build`。首页会链接到 `/guide/`。如果 `site.base-path` 为 `/docs/`，链接是 `/docs/guide/`。
 
 ```typst
 #import "@tola/address:0.0.0": output-url
@@ -181,7 +154,7 @@ Example - 发布一个页面，并从另一篇文档链接到它：
 ]
 ```
 
-Example - 把输出挂到一个部署路径和一个 origin 下：
+示例：从输出路径生成链接：
 
 ```typst
 #import "@tola/address:0.0.0": output-url
@@ -193,14 +166,14 @@ Example - 把输出挂到一个部署路径和一个 origin 下：
 )
 ```
 
-Example - 输出名里的字面 `%20` 只编码一次：
+示例：对输出名中的字面 `%20` 编码一次：
 
 ```typst
 #import "@tola/address:0.0.0": output-url
 #assert.eq(output-url("100%20.html"), "/100%2520.html")
 ```
 
-Example - 链接 hook 自己的产出，它没有任何 `assets` 声明为它命名：
+示例：链接 hook 生成的文件：
 
 ```typst
 #import "@tola/address:0.0.0": output-url
@@ -213,21 +186,21 @@ Example - 链接 hook 自己的产出，它没有任何 `assets` 声明为它命
 
 ### `base-path`
 
-部署路径；`auto` 取站点自身的 `base-path`。
+站点的部署路径，例如 `/docs/`。省略或传 `auto` 时，用 `site.base-path`。
 
 ### `origin`
 
-结果的绝对 origin。
+传入 `https://example.test` 这样的 origin 可得到完整 URL。省略或传 `none` 时，返回 `/docs/guide/` 这样的路径。
 
 ## `route-url`
 
-解码后的站点根 route 对应的浏览器 URL，使用其 output 的规范 URL。
+根据路由生成浏览器 URL，默认加上 `site.base-path`。
 
-它等于 `output-url(output-of(route), base-path: base-path, origin: origin)`：末尾 `/` 命名 index 输出，显式的 `/guide/index.html` 也会变成 `/guide/`。文件 route（如 `/manual.pdf`）保留文件名。它不保留每个 route 的原始拼写，而是选择与 `output-url` 相同的规范地址。
+相当于先用 `output-of` 取输出路径，再用 `output-url` 生成链接。例如，`/guide/` 和 `/guide/index.html` 都生成指向目录首页的链接。
 
-传入不带部署前缀的解码后文本：Unicode、字面 `%` 和 `#` 都是文件名字符。已编码 URL 路径应先通过 `decode-url-path` 恰好解码一次。部署前缀只添加一次；`base-path: auto` 使用 `site.base-path`，`origin` 的约束与 `output-url` 一致。
+传入不带部署前缀的路由。如果路径已经做过百分号编码，先用 `decode-url-path` 解码一次。`base-path` 和 `origin` 的用法同 `output-url`。
 
-Example - 规范化 route，再挂载并编码：
+示例：给路由加部署前缀并生成链接：
 
 ```typst
 #import "@tola/address:0.0.0": route-url, decode-url-path
@@ -246,38 +219,40 @@ Example - 规范化 route，再挂载并编码：
 
 ### `base-path`
 
-部署路径；`auto` 取站点自身的 `base-path`。
+站点的部署路径，例如 `/docs/`。省略或传 `auto` 时，用 `site.base-path`。
 
 ### `origin`
 
-结果的绝对 origin。
+传入 `https://example.test` 这样的 origin 可得到完整 URL。省略或传 `none` 时，返回 `/docs/guide/` 这样的路径。
 
 ## `asset-url`
 
-依赖站点配置（`[assets]` 声明、`[site]` 的 `base-path`）：已声明资产 URL 对外提供服务的浏览器 URL。
+生成 `[assets]` 中静态资源的链接。
 
-传入声明拼写的不带部署前缀的站点根 URL，不包含 `site.base-path`：
+传入 `[assets]` 里声明的 URL 路径，省略部署前缀。
 
 - `assets.files`：条目自己的 `url`，例如 `"/styles/base.css"`。
 - `assets.trees`：树的 `url-prefix` 加上成员在树内的路径；`url-prefix = "/assets"`、树里有 `images/logo.svg` 时，对应 `asset-url("/assets/images/logo.svg")`。
 
-参数遵循 URL 路径语法，只进行一次百分号解码。Unicode 和内部空格可以直接写，也可以编码；文件名中的字面 `%` 或 `#` 必须写为 `%25` 或 `%23`。不接受 query 或 fragment，也不要传入另一次调用的解码结果。构建时，它保留声明的精确文件名（包括 `index.html`），并在 `assets.cache-busting` 打开时追加 `?h=<identity>`：内容变了，地址跟着变，名称保持不变。
+设为 `follow-file-symlinks = true` 后，Tola 用符号链接的名字发布它指向的文件。例如，`static/downloads/guide.txt` 指向 `shared/notes.txt`，这条树的 `source` 是 `"static/downloads"`，`url-prefix` 是 `"/downloads"`。使用默认 `site.base-path` 时，浏览器访问 `/downloads/guide.txt`，读到的是 `notes.txt` 的内容。在 Typst 里写 `asset-url("/downloads/guide.txt")`。完整配置见 `tola help --lang zh "[assets]"`。
 
-约束：返回的 URL 以 `/` 开头，并在前面加上 `site.base-path`，直接拿去用；再挂载一次就会重复；没有任何 `assets` 声明发布这个 URL 时调用处报错，即使该路径由别的生产者发布，比如 `resize-image` 的派生结果。
+路径里的 Unicode 字符和空格可以直接写，也可以编码。文件名里的 `%` 和 `#` 要写成 `%25` 和 `%23`。参数只接受路径。`index.html` 也会保留原文件名。开启 `assets.cache-busting` 后，链接会带上 `?h=<hash>`。
+
+返回的链接已带 `site.base-path`。引用 `[assets]` 中不存在的资源时会报错。要引用 `resize-image` 生成的图片，直接用它返回的 `url`。
 
 两者的区别：
 
 | | `output-url(output)` | `asset-url(声明的 URL)` |
 | --- | --- | --- |
 | 输入 | 解码后的 output：`build.publish-dir` 下的文件路径，不带前导 `/`（`assets/logo.png`） | `[assets]` 声明拼写的站点根 URL，带前导 `/`（`/assets/logo.png`）；遵循 URL 语法，字面 `%` 和 `#` 必须转义 |
-| 发布检查 | 不检查——hook 将来产出的文件也能解析 | `[assets]` 声明必须发布这个 URL，即使该路径由别的生产者写出 |
-| 结果 | 挂载后的规范 URL；`assets/index.html` 使用 `/assets/` | 挂载后的精确文件 URL；`/assets/index.html` 保持 `/assets/index.html`，`assets.cache-busting` 打开时追加 `?h=<identity>` |
+| 检查文件 | 生成链接时不检查，可传入稍后由 hook 写出的文件 | 资源必须在 `[assets]` 中启用 |
+| 结果 | 带部署前缀，目录首页用 `/assets/` | 带部署前缀，保留 `/assets/index.html`，开启 `assets.cache-busting` 时加 `?h=<hash>` |
 
-编辑器源检查只解析挂载后的地址，不带 identity，因为它不渲染资产字节。`tola check` 会准备完整 output，包括资产 identity，但不发布它们。
+编辑器检查返回的 URL 省略 `?h=…`。用 `tola check` 可以检查构建时实际生成的 URL。
 
-hook 自己的产出正是这样的路径：页面用 `output-url("assets/…")` 链接它，两个调用彼此独立——这里传声明的拼写，绝不传另一个函数的结果。
+链接 hook 生成的文件时，把输出路径直接传给 `output-url`，例如 `output-url("assets/search.js")`。
 
-Example - 解析站点在 `/assets` 下发布的文件：
+示例：链接 `/assets` 下声明的资源：
 
 ```typst site
 #import "@tola/address:0.0.0": asset-url
@@ -288,21 +263,21 @@ Example - 解析站点在 `/assets` 下发布的文件：
 
 ### `declared-url`
 
-声明拼写的站点根资产 URL，例如 "/app.js"。
+`[assets]` 声明的资源路径，例如 `"/app.js"`。
 
 ## `decode-url-path`
 
-纯函数：把百分号编码的站点根 URL 路径恰好解码一次。
+把 URL 路径里的百分号转义解码一次，得到可传给 `output-of` 的路由。
 
-每个转义都会还原成它所指的字节，所以 `/caf%C3%A9/` 是 `/café/`，`/Hello%20World/` 是 `/Hello World/`。只在这里解码一次。
+例如，`/caf%C3%A9/` 变成 `/café/`，`/Hello%20World/` 变成 `/Hello World/`。
 
-约束：参数只能是路径——传入 origin、query string 或 fragment 都会报错；转义的 `/` 或 `\` 同样会报错，因为层级只由未转义的 `/` 划分。
+只传路径，不带域名、查询参数或锚点。编码后的斜杠或反斜杠也会报错。
 
-解码后的路径还必须满足可移植输出文件名规则；它不是通用 URL 解码器，也不检查路径是否已发布。
+解码后的每一段都要能作为跨平台文件名。文件是否已经发布不影响这一步。
 
-metadata 可以使用 `@tola/schema` 的 `url-path`，在应用相同规则的同时收集字段错误。解析结果已经解码，直接交给 `output-of` 或 `route-url` 即可。
+要校验文章元数据中的固定链接，用 `@tola/schema` 的 `url-path`。它会指出哪个字段出错，成功时可把结果直接传给 `output-of` 或 `route-url`。
 
-Example - 把百分号编码的路径恰好解码一次：
+示例：把百分号编码的路径恰好解码一次：
 
 ```typst
 #import "@tola/address:0.0.0": decode-url-path
@@ -311,7 +286,7 @@ Example - 把百分号编码的路径恰好解码一次：
 #assert.eq(decode-url-path("/plain/"), "/plain/")
 ```
 
-Example - 把路径解码一次，再命名输出文件：
+示例：从已编码的路径得到输出文件名：
 
 ```typst
 #import "@tola/address:0.0.0": decode-url-path, output-of

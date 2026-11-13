@@ -802,7 +802,8 @@
 /// Accept any present value, including `none`, and return it unchanged.
 /// No value is rejected. An absent object key still needs `optional`.
 ///
-/// Example - accept any present value:
+/// Example: Accept any present value:
+///
 /// ```typst
 /// #import "@tola/schema:0.0.0": any, parse
 /// #assert.eq(parse(none, any), none)
@@ -819,7 +820,9 @@
 /// their values. A missing declared key is an error unless its declaration accepts absence, and a
 /// present declared value must satisfy its declaration.
 ///
-/// Example - validate page metadata and supply a missing tag list:
+/// Example: Normalize declared fields:
+///
+/// This schema trims the title and fills in an empty tag list when `tags` is absent.
 /// ```typst
 /// #import "@tola/schema:0.0.0": schema, parse, non-empty, trim, optional, array-of
 /// #let page-schema = schema((
@@ -829,7 +832,8 @@
 /// #assert.eq(parse((title: " Notes "), page-schema), (title: "Notes", tags: ()))
 /// ```
 ///
-/// Example - keep undeclared keys with `unknown`:
+/// Example: Keep undeclared keys with `unknown`:
+///
 /// ```typst
 /// #import "@tola/schema:0.0.0": parse, schema, try-parse
 /// #let page = schema((title: str), unknown: "keep")
@@ -839,7 +843,7 @@
 ///
 /// Related: optional, parse
 /// - fields (dictionary): a Typst type or another schema declaration for each field.
-/// - unknown (string): `"error"` rejects extra keys; `"keep"` preserves them without validating
+/// - unknown (string): Omit this option or use `"error"` to reject extra keys. `"keep"` preserves them without validating
 ///   their values.
 /// -> dictionary
 #let schema = core.schema
@@ -854,14 +858,16 @@
 /// `optional(nullable(str))` accepts absence or `none` while `optional(str)` accepts absence or a
 /// string. Optional array and tuple members still occupy a required position.
 ///
-/// Example - supply a default for a missing key:
+/// Example: Supply a default for a missing key:
+///
 /// ```typst
 /// #import "@tola/schema:0.0.0": schema, optional, parse
 /// #let settings = schema((retries: optional(int, default: 3)))
 /// #assert.eq(parse((:), settings), (retries: 3))
 /// ```
 ///
-/// Example - tell an absent key from an explicit `none`:
+/// Example: Tell an absent key from an explicit `none`:
+///
 /// ```typst
 /// #import "@tola/schema:0.0.0": nullable, optional, parse, schema, try-parse
 /// #let skippable = schema((nickname: optional(str)))
@@ -879,7 +885,8 @@
 /// Accept an explicit `none` before consulting the inner schema.
 /// Any other value, including an absent object key, reaches the inner schema.
 ///
-/// Example - accept an explicit none:
+/// Example: Accept an explicit none:
+///
 /// ```typst
 /// #import "@tola/schema:0.0.0": schema, optional, nullable, parse
 /// #let profile = schema((nickname: optional(nullable(str))))
@@ -895,7 +902,8 @@
 /// Accept a value equal to the declared Typst value, and return it unchanged.
 /// Any other value is rejected by equality.
 ///
-/// Example - accept one exact value:
+/// Example: Accept one exact value:
+///
 /// ```typst
 /// #import "@tola/schema:0.0.0": literal, parse, try-parse
 /// #assert.eq(parse("draft", literal("draft")), "draft")
@@ -910,7 +918,8 @@
 /// Accept a value equal to one member of `values`, and return it unchanged.
 /// Any other value is rejected, and an empty `values` array is a programming error.
 ///
-/// Example - restrict a value to a fixed set:
+/// Example: Restrict a value to a fixed set:
+///
 /// ```typst
 /// #import "@tola/schema:0.0.0": enum-of, parse, try-parse
 /// #let channel = enum-of(("r", "g", "b"))
@@ -928,13 +937,15 @@
 /// An empty array succeeds; use `non-empty(array-of(member))` to require at least one member. Any
 /// other value kind is a type issue.
 ///
-/// Example - normalize every array member:
+/// Example: Normalize every array member:
+///
 /// ```typst
 /// #import "@tola/schema:0.0.0": array-of, trim, parse
 /// #assert.eq(parse((" a ", "b"), array-of(trim(str))), ("a", "b"))
 /// ```
 ///
-/// Example - reject an empty array with `non-empty`:
+/// Example: Reject an empty array with `non-empty`:
+///
 /// ```typst
 /// #import "@tola/schema:0.0.0": array-of, non-empty, parse, try-parse
 /// #assert.eq(parse((), array-of(str)), ())
@@ -953,13 +964,15 @@
 /// `schema` when the keys have different requirements, and `dictionary-of(int)` to accept
 /// arbitrary keys whose values are integers. Any other value kind is a type issue.
 ///
-/// Example - normalize every dictionary value:
+/// Example: Normalize every dictionary value:
+///
 /// ```typst
 /// #import "@tola/schema:0.0.0": dictionary-of, trim, parse
 /// #assert.eq(parse((first: " Ada "), dictionary-of(trim(str))), (first: "Ada"))
 /// ```
 ///
-/// Example - report a failing value at its key:
+/// Example: Report a failing value at its key:
+///
 /// ```typst
 /// #import "@tola/schema:0.0.0": dictionary-of, parse, try-parse
 /// #let counts = dictionary-of(int)
@@ -978,7 +991,8 @@
 /// The scalar path takes any non-array value, and its failure carries no array index.
 /// `parse("tag", one-or-many(str))` returns `("tag",)`, and an empty array returns `()`.
 ///
-/// Example - accept one member or an array of them:
+/// Example: Accept one member or an array of them:
+///
 /// ```typst
 /// #import "@tola/schema:0.0.0": one-or-many, parse
 /// #assert.eq(parse("tag", one-or-many(str)), ("tag",))
@@ -997,7 +1011,8 @@
 /// `rest` fixes the count and forbids extra members. Present members are still checked when the
 /// count is wrong: a `schema.arity` issue reports the count, alongside any member issues.
 ///
-/// Example - parse fixed positions with a homogeneous rest:
+/// Example: Parse fixed positions with a homogeneous rest:
+///
 /// ```typst
 /// #import "@tola/schema:0.0.0": tuple, parse, try-parse
 /// #let pair = tuple(str, int, rest: bool)
@@ -1005,7 +1020,8 @@
 /// #assert.eq(try-parse(("x",), pair).ok, false)
 /// ```
 ///
-/// Example - fix the member count without `rest`:
+/// Example: Fix the member count without `rest`:
+///
 /// ```typst
 /// #import "@tola/schema:0.0.0": parse, tuple, try-parse
 /// #let pair = tuple(str, int)
@@ -1014,6 +1030,7 @@
 /// ```
 ///
 /// Related: array-of
+/// - members (array): pass a schema for each fixed position, in order, as in `tuple(str, int)`.
 /// - rest (none | type | dictionary): the schema for members beyond the fixed positions;
 ///   `none` forbids extra members.
 /// -> dictionary
@@ -1023,7 +1040,8 @@
 /// The schema the factory returns decides the value, and it may be recursive. An invalid factory
 /// return is a programming error.
 ///
-/// Example - a tree with optional children:
+/// Example: A tree with optional children:
+///
 /// ```typst
 /// #import "@tola/schema:0.0.0": schema, optional, array-of, lazy, parse
 /// #let node-schema() = schema((
@@ -1044,17 +1062,19 @@
 /// when several branches accept the value. A missing key reports a single `is required`, dropping
 /// the branches whose only reported cause is that absence; a branch that carries its own notes or
 /// children keeps its report. A branch that fails for any other reason contributes issues.
-/// The first successful branch's value is returned. A programming error inside a branch
+/// Return the value from the first branch that parses it. A programming error inside a branch
 /// propagates instead of failing that alternative. Use `variant` for tagged objects when only one
 /// branch should run, and pass schemas positionally, for example `union(str, int)`.
 ///
-/// Example - take the first successful branch:
+/// Example: Use the first branch that parses the input:
+///
 /// ```typst
 /// #import "@tola/schema:0.0.0": union, trim, parse
 /// #assert.eq(parse(" x ", union(trim(str), str)), "x")
 /// ```
 ///
-/// Example - choose between two object shapes:
+/// Example: Choose between two object shapes:
+///
 /// ```typst
 /// #import "@tola/schema:0.0.0": parse, schema, union
 /// #let contact = union(schema((email: str)), schema((phone: str)))
@@ -1073,7 +1093,8 @@
 /// branch's value is returned. Checks and conversions belong inside their fields or outside the
 /// complete variant.
 ///
-/// Example - select an object shape without evaluating unrelated branches:
+/// Example: Select an object shape without evaluating unrelated branches:
+///
 /// ```typst
 /// #import "@tola/schema:0.0.0": variant, schema, literal, parse
 /// #let block-schema = variant("kind",
@@ -1083,7 +1104,8 @@
 /// #assert.eq(parse((kind: "text", body: "Hello"), block-schema).body, "Hello")
 /// ```
 ///
-/// Example - report a missing tag at its key:
+/// Example: Report a missing tag at its key:
+///
 /// ```typst
 /// #import "@tola/schema:0.0.0": literal, schema, try-parse, variant
 /// #let block-schema = variant("kind", schema((kind: literal("text"), body: str)))
@@ -1097,10 +1119,10 @@
 /// -> dictionary
 #let variant = core.variant
 
-/// Trim a successful string and return it.
-/// Any other value kind, including `none`, fails.
+/// Trim leading and trailing whitespace after parsing. The parsed value must be a string.
 ///
-/// Example - trim a successful string:
+/// Example: Trim whitespace from a string:
+///
 /// ```typst
 /// #import "@tola/schema:0.0.0": trim, parse, try-parse
 /// #assert.eq(parse("  padded\n", trim(str)), "padded")
@@ -1108,17 +1130,17 @@
 /// ```
 ///
 /// Related: non-empty
-/// - member (type | dictionary): the schema whose successful string is trimmed.
+/// - member (type | dictionary): the schema that parses the input before trimming.
 /// -> dictionary
 #let trim = core.trim
 
-/// Require a successful string, array, or dictionary to be nonempty, and return it unchanged.
-/// An empty string, array, or dictionary fails, and any other value kind fails too.
+/// After parsing, require a nonempty string, array, or dictionary. Return that value unchanged.
 ///
 /// Order matters: `non-empty(trim(str))` rejects whitespace-only text, whereas
 /// `trim(non-empty(str))` accepts that text and returns an empty string.
 ///
-/// Example - reject an empty value:
+/// Example: Reject an empty value:
+///
 /// ```typst
 /// #import "@tola/schema:0.0.0": non-empty, try-parse
 /// #assert.eq(try-parse("x", non-empty(str)).ok, true)
@@ -1131,13 +1153,12 @@
 /// -> dictionary
 #let non-empty = core.non-empty
 
-/// Reject a successful value when the predicate returns `false`.
-/// The successful value is returned unchanged. A nonboolean return or a callback panic is a
-/// programming error.
-/// Pass `message` explicitly as a string. Although the declaration's signature defaults it to
-/// `none`, construction rejects both `none` and an omitted message.
+/// After the schema parses the value, run the predicate. Return the value if it passes.
+/// If the predicate returns `false`, report `message`. Supply that message as a string.
+/// The predicate must return a boolean.
 ///
-/// Example - reject a value with a predicate:
+/// Example: Reject a value with a predicate:
+///
 /// ```typst
 /// #import "@tola/schema:0.0.0": refine, parse, try-parse
 /// #let even = refine(int, value => calc.rem(value, 2) == 0, message: "must be even")
@@ -1146,21 +1167,21 @@
 /// ```
 ///
 /// Related: check
-/// - member (type | dictionary): the schema whose successful value is passed to the predicate.
-/// - predicate (function): the boolean predicate applied to the successful value.
-/// - message (string): the required message of the `custom` issue a `false` predicate reports.
+/// - member (type | dictionary): the schema that parses the input before the predicate runs.
+/// - predicate (function): a function that returns a boolean for the parsed value.
+/// - message (string): the message to report as a `custom` issue when the predicate returns `false`.
 /// -> dictionary
 #let refine = core.refine
 
-/// Inspect the successful values of declared fields and report the callback's Issues.
+/// Check a rule that uses already parsed fields, such as an end date following a start date.
 ///
-/// `on` accepts the distinct declared field keys whose successful values form the callback input;
-/// omit it to inspect the whole successful value. A named field is read from the same object pass,
-/// even when an unrelated field fails. A failed dependency blocks the callback, and an absent one
-/// stays absent. Return `()` for success or `(issue(...), ...)` for failure; paths are relative to
-/// the value being checked.
+/// List the fields the check needs in `on`. The callback can run even if an unlisted field
+/// fails. It only receives fields that are present and skips the check if a listed field fails.
+/// Omit `on` to check the whole parsed value. Return `()` for success or `(issue(...), ...)`
+/// to report problems. Issue paths are relative to the value being checked.
 ///
-/// Example - validate a relationship after its two fields have parsed:
+/// Example: Validate a relationship after its two fields have parsed:
+///
 /// ```typst
 /// #import "@tola/schema:0.0.0": schema, check, issue, try-parse
 /// #let interval = check(schema((start: int, end: int)), bounds => {
@@ -1171,42 +1192,43 @@
 /// ```
 ///
 /// Related: issue, refine
-/// - member (type | dictionary): the schema whose successful value is inspected.
-/// - inspect (function): the callback that receives the successful value and returns an array
-///   of Issues.
-/// - on (none | array): the distinct declared field keys whose successful values form the
-///   callback input. `on` cannot cross a conversion, union, variant, or lazy boundary.
+/// - member (type | dictionary): the schema that parses the input before the check.
+/// - inspect (function): a function that receives the parsed value or the fields in `on`.
+///   Return an array of issues, or `()` when the check passes.
+/// - on (none | array): the field names to pass to the callback. List each field once.
+///   Use fields declared directly on the object schema, outside conversions,
+///   unions, variants, or lazy schemas.
 /// -> dictionary
 #let check = core.check
 
-/// Convert the inner successful value once, then parse the result through `output`.
-/// Accept a function or a callable Typst type as the converter, and `output` defaults to `any`.
-/// The converted value is returned on success; an inner failure or a failure against `output` is
-/// reported instead. A dictionary shaped like a Result is an ordinary value here. For example,
-/// `parse(7, map(int, str, output: non-empty(str)))` returns `"7"`.
+/// Parse the input, convert the parsed value, and check the result with `output`.
+/// Use a function or a callable Typst type, such as `str` to convert an integer to a string.
+/// `output` defaults to `any`. If the input fails validation, the converter does not run.
+/// If it returns a Result dictionary, `map` treats it as an ordinary dictionary.
 ///
-/// Example - convert a successful value:
+/// Example: Convert a parsed value:
+///
 /// ```typst
 /// #import "@tola/schema:0.0.0": map, parse
 /// #assert.eq(parse(7, map(int, str, output: str)), "7")
 /// ```
 ///
 /// Related: convert
-/// - member (type | dictionary): the schema whose successful value is passed to the converter.
+/// - member (type | dictionary): the schema that parses the input before conversion.
 /// - convert-value (function | type): a function or a callable Typst type returning a plain value.
-/// - output (type | dictionary): the schema the converted value is parsed through.
+/// - output (type | dictionary): the schema that checks the converted value.
 /// -> dictionary
 #let map = core.map
 
-/// Convert the inner successful value once with a callback that returns a Result.
+/// Convert the parsed value with a function that can report problems.
 ///
-/// The result is parsed through `output`.
-/// Accept a function or a callable Typst type as the callback, and `output` defaults to `any`.
-/// The converted value is returned on success. Returning `err(...)` reports a value failure, and a
-/// panic in the callback is a programming error that passes through `try-parse`. Use `map` for a
-/// callback that returns a plain value.
+/// The converter may be a function or callable Typst type. Return `ok(value)` to check the
+/// converted value against `output`, which defaults to `any`. Return `err(issue(...))`
+/// to report a validation problem through `try-parse`. A `panic` stops compilation.
+/// Use `map` if your converter returns a plain value.
 ///
-/// Example - reject a conversion with a structured cause:
+/// Example: Reject a conversion with a structured cause:
+///
 /// ```typst
 /// #import "@tola/schema:0.0.0": convert, ok, err, issue, try-parse
 /// #let port = convert(int, value => {
@@ -1216,7 +1238,8 @@
 /// #assert.eq(try-parse(443, port), (ok: true, value: "443"))
 /// ```
 ///
-/// Example - report a rejected conversion with its Issue:
+/// Example: Report a rejected conversion with its Issue:
+///
 /// ```typst
 /// #import "@tola/schema:0.0.0": convert, err, issue, ok, try-parse
 /// #let port = convert(int, value => {
@@ -1229,19 +1252,19 @@
 /// ```
 ///
 /// Related: map, err
-/// - member (type | dictionary): the schema whose successful value is passed to the converter.
+/// - member (type | dictionary): the schema that parses the input before conversion.
 /// - convert-value (function | type): the callback returning `ok(value)` or `err(..issues)`.
-/// - output (type | dictionary): the schema the successful converted value is parsed through.
+/// - output (type | dictionary): the schema that checks the value inside `ok(...)`.
 /// -> dictionary
 #let convert = core.convert
 
-/// Attach documentation to the schema's successful value; parsing and Issues are unaffected.
-/// The successful value is returned unchanged.
-/// An outer description replaces an inner description at the same node. Describe a nested field
-/// separately to give that field its own documentation; use `issue(..., notes: ...)` for
-/// diagnostics.
+/// Add a description that appears in `inspect`. Parsing returns the same value and issues.
+/// When two descriptions apply to the same part of a schema, the outer one wins. To
+/// describe a nested field, wrap that field's schema in `describe`. To add a note to a
+/// diagnostic, use `issue(..., notes: ...)`.
 ///
-/// Example - document a successful value:
+/// Example: Describe what a field contains:
+///
 /// ```typst
 /// #import "@tola/schema:0.0.0": describe, parse
 /// #let slug = describe(str, "lowercase URL segment")
@@ -1249,8 +1272,8 @@
 /// ```
 ///
 /// Related: inspect, issue
-/// - member (type | dictionary): the schema whose successful value the description documents.
-/// - description (string): the documentation attached to the successful value.
+/// - member (type | dictionary): the schema to describe.
+/// - description (string): the text shown by `inspect`.
 /// -> dictionary
 #let describe = core.describe
 
@@ -1262,17 +1285,19 @@
 /// `kind: "unknown"`.
 ///
 /// `presence: "required"` guarantees a successful object field is present; `"optional"` describes
-/// a declared omission path, which an earlier union branch may shadow; `"unknown"` is unproved.
+/// a field that may be omitted under the schema, although an earlier union branch can take
+/// precedence. `"unknown"` means the declaration does not establish whether it is present.
 /// A `default: (value: ...)` carries the raw declared default, including `none`, without
-/// validating or converting it. Absent default keys stay absent. Container positions are always
+/// validating or converting it. The result has a `default` field only when the schema declares one. Container positions are always
 /// present. `map` and `convert` describe their output shape while keeping their input's presence
 /// and default. Input documentation never describes generated output.
 ///
 /// By default the result describes successful output values. With `input: true`, it describes
 /// values before parsing: fields with defaults can be omitted, and transformations describe
-/// their input. Both views describe declared shapes without proving that any given value passes.
+/// their input. Run `parse` or `try-parse` to check a specific value.
 ///
-/// Example - derive an output description without running callbacks:
+/// Example: Derive an output description without running callbacks:
+///
 /// ```typst
 /// #import "@tola/schema:0.0.0": schema, optional, inspect
 /// #let declaration = schema((title: str, subtitle: optional(str), draft: optional(bool, default: false)))
@@ -1285,13 +1310,14 @@
 ///
 /// Related: describe, map, convert
 /// - member (type | dictionary): the schema to describe.
-/// - input (bool): describe values before parsing instead of successful output values.
+/// - input (bool): set to `true` to describe values before parsing. Defaults to the parsed output.
 /// -> dictionary
 #let inspect = core.inspect
 
 /// Parse once and return the complete normalized value, or fail with `format-issues` output.
 ///
-/// Example - return a normalized value in one call:
+/// Example: Return a normalized value in one call:
+///
 /// ```typst
 /// #import "@tola/schema:0.0.0": non-empty, trim, parse
 /// #assert.eq(parse("  Notes  ", non-empty(trim(str))), "Notes")
@@ -1303,15 +1329,17 @@
 /// -> any
 #let parse = core.parse
 
-/// Try one parse and return exactly `(ok: true, value: value)` or `(ok: false, issues: issues)`.
-/// Failure issues are nonempty and never accompany a partial value.
-/// Schema validation failures come back as a Result; malformed declarations, invalid callback
-/// return shapes, and callback panics still stop compilation. The input is always present,
-/// including `none`. Missing keys arise only while parsing an object. Render failures with
-/// `format-issues`; a value the schema generated itself is named in that text rather than
-/// appearing as something the input supplied.
+/// Return `(ok: true, value: value)` when parsing succeeds or `(ok: false, issues: issues)`
+/// when validation fails. The failure contains one or more issues. Use `format-issues`
+/// to read them.
 ///
-/// Example - return a Result instead of failing:
+/// An invalid schema, an unexpected callback return value, or a `panic` still stops
+/// compilation. Passing `none` supplies a value. A missing key only occurs within a
+/// dictionary. When a default or conversion result fails validation, the message names
+/// where the value came from.
+///
+/// Example: Return a Result instead of failing:
+///
 /// ```typst
 /// #import "@tola/schema:0.0.0": try-parse
 /// #assert.eq(try-parse(7, int), (ok: true, value: 7))
@@ -1330,7 +1358,8 @@
 /// with the fixed ones, so declared defaults still fill whatever neither call supplies. Supplying
 /// a field the first call fixed is an error, so a fixed field cannot be silently overridden.
 ///
-/// Example - share one layout across many pages:
+/// Example: Share one layout across many pages:
+///
 /// ```typst
 /// #import "@tola/schema:0.0.0": optional, partial, schema
 /// #let page-schema = schema((title: str, layout: optional(str, default: "page")))
@@ -1343,14 +1372,12 @@
 /// -> function
 #let partial = core.partial
 
-/// Report the value each omitted key becomes.
+/// Return the defaults declared on this object's fields, as written before parsing.
+/// If a nested object is omitted and has no default of its own, its field defaults
+/// do not create it.
 ///
-/// Only keys whose declaration declares a default are listed, and each is the declared default as
-/// written rather than a parsed value. A nested object's own defaults apply when that object is
-/// supplied, so they are not listed here: the object itself is required unless its declaration is
-/// optional with a default.
+/// Example: Read the fallbacks a declaration supplies:
 ///
-/// Example - read the fallbacks a declaration supplies:
 /// ```typst
 /// #import "@tola/schema:0.0.0": array-of, defaults, optional, schema
 /// #let page-schema = schema((title: str, tags: optional(array-of(str), default: ())))
@@ -1365,21 +1392,23 @@
 /// Construct a successful Result from any value.
 /// `ok(none)` is a success whose value is `none`.
 ///
-/// Example - construct a successful Result:
+/// Example: Construct a successful Result:
+///
 /// ```typst
 /// #import "@tola/schema:0.0.0": ok
 /// #assert.eq(ok(none), (ok: true, value: none))
 /// ```
 ///
 /// Related: err
-/// - value (any): the value the successful Result carries.
+/// - value (any): the value to return in `(ok: true, value: ...)`.
 /// -> dictionary
 #let ok = core.ok
 
 /// Construct a failed Result from one or more Issues.
 /// `err()` with no Issue is a programming error. The Result carries `ok: false` and the Issues.
 ///
-/// Example - construct a failed Result from Issues:
+/// Example: Construct a failed Result from Issues:
+///
 /// ```typst
 /// #import "@tola/schema:0.0.0": err, issue
 /// #let failure = err(issue("too small", code: "size", path: ("count",)))
@@ -1398,7 +1427,8 @@
 /// of Issues. The returned Issue describes a value the input supplied; the schema records a
 /// declared default or a conversion in `origin` when it generated the value itself.
 ///
-/// Example - build an Issue with a path:
+/// Example: Build an Issue with a path:
+///
 /// ```typst
 /// #import "@tola/schema:0.0.0": issue
 /// #let problem = issue("duplicate tag", path: ("tags", 0), notes: ("remove the repeat",))
@@ -1413,21 +1443,23 @@
 /// -> dictionary
 #let issue = core.issue
 
-/// Render Issues to deterministic text a site author reads.
+/// Format an array of issues as text for the site author.
 ///
 /// An ordinary issue becomes one line with its child causes indented below it. A failure that came
 /// from a declared default or a conversion leads with the field and the reason; the schema's
 /// default or conversion is named only where it helps, and no internal message is repeated. Other
 /// causes and notes are indented below. A malformed Issue stops compilation.
 ///
-/// Example - render an Issue tree as text:
+/// Example: Render an Issue tree as text:
+///
 /// ```typst
 /// #import "@tola/schema:0.0.0": issue, format-issues
 /// #let problem = issue("is required", code: "schema.missing", path: ("title",))
 /// #assert.eq(format-issues((problem,)), "`$.title`: is required")
 /// ```
 ///
-/// Example - render nested causes and notes:
+/// Example: Render nested causes and notes:
+///
 /// ```typst
 /// #import "@tola/schema:0.0.0": format-issues, issue
 /// #let cause = issue("is required", code: "schema.missing", path: ("title",), notes: ("add a title",))
@@ -1435,7 +1467,8 @@
 /// #assert.eq(format-issues((tree,)), "`$`: metadata is invalid\n  `$.title`: is required\n    note: add a title")
 /// ```
 ///
-/// Example - lead with a declared default's cause:
+/// Example: Lead with a declared default's cause:
+///
 /// ```typst
 /// #import "@tola/schema:0.0.0": format-issues, optional, schema, try-parse
 /// #let cause = try-parse((:), schema((count: optional(int, default: "bad")))).issues.first()
@@ -1452,7 +1485,8 @@
 /// A shorter value is rejected. Any other value kind is a type issue. The measured value is
 /// returned unchanged.
 ///
-/// Example - require a minimum length:
+/// Example: Require a minimum length:
+///
 /// ```typst
 /// #import "@tola/schema:0.0.0": min-length, try-parse
 /// #assert.eq(try-parse("ab", min-length(str, 3)).ok, false)
@@ -1460,7 +1494,7 @@
 /// ```
 ///
 /// Related: max-length
-/// - member (type | dictionary): the schema whose successful value is measured.
+/// - member (type | dictionary): the schema that parses the value before its length is checked.
 /// - minimum (int): the nonnegative minimum number of clusters, members, or entries.
 /// -> dictionary
 #let min-length = core.min-length
@@ -1470,7 +1504,8 @@
 /// A longer value is rejected. Any other value kind is a type issue. The measured value is
 /// returned unchanged.
 ///
-/// Example - cap the length of a value:
+/// Example: Cap the length of a value:
+///
 /// ```typst
 /// #import "@tola/schema:0.0.0": max-length, try-parse
 /// #assert.eq(try-parse((1, 2), max-length(array, 2)).ok, true)
@@ -1478,7 +1513,7 @@
 /// ```
 ///
 /// Related: min-length
-/// - member (type | dictionary): the schema whose successful value is measured.
+/// - member (type | dictionary): the schema that parses the value before its length is checked.
 /// - maximum (int): the nonnegative maximum number of clusters, members, or entries.
 /// -> dictionary
 #let max-length = core.max-length
@@ -1487,7 +1522,8 @@
 /// Matching searches anywhere in the string, so add anchors for a whole-string constraint. The
 /// regex sees the string exactly as parsed, and the accepted string is returned unchanged.
 ///
-/// Example - require a regex match:
+/// Example: Require a regex match:
+///
 /// ```typst
 /// #import "@tola/schema:0.0.0": matches, try-parse
 /// #let slug = matches(str, regex("^[a-z0-9-]+$"))
@@ -1496,7 +1532,7 @@
 /// ```
 ///
 /// Related: trim
-/// - member (type | dictionary): the schema whose successful string is matched.
+/// - member (type | dictionary): the schema that parses the string before matching it.
 /// - expression (regex): the regular expression searched in the string.
 /// -> dictionary
 #let matches = core.matches
@@ -1504,7 +1540,8 @@
 /// Require an integer or float greater than or equal to `minimum`.
 /// The accepted value is returned unchanged. NaN fails; infinities compare like any other number.
 ///
-/// Example - enforce an inclusive lower bound:
+/// Example: Enforce an inclusive lower bound:
+///
 /// ```typst
 /// #import "@tola/schema:0.0.0": at-least, try-parse
 /// #assert.eq(try-parse(5, at-least(int, 5)).ok, true)
@@ -1512,7 +1549,7 @@
 /// ```
 ///
 /// Related: at-most
-/// - member (type | dictionary): the schema whose successful value is compared.
+/// - member (type | dictionary): the schema that parses the value before the comparison.
 /// - minimum (int | float): the bound, an integer or float other than NaN.
 /// -> dictionary
 #let at-least = core.at-least
@@ -1520,7 +1557,8 @@
 /// Require an integer or float less than or equal to `maximum`.
 /// The accepted value is returned unchanged. NaN fails; infinities compare like any other number.
 ///
-/// Example - enforce an inclusive upper bound:
+/// Example: Enforce an inclusive upper bound:
+///
 /// ```typst
 /// #import "@tola/schema:0.0.0": at-most, try-parse
 /// #assert.eq(try-parse(5, at-most(int, 5)).ok, true)
@@ -1528,21 +1566,22 @@
 /// ```
 ///
 /// Related: at-least
-/// - member (type | dictionary): the schema whose successful value is compared.
+/// - member (type | dictionary): the schema that parses the value before the comparison.
 /// - maximum (int | float): the bound, an integer or float other than NaN.
 /// -> dictionary
 #let at-most = core.at-most
 
 /// An unquoted ASCII dot-atom mailbox per RFC 5322.
-/// The local part is nonempty dot-separated atext atoms of at most 64 bytes, followed by `@` and
-/// one or more DNS-style labels. Each label holds 1-63 ASCII letters, digits, or hyphens and
+/// Before `@`, use nonempty segments of ASCII `atext` characters separated by dots.
+/// The entire part before `@` may be at most 64 bytes. After `@`, use one or more DNS-style labels. Each label holds 1-63 ASCII letters, digits, or hyphens and
 /// starts and ends with a letter or digit; the whole address is at most 254 bytes, and a
 /// single-label domain is accepted.
 /// The grammar covers the bare address only: quotes, comments, display names, domain literals,
 /// and Unicode lie outside it. The check is syntactic: no trimming, DNS lookup, or deliverability
 /// test.
 ///
-/// Example - validate an email address:
+/// Example: Validate an email address:
+///
 /// ```typst
 /// #import "@tola/schema:0.0.0": email, try-parse
 /// #assert.eq(try-parse("ada@example.com", email).ok, true)
@@ -1555,7 +1594,8 @@
 /// The accepted spelling is returned unchanged. Brackets, a port, a zone identifier, and
 /// surrounding whitespace are rejected.
 ///
-/// Example - validate an IPv4 address:
+/// Example: Validate an IPv4 address:
+///
 /// ```typst
 /// #import "@tola/schema:0.0.0": ipv4, try-parse
 /// #assert.eq(try-parse("192.168.0.1", ipv4).ok, true)
@@ -1570,7 +1610,8 @@
 /// A strict dotted-decimal IPv4 suffix may replace the final two groups. The spelling is returned
 /// unchanged. Brackets, ports, zone identifiers, and surrounding whitespace are rejected.
 ///
-/// Example - validate an IPv6 address:
+/// Example: Validate an IPv6 address:
+///
 /// ```typst
 /// #import "@tola/schema:0.0.0": ipv6, try-parse
 /// #assert.eq(try-parse("2001:db8::1", ipv6).ok, true)
@@ -1582,7 +1623,8 @@
 /// An IPv4 or IPv6 address, returned unchanged.
 /// Brackets, a zone identifier, and a port are rejected.
 ///
-/// Example - validate either IP family:
+/// Example: Validate either IP family:
+///
 /// ```typst
 /// #import "@tola/schema:0.0.0": ip, try-parse
 /// #assert.eq(try-parse("::1", ip).ok, true)
@@ -1598,7 +1640,8 @@
 /// returned unchanged. Whitespace and control characters are rejected, and the check is
 /// syntactic: no trimming, percent decoding, normalization, or DNS lookup.
 ///
-/// Example - validate an absolute HTTP(S) URL:
+/// Example: Validate an absolute HTTP(S) URL:
+///
 /// ```typst
 /// #import "@tola/schema:0.0.0": http-url, try-parse
 /// #assert.eq(try-parse("https://example.com/posts", http-url).ok, true)
@@ -1611,7 +1654,8 @@
 ///
 /// The accepted spelling is returned unchanged, without a network or deliverability check.
 ///
-/// Example - restrict a URL to HTTPS:
+/// Example: Restrict a URL to HTTPS:
+///
 /// ```typst
 /// #import "@tola/schema:0.0.0": https-url, try-parse
 /// #assert.eq(try-parse("https://example.com", https-url).ok, true)
@@ -1630,7 +1674,8 @@
 /// Use the returned route directly with `output-of` or `route-url` from `@tola/address`.
 /// A literal `%` or `#` in a filename is written as `%25` or `%23` in the input.
 ///
-/// Example - parse a permalink and collect a field error:
+/// Example: Parse a permalink and collect a field error:
+///
 /// ```typst
 /// #import "@tola/schema:0.0.0": parse, try-parse, schema, url-path
 /// #let page = schema((permalink: url-path))
@@ -1655,7 +1700,8 @@
 /// 1 through 9999. Calendar validity is checked. Full datetimes, time-only values, timestamp
 /// strings, and surrounding whitespace are rejected rather than truncated or trimmed.
 ///
-/// Example - parse, display, and report a date field error:
+/// Example: Parse, display, and report a date field error:
+///
 /// ```typst
 /// #import "@tola/schema:0.0.0": date, parse, schema, try-parse
 /// #let published = parse("2026-10-14", date)
@@ -1685,7 +1731,8 @@
 /// `(precision: "day", year: int, month: int, day: int)`. Native dates have day precision.
 /// Missing components stay absent; parsing does not choose a time or timezone.
 ///
-/// Example - preserve a date's precision and report an array member error:
+/// Example: Preserve a date's precision and report an array member error:
+///
 /// ```typst
 /// #import "@tola/schema:0.0.0": array-of, parse, partial-date, schema, try-parse
 /// #assert.eq(parse("2026", partial-date), (precision: "year", year: 2026))
@@ -1724,7 +1771,8 @@
 /// or to feed and sitemap declarations; their timestamp formatters retain at most nanoseconds,
 /// and RSS dates have second precision.
 ///
-/// Example - compare offsets and sort timestamps with 18-digit fractions:
+/// Example: Compare offsets and sort timestamps with 18-digit fractions:
+///
 /// ```typst
 /// #import "@tola/schema:0.0.0": timestamp, parse, schema, try-parse
 /// #let early = parse("2026-10-14T08:30:00.123456789012345678+08:00", timestamp)

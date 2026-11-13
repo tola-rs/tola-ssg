@@ -87,15 +87,7 @@ pub(in crate::cli) fn run_with_source(
     }
     output.summary(format!("Initialized {}", display_path_toward_home(&root)))?;
     output.status(tree::render(writes))?;
-    let edit = if args.from.is_some() {
-        "Edit the site sources."
-    } else {
-        "Add a page under `content/`."
-    };
-    output.block(format!(
-        "Next steps:\n  Switch to `{}`.\n  {edit}\n  Run `tola dev`.\n\n         To connect your editor, run `tola editor setup`.",
-        display_path_toward_home(&root),
-    ))?;
+    output.status("Run `tola dev` from the site directory.")?;
     Ok(())
 }
 

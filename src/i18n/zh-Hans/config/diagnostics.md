@@ -1,31 +1,36 @@
 # `[diagnostics]`
 
-更改终端输出时显示诊断的数量上限。
+限制终端一次显示多少条错误和警告。
 
 ## 配置项
 
 ### `max_errors`
 
-每批终端输出最多显示几条错误，默认 3。
+终端最多显示几条错误。默认 3 条，设为 `0` 隐藏错误。
 
 ### `max_warnings`
 
-每批终端输出最多显示几条警告，默认 3。
+终端最多显示几条警告。默认 3 条，设为 `0` 隐藏警告。
 
 ## 用法
 
-`max_errors` 与 `max_warnings` 限制一批终端输出最多显示几条诊断。错误先于警告输出，每个严重级别各按自己的上限计数，每次开发重建都会开始新的一批。终端位置沿用 Typst CLI 的编号：行号从 1 开始，列号从 0 开始。
+例如，只显示错误，最多 10 条：
 
 ```toml
 [diagnostics]
-max_errors = 3
-max_warnings = 3
+max_errors = 10
+max_warnings = 0
 ```
 
-把上限设为 `0`，可在终端隐藏对应的严重级别——这只是终端输出：`--log-file` 的完整记录与编辑器通过 LSP 拿到的诊断都不受影响。终端里显示的路径相对你运行命令的位置；编辑器按打开的文件与行列出诊断。超出上限的批次会在末尾说明隐藏了多少条：
+这两项只限制终端显示的条数。有错误时，构建仍会失败。
 
-```
-3 errors not shown; increase `diagnostics.max_errors` to show more
+### 查看完整报告
+
+把完整报告保存到 `check.json`，再在终端打开：
+
+```sh
+tola check --json --pretty > check.json
+tola nu --stdin @tola-scripts/diagnostic render < check.json
 ```
 
-`[diagnostics]` 并不会影响构建本身的结果。
+完整报告包含终端省略的错误和警告。字段说明见 [`@tola-scripts/diagnostic`](tola-help://scripts/diagnostic)。

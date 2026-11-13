@@ -11,7 +11,7 @@ pub enum BuildMode {
 }
 
 impl BuildMode {
-    /// The mode's name, as a hook command receives it in `TOLA_BUILD_MODE`.
+    /// The build mode name provided to hooks.
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Production => "prod",

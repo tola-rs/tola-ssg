@@ -2,7 +2,7 @@
 //
 // Call `current-document()`, `headings()`, and `references()` in `context` inside a
 // `document(…)` body. Sources rendered in the same document read the same document. To read
-// a source file’s own identity, use `@tola/source`.
+// the original source file’s path or metadata, use `@tola/source`.
 
 /// Read the text of a string or of your content.
 ///
@@ -14,7 +14,7 @@
 /// Reading a string or content always succeeds. An element that carries neither text nor content
 /// of its own contributes nothing, and a warning names it where you wrote it.
 ///
-/// Example - read text from a string and from content:
+/// Example: Read text from a string and from content:
 ///
 /// ```typst
 /// #import "@tola/document:0.0.0": plain-text
@@ -22,7 +22,7 @@
 /// #assert.eq(plain-text([Hello, *world*!]), "Hello, world!")
 /// ```
 ///
-/// Example - an element that carries no text contributes nothing:
+/// Example: Extract text from an HTML image element:
 ///
 /// ```typst
 /// #import "@tola/document:0.0.0": plain-text
@@ -33,15 +33,13 @@
 /// Related: headings, @tola/head
 #import "@tola/host:0.0.0": plain-text
 
-/// The document whose output contains this call: its `output`, `route`, and `location`.
+/// Return the document that contains this call.
 ///
-/// `output` is the document's output path in the Bundle, such as `notes/index.html`. `route` is
-/// the site-root route it is reachable at, before a deployment path is applied. `location` is
-/// the location of the enclosing document element, so you can pass it to `link` or to a query.
-/// Call it inside `context`. A call outside a `document(…)` body raises an error. Two sources
-/// rendered into one document report the same document.
+/// Call it inside `context` in a `document(…)` body. The returned `output` is the file path,
+/// such as `notes/index.html`. The `route` is the site route, such as `/notes/`, before the
+/// deployment prefix. Pass `location` to `link` or `query`.
 ///
-/// Example - identify the containing document:
+/// Example: Read the current document's output path and route:
 ///
 /// ```typst
 /// #import "@tola/document:0.0.0": current-document
@@ -54,7 +52,7 @@
 /// ]
 /// ```
 ///
-/// Example - scope a query to the containing document:
+/// Example: Query headings in the current document:
 ///
 /// ```typst
 /// #import "@tola/document:0.0.0": current-document
@@ -69,13 +67,11 @@
 /// Related: references, headings, @tola/source
 #import "@tola/host:0.0.0": current-document
 
-/// The native `link` and `ref` occurrences that reached the output, in Bundle order.
+/// Find the Typst links and references that appear in the site's documents, in Bundle order.
 ///
-/// Call it inside `context`. Whether a reference counts is decided after show rules: a link whose
-/// show rules replace it with plain text or with raw HTML does not count, while a link a show rule
-/// produced counts in its place. Each document contributes its outermost such `link` and `ref`
-/// occurrences, then every supplied filter applies to those occurrences. Distinct occurrences
-/// remain distinct even when they point at the same target.
+/// Call it inside `context`. The result lists the outermost `link` and `ref` elements after show
+/// rules run. Links replaced with text or raw HTML are skipped. Links to the same target still
+/// get separate results when they appear in different places.
 ///
 /// | Parameter | Selects |
 /// | --- | --- |
@@ -98,12 +94,11 @@
 /// selects the heading element, not the chapter text following it; label a containing element
 /// such as `html.section` to select that text. Every supplied condition must match.
 ///
-/// Each record describes one reference as it reached the output, so show rules decide what is
-/// reported: a `ref` reports the label it names, and a `link` the destination it spells at that
-/// point. A link a show rule writes, including one written in place of a `ref`, is reported as that
-/// link, not as the ref. Native destinations name one target. A destination naming its own scheme
-/// and host is `external`, `site.origin` included. External and unresolved references remain
-/// available without target filters.
+/// Each record describes a link after show rules run. A `ref` reports its label. A `link`
+/// reports its destination, including when a show rule replaces a `ref` with a `link`.
+/// A Typst reference must have a unique target. A URL with a scheme and host counts as
+/// `external`, even if it uses the site's origin. Omit target filters to include external
+/// links and links whose destination could not be found.
 ///
 /// | Field | Meaning |
 /// | --- | --- |
@@ -111,7 +106,7 @@
 /// | `document` | The originating document's `output`, `route`, and `location` |
 /// | `destination` | The destination that element carried, after show rules |
 /// | `resolution` | `found`, `external`, or `unresolved` |
-/// | `reason` | Why nothing resolved, as a dictionary; `none` when something did |
+/// | `reason` | Why the destination could not be found, or `none` when it was found |
 /// | `target` | The target dictionary, when its output or address is known; otherwise `none` |
 ///
 /// A target carries `kind`, `output`, `route`, `query`, `fragment`, and `location`; a value it
@@ -121,23 +116,23 @@
 /// match `to` document or asset selections, but not element selections or `to-within`.
 ///
 /// A URL's `fragment` is percent-decoded for display; a native target's anchor is kept as assigned.
-/// Native whole-document and asset targets have no fragment. `found` means a native Bundle output
-/// exists, whether or not the exported HTML holds the fragment. Raw HTML links and other
-/// producers' outputs belong to final HTML validation, outside this query. Render a derived list
-/// outside the region `from-within` reads so the list does not join its own query.
+/// Whole-document and asset targets have `fragment: none`. `found` means the destination
+/// was found in the Typst Bundle. Run `tola check` to check the final HTML, including HTML
+/// links you wrote directly and fragments in the exported pages. Keep the links you generate
+/// from this query outside the region passed to `from-within`.
 ///
-/// A `reason` carries a stable `tag` to branch on, a `message`, and a `help` naming the fix:
+/// Use `reason.tag` to test why a link failed. Show `reason.message` for the explanation and `reason.help` for the suggested fix.
 ///
 /// | Tag | Meaning |
 /// | --- | --- |
 /// | `outside-mount` | The destination lies outside `site.base-path` |
 /// | `invalid-destination` | The destination is not a URL this site can read |
-/// | `no-such-target` | No output of this build answers the destination |
-/// | `positional-destination` | An element destination does not name a site target |
+/// | `no-such-target` | No matching output in this build |
+/// | `positional-destination` | The link points to a page position. Use a URL, label, or element location |
 /// | `label-has-no-location` | The label's content has no location in this build |
 /// | `ambiguous-label` | More than one element carries the label |
 ///
-/// Example - list the pages that link to the page you are rendering:
+/// Example: List the pages that link to the page you are rendering:
 ///
 /// ```typst
 /// #import "@tola/address:0.0.0": output-url
@@ -163,7 +158,7 @@
 /// ]
 /// ```
 ///
-/// Example - point at one heading rather than its whole document:
+/// Example: Find references to a specific heading:
 ///
 /// ```typst
 /// #import "@tola/address:0.0.0": output-url
@@ -183,7 +178,7 @@
 /// ]
 /// ```
 ///
-/// Example - read only the references one document writes:
+/// Example: Find links from one document:
 ///
 /// ```typst
 /// #import "@tola/document:0.0.0": references
@@ -198,7 +193,7 @@
 /// ]
 /// ```
 ///
-/// Example - references in A's body to native targets inside B's chapter:
+/// Example: Find links to a chapter in another document:
 ///
 /// ```typst
 /// #import "@tola/document:0.0.0": references
@@ -222,7 +217,7 @@
 /// ] <b>
 /// ```
 ///
-/// Example - select several targets or the headings inside a region:
+/// Example: Select several targets or the headings inside a region:
 ///
 /// ```typst
 /// #import "@tola/document:0.0.0": references
@@ -260,7 +255,7 @@
 /// | Field | Meaning |
 /// | --- | --- |
 /// | `level` | The heading's resolved level: its declared depth plus the `offset` in effect |
-/// | `nesting` | Depth in the outline tree; `none` when not outlined |
+/// | `nesting` | Level in the outline, or `none` if the heading is excluded |
 /// | `number` | Rendered number: a string from a pattern, a callback's result, or `none` |
 /// | `body` | The heading's source content before show rules |
 /// | `text` | Plain heading text before show rules |
@@ -268,15 +263,10 @@
 /// | `location` | The native location to pass to `link` |
 /// | `outlined` | Whether the heading participates in the outline |
 ///
-/// `outlined` is the native heading flag. `nesting` is the outline-tree depth. They agree:
-/// `nesting` is `none` exactly when `outlined` is `false`.
+/// `level` includes any offset. For example, `set heading(offset: 2)` makes a heading written
+/// with `==` report level 4.
 ///
-/// `level` is resolved, not declared: under `set heading(offset: 2)`, a heading written `==`
-/// reports `level` 4. No field holds the declared depth.
-///
-/// The query is scoped to this document, so the result never mixes in another page's headings.
-/// A bare `query(selector(heading))` is not scoped: inside a Bundle it reaches every document in
-/// the build. Scope any other selector the same way with
+/// `headings()` looks only in the current document. To limit any other query to this document, use
 /// `query(selector(…).within(current-document().location))`.
 ///
 /// `location` is the value to pass to `link()`, and linking makes Typst generate an anchor for
@@ -284,6 +274,8 @@
 /// `loc-N`. Typst assigns anchors on demand, so a heading that nothing links to has no anchor id
 /// in the exported HTML. Call it inside `context`; every location it returns belongs to this
 /// compilation.
+///
+/// Example: Build a table of contents for the current document:
 ///
 /// Save this as `site.typ` in a new site and run `tola build`. The home page links to
 /// “Introduction” and “Details”. Level 3 and headings with `outlined: false` are omitted.
@@ -304,7 +296,7 @@
 /// #document("other.html")[= Another document]
 /// ```
 ///
-/// Example - watch `nesting` and `label` follow the outline tree:
+/// Example: Inspect `nesting` and `label` in the outline:
 ///
 /// ```typst
 /// #import "@tola/document:0.0.0": headings
@@ -321,9 +313,9 @@
 /// ```
 ///
 /// Related: current-document
-/// - depth (none | int): `none` for every heading, or a positive integer to keep only headings
-///   whose resolved `level` is at most this value. This compares `level`, not the declared depth,
-///   so under `set heading(offset: …)` a heading written `==` may be excluded by `depth: 2`.
+/// - depth (none | int): If omitted or `none`, include all headings. Pass a positive integer to keep headings
+///   whose effective `level` is at most that number. This includes any `heading` offset:
+///   a `==` heading with an offset of 1 has level 3, so `depth: 2` omits it.
 /// -> array
 #let headings = {
   // Bound outside the loop below, whose `heading` would shadow the element function.

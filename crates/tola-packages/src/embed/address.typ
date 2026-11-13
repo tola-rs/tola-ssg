@@ -1,69 +1,19 @@
-// @tola/address:0.0.0 - slugs, routes, output paths, and browser URLs
+// @tola/address:0.0.0 - Generate slugs and convert between routes, output paths, and browser URLs.
 //
-// Choose a route for a document, turn it into an output for `#document`, then turn that output
-// into a browser URL for links. These values describe different parts of publishing the same file:
-//
-// | Value | Meaning | Example |
-// | --- | --- | --- |
-// | route | A decoded logical address from the site root; starts with `/` | `/Hello World/` |
-// | output | The file path written under `build.publish-dir`; no leading `/` or deployment prefix | `Hello World/index.html` |
-// | browser URL | The address used in a link; percent-encoded, with the deployment prefix and optionally an origin | `/docs/Hello%20World/` |
-//
-// A route's leading `/` means the root of this site. Its trailing slash distinguishes a directory
-// from a file: `/guide/` gives `guide/index.html`, while `/guide` gives the file `guide`.
-// `output-of` makes this conversion; `route-of` returns the canonical route of an output, so
-// `guide/index.html` becomes `/guide/`. An explicit route `/guide/index.html` names the same output
-// as `/guide/` and canonicalizes to `/guide/` too.
-//
-// A source path names an input file, such as `content/hello.typ`; it is separate from all three
-// addresses. The output passed to `#document` decides where that document is published. Use
-// `join-route` to compose decoded route segments, and `slugify` first when those segments should
-// be slugs (`slugify("Hello World")` gives `"hello-world"`).
-//
-// Here the route and output retain the space. Only the browser URL encodes it and adds `/docs/`:
-//
-// ```typst
-// #import "@tola/address:0.0.0": output-of, route-of, output-url, route-url
-// #let route = "/Hello World/"
-// #let output = output-of(route)
-// #let url = output-url(output, base-path: "/docs/")
-// #assert.eq(output, "Hello World/index.html")
-// #assert.eq(route-of(output), route)
-// #assert.eq(url, "/docs/Hello%20World/")
-// #assert.eq(route-url(route, base-path: "/docs/"), url)
-// ```
-//
-// `[site]` `base-path` is where the published tree is served: with `base-path = "/docs/"`,
-// `Hello World/index.html` is still written directly under `build.publish-dir`, with no `docs/`
-// folder added. `output-url` and `route-url` use that setting by default; pass `origin: site.origin`
-// for an absolute URL. Use their results directly: adding `/docs/` again duplicates the prefix.
-// A site-root URL written by hand must include the prefix itself. Tola does not rewrite link strings.
-//
-// Routes and outputs are decoded text: `%` and `#` are literal filename characters. Browser URLs
-// encode them as `%25` and `%23`; a literal `%20` in a filename becomes `%2520`. Decode an encoded,
-// unmounted URL path with `decode-url-path` exactly once before using it as a route. URL queries
-// and fragments are separate suffixes: append `#intro` to the completed URL for a section link;
-// `#` inside a decoded route instead names a character in the filename.
-//
-// Use `asset-url` for an unmounted URL declared under `[assets]`, such as `/assets/logo.png`.
-// This input follows URL path syntax: escape literal `%` and `#` as `%25` and `%23`, and pass no
-// query or fragment. It checks the declaration, keeps its exact filename, applies `base-path`, and
-// adds `?h=<asset hash>` when cache-busting is on. `output-url` instead accepts any output path
-// without checking that it exists, including files a `generate-outputs` hook writes through
-// `TOLA_HOOK_OUTPUT_DIR`. Document exports, native `asset()` files, and hook outputs all live under
-// `build.publish-dir`; none includes the deployment prefix.
+// Use `output-of` to get the output path for `#document`, and `output-url` to make a link.
 
-/// Pure function: turn text into a slug, the string you can put in a URL or file name unchanged.
+/// Turn a title or other text into a slug for a URL or filename.
 ///
 /// A slug keeps letters, marks, numbers, and the punctuation that is safe in URLs and filenames:
 /// `slugify("Deep Notes")` gives `"deep-notes"`. Every other character separates words, and the
 /// result is NFC normalized.
 ///
-/// Constraints: text with nothing left to slug is an error; `mode`, `case`, and `separator` accept
-/// only their listed values; under `mode: "ascii"` the readings follow `language`, so only a
-/// primary `ja` subtag reads Han as Japanese — every other tag, `en` included, reads it in Chinese.
+/// Text with no usable characters raises an error. In `mode: "ascii"`, a language tag with
+/// primary subtag `ja` reads Han characters as Japanese. Other tags read them as Chinese.
 ///
-/// Example - slug a title with the defaults, then with options:
+/// Han characters with several readings follow the word they occur in.
+///
+/// Example: Make a slug from a title:
 ///
 /// ```typst
 /// #import "@tola/address:0.0.0": slugify
@@ -71,8 +21,7 @@
 /// #assert.eq(slugify("Deep Notes", case: "upper", separator: "_"), "DEEP_NOTES")
 /// ```
 ///
-/// Example - transcribe Han text and accents to ASCII; a Han word is read as a word, so a character
-/// with several readings follows the word it is in:
+/// Example: Transcribe Han text and accents to ASCII:
 ///
 /// ```typst
 /// #import "@tola/address:0.0.0": slugify
@@ -82,17 +31,16 @@
 /// Related: join-route
 #import "@tola/host:0.0.0": slugify
 
-/// Pure function: join a `segments` array into a decoded site-root route.
+/// Join path segments into a route such as `/posts/deep-notes/`.
 ///
-/// Each segment is kept exactly as spelled, so slug it first when you want slugs, other casing, or
-/// transcription. A source's `route-segments` are only the default the file layout gives; a
-/// document's own output decides where it is reachable.
+/// Segments keep their original text. Call `slugify` first to change case, replace spaces, or
+/// transliterate. A source's `route-segments` suggest a route. The path you pass to `document`
+/// determines where the page is published.
 ///
-/// Constraints: the result always starts and ends with `/`, and no segments give the site root `/`;
-/// a segment that is empty, `.`, `..`, or that holds `/`, `\`, or a character no published filename
-/// can carry is an error.
+/// The result starts and ends with `/`. An empty array gives `/`. Each segment must be a valid
+/// filename. Empty segments, `.`, `..`, slashes, and backslashes raise an error.
 ///
-/// Example - keep the segments as spelled, then slug each one to publish them:
+/// Example: Use a title as the route for an article:
 ///
 /// ```typ
 /// #import "@tola/address:0.0.0": join-route, output-of, slugify
@@ -101,7 +49,7 @@
 /// #document(output-of(route), title: [Deep Notes])[Body]
 /// ```
 ///
-/// Example - read the default route the file layout gives every source:
+/// Example: Read a source’s default route from its file layout:
 ///
 /// ```typst site
 /// #import "@tola/address:0.0.0": join-route
@@ -120,7 +68,7 @@
 /// Related: slugify, output-of, @tola/source
 #import "@tola/host:0.0.0": join-route
 
-/// Pure function: convert a decoded site-root route to its output file path.
+/// Convert a route such as `/guide/` into a file path such as `guide/index.html`.
 ///
 /// A route is a logical address within the site, without `base-path` or `origin`; `%` and `#`
 /// are literal filename characters. A trailing `/` names a directory, published as its
@@ -128,10 +76,9 @@
 /// trailing `/` names a file exactly as spelled, so `/guide` is `guide` and `/manual.pdf` is
 /// `manual.pdf`.
 ///
-/// Constraints: a route is taken as spelled, so decode a percent-encoded URL path with
-/// `decode-url-path` first — exactly once.
+/// If you have a percent-encoded URL path, call `decode-url-path` once before passing it here.
 ///
-/// Example - name the output file for a route:
+/// Example: Name the output file for a route:
 ///
 /// ```typst
 /// #import "@tola/address:0.0.0": output-of
@@ -140,7 +87,7 @@
 /// #assert.eq(output-of("/manual.pdf"), "manual.pdf")
 /// ```
 ///
-/// Example - keep a literal `%` or `#` as a filename character:
+/// Example: Keep a literal `%` or `#` as a filename character:
 ///
 /// ```typst
 /// #import "@tola/address:0.0.0": output-of
@@ -150,7 +97,7 @@
 /// Related: join-route, decode-url-path
 #import "@tola/host:0.0.0": output-of
 
-/// Pure function: convert an output file path to its canonical decoded site-root route.
+/// Get the route for an output file. For `guide/index.html`, this returns `/guide/`.
 ///
 /// An exact `index.html` filename becomes the directory address that contains it, so `index.html`
 /// is `/` and `guide/index.html` is `/guide/`. Every other filename keeps its path under `/`, so
@@ -160,7 +107,7 @@
 /// `output-of(route-of(output))` recovers the output; converting `/guide/index.html`
 /// to an output and back gives its canonical route `/guide/`.
 ///
-/// Example - map output files back to routes:
+/// Example: Map output files back to routes:
 ///
 /// ```typst
 /// #import "@tola/address:0.0.0": route-of
@@ -187,15 +134,19 @@
 /// `origin` is an absolute `http`/`https` origin and cannot include a deployment path, credentials,
 /// query, or fragment; output names are encoded once, so a literal `%20` becomes `%2520`.
 ///
-/// Any output path resolves here, including one a hook produces: publication is not checked, because the
-/// address is a name, not a promise that the file exists. A URL a `[assets]` declaration spells is
-/// not an output path — `asset-url` resolves those, and adds their byte identity.
+/// Use `output-url` for a file the site will write, including files generated by hooks.
+/// The function returns a URL without checking whether the file exists. For a URL declared
+/// in `[assets]`, use `asset-url`. With cache-busting enabled, it appends a content hash
+/// as `?h=…`, so the URL changes when the file changes.
 ///
 /// Keep the document output unprefixed, and use the returned URL directly in a link. With
 /// `site.base-path = "/docs/"`, this page links to `/docs/guide/` while the output stays
 /// `guide/index.html`. Final reference checks verify that the linked output exists.
 ///
-/// Example - publish a page and link it from another document:
+/// Example: Apply the deployment prefix to a link:
+///
+/// Save this as `site.typ` in a new site and run `tola build`. The home page links to
+/// `/guide/`, or to `/docs/guide/` if `site.base-path` is `/docs/`.
 ///
 /// ```typst
 /// #import "@tola/address:0.0.0": output-url
@@ -209,7 +160,7 @@
 /// ]
 /// ```
 ///
-/// Example - mount an output under a base path and an origin:
+/// Example: Mount an output under a base path and an origin:
 ///
 /// ```typst
 /// #import "@tola/address:0.0.0": output-url
@@ -221,14 +172,14 @@
 /// )
 /// ```
 ///
-/// Example - encode a literal `%20` in an output name exactly once:
+/// Example: Encode a literal `%20` in an output name exactly once:
 ///
 /// ```typst
 /// #import "@tola/address:0.0.0": output-url
 /// #assert.eq(output-url("100%20.html"), "/100%2520.html")
 /// ```
 ///
-/// Example - link a hook's own output, which no `assets` declaration names:
+/// Example: Link a file generated by a hook:
 ///
 /// ```typst
 /// #import "@tola/address:0.0.0": output-url
@@ -236,8 +187,8 @@
 /// ```
 /// Related: output-of, route-url, asset-url, @tola/site
 /// - output (string): the decoded file path under `build.publish-dir`, without a leading `/` or deployment prefix.
-/// - base-path (auto | string): the deployment path; `auto` takes the site's own `base-path`.
-/// - origin (none | string): the absolute origin the result is written under.
+/// - base-path (auto | string): Path the site is deployed under, such as `/docs/`. If omitted or `auto`, use `site.base-path`.
+/// - origin (none | string): Pass an origin such as `https://example.test` to get a full URL. If omitted or `none`, return a path such as `/docs/guide/`.
 /// -> string
 #let output-url(output, base-path: auto, origin: none) = {
   import "@tola/host:0.0.0": output-url as resolve
@@ -250,19 +201,17 @@
   }
 }
 
-/// The browser URL of a decoded site-root route, using the canonical URL of its output.
+/// Make a browser URL from a decoded route.
 ///
-/// This is `output-url(output-of(route), base-path: base-path, origin: origin)`: a trailing `/`
-/// names an index output, and an explicit `/guide/index.html` also becomes `/guide/`.
-/// A file route such as `/manual.pdf` keeps its filename. This does not preserve every route's
-/// original spelling; it chooses the same canonical address as `output-url`.
+/// This has the same result as calling `output-of` and then `output-url`. Both `/guide/` and
+/// `/guide/index.html` link to the directory index. `/manual.pdf` keeps its filename.
 ///
 /// Pass decoded text without the deployment prefix: Unicode, literal `%` and `#` are filename
 /// characters. Decode an encoded URL path with `decode-url-path` exactly once before passing it.
 /// The deployment prefix is added once; `base-path: auto` uses `site.base-path`, and `origin`
 /// follows `output-url`.
 ///
-/// Example - canonicalize a route, then mount and encode it:
+/// Example: Make a link from a route under `/docs/`:
 ///
 /// ```typst
 /// #import "@tola/address:0.0.0": route-url, decode-url-path
@@ -277,8 +226,8 @@
 ///
 /// Related: output-url, output-of, decode-url-path
 /// - route (string): the decoded site-root route to convert.
-/// - base-path (auto | string): the deployment path; `auto` takes the site's own `base-path`.
-/// - origin (none | string): the absolute origin the result is written under.
+/// - base-path (auto | string): Path the site is deployed under, such as `/docs/`. If omitted or `auto`, use `site.base-path`.
+/// - origin (none | string): Pass an origin such as `https://example.test` to get a full URL. If omitted or `none`, return a path such as `/docs/guide/`.
 /// -> string
 #let route-url(route, base-path: auto, origin: none) = output-url(
   output-of(route),
@@ -286,26 +235,32 @@
   origin: origin,
 )
 
-/// Reads site configuration (`[assets]`, `[site]` `base-path`): the browser URL a declared asset URL serves at.
+/// Return the browser URL for a file declared in `[assets]`.
 ///
-/// Pass the unmounted site-root URL the declaration spells, without `site.base-path`:
+/// Pass the URL path from `[assets]`, without the deployment prefix.
 ///
-/// - `assets.files` - the entry's own `url`, such as `"/styles/base.css"`.
-/// - `assets.trees` - the tree's `url-prefix` followed by the member's path inside the tree:
+/// - `assets.files`: the entry's own `url`, such as `"/styles/base.css"`.
+/// - `assets.trees`: the tree's `url-prefix` followed by the member's path inside the tree.
 ///   `url-prefix = "/assets"` with `images/logo.svg` in that tree gives
 ///   `asset-url("/assets/images/logo.svg")`.
+///
+/// With `follow-file-symlinks = true`, the URL uses the link's name and serves the
+/// target file's contents. For example, if `static/downloads/guide.txt` points to
+/// `shared/notes.txt`, set the tree's `source` to `"static/downloads"` and
+/// `url-prefix` to `"/downloads"`. With the default `site.base-path`, readers
+/// open `/downloads/guide.txt` to read the contents of `notes.txt`. In Typst,
+/// use `asset-url("/downloads/guide.txt")`. See `tola help "[assets]"` for the
+/// full setup.
 ///
 /// The argument follows URL path syntax and is percent-decoded once. Unicode and interior spaces
 /// may appear directly or encoded; a literal `%` or `#` in a filename must be written `%25` or
 /// `%23`. Queries and fragments are not accepted. Do not pass the decoded result of another call.
 /// A build resolves the declaration's exact filename, including `index.html`, and appends
-/// `?h=<identity>` when `assets.cache-busting` is on, so changed bytes become a changed address
+/// `?h=<hash>` when `assets.cache-busting` is on, so changed bytes become a changed address
 /// under an unchanged name.
 ///
-/// Constraints: the returned URL starts with `/` and includes `site.base-path`, so use it directly
-/// from any document — mounting it again duplicates it; calling it for a URL that no `assets`
-/// declaration publishes is an error at the call site, even when something else publishes that
-/// path, such as a `resize-image` derivative.
+/// The returned URL already includes `site.base-path`. A path missing from `[assets]` raises an
+/// error. For an image created by `resize-image`, use the `url` it returns.
 ///
 /// How the two differ:
 ///
@@ -313,16 +268,14 @@
 /// | --- | --- | --- |
 /// | Input | a decoded output file path under `build.publish-dir`, no leading `/` (`assets/logo.png`) | the site-root URL a declaration spells, leading `/` included (`/assets/logo.png`); URL syntax with literal `%` and `#` escaped |
 /// | Publication | not checked — a hook's future output resolves too | the `[assets]` declaration must publish the URL, even when something else writes that path |
-/// | Result | the mounted canonical URL; `assets/index.html` uses `/assets/` | the mounted exact file URL; `/assets/index.html` stays `/assets/index.html`, plus `?h=<identity>` when `assets.cache-busting` is on |
+/// | Result | the mounted canonical URL; `assets/index.html` uses `/assets/` | the mounted exact file URL; `/assets/index.html` stays `/assets/index.html`, plus `?h=<hash>` when `assets.cache-busting` is on |
 ///
-/// An editor source check resolves the mounted address without the identity, because it does not
-/// render asset bytes. `tola check` prepares the complete outputs, including asset identities,
-/// without publishing them.
+/// Editor checks return the URL without `?h=…`. Run `tola check` to check the final asset URLs
+/// without publishing the site.
 ///
-/// A hook's own output is such a path: pages link it with `output-url("assets/…")`, and the two
-/// calls stay apart — pass a declaration's spelling here, never another function's result.
+/// Use `output-url("assets/…")` to link to a file generated by a hook.
 ///
-/// Example - resolve a file the site publishes under `/assets`:
+/// Example: Link a declared asset under `/assets`:
 ///
 /// ```typst site
 /// #import "@tola/address:0.0.0": asset-url
@@ -333,20 +286,17 @@
 /// Related: output-url, @tola/site, @tola/image
 #import "@tola/host:0.0.0": asset-url
 
-/// Pure function: decode a percent-encoded site-root URL path exactly once.
+/// Decode a percent-encoded URL path once so it can be used as a route.
 ///
-/// Every escape becomes the byte it names, so `/caf%C3%A9/` is `/café/` and `/Hello%20World/` is
-/// `/Hello World/`. Decode here, once.
+/// For example, `/caf%C3%A9/` becomes `/café/` and `/Hello%20World/` becomes `/Hello World/`.
 ///
-/// Constraints: pass a path and nothing else — an origin, query string, or fragment raises an
-/// error, and so does an escaped `/` or `\`, because only an unescaped `/` starts a hierarchy
-/// level. The decoded path must also satisfy the portable output-name rules; this is not a
-/// general URL decoder and does not check that the path is published.
+/// Pass only a path. An origin, query string, fragment, or encoded slash or backslash raises an
+/// error. Each decoded segment must be usable as a filename on supported platforms.
 ///
 /// For metadata, `@tola/schema`'s `url-path` applies these rules while collecting field errors.
 /// Its parsed value is already decoded and can be passed directly to `output-of` or `route-url`.
 ///
-/// Example - decode a percent-encoded path exactly once:
+/// Example: Decode a percent-encoded path exactly once:
 ///
 /// ```typst
 /// #import "@tola/address:0.0.0": decode-url-path
@@ -355,7 +305,7 @@
 /// #assert.eq(decode-url-path("/plain/"), "/plain/")
 /// ```
 ///
-/// Example - decode a path once, then name the output file:
+/// Example: Decode a path once, then name the output file:
 ///
 /// ```typst
 /// #import "@tola/address:0.0.0": decode-url-path, output-of

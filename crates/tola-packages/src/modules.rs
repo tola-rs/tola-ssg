@@ -38,7 +38,7 @@ pub(super) fn get_module(
     engine: &mut Engine,
     args: &mut Args,
     span: Span,
-    /// The configured module alias. Omit it to select the calling module.
+    /// The configured alias. Inside an `@tola-modules` package, omit it to use the current instance.
     #[external]
     #[default]
     name: Str,

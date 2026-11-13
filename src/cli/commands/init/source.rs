@@ -149,13 +149,13 @@ pub(super) fn generate(
                 directory: candidate.clone(),
                 environment: super::super::nu::environment(scope),
             };
-            let runtime = tola_nu::Runtime::for_invocation(Vec::new(), vec![initializer.manifest.clone()], context)?
+            let runtime = super::super::nu::prepare_runtime(Vec::new(), vec![initializer.manifest.clone()], context, Vec::new())?
                 .with_host(tola_nu::Host {
                     init: Some(serde_json::json!({
                         "target-dir": target, "output-dir": candidate, "interactive": args.interactive,
                         "module": { "name": initializer.name, "root": initializer.root, "manifest": initializer.manifest },
                     })),
-                    ..Default::default()
+                    ..super::super::nu::host()
                 })?
                 .with_cancellation(cancellation.token().signal_flag());
             let status = runtime.run_embedded(&path, &arguments)?;

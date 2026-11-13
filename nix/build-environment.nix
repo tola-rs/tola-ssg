@@ -9,7 +9,7 @@ let
   rustPackages =
     targetPkgs:
     let
-      versionOf = name: lib.replaceStrings [ "_" ] [ "." ] (lib.removePrefix "rustPackages_" name);
+      versionOf = name: targetPkgs.${name}.rustc.version;
       packaged = builtins.filter (lib.hasPrefix "rustPackages_") (builtins.attrNames targetPkgs);
       suitable = builtins.filter (name: lib.versionAtLeast (versionOf name) rustVersion) packaged;
       ordered = builtins.sort (left: right: lib.versionOlder (versionOf left) (versionOf right)) suitable;

@@ -80,25 +80,23 @@ fn builtins_cannot_be_module_namespaces() {
 
 #[test]
 fn namespace_options_end_at_the_module_command() {
-    use crate::cli::args::Cli;
-    use clap::Parser;
-
-    let mut process = Cli::try_parse_from(["tola", "-v", "notes"]).unwrap().global;
     let argv = [
         "-Csite.toml",
         "--offline",
         "-qv",
         "scan",
         "--help",
+        "--color",
+        "never",
         "--",
         "--pure",
     ];
     let argv = argv.map(OsString::from);
-    let args = ExtensionArgs::parse("notes", &argv, &mut process).unwrap();
+    let (args, process) = ExtensionArgs::parse("notes", &argv).unwrap();
     assert_eq!(args.config.path.as_deref(), Some(Path::new("site.toml")));
-    assert_eq!(args.input.scope(), InputScope::Offline);
+    assert_eq!(args.input.mode().scope(), InputScope::Offline);
     assert!(process.quiet);
-    assert_eq!(process.verbose, 2);
+    assert_eq!(process.verbose, 1);
     assert!(args.help.is_none());
     assert_eq!(args.command_args, argv[3..]);
 }

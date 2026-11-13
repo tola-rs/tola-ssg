@@ -5,9 +5,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::error::{NuError, Result};
+use crate::host::{HostCommand, Operation};
 use nu_protocol::{
     Module, ModuleId,
-    engine::{EngineState, StateWorkingSet},
+    engine::{Command, EngineState, StateWorkingSet},
 };
 
 /// One site module's public Nu entry, as the CLI resolved it from configuration.
@@ -78,11 +79,12 @@ pub(super) struct Library {
 }
 
 impl Library {
-    pub fn builtin(name: &str) -> Self {
+    pub fn builtin(module: &crate::BuiltinModule) -> Self {
+        let name = module.name;
         let root = PathBuf::from("tola").join(name);
         Self {
             alias: name.into(),
-            entry: root.join(format!("{name}.nu")),
+            entry: root.join(module.entry),
             root,
             origin: Origin::Builtin { name: name.into() },
         }
@@ -142,9 +144,9 @@ impl Library {
     }
 }
 
-pub(super) fn register(
+pub(super) fn register<'a>(
     engine: &mut EngineState,
-    builtins: &[Library],
+    builtins: impl Iterator<Item = &'a crate::BuiltinModule>,
     configured: &[Library],
     overlays: &[SourceOverlay],
     directories: &mut BTreeSet<PathBuf>,
@@ -163,19 +165,27 @@ pub(super) fn register(
                     .filter_map(|overlay| overlay.path.parent().map(Path::to_path_buf)),
             ),
     );
-    crate::resources::register(&mut working);
     add_overlays(&mut working, overlays, directories)?;
     working.enter_scope();
-    for declaration in crate::image::declarations() {
-        working.add_decl(declaration);
+    // Register declarations without leaving their unqualified names in scope.
+    working.enter_scope();
+    let mut native = Module::new(b"tola-native".to_vec());
+    for command in crate::image::declarations() {
+        add_command(&mut working, &mut native, command);
     }
-    for declaration in crate::highlight::declarations() {
-        working.add_decl(declaration);
+    for operation in [Operation::Render, Operation::Submit] {
+        add_command(
+            &mut working,
+            &mut native,
+            Box::new(HostCommand(operation, host.clone())),
+        );
     }
-    working.add_decl(Box::new(crate::cli::Capture));
-    use crate::host::{HostCommand, Operation};
-    use nu_protocol::engine::Command;
     let mut root = Module::new(b"tola".to_vec());
+    add_command(
+        &mut working,
+        &mut root,
+        Box::new(crate::highlight::Highlight),
+    );
     for operation in [
         Operation::Site,
         Operation::Module,
@@ -183,26 +193,24 @@ pub(super) fn register(
         Operation::Init,
         Operation::Query,
     ] {
-        let command = HostCommand(operation, host.clone());
-        let name = command.name().as_bytes().to_vec();
-        let declaration = working.add_decl(Box::new(command));
-        root.add_decl(name, declaration);
+        add_command(
+            &mut working,
+            &mut root,
+            Box::new(HostCommand(operation, host.clone())),
+        );
     }
+    working.exit_scope();
+    // These commands are Custom so Nu's forced-builtin lookup cannot bypass the import.
+    working.add_module("tola-native", native, Vec::new());
     for builtin in builtins {
-        let mut id = parse(&mut working, builtin)?;
-        if builtin.alias == "diagnostic" {
-            let mut module = working.get_module(id).clone();
-            let comments = working.get_module_comments(id).unwrap_or_default().to_vec();
-            let command = HostCommand(Operation::Submit, host.clone());
-            let name = command.name().as_bytes().to_vec();
-            module.add_decl(name, working.add_decl(Box::new(command)));
-            id = working.add_module(&builtin.alias, module, comments);
-        }
+        let library = Library::builtin(builtin);
+        crate::resources::register(&mut working, &library.root, builtin.sources);
+        let id = parse(&mut working, &library)?;
         let main = module_has_main(&working, id);
-        root.add_submodule(builtin.alias.as_bytes().to_vec(), id);
+        root.add_submodule(builtin.name.as_bytes().to_vec(), id);
         entries.insert(
-            format!("@tola-scripts/{}", builtin.alias),
-            entry(builtin, main, "@tola-scripts"),
+            format!("@tola-scripts/{}", builtin.name),
+            entry(&library, main, "@tola-scripts"),
         );
     }
     working.exit_scope();
@@ -268,6 +276,11 @@ pub(super) fn register(
         pending = next;
     }
     Ok(entries)
+}
+
+fn add_command(working: &mut StateWorkingSet, module: &mut Module, command: Box<dyn Command>) {
+    let name = command.name().as_bytes().to_vec();
+    module.add_decl(name, working.add_decl(command));
 }
 
 fn parse(working: &mut StateWorkingSet, library: &Library) -> Result<ModuleId> {

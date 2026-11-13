@@ -180,15 +180,15 @@ fn naming_rules(
 pub(super) fn tola_slug(
     /// The text to turn into a slug.
     text: Spanned<Str>,
-    /// The normalization mode: `unicode` or `ascii`.
+    /// If omitted, keep Unicode letters and numbers. Set `ascii` to transliterate them.
     #[named]
     #[default(Spanned::detached("unicode".into()))]
     mode: Spanned<Str>,
-    /// The case the name takes: `lower`, `upper`, `capitalize`, or `preserve`.
+    /// Letter case. If omitted, use `lower`. Other choices are `upper`, `capitalize`, and `preserve`.
     #[named]
     #[default(Spanned::detached("lower".into()))]
     case: Spanned<Str>,
-    /// The separator between words: `-` or `_`.
+    /// Word separator. If omitted, use `-`. Pass `_` to use underscores.
     #[named]
     #[default(Spanned::detached("-".into()))]
     separator: Spanned<Str>,

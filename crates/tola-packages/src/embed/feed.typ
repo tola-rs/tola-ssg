@@ -2,28 +2,6 @@
 
 /// Publish an RSS, Atom, or JSON Feed from the Typst entry file (`site.typ` in a new site).
 ///
-/// #### Add an RSS feed
-///
-/// In `tola.toml`, set `origin = "https://example.com"` under `[site]` so Tola can write absolute
-/// URLs. Add this to `site.typ`.
-///
-/// ```typst
-/// #import "@tola/feed:0.0.0": feed
-/// #document("notes/index.html", title: [A Typst note])[I use Typst to keep my notes in one place.]
-/// #feed(
-///   title: "Notes",
-///   entries: ((
-///     id: "urn:notes:first",
-///     target: "notes/index.html",
-///     published: datetime(year: 2026, month: 9, day: 1),
-///     summary: "My first note on Typst.",
-///   ),),
-/// )
-/// ```
-///
-/// Run `tola build`. With the default settings, `public/feed.xml` contains the excerpt and a
-/// link to `https://example.com/notes/`.
-///
 /// #### Entries and formats
 ///
 /// Set a non-blank `title` on the feed or in `[site]`. Each entry needs `target` and `published`.
@@ -91,7 +69,29 @@
 /// when your schema returns a timestamp record. Feed formatting preserves the numeric offset
 /// and at most nine fractional digits; RSS dates have second precision.
 ///
-/// #### Include the article without the navigation
+/// Example: Add an RSS feed:
+///
+/// In `tola.toml`, set `origin = "https://example.com"` under `[site]` so Tola can write absolute
+/// URLs. Add this to `site.typ`.
+///
+/// ```typst
+/// #import "@tola/feed:0.0.0": feed
+/// #document("notes/index.html", title: [A Typst note])[I use Typst to keep my notes in one place.]
+/// #feed(
+///   title: "Notes",
+///   entries: ((
+///     id: "urn:notes:first",
+///     target: "notes/index.html",
+///     published: datetime(year: 2026, month: 9, day: 1),
+///     summary: "My first note on Typst.",
+///   ),),
+/// )
+/// ```
+///
+/// Run `tola build`. With the default settings, `public/feed.xml` contains the excerpt and a
+/// link to `https://example.com/notes/`.
+///
+/// Example: Include the article without the navigation:
 ///
 /// Replace the previous example with this version. `content.id` selects the `<article>`.
 ///
@@ -123,7 +123,7 @@
 /// )
 /// ```
 ///
-/// #### Write a separate body for feed readers
+/// Example: Write a separate body for feed readers:
 ///
 /// Put this declaration at the start of `content/note.typ`, followed by the page's normal body.
 /// When building the entries in `site.typ`, pass `feed-summary` to `summary` and `feed-content`
@@ -141,16 +141,15 @@
 ///
 /// Related: @tola/sitemap, @tola/schema
 ///
-/// - output (auto | string): the output file, relative to the site output root; `auto` follows
-///   `format`: `rss` gives `feed.xml`, `atom` gives `atom.xml`, and `json` gives `feed.json`.
-/// - format (string): the feed format: `rss`, `atom`, or `json`.
-/// - id (auto | string): the feed identifier; `auto` is the feed's own absolute URL.
-/// - title (auto | content | string): the feed title; `auto` takes the site's title.
-/// - description (auto | content | string): the feed description; `auto` takes the site's
-///   description.
-/// - language (auto | string): the feed language; `auto` takes the site's language tag.
-/// - authors (auto | array): the feed authors; `auto` takes the site's authors.
-/// - entries (array): the entries to publish, in the order you give them.
+/// - output (auto | string): File path relative to the publish directory. If omitted or `auto`,
+///   RSS uses `feed.xml`, Atom uses `atom.xml`, and JSON Feed uses `feed.json`.
+/// - format (string): Generate `rss` if omitted. You can also choose `atom` or `json`.
+/// - id (auto | string): Feed identifier. If omitted or `auto`, use the feed file's absolute URL.
+/// - title (auto | content | string): Feed title. If omitted or `auto`, use the site's title.
+/// - description (auto | content | string): Feed description. If omitted or `auto`, use the site's description.
+/// - language (auto | string): Language tag. If omitted or `auto`, use the site's language tag.
+/// - authors (auto | array): Feed authors. If omitted or `auto`, use the site's authors.
+/// - entries (array): Entries in publication order. If omitted, publish an empty feed.
 /// -> content
 #let feed(
   output: auto,

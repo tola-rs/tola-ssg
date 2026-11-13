@@ -7,23 +7,26 @@ export def main [] {
 }
 
 # Print metadata for an image file as JSON.
-def "main metadata" [source: path] {
+def "main metadata" [
+  source: path # Image file to inspect.
+] {
   metadata $source | to json
 }
 
-# Resize a raster file. With --output, write the file and print its metadata as JSON.
+# Resize an image file. With --output, write the file and print its metadata as JSON.
+# SVG requires an explicit raster format.
 # Without --op, keep the source size, fit one dimension, or fill both dimensions.
 def "main resize" [
-  source: path
-  --output(-o): path
-  --width: int
-  --height: int
-  --op: string
-  --anchor: string = "center"
-  --format: string = "auto"
-  --quality: int
-  --filter: string = "lanczos3"
-  --background: string
+  source: path # Image file to resize.
+  --output(-o): path # New file in an existing directory. Omit to display the encoded bytes in hex.
+  --width: int # Output width in pixels.
+  --height: int # Output height in pixels.
+  --op: string # scale, fit-width, fit-height, fit, or fill.
+  --anchor: string = "center" # Which part of the image to keep when cropping.
+  --format: string = "auto" # auto, jpeg, jpg, png, or webp. SVG requires a format other than auto.
+  --quality: int # JPEG 1–100 or WebP 0–100.
+  --filter: string = "lanczos3" # Raster resampling: nearest, triangle, catmull-rom, gaussian, or lanczos3.
+  --background: string # Opaque sRGB color, #RRGGBB.
 ] {
   let options = {
     width: $width, height: $height, op: $op, anchor: $anchor,

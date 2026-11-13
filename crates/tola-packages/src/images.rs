@@ -343,37 +343,44 @@ pub(super) fn resize_image(
     engine: &mut Engine,
     /// A path string relative to this call, or an already resolved path.
     source: Spanned<DataSource>,
-    /// Positive output width in pixels, as required by the operation.
+    /// Positive target width in pixels. Required for `fit-width`, `scale`, `fit`, and `fill`.
+    /// `fit-height` calculates it from the aspect ratio.
     #[named]
     #[default]
     width: Option<NonZeroU32>,
-    /// Positive output height in pixels, as required by the operation.
+    /// Positive target height in pixels. Required for `fit-height`, `scale`, `fit`, and `fill`.
+    /// `fit-width` calculates it from the aspect ratio.
     #[named]
     #[default]
     height: Option<NonZeroU32>,
-    /// One of scale, fit-width, fit-height, fit, or fill.
+    /// Resize operation. If omitted, `fill` crops to the requested width and height.
+    /// Use `fit-width` or `fit-height` to set one dimension and keep the aspect ratio.
     #[named]
     #[default("fill".into())]
     op: Str,
-    /// Which part of the source `fill` keeps: center, top, bottom, left, right, top-left,
-    /// top-right, bottom-left, or bottom-right.
+    /// Which part `fill` keeps when cropping. If omitted, crop around the center.
+    /// With `fill` you can also use `top`, `bottom`, `left`, `right`, `top-left`,
+    /// `top-right`, `bottom-left`, or `bottom-right`. Other operations accept only `center`.
     #[named]
     #[default("center".into())]
     anchor: Str,
-    /// One of auto, jpg (or jpeg), png, or webp.
+    /// Use `jpg` (or `jpeg`), `png`, or `webp`. If omitted or `auto`, use JPEG for a lossy
+    /// source without alpha, and PNG otherwise. For SVG, specify a raster format.
     #[named]
     #[default("auto".into())]
     format: Str,
-    /// JPEG quality is 1–100 (default 75). WebP is lossless unless a
-    /// quality from 0–100 is supplied. PNG is always lossless.
+    /// JPEG accepts 1–100. If omitted or set to `none`, use 75.
+    /// WebP uses lossy compression with 0–100. Omit this option or pass `none` for lossless WebP.
+    /// PNG ignores this option.
     #[named]
     #[default]
     quality: Option<i64>,
-    /// One of nearest, triangle, catmull-rom, gaussian, or lanczos3.
+    /// Resampling filter. If omitted, use `lanczos3`. Other choices are `nearest`,
+    /// `triangle`, `catmull-rom`, and `gaussian`. SVG ignores this option.
     #[named]
     #[default("lanczos3".into())]
     filter: Str,
-    /// An opaque color to composite transparency onto before encoding.
+    /// An opaque background color. Required when converting an image with alpha to JPEG.
     #[named]
     #[default]
     background: Option<Color>,
@@ -454,11 +461,12 @@ pub(super) fn image_srcset(
     #[named]
     #[default("webp".into())]
     format: Str,
-    /// JPEG/WebP quality 0–100; `none` selects lossless WebP. PNG ignores it.
+    /// JPEG accepts 1–100, WebP accepts 0–100, and both use 75 if omitted.
+    /// Pass `none` for lossless WebP. PNG ignores this option.
     #[named]
     #[default(Some(75))]
     quality: Option<i64>,
-    /// An opaque color to composite transparency onto before encoding.
+    /// An opaque background color. Required when converting an image with alpha to JPEG.
     #[named]
     #[default]
     background: Option<Color>,
@@ -501,7 +509,8 @@ pub(super) fn img(
     #[named]
     #[default]
     alt: Str,
-    /// How wide the element is displayed, as CSS.
+    /// Tell the browser how wide the image will appear. If omitted, use `100vw` (full viewport).
+    /// The attribute is written when at least two distinct widths are generated.
     #[named]
     #[default("100vw".into())]
     sizes: Str,
@@ -509,11 +518,12 @@ pub(super) fn img(
     #[named]
     #[default("webp".into())]
     format: Str,
-    /// JPEG/WebP quality 0–100; `none` selects lossless WebP. PNG ignores it.
+    /// JPEG accepts 1–100, WebP accepts 0–100, and both use 75 if omitted.
+    /// Pass `none` for lossless WebP. PNG ignores this option.
     #[named]
     #[default(Some(75))]
     quality: Option<i64>,
-    /// An opaque color to composite transparency onto before encoding.
+    /// An opaque background color. Required when converting an image with alpha to JPEG.
     #[named]
     #[default]
     background: Option<Color>,

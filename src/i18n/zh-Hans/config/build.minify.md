@@ -1,23 +1,30 @@
 # `[build.minify]`
 
-在发布前，对由 Typst 编译而来的 HTML、`[assets]` 中的 CSS 与 JavaScript 文件进行压缩。
+发布前压缩 Typst 生成的 HTML，以及 `[assets]` 中的 CSS 和 JavaScript。
 
 ## 配置项
 
 ### `html`
 
-是否压缩每个已发布页面的 HTML。
+压缩 Typst 生成的 HTML。省略时开启。
 
 ### `css`
 
-是否压缩 `[assets]` 下声明的 CSS 源，以及页面 HTML 里内嵌的 `<style>`。
+压缩 `[assets]` 中的 CSS 文件和页面里的 `<style>`。省略时开启。
 
 ### `javascript`
 
-是否压缩 `[assets]` 下声明的 `.js` 与 `.mjs` 源，以及页面 HTML 里内嵌的 `<script>`（含 module）。
+压缩 `[assets]` 中的 `.js`、`.mjs` 文件和页面里的 `<script>`，包括 module。省略时开启。
 
 ## 用法
 
-压缩发生在构建 output 时，`check`、`dev`、`preview` 都会根据 `[build.minify]` 选择是否压缩。因为进行压缩的时间很快，因此默认全部压缩。
+要保留易读的 HTML，可以单独关闭 HTML 压缩：
 
-`--minify=false` 为单次运行关闭三项。`[assets]` 下的 `cache-busting` 设置为 `true` 时，`asset-url`（位于 `@tola/address`）返回的 URL 上会被追加 `?h=`，标识压缩之后的字节——也就是浏览器实际收到的内容；压缩结果一变，URL 就变。如果 CSS 或 JavaScript 无法被成功压缩，那么会产生警告，保留原内容。
+```toml
+[build.minify]
+html = false
+```
+
+在用 `tola init` 创建的站点中，把 `= Hello` 写进 `content/index.typ`。从站点根目录运行 `tola build`，用文本编辑器打开 `public/index.html`，可以看到带缩进的 HTML。CSS 和 JavaScript 仍按各自的设置处理。用 `tola build --minify=false` 可一次关闭三项压缩。`check`、`dev` 和 `preview` 也读取这些设置。
+
+压缩 CSS 和 JavaScript 时会保留以 `/*!` 开头的许可证注释。压缩失败时，Tola 会发警告，并使用原文件内容。启用 `cache-busting` 后，资源 URL 的哈希按实际发布的内容计算。`generate-outputs` 的文件由 hook 自行压缩。

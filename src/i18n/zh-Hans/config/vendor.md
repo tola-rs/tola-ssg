@@ -1,43 +1,34 @@
 # `[vendor]`
 
-把 packages、字体与图标随站点一起保留，以便在其他机器上离线构建。
+把依赖复制到站点里，供离线或 `--pure` 构建使用。支持远程模块、Typst 包和远程图标集。
 
 ## 配置项
 
 ### `path`
 
-`tola vendor` 把这次构建选中的输入冻结到哪个目录，相对站点根。
+`tola vendor` 将依赖复制到这里。运行命令前，在 `tola.toml` 里设置一个相对于站点根目录的路径。
 
 ## 用法
 
-`tola vendor` 把生产构建选中的外部输入冻结到这个目录。使用命令之前声明 `path`：
+例如，把依赖放进 `vendor/`：
 
 ```toml
 [vendor]
 path = "vendor"
 ```
 
-`path` 必须是站点根下、`.tola` 之外的真实目录。
+运行 `tola vendor`，再用 `tola build --pure` 确认能用这些副本构建。把 `vendor/` 和 `tola.lock` 随站点提交。Tola 会先校验准备好的副本，再替换这三个子目录：
 
-Tola 准备依赖，检查准备好的副本能否在 `--pure` 下构建，然后才替换已安装副本。准备失败会保留上次输入；替换中途中断时，下一次 `tola vendor` 会完成替换，在那之前构建会拒绝运行，`--dry-run` 也会拒绝运行。Tola 的工作文件放在 `path` 旁的兄弟目录里，其名字以 `.` 开头、以 `-swap` 结尾：上面的 `vendor` 对应 `.vendor-swap`。
+- `modules/` 按别名保存锁定的远程模块。
+- `typst-packages/` 按命名空间、包名和版本保存 Typst 包。
+- `icons/` 为每个远程图标集保存一个 JSON 文件。
 
-`tola vendor` 不运行任何 hook 阶段——`before-build`、`generate-outputs`、`after-publish` 都不跑——也不发布站点 output。`before-build` hook 生成的文件必须已经存在：先用一次正常构建把它们生成出来。`generate-outputs` hook 的文件也不在冻结范围内：每次构建都会重新生成，本机如此，用 vendored 输入构建的机器也如此。
+编译字体用 `[typst.fonts] paths` 指定目录，`tola vendor` 不会复制它们。
 
-Tola 整体替换这两个子目录，`path` 下的其他文件不动：
+`path` 必须位于站点内、`.tola` 之外。准备失败时保留上次副本。替换中断后，先重新运行 `tola vendor` 再构建。
 
-- `typst-packages/` —— 按 `{namespace}/{name}/{version}/` 存放解析到的 package，包括从宿主根目录或 `--package-path` 选中的 package
-- `icons/` —— 每个配置的 `remote-json` collection 对应一个 `<namespace>.json`
+用 `tola vendor --dry-run` 只准备和校验副本。要从配置的来源重新复制，用 `tola vendor --refresh`。
 
-站点自己的源文件要放在这两个目录之外。所有 namespace 的 package，包括 `@preview`，都先从 vendor 解析，再查宿主根目录；远程图标 collection 优先读取 vendored 副本——这也是 `--pure` 构建读取它的唯一来源。把这些输入随站点提交：
+如果站点需要 `before-build` 生成的文件，先生成文件，再运行 `tola vendor`。用 `tola check` 检查站点链接，包括指向 hook 输出的链接。
 
-```sh
-tola vendor --dry-run   # prepare and verify without replacing vendor
-tola vendor             # install the verified dependencies
-tola build --pure       # build from site-owned inputs
-```
-
-`--refresh` 不读取已安装的 vendor 副本：每个输入都从其余可用来源（宿主 package 根目录、缓存、网络等）重新解析一遍。用它替换过时的副本，或解析 `tola doctor` 报告的符号链接。重新解析不到某个输入时，保留上次副本。`--dry-run` 保持该副本不变，但可能获取依赖、更新缓存，或等待另一个站点命令完成。
-
-`--offline` 拒绝 Tola 的网络请求，但允许宿主 package 根目录与缓存，以及已开启的系统字体。`--pure` 还排除这些宿主输入与物理上位于站外的源文件，包括指向站外的符号链接。嵌入 package 与字体仍然可用；图像的派生缓存也可使用，因为其源字节仍能复现结果。
-
-这些标志限制 Tola 读取输入，不限制 hook 命令及其工具链：整个构建要在其他机器上复现，需要自己固定每个 hook 的命令及其工具链读取的文件（清单与锁文件），或者提交它生成的文件。
+`--offline` 禁止 Tola 联网。`--pure` 还会拒绝读取全局包、缓存、系统字体和站点外的路径，符号链接指到站点外也会拒绝。仍可使用 Tola 内置的包和字体。hook 自己运行的工具仍使用原有权限。

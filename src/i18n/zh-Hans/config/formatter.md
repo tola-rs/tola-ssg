@@ -1,30 +1,36 @@
 # `[formatter]`
 
-Tola 书写站点自己的 `.typ` 文件所用的样式：`tola fmt` 与语言服务都按这些值格式化。
+`tola fmt` 和编辑器格式化 Typst 文件时，都会读取这些设置。
 
 ## 配置项
 
 ### `indent`
 
-一级嵌套缩进多少个空格。
+每层缩进的空格数，默认 2。
 
 ### `print-width`
 
-格式化结果折行的列宽。格式化器最窄只折到 20 列：更小的值会被提升到 20，而不是被拒绝。
+折行宽度，默认 120 列。小于 20 时按 20 列处理。
 
 ### `prose-wrap`
 
-标记文本中的散文怎么换行：`none` 保留作者自己的换行，`fill` 重新排满每一行，`sentence` 每个句子单独一行。
+默认 `none`，保留正文原有的换行。`fill` 按列宽换行，`sentence` 每个句子单独一行。
 
 ## 用法
 
-`tola fmt` 按这里的样式书写站点自己的 `.typ` 文件，语言服务也用它格式化编辑器里正在编辑的那个文件：
+例如，把折行宽度改为 88 列：
 
 ```toml
 [formatter]
-indent = 2
-print-width = 120
-prose-wrap = "none"
+print-width = 88
 ```
 
-没有 `tola.toml` 的目录就按上面这份默认配置格式化：在这个目录里运行命令，它用这些默认值格式化该目录下的 `.typ` 文件。
+要试一下，可在用 `tola init` 创建的站点里，把这一行写入 `content/index.typ`：
+
+```typst
+#let sizes=(small:8,large:16)
+```
+
+从站点根目录运行 `tola fmt --check`，它会列出需要格式化的文件。运行 `tola fmt` 写回文件后，打开 `content/index.typ`，可以看到赋值符号两边、字段名和字段值之间的空格。
+
+找不到站点配置时，`tola fmt` 使用默认值格式化当前目录下的 `.typ` 文件。

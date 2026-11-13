@@ -1,66 +1,47 @@
 // @tola/image:0.0.0 - image metadata, single images resized on request, and responsive sets
 
-/// Request the derivative a build publishes, and return its URL and dimensions.
+/// Resize an image and publish the result under `_tola/images/`, even when you leave the
+/// return value unused. Pass its `url`, `width`, and `height` to `html.img`. The URL includes
+/// `site.base-path`. The result also includes the source dimensions in `original-width` and
+/// `original-height`. All dimensions are in pixels.
 ///
-/// `source` names the input image: a path string resolved against this call, a path you already
-/// resolved with `path()`, or raw image bytes. Resolve a string before you pass it to another file
-/// or package. Pass the file's own path even when an asset declaration publishes it; the
-/// declaration's URL is for browsers. `width` and `height` are positive pixel counts.
+/// You can also pass image bytes. Use `path()` before passing a relative path to a function
+/// in another file or package.
 ///
-/// `op` names the operation: `scale`, `fit-width`, `fit-height`, `fit`, or `fill` (the default).
-/// It decides which of the two dimensions you must pass:
+/// `scale` sets both dimensions independently. `fit-width` and `fit-height` derive the other
+/// dimension from the aspect ratio and round it to the nearest pixel, with a minimum of one.
+/// `fit` keeps the whole image inside the requested box and leaves it at its original size
+/// if it already fits. `fill` crops to the requested size. Every operation except `fit` can
+/// enlarge the image.
 ///
-/// - `scale` needs both, and may change the aspect ratio.
-/// - `fit-width` needs `width`, and `fit-height` needs `height`. Both keep the aspect ratio.
-/// - `fit` needs both, fits the image inside that box, and keeps the source size when the image
-///   already fits.
-/// - `fill` needs both, crops the image to that size, and keeps the part named by `anchor` (the
-///   center by default).
+/// #### Image limits
 ///
-/// `anchor` decides which part `fill` keeps: `center` (the default), `top`, `bottom`, `left`,
-/// `right`, `top-left`, `top-right`, `bottom-left`, or `bottom-right`. Every other operation keeps
-/// the whole source, so it refuses any `anchor` but `center`.
+/// JPEG supports up to 65,535 pixels per axis and uses 4:2:0 chroma subsampling. WebP supports
+/// up to 16,383 pixels per axis. PNG preserves more detail in coloured text and fine lines.
+/// Images embedded in an SVG must use data URIs. SVG text uses the compiler's default fonts.
+/// Convert text to paths to keep its shapes. Animated input returns an error.
 ///
-/// A dimension you omit is `none`. `fit-width` uses only `width`, and `fit-height` uses only
-/// `height`. Every operation except `fit` can enlarge the source. A derived dimension rounds to
-/// the nearest pixel, with a minimum of one pixel.
+/// Use `[assets]` to publish the original too. Run `tola check --json` to inspect generated
+/// image paths and media types.
 ///
-/// `format` is `auto`, `jpg` (or `jpeg`), `png`, or `webp`. `auto` chooses JPEG for a lossy source
-/// without alpha, and PNG for everything else, including GIF. JPEG quality runs from 1 to 100 and
-/// defaults to 75. WebP is lossless until you pass `quality` (0 to 100); PNG is always lossless.
-/// A valid `quality` affects only JPEG and WebP. Output dimensions cannot exceed 65,535 pixels
-/// per axis for JPEG, or 16,383 for WebP. JPEG halves colour resolution (4:2:0); use PNG for
-/// coloured text and fine graphics. `quality: none` uses the format's default.
+/// Example: Publish a 640-pixel preview:
 ///
-/// An SVG source is rasterized at the requested pixel size and needs an explicit raster `format`:
-/// `auto` cannot choose one. Its text uses the compiler's default fonts, and linked images must be
-/// data URIs. Outline its text when the raster must not depend on those fonts.
+/// Put a PNG at `assets/logo.png`, save this as `site.typ`, and run `tola build`.
+/// Tola writes a 640-pixel-wide image to `public/_tola/images/` and places it on the home page
+/// at `public/index.html`. The height follows the source aspect ratio.
 ///
-/// AVIF output is not supported; choose `webp`, `png`, `jpg`, or `auto` instead.
+/// ```typst site
+/// #import "@tola/image:0.0.0": resize-image
+/// #let preview = resize-image("assets/logo.png", width: 640, op: "fit-width")
+/// #document("index.html")[
+///   #html.img(src: preview.url, width: preview.width, height: preview.height, alt: "Site logo")
+/// ]
+/// ```
 ///
-/// `filter` names the resampling kernel: `nearest`, `triangle`, `catmull-rom`, `gaussian`, or
-/// `lanczos3` (the default). The kernel applies only when the crop and the output differ in size;
-/// an SVG is rendered at the target size, so `filter` has no effect on it. `background` accepts an
-/// opaque Typst color, which Typst converts to sRGB before compositing. JPEG output needs
-/// `background` when the source's `has-alpha` is true; a source without alpha encodes directly. A
-/// `filter` or `background` with no effect resolves to the same derivative as omitting it.
+/// Example: Check the output and source dimensions:
 ///
-/// The result carries the derivative's published `url`, its `width` and `height`, and the
-/// source's own `original-width` and `original-height`. The call requests the derivative whether
-/// or not you use the returned URL and dimensions: a build publishes every derivative its
-/// converged evaluation requested, and an editor check reports diagnostics only. This call
-/// publishes the derivative alone; the source image keeps whatever the asset declaration
-/// publishes for it. `resize-image` refuses animated images. The URL includes
-/// `site.base-path`, ready for `html.img(src: resized.url, ...)`. Pass the integer pixel
-/// dimensions straight to `html.img`'s `width` and `height`.
-///
-/// A build adds each requested derivative to the site's output graph, under `_tola/images/` and
-/// a name derived from the source bytes and the recipe; equivalent requests land on one output.
-/// The returned `url` is the ordinary way to link it. When only an output path is at hand,
-/// `output-url` turns it into the browser URL. `tola check --json` reports the outputs collected
-/// by that operation, including their producer and media type, when that stage completes.
-///
-/// Example - resize to an exact width and height:
+/// The following size assertions use an 8 × 4 PNG at `assets/logo.png`, relative to the
+/// entry file. With your own image, use its dimensions for the `original-*` assertions.
 ///
 /// ```typst site
 /// #import "@tola/image:0.0.0": resize-image
@@ -71,7 +52,7 @@
 /// #assert.eq(resized.original-height, 4)
 /// ```
 ///
-/// Example - derive the height from the width:
+/// Example: Derive the height from the width:
 ///
 /// ```typst site
 /// #import "@tola/image:0.0.0": resize-image
@@ -80,7 +61,7 @@
 /// #assert.eq(resized.height, 2)
 /// ```
 ///
-/// Example - resize into a fixed layout slot:
+/// Example: Resize into a fixed layout slot:
 ///
 /// ```typst site
 /// #import "@tola/image:0.0.0": resize-image
@@ -95,7 +76,7 @@
 /// ]
 /// ```
 ///
-/// Example - keep the left edge of the source when filling a slot:
+/// Example: Crop a square and keep the left edge:
 ///
 /// ```typst site
 /// #import "@tola/image:0.0.0": resize-image
@@ -107,7 +88,7 @@
 /// #assert.eq(edge.height, 2)
 /// ```
 ///
-/// Example - flatten transparency onto an opaque background before JPEG encoding:
+/// Example: Convert to JPEG with a background colour:
 ///
 /// ```typst site
 /// #import "@tola/image:0.0.0": resize-image
@@ -122,7 +103,16 @@
 /// #assert(flat.url.ends-with(".jpg"))
 /// ```
 ///
-/// Example - rasterize an SVG for a bitmap consumer:
+/// Example: Rasterize an SVG:
+///
+/// Create `assets/` in the site root and save this SVG as `assets/mark.svg`. Add the Typst code to
+/// `site.typ` and run `tola build`. Tola generates a 12 × 12 PNG.
+///
+/// ```svg assets/mark.svg
+/// <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+///   <circle cx="12" cy="12" r="10" fill="#3569b0"/>
+/// </svg>
+/// ```
 ///
 /// ```typst site
 /// #import "@tola/image:0.0.0": resize-image
@@ -132,25 +122,28 @@
 /// #assert(mark.url.ends-with(".png"))
 /// ```
 ///
-/// Related: image-metadata, @tola/address, @tola/site, @tola/web
+/// Related: image-metadata, @tola/address, @tola/site, @tola/head
 #import "@tola/host:0.0.0": resize-image
 
-/// Inspect an image, and read its metadata.
+/// Read an image's size, format, and transparency. Use the size to limit an image resize,
+/// or check `has-alpha` before converting to JPEG.
 ///
-/// `source` behaves as in `resize-image`. The result carries `width`, `height`, `format`, `mime`,
-/// `has-alpha`, and `is-lossy`. The dimensions account for the image's orientation. `format` is
-/// `jpg`, `png`, `webp`, `gif`, `bmp`, or `svg`. Dimensions are CSS pixels; an SVG reports its
-/// intrinsic size at 96 DPI, so a size in points converts at 4/3 (`256pt` reports `341`). A vector
-/// without `width`/`height` reports its `viewBox` size, where a browser falls back to 300×150. An
-/// SVG counts as having alpha. Inspection reads what the file declares about itself, so `has-alpha`
-/// counts an unused GIF transparency declaration and an uncovered GIF canvas as alpha. The
-/// original file's URL comes from its own asset declaration: declare the file as an asset when it
-/// needs a URL.
+/// `source` accepts the same inputs as `resize-image`. The result has these fields:
 ///
-/// Read it before resizing when the recipe depends on the source: `has-alpha` decides whether
-/// JPEG needs a `background`, and `width` decides the target size.
+/// - `width` and `height`: size in CSS pixels after accounting for image orientation.
+/// - `format`: `jpg`, `png`, `webp`, `gif`, `bmp`, or `svg`. `mime` gives the media type.
+/// - `has-alpha`: whether the image can contain transparency. This is true for SVG and
+///   for GIF with a declared transparent color or an uncovered part of the canvas.
+/// - `is-lossy`: whether the image uses lossy encoding.
 ///
-/// Example - read an image's metadata:
+/// SVG lengths are converted at 96 DPI and rounded up to whole pixels. If only one
+/// dimension is specified, Tola calculates the other from the `viewBox` aspect ratio.
+/// With neither dimension, Tola uses the `viewBox` size. Without a `viewBox`, both
+/// dimensions are required.
+///
+/// To use the original image in the browser, add it to `[assets]`.
+///
+/// Example: Read an image's metadata:
 ///
 /// ```typst site
 /// #import "@tola/image:0.0.0": image-metadata
@@ -161,7 +154,7 @@
 /// #assert.eq(metadata.has-alpha, false)
 /// ```
 ///
-/// Example - branch on the source's own dimensions and alpha:
+/// Example: Limit the preview width and keep transparency:
 ///
 /// ```typst site
 /// #import "@tola/image:0.0.0": image-metadata, resize-image
@@ -181,7 +174,10 @@
 /// #assert(preview.url.ends-with(".jpg"))
 /// ```
 ///
-/// Example - read a vector's intrinsic size before rasterizing it:
+/// Example: Read the dimensions of an SVG:
+///
+/// Use `assets/mark.svg` from the `resize-image` example. Its `viewBox` is 24 × 24,
+/// so `image-metadata` returns that size.
 ///
 /// ```typst site
 /// #import "@tola/image:0.0.0": image-metadata
@@ -192,38 +188,32 @@
 /// #assert.eq(mark.has-alpha, true)
 /// ```
 ///
-/// Related: resize-image, @tola/address, @tola/web
+/// Related: resize-image, @tola/address, @tola/head
 #import "@tola/host:0.0.0": image-metadata
 
-/// Derive one image at several widths, and return what a responsive `<img>` needs.
+/// Resize an image to several widths and return values for a responsive `<img>`.
 ///
-/// This is the route for photographs: give it the widths your layout needs, and it requests one
-/// derivative per width, exactly as `resize-image` does for a single one. `sizes` stays yours to
-/// write — nothing here can know the width a browser will end up using.
+/// Pass the widths your layout needs, such as `widths: (480, 960)`. Set HTML `sizes` to
+/// tell the browser how wide the image appears in the layout.
 ///
-/// An SVG source is refused: a vector has no `w` descriptor. Use `image()` for vector display, or
-/// `resize-image` with an explicit raster format for a bitmap.
+/// This function accepts raster images. To display an SVG, use `image()`.
+/// To convert it to a bitmap, call `resize-image` with a raster format.
 ///
-/// `widths` is `auto` by default, which derives the source's own width: a call with no widths
-/// converts the format without resampling. A list of widths is sorted ascending and duplicates
-/// collapse, so a call that asks for one width twice still derives it once. Every derivative uses
-/// `fit-width` and keeps the source's aspect ratio, and a width larger than the source enlarges it,
-/// as `resize-image` does.
+/// With `widths: auto` (the default), the image is encoded at its original size. A list of widths
+/// is sorted from smallest to largest, and repeated widths are counted once. Resizing keeps the
+/// aspect ratio and can enlarge the image.
 ///
-/// The result carries one `<img>`'s values: `url` is the widest derivative, `srcset` lists every
-/// derivative with its `w` descriptor, and `width` and `height` describe the widest one, so the page
-/// can reserve the right space before the image loads. `format` defaults to `webp` and `quality` to
-/// 75, because this route serves the page; `quality: none` selects lossless WebP.
+/// `url`, `width`, and `height` describe the widest image. `srcset` lists each URL with
+/// its width, such as `480w`.
 ///
-/// Write these values with `html.elem`: a `sizes` list uses viewport units and ends with an entry
-/// that has no media condition, which the typed `html.img` cannot express. The HTML layer parses and
-/// rewrites the `srcset` URLs on its own. `img` below performs this assembly for one element.
+/// Use `img` to create the element directly. To write your own `sizes` attribute, use
+/// `html.elem("img", attrs: ...)`. It accepts CSS viewport units and a final width without
+/// a media condition.
 ///
-/// Every derivative is requested on its own, so a build publishes one output per distinct width
-/// under `_tola/images/`, and equivalent requests land on one output: two calls whose widths overlap
-/// share those derivatives. An editor check reports diagnostics only, as with `resize-image`.
+/// A build publishes the resized files under `_tola/images/`. Calls with the same source,
+/// width, and settings share the same file.
 ///
-/// Example - derive one image at two widths:
+/// Example: Resize one image to two widths:
 ///
 /// ```typst site
 /// #import "@tola/image:0.0.0": image-srcset
@@ -232,48 +222,71 @@
 /// #assert(photo.srcset.ends-with(" 4w"))
 /// ```
 ///
-/// Example - record the widest derivative as a page's social image:
+/// Example: Use the widest image in the page's share card:
+///
+/// Put a PNG at `assets/logo.png`
+/// and set `origin = "https://example.test"` under `[site]` in `tola.toml`. Save the
+/// example as `site.typ` and run `tola build --minify=false`.
 ///
 /// ```typst site
 /// #import "@tola/image:0.0.0": image-srcset
-/// #let photo = image-srcset("assets/logo.png", widths: (2, 4))
-/// #document("index.html")[
-///   #html.elem("meta", attrs: (property: "og:image", content: photo.url))
+/// #import "@tola/head:0.0.0": open-graph
+/// #import "@tola/site:0.0.0": site
+/// #let origin = site.origin
+/// #let photo = image-srcset("assets/logo.png", widths: (480, 960))
+/// #let entries = open-graph(
+///   title: "Field notes",
+///   url: site.url,
+///   images: ((url: origin + photo.url, alt: "Site logo"),),
+/// )
+/// #document("index.html", title: "Field notes")[
+///   #html.html[#html.head(entries.join()) #html.body[Field notes]]
 /// ]
 /// ```
 ///
-/// Related: img, resize-image, image-metadata, @tola/address, @tola/web
+/// In `public/index.html`, the `<head>` includes the following tag. The filename depends on
+/// the image and resize settings. `photo.url` already includes `site.base-path`.
+///
+/// ```html
+/// <meta property="og:image" content="https://example.test/_tola/images/…webp">
+/// ```
+///
+/// Related: img, resize-image, image-metadata, @tola/address, @tola/head
 #import "@tola/host:0.0.0": image-srcset
 
 /// Place one image at several widths, as a responsive `<img>`.
 ///
-/// `source` behaves as in `resize-image`. `widths` is `auto`, which derives the source's own width,
-/// or a list of pixel widths to derive; `sizes` says how wide the element is displayed and defaults
-/// to `100vw`, the browser's own assumption. Pass the width your layout reserves, such as
-/// `"(max-width: 760px) 100vw, 720px"`, whenever the element is not full-width.
+/// `widths` lists the image files to generate. `sizes` tells the browser how wide the
+/// image will appear, so it can choose a file from `srcset`. For example,
+/// `"(max-width: 760px) 100vw, 720px"` tells the browser to use the full viewport
+/// width up to 760 pixels, and 720 CSS pixels on larger screens.
 ///
-/// The element carries the widest derivative's `src`, its pixel `width` and `height` so the page
-/// reserves space, and `srcset` with `sizes` only when more than one width was asked for. `alt` is
-/// written even when you leave it empty: an omitted `alt` is invalid HTML, while `alt: ""` marks a
-/// decorative image. `format` and `quality` default to `webp` and 75, as in `image-srcset`.
+/// The element carries the widest image's `src`, its pixel `width` and `height` so the page
+/// reserves space, and `srcset` with `sizes` only when at least two distinct widths remain. `alt` is
+/// written even when you leave it empty. Use `alt: ""` for a decorative image.
 ///
-/// Attributes this function owns — `src`, `srcset`, `sizes`, `width`, `height`, and `alt` — cannot
-/// also appear in `attrs`. `loading` and `decoding` default to `lazy` and `async` and may be
-/// overridden there. Every other attribute, including `data-*`, passes through unchanged.
+/// Use `attrs` for extra HTML attributes with string values. The function sets `src`,
+/// `srcset`, `sizes`, `width`, `height`, and `alt` itself. These names are reserved
+/// regardless of case. To override `loading: "lazy"` or `decoding: "async"`, set
+/// those attributes in `attrs`.
 ///
 /// The element is HTML: call it from an HTML document. A paged document uses `image` instead.
 ///
-/// An SVG source is refused for the same reason as `image-srcset`; use `image()` or
-/// `resize-image` with an explicit raster format.
+/// This function accepts raster images. For SVG, use `image()` or convert it first
+/// with `resize-image` and a raster format.
 ///
-/// Example - one image at two widths:
+/// Example: Add a responsive image to a page:
+///
+/// Place a PNG at `assets/logo.png` and save this as `site.typ` in a new site. Run
+/// `tola build`. The home page has an `img` with a `srcset` for both widths. Replace
+/// `2` and `4` with the widths your layout needs.
 ///
 /// ```typst site
 /// #import "@tola/image:0.0.0": img
 /// #document("index.html")[#img("assets/logo.png", widths: (2, 4), alt: "Logo")]
 /// ```
 ///
-/// Example - a layout that is at most 720 pixels wide, with a top-priority hero image:
+/// Example: Prioritize a hero image in a layout up to 720 pixels wide:
 ///
 /// ```typst site
 /// #import "@tola/image:0.0.0": img
@@ -288,5 +301,5 @@
 /// ]
 /// ```
 ///
-/// Related: image-srcset, resize-image, image-metadata, @tola/web
+/// Related: image-srcset, resize-image, image-metadata, @tola/head
 #import "@tola/host:0.0.0": img

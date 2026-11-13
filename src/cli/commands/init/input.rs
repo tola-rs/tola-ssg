@@ -129,7 +129,7 @@ mod tests {
     use clap::Parser;
 
     fn source(arguments: &[&str]) -> Result<Source> {
-        let Commands::Init(args) = Cli::try_parse_from(arguments)?.command else {
+        let Commands::Init { args, .. } = Cli::try_parse_from(arguments)?.command else {
             unreachable!()
         };
         Source::from_args(&args)?.context("missing source")

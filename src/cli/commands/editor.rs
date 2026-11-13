@@ -23,7 +23,7 @@ pub(in crate::cli) fn run(
     cancellation: &Cancellation,
 ) -> Result<()> {
     match command {
-        EditorCommand::Template { editor } => {
+        EditorCommand::Template { editor, .. } => {
             destination::start(output, &cancellation.token())?;
             let packages = crate::cli::config::package_locations(&Default::default(), scope)?;
             output.status(crate::editor::settings_instructions(editor))?;
@@ -31,11 +31,11 @@ pub(in crate::cli) fn run(
             Ok(())
         }
         EditorCommand::Setup {
-            input: _,
             site,
             editors,
             list,
             dry_run,
+            ..
         } => {
             let (loaded, directory) =
                 load_editor_context(&site.config, &site.packages, scope, output, cancellation)?;
@@ -84,7 +84,7 @@ pub(in crate::cli) fn run(
             output.status(crate::editor::startup_instructions(&editors))?;
             Ok(())
         }
-        EditorCommand::Packages { input: _, site } => {
+        EditorCommand::Packages { site, .. } => {
             let (loaded, directory) =
                 load_editor_context(&site.config, &site.packages, scope, output, cancellation)?;
             let package_inputs = editor_package_inputs(

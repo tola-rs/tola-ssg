@@ -242,8 +242,8 @@ impl CommandOutput {
         self.terminal.write_stdout_code(source, language)
     }
 
-    /// Write documentation to stdout, through this invocation's pager when it has one.
-    pub(crate) fn write_documentation(&self, bytes: impl AsRef<[u8]>) -> anyhow::Result<()> {
+    /// Write documentation and report whether it went through this invocation's pager.
+    pub(crate) fn write_documentation(&self, bytes: impl AsRef<[u8]>) -> anyhow::Result<bool> {
         self.terminal.write_documentation(bytes)
     }
 

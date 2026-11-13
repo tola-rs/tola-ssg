@@ -8,6 +8,7 @@ pub(crate) const CROSS_REFERENCE_SCHEME: &str = "tola-help://";
 pub(crate) enum HelpCategory {
     Config,
     Packages,
+    Scripts,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -17,6 +18,7 @@ pub(crate) enum PageId {
     Config { section: String },
     Package { name: String },
     PackageSelection { name: String, exports: Vec<String> },
+    Script { name: String },
 }
 
 impl PageId {
@@ -27,13 +29,14 @@ impl PageId {
             Self::Index(HelpCategory::Packages)
             | Self::Package { .. }
             | Self::PackageSelection { .. } => "packages",
+            Self::Index(HelpCategory::Scripts) | Self::Script { .. } => "scripts",
         };
         let mut uri = url::Url::parse(&format!("{CROSS_REFERENCE_SCHEME}{host}"))
             .expect("help categories are valid URL hosts");
         let segments: Vec<&str> = match self {
             Self::Overview | Self::Index(_) => Vec::new(),
             Self::Config { section } => section.split('.').collect(),
-            Self::Package { name } => vec![name],
+            Self::Package { name } | Self::Script { name } => vec![name],
             Self::PackageSelection { name, exports } if exports.len() == 1 => {
                 vec![name, &exports[0]]
             }
@@ -118,6 +121,10 @@ impl LinkTarget {
                 }
             }
             ("packages", []) if query.is_empty() => PageId::Index(HelpCategory::Packages),
+            ("scripts", []) if query.is_empty() => PageId::Index(HelpCategory::Scripts),
+            ("scripts", [name]) if query.is_empty() && identifier(name) => PageId::Script {
+                name: (*name).into(),
+            },
             ("packages", [name]) if identifier(name) && query.is_empty() => PageId::Package {
                 name: (*name).into(),
             },
@@ -158,6 +165,18 @@ pub(crate) fn request(targets: &[String]) -> Option<LinkTarget> {
         [uri] if uri.starts_with(CROSS_REFERENCE_SCHEME) => {
             return LinkTarget::from_uri(uri, &PageId::Overview);
         }
+        [script, command @ ..] if script.starts_with("@tola-scripts/") => {
+            let name = script.strip_prefix("@tola-scripts/")?;
+            if !identifier(name) || !command.iter().all(|word| identifier(word)) {
+                return None;
+            }
+            let page = PageId::Script { name: name.into() };
+            return Some(if command.is_empty() {
+                LinkTarget::Page(page)
+            } else {
+                LinkTarget::PageAnchor(page, super::model::anchor(&command.join(" ")))
+            });
+        }
         [package, exports @ ..] if package.starts_with("@tola/") => {
             let name = package.strip_prefix("@tola/")?;
             if !identifier(name) {
@@ -191,6 +210,7 @@ pub(crate) fn request(targets: &[String]) -> Option<LinkTarget> {
                 match target.as_str() {
                     "config" => PageId::Index(HelpCategory::Config),
                     "package" => PageId::Index(HelpCategory::Packages),
+                    "scripts" => PageId::Index(HelpCategory::Scripts),
                     _ => return None,
                 }
             }
@@ -228,6 +248,13 @@ mod tests {
             (vec![], PageId::Overview),
             (vec!["config"], PageId::Index(HelpCategory::Config)),
             (vec!["package"], PageId::Index(HelpCategory::Packages)),
+            (vec!["scripts"], PageId::Index(HelpCategory::Scripts)),
+            (
+                vec!["@tola-scripts/image"],
+                PageId::Script {
+                    name: "image".into(),
+                },
+            ),
             (
                 vec!["[hooks]"],
                 PageId::Config {
@@ -260,6 +287,10 @@ mod tests {
             PageId::Overview,
             PageId::Index(HelpCategory::Config),
             PageId::Index(HelpCategory::Packages),
+            PageId::Index(HelpCategory::Scripts),
+            PageId::Script {
+                name: "image".into(),
+            },
             PageId::Config {
                 section: "hooks".into(),
             },
@@ -280,5 +311,19 @@ mod tests {
             let target = LinkTarget::PageAnchor(page, anchor("Details 名称"));
             assert_eq!(LinkTarget::from_uri(&target.uri(), &current), Some(target));
         }
+    }
+
+    #[test]
+    fn script_command_targets_its_heading() {
+        let arguments = ["@tola-scripts/image".to_owned(), "resize".to_owned()];
+        let page = PageId::Script {
+            name: "image".into(),
+        };
+        let target = LinkTarget::PageAnchor(page, anchor("resize"));
+        assert_eq!(request(&arguments), Some(target.clone()));
+        assert_eq!(
+            LinkTarget::from_uri(&target.uri(), &PageId::Overview),
+            Some(target)
+        );
     }
 }

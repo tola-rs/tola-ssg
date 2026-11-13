@@ -10,38 +10,65 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
-use tola_input::InputScope;
+use tola_input::{InputMode, InputScope};
 
 use crate::cli::output::CommandOutput;
-use crate::cli::{IconInspectArgs, InspectCommand, SourceInspectArgs};
+use crate::cli::{
+    BuildArgs, ConfigFileArgs, IconInspectArgs, InspectCommand, SiteArgs, SourceInspectArgs,
+};
 
 const SOURCE_LIST_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
 
-pub(in crate::cli) fn run(request: super::SiteRequest<'_>, command: InspectCommand) -> Result<()> {
+pub(in crate::cli) fn run(
+    config: ConfigFileArgs,
+    command: InspectCommand,
+    mode: InputMode,
+    output: &CommandOutput,
+    cancellation: &Cancellation,
+) -> Result<()> {
+    let scope = mode.scope();
     match command {
-        InspectCommand::Fonts(display) => {
+        InspectCommand::Fonts {
+            packages,
+            fonts,
+            display,
+            ..
+        } => {
+            let request = super::SiteRequest::new(
+                SiteArgs { config, packages },
+                BuildArgs::from_fonts(fonts),
+                mode,
+                output,
+                cancellation,
+            )?;
             let value = super::fonts::value(&request)?;
-            super::read::write(
-                &value,
-                "fonts",
-                &display,
-                request.scope(),
-                request.output,
-                request.cancellation,
-            )
+            super::read::write(&value, "fonts", &display, scope, output, cancellation)
         }
         InspectCommand::Config(args) => {
+            let request = super::SiteRequest::new(
+                SiteArgs {
+                    config,
+                    packages: args.packages,
+                },
+                BuildArgs::default(),
+                mode,
+                output,
+                cancellation,
+            )?;
             let value = super::config::value(&request, &args.build)?;
-            super::read::write(
-                &value,
-                "config",
-                &args.display,
-                request.scope(),
-                request.output,
-                request.cancellation,
-            )
+            super::read::write(&value, "config", &args.display, scope, output, cancellation)
         }
         command => {
+            let request = super::SiteRequest::new(
+                SiteArgs {
+                    config,
+                    ..Default::default()
+                },
+                BuildArgs::default(),
+                mode,
+                output,
+                cancellation,
+            )?;
             let loaded = request.load_config(&crate::config::ConfigOverrides::default())?;
             let config = loaded.config();
             match command {
@@ -49,19 +76,19 @@ pub(in crate::cli) fn run(request: super::SiteRequest<'_>, command: InspectComma
                     args,
                     config,
                     &request.resources,
-                    request.scope(),
-                    request.output,
-                    request.cancellation,
+                    scope,
+                    output,
+                    cancellation,
                 ),
                 InspectCommand::Icons(args) => icons(
                     args,
                     config,
                     &request.resources,
-                    request.scope(),
-                    request.output,
-                    request.cancellation,
+                    scope,
+                    output,
+                    cancellation,
                 ),
-                _ => unreachable!("font, config, and preset inspection return above"),
+                _ => unreachable!("font and config inspection return above"),
             }
         }
     }

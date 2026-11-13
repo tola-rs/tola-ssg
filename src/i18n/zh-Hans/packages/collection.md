@@ -1,21 +1,23 @@
 # `@tola/collection`
 
-对一组你自己提供的值（成员数组）做四类操作：查、分、筛、层级。
+给文章分组、按标签筛选、找上一篇和下一篇，或按父子关系查找成员。
 
 - 索引与分组：`index-by`、`group-by`、`group-by-keys`
 - 筛选与取字段：`select-members`、`pick`
 - 顺序与邻居：`adjacent`、`window`
 - 层级：`children`、`descendants`、`ancestors`、`lineage`、`siblings`
 
-共用约定：`key`、`keys`、`parent` 都是你提供的函数——`key` 接收成员、返回它的键；`keys` 接收成员、返回它带的归属；`parent` 接收成员键、返回它的容器键，根节点返回 `none`。以成员为锚点的查询在该成员缺席时返回 `none`；`children` 和 `descendants` 允许容器不在成员数组中。空数组表示没有选中成员。筛选结果保持 `members` 的输入顺序，`ancestors` 和 `lineage` 则沿父链从根向下排列。分组按组键首次出现的顺序。`index-by`、`adjacent`、`window` 与层级类函数要求成员的键唯一（重复会报错）；`group-by`、`group-by-keys`、`select-members` 不要求。
+`key` 从成员取一个键，`keys` 从成员取多个键，例如文章的 tag。`parent` 接收成员的键，返回父节点的键。根节点的父键是 `none`。
+
+查找指定成员时，找不到该成员返回 `none`。找到成员但没有匹配项时，返回空数组或省略相应的字段，具体见各函数。`children` 和 `descendants` 可以查找未列入成员数组的父节点。分组按键首次出现的顺序排列，筛选保留输入顺序。
 
 ## `pick`
 
-返回新字典：`fields` 里由 `keys` 命名的条目，顺序按 `keys` 列出的顺序。
+按 `keys` 给出的顺序，从 `fields` 复制同名字段，返回新字典。
 
-约束：`keys` 里的每个键都必须是字符串；只复制 `fields` 里确实存在的键；同一个键列两次只算一次；值原样复制（`none` 也不例外）；键里的点是普通字符，所以 `"a.b"` 是一个键。
+只复制 `fields` 中存在的键。重复的键只取一次，值原样保留，包括 `none`。键须为字符串，例如 `"a.b"` 是一个完整的键。
 
-Example - 复制选中的字段（含带点的键）：
+示例：复制选中的字段（含带点的键）：
 
 ```typst
 #import "@tola/collection:0.0.0": pick
@@ -33,11 +35,11 @@ Example - 复制选中的字段（含带点的键）：
 
 ## `index-by`
 
-用 `key` 为每个成员取一个键，建立「键 → 成员」的索引。
+为每个成员取一个键，返回以这些键查找成员的字典。
 
-约束：`key` 每个成员调用一次，必须返回字符串——返回数组或 `none` 都算错误；两个成员的键相同也算错误。
+每个成员调用一次 `key`。两个成员的键相同就会报错。
 
-Example - 按路径建立索引：
+示例：按路径建立索引：
 
 ```typst
 #import "@tola/collection:0.0.0": index-by
@@ -56,15 +58,15 @@ Example - 按路径建立索引：
 
 ### `key`
 
-接收一个成员，返回它的字符串键。
+从每个成员取出一个字符串作键。省略时，直接用成员本身，成员必须是字符串。
 
 ## `group-by`
 
-按每个成员的一个键分组：每个成员只进一组。（成员有多个归属时用 `group-by-keys`。）
+按单个键分组。例如，用文章的栏目分组，每篇文章只进一个组。按多个 tag 分组时用 `group-by-keys`。
 
-约束：`key` 每个成员调用一次，必须返回字符串。组的顺序是组键首次出现的顺序，组内成员保持输入顺序。
+每个成员调用一次 `key`。组按键首次出现的顺序排列，组内保持输入顺序。
 
-Example - 按每个成员各自的一个键分组：
+示例：按栏目分组：
 
 ```typst
 #import "@tola/collection:0.0.0": group-by
@@ -80,15 +82,15 @@ Example - 按每个成员各自的一个键分组：
 
 ### `key`
 
-接收一个成员，返回它的字符串键。
+从每个成员取出一个字符串作键。省略时，直接用成员本身，成员必须是字符串。
 
 ## `group-by-keys`
 
-按每个成员携带的多个键分组：一个成员可以进多个组。（每个成员只有一个归属时用 `group-by`。）
+按多个键分组。例如，一篇文章可以出现在每个 tag 对应的组里。每篇只有一个键时，用 `group-by`。
 
-约束：`keys` 每个成员调用一次，返回该成员的归属；同一个成员里重复的归属只算一次；归属为空的成员不进任何组。组的顺序是归属键首次出现的顺序，组内成员保持输入顺序。
+每个成员调用一次 `keys`。重复的键只算一次，没有键的成员不进组。组按键首次出现的顺序排列，组内保留输入顺序。
 
-Example - 每个成员各自带来新的归属：
+示例：按标签给笔记分组：
 
 ```typst
 #import "@tola/collection:0.0.0": group-by-keys
@@ -111,15 +113,15 @@ Example - 每个成员各自带来新的归属：
 
 ### `keys`
 
-接收一个成员，返回它的归属键。
+从每个成员取出一个字符串数组作分组键。省略时，成员本身须是字符串数组。
 
 ## `select-members`
 
-按成员的归属筛选：`"any"` 命中一个就保留，`"all"` 要求全部命中。
+按键筛选成员。例如，用 `keys: note => note.tags` 查找带有指定 tag 的笔记。
 
-约束：`keys` 返回一个成员的归属；归属是普通值，所以 `(none,)` 算一个归属、`()` 一个也不算。`wanted` 为空时，`"any"` 什么都不选，`"all"` 全选。
+`"any"` 匹配 `wanted` 中任意一个键，`"all"` 要求匹配全部。`(none,)` 含有一个键，`()` 没有键。`wanted` 为空时，`"any"` 不选任何成员，`"all"` 选全部成员。
 
-Example - any 与 all：
+示例：匹配任意键或全部键：
 
 ```typst
 #import "@tola/collection:0.0.0": select-members
@@ -135,7 +137,7 @@ Example - any 与 all：
 )
 ```
 
-Example - 空的 `wanted`：
+示例：用空的 `wanted` 筛选成员：
 
 ```typst
 #import "@tola/collection:0.0.0": select-members
@@ -150,23 +152,25 @@ Example - 空的 `wanted`：
 
 ### `wanted`
 
-成员必须具有的归属。
+要匹配的键。
 
 ### `keys`
 
-接收一个成员，返回它的归属。
+从每个成员取出一个键数组，键可以是 `none`。省略时，成员本身须是数组。
 
 ### `match`
 
-有一个归属命中就够，还是必须全部命中。
+`"any"` 匹配任意一个键，是默认值。`"all"` 要求匹配全部。
 
 ## `adjacent`
 
-取键为 `at` 的成员的前后邻居，返回 `{ before, after }`。
+查找 `at` 对应成员的上一项和下一项，分别放在 `before` 和 `after` 中。
 
-约束：没有成员以 `at` 为键时，结果是 `none`；只有邻居确实存在时，字典里才出现对应的 `before` 或 `after` 键，而邻居本身可以是 `none`；成员键必须唯一（`at` 不存在时也一样）；键可以是任何可比较的值，包括 `none`——`index-by` 更严格，要求字符串。
+找不到 `at` 时返回 `none`。如果成员已经是第一项，结果没有 `before`。如果它是最后一项，结果没有 `after`。存在的上一项或下一项，其值可以是 `none`。
 
-Example - 查找成员的邻居：
+每个成员的键必须唯一。键可以是任何可比较的值，包括 `none`。
+
+示例：查找上一项和下一项：
 
 ```typst
 #import "@tola/collection:0.0.0": adjacent
@@ -177,7 +181,7 @@ Example - 查找成员的邻居：
 #assert.eq(adjacent(pages, "z", key: page => page.id), none)
 ```
 
-Example - 走到链的两端：
+示例：查找列表首尾的相邻项：
 
 ```typst
 #import "@tola/collection:0.0.0": adjacent
@@ -187,27 +191,32 @@ Example - 走到链的两端：
 #assert.eq(adjacent(steps, "middle"), (before: none, after: "last"))
 ```
 
-Example - 链接到一节里的上一篇与下一篇：
+示例：链接到上一篇和下一篇：
 
-```typst site
-#import "@tola/address:0.0.0": join-route, output-of
+在用 `tola init` 创建的站点里，把下面的代码保存为 `site.typ`，运行 `tola dev`。在终端打印的站点地址下打开 `/guide/install/`，可以看到指向 Guide 和 Deploy 的链接。数组里的顺序就是阅读顺序。
+
+```typst
+#import "@tola/address:0.0.0": output-url
 #import "@tola/collection:0.0.0": adjacent
-#import "@tola/source:0.0.0": all-sources
 
-// The guide's pages, in the order the section declares.
 #let pages = (
-  all-sources()
-    .filter(source => source.path.starts-with("guide/"))
-    .sorted(key: source => (source.meta.order, source.id))
-    .map(source => (
-      output: output-of(join-route(source.route-segments)),
-      title: source.meta.title,
-    ))
+  (output: "guide/index.html", title: "Guide"),
+  (output: "guide/install/index.html", title: "Install"),
+  (output: "guide/deploy/index.html", title: "Deploy"),
 )
 
-#let neighbors = adjacent(pages, "guide/install/index.html", key: page => page.output)
-#assert.eq(neighbors.before.title, "Guide")
-#assert.eq(neighbors.after.title, "Deploy")
+#for page in pages {
+  let neighbors = adjacent(pages, page.output, key: item => item.output)
+  document(page.output, title: page.title)[
+    #heading(level: 1, page.title)
+    #for direction in ("before", "after") {
+      if direction in neighbors {
+        let item = neighbors.at(direction)
+        block(link(output-url(item.output), item.title))
+      }
+    }
+  ]
+}
 ```
 
 ### `members`
@@ -216,21 +225,19 @@ Example - 链接到一节里的上一篇与下一篇：
 
 ### `at`
 
-要取邻居的成员键。
+要查找上一项和下一项的成员键。
 
 ### `key`
 
-接收一个成员，返回它的键。
+从每个成员取出一个键。省略时，直接用成员本身。
 
 ## `window`
 
-取键为 `at` 的成员前后各 `before`/`after` 个邻居，不含它自己。
+在 `at` 对应的成员前后分别取最多 `before` 项和 `after` 项，结果保持输入顺序，省略该成员本身。
 
-结果保持输入顺序；没有成员以 `at` 为键时，结果是 `none`。
+找不到 `at` 时返回 `none`。每个成员的键必须唯一。
 
-约束：成员键必须唯一（`at` 不存在时也一样）；`before` 与 `after` 必须是非负整数。
-
-Example - 取某个成员周围的窗口：
+示例：取指定成员前后的几项：
 
 ```typst
 #import "@tola/collection:0.0.0": window
@@ -240,7 +247,7 @@ Example - 取某个成员周围的窗口：
 #assert.eq(window(pages, "z", key: page => page.id), none)
 ```
 
-Example - 只保留 `at` 一侧的成员：
+示例：只保留 `at` 一侧的成员：
 
 ```typst
 #import "@tola/collection:0.0.0": window
@@ -256,27 +263,27 @@ Example - 只保留 `at` 一侧的成员：
 
 ### `at`
 
-窗口以哪个成员键为中心。
+从这个成员的位置向前或向后取值。
 
 ### `key`
 
-接收一个成员，返回它的键。
+从每个成员取出一个键。省略时，直接用成员本身。
 
 ### `before`
 
-向前包含多少个成员；`0` 表示不包含。必须是非负整数。
+取前面几项。必须是非负整数，省略时一项也不取。
 
 ### `after`
 
-向后包含多少个成员；`0` 表示不包含。必须是非负整数。
+取后面几项。必须是非负整数，省略时一项也不取。
 
 ## `children`
 
-取容器键 `of` 的直接子成员。
+列出父键为 `of` 的成员。
 
-约束：`of` 不能是 `none`；容器本身可以不出现在 `members` 里；成员键必须唯一且不能是 `none`；`parent` 接收成员键（不是成员）、返回它的容器键，在根处返回 `none`；只看直接边，自环算错误。
+`of` 是要查找子项的父节点键，即使父节点没列在 `members` 中也可以查。`of` 和成员键都不能是 `none`，成员键也不能重复。成员把自己设为父节点时会报错。
 
-Example - 列出容器的直接子成员：
+示例：查找直接子项：
 
 ```typst
 #import "@tola/collection:0.0.0": children
@@ -286,7 +293,7 @@ Example - 列出容器的直接子成员：
 #assert.eq(kids.map(page => page.id), ("api", "faq"))
 ```
 
-Example - 列出不在 `members` 里的容器的子成员：
+示例：查找未列入 `members` 的父节点的子项：
 
 ```typst
 #import "@tola/collection:0.0.0": children
@@ -302,23 +309,25 @@ Example - 列出不在 `members` 里的容器的子成员：
 
 ### `of`
 
-要取其直接子成员的容器键。
+要查找的父节点的键。
 
 ### `parent`
 
-接收成员键而不是成员；返回它的容器键，在根处返回 `none`。
+接收成员键而不是成员；返回它的父键，在根处返回 `none`。
 
 ### `key`
 
-接收一个成员，返回它的键。
+从每个成员取出一个键。省略时，直接用成员本身。
 
 ## `descendants`
 
-取容器键 `of` 的所有后代（任意深度），不含容器本身。
+列出 `of` 对应节点的所有后代，省略该节点。
 
-约束：`of` 不能是 `none`；容器本身可以不出现在 `members` 里；成员键必须唯一且不能是 `none`，`parent` 在根处返回 `none`。每个成员的父链都会完整走一遍来发现环（包括匹配到容器之后的部分），链上 `members` 里没有对应成员的键也照常经过。父查找开销大时，可以复用预先算好的「键 → 父键」字典。
+`of` 可以指向没有列在 `members` 中的父节点。`of` 和成员键都不能是 `none`，成员键也不能重复。
 
-Example - 列出容器的所有后代：
+从每个成员沿 `parent` 向上查找。中途经过 `members` 里没有的键时仍继续。即使已经找到 `of`，也会检查剩下的路径是否有环。
+
+示例：查找节点的所有后代：
 
 ```typst
 #import "@tola/collection:0.0.0": descendants
@@ -328,7 +337,7 @@ Example - 列出容器的所有后代：
 #assert.eq(nested.map(page => page.id), ("api", "usage", "faq"))
 ```
 
-Example - 沿着链经过不是成员的键：
+示例：查找后代时经过未列入 `members` 的节点：
 
 ```typst
 #import "@tola/collection:0.0.0": descendants
@@ -343,23 +352,25 @@ Example - 沿着链经过不是成员的键：
 
 ### `of`
 
-要取其所有后代的容器键。
+要查找其后代的节点的键。
 
 ### `parent`
 
-返回成员键的容器键，在根处返回 `none`。
+返回成员键的父键，在根处返回 `none`。
 
 ### `key`
 
-接收一个成员，返回它的键。
+从每个成员取出一个键。省略时，直接用成员本身。
 
 ## `ancestors`
 
-取键为 `at` 的成员的祖先，从根排到它的父键，不含它自己。
+列出 `at` 对应成员的祖先，从根节点排到它的父节点。
 
-约束：只包含 `members` 里有的祖先；成员键必须唯一，成员键和 `at` 都不能是 `none`；`at` 不在 `members` 里时返回 `none`。上溯沿 `parent` 走到 `none` 为止，链上 `members` 里没有对应成员的键也照常经过；链中出现重复的键算错误。
+找不到 `at` 时返回 `none`。`at` 和成员键都不能是 `none`，成员键也不能重复。
 
-Example - 上溯成员的祖先链：
+沿 `parent` 向上查找，直到它返回 `none`。不在 `members` 里的节点可以经过，但不会出现在结果里。路径上遇到重复的键会报错。
+
+示例：从根节点到父节点列出所有祖先：
 
 ```typst
 #import "@tola/collection:0.0.0": ancestors
@@ -379,19 +390,21 @@ Example - 上溯成员的祖先链：
 
 ### `parent`
 
-返回成员键的容器键，在根处返回 `none`。
+返回成员键的父键，在根处返回 `none`。
 
 ### `key`
 
-接收一个成员，返回它的键。
+从每个成员取出一个键。省略时，直接用成员本身。
 
 ## `lineage`
 
-取键为 `at` 的成员的祖先，并把 `at` 自己排在最后——面包屑用。
+返回从根到 `at` 的成员列表，可用于面包屑导航。
 
-约束：只包含 `members` 里有的祖先；成员键必须唯一，成员键和 `at` 都不能是 `none`；`at` 不在 `members` 里时返回 `none`。上溯沿 `parent` 走到 `none` 为止，链上 `members` 里没有对应成员的键也照常经过；链中出现重复的键算错误。
+找不到 `at` 时返回 `none`。`at` 和成员键都不能是 `none`，成员键也不能重复。
 
-Example - 沿着链经过不是成员的键：
+沿 `parent` 向上查找，直到它返回 `none`。不在 `members` 里的节点可以经过，但不会出现在结果里。路径上遇到重复的键会报错。
+
+示例：查找祖先时经过未列入 `members` 的节点：
 
 ```typst
 #import "@tola/collection:0.0.0": lineage
@@ -401,7 +414,7 @@ Example - 沿着链经过不是成员的键：
 #assert.eq(trail.map(page => page.title), ("Root", "Leaf"))
 ```
 
-Example - 锚点不在 `members` 里：
+示例：指定的成员不在 `members` 中：
 
 ```typst
 #import "@tola/collection:0.0.0": lineage
@@ -419,19 +432,21 @@ Example - 锚点不在 `members` 里：
 
 ### `parent`
 
-返回成员键的容器键，在根处返回 `none`。
+返回成员键的父键，在根处返回 `none`。
 
 ### `key`
 
-接收一个成员，返回它的键。
+从每个成员取出一个键。省略时，直接用成员本身。
 
 ## `siblings`
 
-取与键为 `at` 的成员同父的其它成员。
+查找和 `at` 有同一个父节点的其他成员。
 
-约束：成员键必须唯一，成员键和 `at` 都不能是 `none`；`at` 不在 `members` 里时返回 `none`。`parent` 返回 `none` 的成员是根；所有根都共享 `parent: none`，但根没有兄弟。只看直接父边，自环算错误。
+找不到 `at` 时返回 `none`。如果 `at` 的 `parent` 返回 `none`，它是根节点，结果为 `()`。
 
-Example - 列出同父的成员：
+`at` 和成员键都不能是 `none`，成员键也不能重复。成员把自己设为父节点时会报错。
+
+示例：查找同一个父节点下的成员：
 
 ```typst
 #import "@tola/collection:0.0.0": siblings
@@ -441,7 +456,7 @@ Example - 列出同父的成员：
 #assert.eq(peers.map(page => page.id), ("faq",))
 ```
 
-Example - 根没有兄弟：
+示例：检查根节点的同级成员：
 
 ```typst
 #import "@tola/collection:0.0.0": siblings
@@ -457,12 +472,12 @@ Example - 根没有兄弟：
 
 ### `at`
 
-要取其兄弟的成员键。
+要查找同级成员的键。
 
 ### `parent`
 
-返回成员键的容器键，在根处返回 `none`。
+返回成员键的父键，在根处返回 `none`。
 
 ### `key`
 
-接收一个成员，返回它的键。
+从每个成员取出一个键。省略时，直接用成员本身。

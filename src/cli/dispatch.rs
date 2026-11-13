@@ -30,11 +30,7 @@ pub(super) fn dispatch(
     match command {
         Commands::Nu(_) => unreachable!("script runs before cancellation is installed"),
         Commands::Extension(_) => unreachable!("extension arguments are parsed before dispatch"),
-        Commands::Update {
-            input: _,
-            site,
-            update,
-        } => commands::update::run(
+        Commands::Update { site, update, .. } => commands::update::run(
             site.config,
             site.packages,
             mode,
@@ -42,19 +38,14 @@ pub(super) fn dispatch(
             output,
             cancellation,
         ),
-        Commands::Module { command } => commands::module::run(command, output, cancellation),
-        Commands::Init(args) => commands::init::run(&args, mode, output, cancellation),
-        Commands::Edit {
-            input: _,
-            site,
-            command,
-        } => commands::edit::run(site.config, command, output, cancellation),
+        Commands::Module { command, .. } => commands::module::run(command, output, cancellation),
+        Commands::Init { args, .. } => commands::init::run(&args, mode, output, cancellation),
         Commands::Build {
-            input: _,
             site,
             build,
             json,
             pretty,
+            ..
         } => {
             let request = match commands::SiteRequest::new(site, build, mode, output, cancellation)
             {
@@ -64,31 +55,33 @@ pub(super) fn dispatch(
             commands::build::run(request, json, pretty)
         }
         Commands::Dev {
-            input: _,
             site,
             build,
             development,
+            json,
+            ..
         } => commands::dev::run(
             commands::SiteRequest::new(site, build, mode, output, cancellation)?,
             development,
+            crate::dev::events::Events(json),
         ),
         Commands::Preview {
-            input: _,
             site,
             build,
             server,
+            ..
         } => commands::preview::run(
             commands::SiteRequest::new(site, build, mode, output, cancellation)?,
             server,
         ),
         Commands::Check {
-            input: _,
             site,
             build,
             no_build,
             no_hooks,
             json,
             pretty,
+            ..
         } => {
             let request = match commands::SiteRequest::new(site, build, mode, output, cancellation)
             {
@@ -101,11 +94,7 @@ pub(super) fn dispatch(
                 commands::check::run(request, json, no_hooks, pretty)
             }
         }
-        Commands::Fmt {
-            input: _,
-            site,
-            check,
-        } => commands::fmt::run(
+        Commands::Fmt { site, check, .. } => commands::fmt::run(
             site.config,
             site.packages,
             scope,
@@ -114,25 +103,10 @@ pub(super) fn dispatch(
             cancellation,
         ),
         Commands::Inspect {
-            input: _,
-            site,
-            command,
-            fonts,
-        } => commands::inspect::run(
-            commands::SiteRequest::new(
-                site,
-                BuildArgs::from_fonts(fonts),
-                mode,
-                output,
-                cancellation,
-            )?,
-            command,
-        ),
+            config, command, ..
+        } => commands::inspect::run(config, command, mode, output, cancellation),
         Commands::Query {
-            input: _,
-            site,
-            fonts,
-            query,
+            site, fonts, query, ..
         } => {
             let request = commands::SiteRequest::new(
                 site,
@@ -151,10 +125,10 @@ pub(super) fn dispatch(
             )
         }
         Commands::Vendor {
-            input: _,
             site,
             vendor,
             fonts,
+            ..
         } => commands::vendor::run(
             site.config,
             site.packages,
@@ -174,11 +148,7 @@ pub(super) fn dispatch(
             cancellation,
         ),
         Commands::Editor { command } => commands::editor::run(command, scope, output, cancellation),
-        Commands::Lsp {
-            input: _,
-            site,
-            fonts,
-        } => commands::lsp::run(
+        Commands::Lsp { site, fonts, .. } => commands::lsp::run(
             site.config,
             site.packages,
             fonts,
@@ -186,7 +156,7 @@ pub(super) fn dispatch(
             cancellation,
             output,
         ),
-        Commands::Skill(args) => commands::skill::run_builtin(&args, output, cancellation),
+        Commands::Skill { args, .. } => commands::skill::run_builtin(&args, output, cancellation),
         Commands::Version(args) => commands::version::run(&args, output),
         Commands::Help(args) => commands::help::run(
             &args,
@@ -195,9 +165,6 @@ pub(super) fn dispatch(
             output,
             cancellation,
         ),
-        Commands::Diagnostic {
-            command: super::args::DiagnosticCommand::Render,
-        } => commands::diagnostic::render(output),
         Commands::Completions(args) => {
             destination::start(output, &cancellation.token())?;
             commands::completions::run(args.shell, output)

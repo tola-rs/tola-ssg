@@ -3,45 +3,38 @@
 use serde::{Deserialize, Serialize};
 use tola_config::Config;
 
-/// Development watch settings.
+/// Control when `tola dev` rebuilds the site and reloads the browser.
 #[derive(Debug, Clone, Serialize, Deserialize, Config)]
 #[serde(default)]
 #[config(crate = tola_config, section = "dev")]
 pub(crate) struct DevConfig {
-    /// Whether `tola dev` watches saved files and reloads the browser.
+    /// Watch files and reload the browser after a rebuild. Omit this setting to leave watching on.
     pub(crate) watch: bool,
 }
 
 impl DevConfig {
     /// What `tola help "[dev]"` adds under its table.
-    pub const HELP: &'static str = "\
-Three commands take a site from sources to a page you can read. `tola build` builds once, writes
-the publish directory, and exits. `tola dev` builds, serves the site locally, and keeps watching
-every source it read: an edit rebuilds and refreshes the browser. `tola preview` builds once with
-production settings and serves that result locally without watching or writing `publish-dir`, so
-you can see the pages about to go live before you commit them.
-
-`watch` belongs to `tola dev`, the only one of the three that watches:
+    pub const HELP: &'static str = r#"
+File watching and browser reload are on by default. To turn them off for the site, add this to
+`tola.toml`.
 
 ```toml
 [dev]
-watch = true
+watch = false
 ```
 
-Run the same site three ways:
+Run `tola dev` from the site root and open the printed URL. With watching off, the server keeps
+serving the first build when you save a file. For one run, use `tola dev --watch=false`.
 
-```sh
-tola build      # write the publish directory and exit
-tola dev        # serve locally and rebuild on every edit
-tola preview    # serve the production build without watching
-```
+`tola dev` always builds in `dev` mode, and each hook follows its `dev` setting. To serve one
+production build, use `tola preview`. Both commands use `[server]`.
 
-The listener both serving commands use is `[server]`; `watch = false` runs `tola dev` as a single
-build that keeps serving.
+### Check a hook while editing
 
-It still differs from `tola preview`: `tola dev` always builds in the `dev` mode (commands read
-`TOLA_BUILD_MODE=dev`) and hooks follow their own `dev` field — after-publish with `dev = \"run\"`
-runs here too; `tola preview` builds with production settings and never runs after-publish.";
+When changes to a data file should trigger a rebuild, add its path to the hook's `rerun-on`.
+Tola already watches the script named by `nu`. To rerun a `generate-outputs` hook configured
+with `dev = "reuse"` on every rebuild, start `tola dev --no-reuse`.
+See [`[hooks]`](tola-help://config/hooks) for the stages and their options."#;
 }
 
 impl Default for DevConfig {

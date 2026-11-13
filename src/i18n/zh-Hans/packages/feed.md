@@ -1,36 +1,16 @@
 # `@tola/feed`
 
-RSS、Atom 与 JSON Feed 输出
+为文章生成 RSS、Atom 或 JSON Feed。
 
 ## `feed`
 
 在 Typst 入口文件（新站点默认为 `site.typ`）中调用 `feed`，生成 RSS、Atom 或 JSON Feed。
 
-#### 添加 RSS feed
-
-在 `tola.toml` 的 `[site]` 下设置 `origin = "https://example.com"`，用于生成绝对 URL。把下面的代码加到 `site.typ`。
-
-```typst
-#import "@tola/feed:0.0.0": feed
-#document("notes/index.html", title: [一则 Typst 笔记])[我用 Typst 整理笔记。]
-#feed(
-  title: "笔记",
-  entries: ((
-    id: "urn:notes:first",
-    target: "notes/index.html",
-    published: datetime(year: 2026, month: 9, day: 1),
-    summary: "我的第一则 Typst 笔记。",
-  ),),
-)
-```
-
-运行 `tola build`。按默认设置，`public/feed.xml` 会包含这条摘要和链接 `https://example.com/notes/`。
-
 #### 条目与格式
 
 feed 标题取自 `title` 或 `site.title`，不能为空或全是空白。每条内容都要写 `target` 和 `published`。
 
-`target` 可以是输出路径、`(output:, fragment:)` 字典、Typst label 或 location。省略条目的 `id` 或设为 `auto` 时，默认用目标 URL。`title` 同理，默认用目标文档的标题。还可以设置 `updated`、`summary`、`content` 和 `authors`。
+`target` 可以填输出路径、`(output:, fragment:)` 字典、Typst label 或 location。条目的 `id` 默认用目标 URL，`title` 默认用目标文档的标题。还可以设置 `updated`、`summary`、`content` 和 `authors`。
 
 用 `summary` 写摘要。需要在 feed 里附上正文时，另设 `content`。
 
@@ -56,13 +36,33 @@ Atom 的 `updated` 默认取 `published`。RSS 省略修改日期。JSON Feed �
 
 #### ID、锚点和日期
 
-feed 的 `id` 标识 Atom feed，条目的 `id` 标识一条内容，`content.id` 指定 HTML 元素。条目 `id` 必须有内容，在 feed 内唯一。移动页面时，保留已经发布的显式条目 `id`。Atom 的 feed 和条目 `id` 都必须是绝对 URI。作者可以在 feed 上指定，也可以在非空 feed 的每个条目中分别指定。
+条目 `id` 必须非空，在同一个 feed 中不能重复。文章移动后，已经对外发布的条目 `id` 应继续沿用。Atom 的 feed 和条目 `id` 都必须是绝对 URI。Atom 要有作者，可以统一写在 feed 上，也可以为非空 feed 的每个条目分别指定。提取 HTML 用的 `content.id` 填元素的 ID。
 
 如果 `target` 指向文档内的 label 或 location，用 `#link(<label>)`、`@label` 或 `#outline()` 在站点里链接到它。Typst 导出时才会为该元素生成 `id`。直接指定 `fragment` 时，它也必须指向已导出的锚点。指向整篇文档的 label 或 location 可以直接使用。
 
 `published` 和 `updated` 接受带完整日期的 Typst `datetime`，或带时区的 RFC 3339 字符串。`datetime` 按 UTC 解释，省略时间时取午夜。字符串只写日期、带首尾空白或使用闰秒都会报错。使用 `@tola/schema` 的 `timestamp` 时，传入返回值的 `.rfc3339`。feed 保留数字时区偏移和最多九位小数，RSS 只保留整秒。
 
-#### 在 feed 中附上文章正文
+示例：添加 RSS feed：
+
+在 `tola.toml` 的 `[site]` 下设置 `origin = "https://example.com"`，用于生成绝对 URL。把下面的代码加到 `site.typ`。
+
+```typst
+#import "@tola/feed:0.0.0": feed
+#document("notes/index.html", title: [一则 Typst 笔记])[我用 Typst 整理笔记。]
+#feed(
+  title: "笔记",
+  entries: ((
+    id: "urn:notes:first",
+    target: "notes/index.html",
+    published: datetime(year: 2026, month: 9, day: 1),
+    summary: "我的第一则 Typst 笔记。",
+  ),),
+)
+```
+
+运行 `tola build`。按默认设置，`public/feed.xml` 会包含这条摘要和链接 `https://example.com/notes/`。
+
+示例：在 feed 中附上文章正文：
 
 用下面这段替换前面的 RSS 示例。`content.id` 选中 `<article>`，把文章正文放进 feed。
 
@@ -94,9 +94,9 @@ feed 的 `id` 标识 Atom feed，条目的 `id` 标识一条内容，`content.id
 )
 ```
 
-#### 单独给订阅者写一份正文
+示例：单独给订阅者写一份正文：
 
-把这段放在 `content/note.typ` 开头，后面照常写页面正文。在 `site.typ` 生成条目时，从页面的 metadata 读取 `feed-summary` 和 `feed-content`，分别传给 `summary` 和 `content`。
+把这段放在 `content/note.typ` 开头，下面照常写文章正文。在 `site.typ` 生成条目时，从文章的元数据读取 `feed-summary` 和 `feed-content`，分别传给 `summary` 和 `content`。
 
 ```typst site
 #import "@tola/source:0.0.0": tola-meta
@@ -110,32 +110,32 @@ feed 的 `id` 标识 Atom feed，条目的 `id` 标识一条内容，`content.id
 
 ### `output`
 
-相对于构建输出目录的文件路径。`auto` 按格式使用 `feed.xml`、`atom.xml` 或 `feed.json`。
+相对于发布目录的文件路径。省略或传 `auto` 时，RSS 用 `feed.xml`，Atom 用 `atom.xml`，JSON Feed 用 `feed.json`。
 
 ### `format`
 
-feed 格式：`rss`、`atom` 或 `json`。
+省略时生成 `rss`。也可设为 `atom` 或 `json`。
 
 ### `id`
 
-feed 标识符；`auto` 取 feed 自己的绝对 URL。
+feed 的标识符。省略或传 `auto` 时，用 feed 文件的绝对 URL。
 
 ### `title`
 
-feed 标题；`auto` 取站点标题。
+feed 的标题。省略或传 `auto` 时，用站点标题。
 
 ### `description`
 
-feed 描述；`auto` 取站点描述。
+feed 的描述。省略或传 `auto` 时，用站点描述。
 
 ### `language`
 
-feed 语言。`auto` 使用站点的语言标签。
+feed 的语言标签。省略或传 `auto` 时，用站点的语言标签。
 
 ### `authors`
 
-feed 作者；`auto` 取站点的作者。
+feed 的作者。省略或传 `auto` 时，用站点的作者列表。
 
 ### `entries`
 
-要发布的条目，按你给出的顺序。
+按发布顺序传入条目。省略时生成空 feed。

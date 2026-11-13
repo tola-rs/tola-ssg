@@ -14,8 +14,7 @@ pub use tola_module::hooks::{
     CommandOutput, DevParticipation, HookStage, ModuleHookOrigin, RerunOn,
 };
 
-/// External commands Tola runs around a build, grouped by stage. Each stage waits for its
-/// commands to exit before it continues.
+/// Run scripts before compilation, while generating files, or after publication.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, Config)]
 #[serde(default, deny_unknown_fields)]
 #[config(section = "hooks")]
@@ -33,15 +32,45 @@ pub struct HooksConfig {
 
 impl HooksConfig {
     /// What `tola help "[hooks]"` adds under its child tables.
-    pub const HELP: &'static str = "\
-Choose the stage by what the command produces: `before-build` writes site inputs before source
-discovery; `generate-outputs` adds final files after the Bundle compiles; `after-publish` consumes
-the committed site. Bundle, configured assets, and generated outputs pass the same conflict and
-reference checks before publication.
+    pub const HELP: &'static str = r#"
+| Stage | When to use it |
+| --- | --- |
+| `before-build` | Generate Typst pages, templates, data files, or assets before source discovery. |
+| `generate-outputs` | Add files after compilation, such as a search index. |
+| `after-publish` | Read the published files, for example to upload the site. |
 
-The commands differ in which stages they run. Hooks are enabled by default. Set `enable = false` to disable one, or use `enabled-by`
-to select a boolean site option. Declare a `nu` script with optional `args`, or an
-`argv` array with an external executable and its arguments.
+### Choose how to run a hook
+
+Set `nu` to a script for Tola’s built-in Nushell. Put script arguments in `args`.
+For an external program and its arguments, use `argv`. Site hooks run from the site root.
+
+### Set the order
+
+Within a stage, each site and module runs its own hooks in ascending `order`.
+The default is 0. Hooks at the same order may run together. Use
+[`include`](tola-help://config/include) to keep hook declarations in separate files.
+Tola sorts those site hooks together by `order`.
+
+Modules run in alias order. Site hooks run first in `before-build` and last in the
+other two stages. A failed group stops later groups in that stage. All `generate-outputs`
+hooks read the same compiled files. Put steps that share generated files in one script.
+
+Under `[build]`, use `hook-jobs` to cap concurrency or set `par-hooks = false` to run one
+hook at a time.
+
+### See which hooks will run
+
+From the site root, run `tola inspect config --mode dev --json --pretty`. Under
+`hooks.stages`, `declarations` lists hooks, where they were declared, and why any are skipped.
+`batches` lists the run groups in order. Use `--mode prod` for production. Inspection
+only reads the configuration.
+
+### When hooks run
+
+Hooks are enabled by default. Set `enable = false` to turn one off. Set
+`enabled-by = "images.enable"` to run a hook only when that option is true. Quote keys
+that contain a dot, as in `enabled-by = '"images.enable"'`. A missing key, non-table parent,
+or non-boolean value is an error. With `enable = false`, Tola skips the lookup.
 
 | Command | Build mode | before-build | generate-outputs | after-publish |
 | --- | --- | --- | --- | --- |
@@ -52,73 +81,48 @@ to select a boolean site option. Declare a `nu` script with optional `args`, or 
 | `tola inspect` | — | skip | skip | skip |
 | `tola vendor` | `prod` | skip | skip | skip |
 
-One `tola build` runs in this order: `before-build` hooks run first → discovery follows
-`content-dir`, the root Bundle compiles, and `[assets]` files are collected (that complete result
-is the candidate) → `generate-outputs` hooks add their files to the candidate → conflicts and
-references are checked → publication writes the whole candidate into `build.publish-dir` →
-`after-publish` hooks consume the published site.
+Use `tola check --no-hooks` to skip both build stages. By default, `tola dev` runs the first
+two stages and skips `after-publish`. See `[[hooks.generate-outputs]]` for `dev = "reuse"`.
 
-Build and publication differ: building produces the candidate and checks it; publication does one
-thing — writes the checked result into `build.publish-dir` as a whole (a successful build replaces
-the whole directory). The first two stages run before publication, a failure in any of those steps
-publishes nothing and leaves the previous output in place; `after-publish` runs after publication,
-and a failure there cannot undo it.
+An error before publication leaves the previous site in place. An `after-publish` failure
+is reported after the new files are already on disk.
 
-`check` and `preview` build from sources with production settings; they do not write
-`build.publish-dir`. `dev` serves successful builds in memory. The `dev` field defaults to `run`
-for the first two stages and `skip` for after-publish.
+### Report issues and find paths
 
-`generate-outputs` also accepts `dev = \"reuse\"`. In development, a command whose observed inputs
-are unchanged reuses the previous successful revision's outputs instead of running. The command
-must then be a pure function of the built site, its `rerun-on` paths, its command, and its declared
-outputs. A command that reads time, network, environment state, or files outside the site keeps
-`dev = \"run\"`. Production builds always run every hook.
+In a Nu hook, import `use tola diagnostic` and pass the issues to `diagnostic submit`.
+Submit one list per run. Pass `[]` when there are no issues. Omit `location` in a regular
+hook report. Warnings appear in the terminal and errors fail the hook. An external
+command can write its report to `reportPath`. See [`@tola-scripts/diagnostic`](tola-help://scripts/diagnostic)
+for a complete example. If `tola dev` reuses files from a `generate-outputs` hook, it also
+reuses that hook's report.
 
-Commands run from the site root as finite argv arrays, without an implicit shell. Within a stage,
-entries run in configuration order; failure stops the remaining entries. Put dependent steps or
-conditions in the site's own runner, for example `argv = [\"just\", \"css\"]`. Tola does not
-require `just`. Output generators each read the same upstream snapshot and write to a private
-directory: a later generator cannot read an earlier generator's new outputs.
+In a Nu script, import `use tola get-context` and run `get-context | get hook.stage` to
+read the stage. From an external command, run `"$TOLA_EXECUTABLE" nu @tola-scripts/context --json`.
+See [`@tola-scripts/context`](tola-help://scripts/context) for fields and examples.
 
-Any hook can submit an unlocated diagnostic batch through `TOLA_REPORT_PATH`, including from Nu
-with `use tola diagnostic` and `diagnostic submit`. Warnings do not fail a successful command;
-errors do. An after-publish error cannot undo publication. A reused development `generate-outputs`
-result retains its report. No report and an empty batch are distinct. Independent checks and
-unsaved editor snapshots are not supported by this report interface.
+Your script manages its own cache files. Each hook run gets a fresh temporary directory.
+`TMPDIR`, `TMP`, and `TEMP` point to `hook.tempDir`.
 
-Every invocation receives these environment variables:
+### Watch files the script reads
 
-| Variable | Purpose | Stages |
-| --- | --- | --- |
-| `TOLA_REPORT_PATH` | optional complete diagnostic report | every stage |
-| `TOLA_PROJECT_ROOT` | absolute resolved project root | every stage |
-| `TOLA_CONFIG_PATH` | absolute resolved path to the configuration file | every stage |
-| `TOLA_CONTENT_ROOT` | absolute resolved content directory | every stage |
-| `TOLA_EXECUTABLE` | the current Tola executable | every stage |
-| `TOLA_INPUT_SCOPE` | the caller's input policy: `online`, `offline`, or `pure` | every stage |
-| `TOLA_HOOK_STAGE` | the stage: `before-build`, `generate-outputs`, or `after-publish` | every stage |
-| `TOLA_BUILD_MODE` | the build mode: `prod` or `dev` | every stage |
-| `TOLA_HOOK_CACHE_DIR` | `.tola/hooks/<stage>/<entry name>`, persisting across runs, such as `.tola/hooks/generate-outputs/search` | every stage |
-| `TOLA_HOOK_TEMP_DIR` | this invocation's own temporary directory, removed afterwards | every stage |
-| `TOLA_HOOK_INPUT_DIR` | the command's input: a read-only snapshot of everything built upstream, laid out like the published directory | `generate-outputs`, `after-publish` |
-| `TOLA_HOOK_OUTPUT_DIR` | empty on every run; a relative path written there is that path under `build.publish-dir` | `generate-outputs` |
+Tola already watches the entry script named by `nu`. List any extra data, templates, or
+configuration files in `rerun-on`. Patterns start at the site root, and matching a
+directory also matches its contents. `*` matches within one directory and `**` can
+cross directories. Exclusions take priority. A pattern may start with no matches.
+A file created later can still trigger a rebuild.
+`include` is required when you write `rerun-on`; `exclude` defaults to an empty list.
+In a module hook, string paths start at the module root. For files in the consuming
+site, use entries such as `{ project = "content/**/*.typ" }`.
 
-The command owns what it puts in the cache directory; Tola only creates it, never cleans it, and
-never reuses what it holds. The temporary and output directories are new on every run. `TMPDIR`,
-`TMP`, and `TEMP` name `TOLA_HOOK_TEMP_DIR`. A variable a stage does not define is absent, never
-inherited from the caller.
+Hooks run with your permissions. The `--offline` and `--pure` flags restrict Tola's input
+reads. Scripts can still access files and the network. A cancelled development build stops
+its pre-publication hooks. Files those hooks already wrote remain on disk.
 
-`rerun-on` adds extra inputs, for example
-`rerun-on = { include = [\"styles/**/*.css\", \"package.json\"], exclude = [\"styles/vendor\"] }`.
-Each pattern is relative to the site. A matched directory includes or excludes its descendants.
-Changes to selected inputs trigger a whole development build. Add inputs a tool reads that Tola
-does not otherwise observe, such as its stylesheet sources, runner, manifest, or lockfile.
-The stage pages show a stylesheet producer, a search index, and a publication consumer.
+Examples:
 
-Hooks are trusted scripts with the caller's permissions. `--offline` and `--pure` restrict Tola's
-own input reads, not these commands. Superseded development builds cancel their pre-publication
-commands, but script side effects are not rolled back. After-publish development scheduling is
-explained on that stage's page.";
+- [Run hooks in order across configuration files](tola-help://config/hooks/before-build)
+- [Add a page list or search index](tola-help://config/hooks/generate-outputs)
+- [Upload the site or check its home page](tola-help://config/hooks/after-publish)"#;
 }
 
 /// Chain one projection over the three hook stages in lifecycle order.
@@ -380,28 +384,29 @@ pub struct BeforeBuildHookConfig {
     #[serde(skip)]
     #[config(skip)]
     pub origin: Option<ModuleHookOrigin>,
-    /// Whether this hook runs.
+    /// Set `false` to turn off this hook. If omitted, the hook is enabled.
     pub enable: bool,
-    /// The hook's name, so status lines and diagnostics can point at it: one word without
-    /// whitespace, unique within its stage. A blank, spaced, or repeated name is an error.
+    /// Name shown in progress and diagnostics. Choose a nonempty name with no whitespace,
+    /// unique within this site or module instance and stage.
     pub name: String,
-    /// The command to run, executed from the site root without an implicit shell. This stage sets
-    /// no `TOLA_HOOK_INPUT_DIR` or `TOLA_HOOK_OUTPUT_DIR` (`generate-outputs` does): the command
-    /// writes the site inputs itself, with no build directory to read.
+    /// Command and arguments to run from the site root. Use `argv` or `nu`. To run a shell
+    /// script, name the shell explicitly. Write files where the site will read them.
     #[config(collection = inline)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub argv: Option<Vec<String>>,
-    /// Embedded Nu entry relative to the site root.
+    /// Nu script to run, relative to the site root. Use `nu` or `argv`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nu: Option<PathBuf>,
-    /// Literal arguments to the Nu entry.
+    /// Arguments passed to the Nu script. Omit this for a script that takes no arguments.
     #[config(collection = inline)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub args: Option<Vec<String>>,
-    /// Boolean key in the site's options.
+    /// Run only when this `[options]` key is `true`, for example `images.enable`.
+    /// Omit this setting to run without checking an option.
     #[serde(rename = "enabled-by", skip_serializing_if = "Option::is_none")]
     pub enabled_by: Option<String>,
-    /// Whether `tola dev` runs this entry: `"run"` (the default) or `"skip"`.
+    /// If omitted or set to `"run"`, `tola dev` runs the hook on each build. Use `"skip"`
+    /// to skip it during development.
     #[config(values = DevParticipation::VALUES)]
     pub dev: DevParticipation,
     /// Extra site-relative inputs selected by `include` and `exclude` patterns.
@@ -418,97 +423,102 @@ pub struct BeforeBuildHookConfig {
 
 impl BeforeBuildHookConfig {
     /// What `tola help "[hooks.before-build]"` adds under its table.
-    pub const HELP: &'static str = "\
-This stage writes the files Typst and `[assets]` read.
+    pub const HELP: &'static str = r#"
+### Generate other inputs
 
-Here is a complete Tailwind CSS example: `just` runs the task, Deno executes `@tailwindcss/cli` to
-build the stylesheet, the `before-build` hook runs it before source discovery, and `[assets]` maps
-`static/web-assets/tailwind-output` to `/assets/tailwind-output`. Input and product stay apart, and
-the paths say which is which: the input is `static/tailwind-sources/site.css` (never published),
-the product is `static/web-assets/tailwind-output/site.css` (published with the tree at
-`/assets/tailwind-output/site.css`).
+Write templates, data files, or assets to their source paths. For example, generate
+`static/site.css` and declare it under `[assets]` to publish it. Declare the files or directories
+in `generates`. Tola checks that they exist after the command runs and watches them in dev mode.
+Keep generated inputs outside `build.publish-dir` and `.tola`.
 
-`justfile`:
+The command runs once per build. Use `hook.cacheDir` for files needed across runs and
+`hook.tempDir` for this run's temporary files. This stage runs before there is a built
+site to read, so write input files directly in the site.
 
-```just
-css:
-    deno task css
+Example: Generate a Typst page:
+
+In a site created with `tola init`, save this as `write-release-notes.nu` in the site root.
+The script uses the configured content directory.
+
+```nu
+use tola get-context
+
+let content = get-context | get site.contentRoot
+"= Release notes\n" | save --force ($content | path join "releases.typ")
 ```
 
-`deno.json`:
-
-```json
-{
-  \"imports\": {
-    \"@tailwindcss/cli\": \"npm:@tailwindcss/cli@4.3.3\",
-    \"tailwindcss\": \"npm:tailwindcss@4.3.3\"
-  },
-  \"tasks\": {
-    \"css\": \"deno run -A npm:@tailwindcss/cli@4.3.3 -i static/tailwind-sources/site.css -o static/web-assets/tailwind-output/site.css --minify\"
-  }
-}
-```
-
-`tola.toml`:
+Add the hook to `tola.toml`.
 
 ```toml
 [[hooks.before-build]]
-name = \"tailwind\"
-argv = [\"just\", \"css\"]
-generates = [\"static/web-assets/tailwind-output/site.css\"]
-rerun-on = { include = [\"static/tailwind-sources\", \"deno.json\", \"deno.lock\", \"justfile\"] }
+name = "release-notes"
+nu = "write-release-notes.nu"
+generates = ["content/releases.typ"]
 ```
 
-Files reach browsers only once they are published: the `[assets]` below maps the whole
-`static/web-assets` tree to `/assets`, so the product is published as
-`/assets/tailwind-output/site.css`. Generated data can also stay unpublished and serve Typst alone:
-a page imports it to produce a document or another output.
+Run `tola build` from the site root. The hook writes `content/releases.typ` before source
+discovery. The default `site.typ` publishes it as `public/releases/index.html`.
+If you changed `build.content-dir`, update the path in `generates` as well.
 
-`tola.toml`:
+Example: Run two hooks in order across config files:
+
+In a site created with `tola init`, create `config/`, `data/`, and `tools/`. Save
+this as `data/release.json`:
+
+```json
+{"title": "Atlas 2.0"}
+```
+
+Save this as `tools/read-release.nu`:
+
+```nu
+mkdir generated
+open data/release.json | get title | save --force generated/release.txt
+```
+
+Save this as `tools/write-upcoming.nu`:
+
+```nu
+let title = open --raw generated/release.txt
+$"= ($title)\n" | save --force content/upcoming.typ
+```
+
+Add this line at the top of `tola.toml`, before the first table header:
 
 ```toml
-[assets]
-trees = [{ source = \"static/web-assets\", url-prefix = \"/assets\" }]
+include = ["config/release.toml"]
 ```
 
-Every page links it in its head (`site.typ` or a page template):
+Save this as `config/release.toml`:
 
-```typst
-#html.link(rel: \"stylesheet\", href: asset-url(\"/assets/tailwind-output/site.css\"))
+```toml
+[[hooks.before-build]]
+name = "upcoming-page"
+order = 10
+nu = "tools/write-upcoming.nu"
+generates = ["content/upcoming.typ"]
 ```
 
-Tailwind's input CSS must name the content and template files it scans. Hooks are for commands that
-run once: Tola has no plans to support long-running commands such as a tool's watch mode, which
-would add great complexity to development, the build flow, the hook mechanism, and analysis. Tola
-owns development watching, and the hook mechanism provides only the necessary infrastructure:
-incremental builds, caches, and persistence for a command's own products are the producer's own
-logic, with environment variables such as `TOLA_HOOK_CACHE_DIR` and `TOLA_HOOK_TEMP_DIR` as Tola's
-interface.
+Add the data hook to `tola.toml`:
 
-`generates` states which files the command writes: Tola checks those paths exist after the command
-runs and watches them during development.
+```toml
+[[hooks.before-build]]
+name = "release-data"
+order = 0
+nu = "tools/read-release.nu"
+rerun-on = { include = ["data/release.json"] }
+generates = ["generated/release.txt"]
+```
 
-They are inputs to the site, not outputs: only after every hook in this stage has run does Tola
-build — discovery follows `content-dir`, the root Bundle compiles, `[assets]` files are collected,
-then references are checked and the site is published.
-
-The command environment for this stage:
-- `TOLA_HOOK_STAGE`: this stage, `before-build`.
-- `TOLA_BUILD_MODE`: `prod` (`build`, `check`, `preview`, `vendor`) or `dev` (`tola dev`).
-- `TOLA_HOOK_CACHE_DIR`: persists across runs below `.tola/hooks/before-build/<entry name>`;
-  the command owns its contents and Tola only creates the directory — keep incremental products
-  there, for example `\"$TOLA_HOOK_CACHE_DIR\"/tailwind`.
-- `TOLA_HOOK_TEMP_DIR`: this invocation's own temporary directory, removed afterwards; `TMPDIR`,
-  `TMP`, and `TEMP` name it too.
-
-There is no `TOLA_HOOK_INPUT_DIR` or `TOLA_HOOK_OUTPUT_DIR`: the command writes the site's input
-files directly.";
+Run `tola build` from the site root. `release-data` runs before `upcoming-page` even
+though `config/release.toml` was loaded first. With the default `site.typ` and publish
+directory, `public/upcoming/index.html` shows “Atlas 2.0”. If you run `tola dev` instead,
+editing `data/release.json` rebuilds the page. Paths such as `tools/write-upcoming.nu`
+start at the site root, even when declared in `config/release.toml`."#;
 }
 
-/// Produces declared final output files after the site program compiles, adding them to the
-/// candidate output graph before reference checks. They are unavailable to the preceding Typst
-/// compilation, but pages may link their known URLs without an `[assets]` declaration, and
-/// reference checks validate those links.
+/// Generate files after Typst compiles. Use `before-build` for files Typst needs to read.
+/// Tola checks links to generated output before publication.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Config)]
 #[serde(default, deny_unknown_fields)]
 #[config(section = "hooks.generate-outputs", collection = array_table)]
@@ -516,128 +526,152 @@ pub struct OutputCommandConfig {
     #[serde(skip)]
     #[config(skip)]
     pub origin: Option<ModuleHookOrigin>,
-    /// Whether this hook runs.
+    /// Set `false` to turn off this hook. If omitted, the hook is enabled.
     pub enable: bool,
-    /// The hook's name, so status lines and diagnostics can point at it: one word without
-    /// whitespace, unique within its stage. A blank, spaced, or repeated name is an error.
+    /// Name shown in progress and diagnostics. Choose a nonempty name with no whitespace,
+    /// unique within this site or module instance and stage.
     pub name: String,
-    /// The command to run, executed from the site root without an implicit shell. It reads the
-    /// upstream snapshot below `TOLA_HOOK_INPUT_DIR` and writes declared outputs below
-    /// `TOLA_HOOK_OUTPUT_DIR`; written paths are relative to the final site output.
+    /// Command and arguments to run from the site root. Use `argv` or `nu`. Read compiled pages
+    /// and assets from `hook.inputDir`. Write files to `hook.outputDir` using
+    /// paths relative to the publish directory.
     #[config(collection = inline)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub argv: Option<Vec<String>>,
-    /// Embedded Nu entry relative to the site root.
+    /// Nu script to run, relative to the site root. Use `nu` or `argv`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nu: Option<PathBuf>,
-    /// Literal arguments to the Nu entry.
+    /// Arguments passed to the Nu script. Omit this for a script that takes no arguments.
     #[config(collection = inline)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub args: Option<Vec<String>>,
-    /// Boolean key in the site's options.
+    /// Run only when this `[options]` key is `true`, for example `images.enable`.
+    /// Omit this setting to run without checking an option.
     #[serde(rename = "enabled-by", skip_serializing_if = "Option::is_none")]
     pub enabled_by: Option<String>,
-    /// Whether `tola dev` runs this hook: `"run"` (the default), `"reuse"`, or `"skip"`.
-    /// `reuse` skips the command when its inputs are unchanged from the previous successful
-    /// development revision and reuses that revision's outputs.
+    /// If omitted or set to `"run"`, `tola dev` runs the hook on each build. Use `"reuse"`
+    /// to use the last successful outputs when the inputs are unchanged, or `"skip"`
+    /// to skip the hook during development.
     #[config(values = DevParticipation::REUSE_VALUES)]
     pub dev: DevParticipation,
     /// Extra site-relative inputs selected by `include` and `exclude` patterns. For
     /// `dev = "reuse"`, the selected inputs are also part of the hook's fingerprint.
     #[serde(rename = "rerun-on")]
     pub rerun_on: RerunOn,
-    /// Final site output paths this hook adds to the candidate, written relative to
-    /// `build.publish-dir` (default `public`), as `{ file = "manifest.json" }` or
-    /// `{ tree = "assets/thumbnails" }`. Required: the written files must match these
-    /// declarations, every path stays outside `_tola`, and a path another producer owns
-    /// fails the build instead of replacing that output.
+    /// Required output paths relative to `build.publish-dir`, for example
+    /// `{ file = "build.txt" }` or `{ tree = "assets/search" }`. Written files must match
+    /// these declarations. Keep them outside `_tola` and use unique output paths.
     #[config(collection = inline)]
     pub outputs: Vec<CommandOutput>,
 }
 
 impl OutputCommandConfig {
     /// What `tola help "[hooks.generate-outputs]"` adds under its table.
-    pub const HELP: &'static str = "\
-This stage generates final files from the compiled site.
+    pub const HELP: &'static str = r#"
+### Read pages and write files
 
-Here is a complete Pagefind example: it reads the HTML snapshot and writes a search index that
-joins the same output set as the pages it indexes.
+- `hook.inputDir`: Read compiled pages and `[assets]` files here.
+- `hook.outputDir`: Write every path listed in `outputs`. This directory starts empty.
+  Tola publishes the files at the same relative paths.
+- `hook.cacheDir`: Keep files for later runs. Copy the finished files to `hook.outputDir`
+  even if you reuse the cache.
+- `hook.tempDir`: Store scratch files for this run. Tola removes it when the command exits.
 
-`justfile`:
+Hooks in this stage read the same files and write their own outputs. If one step needs a file
+created by another, put both steps in one script.
 
-```just
-search:
-    deno task search
+To link the generated file from Typst, import `output-url` from `@tola/address:0.0.0` and use
+`#link(output-url("build.txt"))[Build info]`. Tola checks the target after the hook runs.
+If the files need minification or a hash in the URL, add that step to the hook.
+
+### Reuse files during development
+
+With `dev = "reuse"`, a development build uses the last successful outputs when the
+site, script and settings, watched inputs, and output declarations are unchanged.
+
+List additional inputs in `rerun-on`. Use `dev = "run"` if the script depends on the
+network, time, environment variables, or files outside the site. Production builds
+always run enabled hooks. Use `tola dev -v` to see which outputs changed.
+
+
+For a complete Nu example that writes `public/build.txt`, see [`@tola-scripts/context`](tola-help://scripts/context).
+
+Example: List the built pages as JSON:
+
+Save this as `write-page-list.nu` next to `tola.toml`. It uses the Nushell bundled
+with Tola.
+
+```nu
+use tola get-context
+
+let hook = get-context | get hook
+glob ($hook.inputDir | path join "**/*.html")
+| each {|file| $file | path relative-to $hook.inputDir }
+| sort
+| to json
+| save ($hook.outputDir | path join "pages.json")
 ```
 
-`deno.json`:
-
-```json
-{
-  \"imports\": { \"pagefind\": \"npm:pagefind@1.5.2\" },
-  \"tasks\": {
-    \"search\": \"deno run -A npm:pagefind@1.5.2 --site \\\"$TOLA_HOOK_INPUT_DIR\\\" --output-path \\\"$TOLA_HOOK_OUTPUT_DIR/assets/pagefind-search\\\"\"
-  }
-}
-```
-
-`tola.toml`:
+Add the hook to `tola.toml`:
 
 ```toml
 [[hooks.generate-outputs]]
-name = \"search\"
-argv = [\"just\", \"search\"]
-outputs = [{ tree = \"assets/pagefind-search\" }]
-rerun-on = { include = [\"deno.json\", \"deno.lock\", \"justfile\"] }
+name = "page-list"
+nu = "write-page-list.nu"
+outputs = [{ file = "pages.json" }]
 ```
 
-Every generator reads the same compiled site. Put transformations that depend on one another in the
-same command.
+In a site created with `tola init`, write a heading in `content/index.typ`, then run
+`tola build` from the site root. With the default publish directory, open
+`public/pages.json`. It lists HTML filenames relative to that directory, such as
+`index.html`.
 
-The declared output needs no `[assets]` entry. `asset-url` resolves only `[assets]` declarations,
-and errors unless the file was published. Link a known output path with
-`output-url(\"assets/pagefind-search/pagefind-ui.css\")`. These files do not exist during the
-preceding Typst compilation, so Tola cannot compute their asset URLs then. Tola does not minify or
-cache-bust a hook's products; the producer's command handles all of that itself: Pagefind, for
-example, gives its index and fragment files content-hashed names.
+Example: Pagefind search:
 
-A page uses it like this: the template head links the generated CSS and JavaScript directly:
+To use another search tool, keep the same input and output directories and declare
+its files in `outputs`.
+
+With Node.js and npm available, save this as `index-search.nu` in the site root.
+Tola runs this script with its built-in Nushell.
+
+```nu
+use tola get-context
+
+let hook = get-context | get hook
+let index_dir = $hook.outputDir | path join "pagefind"
+^npx -y pagefind --site $hook.inputDir --output-path $index_dir
+```
+
+Add the hook to `tola.toml`.
+
+```toml
+[[hooks.generate-outputs]]
+name = "search"
+nu = "index-search.nu"
+outputs = [{ tree = "pagefind" }]
+```
+
+In a site created with `tola init`, add this to `content/index.typ`. It loads the
+[Pagefind search components](https://pagefind.app/docs/) from the hook's output.
 
 ```typst
-#import \"@tola/address:0.0.0\": output-url
-
-#html.link(rel: \"stylesheet\", href: output-url(\"assets/pagefind-search/pagefind-ui.css\"))
-#html.elem(\"script\", attrs: (src: output-url(\"assets/pagefind-search/pagefind-ui.js\")))
+#import "@tola/address:0.0.0": output-url
+#import "@tola/site:0.0.0": site
+#html.link(rel: "stylesheet", href: output-url("pagefind/pagefind-component-ui.css"))
+#html.elem("script", attrs: (
+  type: "module",
+  src: output-url("pagefind/pagefind-component-ui.js"),
+))[]
+#html.elem("pagefind-config", attrs: ("base-url": site.base-path))[]
+#html.elem("pagefind-modal-trigger", attrs: (placeholder: "Search"))[]
+#html.elem("pagefind-modal")[]
 ```
 
-In development, `dev = \"reuse\"` records the built site's output identities, the `rerun-on` paths'
-contents, the command, and the declared outputs. When all of them match the previous successful
-revision, the command does not run and those outputs are reused unchanged. List every site file the
-command reads in `rerun-on`; an omitted input can make reuse serve stale output. The value is never
-used by production builds. The default remains `dev = \"run\"`. Run `tola dev -v` to list every
-changed output path.
-
-Like every hook stage, this stage runs commands once: Tola does not run long-lived commands such as
-a watch mode, and Tola owns development watching; incremental builds and caches for the command's
-own products are the producer's logic, with `TOLA_HOOK_CACHE_DIR` available.
-
-The command environment for this stage:
-- `TOLA_HOOK_INPUT_DIR`: the command's input — a read-only snapshot of what the build produced
-  upstream: the compiled pages and `[assets]` files, laid out like the published directory, with
-  read-only file modes. It holds nothing another hook wrote in this stage, it is not
-  `build.content-dir`, it is not `build.publish-dir`, and it exists only while this command runs.
-  The example reads it with `--site \"$TOLA_HOOK_INPUT_DIR\"`.
-- `TOLA_HOOK_OUTPUT_DIR`: empty on every run; a relative path written there is that path under
-  `build.publish-dir` — writing `\"$TOLA_HOOK_OUTPUT_DIR\"/assets/pagefind-search` publishes at
-  `assets/pagefind-search`, served as `/assets/pagefind-search/…`.
-- `TOLA_HOOK_STAGE`, `TOLA_BUILD_MODE`, `TOLA_HOOK_CACHE_DIR`, and `TOLA_HOOK_TEMP_DIR`: as in
-  every stage — the stage name, the mode (`prod` or `dev`), a cross-run cache directory such as
-  `\"$TOLA_HOOK_CACHE_DIR\"/search/index.json`, and this invocation's temporary directory. A cache
-  hit still has to write the declared outputs again.";
+Run `tola build` from the site root. The default output includes the search bundle under
+`public/pagefind/`. To try it locally, run `tola preview` and open the printed URL.
+Click Search on the home page and enter a word from one of your pages."#;
 }
 
-/// Consumes one committed revision through a read-only view, without declaring further site
-/// outputs.
+/// Run a command with a read-only copy of the published site.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Config)]
 #[serde(default, deny_unknown_fields)]
 #[config(section = "hooks.after-publish", collection = array_table)]
@@ -645,28 +679,30 @@ pub struct AfterPublishHookConfig {
     #[serde(skip)]
     #[config(skip)]
     pub origin: Option<ModuleHookOrigin>,
-    /// Whether this hook runs.
+    /// Set `false` to turn off this hook. If omitted, the hook is enabled.
     pub enable: bool,
-    /// The hook's name, so status lines and diagnostics can point at it: one word without
-    /// whitespace, unique within its stage. A blank, spaced, or repeated name is an error.
+    /// Name shown in progress and diagnostics. Choose a nonempty name with no whitespace,
+    /// unique within this site or module instance and stage.
     pub name: String,
-    /// The command to run, executed from the site root without an implicit shell.
-    /// `TOLA_HOOK_INPUT_DIR` is a read-only view of the published site, so a failure here cannot
-    /// undo publication.
+    /// Command and arguments to run from the site root. Use `argv` or `nu`.
+    /// Read the published files from `hook.inputDir`. If the command fails, the site is
+    /// already published.
     #[config(collection = inline)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub argv: Option<Vec<String>>,
-    /// Embedded Nu entry relative to the site root.
+    /// Nu script to run, relative to the site root. Use `nu` or `argv`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nu: Option<PathBuf>,
-    /// Literal arguments to the Nu entry.
+    /// Arguments passed to the Nu script. Omit this for a script that takes no arguments.
     #[config(collection = inline)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub args: Option<Vec<String>>,
-    /// Boolean key in the site's options.
+    /// Run only when this `[options]` key is `true`, for example `images.enable`.
+    /// Omit this setting to run without checking an option.
     #[serde(rename = "enabled-by", skip_serializing_if = "Option::is_none")]
     pub enabled_by: Option<String>,
-    /// Whether `tola dev` runs this hook: `"skip"` (the default) or `"run"`.
+    /// If omitted or set to `"skip"`, `tola dev` skips the hook. Use `"run"` to run it
+    /// after a successful development build.
     #[config(values = DevParticipation::VALUES)]
     pub dev: DevParticipation,
     /// Extra site-relative inputs selected by `include` and `exclude` patterns.
@@ -676,56 +712,81 @@ pub struct AfterPublishHookConfig {
 
 impl AfterPublishHookConfig {
     /// What `tola help "[hooks.after-publish]"` adds under its table.
-    pub const HELP: &'static str = "\
-This stage consumes a successfully committed site, for example to sync it to a host:
+    pub const HELP: &'static str = r#"
+### Read the published files
 
-`justfile`:
+Read the published files for this run from the read-only `hook.inputDir`. Keep files
+across runs in `hook.cacheDir`, and use `hook.tempDir` for scratch files. To add files
+to the publication, use `generate-outputs`.
 
-```just
-rsync:
-    rsync -a --delete \"$TOLA_HOOK_INPUT_DIR/\" user@example.com:/srv/site/
+### When the hook runs in development
+
+`tola dev` skips this stage by default. Set `dev = "run"` to run it after the browser
+can load the published files. If several builds finish while the hook is busy, the
+hook takes the latest one next.
+
+If the site, command, and `rerun-on` inputs are unchanged, Tola keeps the previous
+result, even a failure. Stopping `tola dev` cancels running and pending work.
+
+Example: Copy the published site:
+
+With `rsync` available, save this as `upload.nu` in the site root. Replace the example
+destination with a directory you can write to. The trailing slash on the source tells
+`rsync` to copy the directory's contents.
+
+```nu
+use tola get-context
+
+let input_dir = get-context | get hook.inputDir
+^rsync -a -- ($input_dir + "/") "user@example.com:/srv/site/"
 ```
 
-`tola.toml`:
+Add this to `tola.toml`.
 
 ```toml
 [[hooks.after-publish]]
-name = \"rsync\"
-argv = [\"just\", \"rsync\"]
+name = "upload"
+nu = "upload.nu"
 ```
 
-The recipe syncs the site just published to a host. after-publish runs after publication:
-`TOLA_HOOK_INPUT_DIR` is a read-only snapshot — the site just published — and it does not change
-while the command reads. When this stage's hooks run, the preceding build counts as successful: a
-command's failure does not undo publication (the built site is already written into
-`build.publish-dir`). This stage is the after-publication wrap-up: a hook may work with the site —
-upload it, notify something — but files it writes here are not part of this publication and are not
-checked. To give the site more files, produce them in `generate-outputs`: those outputs are checked
-before publication and published with the site.
+Run `tola build` from the site root. Tola publishes the site, then the hook uploads
+the files from `hook.inputDir`. If the upload fails, the command exits with an error.
+The published files are still on disk.
 
-`tola build` waits for these commands before exiting; a failure gives a failing command result
-even though the output was written. `check`, `preview`, `inspect`, and `vendor` never run them.
+Example: Flag a draft marker on the published home page:
 
-Like every hook stage, this one runs commands once: Tola owns development watching, and incremental
-builds and caches for the command's own products are the producer's logic
-(`TOLA_HOOK_CACHE_DIR` is available).
+In a site created with `tola init`, write `DRAFT-MARKER` on a line in `content/index.typ`.
+Save this as `check-home.nu` next to `tola.toml`:
 
-Development skips this stage by default. With `dev = \"run\"`, consumers run serially without
-holding up browser updates. While one revision is running, only the latest waiting revision is
-kept, so intermediate revisions may receive no consumer call. A rebuild that changes nothing —
-the same site, commands, and `rerun-on` contents as the previous run — keeps that run's result,
-failure included, instead of running the commands again. Stopping `tola dev` cancels the running
-command and discards waiting work. Use this mode for consumers that can handle the latest site,
-rather than for an audit of every revision.
+```nu
+use tola [get-context diagnostic]
 
-The command environment for this stage:
-- `TOLA_HOOK_INPUT_DIR`: the command's input — a read-only snapshot of the site just committed,
-  laid out like the published directory, so the whole directory is what a consumer uploads.
-- `TOLA_HOOK_STAGE`, `TOLA_BUILD_MODE`, `TOLA_HOOK_CACHE_DIR`, and `TOLA_HOOK_TEMP_DIR`: as in
-  every stage — the stage name, the mode (`prod` or `dev`), a cross-run cache directory, and this
-  invocation's temporary directory.
+let home = get-context | get hook.inputDir | path join "index.html"
 
-There is no `TOLA_HOOK_OUTPUT_DIR`: this stage adds no output.";
+let issues = if (open --raw $home | str contains "DRAFT-MARKER") {
+  [
+    (
+      diagnostic make "Remove DRAFT-MARKER from the home page." --code draft-marker
+    )
+  ]
+} else {
+  []
+}
+$issues | diagnostic submit
+```
+
+Add this to `tola.toml`:
+
+```toml
+[[hooks.after-publish]]
+name = "check-home"
+nu = "check-home.nu"
+dev = "run"
+```
+
+Run `tola build` from the site root. The new home page is published and Tola prints a
+warning about the marker. Remove the marker and build again to clear the warning.
+With `dev = "run"`, this check also runs after a development build publishes."#;
 }
 
 impl Default for BeforeBuildHookConfig {

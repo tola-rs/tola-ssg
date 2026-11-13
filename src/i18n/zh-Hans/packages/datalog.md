@@ -1,22 +1,30 @@
 # `@tola/datalog`
 
-数据库须显式声明所有关系，包括空关系。一个名字在数据库中只对应一种参数个数。事实、规则和查询引用未声明的关系会报错。
+用已知数据和规则查询关系。例如，给出页面之间的直接链接，查询从某个页面出发能到达哪里。
 
-事实是只含常量的原子。规则头、查询返回列和否定条件中的变量，必须出现在同一条规则或查询的正原子中。否定必须分层，依赖环不能经过否定边。
+用 `relation` 声明表名和列数，空表也要声明。用 `atom` 写一行已知数据，例如 `edge.atom("a", "b")`。用 `rule` 声明可以根据哪些条件推导出新的一行。
 
-常量按类型和值比较。类型顺序为 `none`、`bool`、`int`、有限 `float`、`decimal`、`str`、`bytes`、`datetime`。布尔和数值按值排序，字符串和字节按字典序排序。日期、时间、日期时间依次排列，各自按时间顺序排序。Decimal 去掉小数部分的尾零，浮点数和 decimal 各自使用唯一的零表示。
+规则的结论、`select` 和 `negate` 用到的变量，必须也出现在同一条规则或查询中没被否定的条件里，例如 `reach.atom("a", z)`。这样才能知道变量可以取哪些值。
+
+例如，定义 `visible` 的规则可以写 `negate(hidden.atom(z))`，前提是 `hidden` 的定义不会直接或间接用到 `visible`。这叫分层否定。
+
+查询结果按列排序并去重。不同类型的值各自比较，类型顺序为 `none`、`bool`、`int`、有限 `float`、`decimal`、`str`、`bytes`、`datetime`。字符串和字节按字典序比较。日期、时间、日期时间分别排序，依次排列。
 
 ## `relation`
 
-创建关系声明。用 `.atom(..terms)` 创建该关系的原子，每列传入一个常量或变量。零列关系用 `.atom()`。
+声明关系名和列数。例如，`relation("edge", 2)` 声明两列，可分别记录链接的起点和终点。用 `atom` 写出一条事实，或在规则和查询里匹配数据。
 
 ### `name`
 
-按原样比较的非空关系名。
+关系名，不能为空。名称区分大小写。
 
 ### `arity`
 
-参数个数，必须是非负整数。
+关系的列数，必须是非负整数。
+
+### `.atom.terms`
+
+每列传一个常量或变量。如果 `edge = relation("edge", 2)`，`edge.atom("a", "b")` 可作为一条事实传给 `database` 的 `facts`。在查询中，`edge.atom("a", var("target"))` 匹配从 `"a"` 出发的链接。零列关系直接调用 `atom()`。要引用 Typst 内容或函数，可用字符串 ID。
 
 ## `var`
 
@@ -24,39 +32,43 @@
 
 ### `name`
 
-按原样比较的非空变量名。
+变量名，不能为空。名称区分大小写。
 
 ## `rule`
 
-规则体的条件全部成立时，推导规则头。至少传入一个条件。
+条件全部满足时，把指定的一行加入结果关系。至少写一个条件。
 
 ### `head`
 
-要推导的原子。
+条件成立时要推导出的那一行。
 
 ### `literal`
 
-第一个体条件，可以是正原子或否定条件。
+第一项条件，可以是正原子或 `negate` 条件。
 
 ### `rest`
 
-以位置参数传入的其余体条件。
+其余条件，接在 `literal` 后面逐个传入。
 
 ## `negate`
 
-构造否定条件。对当前变量绑定，没有匹配行时成立。
+关系中没有与这些值匹配的行时，条件成立。
 
 ### `atom`
 
-要检查是否缺席的原子。
+要在关系中查找的原子。
 
 ## `database`
 
-构建不可变数据库。一个关系可以有输入事实和推导规则。比较数据库时，比较关系声明、事实集合和规则结构，源位置只用于诊断。
+用关系声明、已知事实和规则创建数据库。
 
-用 `db.query(select: …, where: …)` 查询。两项都是必填数组。`select` 按输出列顺序列出变量，允许重复。`where` 的所有条件必须成立。
+用 `db.query(select: …, where: …)` 查询数据库。例如，数据库里有事实 `edge.atom("a", "b")`，且 `target = var("target")`，调用 `db.query(select: (target,), where: (edge.atom("a", target),))` 会返回 `(("b",),)`。
 
-查询返回二维数组，按投影列做字典序排序，并按 Datalog 的常量相等性去重。Typst 的 `==` 可能把不同数值类型判为相等。选择列为空时，条件成立返回 `((),)`，否则返回 `()`。空条件成立。下面的例子查询从 `a` 可达且不在 `hidden` 中的节点，结果是 `("b",)` 和 `("c",)` 两行。
+查询返回行数组，按 `select` 指定的列排序，再去掉重复行。Datalog 比较时区分数值类型，例如 `1` 和 `1.0`。选择列为空时，条件成立返回 `((),)`，否则返回 `()`。空条件成立。
+
+示例：查找沿着链接可以到达的页面：
+
+用下面的代码替换新站点的 `site.typ`，从站点根目录运行 `tola build`。两条规则把直接和间接可达的页面加入 `reach`。查询会排除 `hidden` 中的 `b`，但仍然可以经过 `b` 到达 `c`。使用默认发布目录时，`public/index.html` 会显示 `Reachable pages: c`。
 
 ```typst
 #import "@tola/datalog:0.0.0": relation, var, rule, negate, database
@@ -67,25 +79,35 @@
 #let y = var("y")
 #let z = var("z")
 #let db = database((edge, reach, hidden),
-  facts: (edge.atom("a", "b"), edge.atom("b", "c")),
+  facts: (edge.atom("a", "b"), edge.atom("b", "c"), hidden.atom("b")),
   rules: (
     rule(reach.atom(x, y), edge.atom(x, y)),
     rule(reach.atom(x, z), reach.atom(x, y), edge.atom(y, z)),
   ),
 )
-#assert.eq(db.query(select: (z,), where: (
+#let rows = db.query(select: (z,), where: (
   reach.atom("a", z), negate(hidden.atom(z)),
-)), (("b",), ("c",)))
+))
+#assert.eq(rows, (("c",),))
+#document("index.html")[Reachable pages: #rows.map(row => row.first()).join(", ")]
 ```
 
 ### `relations`
 
-关系声明数组。同一名字只能声明一次。显式声明的关系可以为空。
+关系声明数组。每个关系名只声明一次。关系可以没有数据。
 
 ### `facts`
 
-调用者直接提供的不含变量的原子，默认为 `()`。
+已知数据行的数组。每行只能用常量。默认是 `()`。
 
 ### `rules`
 
 推导规则，默认为 `()`。
+
+### `.query.select`
+
+按结果的列顺序传入变量数组。可以重复使用同一个变量。
+
+### `.query.where`
+
+传入条件数组，可以包含正原子和 `negate` 条件。所有条件都要成立。传 `()` 表示没有条件。

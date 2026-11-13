@@ -244,7 +244,7 @@ Two
             assert!(paths.insert(section.path.clone()), "{:?}", section.path);
             let mut arguments = vec!["tola".to_owned(), "skill".to_owned()];
             arguments.extend(section.path);
-            let crate::cli::Commands::Skill(args) =
+            let crate::cli::Commands::Skill { args, .. } =
                 crate::cli::Cli::try_parse_from(arguments).unwrap().command
             else {
                 panic!("expected skill request");

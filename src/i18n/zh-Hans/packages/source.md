@@ -1,31 +1,31 @@
 # `@tola/source`
 
-发现的内容源、调用所在的源，以及 metadata 声明
+列出 Typst 内容文件，读取源文件信息，或声明和校验文章元数据。
 
-入口文件决定在哪些页面使用源文件。同一个源可以出现在多个页面里。站点自行定义 `title`、`draft`、`permalink` 等 metadata 字段及其规则。
+站点入口决定每个源文件用在哪些文档里。站点可以自行约定 `title`、`draft`、`permalink` 等元数据字段。
 
 ## `all-sources`
 
-按完整内容路径的顺序列出构建所发现的全部内容源。
+列出 `build.content-dir` 下发现的内容文件，按相对路径排序。
 
-发现会读取 `build.content-dir` 目录，并且只接受扩展名为小写 `.typ` 的文件。隐藏名称（以点开头）、符号链接和站点入口都会跳过。目录索引在这个顺序中也是普通源；需要编辑顺序时请显式排序。
+只列出 `build.content-dir` 下以小写 `.typ` 结尾的文件。隐藏文件、符号链接和站点入口会跳过。目录里的 `index.typ` 和其他文件一起按路径排序。需要按文章日期等顺序排列时，自行排序。
 
 每条记录包含：
 
 - `id` 与 `path` 是同一个路径字符串，相对于 `build.content-dir`，包含扩展名，例如 `posts/deep.typ` 或 `about/index.typ`。源文件改名或在内容目录内移动时，两个值都会改变。
-- `file`：从站点根出发、指向同一个文件的 Typst `path` 值。直接传给 `include` 或 `read`；它是输入路径，绝不是浏览器 URL。
+- `file`：可直接传给 `include` 或 `read` 的 Typst `path`，以站点根目录为准。
 - `filename`：`path` 的最后一段，例如 `deep.typ`。
-- `route-segments`：文件布局赋予该源的身份分段：根索引为 `()`，`about.typ` 与 `about/index.typ` 都是 `("about",)`，`posts/deep.typ` 是 `("posts", "deep")`。
-- `meta`：该源在本轮求值中被看到的 metadata。若它的 metadata 会读取其他源，就要经过多轮才能收敛，因此记录在这几轮之间可能变化。根程序拿到的是稳定后的值。
+- `route-segments`：从文件路径取出的默认 route 各段。首页为 `()`，`about.typ` 和 `about/index.typ` 都是 `("about",)`，`posts/deep.typ` 是 `("posts", "deep")`。
+- `meta`：通过 `tola-meta` 声明的元数据。需要读取多篇文章时，在 `site.typ` 中读取。
 
-如果页面搬迁后订阅条目需要保留原来的身份，请在站点的 metadata 中保存固定 ID，并把它显式传给 `@tola/feed` 条目的 `id`。
+为 feed 条目保存固定的 `id`，页面移动后继续使用它。这样订阅阅读器仍能识别同一条内容。
 
 `tola inspect sources` 列出发现的文件路径，不求值 metadata。
-用模型查询把站点需要的 metadata 返回为 JSON。
+用 `tola query` 可以将选定的 metadata 输出为 JSON。
 
-这些分段只是 route 的建议。用 `@tola/address` 对分段做 slug 并连接起来，而文档实际以哪条 route 可达，由它自己的 output 决定。
+要按源文件路径安排输出，先用 `@tola/address` 的 `join-route` 拼接 `route-segments`，再用 `output-of` 得到输出路径，传给 `#document`。
 
-Example - 列出空站点的源：
+示例：列出空站点的源：
 
 ```typst
 #import "@tola/source:0.0.0": all-sources
@@ -33,7 +33,7 @@ Example - 列出空站点的源：
 #assert.eq(sources.len(), 0)
 ```
 
-Example - 按路径选择并发布一个源：
+示例：按路径选出一篇文章并发布：
 
 在 `content/guide/index.typ` 写入 `= Guide`。在新站点中将这段代码保存为 `site.typ`，再运行 `tola build`。默认输出为 `public/guide/index.html`。
 
@@ -47,21 +47,21 @@ Example - 按路径选择并发布一个源：
 
 ## `current-source`
 
-包含本次调用的源。
+读取调用所在的 Typst 源文件的信息。
 
-记录带有 `id`、`file`、`path`、`filename` 与 `route-segments`，含义与 `all-sources()` 的记录完全相同。它不带 `meta`，并且可以在普通求值期间读取，不需要 `context`。
+返回的 `id`、`file`、`path`、`filename` 和 `route-segments` 和 `all-sources()` 中含义相同。可以直接调用，无需 `context`。
 
-请在内容源自身中调用它，再把记录传给模板。写在其他文件里的调用命名的是那个文件。在不属于内容源的文件（例如站点入口）中调用会报错。被渲染进另一篇文档的源仍然报告自己；改变的只是包含它的文档。
+在内容文件里调用，再把结果传给模板。在模板里直接调用，读到的是模板文件的位置，如果模板不在内容目录中，就会报错。同一个内容文件用在不同文档里时，这个函数始终返回源文件的信息。
 
 ## `tola-meta`
 
-声明本内容源的 metadata。
+声明当前内容文件的元数据。
 
-这次调用就是声明：传入一个描述该源的字典。在普通求值中调用一次，可以直接调用，也可以通过从其他文件导入的函数调用。延迟到 `context` 或带 selector 的 show rule 中的调用不声明 metadata。作用于全文的 show wrapper 会在后续正文求值完成后运行，因此正文出错可能使其中的声明无法执行。已经执行过的声明会在后续出错时保留；源自身的错误仍会使构建失败，即使你的站点把这个源当作 draft 排除。
+每个内容文件可调用一次。通常把它写在正文前，也可以调用从其他文件导入的封装函数。放在 `context` 或带 selector 的 show rule 里时，Tola 不会把它当作源文件的 metadata。全局 `#show:` 在正文求值之后运行，因此正文出错可能使其中的声明无法执行。即使站点会筛掉某个草稿，该文件的错误仍会使构建失败。
 
-调用返回一个不可见的 `<tola-meta>` 标记，其中含有同一个字典，`query(<tola-meta>)` 能找到它。标记最终放在哪里都不影响结果：声明只来自这次调用。在同一个源里再调用一次会报错，因为一个源只声明一次 metadata。导入的函数为正在求值这次调用的源声明 metadata。被 import 或 include 的文件中的顶层声明仍然属于那些文件自身。
+返回值是一个不可见的 `<tola-meta>` 标记，里面是传入的字典。把它放进文档后可用 `query(<tola-meta>)` 查询。Tola 在调用时就记录 metadata，因此把返回值赋给变量也能声明。导入的封装函数为调用它的源文件声明 metadata。其他文件的顶层调用仍归各自文件。
 
-Example - 声明 metadata 并读取它的标记：
+示例：声明 metadata 并读取它的标记：
 
 ```typst site
 #import "@tola/source:0.0.0": tola-meta
@@ -70,7 +70,7 @@ Example - 声明 metadata 并读取它的标记：
 #assert.eq(marker.label, <tola-meta>)
 ```
 
-Example - 封装具名 metadata 字段：
+示例：封装具名 metadata 字段：
 
 ```typst
 #import "@tola/source:0.0.0": tola-meta
@@ -81,21 +81,24 @@ Example - 封装具名 metadata 字段：
 
 ### `payload`
 
-所声明的 metadata：描述该源的字典。
+要为这篇内容声明的元数据字典。
 
 ## `parse-sources`
 
-按 metadata 字段的声明解析源记录。
+校验源文件的 metadata，并返回带有解析后 `meta` 的记录。
 
-传入 `all-sources()` 给出的完整记录，或它的子集，再传入一份 `@tola/schema` 声明，说明你期望的 metadata。不同源需要不同声明时，改为传入一个函数：它接收完整源记录，返回该源的声明。这次调用会先解析完全部记录再报告字段问题，包括使用不同声明的源。字段诊断会命名 metadata 校验失败的源；能确定字面量值的位置时指向该值，否则指向实际的 `tola-meta` 声明处，包括导入函数内部。没有声明 metadata 时指向源文件起点。wrapper 参数不会反向追踪到调用者。note 和嵌套原因保留为独立诊断提示。声明格式有误时，在调用处报告预期类型与实际类型；schema 函数返回无效声明时会命名它正在为哪个源选择声明。callback 执行出错时保留其自身位置并停止编译。完整源集合的校验放在根程序中：内容源自身求值时，声明可能还不完整。
+在 `site.typ` 中传入要校验的源文件记录和一个 `@tola/schema` 规则。不同文章需要不同字段时，可以传一个函数，按源文件返回对应的 schema。没声明元数据的文件按空字典校验。
 
-返回的每条记录就是你传入的那条记录，只是 `meta` 换成了按声明解析得到的值。未声明 metadata 的源带 `meta: none`，只有这个函数把它读作空字典。解析出的 metadata 始终是字典。
+返回记录的顺序和路径照旧，筛选和模板可以直接用其中的 `meta`。校验失败时，Tola 会指出相关文件及 metadata 的位置。文件没有声明时，诊断指向文件开头。
 
-输入顺序和身份字段保持不变。解析不会写回 `all-sources()`，也不会改动原始 metadata 声明。
+示例：发布文章，跳过草稿：
 
-Example - 在根程序中校验、选择并发布源：
+在用 `tola init` 创建的站点里，新建 `content/guide.typ` 和 `content/draft.typ`。两个文件都先写 `#import "@tola/source:0.0.0": tola-meta`。
 
-这个站点选择 `title` 与 `draft` 作为 metadata 字段，先校验全部源再排除 draft，并将文件布局的各分段做 slug，决定每篇文档的 output。
+- `guide.typ`：接着写 `#tola-meta((title: "Guide"))`，下一行写正文 `= Guide`。
+- `draft.typ`：接着写 `#tola-meta((title: "Draft", draft: true))`，下一行写正文 `= Draft`。
+
+把下面的代码保存为 `site.typ`，在站点根目录运行 `tola build`。使用默认配置时会生成 `public/guide/index.html`。草稿参与校验，随后被筛掉。若 `content/` 下还有其他文章，也要给它们声明非空的 `title`。
 
 ```typst site
 #import "@tola/address:0.0.0": join-route, output-of, slugify
@@ -122,4 +125,4 @@ Example - 在根程序中校验、选择并发布源：
 
 ### `schema`
 
-metadata 声明，或接收每条完整源记录并返回其声明的函数。
+校验元数据的 schema，也可以传入一个函数，根据每条源文件记录返回对应的 schema。

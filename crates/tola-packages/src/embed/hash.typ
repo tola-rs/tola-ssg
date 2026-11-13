@@ -1,8 +1,7 @@
-// @tola/hash:0.0.0 - BLAKE3 digests and their hexadecimal spelling
+// @tola/hash:0.0.0 - Hash bytes with BLAKE3 and format them as hexadecimal
 //
-// `blake3` hashes bytes and returns the 32-byte BLAKE3 digest. `bytes-to-hex` spells
-// bytes as lowercase hexadecimal. A string hashes as its UTF-8 encoding, so pass
-// `bytes(text)` when the input is text.
+// `blake3` hashes bytes and returns the 32-byte BLAKE3 digest. `bytes-to-hex` writes
+// bytes as lowercase hexadecimal. For text, pass `bytes(text)` to hash its UTF-8 encoding.
 //
 // Example - name a file after the bytes it holds:
 //
@@ -14,10 +13,10 @@
 
 /// Hash bytes with BLAKE3.
 ///
-/// The result is 32 bytes. `bytes-to-hex` spells the same digest as 64 hexadecimal
+/// The result is 32 bytes. `bytes-to-hex` writes the same digest as 64 hexadecimal
 /// characters.
 ///
-/// Example - hash the UTF-8 encoding of a string:
+/// Example: Hash the UTF-8 encoding of a string:
 ///
 /// ```typst
 /// #import "@tola/hash:0.0.0": blake3
@@ -31,16 +30,15 @@
   digest(value)
 }
 
-/// Spell bytes as lowercase hexadecimal, two digits per byte.
+/// Return lowercase hexadecimal text, two digits per byte.
 ///
-/// Example:
 ///
 /// ```typst
 /// #import "@tola/hash:0.0.0": bytes-to-hex
 /// #assert.eq(bytes-to-hex(bytes((1, 255))), "01ff")
 /// ```
 ///
-/// - value (bytes): The bytes to spell.
+/// - value (bytes): The bytes to convert to hexadecimal.
 /// -> str
 #let bytes-to-hex(value) = {
   import "@tola/host:0.0.0": bytes-to-hex as spell

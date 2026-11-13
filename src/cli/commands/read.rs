@@ -1,6 +1,6 @@
 //! Selection and JSON output shared by read-only commands.
 
-use anyhow::Result;
+use anyhow::{Result, ensure};
 use serde::Serialize;
 use serde_json::Value;
 use tola_input::InputScope;
@@ -31,11 +31,14 @@ pub(super) fn select(
     cancellation: &Cancellation,
 ) -> Result<Option<Value>> {
     cancellation.token().ensure_active()?;
-    if !args.interactive
-        || args.output.is_some()
-        || !crate::cli::interaction::available()
-        || value.as_array().is_some_and(Vec::is_empty)
-    {
+    if !args.interactive {
+        return Ok(Some(value.clone()));
+    }
+    ensure!(
+        crate::cli::interaction::available(),
+        "`--interactive` needs a terminal; omit it to print the result"
+    );
+    if value.as_array().is_some_and(Vec::is_empty) {
         return Ok(Some(value.clone()));
     }
     let array = value.is_array();

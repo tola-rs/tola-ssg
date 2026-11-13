@@ -1,95 +1,133 @@
 # `[[hooks.generate-outputs]]`
 
-在站点程序编译完成后产出声明的最终输出文件，并在引用检查之前把它们并入候选输出图。它们对之前的 Typst 编译不可见，但页面可以链接它们已知的 URL，无需 `[assets]` 声明，引用检查也会校验这些链接。
+Typst 编译后运行。适合生成搜索索引、文件清单等要一并发布的文件。要生成编译时读取的文件，用 `before-build`。
 
 ## 配置项
 
 ### `enable`
 
-是否运行该 hook。
+默认启用。设为 `false` 跳过这个 hook。
 
 ### `name`
 
-该 hook 的名字，出现在状态行与诊断里。必须是一个不含空白的词，且在本阶段内唯一：为空、含空白、或在本阶段内重名都会报错。
+状态和错误消息里显示的名称。同一阶段内不能重名，名称不能为空或包含空白。
+
+### `order`
+
+非负整数，省略时为 `0`。同一站点或模块的 `generate-outputs` hook 按此数值从小到大执行。同序号的 hook 可以并行，各自从同一份已编译站点读取文件。
 
 ### `argv`
 
-运行的命令，从站点根执行，不经过隐式 shell。命令读 `TOLA_HOOK_INPUT_DIR` 下的上游快照，把声明的输出写到 `TOLA_HOOK_OUTPUT_DIR` 下；写出的路径相对站点最终输出。
+从站点根目录运行的命令及参数。`argv` 和 `nu` 二选一。从 `hook.inputDir` 读取页面和静态文件，写到 `hook.outputDir`。
 
 ### `nu`
 
-嵌入式 Nu 脚本，相对于站点根。
+要运行的 Nu 脚本，路径相对于站点根目录。`nu` 和 `argv` 二选一。
 
 ### `args`
 
-传给 Nu 脚本的字面参数。
+传给 `nu` 脚本的参数，可省略。
 
 ### `enabled-by`
 
-启用该 hook 的站点顶层布尔选项。
+例如填 `"images.enable"`，只在 `[options.images]` 的 `enable` 为 `true` 时运行。省略时不检查选项。
 
 ### `dev`
 
-`tola dev` 是否运行该 hook：`"run"`（默认）或 `"skip"`。
+省略或设为 `"run"` 时，`tola dev` 每次构建都运行。设为 `"reuse"` 时，输入未变就复用上次成功生成的文件。设为 `"skip"` 时，开发构建会跳过。
 
 ### `rerun-on`
 
-额外观察的站点相对模式，使用必填的 `include` 与可选的 `exclude`。所选输入变化触发一次完整的 `tola dev` 构建。
+让额外输入的变化触发重建。指定后须填 `include`，可省略 `exclude`。配置了 `dev = "reuse"` 时，匹配文件的内容也用于判断是否能复用上次输出。
 
 ### `outputs`
 
-该 hook 并入候选的最终站点输出路径，写成以 `build.publish-dir`（默认 `public`）为根的相对路径：`{ file = "manifest.json" }` 或 `{ tree = "assets/thumbnails" }`。必填：实际写出的文件必须与这些声明一致，每条路径都要在 `_tola` 之外，而别的生产者已拥有的路径会让构建失败，而不是覆盖那条输出。
+必填。路径相对于 `build.publish-dir`，例如 `{ file = "build.txt" }` 或 `{ tree = "assets/search" }`。实际生成的文件须与声明一致，路径不能在 `_tola` 下，也不能与其他输出冲突。
 
 ## 用法
 
-这个阶段从编译结果生成最终文件。
+### 读取页面和写入文件
 
-下面用 Pagefind 举一个完整例子：它读取 HTML 快照，写出的搜索索引与它索引的页面进入同一份 output。
+- `hook.inputDir`：从这个只读目录读取已编译的页面和 `[assets]` 文件。
+- `hook.outputDir`：把 `outputs` 声明的文件写到这里。目录每次从空开始，文件按同样的相对路径发布。
+- `hook.cacheDir`：保存下次还能用的数据。即使用了缓存，仍要把成品写入 `hook.outputDir`。
+- `hook.tempDir`：放本次的临时文件，命令结束后删除。
+- `hook.outputDir`：每次都是空目录。把 `outputs` 声明的文件写到这里，Tola 按同样的相对路径发布。
+同一阶段的 hook 读取相同的输入，各自生成自己的文件。一个步骤需要读取另一个步骤生成的文件时，把两步写在同一个脚本里。
 
-`justfile`：
+在 Typst 页面中，从 `@tola/address:0.0.0` 导入 `output-url`，再写 `#link(output-url("build.txt"))[构建信息]`。Tola 会在 hook 运行后检查链接。输出文件如需压缩或 cache-busting，由脚本处理。
 
-```just
-search:
-    deno task search
+### 开发时复用文件
+
+设 `dev = "reuse"` 后，站点内容、脚本及配置、监听的输入和输出声明都没变时，开发构建会用上次成功生成的文件。
+
+把脚本额外读取的文件列进 `rerun-on`。脚本还依赖网络、时间、环境变量或站点外文件时，设 `dev = "run"`。生产构建每次都会运行已启用的 hook。用 `tola dev -v` 查看哪些输出路径变了。
+
+
+要用内置 Nushell 生成 `public/build.txt`，见 [`@tola-scripts/context`](tola-help://scripts/context) 的完整示例。
+
+示例：发布 HTML 文件清单：
+
+把脚本存为站点根目录下的 `write-page-list.nu`：
+
+```nu
+use tola get-context
+
+let hook = get-context | get hook
+glob ($hook.inputDir | path join "**/*.html")
+| each {|file| $file | path relative-to $hook.inputDir }
+| sort
+| to json
+| save ($hook.outputDir | path join "pages.json")
 ```
 
-`deno.json`：
+把 hook 加到 `tola.toml`：
 
-```json
-{
-  "imports": { "pagefind": "npm:pagefind@1.5.2" },
-  "tasks": {
-    "search": "deno run -A npm:pagefind@1.5.2 --site \"$TOLA_HOOK_INPUT_DIR\" --output-path \"$TOLA_HOOK_OUTPUT_DIR/assets/pagefind-search\""
-  }
-}
+```toml
+[[hooks.generate-outputs]]
+name = "page-list"
+nu = "write-page-list.nu"
+outputs = [{ file = "pages.json" }]
 ```
 
-`tola.toml`：
+在用 `tola init` 创建的站点中，给 `content/index.typ` 写一个标题，再从站点根目录运行 `tola build`。使用默认发布目录时，打开 `public/pages.json`，可以看到 `index.html` 等相对于发布目录的 HTML 文件名。
+
+示例：用 Pagefind 生成搜索索引：
+
+也可以换成其他搜索工具，读写目录和 `outputs` 的写法相同。
+
+安装 Node.js 和 npm 后，把脚本存为站点根目录下的 `index-search.nu`：
+
+```nu
+use tola get-context
+
+let hook = get-context | get hook
+let index_dir = $hook.outputDir | path join "pagefind"
+^npx -y pagefind --site $hook.inputDir --output-path $index_dir
+```
+
+在 `tola.toml` 中加入这个 hook。
 
 ```toml
 [[hooks.generate-outputs]]
 name = "search"
-argv = ["just", "search"]
-outputs = [{ tree = "assets/pagefind-search" }]
-rerun-on = { include = ["deno.json", "deno.lock", "justfile"] }
+nu = "index-search.nu"
+outputs = [{ tree = "pagefind" }]
 ```
 
-每个生成命令读的是同一份编译结果；几步转换相互依赖时，把它们放进同一个命令里。
-
-与所有 hook 阶段一样，这个阶段只跑单次命令：Tola 不做 watch 这类长驻运行，开发监听由 Tola 负责；命令自己的增量编译与缓存由生产者自己编写，可用 `TOLA_HOOK_CACHE_DIR`。
-
-页面这样用它：模板的 head 里直接链接生成的 CSS 与 JS：
+在用 `tola init` 创建的站点中，把下面的代码加到 `content/index.typ`。它会加载 hook 生成的 [Pagefind 搜索组件](https://pagefind.app/docs/)。
 
 ```typst
 #import "@tola/address:0.0.0": output-url
-
-#html.link(rel: "stylesheet", href: output-url("assets/pagefind-search/pagefind-ui.css"))
-#html.elem("script", attrs: (src: output-url("assets/pagefind-search/pagefind-ui.js")))
+#import "@tola/site:0.0.0": site
+#html.link(rel: "stylesheet", href: output-url("pagefind/pagefind-component-ui.css"))
+#html.elem("script", attrs: (
+  type: "module",
+  src: output-url("pagefind/pagefind-component-ui.js"),
+))[]
+#html.elem("pagefind-config", attrs: ("base-url": site.base-path))[]
+#html.elem("pagefind-modal-trigger", attrs: (placeholder: "搜索"))[]
+#html.elem("pagefind-modal")[]
 ```
 
-声明的 output 无需 `[assets]` 条目。`asset-url` 只解析 `[assets]` 声明，并校验该文件确实已发布，否则报错。用 `output-url("assets/pagefind-search/pagefind-ui.css")` 链接已知 output 路径。这些文件在之前的 Typst 编译时尚不存在，因此 Tola 当时无法计算它们的资源 URL。Tola 不会为 hook 的产物做压缩、cache-busting 等，全部由生产者/命令自己解决：例如 Pagefind 会给自己的索引与片段文件起带哈希的名字。
-
-本阶段的命令环境：
-- `TOLA_HOOK_INPUT_DIR`：命令的输入——上游已产出的整站的只读快照：页面与 `[assets]` 文件都在、布局与发布后的目录一致、文件不可写；本阶段其它 hook 刚写出的 output 不在里面，它也不是 `build.content-dir` 或 `build.publish-dir`，只在这条命令运行期间存在。例子里的 `--site "$TOLA_HOOK_INPUT_DIR"` 就是读它。
-- `TOLA_HOOK_OUTPUT_DIR`：每次运行都是空目录；写进去的相对路径就是 `build.publish-dir` 下的相对路径——写到 `"$TOLA_HOOK_OUTPUT_DIR"/assets/pagefind-search` 会发布成 `assets/pagefind-search`，URL 是 `/assets/pagefind-search/…`。
-- `TOLA_HOOK_STAGE`、`TOLA_BUILD_MODE`、`TOLA_HOOK_CACHE_DIR`、`TOLA_HOOK_TEMP_DIR`：与其它阶段相同——阶段名、模式（`prod` 或 `dev`）、跨次缓存目录（例如 `"$TOLA_HOOK_CACHE_DIR"/search/index.json`）、本次临时目录。命中缓存也要重新写出声明的 output。
+从站点根目录运行 `tola build`，默认会把搜索索引和组件写到 `public/pagefind/`。运行 `tola preview` 并打开打印的地址，点击首页的「搜索」，输入站内文章中出现过的词。

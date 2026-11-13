@@ -1,12 +1,10 @@
 //! `tola help`: documentation pages and the interactive tree browser.
 //!
-//! Pages are composed in `crate::help` from the packages' own declarations and the bundled
-//! translations, so this command loads no caller site: it parses the request, picks the language,
-//! and writes the document.
+//! Compose configuration, package, and script pages without loading a site.
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use anyhow::Result;
-use serde::Serialize;
+use anyhow::{Result, ensure};
+use serde::{Deserialize, Serialize};
 use tola_input::InputScope;
 
 use crate::cancellation::Cancellation;
@@ -16,7 +14,7 @@ use crate::cli::log::destination;
 use crate::cli::output::CommandOutput;
 use crate::help::data::{self, Document};
 use crate::help::model::{CROSS_REFERENCE_SCHEME, HelpCategory, LinkTarget, PageId};
-use crate::help::pages;
+use crate::help::{pages, search};
 use crate::i18n::HelpLanguage;
 
 pub(in crate::cli) fn run(
@@ -26,13 +24,17 @@ pub(in crate::cli) fn run(
     output: &CommandOutput,
     cancellation: &Cancellation,
 ) -> Result<()> {
+    ensure!(
+        !args.interactive || crate::cli::interaction::available(),
+        "`--interactive` needs a terminal; omit it to print the documentation"
+    );
     let target = pages::request(&args.targets)?;
     destination::start(output, &cancellation.token())?;
-    if args.interactive && args.targets.is_empty() && crate::cli::interaction::available() {
+    if args.interactive {
         return interactive(language, scope, output, cancellation);
     }
     let document = load(&target, language)?;
-    write_document(&document, args.format, output, args.interactive)
+    write_document(&document, args.format, output)
 }
 
 fn load(target: &LinkTarget, language: HelpLanguage) -> Result<Document> {
@@ -40,36 +42,21 @@ fn load(target: &LinkTarget, language: HelpLanguage) -> Result<Document> {
     data::document(&pages::page_of(id, language)?, target)
 }
 
-fn write_document(
-    document: &Document,
-    format: HelpFormat,
-    output: &CommandOutput,
-    direct: bool,
-) -> Result<()> {
+fn write_document(document: &Document, format: HelpFormat, output: &CommandOutput) -> Result<()> {
     match format {
         HelpFormat::Json => output.write_stdout_line(serde_json::to_string(document)?),
         HelpFormat::Markdown => output.write_stdout(&document.markdown),
-        HelpFormat::Text => {
-            let rendered = pages::render(
-                &document.markdown,
-                output.terminal().stdout_columns(),
-                output.terminal().stdout_uses_color(),
-            );
-            if direct {
-                output.write_stdout(rendered)
-            } else {
-                output.write_documentation(rendered)
-            }
-        }
+        HelpFormat::Text => write_text(document, output).map(|_| ()),
     }
 }
 
-#[derive(Clone, Copy, Serialize)]
-#[serde(rename_all = "lowercase")]
-enum Category {
-    Start,
-    Configuration,
-    Packages,
+fn write_text(document: &Document, output: &CommandOutput) -> Result<bool> {
+    let rendered = pages::render(
+        &document.markdown,
+        output.terminal().stdout_columns(),
+        output.terminal().stdout_uses_color(),
+    );
+    output.write_documentation(rendered)
 }
 
 #[derive(Serialize)]
@@ -81,16 +68,27 @@ struct Group {
 #[derive(Serialize)]
 struct TreeInput {
     title: &'static str,
+    contents_columns: usize,
     groups: Vec<Group>,
     bodies: BTreeMap<String, String>,
     targets: BTreeMap<String, String>,
+    sections: Vec<search::Section>,
+    paged: bool,
+    last_page: Option<String>,
 }
 
 struct Page {
     title: String,
     target: String,
-    category: Category,
+    group: Option<HelpCategory>,
     body: String,
+    sections: Vec<search::Section>,
+}
+
+#[derive(Deserialize)]
+struct Selection {
+    page: String,
+    target: String,
 }
 
 fn interactive(
@@ -99,15 +97,29 @@ fn interactive(
     output: &CommandOutput,
     cancellation: &Cancellation,
 ) -> Result<()> {
-    let columns = (output.terminal().stdout_columns().unwrap_or(80) * 3 / 5).max(24);
-    let pages = collect(language, columns, output.terminal().stdout_uses_color())?;
-    let input = tree_input(&pages);
-    let selected: Option<String> =
-        crate::cli::interaction::run(include_str!("help.nu"), &input, scope, cancellation)?;
-    if let Some(address) = selected {
-        let next = pages::request(&[address])?;
+    let columns = output.terminal().stdout_columns().unwrap_or(80);
+    let contents_columns = (columns * 3 / 10).clamp(1, 32);
+    // The split handle takes one column and the preview border takes two.
+    let preview_columns = columns.saturating_sub(contents_columns + 3).max(1);
+    let pages = collect(
+        language,
+        preview_columns,
+        output.terminal().stdout_uses_color(),
+    )?;
+    let mut input = tree_input(pages, contents_columns, output.terminal().has_pager());
+    while let Some(selected) = crate::cli::interaction::run::<Selection>(
+        include_str!("help.nu"),
+        &input,
+        scope,
+        cancellation,
+    )? {
+        let next = pages::request(&[selected.target])?;
         let document = load(&next, language)?;
-        write_document(&document, HelpFormat::Text, output, false)?;
+        if !write_text(&document, output)? {
+            break;
+        }
+        cancellation.token().ensure_active()?;
+        input.last_page = Some(selected.page);
     }
     Ok(())
 }
@@ -117,6 +129,7 @@ enum PageKey {
     Overview,
     Config(String),
     Package(String),
+    Script(String),
 }
 
 fn page_key(id: &PageId) -> Option<PageKey> {
@@ -127,6 +140,7 @@ fn page_key(id: &PageId) -> Option<PageKey> {
         PageId::Package { name } | PageId::PackageSelection { name, .. } => {
             Some(PageKey::Package(name.clone()))
         }
+        PageId::Script { name } => Some(PageKey::Script(name.clone())),
     }
 }
 
@@ -137,6 +151,7 @@ fn canonical_target(key: &PageKey) -> LinkTarget {
             section: section.clone(),
         }),
         PageKey::Package(name) => LinkTarget::Page(PageId::Package { name: name.clone() }),
+        PageKey::Script(name) => LinkTarget::Page(PageId::Script { name: name.clone() }),
     }
 }
 
@@ -147,7 +162,16 @@ fn page_title(id: &PageId) -> String {
         PageId::Package { name } | PageId::PackageSelection { name, .. } => {
             format!("@tola/{name}")
         }
-        PageId::Index(_) => unreachable!("index pages are not leaves"),
+        PageId::Script { name } => format!("@tola-scripts/{name}"),
+        PageId::Index(category) => group_name(*category).into(),
+    }
+}
+
+fn group_name(category: HelpCategory) -> &'static str {
+    match category {
+        HelpCategory::Config => "Configuration",
+        HelpCategory::Packages => "Packages",
+        HelpCategory::Scripts => "Scripts",
     }
 }
 
@@ -156,6 +180,7 @@ fn collect(language: HelpLanguage, columns: usize, color: bool) -> Result<Vec<Pa
         LinkTarget::Page(PageId::Overview),
         LinkTarget::Page(PageId::Index(HelpCategory::Config)),
         LinkTarget::Page(PageId::Index(HelpCategory::Packages)),
+        LinkTarget::Page(PageId::Index(HelpCategory::Scripts)),
     ]);
     let mut processed = BTreeSet::new();
     let mut seen = BTreeSet::new();
@@ -167,25 +192,31 @@ fn collect(language: HelpLanguage, columns: usize, color: bool) -> Result<Vec<Pa
         if !processed.insert(id.uri()) {
             continue;
         }
-        let document = data::document(&pages::page_of(&id, language)?, &target)?;
-        if let Some(key) = page_key(&id) {
-            if !seen.insert(key) {
-                continue;
-            }
-            let category = match &id {
-                PageId::Overview => Category::Start,
-                PageId::Config { .. } => Category::Configuration,
-                PageId::Package { .. } | PageId::PackageSelection { .. } => Category::Packages,
-                PageId::Index(_) => unreachable!("index pages are not leaves"),
-            };
-            let body = pages::render(&document.markdown, Some(columns), color);
-            pages.push(Page {
-                title: page_title(&id),
-                target: target.uri(),
-                category,
-                body,
-            });
+        let page = pages::page_of(&id, language)?;
+        let document = data::document(&page, &target)?;
+        if let Some(key) = page_key(&id)
+            && !seen.insert(key)
+        {
+            continue;
         }
+        let group = match &id {
+            PageId::Overview | PageId::Index(_) => None,
+            PageId::Config { .. } => Some(HelpCategory::Config),
+            PageId::Package { .. } | PageId::PackageSelection { .. } => {
+                Some(HelpCategory::Packages)
+            }
+            PageId::Script { .. } => Some(HelpCategory::Scripts),
+        };
+        let body = pages::render(&document.markdown, Some(columns), color);
+        let title = page_title(&id);
+        let sections = search::sections(&page, &title);
+        pages.push(Page {
+            title,
+            target: target.uri(),
+            group,
+            body,
+            sections,
+        });
         for link in &document.links {
             if link.target.starts_with(CROSS_REFERENCE_SCHEME)
                 && let Some(next) = LinkTarget::from_uri(&link.target, &id)
@@ -200,45 +231,40 @@ fn collect(language: HelpLanguage, columns: usize, color: bool) -> Result<Vec<Pa
     Ok(pages)
 }
 
-fn tree_input(pages: &[Page]) -> TreeInput {
-    let mut groups = vec![
-        Group {
-            name: "Start",
-            pages: Vec::new(),
-        },
-        Group {
-            name: "Configuration",
-            pages: Vec::new(),
-        },
-        Group {
-            name: "Packages",
-            pages: Vec::new(),
-        },
+fn tree_input(pages: Vec<Page>, contents_columns: usize, paged: bool) -> TreeInput {
+    let categories = [
+        HelpCategory::Config,
+        HelpCategory::Packages,
+        HelpCategory::Scripts,
     ];
+    let mut groups = categories.map(|category| Group {
+        name: group_name(category),
+        pages: Vec::new(),
+    });
     let mut bodies = BTreeMap::new();
     let mut targets = BTreeMap::new();
-    let mut used = BTreeSet::new();
+    let mut sections = Vec::new();
     for page in pages {
-        let mut title = page.title.clone();
-        let mut suffix = 2;
-        while !used.insert(title.clone()) {
-            title = format!("{} ({suffix})", page.title);
-            suffix += 1;
+        if let Some(category) = page.group
+            && let Some(index) = categories.iter().position(|&item| item == category)
+        {
+            groups[index].pages.push(page.title.clone());
         }
-        let index = match page.category {
-            Category::Start => 0,
-            Category::Configuration => 1,
-            Category::Packages => 2,
-        };
-        groups[index].pages.push(title.clone());
-        bodies.insert(title.clone(), page.body.clone());
-        targets.insert(title, page.target.clone());
+        bodies.insert(page.title.clone(), page.body);
+        targets.insert(page.title, page.target);
+        sections.extend(page.sections);
     }
-    groups.retain(|group| !group.pages.is_empty());
     TreeInput {
         title: "Tola help",
-        groups,
+        contents_columns,
+        groups: groups
+            .into_iter()
+            .filter(|group| !group.pages.is_empty())
+            .collect(),
         bodies,
         targets,
+        sections,
+        paged,
+        last_page: None,
     }
 }

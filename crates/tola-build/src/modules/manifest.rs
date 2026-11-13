@@ -3,8 +3,8 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use tola_input::InputMode;
-use tola_module::declaration::ModuleDeclaration;
+use tola_input::{InputMode, InputScope};
+use tola_module::declaration::{ModuleDeclaration, ModuleSource};
 use tola_module::manifest::{
     InitializerSource, ManifestError, ModuleDeclarations, NuModule, read_one, read_selected,
 };
@@ -75,17 +75,33 @@ pub fn find_initializer(
     })
 }
 
-/// Read only configuration-selected module manifests, without loading their referenced inputs.
-pub fn read_declarations(
+/// Discover commands, queries, and Nu entries from module directories already on disk.
+pub fn read_available_declarations(
     site_root: &Path,
     vendor: Option<&Path>,
     declarations: &BTreeMap<String, ModuleDeclaration>,
-    mode: InputMode,
-    cancellation: &crate::cancellation::BuildCancellation,
-) -> std::result::Result<BTreeMap<String, ModuleDeclarations>, ManifestError> {
-    let roots = crate::inputs::module_roots(site_root, mode, vendor, declarations, cancellation)?;
+    scope: InputScope,
+) -> std::io::Result<BTreeMap<String, ModuleDeclarations>> {
+    let site = site_root.canonicalize()?;
+    let mode = InputMode::new(scope, true);
+    let vendor_modules = vendor.map(|dir| dir.join("modules"));
     let mut result = BTreeMap::new();
-    for (name, loaded) in read_selected(site_root, declarations, &roots, mode)? {
+    for (name, declaration) in declarations {
+        let Ok(root) = crate::inputs::declaration_root(&site, vendor, name, &declaration.source)
+        else {
+            continue;
+        };
+        if scope == InputScope::Pure
+            && !matches!(&declaration.source, ModuleSource::Local { .. })
+            && !vendor_modules
+                .as_ref()
+                .is_some_and(|dir| root.starts_with(dir))
+        {
+            continue;
+        }
+        let Ok(loaded) = read_one(&site, name, root, mode) else {
+            continue;
+        };
         let manifest = loaded.manifest;
         let mut commands: BTreeMap<_, _> = manifest
             .commands
@@ -111,8 +127,6 @@ pub fn read_declarations(
 mod tests {
     use super::*;
     use std::path::PathBuf;
-    use tola_input::InputScope;
-    use tola_module::declaration::ModuleSource;
 
     #[test]
     fn nu_selection_prepares_no_site_inputs() {
@@ -249,14 +263,9 @@ argv = ["not-installed", "{module}/init.nu"]
                 ..Default::default()
             },
         )]);
-        let help = read_declarations(
-            directory.path(),
-            None,
-            &declarations,
-            InputMode::new(InputScope::Pure, false),
-            &Default::default(),
-        )
-        .unwrap();
+        let help =
+            read_available_declarations(directory.path(), None, &declarations, InputScope::Pure)
+                .unwrap();
         assert!(help["notes"].commands.contains_key("init"));
     }
 }

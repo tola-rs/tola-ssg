@@ -1,14 +1,15 @@
 # `@tola/hash`
 
-BLAKE3 摘要，以及它们的小写十六进制写法
+计算 BLAKE3 摘要，把字节写成小写十六进制。
 
 ## `blake3`
 
-用 BLAKE3 对字节求摘要。
+返回输入的 32 字节 BLAKE3 摘要。
 
-结果是 32 字节，也就是 `bytes-to-hex` 写成 64 个十六进制字符的同一份摘要。
+用 `bytes-to-hex` 可把摘要转成 64 个十六进制字符。
 
-Example - 字符串与它的 UTF-8 编码得到相同摘要：
+
+用 `bytes("abc")` 编码字符串，得到的 BLAKE3 摘要长 32 字节。
 
 ```typst
 #import "@tola/hash:0.0.0": blake3
@@ -17,13 +18,12 @@ Example - 字符串与它的 UTF-8 编码得到相同摘要：
 
 ### `value`
 
-要求摘要的字节。
+要计算摘要的字节。字符串可先用 `bytes(text)` 转成 UTF-8 字节。
 
 ## `bytes-to-hex`
 
-把字节写成小写十六进制，每字节两位。
+将字节转为小写十六进制文本，每字节两位。
 
-Example：
 
 ```typst
 #import "@tola/hash:0.0.0": bytes-to-hex

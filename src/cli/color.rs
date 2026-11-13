@@ -18,7 +18,7 @@ pub(crate) fn install(color: ColorChoice) {
 pub(crate) fn child_environment() -> Vec<(&'static str, String)> {
     match COLOR.get().copied().unwrap_or(ColorChoice::Auto) {
         ColorChoice::Always => vec![("FORCE_COLOR", "1".into())],
-        ColorChoice::Never => vec![("NO_COLOR", "1".into())],
+        ColorChoice::Never => vec![("NO_COLOR", "1".into()), ("FORCE_COLOR", "0".into())],
         ColorChoice::Auto => Vec::new(),
     }
 }

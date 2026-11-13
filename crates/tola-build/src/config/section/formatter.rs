@@ -9,17 +9,16 @@ use tola_typst_syntax::style::{Options, ProseWrap};
 #[serde(default)]
 #[config(section = "formatter")]
 pub struct FormatterConfig {
-    /// The spaces one nesting level indents by.
+    /// Spaces per indentation level. If omitted, use 2.
     pub indent: usize,
 
-    /// The column the formatter breaks a line at. The formatter wraps no narrower than 20
-    /// columns, so a smaller value is raised to that floor rather than refused.
+    /// Column width for wrapping. If omitted, use 120. Values below 20 use 20.
     #[serde(rename = "print-width")]
     #[config(name = "print-width")]
     pub print_width: usize,
 
-    /// How markup prose is wrapped: `none` keeps the author's line breaks, `fill` wraps prose to
-    /// the line width, and `sentence` places each sentence on its own line.
+    /// Omit this setting or use `none` to keep existing line breaks in prose. Use `fill` to wrap
+    /// to the column width, or `sentence` to put each sentence on its own line.
     #[serde(rename = "prose-wrap")]
     #[config(name = "prose-wrap")]
     pub prose_wrap: ProseWrap,
@@ -47,17 +46,25 @@ impl FormatterConfig {
     }
 
     /// What `tola help "[formatter]"` adds under its table.
-    pub const HELP: &'static str = "\
-`tola fmt` writes the site's own `.typ` files in this style, and the language service uses it for
-the file an editor works in:
+    pub const HELP: &'static str = r#"
+To wrap at 88 columns, add this to `tola.toml`.
 
 ```toml
 [formatter]
-indent = 2
-print-width = 120
-prose-wrap = \"none\"
+print-width = 88
 ```
 
-A directory without a `tola.toml` formats under these defaults: run the command there and it
-formats that directory's `.typ` files with them.";
+To try it in a site created with `tola init`, put this line in `content/index.typ`:
+
+```typst
+#let sizes=(small:8,large:16)
+```
+
+Run `tola fmt --check` from the site root. It lists files that need formatting and leaves
+them untouched. Run `tola fmt` to apply the changes, then open `content/index.typ` to
+see the spaces around the assignment and between the fields. Your editor uses the
+same settings when it formats through Tola.
+
+With no site configuration, `tola fmt` uses these defaults on the `.typ` files below
+the current directory."#;
 }

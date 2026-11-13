@@ -1,7 +1,7 @@
 use nu_engine::CallExt;
 use nu_protocol::{
     PipelineData, ShellError, Signature, Span, SyntaxShape, Type, Value,
-    engine::{Call, Command, EngineState, Stack},
+    engine::{Call, Command, CommandType, EngineState, Stack},
     shell_error::generic::GenericError,
 };
 use serde_json::Value as Json;
@@ -13,7 +13,8 @@ use std::{
 
 pub type Query =
     Arc<dyn Fn(&Path, &str, Option<&Path>, Option<&str>) -> Result<Json, String> + Send + Sync>;
-pub type Diagnostic = Arc<dyn Fn(Json) -> Result<(), String> + Send + Sync>;
+pub type SubmitDiagnostics = Arc<dyn Fn(Json) -> Result<(), String> + Send + Sync>;
+pub type RenderDiagnostics = Arc<dyn Fn(&Path, Json, bool) -> Result<String, String> + Send + Sync>;
 
 #[derive(Default, Clone)]
 pub struct Host {
@@ -23,7 +24,8 @@ pub struct Host {
     pub hook: Option<Json>,
     pub init: Option<Json>,
     pub query: Option<Query>,
-    pub diagnostic: Option<Diagnostic>,
+    pub submit_diagnostics: Option<SubmitDiagnostics>,
+    pub render_diagnostics: Option<RenderDiagnostics>,
 }
 
 #[derive(Clone, Copy)]
@@ -34,12 +36,20 @@ pub(super) enum Operation {
     Init,
     Query,
     Submit,
+    Render,
 }
 
 #[derive(Clone)]
 pub(super) struct HostCommand(pub Operation, pub Arc<OnceLock<Host>>);
 
 impl Command for HostCommand {
+    fn command_type(&self) -> CommandType {
+        match self.0 {
+            Operation::Submit | Operation::Render => CommandType::Custom,
+            _ => CommandType::Builtin,
+        }
+    }
+
     fn name(&self) -> &str {
         match self.0 {
             Operation::Site => "get-site",
@@ -48,6 +58,7 @@ impl Command for HostCommand {
             Operation::Init => "get-init",
             Operation::Query => "query",
             Operation::Submit => "submit",
+            Operation::Render => "render-diagnostics",
         }
     }
 
@@ -59,13 +70,14 @@ impl Command for HostCommand {
             Operation::Init => "Read the current initializer's source and directories.",
             Operation::Query => "Evaluate a site query.",
             Operation::Submit => "Submit one complete batch from a Tola hook or module command.",
+            Operation::Render => "Render a list of diagnostics as terminal text.",
         }
     }
 
     fn extra_description(&self) -> &str {
         match self.0 {
             Operation::Submit => {
-                "An error fails the host operation after the script finishes. Warnings allow it to succeed."
+                "A second submission is rejected, even if the first batch was empty. An error fails the host operation after the script finishes."
             }
             _ => "",
         }
@@ -91,6 +103,9 @@ impl Command for HostCommand {
                 ),
             Operation::Submit => {
                 signature.input_output_types(vec![(Type::list(Type::record()), Type::Nothing)])
+            }
+            Operation::Render => {
+                signature.input_output_types(vec![(Type::list(Type::record()), Type::String)])
             }
             _ => signature,
         }
@@ -160,12 +175,22 @@ impl Command for HostCommand {
                 let error = |message: String| -> ShellError {
                     GenericError::new("cannot submit diagnostics", message, span).into()
                 };
-                let submit = host.diagnostic.as_ref().ok_or_else(|| {
+                let submit = host.submit_diagnostics.as_ref().ok_or_else(|| {
                     error("use `diagnostic submit` in a Tola hook or module command".into())
                 })?;
                 let diagnostics = into_json(input.into_value(span)?).map_err(error)?;
                 submit(diagnostics).map_err(error)?;
                 return Ok(PipelineData::empty());
+            }
+            Operation::Render => {
+                let render = host.render_diagnostics.as_ref().ok_or_else(|| {
+                    error("run the script with Tola to render diagnostics".into())
+                })?;
+                let diagnostics = into_json(input.into_value(span)?).map_err(error)?;
+                let color = stack.get_config(engine).use_ansi_coloring.get(engine);
+                let rendered =
+                    render(engine.cwd(Some(stack))?.as_ref(), diagnostics, color).map_err(error)?;
+                return Ok(PipelineData::value(Value::string(rendered, span), None));
             }
         };
         engine.signals().check(&span)?;

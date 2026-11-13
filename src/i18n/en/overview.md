@@ -1,5 +1,6 @@
-For command options, use `tola <command> --help`.
+For command options, run `tola <command> --help`.
 
-`tola help` provides Tola's bundled offline documentation: `tola.toml` settings (`tola help "[build]"`) and the bundled `@tola/xxx` packages (`tola help "@tola/address" slugify`). Add `-i` or `--interactive` to browse: filter the section and link list, press Enter to open a choice, or select Back to return. Esc finishes browsing. Documentation is in English by default; use `--lang zh` for Simplified Chinese.
+Look up a setting with `tola help "[build]"`, a Typst function with `tola help "@tola/address" slugify`, or a bundled script with `tola help scripts`. Add `--lang zh` for Simplified Chinese.
+Run `tola help -i` to browse. Press → to expand a group, / to search, Tab to focus the results, and Ctrl+G to return to the contents. Press Enter to read the selection, then `q` to return and `q` again to quit. With paging off, Enter prints the selection and exits.
 
-`tola skill` introduces the task-focused authoring guide. Use `tola skill writing math` or `tola skill modules create` to read only what the task needs. `--list` shows the heading tree; `--all` includes the selected topic’s subsections.
+`tola skill` shows how to write and build a site. Try `tola skill writing math` for math or `tola skill modules create` for modules. Use `--list` to see the topics and `--all` to include subsections.

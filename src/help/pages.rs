@@ -75,7 +75,7 @@ pub(crate) fn request(targets: &[String]) -> Result<LinkTarget> {
     super::target::request(targets).ok_or_else(|| {
         target_error(
             &targets.join(" "),
-            "Choose `tola help config` or `tola help package`",
+            "Use `tola help config`, `tola help package`, or `tola help scripts`",
         )
     })
 }
@@ -83,10 +83,11 @@ pub(crate) fn request(targets: &[String]) -> Result<LinkTarget> {
 pub(crate) fn page_of(id: &PageId, language: HelpLanguage) -> Result<HelpPage> {
     match id {
         PageId::Overview => Ok(overview_page(language)),
-        PageId::Index(category) => Ok(index_page(*category)),
+        PageId::Index(category) => Ok(index_page(*category, language)),
         PageId::Config { section } => table_page(section, language),
         PageId::Package { name } => package_page(name, &[], language),
         PageId::PackageSelection { name, exports } => package_page(name, exports, language),
+        PageId::Script { name } => super::scripts::page(id.clone(), name, language),
     }
 }
 
@@ -166,12 +167,15 @@ fn overview_page(language: HelpLanguage) -> HelpPage {
     HelpPage::new(id, markdown)
 }
 
-fn index_page(category: HelpCategory) -> HelpPage {
+fn index_page(category: HelpCategory, language: HelpLanguage) -> HelpPage {
     let id = PageId::Index(category);
     let mut markdown = String::new();
     match category {
         HelpCategory::Config => {
-            markdown.push_str("# Configuration tables\n\n");
+            markdown.push_str(match language {
+                HelpLanguage::English => "# Configuration tables\n\nLook up settings in `tola.toml`. Use `tola help \"[build]\"` to find the publish directory, or `tola help \"[hooks]\"` to see when build scripts run.\n\n",
+                HelpLanguage::SimplifiedChinese => "# 配置表\n\n查阅 `tola.toml`。用 `tola help --lang zh \"[build]\"` 查发布目录，用 `tola help --lang zh \"[hooks]\"` 查脚本在哪个构建阶段运行。\n\n",
+            });
             // A table with settings of its own is an entry; so is a container grouping several
             // child tables.
             for table in TABLES.iter().filter(|table| {
@@ -185,11 +189,32 @@ fn index_page(category: HelpCategory) -> HelpPage {
             }
         }
         HelpCategory::Packages => {
-            markdown.push_str("# Bundled packages\n\n");
+            markdown.push_str(match language {
+                HelpLanguage::English => "# Bundled Typst packages\n\nLook up imports, parameters, and examples for `@tola/*` packages. To highlight code in HTML, start with `tola help \"@tola/code\" render-code`.\n\n",
+                HelpLanguage::SimplifiedChinese => "# 内置 Typst 包\n\n查阅 `@tola/*` 包的导入方式、参数和示例。要给 HTML 中的代码加语法高亮，可以查 `tola help --lang zh \"@tola/code\" render-code`。\n\n",
+            });
             for package in tola_packages::builtin_packages() {
                 let name = package.spec().name.to_string();
                 let label = named(&format!("@tola/{name}"), package_target(&name, &[]));
                 markdown.push_str(&format!("- {label}\n"));
+            }
+        }
+        HelpCategory::Scripts => {
+            markdown.push_str(match language {
+                HelpLanguage::English => "# Built-in scripts\n\nUse `tola nu` to inspect or resize images and render JSON diagnostics. The script pages list commands, options, and examples.\n\n",
+                HelpLanguage::SimplifiedChinese => "# 内置脚本\n\n用 `tola nu` 查看或缩放图片，也可以把 JSON 诊断显示在终端。点开脚本页可查命令、选项和示例。\n\n",
+            });
+            for script in super::scripts::builtins() {
+                let label = cross_reference(
+                    &format!("@tola-scripts/{}", script.name),
+                    &LinkTarget::Page(PageId::Script {
+                        name: script.name.to_owned(),
+                    }),
+                );
+                let intro = i18n::script(language, script.name)
+                    .and_then(Translation::intro)
+                    .unwrap_or(script.summary);
+                markdown.push_str(&format!("- {label}{}{intro}\n", language.colon()));
             }
         }
     }
@@ -497,23 +522,24 @@ fn package_page(name: &str, requested: &[String], language: HelpLanguage) -> Res
             export_kind(export),
             code_block("typst-code", &declaration(&export.declaration))
         ));
-        let parameters = match &export.declaration {
-            ExportDeclaration::Function(signature) => {
-                parameter_sections(translation, &export.name, signature)
-            }
-            ExportDeclaration::Value(_) => String::new(),
-        };
         let summary = translation
             .and_then(|translation| translation.section(&export.name))
             .unwrap_or(&export.documentation.summary);
-        text.push_str(&parameters);
         if !summary.is_empty() {
-            if !parameters.is_empty() {
-                // A heading names the export's own documentation, so no reader takes it for
-                // another parameter.
-                text.push_str("\n### Description\n");
-            }
             text.push_str(&format!("\n{summary}\n"));
+        }
+        let parameter_prose =
+            |name: &str| translation.and_then(|translation| translation.field(&export.name, name));
+        if let ExportDeclaration::Function(signature) = &export.declaration {
+            write_parameters(&mut text, signature, language, parameter_prose);
+        }
+        for method in &export.methods {
+            text.push_str(&format!(
+                "\n### `{}`\n\n{}\n",
+                method.name,
+                code_block("typst-code", &method.method_code()),
+            ));
+            write_parameters(&mut text, method, language, |_| None);
         }
         text.push_str(&related_section(&target, &export.related, &names));
         page.push_export(text);
@@ -530,39 +556,63 @@ fn declaration(declaration: &ExportDeclaration) -> String {
     }
 }
 
-/// The parameter sections, in the order the signature spells the parameters: each group headed,
-/// each parameter named with the type it renders, then what the documentation says about it. The
-/// signature already shows which parameters are optional and which collect arguments.
-fn parameter_sections(
-    translation: Option<&Translation>,
-    export: &str,
+/// List the parameters by argument kind. Their defaults appear in the signature.
+fn write_parameters<'a>(
+    text: &mut String,
     signature: &Signature,
-) -> String {
-    let mut text = String::new();
+    language: HelpLanguage,
+    prose: impl Fn(&str) -> Option<&'a str>,
+) {
+    let (positional, rest, named, required) = match language {
+        HelpLanguage::English => (
+            "Positional parameters",
+            "Rest parameters",
+            "Named parameters",
+            "required",
+        ),
+        HelpLanguage::SimplifiedChinese => ("位置参数", "剩余参数", "命名参数", "必填"),
+    };
     for (heading, group) in [
-        ("Positional Parameters", signature.positional()),
-        ("Rest Parameters", signature.rest()),
-        ("Named Parameters", signature.named()),
+        (positional, signature.positional()),
+        (rest, signature.rest()),
+        (named, signature.named()),
     ] {
         if group.is_empty() {
             continue;
         }
-        text.push_str(&format!("\n### {heading}\n"));
+        text.push_str(&format!("\n**{heading}**\n\n"));
         for parameter in group {
-            text.push_str(&format!("\n#### {}\n", parameter.name));
+            let prefix = if parameter.kind == tola_packages::ParameterKind::Rest {
+                ".."
+            } else {
+                ""
+            };
             text.push_str(&format!(
-                "\n{}\n",
-                code_block("typst-code", &format!("type: {}", parameter.ty_spelling()))
+                "- `{prefix}{}: {}`",
+                parameter.name,
+                parameter.ty_spelling()
             ));
-            let documentation = translation
-                .and_then(|translation| translation.field(export, &parameter.name))
-                .or(parameter.docs.as_deref());
-            if let Some(documentation) = documentation {
-                text.push_str(&format!("\n{documentation}\n"));
+            if parameter.required {
+                text.push_str(&format!(" · {required}"));
             }
+            let documentation = prose(&parameter.name).or(parameter.docs.as_deref());
+            if let Some(documentation) = documentation {
+                let mut lines = documentation.lines();
+                if let Some(first) = lines.next() {
+                    text.push_str(language.colon());
+                    text.push_str(first);
+                }
+                for line in lines {
+                    text.push('\n');
+                    if !line.is_empty() {
+                        text.push_str("  ");
+                        text.push_str(line);
+                    }
+                }
+            }
+            text.push('\n');
         }
     }
-    text
 }
 
 /// The related-targets section one export renders: the package's own exports as one command,
@@ -645,7 +695,7 @@ fn related_packages(section: &str) -> Vec<String> {
         .collect()
 }
 
-fn code_block(language: &str, source: &str) -> String {
+pub(super) fn code_block(language: &str, source: &str) -> String {
     let longest = source
         .split(|character| character != '`')
         .map(str::len)
@@ -713,7 +763,7 @@ fn package_names() -> impl Iterator<Item = String> {
     tola_packages::builtin_packages().map(|package| package.spec().name.to_string())
 }
 
-fn target_error(target: &str, choices: &str) -> anyhow::Error {
+pub(super) fn target_error(target: &str, choices: &str) -> anyhow::Error {
     help_error(
         crate::codes::help::TARGET,
         format!("`{target}` is not a help target"),
@@ -756,7 +806,12 @@ mod tests {
     }
 
     fn requests() -> Vec<Vec<String>> {
-        let mut requests = vec![vec![], targets(&["config"]), targets(&["package"])];
+        let mut requests = vec![
+            vec![],
+            targets(&["config"]),
+            targets(&["package"]),
+            targets(&["scripts"]),
+        ];
         requests.extend(
             TABLES
                 .iter()

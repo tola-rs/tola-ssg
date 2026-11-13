@@ -11,15 +11,18 @@
 - `site/` and `site.rs` — realized documents and resources, route indexes, references, immutable revisions.
 - `content/`, `metadata/` — content discovery, source identity, shared native Typst source dictionaries.
 - `filesystem/` — source identities and sets, fingerprints, path normalization, unsaved source overrides, atomic writes.
-- `config/` — parsed configuration sources and validated build sections; consumers receive resolved values.
-- `hooks/` — hook actions, external process environment and capture, application-provided Nu execution, and cancellation.
+- `config/` — site configuration source graphs, fragment validation, merge origins, and validated build sections; consumers receive resolved values.
+- `hooks/` — hook batches, shared session permits, actions, external process capture, application-provided Nu execution, and cancellation.
 - `report/` — the versioned report file an external program writes.
 - `seo/`, `asset/`, `image/`, `icon/`, `package/`, `modules/`, `inspect/` — producers, package access, site modules, and read-only views that feed or describe the graph.
 - `observation.rs` — input observation evidence; `cancellation.rs` — the shared token and cancelled error; `mode.rs` — build mode; `html.rs` — shared HTML escaping.
 
 ## Invariants
 
+- Site configuration includes are local sources applied depth first before their containing file. The merged source graph retains file identities, applications and field origins; defaults and invocation overrides follow merging. Module manifests do not include fragments.
+- Configuration sources, including optional missing targets, are protected from site writes and checked for freshness before publication.
 - Build order: before-build hooks, discovery, root Bundle convergence, output collection, reference validation, candidate validation, publication.
+- Within a stage, each site or module instance owns its order batches. Modules follow alias order; same-order hooks may run together under the site's shared session limit.
 - One sealed, complete graph. Never publish partially converged output; never mutate the graph after sealing.
 - Exact asset declarations own their sources before option gates. Tree patterns match from the declaring root within the `source` subtree. Module replacements substitute selected assets.
 - Hook input selection supplies dependency evidence for development reuse. Nu entry scripts are observed separately. Output reuse also compares the upstream site, effective options, action, and declared outputs.

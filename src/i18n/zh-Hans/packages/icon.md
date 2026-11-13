@@ -1,32 +1,33 @@
 # `@tola/icon`
 
-配置好的图标：内联 SVG、SVG 字节或已发布的 URL。
+在文档中使用 `[icons]` 里配置的 SVG 图标。
 
-图标颜色由其 SVG 本身内容决定。用 `currentColor` 画的图标跟随所在页面的 `color`，主题或 CSS 类就能改变它的颜色；fills 与 strokes 写死颜色的图标保持自己的颜色。首选那些跟随主题色的图标（比如 `lucide`）。
+SVG 的 `fill` 或 `stroke` 用 `currentColor` 时，内联图标跟随文字颜色。SVG 中指定的其他颜色保持原样。
 
 ## `icon`
 
-把配置好的图标画成内联 SVG，高度为 1em。
+将已配置的图标插入 HTML，生成高 1em 的内联 SVG。
 
-它产生的是 HTML 元素，所以要在 HTML 文档里调用。`icon-bytes` 与 `icon-url` 的返回值任何目标都能用。
+`icon()` 只能在 HTML 文档中使用。其他输出格式可用 `icon-bytes` 或 `icon-url`。
 
-图标 id 取自站点在 `tola.toml` 的 `icons.collections` 下声明的 collection：`tola help "[icons]"` 说明每种来源类型，`tola inspect icons` 列出已配置的 namespace。`tola inspect icons lucide` 将图标与别名逐行列出为 `namespace`/`name`。
+Iconify 的完整配置见 [`[icons]`](tola-help://config/icons)。配置好 Lucide 后，在 HTML 文档中用 `icon("lucide:rocket")` 插入火箭图标。
 
-图标颜色由其 SVG 本身内容决定：用 `currentColor` 画的跟随所在页面的 `color`，主题或 CSS 类就能改变它；fills 与 strokes 写死颜色的保持自己的颜色。首选那些跟随主题色的图标：`lucide` 集合的每个图标都用 `currentColor` 画，拿来就直接跟着页面的文字颜色走。
 `icon()` 在调用时检查 id，即使返回的内容没有使用。
 
-Example - 在 HTML 文档里渲染一个配置好的图标：
+示例：插入装饰性图标和带标签的图标：
+
+按 `tola help --lang zh "[icons]"` 配置 `brand:mark`。把下面的代码放到新站点的 Typst 入口文件，运行 `tola build`。首页会包含内联 SVG。
 
 ```typst site
 #import "@tola/icon:0.0.0": icon
 #assert.eq(type(icon("brand:mark")), content)
 #document("index.html")[
   #icon("brand:mark")
-  #icon("brand:logo", label: "Example site logo", attrs: (class: "brand",))
+  #icon("brand:mark", label: "Example site logo", attrs: (class: "brand",))
 ]
 ```
 
-Example - 把图标插进 HTML 文档，同时用已发布的图标 URL 直接当图片地址：
+示例：同时使用内联 SVG 和图标 URL：
 
 ```typst site
 #import "@tola/icon:0.0.0": icon, icon-url
@@ -38,7 +39,7 @@ Example - 把图标插进 HTML 文档，同时用已发布的图标 URL 直接�
 ]
 ```
 
-Example - 把收集到的图标字节交给 `asset()` 发布：
+示例：把图标发布到指定路径：
 
 ```typst site
 #import "@tola/icon:0.0.0": icon-bytes
@@ -53,19 +54,18 @@ Example - 把收集到的图标字节交给 `asset()` 发布：
 
 ### `label`
 
-`none` 表示装饰性图标；非空的 `label` 表示信息性图片。只含空白的 `label` 会报错。
+省略或传 `none` 时，将图标标记为装饰。图标有实际含义时，填写供屏幕阅读器读取的名称，例如 `"站点标志"`。只含空白会报错。
 
 ### `attrs`
 
-值为字符串的根 SVG 属性，例如 `class`、`width`、`height`、`style`。`aria-label`、`aria-labelledby`、`aria-hidden`、`role`、`focusable` 由 `label` 掌管，在 `attrs` 里写其中任何一个都会报错；`class` 与 `style` 会追加到 SVG 已有的值上。
+添加到根 SVG 元素的属性，值须为字符串，例如 `(class: "brand",)`。省略时不加额外属性。`aria-label`、`aria-labelledby`、`aria-hidden`、`role`、`focusable` 由 `label` 掌管，在 `attrs` 里写其中任何一个都会报错；`class` 与 `style` 会追加到 SVG 已有的值上。
 
 ## `icon-bytes`
 
-配置好的图标的规范化 SVG 字节，可交给 `asset()` 或 Typst 的 `image(bytes)`。
+返回 SVG 字节。可传给 Typst 的 `image(bytes)` 显示，或交给 `asset()` 发布到指定路径。需要直接发布并取得 URL 时，用 `icon-url()`。
 
-只有 `icon-url()` 会把图标发布成 SVG 文件。
 
-Example - 把图标的字节发布成 Bundle 文件：
+按 `tola help --lang zh "[icons]"` 配置 `brand:mark`，在 `site.typ` 中使用下面的代码。运行 `tola build` 后，默认会生成 `public/mark.svg`。
 
 ```typst site
 #import "@tola/icon:0.0.0": icon-bytes
@@ -81,13 +81,14 @@ Example - 把图标的字节发布成 Bundle 文件：
 
 ## `icon-url`
 
-发布配置好的图标，并返回它对外提供服务的 URL。
+发布 SVG 图标，返回可以在网页上使用的 URL。
 
-一次构建只发布文档请求过的图标。URL 以 `/` 开头，包含 `site.base-path`，可以直接写进 HTML 的图片或链接属性。规范化 SVG 字节相同的图标共用一个已发布文件。
+构建只发布文档用到的图标。URL 已包含 `site.base-path`，可直接填在 `<img>` 或链接里。
 
-页面的 `color` 到不了已发布的图标：独立的文件继承不到它。想让图标跟随主题色，请用 `icon()`。
+要让图标跟随文字颜色，用 `icon()` 插入包含 `currentColor` 的 SVG。
 
-Example - 发布图标并在图片里使用它的 URL：
+
+按 `tola help --lang zh "[icons]"` 配置 `brand:mark`。把下面的代码加到 `site.typ`，运行 `tola build`。首页会通过图片元素加载已发布的 SVG。
 
 ```typst site
 #import "@tola/icon:0.0.0": icon-url

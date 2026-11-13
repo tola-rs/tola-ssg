@@ -13,7 +13,6 @@
     reason = "Nushell's ShellError is the engine's own named error type, matched by callers and required by its command API"
 )]
 
-mod cli;
 mod error;
 mod execution;
 mod highlight;
@@ -26,7 +25,7 @@ mod resources;
 mod signatures;
 
 pub use error::NuError;
-pub use host::{Diagnostic, Host, Query};
+pub use host::{Host, Query, SubmitDiagnostics};
 pub use lsp::serve_lsp;
 pub use modules::{ConfiguredModule, Dependency, ModuleEntry, Origin, SourceOrigin, SourceOverlay};
 pub use nu_protocol::{Flag, PositionalArg, Signature};
@@ -50,7 +49,7 @@ use nu_protocol::{
 };
 
 /// The embedded Nushell release every nu-* dependency is pinned to.
-pub const NU_VERSION: &str = "0.116.1";
+pub const NU_VERSION: &str = "0.117.0";
 
 /// A built-in Nu library and how it appears in command help.
 pub struct BuiltinModule {
@@ -60,29 +59,36 @@ pub struct BuiltinModule {
     pub summary: &'static str,
     /// Whether this built-in publishes a runnable `main`.
     pub executable: bool,
+    /// The entry file within this module's virtual directory.
+    pub entry: &'static str,
+    /// Source files relative to the module's virtual directory.
+    pub sources: &'static [(&'static str, &'static [u8])],
 }
 
 /// Built-in Nu modules available through `use tola`.
 pub const BUILTIN_MODULES: &[BuiltinModule] = &[
     BuiltinModule {
-        name: "cli",
-        summary: "Capture finite CLI output and exit status",
-        executable: false,
-    },
-    BuiltinModule {
         name: "image",
         summary: "Inspect, resize, and convert images",
         executable: true,
+        entry: "image.nu",
+        sources: &[
+            ("image.nu", include_bytes!("../nu/image.nu")),
+            ("image_core.nu", include_bytes!("../nu/image_core.nu")),
+        ],
     },
     BuiltinModule {
         name: "diagnostic",
         summary: "Construct, render, and submit diagnostics",
-        executable: false,
-    },
-    BuiltinModule {
-        name: "ui",
-        summary: "Interactive tables, confirmations, and syntax highlighting",
-        executable: false,
+        executable: true,
+        entry: "diagnostic.nu",
+        sources: &[
+            ("diagnostic.nu", include_bytes!("../nu/diagnostic.nu")),
+            (
+                "diagnostic_core.nu",
+                include_bytes!("../nu/diagnostic_core.nu"),
+            ),
+        ],
     },
 ];
 
@@ -150,6 +156,17 @@ impl Runtime {
         context: InvocationContext,
         overlays: Vec<SourceOverlay>,
     ) -> Result<Self> {
+        Self::for_invocation_with_builtins(modules, dependencies, context, overlays, &[])
+    }
+
+    /// Prepare an invocation with additional built-in modules supplied by the application.
+    pub fn for_invocation_with_builtins(
+        modules: Vec<ConfiguredModule>,
+        dependencies: Vec<PathBuf>,
+        context: InvocationContext,
+        overlays: Vec<SourceOverlay>,
+        builtins: &[BuiltinModule],
+    ) -> Result<Self> {
         if !(context.directory.is_absolute() && context.directory.is_dir()) {
             return Err(NuError::InvocationDirectory);
         }
@@ -166,11 +183,7 @@ impl Runtime {
             sources.insert(overlay.path.clone(), overlay);
         }
         let overlay_paths = sources.keys().cloned().collect();
-        let builtins = BUILTIN_MODULES
-            .iter()
-            .map(|module| module.name)
-            .map(modules::Library::builtin)
-            .collect::<Vec<_>>();
+        let builtins = BUILTIN_MODULES.iter().chain(builtins);
         let binding_paths: Vec<_> = modules
             .iter()
             .flat_map(|module| [module.root.join(&module.entry), module.manifest.clone()])
@@ -212,7 +225,7 @@ impl Runtime {
             engine = base.clone();
             let result = modules::register(
                 &mut engine,
-                &builtins,
+                builtins.clone(),
                 &configured,
                 &supplied,
                 &mut directories,
@@ -302,15 +315,12 @@ impl Runtime {
                 }
             }
         }
-        for &(name, bytes) in resources::FILES {
-            let path = Path::new(name);
-            if let Some(library) = builtins
-                .iter()
-                .find(|library| path.starts_with(&library.root))
-            {
+        for builtin in builtins {
+            let library = modules::Library::builtin(builtin);
+            for &(name, bytes) in builtin.sources {
                 origins.push(SourceOrigin {
-                    path: path.into(),
-                    relative: path.strip_prefix(&library.root)?.into(),
+                    path: library.root.join(name),
+                    relative: name.into(),
                     origin: library.origin.clone(),
                     digest: modules::digest(bytes),
                     version: None,
@@ -771,14 +781,86 @@ mod tests {
     }
 
     #[test]
-    fn ui_highlight_reaches_the_native_highlighter() {
+    fn syntax_highlight_reaches_the_native_highlighter() {
         let runtime = Runtime::new(Vec::new(), Vec::new()).unwrap();
         let value = evaluate(
             &runtime,
-            r#"use tola ui
-"fn main() {}" | ui highlight rust | str contains '[38;2;'"#,
+            r#"use tola
+"fn main() {}" | tola syntax-highlight rust | str contains '[38;2;'"#,
         );
         assert!(value.as_bool().unwrap());
+    }
+
+    #[test]
+    fn user_scripts_cannot_import_native_commands() {
+        let scenario = Scenario::new();
+        let runtime = Runtime::for_invocation(
+            Vec::new(),
+            Vec::new(),
+            InvocationContext {
+                directory: scenario.root().to_path_buf(),
+                environment: BTreeMap::new(),
+            },
+        )
+        .unwrap();
+        let mut working = StateWorkingSet::new(&runtime.engine);
+        nu_parser::parse(&mut working, None, b"use tola-native", false);
+        assert!(matches!(
+            working.parse_errors.first(),
+            Some(nu_protocol::ParseError::ModuleNotFound(..))
+        ));
+        for command in [
+            "inspect-image",
+            "resize-image",
+            "render-diagnostics",
+            "submit",
+            "syntax-highlight",
+        ] {
+            assert!(runtime.engine.find_decl(command.as_bytes(), &[]).is_none());
+            assert!(nu_engine::find_builtin_decl(&runtime.engine, command).is_none());
+        }
+    }
+
+    #[test]
+    fn diagnostic_commands_reach_the_invocation_host() {
+        let submitted = Arc::new(OnceLock::new());
+        let rendered = Arc::new(OnceLock::new());
+        let submit = submitted.clone();
+        let render = rendered.clone();
+        let mut runtime = Runtime::new(Vec::new(), Vec::new())
+            .unwrap()
+            .with_host(Host {
+                submit_diagnostics: Some(Arc::new(move |issues| {
+                    submit.set(issues).unwrap();
+                    Ok(())
+                })),
+                render_diagnostics: Some(Arc::new(move |_, issues, _| {
+                    render.set(issues).unwrap();
+                    Ok(String::new())
+                })),
+                ..Host::default()
+            })
+            .unwrap();
+        evaluate(
+            &runtime,
+            "use tola diagnostic\n[(diagnostic make 'test')] | diagnostic submit",
+        );
+        let issues = serde_json::json!([{ "severity": "warning", "message": "test" }]);
+        assert_eq!(submitted.get(), Some(&issues));
+
+        let entry = runtime.resolve_locator("@tola-scripts/diagnostic").unwrap();
+        let input = Value::string(issues.to_string(), Span::test_data());
+        assert_eq!(
+            execution::evaluate(
+                &entry.path,
+                &["render".into()],
+                &mut runtime.engine,
+                &mut runtime.stack,
+                PipelineData::value(input, None),
+            ),
+            0
+        );
+        assert_eq!(rendered.get(), Some(&issues));
     }
 
     #[test]

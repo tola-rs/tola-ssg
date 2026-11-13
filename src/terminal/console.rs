@@ -238,16 +238,20 @@ impl Terminal {
         self.sink.write_stdout(rendered.as_bytes())
     }
 
-    /// Write the `tola help` documentation, through the pager when one is configured.
+    pub(crate) fn has_pager(&self) -> bool {
+        self.pager.is_some()
+    }
+
+    /// Write the documentation and report whether it went through the pager.
     ///
     /// A pager that cannot start leaves a note on stderr, and the documentation reaches stdout
     /// instead.
-    pub fn write_documentation(&self, bytes: impl AsRef<[u8]>) -> anyhow::Result<()> {
+    pub fn write_documentation(&self, bytes: impl AsRef<[u8]>) -> anyhow::Result<bool> {
         if let Some(pager) = &self.pager {
             match pager.start() {
                 Ok(started) => {
                     started.write(bytes.as_ref())?;
-                    return Ok(());
+                    return Ok(true);
                 }
                 Err(error) => {
                     tracing::debug!(
@@ -265,7 +269,8 @@ impl Terminal {
                 }
             }
         }
-        self.write_stdout(bytes)
+        self.write_stdout(bytes)?;
+        Ok(false)
     }
 
     pub(crate) fn is_interactive(&self) -> bool {

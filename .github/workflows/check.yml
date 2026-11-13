@@ -94,7 +94,7 @@ jobs:
           persist-credentials: false
       - uses: hustcer/setup-nu@eacad52a4634c4f8d17a94916f93be6856861b9c # v3.29
         with:
-          version: 0.116.1
+          version: 0.117.0
       - uses: ./.github/actions/setup-rust
         with:
           components: rustfmt
@@ -189,7 +189,7 @@ jobs:
           persist-credentials: false
       - uses: hustcer/setup-nu@eacad52a4634c4f8d17a94916f93be6856861b9c # v3.29
         with:
-          version: 0.116.1
+          version: 0.117.0
       - uses: ./.github/actions/setup-rust
       - run: just tools::check
 

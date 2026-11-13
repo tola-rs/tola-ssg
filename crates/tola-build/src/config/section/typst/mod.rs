@@ -9,7 +9,7 @@ pub mod fonts;
 
 pub use fonts::FontsConfig;
 
-/// How the Typst compiler finds the fonts it can use.
+/// Font settings for the Typst compiler. See `[typst.fonts]`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, Config)]
 #[serde(default)]
 #[config(section = "typst")]

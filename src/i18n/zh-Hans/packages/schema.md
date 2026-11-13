@@ -1,30 +1,20 @@
 # `@tola/schema`
 
-声明值的形状，再把值解析进去。声明是可以复用的 Typst 值：你可以给它取名、保存它，也可以把它嵌进另一份声明。
+用 `schema` 规定字典里每个字段接受什么值。规则可以是 Typst 类型，例如 `str`，也可以是 `array-of(str)` 这样的组合。允许缺少键时用 `optional`，允许值为 `none` 时用 `nullable`。
 
-从 `schema` 开始：它为每个字段命名，并给每个字段一份声明，可以是 `str` 这样的 Typst 类型，也可以用下面的组合子搭出来。键可能缺失时加 `optional`，键可能是 `none` 时加 `nullable`。
+`parse` 校验输入并返回解析后的值，失败时会报错。要自己处理失败，用 `try-parse`，再用 `format-issues` 把返回的 `issues` 转成文字。
 
-内部形状交给 `array-of`、`dictionary-of`、`tuple`、`one-or-many`、`enum-of` 和 `literal`。要按顺序尝试多个分支用 `union`，要按 tag 值选中一个分支用 `variant`。
+规则从内向外执行。例如，`non-empty(trim(str))` 先去掉首尾空白，再检查字符串是否为空。`union` 按顺序尝试几种规则，`variant` 按字段值选一条规则。
 
-嵌套就是普通的函数调用，内层声明先做决定：`optional(array-of(trim(str)))` 接受缺失的键，也接受成员都经过 trim 的数组。
-
-把值和声明交给 `parse` 得到规范化值，或交给 `try-parse` 得到 Result。你传入的值不会被改动；规范化值是一个新值。
-
-包装一份声明可以改变它的值如何被检查、如何被塑造。`trim` 与 `non-empty` 做规范化和拒绝，`refine` 与 `check` 用回调做校验，`map` 做变换，`convert` 做可能被拒绝的变换。包装器从内向外执行：`non-empty(trim(str))` 先 trim，再拒绝空字符串。
-
-失败以 Issue 表示，用 `format-issues` 渲染成文本。`describe` 为值附加文档，`inspect` 只从声明本身推导输出形状，不运行任何回调。声明本身写错、回调里有编程错误都会中止编译；只有值层面的失败才成为 Issue。外层 Typst 上下文重新求值时，回调可能再次运行，所以每次解析都从头执行。
-
-解析发生在值进入的地方：根程序先解析全部源的 metadata，之后的选择与模板直接读取解析结果，不再重复校验。
-
-声明和解析只作用于你传入的值；源的 metadata 请用 `@tola/source` 的 `parse-sources`。
+要校验文章元数据，在 `site.typ` 中调用 `@tola/source` 的 `parse-sources`。
 
 ## `any`
 
 接受任何存在的值，包括 `none`，原样返回。
 
-不会拒绝任何值；对象中缺失的键仍然需要 `optional`。
+字典里缺少的键仍要用 `optional`。
 
-Example - 接受任何存在的值：
+示例：接受任何存在的值：
 
 ```typst
 #import "@tola/schema:0.0.0": any, parse
@@ -34,11 +24,13 @@ Example - 接受任何存在的值：
 
 ## `schema`
 
-声明字典字段，字段按你书写的顺序求值，返回规范化后的字典。
+按 `fields` 声明的顺序检查字典字段，返回解析后的字典。
 
-`fields` 为每个键给出一个 Typst 类型或另一份声明；`unknown` 决定你没有声明的键：`"error"` 拒绝多余键，`"keep"` 原样保留但不校验它们的值。声明的键缺失时报错，除非它的声明接受缺失；声明过的值存在时，必须满足对应的声明。
+`fields` 的每个值可以是 Typst 类型或其他 schema 规则。默认遇到未声明的键就报错。设 `unknown: "keep"` 会原样保留这些键和值。必填字段缺失时会报错。
 
-Example - 校验页面 metadata，并补上缺失的 tag 列表：
+示例：去掉标题首尾空白，并为标签填默认值：
+
+下面的 schema 去掉标题首尾的空白，缺少 `tags` 时补上空数组。
 
 ```typst
 #import "@tola/schema:0.0.0": schema, parse, non-empty, trim, optional, array-of
@@ -49,7 +41,7 @@ Example - 校验页面 metadata，并补上缺失的 tag 列表：
 #assert.eq(parse((title: " Notes "), page-schema), (title: "Notes", tags: ()))
 ```
 
-Example - 用 `unknown` 保留未声明的键：
+示例：用 `unknown` 保留未声明的键：
 
 ```typst
 #import "@tola/schema:0.0.0": parse, schema, try-parse
@@ -64,17 +56,17 @@ Example - 用 `unknown` 保留未声明的键：
 
 ### `unknown`
 
-`"error"` 拒绝多余的键；`"keep"` 原样保留，但不校验它们的值。
+省略或设为 `"error"` 时，遇到未声明的键就报错。设为 `"keep"` 时保留这些键，值不经校验。
 
 ## `optional`
 
-允许对象键缺失；键存在时，返回内部声明的值。
+允许省略一个键。键存在时，用 `member` 校验并返回结果。
 
-`default: value` 为缺失的键提供值，且只在键缺失时经内部 schema 解析。值存在时一律走内部 schema，无效就报错。默认表达式在你构造声明时求值；作为默认值传入的函数会当成普通值保留。
+用 `default` 给缺少的键补值，例如 `optional(int, default: 3)`。传入的值和用到的默认值都须通过 `member` 校验。默认值在声明规则时就算好。传函数作默认值时，保留该函数本身。
 
-没有默认值时，缺失的键在规范化字典中保持缺失。存在的 `none`、`auto`、空字符串或空数组都是值，会进入内部 schema：所以 `optional(nullable(str))` 接受缺失或 `none`，而 `optional(str)` 只接受缺失或字符串。可选的数组、元组成员仍占用必需的位置。
+缺少的键如果没有默认值，结果里也没有这个键。`none`、`auto`、空字符串和空数组都是实际的值，会交给 `member` 校验。`optional(nullable(str))` 允许省略或传 `none`，`optional(str)` 允许省略或传字符串。数组和元组里的位置仍然需要填。
 
-Example - 为缺失的键提供默认值：
+示例：为缺失的键提供默认值：
 
 ```typst
 #import "@tola/schema:0.0.0": schema, optional, parse
@@ -82,7 +74,7 @@ Example - 为缺失的键提供默认值：
 #assert.eq(parse((:), settings), (retries: 3))
 ```
 
-Example - 区分键缺失与显式 `none`：
+示例：区分键缺失与显式 `none`：
 
 ```typst
 #import "@tola/schema:0.0.0": nullable, optional, parse, schema, try-parse
@@ -95,15 +87,15 @@ Example - 区分键缺失与显式 `none`：
 
 ### `member`
 
-值存在时交给它解析、键缺失时跳过的 schema。
+有值时用这条规则校验。键缺失且没有默认值时跳过。
 
 ## `nullable`
 
-看到显式的 `none` 就直接接受，不再交给内部 schema。
+允许直接传入 `none`。
 
-其他任何值，包括对象中缺失的键，都会进入内部 schema。
+其余输入交给 `member` 校验。要允许省略键，再用 `optional`。
 
-Example - 接受显式的 none：
+示例：接受 `none` 作为字段值：
 
 ```typst
 #import "@tola/schema:0.0.0": schema, optional, nullable, parse
@@ -114,15 +106,13 @@ Example - 接受显式的 none：
 
 ### `member`
 
-除显式的 `none` 外，其他任何值都交给它解析的 schema。
+用于校验 `none` 以外的输入。
 
 ## `literal`
 
-接受等于所声明 Typst 值的值，原样返回。
+只接受等于指定 Typst 值的输入，原样返回。
 
-其他值都按相等性判为不匹配。
-
-Example - 接受一个精确的值：
+示例：接受一个精确的值：
 
 ```typst
 #import "@tola/schema:0.0.0": literal, parse, try-parse
@@ -132,15 +122,15 @@ Example - 接受一个精确的值：
 
 ### `value`
 
-按相等性接受的 Typst 值。
+允许的值。
 
 ## `enum-of`
 
-接受等于 `values` 中某一项的值，原样返回。
+只接受 `values` 数组里的值，原样返回。
 
-其他值一律拒绝；`values` 为空数组属于编程错误。
+`values` 至少要有一项。
 
-Example - 把值限制在固定集合中：
+示例：把值限制在固定集合中：
 
 ```typst
 #import "@tola/schema:0.0.0": enum-of, parse, try-parse
@@ -155,18 +145,18 @@ Example - 把值限制在固定集合中：
 
 ## `array-of`
 
-按索引顺序解析数组的每个成员，返回由规范化成员组成的新数组。
+依次校验数组的每一项，返回解析后的数组。
 
-某个成员失败时贡献它自己的问题，问题路径以该成员的索引开头。空数组算成功；要求至少一个成员时，用 `non-empty(array-of(member))`。其他类型的值算类型问题。
+某一项校验失败时，错误会指出该项的索引。默认接受空数组。要至少有一项，用 `non-empty(array-of(member))`。传入非数组值会报类型错误。
 
-Example - 规范化数组的每个成员：
+示例：规范化数组的每个成员：
 
 ```typst
 #import "@tola/schema:0.0.0": array-of, trim, parse
 #assert.eq(parse((" a ", "b"), array-of(trim(str))), ("a", "b"))
 ```
 
-Example - 用 `non-empty` 拒绝空数组：
+示例：用 `non-empty` 拒绝空数组：
 
 ```typst
 #import "@tola/schema:0.0.0": array-of, non-empty, parse, try-parse
@@ -180,18 +170,18 @@ Example - 用 `non-empty` 拒绝空数组：
 
 ## `dictionary-of`
 
-按插入顺序解析字典的每个值，返回保留每个字符串字面量键的新字典。
+按原顺序校验字典的每个值，保留原来的键。
 
-某个值失败时，在该键下贡献它自己的问题。空字典算成功。键各有不同要求时改用 `schema`；`dictionary-of(int)` 接受任意键，只要值是整数。其他类型的值算类型问题。
+某个值校验失败时，错误会指出该键。空字典也能通过。例如，`dictionary-of(int)` 允许任意键，只要值是整数。各键需要不同规则时，用 `schema`。传入非字典值会报类型错误。
 
-Example - 规范化字典的每个值：
+示例：规范化字典的每个值：
 
 ```typst
 #import "@tola/schema:0.0.0": dictionary-of, trim, parse
 #assert.eq(parse((first: " Ada "), dictionary-of(trim(str))), (first: "Ada"))
 ```
 
-Example - 失败的值报告在它所在的键上：
+示例：在值不符合要求时指出对应的键：
 
 ```typst
 #import "@tola/schema:0.0.0": dictionary-of, parse, try-parse
@@ -208,11 +198,11 @@ Example - 失败的值报告在它所在的键上：
 
 ## `one-or-many`
 
-数组按多个成员接受，标量按一个成员接受，返回数组。
+输入可以是一个值或一个数组，结果都是数组。
 
-只有非数组值会走标量路径，标量失败不带数组索引。`parse("tag", one-or-many(str))` 返回 `("tag",)`，空数组返回 `()`。
+例如，`parse("tag", one-or-many(str))` 返回 `("tag",)`。空数组返回 `()`。单个值失败时，报告里没有数组索引。
 
-Example - 接受单个成员或成员数组：
+示例：接受单个成员或成员数组：
 
 ```typst
 #import "@tola/schema:0.0.0": one-or-many, parse
@@ -226,11 +216,11 @@ Example - 接受单个成员或成员数组：
 
 ## `tuple`
 
-解析固定位置上的成员，以及可选的、后面成员共用的 `rest`，返回规范化后的数组。
+可以为每个位置指定不同的规则，剩余成员共用可选的 `rest` 规则。返回解析后的数组。
 
-固定成员决定成员数的下限，即使它们的 schema 是可选的；`rest` 为 `none` 时成员数固定，多余成员一律拒绝。成员数不对时，存在的成员仍会逐个检查：`schema.arity` 报告成员数问题，同时保留各成员的问题。
+数组至少要填满固定位置，即使用了 `optional`。省略 `rest` 时也不能多填。成员数不对时会报告 `schema.arity`，并继续检查已经填了的成员。
 
-Example - 解析固定位置与同质 rest：
+示例：为前几项各设规则，剩下的项共用一条规则：
 
 ```typst
 #import "@tola/schema:0.0.0": tuple, parse, try-parse
@@ -239,7 +229,7 @@ Example - 解析固定位置与同质 rest：
 #assert.eq(try-parse(("x",), pair).ok, false)
 ```
 
-Example - 不写 `rest` 时成员数固定：
+示例：不写 `rest` 时成员数固定：
 
 ```typst
 #import "@tola/schema:0.0.0": parse, tuple, try-parse
@@ -248,17 +238,21 @@ Example - 不写 `rest` 时成员数固定：
 #assert.eq(try-parse(("x", 2, true), pair).ok, false)
 ```
 
+### `members`
+
+固定位置的 schema，按顺序逐个传入，如 `tuple(str, int)`。
+
 ### `rest`
 
-固定位置之后成员的 schema；`none` 禁止多余成员。
+剩余成员共用的 schema。省略或传 `none` 时，成员数由 `members` 固定。
 
 ## `lazy`
 
-把零参数 schema 工厂推迟到真正解析持有它的节点时再调用。
+等到校验当前值时，再调用一个无参数函数取得要用的 schema。
 
-工厂返回的 schema 决定这个值，它可以是递归 schema。工厂返回的不是合法声明属于编程错误。
+函数可以返回一条引用自身的规则，用于校验树之类的递归结构。返回值必须是有效的 schema。
 
-Example - 带可选子节点的树：
+示例：带可选子节点的树：
 
 ```typst
 #import "@tola/schema:0.0.0": schema, optional, array-of, lazy, parse
@@ -271,24 +265,24 @@ Example - 带可选子节点的树：
 
 ### `factory`
 
-零参数 schema 工厂；它可以返回递归 schema，不需要注册表，不需要给默认值做缓存，也不用自己设递归上限。
+返回 schema 的无参数函数，可以返回递归规则。
 
 ## `union`
 
-接受第一个成功的分支，也包括允许键缺失的分支。
+按顺序尝试规则，返回第一条通过的结果。允许缺少键的规则也可能先通过。
 
-分支按你传入的顺序依次尝试，所以多个分支都接受同一个值时，顺序也决定规范化结果。键缺失时只报告一条 `is required`，并丢掉那些只因这个缺失而失败的分支；自带备注或子问题的分支保留自己的报告。因其他原因失败的分支都会贡献问题。
+所有规则都失败时，报告会列出失败原因。只因缺少同一个键而失败的分支通常合并成一条 `is required`，带备注或子问题的分支仍会单独报告。
 
-返回第一个成功分支的值。分支里的编程错误会直接抛出，而不是让该分支判为不匹配。带 tag 的对象只应运行一个分支时用 `variant`；schema 按位置传入，例如 `union(str, int)`。
+规则写错或回调出错会中止编译。用 `union(str, int)` 这样的写法逐个传入规则。想按字典里的字段值选定一条规则时，用 `variant`。
 
-Example - 取第一个成功的分支：
+示例：取第一个成功的分支：
 
 ```typst
 #import "@tola/schema:0.0.0": union, trim, parse
 #assert.eq(parse(" x ", union(trim(str), str)), "x")
 ```
 
-Example - 在两个对象形状中选择：
+示例：在两种字典结构中选择：
 
 ```typst
 #import "@tola/schema:0.0.0": parse, schema, union
@@ -299,13 +293,13 @@ Example - 在两个对象形状中选择：
 
 ## `variant`
 
-按显式 tag 选择一个对象分支。
+根据字典中某个字段的值选择规则。
 
-`tag-key` 是选择分支的字符串键；每个分支都必须把它声明为互不相同的必需 `literal(...)`。分支写成 `schema(...)` 声明，可以用 `describe` 注解。
+`tag-key` 是用来选择规则的字段名。每条分支都用 `schema(...)` 声明，并为该字段指定一个必填的 `literal(...)` 值。各分支的值必须不同。可以用 `describe` 给分支加说明。
 
-tag 缺失或未知时，只在该键处报告，其他分支一律跳过。返回被选中分支的值。校验和转换要放进各自字段里，或者放在整个 variant 之外。
+没有填写该字段，或它的值不在任何分支中时，错误会指向这个字段。选中分支后，返回该分支的解析结果。要添加校验或转换，可放到分支的字段里，或包住整个 `variant`。
 
-Example - 选择一种对象形状，而不求值无关分支：
+示例：按 tag 选择要解析的字典结构：
 
 ```typst
 #import "@tola/schema:0.0.0": variant, schema, literal, parse
@@ -316,7 +310,7 @@ Example - 选择一种对象形状，而不求值无关分支：
 #assert.eq(parse((kind: "text", body: "Hello"), block-schema).body, "Hello")
 ```
 
-Example - tag 缺失时报在它所在的键上：
+示例：缺少标签字段时查看报错：
 
 ```typst
 #import "@tola/schema:0.0.0": literal, schema, try-parse, variant
@@ -332,11 +326,11 @@ Example - tag 缺失时报在它所在的键上：
 
 ## `trim`
 
-对成功的字符串做 trim 并返回。
+去掉解析后字符串的首尾空白。
 
-其他类型的值，包括 `none`，一律判失败。
+传入非字符串值会报类型错误。
 
-Example - 对成功的字符串做 trim：
+示例：去掉字符串首尾空白：
 
 ```typst
 #import "@tola/schema:0.0.0": trim, parse, try-parse
@@ -346,17 +340,15 @@ Example - 对成功的字符串做 trim：
 
 ### `member`
 
-要 trim 其成功字符串的 schema。
+解析字符串的规则。解析成功后再去掉首尾空白。
 
 ## `non-empty`
 
-要求成功的字符串、数组或字典非空，并原样返回。
-
-空字符串、空数组或空字典判失败，其他类型的值同样判失败。
+要求解析后的字符串、数组或字典非空，通过后原样返回。其他类型会报错。
 
 顺序很重要：`non-empty(trim(str))` 拒绝只有空白字符的文本；`trim(non-empty(str))` 接受这段文本，并返回空字符串。
 
-Example - 拒绝空值：
+示例：拒绝空字符串：
 
 ```typst
 #import "@tola/schema:0.0.0": non-empty, try-parse
@@ -370,13 +362,9 @@ Example - 拒绝空值：
 
 ## `refine`
 
-谓词返回 `false` 时拒绝成功的值。
+先解析，再用你提供的函数检查结果。函数返回 `true` 时保留该值，返回 `false` 时报告必填的 `message`。
 
-成功的值原样返回。谓词返回非布尔值，或者回调 panic，都属于编程错误。
-
-请显式传入字符串 `message`。虽然声明签名将它默认为 `none`，构造声明时仍会拒绝 `none` 和省略消息的调用。
-
-Example - 用谓词拒绝值：
+示例：用函数检查解析结果：
 
 ```typst
 #import "@tola/schema:0.0.0": refine, parse, try-parse
@@ -387,23 +375,23 @@ Example - 用谓词拒绝值：
 
 ### `member`
 
-成功值会传给谓词的 schema。
+先用这个 schema 解析，再把结果交给检查函数。
 
 ### `predicate`
 
-施加在成功值上的布尔谓词。
+接收解析后的值并返回布尔值的函数。
 
 ### `message`
 
-必须提供的字符串消息；谓词返回 `false` 时报告为 `custom` 问题。
+检查函数返回 `false` 时报告的消息，代码为 `custom`。必填。
 
 ## `check`
 
-检查已声明字段的成功值，并报告回调给出的 Issues。
+检查多个字段之间的规则，例如结束日期不能早于开始日期。
 
-`on` 接收一组互不相同的已声明字段键，它们的成功值组成回调的输入；省略 `on` 就检查整个成功值。指定的字段取自同一次对象解析，即使某个无关字段失败也一样。依赖的字段失败时，回调不运行；缺失的字段保持缺失。成功返回 `()`，失败返回 `(issue(...), ...)`；路径以正在检查的值为基准。
+用 `on` 列出要检查的字段，省略时传入整个解析结果。选中的字段解析失败时会跳过检查，未选中的字段出错时仍可检查。缺失的字段不会传入。检查通过时返回 `()`，有问题时返回 `(issue(...), ...)`。问题路径从当前检查的值算起。
 
-Example - 在两个字段解析完成后校验它们的关系：
+示例：要求 `end` 大于或等于 `start`：
 
 ```typst
 #import "@tola/schema:0.0.0": schema, check, issue, try-parse
@@ -416,23 +404,23 @@ Example - 在两个字段解析完成后校验它们的关系：
 
 ### `member`
 
-回调会检查其成功值的 schema。
+先用这个 schema 解析，再检查结果。
 
 ### `inspect`
 
-接收成功值并返回 Issues 数组的回调。
+接收解析结果或 `on` 指定字段的函数。检查通过时返回 `()`，发现问题时返回问题数组。
 
 ### `on`
 
-一组互不相同的已声明字段键；它们的成功值组成回调的输入。`on` 不能跨越 conversion、union、variant 或 lazy 边界。
+要交给检查函数的字段名。每个字段只列一次，且必须直接声明在被检查的字典 schema 中。写在转换、`union`、`variant` 或 `lazy` 里的字段不能从外部用 `on` 选取。
 
 ## `map`
 
-把内部成功值转换一次，再让结果经 `output` 解析。
+用函数转换解析结果，再用 `output` 检查转换后的值。
 
-转换器可以是函数，也可以是可调用的 Typst 类型；`output` 默认为 `any`。成功时返回转换后的值；内部失败或未通过 `output` 都会报告问题。形如 Result 的字典在这里是普通值：例如 `parse(7, map(int, str, output: non-empty(str)))` 返回 `"7"`。
+例如，可以用 `str` 把整数转成字符串。输入解析失败时会跳过转换。转换结果必须通过 `output` 的校验，省略时接受任意结果。要在转换时返回校验问题，用 `convert`。
 
-Example - 用普通函数转换成功值：
+示例：用普通函数转换解析结果：
 
 ```typst
 #import "@tola/schema:0.0.0": map, parse
@@ -441,7 +429,7 @@ Example - 用普通函数转换成功值：
 
 ### `member`
 
-成功值会传给转换器的 schema。
+先用这个 schema 解析，再把结果传给转换函数。
 
 ### `convert-value`
 
@@ -449,15 +437,15 @@ Example - 用普通函数转换成功值：
 
 ### `output`
 
-转换后的值要经其解析的 schema。
+校验转换结果的 schema。
 
 ## `convert`
 
-用一个返回 Result 的回调把内部成功值转换一次，再让结果经 `output` 解析。
+用函数转换解析结果，也可以返回转换失败的原因。
 
-回调可以是函数，也可以是可调用的 Typst 类型；`output` 默认为 `any`。成功时返回转换后的值。返回 `err(...)` 表示值层面的失败；回调里 panic 属于编程错误，会直接穿过 `try-parse`。回调返回普通值时请用 `map`。
+函数返回 `ok(value)` 时，Tola 用 `output` 校验其中的值，默认接受任意类型。返回 `err(issue(...))` 时，`try-parse` 会返回这些问题。函数调用 `panic` 会中止编译。若函数直接返回普通值，请用 `map`。
 
-Example - 以结构化原因拒绝一次转换：
+示例：转换失败时返回一条校验问题：
 
 ```typst
 #import "@tola/schema:0.0.0": convert, ok, err, issue, try-parse
@@ -468,7 +456,7 @@ Example - 以结构化原因拒绝一次转换：
 #assert.eq(try-parse(443, port), (ok: true, value: "443"))
 ```
 
-Example - 把回调拒绝时给出的 Issue 带回结果：
+示例：在 `try-parse` 的结果中读取转换失败的原因：
 
 ```typst
 #import "@tola/schema:0.0.0": convert, err, issue, ok, try-parse
@@ -483,7 +471,7 @@ Example - 把回调拒绝时给出的 Issue 带回结果：
 
 ### `member`
 
-成功值会传给转换器的 schema。
+先用这个 schema 解析，再把结果传给转换函数。
 
 ### `convert-value`
 
@@ -491,15 +479,15 @@ Example - 把回调拒绝时给出的 Issue 带回结果：
 
 ### `output`
 
-转换后的成功值要经其解析的 schema。
+用于检查转换结果的 schema。
 
 ## `describe`
 
-为声明的成功值附加文档。
+为 schema 的解析结果添加说明。
 
-成功的值原样返回。同一节点上，外层描述会替换内层描述。要让嵌套字段有自己的文档，单独 describe 那个字段；诊断信息请用 `issue(..., notes: ...)`。
+说明会出现在 `inspect` 的结果中。给同一处加了两次说明时，以外层为准。要描述某个嵌套字段，给该字段的 schema 单独加 `describe`。要给诊断加备注，用 `issue(..., notes: ...)`。
 
-Example - 为成功值附加文档：
+示例：为解析结果添加说明：
 
 ```typst
 #import "@tola/schema:0.0.0": describe, parse
@@ -509,23 +497,23 @@ Example - 为成功值附加文档：
 
 ### `member`
 
-成功值由这条描述记录的 schema。
+要添加说明的 schema。
 
 ### `description`
 
-附加到成功值上的文档。
+描述解析结果的文字。
 
 ## `inspect`
 
-只从声明本身推导 schema 的形状，不运行任何回调。
+查看 schema 声明的字段、类型和默认值。这个函数不运行回调。
 
-返回树的每个节点都带 `kind`、`presence` 与 `description`。Typst 类型的节点还带 `type`；对象带 `fields` 与 `unknown`；容器带自己的成员；union 与 variant 保留各自的备选。lazy 工厂保持 `kind: "unknown"`。
+每条规则都有 `kind`、`presence` 和 `description`。Typst 类型另有 `type`，字典规则另有 `fields` 和 `unknown`。数组等容器会列出成员规则，`union` 和 `variant` 会列出分支。`lazy` 的 `kind` 是 `"unknown"`。
 
-`presence: "required"` 表示成功的对象字段一定存在；`"optional"` 表示一条已声明的省略路径，更早的 union 分支可能遮蔽它；`"unknown"` 表示无法证明。`default: (value: ...)` 给出原始声明的默认值，包括 `none`，不做校验也不做转换；缺失的默认键保持缺失。容器的位置始终存在。map 与 convert 描述各自的输出形状，同时保留输入的 presence 与 default。输入文档永远不会描述生成的输出。
+`presence` 表示字段是否会出现，取值是 `"required"`、`"optional"` 或 `"unknown"`。存在默认值时，`default.value` 是校验或转换之前的原值。数组和元组中的位置始终存在。`map` 和 `convert` 默认显示输出规则，字段是否存在及默认值仍取自输入声明。
 
-默认描述成功解析后的值。传入 `input: true` 可查看解析前的形状，此时有默认值的字段可以省略，转换描述的是输入。两种描述都来自声明本身，具体值能否通过校验由解析决定。
+默认描述解析后的值。用 `input: true` 查看 schema 接受的输入，此时带默认值的字段会标为可省略，转换会显示它接受的类型。要检查一个具体值，用 `parse` 或 `try-parse`。
 
-Example - 推导输出描述而不运行回调：
+示例：查看解析结果有哪些字段和类型：
 
 ```typst
 #import "@tola/schema:0.0.0": schema, optional, inspect
@@ -543,13 +531,13 @@ Example - 推导输出描述而不运行回调：
 
 ### `input`
 
-为 true 时描述解析前的值，默认描述成功解析后的值。
+设为 `true` 时查看允许的输入。默认查看解析结果。
 
 ## `parse`
 
-解析一次并返回完整的规范化值；失败时，以 `format-issues` 的输出作为失败信息。
+校验输入并返回解析结果。失败时会报错，消息与 `format-issues` 的输出相同。
 
-Example - 一次调用返回规范化值：
+示例：解析字典并补上默认值：
 
 ```typst
 #import "@tola/schema:0.0.0": non-empty, trim, parse
@@ -562,15 +550,15 @@ Example - 一次调用返回规范化值：
 
 ### `member`
 
-值要经其解析的 schema。
+校验这个值的 schema。
 
 ## `try-parse`
 
-解析一次后，精确返回 `(ok: true, value: value)` 或 `(ok: false, issues: issues)` 之一。
+成功时返回 `(ok: true, value: value)`，失败时返回 `(ok: false, issues: issues)`。
 
-失败时 issues 非空，也绝不会连同部分值一起返回。schema 校验失败会以 Result 返回；声明本身写错、回调返回形状非法或回调 panic 仍会中止编译。输入总是存在的，包括 `none`；只有解析对象时才会遇到缺失的键。失败请用 `format-issues` 渲染；schema 自己生成的值会在文本里说明，而不会伪装成输入提供的值。
+校验失败时，`issues` 至少有一项。用 `format-issues` 查看原因。schema 写错、回调返回了约定之外的值，或调用了 `panic`，仍会中止编译。传入 `none` 时，schema 会按一个实际值处理。缺失的键只出现在字典中。默认值或转换结果出错时，诊断会指明值的来源。
 
-Example - 返回 Result 而不是失败：
+示例：检查输入，并根据 `ok` 处理结果：
 
 ```typst
 #import "@tola/schema:0.0.0": try-parse
@@ -584,15 +572,15 @@ Example - 返回 Result 而不是失败：
 
 ### `member`
 
-值要经其解析的 schema。
+校验这个值的 schema。
 
 ## `partial`
 
-先固定一部分字段，其余字段在返回的函数被调用时补上。
+先给字典填一部分字段，返回一个可以补齐其他字段的函数。
 
-返回的函数接收剩余字段（具名参数），并与固定字段一起解析，所以两次调用都没给的键仍由声明的默认值填充。给第一次已固定的字段再次赋值是错误，固定字段不会被静默覆盖。
+调用返回的函数时，用具名参数补齐字段，再一起校验。两次都没填写的字段按 schema 的默认值处理。已经固定的字段不能再传一次。
 
-Example - 让许多页面共享同一个版式：
+示例：让许多页面共享同一个版式：
 
 ```typst
 #import "@tola/schema:0.0.0": optional, partial, schema
@@ -603,15 +591,13 @@ Example - 让许多页面共享同一个版式：
 
 ### `member`
 
-字段要经其检查的对象 schema。
+校验这些字段的字典 schema。
 
 ## `defaults`
 
-报告每个被省略的键会取什么值。
+读取字典各字段声明的默认值，保留解析前的值。读取嵌套字段的默认值需要为包含它们的字典本身声明默认值。
 
-只列出声明了默认值的键，且列出的是声明里原样写下的默认值，而不是解析后的值。嵌套对象自身的默认值只在提供该对象时生效，所以不在这里列出：除非声明是带默认值的 optional，否则对象本身仍然必需。
-
-Example - 读取声明提供的回退值：
+示例：读取默认值：
 
 ```typst
 #import "@tola/schema:0.0.0": array-of, defaults, optional, schema
@@ -625,11 +611,11 @@ Example - 读取声明提供的回退值：
 
 ## `ok`
 
-用任意值构造一个成功的 Result。
+返回成功的 Result，包含给定的值。
 
 `ok(none)` 是一次成功，值是 `none`。
 
-Example - 构造成功的 Result：
+示例：构造成功的 Result：
 
 ```typst
 #import "@tola/schema:0.0.0": ok
@@ -642,11 +628,11 @@ Example - 构造成功的 Result：
 
 ## `err`
 
-用一个或多个 Issues 构造失败的 Result。
+返回失败的 Result，至少提供一条问题。
 
-不传 Issue 的 `err()` 是编程错误。Result 有 `ok: false` 和这些 Issues。
+结果包含 `ok: false` 和传入的 `issues`。
 
-Example - 由 Issues 构造失败的 Result：
+示例：返回一条校验问题：
 
 ```typst
 #import "@tola/schema:0.0.0": err, issue
@@ -657,11 +643,11 @@ Example - 由 Issues 构造失败的 Result：
 
 ## `issue`
 
-构造一个 Issue：schema 报告的单个问题。
+描述一条校验问题，可以指定哪个字段出错。
 
-路径以正在检查的值为基准：`("author.name",)` 命名一个键，`("author", "name")` 命名嵌套键，`("authors", 0)` 命名数组成员。要加入嵌套原因，把 Issue 展开进字典，再把 `children` 换成 Issues 数组。`issue()` 描述输入提供的值；schema 生成值时会在 `origin` 里记录声明默认值或转换。
+路径从正在校验的值算起。`("author.name",)` 指一个带点的键，`("author", "name")` 指嵌套字段，`("authors", 0)` 指数组的第一项。要补充下一级原因，可展开这条问题的字典，再给 `children` 填一个问题数组。
 
-Example - 构造带路径的 Issue：
+示例：构造带路径的 Issue：
 
 ```typst
 #import "@tola/schema:0.0.0": issue
@@ -671,11 +657,11 @@ Example - 构造带路径的 Issue：
 
 ### `message`
 
-人类可读的问题描述。
+显示给读者的问题说明。
 
 ### `code`
 
-机器可读的问题代码。
+供代码识别问题的字符串。
 
 ### `path`
 
@@ -687,11 +673,11 @@ Example - 构造带路径的 Issue：
 
 ## `format-issues`
 
-把 Issue 渲染成站点作者可读的确定文本。
+把一条校验问题转成可显示的文字。
 
-普通 issue 占一行，子原因缩进排在下面。来自声明默认值或转换的失败，先给字段和原因；只有需要时才会提到 schema 的默认值或转换，不会重复内部消息。其它原因和备注缩进排在下面。Issue 本身不合法会中止编译。
+先显示出错的字段和原因，再缩进显示下一级原因和备注。默认值或转换结果出错时，也会指出值的来源。
 
-Example - 把 Issue 渲染为文本：
+示例：把 Issue 渲染为文本：
 
 ```typst
 #import "@tola/schema:0.0.0": issue, format-issues
@@ -699,7 +685,7 @@ Example - 把 Issue 渲染为文本：
 #assert.eq(format-issues((problem,)), "`$.title`: is required")
 ```
 
-Example - 渲染嵌套原因与备注：
+示例：渲染嵌套原因与备注：
 
 ```typst
 #import "@tola/schema:0.0.0": format-issues, issue
@@ -708,7 +694,7 @@ Example - 渲染嵌套原因与备注：
 #assert.eq(format-issues((tree,)), "`$`: metadata is invalid\n  `$.title`: is required\n    note: add a title")
 ```
 
-Example - 先给出声明默认值的原因：
+示例：先给出声明默认值的原因：
 
 ```typst
 #import "@tola/schema:0.0.0": format-issues, optional, schema, try-parse
@@ -722,11 +708,11 @@ Example - 先给出声明默认值的原因：
 
 ## `min-length`
 
-接受至少 `minimum` 个字素簇、数组成员或字典条目的值，短于它的值一律拒绝。
+要求字符串、数组或字典的长度至少为 `minimum`。字符串按字素簇计数。
 
-其他类型的值算类型问题。被度量的值原样返回。
+通过后原样返回。其他类型会报类型错误。
 
-Example - 要求最小长度：
+示例：要求最小长度：
 
 ```typst
 #import "@tola/schema:0.0.0": min-length, try-parse
@@ -736,19 +722,19 @@ Example - 要求最小长度：
 
 ### `member`
 
-要度量其成功值的 schema。
+先用这个 schema 解析，再检查结果的长度。
 
 ### `minimum`
 
-非负的最小簇、成员或条目数。
+最少多少个字素簇、数组项或字典条目。必须是非负整数。
 
 ## `max-length`
 
-接受至多 `maximum` 个字素簇、数组成员或字典条目的值，长于它的值一律拒绝。
+要求字符串、数组或字典的长度最多为 `maximum`。字符串按字素簇计数。
 
-其他类型的值算类型问题。被度量的值原样返回。
+通过后原样返回。其他类型会报类型错误。
 
-Example - 限制值的最大长度：
+示例：限制值的最大长度：
 
 ```typst
 #import "@tola/schema:0.0.0": max-length, try-parse
@@ -758,19 +744,19 @@ Example - 限制值的最大长度：
 
 ### `member`
 
-要度量其成功值的 schema。
+先用这个 schema 解析，再检查结果的长度。
 
 ### `maximum`
 
-非负的最大簇、成员或条目数。
+最多多少个字素簇、数组项或字典条目。必须是非负整数。
 
 ## `matches`
 
-要求字符串匹配一个 Typst regex 值；字符串形式的模式一律拒绝。
+用 Typst 的 `regex(...)` 校验字符串。
 
-匹配搜索字符串中任意位置，要约束整串请加 anchor。匹配直接作用于解析后的字符串本身，通过后原样返回。
+默认匹配字符串中的任意位置。要检查整串，用 `^` 和 `$` 限定开头和结尾。通过后原样返回。
 
-Example - 要求匹配正则表达式：
+示例：要求匹配正则表达式：
 
 ```typst
 #import "@tola/schema:0.0.0": matches, try-parse
@@ -781,7 +767,7 @@ Example - 要求匹配正则表达式：
 
 ### `member`
 
-成功字符串要参与匹配的 schema。
+先用这条规则解析字符串，再检查正则表达式。
 
 ### `expression`
 
@@ -793,7 +779,7 @@ Example - 要求匹配正则表达式：
 
 通过的值原样返回。NaN 判失败；无穷与普通数字一样比较。
 
-Example - 施加包含下界：
+示例：允许等于下限：
 
 ```typst
 #import "@tola/schema:0.0.0": at-least, try-parse
@@ -803,7 +789,7 @@ Example - 施加包含下界：
 
 ### `member`
 
-其成功值要参与比较的 schema。
+先用这个 schema 解析，再比较结果。
 
 ### `minimum`
 
@@ -815,7 +801,7 @@ Example - 施加包含下界：
 
 通过的值原样返回。NaN 判失败；无穷与普通数字一样比较。
 
-Example - 施加包含上界：
+示例：允许等于上限：
 
 ```typst
 #import "@tola/schema:0.0.0": at-most, try-parse
@@ -825,7 +811,7 @@ Example - 施加包含上界：
 
 ### `member`
 
-其成功值要参与比较的 schema。
+先用这个 schema 解析，再比较结果。
 
 ### `maximum`
 
@@ -833,13 +819,13 @@ Example - 施加包含上界：
 
 ## `email`
 
-符合 RFC 5322 的未加引号 ASCII dot-atom 邮箱。
+校验未加引号的 ASCII 邮箱地址，使用 RFC 5322 的 dot-atom 格式。
 
 本地部分由非空、以点分隔的 atext 原子组成，至多 64 字节，后面是 `@` 和一个或多个 DNS 风格标签。每个标签由 1-63 个 ASCII 字母、数字或连字符组成，首尾是字母或数字；整个地址至多 254 字节，接受单标签域名。
 
-只接受裸地址本身：引号、注释、显示名、域名字面量和 Unicode 都在语法之外。检查只做语法判断，不做 trim、DNS 查询或可投递性验证。
+只传地址本身。带显示名、引号、注释、域名字面量或 Unicode 的地址会报错。这个函数只校验格式。
 
-Example - 校验邮箱地址：
+示例：校验邮箱地址：
 
 ```typst
 #import "@tola/schema:0.0.0": email, try-parse
@@ -849,11 +835,11 @@ Example - 校验邮箱地址：
 
 ## `ipv4`
 
-点分十进制 IPv4 地址：四个 0-255 的八位组，不允许多余的前导零。
+校验 IPv4 地址，由四个 0–255 的十进制数组成，用点分隔。多余的前导零会报错。
 
-通过的拼写原样返回。方括号、端口、zone 标识和首尾空白一律拒绝。
+通过后保留原写法。只给地址，省略方括号、端口、区域标识和首尾空白。
 
-Example - 校验 IPv4 地址：
+示例：校验 IPv4 地址：
 
 ```typst
 #import "@tola/schema:0.0.0": ipv4, try-parse
@@ -863,11 +849,11 @@ Example - 校验 IPv4 地址：
 
 ## `ipv6`
 
-IPv6 地址：八个 1-4 位十六进制组，或者用一处 `::` 替换至少一个组。
+校验 IPv6 地址。可以写八组 1–4 位十六进制数，也可以用一处 `::` 省略至少一组。
 
-严格点分十进制的 IPv4 后缀可以替换最后两组。拼写原样返回。方括号、端口、zone 标识和首尾空白一律拒绝。
+最后两组可以用点分十进制的 IPv4 地址代替。通过后保留原写法。只给地址，省略方括号、端口、区域标识和首尾空白。
 
-Example - 校验 IPv6 地址：
+示例：校验 IPv6 地址：
 
 ```typst
 #import "@tola/schema:0.0.0": ipv6, try-parse
@@ -881,7 +867,7 @@ IPv4 或 IPv6 地址，原样返回。
 
 方括号、zone 标识和端口一律拒绝。
 
-Example - 校验任一 IP 族：
+示例：接受 IPv4 或 IPv6 地址：
 
 ```typst
 #import "@tola/schema:0.0.0": ip, try-parse
@@ -891,11 +877,11 @@ Example - 校验任一 IP 族：
 
 ## `http-url`
 
-绝对的 HTTP(S) URI/IRI，scheme 大小写不敏感，authority/host 必须非空。
+校验绝对 HTTP(S) URL，可以包含 Unicode。协议名不区分大小写，必须有主机名或 IP 地址。
 
-RFC 3986 的各组成部分都支持：userinfo、registered name、方括号形式的 IPv6/IPvFuture、合法的百分号转义，以及留空的端口或 0-65535 的十进制端口。Unicode 部分使用 RFC 3987 的 ucschar，私有使用字符只能出现在 query 里。通过的拼写原样返回。空白和控制字符一律拒绝；检查只做语法判断，不做 trim、百分号解码或规范化，也不查 DNS。
+按 RFC 3986 和 RFC 3987 检查格式。通过后原样返回。支持用户名和密码、IPv6 或 IPvFuture 地址、百分号编码和端口。端口可留空，填写时须是 0–65535 的整数。包含空白或控制字符时会报错。
 
-Example - 校验绝对的 HTTP(S) URL：
+示例：校验绝对的 HTTP(S) URL：
 
 ```typst
 #import "@tola/schema:0.0.0": http-url, try-parse
@@ -905,11 +891,11 @@ Example - 校验绝对的 HTTP(S) URL：
 
 ## `https-url`
 
-绝对的 HTTPS URI/IRI，语法与 `http-url` 相同，scheme 只能是大小写不敏感的 `https`。
+校验绝对 HTTPS URL，可以包含 Unicode。其余规则与 `http-url` 相同。
 
-通过的拼写原样返回，检查不涉及网络和可投递性。
+通过后原样返回，只检查格式。
 
-Example - 把 URL 限定为 HTTPS：
+示例：把 URL 限定为 HTTPS：
 
 ```typst
 #import "@tola/schema:0.0.0": https-url, try-parse
@@ -919,13 +905,13 @@ Example - 把 URL 限定为 HTTPS：
 
 ## `url-path`
 
-站点根 URL 路径，解析后返回解码的 route。
+校验以 `/` 开头的 URL 路径，返回解码后的路由。
 
-百分号转义只解码一次。路径必须以单个 `/` 开头，不包含 origin、query 或 fragment，并满足 Tola 可跨平台发布的文件名规则。文件名内部允许 Unicode 和空格；首尾空白与编码后的路径分隔符不被接受。解析不会移除部署前缀，也不检查 output 是否存在。
+百分号转义只解码一次。只传路径，开头恰好一个 `/`。路径的各段要能作为跨平台文件名。段内允许 Unicode 和空格，整条路径不能有首尾空白，编码后的斜杠和反斜杠也会报错。传入前自行去掉域名、部署前缀、查询参数和锚点。
 
 返回的 route 直接交给 `@tola/address` 的 `output-of` 或 `route-url`。文件名中的字面 `%`、`#` 在输入中分别写成 `%25`、`%23`。
 
-Example - 解析 permalink 并收集字段错误：
+示例：校验文章的 `permalink`：
 
 ```typst
 #import "@tola/schema:0.0.0": parse, try-parse, schema, url-path
@@ -937,11 +923,11 @@ Example - 解析 permalink 并收集字段错误：
 
 ## `date`
 
-日历日期，返回原生的纯日期 `datetime`。
+校验年月日，返回不带时间的 Typst `datetime`。
 
-接受不带时间的原生日期，或严格的 `YYYY-MM-DD` 字符串，年份范围为 1 到 9999，并检查日历日期是否合法。完整日期时间、纯时间值、时间戳字符串和首尾空白都会被拒绝，不会截去时间或自动 trim。
+接受不带时间的 Typst 日期或 `YYYY-MM-DD` 字符串。年份必须在 1 到 9999 之间，月份和日期必须有效。字符串首尾不能有空白。
 
-Example - 解析、显示日期并报告字段错误：
+示例：解析、显示日期并报告字段错误：
 
 ```typst
 #import "@tola/schema:0.0.0": date, parse, schema, try-parse
@@ -954,13 +940,13 @@ Example - 解析、显示日期并报告字段错误：
 
 ## `partial-date`
 
-日历日期，保留输入声明的年、月或日粒度。
+校验日期，可以只填写年份，或只填写年和月。
 
-接受严格的 `YYYY`、`YYYY-MM`、`YYYY-MM-DD` 字符串，或不带时间的原生日期。年份范围为 1 到 9999，提供的月份和日期必须构成合法日历日期。完整日期时间、纯时间值、时间戳字符串和首尾空白都会被拒绝。
+可传 `YYYY`、`YYYY-MM`、`YYYY-MM-DD` 字符串，或不带时间的 Typst 日期。年份必须在 1 到 9999 之间，填写了月份和日期时也必须有效。字符串首尾不能有空白。
 
-结果只包含声明的分量：`(precision: "year", year: int)`、`(precision: "month", year: int, month: int)` 或 `(precision: "day", year: int, month: int, day: int)`。原生日期具有日粒度。缺失的分量保持缺失；解析不会选择时间或时区。
+返回 `(precision: "year", year: int)`、`(precision: "month", year: int, month: int)` 或 `(precision: "day", year: int, month: int, day: int)`。Typst 日期返回到日。没填的部分不会补齐。
 
-Example - 保留日期粒度并报告数组成员错误：
+示例：保留输入中的年、月或日，并检查无效日期：
 
 ```typst
 #import "@tola/schema:0.0.0": array-of, parse, partial-date, schema, try-parse
@@ -977,9 +963,9 @@ Example - 保留日期粒度并报告数组成员错误：
 
 接受含完整日历日期的原生 datetime，或严格的 RFC 3339 字符串。原生值按 UTC 解释，只有日期而没有时间时取午夜。字符串要求四位年份，范围为 1 到 9999，日期与时间用 `T` 或 `t` 分隔，时区为 `Z`、`z` 或数值偏移 `±hh:mm`。纯日期字符串、纯时间值、首尾空白和闰秒都会被拒绝。
 
-`rfc3339` 保留合法字符串的原拼写；原生输入生成以 `Z` 结尾的 UTC 文本。`unix-seconds` 是自 Unix epoch 起的 UTC 整秒数。`subsecond` 保留全部小数数字，不含小数点并去掉尾随零；零用空字符串表示。排序先比较 `unix-seconds`，整秒相同时再按字符串比较 `subsecond`。解析和这种排序保留任意位小数精度。显示或传给 feed、sitemap 声明时用 `.rfc3339`；它们的时间戳格式化最多保留纳秒，RSS 日期只保留整秒。
+`rfc3339` 保留原字符串。传入 Typst 值时，生成以 `Z` 结尾的 UTC 字符串。`unix-seconds` 是从 Unix 纪元起算的整秒数。`subsecond` 是小数点后的数字，去掉末尾的零，为零时返回空字符串。排序时先比 `unix-seconds`，相同再按字符串比较 `subsecond`。显示日期或传给 feed、sitemap 时用 `.rfc3339`。feed 和 sitemap 最多保留纳秒，RSS 只保留整秒。
 
-Example - 比较时区偏移，并对带 18 位小数的时间戳排序：
+示例：比较时区偏移，并对带 18 位小数的时间戳排序：
 
 ```typst
 #import "@tola/schema:0.0.0": timestamp, parse, schema, try-parse

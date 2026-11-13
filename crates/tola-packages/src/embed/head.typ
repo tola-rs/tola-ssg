@@ -2,20 +2,59 @@
 
 /// Return the charset, viewport, title, and description entries for `html.head`.
 ///
-/// Save this as `site.typ` in a new site and run `tola build`. The generated
-/// `public/guide/index.html` has a title and a canonical link in its HTML head. Use `+`
-/// to append another array of head entries before calling `entries.join()`.
+/// Use `+` to combine the arrays and `entries.join()` to pass their content to `html.head`.
+/// The `#document` title remains available as document metadata.
+///
+/// Example: Write page metadata and link previews:
+///
+/// Replace `site.typ` in a site created with `tola init` with the code below. The example uses an absolute page
+/// URL and a cover image URL. For a published site, use your actual page URL and a public image.
+/// These functions write metadata. Publish the image separately, for example through `[assets]`.
 ///
 /// ```typst
 /// #import "@tola/site:0.0.0": site
-/// #import "@tola/head:0.0.0": canonical, head-metadata
-/// #let entries = head-metadata(site, title: "Guide") + canonical("https://example.test/guide/")
-/// #document("guide/index.html")[
-///   #html.html[#html.head(entries.join()) #html.body[Guide]]
+/// #import "@tola/head:0.0.0": canonical, head-metadata, open-graph, twitter-card
+///
+/// #let url = "https://example.test/guide/"
+/// #let cover = (url: "https://example.test/cover.png", alt: "A map of the trail")
+/// #let entries = (
+///   head-metadata(site, title: "Trail guide", description: "Plan a day hike.")
+///   + canonical(url)
+///   + open-graph(title: "Trail guide", url: url, images: (cover,))
+///   + twitter-card(card: "summary_large_image", title: "Trail guide", image: cover)
+/// )
+///
+/// #document("guide/index.html", title: "Trail guide")[
+///   #html.html[
+///     #html.head(entries.join())
+///     #html.body[Trail guide]
+///   ]
 /// ]
 /// ```
 ///
-/// Example - omit the title and description entries:
+/// Run `tola build --minify=false` from the site root. With the default publish directory,
+/// the `<head>` in `public/guide/index.html` contains these tags (shown with the outer indentation removed).
+///
+/// ```html
+/// <head>
+///   <meta charset="utf-8">
+///   <meta name="viewport" content="width=device-width, initial-scale=1">
+///   <title>Trail guide</title>
+///   <meta name="description" content="Plan a day hike.">
+///   <link rel="canonical" href="https://example.test/guide/">
+///   <meta property="og:title" content="Trail guide">
+///   <meta property="og:type" content="website">
+///   <meta property="og:url" content="https://example.test/guide/">
+///   <meta property="og:image" content="https://example.test/cover.png">
+///   <meta property="og:image:alt" content="A map of the trail">
+///   <meta name="twitter:card" content="summary_large_image">
+///   <meta name="twitter:title" content="Trail guide">
+///   <meta name="twitter:image" content="https://example.test/cover.png">
+///   <meta name="twitter:image:alt" content="A map of the trail">
+/// </head>
+/// ```
+///
+/// Example: Omit the title and description entries:
 ///
 /// ```typst
 /// #import "@tola/site:0.0.0": site
@@ -27,12 +66,13 @@
 /// Related: canonical, open-graph, twitter-card
 ///
 /// - site (dictionary): supplies the defaults, usually the dictionary `@tola/site` provides.
-/// - title (auto | none | content | string): `auto` inherits the site's title; `none` or a blank
+/// - title (auto | none | content | string): If omitted or `auto`, use the site's title. `none` or a blank
 ///   string omits the entry.
-/// - description (auto | none | content | string): `auto` inherits the site's description; `none`
+/// - description (auto | none | content | string): If omitted or `auto`, use the site's description. `none`
 ///   or a blank string omits the entry.
-/// - charset (none | string): the document's character encoding; written unless you pass `none`.
-/// - viewport (none | string): the viewport meta content; written unless you pass `none`.
+/// - charset (none | string): character encoding. Defaults to `utf-8`. Use `none` or a blank string to omit it.
+/// - viewport (none | string): viewport content. Defaults to `width=device-width, initial-scale=1`.
+///   Use `none` or a blank string to omit it.
 /// -> array
 #let head-metadata = {
   import "@tola/schema:0.0.0": literal, optional, parse, schema, union
@@ -95,7 +135,6 @@
 ///
 /// A page declares one canonical URL, and the entry is the head's `<link rel="canonical">`.
 ///
-/// Example - declare a page's canonical URL:
 ///
 /// ```typst
 /// #import "@tola/head:0.0.0": canonical
@@ -118,12 +157,12 @@
 
 /// The Open Graph entries for a page, as an array to join into a head.
 ///
-/// `title` and `url` are required. `kind` defaults to `website`; `images: none` writes a
-/// text-only card without `og:image`, so the result is not a complete Open Graph object.
+/// `title` and `url` are required. `kind` defaults to `website`. Use `images: none` to omit
+/// the image tags. A complete Open Graph object requires an image.
 ///
 /// An optional text value writes an entry only when it is non-blank.
 ///
-/// Example - declare a page's Open Graph entries:
+/// Example: Declare Open Graph entries with an image:
 ///
 /// ```typst
 /// #import "@tola/head:0.0.0": open-graph
@@ -134,7 +173,7 @@
 /// #assert.eq(entries.len(), 5)
 /// ```
 ///
-/// Example - declare a text-only card:
+/// Example: Omit image tags:
 ///
 /// ```typst
 /// #import "@tola/head:0.0.0": open-graph
@@ -146,11 +185,11 @@
 ///
 /// Related: head-metadata, twitter-card
 ///
-/// - title (string): the page's title.
-/// - kind (string): the page's Open Graph type, such as `website` or `article`; defaults to
-///   `website`.
-/// - url (string): the page's absolute URL.
-/// - images (none | array): `none` for a text-only card, or a nonempty array of image
+/// - title (string): the page's title. It must contain text.
+/// - kind (string): the page's Open Graph type, such as `website` or `article`. Defaults to
+///   `website`. It must contain text.
+/// - url (string): the page's absolute HTTP(S) URL.
+/// - images (none | array): `none` to omit image tags, or a nonempty array of image
 ///   dictionaries. Each image requires an absolute HTTP(S) `url` and a non-blank `alt`.
 ///   Optional fields are `secure-url` (an absolute HTTPS URL), `media-type` (a string such as
 ///   `image/png`), and `width` and `height` (positive integer pixel counts). Optional fields
@@ -249,7 +288,6 @@
 /// `card` and `title` are always written, and a `summary_large_image` card also requires `image`.
 /// An optional text value writes an entry only when it is non-blank.
 ///
-/// Example - declare a large-image card:
 ///
 /// ```typst
 /// #import "@tola/head:0.0.0": twitter-card
@@ -263,8 +301,9 @@
 /// Related: head-metadata, open-graph
 ///
 /// - card (string): the card type: `"summary"` or `"summary_large_image"`.
-/// - title (string): the page's title.
-/// - image (none | dictionary): required by a large-image card: an `(url:, alt:)` dictionary.
+/// - title (string): the page's title. It must contain text.
+/// - image (none | dictionary): required for `summary_large_image`. Pass an `(url:, alt:)` dictionary
+///   with an absolute HTTP(S) URL and non-blank alt text.
 /// - description (none | string): the page's description; written only when set.
 /// - handle (none | string): the site's handle; written only when set.
 /// - creator (none | string): the creator's handle; written only when set.

@@ -137,7 +137,7 @@ Each document has one job; a fact lives in exactly one of them.
 
 ### Nushell
 
-Nushell 0.116.1 — the version `.tool-versions` and the dev shell pin; `nu --version` reports the one you are running. Nu is a typed pipeline shell: commands pass tables, records, and lists through pipes instead of text, so `where`, `each`, `select`, and `columns` replace `awk`, `sed`, and `jq`.
+Nushell 0.117.0 — the version `.tool-versions` and CI pin; `nu --version` reports the one you are running. Nu is a typed pipeline shell: commands pass tables, records, and lists through pipes instead of text, so `where`, `each`, `select`, and `columns` replace `awk`, `sed`, and `jq`.
 
 Maintenance scripts live in `tools/` and `just` forwards to them; shared helpers are `tools/lib/*.nu`. Read Key rules and Common mistakes before writing a script, then the table for the category you need. The tables at the end list every built-in in the categories Tola uses, with Nu's own descriptions, taken from `scope commands` on 0.116.1; refresh one with `nu -c 'scope commands | where category == "strings" | select name description'`.
 

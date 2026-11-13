@@ -1,22 +1,21 @@
 # tola-nu
 
-`tola-nu` prepares one Nushell environment for Tola: built-in virtual sources, configured site modules, image and diagnostic commands, CLI capture, and an LSP supervisor. The caller supplies the configuration, modules, overlays, and invocation; this crate loads no personal Nu configuration or plugins.
+`tola-nu` prepares one Nushell environment for Tola: built-in virtual sources, configured site modules, image and diagnostic commands, and an LSP supervisor. The caller supplies the configuration, modules, overlays, and invocation; this crate loads no personal Nu configuration or plugins.
 
 ## Modules
 
 - `execution.rs` — evaluates prepared Nu blocks and returns exit codes instead of terminating the host.
-- `host.rs` — native getters, queries, and diagnostic submission bound to one invocation.
+- `host.rs` — native getters, queries, diagnostic rendering, and report submission bound to one invocation.
 - `modules.rs` — configured modules, sources, overlays, and dependency evidence.
 - `resources.rs` — built-in module sources registered from embedded bytes as virtual files.
-- `signatures.rs` — native command signatures for module help without executing scripts.
-- `cli.rs` — the `cli capture` surface that keeps original `PipelineData`.
-- `image.rs`, `palette.rs`, `highlight.rs` — image inspection and resizing, the default TUI palette, and highlighting.
+- `signatures.rs` — native command signatures for module and script help without evaluating scripts.
+- `image.rs`, `palette.rs`, `highlight.rs` — image inspection and resizing, the default TUI palette, and highlighting. SVG resize uses Typst's renderer with the invocation's fonts.
 - `lsp.rs` — the official `nu-lsp` supervisor, rebuilt when module inputs change.
 - `error.rs` — the crate's error type.
 
 ## Embedded sources
 
-`nu/` ships `cli.nu`, `ui.nu`, `diagnostic.nu`, `image.nu`, and `image_core.nu`. The root `tola` module exports the native getters and query.
+`nu/` ships the diagnostic and image libraries and their command entries. The application supplies `nu-helpers` from `modules/nu-helpers/`. The root `tola` module exports the native getters, `query`, and `syntax-highlight`. The diagnostic and image sources import Rust commands from `tola-native`, whose name is bound while the built-in sources are parsed.
 
 ## Invariants
 

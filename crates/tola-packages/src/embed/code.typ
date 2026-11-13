@@ -5,7 +5,6 @@
 /// `code-themes.tokyo-night` is the theme file's path; pass it to `raw.theme` or
 /// `render-code(dark-theme: …)`.
 ///
-/// Example - check whether a theme name is a key:
 ///
 /// ```typst
 /// #import "@tola/code:0.0.0": code-themes
@@ -28,7 +27,9 @@
 /// select `lisp`, and `babashka` selects `clj`. Other labels pass through as written.
 /// In a literal fence, write the returned language name.
 ///
-/// Example - use the Lisp syntax for SBCL source:
+///
+/// Replace `site.typ` in a new site with this example. Run `tola build` from the site root.
+/// The code block in `public/index.html` uses Lisp syntax.
 ///
 /// ```typst
 /// #import "@tola/code:0.0.0": code-language
@@ -46,13 +47,16 @@
 /// Outside HTML export the element is returned unchanged.
 ///
 /// `raw.theme` decides each block's look before Typst highlights it: `auto` keeps Typst's default,
-/// a path or theme bytes uses that theme, and `none` turns highlighting off. Set it where the block
+/// a path or theme bytes uses that theme, and `none` turns off highlighting in both light and dark themes. Set it where the block
 /// is written, with `#set raw(theme: …)` or a `#show raw.where(…)` rule.
 ///
 /// Load `code-stylesheet()` in the document's head so the browser applies the rendered token
 /// styles. Set `raw.theme` for the primary appearance and `dark-theme` for the dark appearance.
 ///
-/// Example - render code with light and dark themes in a complete page:
+///
+/// Save this as `site.typ` in a new site. Run `tola dev` and open the printed URL.
+/// The page shows a highlighted Rust block in the dark theme. Set `data-theme` to `"light"`
+/// to see the light theme.
 ///
 /// ```typst
 /// #import "@tola/code:0.0.0": code-themes, code-stylesheet, render-code
@@ -75,13 +79,12 @@
 /// Related: code-themes, code-stylesheet
 ///
 /// - raw (content): the raw element to render.
-/// - dark-theme (none | path | bytes): the theme for the site's dark state — a `code-themes` value,
-///   a `path("/…")` value, or theme bytes. It applies while the site's root element has
-///   `data-theme="dark"`. The file is read during the build, so a missing theme fails the build; a
-///   plain string is refused, because it would resolve inside this package.
-/// - attrs (dictionary): HTML attributes for the element Tola renders code into — `class`, `id`,
-///   `data-*`. `class` and `style` extend the helper's own; `data-lang` is refused, since the
-///   language tag sets it.
+/// - dark-theme (none | path | bytes): Theme used when the root element has `data-theme="dark"`. If omitted,
+///   use the main highlighting in both modes. Pass a value from `code-themes`, a Typst `path`,
+///   or theme bytes. Tola reads the theme at build time.
+/// - attrs (dictionary): Extra HTML attributes, for example `(class: "example",)`. If omitted,
+///   use the generated attributes. `class` and `style` append to existing values. The code's
+///   language sets `data-lang`, so leave that key out of `attrs`.
 /// -> content
 #let render-code = {
   import "@tola/host:0.0.0": render-code as render
@@ -108,13 +111,12 @@
   }
 }
 
-/// The browser URL the code stylesheet is mounted at.
+/// Return the browser URL for the shared code stylesheet.
 ///
 /// The stylesheet colors the code `render-code` renders. Use this URL when the head entry needs
 /// attributes of its own; `code-stylesheet` returns the ready-made entry. Every build publishes
 /// the shared stylesheet under `_tola/`, and this URL includes `site.base-path`.
 ///
-/// Example - give the head entry attributes of its own:
 ///
 /// ```typst
 /// #import "@tola/code:0.0.0": code-stylesheet-url
@@ -135,7 +137,6 @@
 /// Put it directly in a head. When the entry needs attributes of its own, build it from
 /// `code-stylesheet-url()` instead.
 ///
-/// Example - load the stylesheet from a document head:
 ///
 /// ```typst
 /// #import "@tola/code:0.0.0": code-stylesheet

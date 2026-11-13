@@ -1,10 +1,10 @@
 # `@tola/uuid`
 
-确定性的 UUID 规范化与版本 5 名称派生
+统一 UUID 的写法，或按名称生成可重复的 UUID v5。
 
 ## `normalize`
 
-将 UUID 字符串转换为小写、带连字符的标准格式。支持 32 位十六进制字符串、带连字符的字符串，以及带连字符并加花括号或 `urn:uuid:` 前缀的写法；无效输入会报错，不自动去除空白。
+将 UUID 字符串转换为小写、带连字符的标准格式。接受 32 个连续的十六进制字符，也接受带连字符的 UUID。带连字符的写法还可以加花括号或 `urn:uuid:` 前缀。首尾有空白会报错。
 
 ### `value`
 
@@ -12,16 +12,20 @@
 
 ## `v5`
 
-根据命名空间和名称确定性计算版本 5 UUID，返回小写带连字符的字符串。字符串名称使用 UTF-8 编码，不进行 Unicode 规范化；字节名称按原样使用。任一输入变化都会改变身份；若名称或路径会变化，应保存 ID。
+根据命名空间和名称生成 UUID v5。两项都相同就会得到同一个 UUID。名称可以直接传字节，也可以传字符串，字符串按原样编码为 UTF-8。页面改名后如果还要沿用原 ID，保存并继续使用第一次生成的 UUID。
+
+
+在新站点中用下面的代码替换 `site.typ`，从站点根目录运行 `tola build`。使用默认发布目录时，`public/index.html` 会显示 `2ed6657d-e927-568b-95e1-2665a8aea6a2`。
 
 ```typst
 #import "@tola/uuid:0.0.0": namespace, v5
-#assert.eq(v5(namespace.dns, "www.example.com"), "2ed6657d-e927-568b-95e1-2665a8aea6a2")
+#let id = v5(namespace.dns, "www.example.com")
+#document("index.html")[#id]
 ```
 
 ### `namespace`
 
-命名空间 UUID 字符串。
+命名空间的 UUID 字符串，写法与 `normalize` 相同。可直接用 `namespace.dns` 等内置值。
 
 ### `name`
 
@@ -29,4 +33,4 @@
 
 ## `namespace`
 
-标准命名空间 UUID 字符串字典，包含 dns、url、oid 和 x500。
+内置命名空间字典。按名称读取 UUID，例如 `namespace.dns`。可用 `dns`、`url`、`oid` 和 `x500`。

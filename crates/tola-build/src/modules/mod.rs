@@ -13,43 +13,24 @@ pub(crate) mod prepared;
 pub mod query;
 mod watch;
 
-pub use manifest::{find_initializer, read_declarations, read_nu_modules};
+pub use manifest::{find_initializer, read_available_declarations, read_nu_modules};
 pub use prepared::{PreparedSite, prepare_site};
 pub use watch::{PreparedHookWatch, prepare_hook_watch};
 
-pub const HELP: &str = r#"A module namespace selects a directory containing `tola-module.toml`:
+pub const HELP: &str = r#"Add each module instance as `[modules.<alias>]` in the site’s `tola.toml`. Several aliases can
+select the same module. The module root must contain `tola-module.toml`.
 
-```toml
-[modules.notes]
-path = "theme"
-```
+### Choose a source and input scope
 
-Paths are relative to the site root unless absolute. Manifests are read when a module is used,
-under the invocation's input scope. `--pure` requires its physical directory inside the site.
-Module directories are build inputs. A site before-build hook can generate files in a
-subdirectory of a site-owned local module. Publication cannot replace module inputs.
-Tola loads the modules the site declares.
-
-A prepared module can also come from an HTTPS download or a local archive:
-
-```toml
-[modules.notes]
-tarball = { url = "https://github.com/example/notebook/releases/download/v1.0.0/theme.tar.zst" }
-```
+Use `path` for a local module. Relative paths start at the site root. With `--pure`,
+the module must be inside the site. A site `before-build` hook can generate inputs in
+such a module. Keep the module directory separate from the publish directory.
 
 `path`, `git`, and `tarball` are mutually exclusive. A `tarball` table has exactly one
-`url` or file `path`, plus optional `sha256` as 64 hexadecimal digits. It accepts tar.gz,
-tar.zst, and ZIP (stored/deflate). The archive must contain one outer directory with
-`tola-module.toml` directly inside it. That outer layer is removed; no `subdir` or
-manifest search is performed. Acquisition never runs author hooks. HTTPS downloads
-must not embed credentials; private Release authentication is not provided.
-
-For an `https` or `ssh` Git repository, replace `path` with a remote source:
-
-```toml
-[modules.notes]
-git = { url = "https://github.com/example/notebook", tag = "v1.0.0", subdir = "theme" }
-```
+HTTPS `url` or local file `path`, plus optional `sha256` as 64 hexadecimal digits. Relative
+archive paths start at the site root. Tola accepts tar.gz, tar.zst, and ZIP (stored/deflate).
+Put `tola-module.toml` directly inside the archive's one outer directory. For a private
+release attachment, download the archive first and use `tarball.path`.
 
 The `git` table holds `url`, optional `subdir`,
 and at most one of `tag`, `branch`, or `rev`. `git.rev` is a full commit ID; `git.subdir`
@@ -60,18 +41,217 @@ A private `https` repository uses your Git credential helper. An `ssh` address, 
 `git@host:path`, uses the system `ssh` with its agent, `~/.ssh/config`, and `known_hosts`.
 `tola.lock` records addresses, selectors, commits, and digests, never credentials.
 
-`tola.lock` pins Git commits and module trees, or archive files and their expanded trees.
-Every existing locked input is verified. `--locked` forbids changing the lock but can
-fetch its missing bytes; `--offline` forbids network access but can record local inputs.
-`--pure` requires locked inputs from the site and vendor, without host caches or network.
-Project-local tarballs can be expanded afresh in pure mode. Run `tola update notes` after
-changing a source or to refresh it, then `tola vendor --refresh` to replace frozen copies.
-An ordinary checksum failure never refreshes the lock automatically.
-Remote initialization is not implemented; initialization still takes a local module directory.
+Run `tola update notes` after changing the module source or to select a new version.
+If you use vendor, run `tola vendor --refresh` to update its copy. Builds verify
+locked Git commits and archives against `tola.lock`.
+
+- `--locked`: Keep the lock file as written. Tola can download a locked dependency that is missing.
+- `--offline`: Use local files and cached inputs. Tola can record local dependencies in the lock.
+- `--pure`: Use locked inputs from the site and vendor. Tola can also expand a locked archive stored inside the site.
+
+### Choose the site entry, options, and assets
 
 Select a module as the site entry with `[build] entry = { module = "notes" }`.
-Its public library is imported as `@tola-modules/notes:0.0.0`. The manifest declares
-its site entry, public exports, assets, and option defaults:
+Import its public Typst library as `@tola-modules/notes:0.0.0`.
+
+Manifest paths are relative to the module. Project `[modules.notes.options]` values
+replace the defaults, with recursive merging when both values are tables.
+Use [`include`](tola-help://config/include) to keep a site's module source and overrides in separate files.
+
+Module assets publish under `/_tola-modules/notes/`, with the site's deployment prefix.
+`enable = false` under `[modules.notes.assets]` disables the instance's static assets.
+A replacement keeps the public resource name and reads from a project-relative file.
+
+Within a module, import `get-module` from `@tola/module:0.0.0` to read its alias, options,
+and assets. Use `assets.files` to read files and `assets.urls` to link them from pages.
+Inside a package, use `project-path` from `@tola/site:0.0.0` to read a file from the site root.
+
+### Run module hooks
+
+A module hook's `enabled-by` reads the boolean setting for that alias. Use
+`get-context | get module.options` in Nu to read the settings after site overrides.
+In `rerun-on`, strings start at the module root. Use `{ project = "..." }` for site
+files. Both accept globs. Tola expands `{name}` to the alias in `generates`, `outputs`,
+and `rerun-on`.
+
+Modules run in alias order. Within a stage, `order` sorts hooks from the same module.
+The site's `par-hooks` and `hook-jobs` apply to all modules. See [`[hooks]`](tola-help://config/hooks)
+for defaults and an ordered example.
+
+### Declare and run queries
+
+Set `entry` relative to the module directory. The query uses the site's sources and packages.
+`label` must identify exactly one metadata value. Return values that can be written as JSON.
+A Typst `path` becomes a record with `root` and `path`. For content or functions, return the
+fields your caller needs.
+
+Declare `references` and `definitions` under their query. Each entry names a function exported
+by `[typst].entry` and one of its parameters. Positional indices start at zero. Dot-separated
+exports traverse public members, such as `content.local`.
+Multiple entries let several functions or parameters use the same query. Unknown exports,
+missing parameters, and conflicting assignments are diagnosed when the editor reads them.
+
+For editor references or definitions, return an array of records. Each record needs a
+nonempty string `id` and a string `name`. Keep IDs unique within the query for that module
+alias. `description` and `url` are optional strings, and `source` is an optional Typst `path`.
+The CLI and LSP both validate these fields. The metadata `label` selects the whole result.
+`name` is the text shown for an individual entry.
+
+When updating an older manifest, remove `returns`, `semantics`, and `role`. In returned
+records, rename `label` to `name` and `detail` to `description`.
+
+A query runs its own Typst entry. Generate any files it needs before running it, since queries
+skip build hooks. Editor queries can use unsaved changes.
+
+Queries print a human-readable table by default. `--json` returns compact JSON,
+`--json --pretty` indents it, and `--json --output FILE` writes it to a file. `-i`
+browses a value in a terminal. Set `projection` to choose the output fields. In interactive mode, you can see the complete
+record before selecting it. Use Nu `where` and `select` for further filtering.
+
+### Run module commands and import Nu libraries
+
+Built-in command names are reserved. Help reads declarations without evaluating a query
+or running its tool. Unknown manifest fields are errors.
+
+Set `nu` to the script path relative to the module root. Use `args` for default script
+arguments. The script runs from the site root with Tola's built-in Nushell.
+Define arguments, types, defaults, and a description in the script's `main` signature
+and comments. Help reads the signature without executing the script. An explicit
+`help` overrides its description. External commands use the declared `help`.
+
+Use `argv` to run an external program when the author calls the command. In declared arguments,
+`{module}` expands to the module directory, `{project}` to the site directory, and `{tola}`
+to the Tola executable. Arguments from the user are passed as written. From that program,
+run `"$TOLA_EXECUTABLE" nu @tola-scripts/context --json` to read the site, module options, and
+input scope for the command.
+
+In a module Nu command, use `diagnostic submit` to report warnings or errors to Tola.
+Submit one list per invocation, even when it is empty. An error fails the command.
+An external program can write its report to `reportPath` from the context.
+See [`@tola-scripts/diagnostic`](tola-help://scripts/diagnostic) for a Nu example.
+
+Use `use tola-modules notes` in Nu for the module selected as `notes`. Public definitions use
+ordinary Nu `export`; imports do not choose a current module configuration. Pass site options
+explicitly to reusable functions. The module's own resources can use Nu `path self`, while user
+paths keep the invocation's working directory.
+
+`tola nu @tola-modules/notes` calls the public entry's `export def main`.
+`tola nu @tola-scripts/image` runs Tola's built-in image script. To import its functions
+inside a Nu script, write `use tola image`. To run a local file, give its path. For a
+filename starting with `@`, write `./@file.nu`. Run `tola nu --help` to list available libraries.
+
+The imported `query` returns Nu values, so you can filter rows with `where` and read fields with
+`get`. To read a metadata label from a separate Typst file, use
+`query ./tools/model.typ --label model`.
+
+For other Tola commands, run `$env.TOLA_EXECUTABLE` as an external program and use Nu's
+`complete` to capture `stdout`, `stderr`, and `exit_code`. Pass `--config` if the child
+needs a specific site. For commands using an input scope, pass `--offline` or `--pure`
+to match `$env.TOLA_INPUT_SCOPE`. Read the output of `tola dev --json` one JSON line at a time.
+
+For another configuration, use `tola notes --config other.toml COMMAND ...`; after COMMAND,
+arguments belong to that command. A declared tool never silently falls back to a global plugin.
+
+See [the built-in image script](tola-help://scripts/image) for file and byte operations.
+
+### Read module guides
+
+The Markdown path starts at the module root. Export paths start in the directory where
+you run the command. Tola reads the guide as text.
+
+`tola skill` reads Tola's own authoring guide from any directory. A module guide uses the
+same section selection and export flags through its declared command.
+
+### Initialize a site
+
+Write new files under `init.outputDir`. If the generated configuration contains relative
+paths, calculate them from `init.targetDir`, where the site will live. Read `module.name`
+if the generated configuration needs the chosen alias, and prompt only when `init.interactive`
+is true. The source may also be a Git URL or an archive. For Git, use `--branch`, `--tag`,
+or `--rev` to select a revision and `--subdir` to select the module directory.
+From a site that already uses the module as `forest`, run `tola forest init new-site`.
+Declare either `[init]` or `[commands.init]`.
+
+Tola checks the new configuration and module options before writing to the target directory.
+`--dry-run` runs those checks without writing to the target. `--force` allows an occupied
+directory and preserves existing files.
+
+### Pack a module
+
+Use `hook.inputDir` in `before-pack` to find the module root. There is no site context
+at this stage.
+
+`before-pack` is a module author hook. Enabled entries run in declaration order
+when the author runs `tola module pack`. Use `name`, `enable`, and either `nu` with
+optional `args` or `argv`. The `order` and `rerun-on` settings are for build hooks.
+
+`[pack] include` selects the files to ship after those hooks run. It is required and
+its paths start at the module root. A directory includes its contents. Use
+`exclude = ["assets/**/*.map"]` to omit matching files. Exclusions take priority.
+Tola always ships `tola-module.toml`, and the release must contain every local file
+or directory it still declares.
+
+`tola module check ./dist/labels-theme` checks the release manifest and the paths it
+declares. Pack already checks the release before replacing the destination. The
+separate command is useful for a directory you downloaded or unpacked yourself.
+To test compilation and runtime hooks, use the release in a site and run `tola check`.
+
+Example: Import a module’s Typst library:
+
+In a site created with `tola init`, add this to the site’s `tola.toml`.
+
+```toml
+[modules.notes]
+path = "theme"
+```
+
+Create `theme/tola-module.toml`.
+
+```toml
+[typst]
+entry = "lib.typ"
+
+[options]
+title = "Field notes"
+```
+
+Save this as `theme/lib.typ`.
+
+```typst
+#import "@tola/module:0.0.0": get-module
+#let note-title = get-module().options.title
+```
+
+Use it in `content/index.typ`.
+
+```typst
+#import "@tola-modules/notes:0.0.0": note-title
+= #note-title
+```
+
+Run `tola build` from the site root. The heading in `public/index.html` reads “Field notes”.
+Set `title = "Lab notes"` under `[modules.notes.options]` in `tola.toml` and build again
+to change it.
+
+Example: Load a module from an archive or Git:
+
+Load a module from a release archive.
+
+```toml
+[modules.notes]
+tarball = { url = "https://github.com/example/notebook/releases/download/v1.0.0/theme.tar.zst" }
+```
+
+Load a module from a Git repository.
+
+```toml
+[modules.notes]
+git = { url = "https://github.com/example/notebook", tag = "v1.0.0", subdir = "theme" }
+```
+
+Example: Declare entries, default options, and assets:
+
+Declare the public library, site entry, assets, and default options in the module manifest.
 
 ```toml
 [typst]
@@ -84,24 +264,18 @@ trees = [{ source = "assets", url-prefix = "/" }]
 search = false
 ```
 
-Manifest paths are relative to the module. Project `[modules.notes.options]` values
-replace the defaults, with recursive merging when both values are tables.
-
-Module assets publish under `/_tola-modules/notes/`, with the site's deployment prefix.
-`enable = false` under `[modules.notes.assets]` disables the instance's static assets.
-A replacement keeps the public resource name and reads from a project-relative file:
+Replace the module’s `style.css` in the site configuration.
 
 ```toml
 [modules.notes.assets.replace]
 "style.css" = "static/custom.css"
 ```
 
-Within a module, import `get-module` from `@tola/module:0.0.0` to read its alias, options,
-and assets. `assets.files` contains native input paths and `assets.urls` contains their
-final URLs. Package absolute paths remain relative to the package root. Use `project-path`
-from `@tola/site:0.0.0` to construct a project input path.
+Example: Add a search hook to a module:
 
-Modules may declare build hooks:
+This example wires up a search script. Write `theme/tools/search.nu` and set
+`search = true` under `[modules.notes.options]` in the site's `tola.toml`. Put
+`{name}` in the output path to give each alias its own files.
 
 ```toml
 [[hooks.generate-outputs]]
@@ -109,18 +283,12 @@ name = "search"
 nu = "tools/search.nu"
 enabled-by = "search"
 rerun-on = { include = [{ project = "content/**/*.typ" }] }
-outputs = [{ tree = "search" }]
+outputs = [{ tree = "_tola-modules/{name}/search" }]
 ```
 
-`enabled-by` names a top-level boolean option. A string in `rerun-on.include` or
-`rerun-on.exclude` is relative to the module root. A `{ project = "..." }` entry is
-relative to the project root. Both forms accept globs and substitute `{name}` with
-the module alias. The Nu script is observed automatically. Module hooks run in
-alias and declaration order. Site hooks run first in before-build and last in the
-other stages. External hooks read effective options as JSON from the file named by
-`TOLA_MODULE_OPTIONS`. Embedded Nu hooks read `(get-module).options`.
+Example: Add a query and a command:
 
-Queries and commands are named in the manifest:
+For the local `notes` module above, put these declarations in `theme/tola-module.toml`.
 
 ```toml
 [queries.nodes]
@@ -131,25 +299,19 @@ label = "notebook-nodes"
 help = "List notebook entries."
 query = "nodes"
 projection = ["id", "name"]
-
-[commands.edit]
-help = "Open a notebook entry."
-argv = ["{module}/tools/edit"]
 ```
 
-Run `tola notes --help`, `tola notes list --help`, or `tola query notes.nodes`.
-Built-in command names are reserved; different aliases may select the same module. Help reads
-declarations without evaluating a query or running its tool. Unknown manifest fields are errors.
-A Nu command uses `nu = "tools/new.nu"` and may declare `args = ["--release"]`.
-Define arguments, types, defaults, and a description in the script's `main` signature
-and comments. Help reads the signature without executing the script. An explicit
-`help` overrides its description. External commands use the declared `help`.
+Save this as `theme/model.typ`.
 
-A query entry is relative to its module, including a declared module outside the site root.
-It uses the site's source discovery and packages. Its label selects exactly one metadata value.
-Ordinary queries accept JSON-compatible scalars, arrays, and dictionaries. Native Typst paths
-are converted to records with `root` and `path`; project content and functions need an explicit
-projection. Private query helpers can stay outside the public Typst library.
+```typst
+#metadata(((id: "welcome", name: "Welcome"),)) <notebook-nodes>
+```
+
+From the site root, run `tola query notes.nodes --json` to see the record. Run `tola notes list` to see its `id` and `name`.
+
+Use `tola notes list --help` to see its options.
+
+Example: Declare references and definitions for a query:
 
 Declare references and definitions under their query:
 
@@ -163,47 +325,29 @@ export = "subtree"
 parameter = { named = "address" }
 ```
 
-Each entry names a function exported by `[typst].entry` and one of its parameters. Positional
-indices start at zero. Dot-separated exports traverse public members, such as `content.local`.
-Multiple entries let several functions or parameters use the same query. Unknown exports,
-missing parameters, and conflicting assignments are diagnosed when the editor reads them.
+Example: Run a Nu command from a module:
 
-A query with references or definitions automatically requires an array of records with unique,
-nonempty string `id`, string `name`, optional string `description` and `url`, and optional native
-Typst `source`. Both CLI and LSP validate this shape. IDs are scoped to the module alias and
-query. The metadata `label` selects the whole result; each record's `name` is display text.
-An ordinary query has its own fields and types. Remove the old `returns`, `semantics`, and
-`role` declarations when migrating; rename record `label` and `detail` to `name` and `description`.
+Keep the local `notes` module from the example above. Add this to `theme/tola-module.toml`:
 
-Queries compile their selected entry independently of the site's page template. Prepare
-required generated inputs before calling them. Module input declarations list possible
-producers regardless of their `enabled-by` condition. Queries sharing an entry also share
-its calculations and failures. The LSP retains query sessions across edits and shares one
-entry compilation across its labels within a source revision.
+```toml
+[commands.title]
+nu = "tools/title.nu"
+```
 
-Queries print a human-readable table by default. `--json` returns compact JSON,
-`--json --pretty` indents it, and `--json --output FILE` writes it to a file. `-i`
-browses a value in a terminal. A command's fixed `projection` is applied after selection, so
-interactive previews keep the original fields. Use Nu `where` and `select` for further filtering.
+Create `theme/tools/` and save this as `theme/tools/title.nu`:
 
-An argv command runs only when invoked, from the site root, with inherited standard streams.
-Its arguments receive literal `{module}`, `{project}`, and `{tola}` path substitutions; trailing user arguments
-are forwarded unchanged. No shell interpolation runs. The tool receives `TOLA_PROJECT_ROOT`,
-`TOLA_MODULE_ROOT`, `TOLA_MODULE_NAME`, `TOLA_CONTENT_ROOT`, `TOLA_CONFIG_PATH`, `TOLA_EXECUTABLE`, and `TOLA_INPUT_SCOPE`. The last two let a
-tool call the same Tola executable with the caller's input policy; they do not sandbox the tool.
-Tola forwards exit status and cancellation and restores a controlling terminal after an interactive
-command. Shell job suspension with Ctrl-Z is not managed by this interface.
+```nu
+use tola get-context
 
-Declare `nu = "tools/new.nu"` to run a module script with the embedded Nushell runtime.
-The script entry is relative to its declaring module; the working directory remains the project
-root. A direct `tola nu file.nu` invocation resolves the entry from the caller's directory.
-No separate Nushell installation is needed. `tola nu --lsp` serves Nu files; `tola lsp` serves Typst.
+def main [] {
+  get-context | get module.options.title
+}
+```
 
-A module argv command or hook can submit an unlocated diagnostic batch through `TOLA_REPORT_PATH`,
-for example with `use tola diagnostic` and `diagnostic submit`. Warnings do not fail a successful
-command; errors do. `after-publish` errors cannot undo publication. A reused development
-`generate-outputs` result retains its report. A missing batch differs from a submitted empty batch.
-Independent checks and unsaved editor snapshots are not supported by this report interface.
+Run `tola notes title` from the site root. It prints the title for this module alias,
+including any override in `[modules.notes.options]`.
+
+Example: Export a Nu library:
 
 A module may also export a reusable Nu library:
 
@@ -212,59 +356,146 @@ A module may also export a reusable Nu library:
 entry = "tools/mod.nu"
 ```
 
-Use `use tola-modules notes` in Nu for the module selected as `notes`. Public definitions use
-ordinary Nu `export`; imports do not choose a current module configuration. Pass site options
-explicitly to reusable functions. The module's own resources can use Nu `path self`, while user
-paths keep the invocation's working directory.
-
-`tola nu @tola-modules/notes` runs that public entry and requires `export def main`.
-`tola nu @tola/image` runs the built-in image entry. These are explicit Tola locators, not Nu
-file paths or download requests. Unknown locators never fall back to files; a file beginning
-with `@` can be written as `./@file.nu`. Nu uses the native roots `tola` and `tola-modules`,
-such as `use tola image`, rather than a special path-prefix import mechanism.
-`tola nu --help` lists built-in and configured Nu libraries without evaluating them.
-
-The root command `query` wraps the existing site query: `use tola` provides `tola query`,
-while `use tola query` imports `query` directly. `use tola cli` provides `cli capture` for
-finite commands, returning `stdout`, `stderr`, and `exit_code`; pass `--config` in the
-argument list when needed. For continuous development events, run `tola dev --json` as a
-native external command and consume its JSON lines, rather than capturing the process.
-
-`use tola image` provides byte operations and file operations. For example:
+Add that `[nu]` table to `theme/tola-module.toml` and save this as `theme/tools/mod.nu`.
 
 ```nu
-use tola image
-let source = (image metadata photo.png)
-image resize photo.png --output preview.webp --width 640 --op fit-width --format webp
+export def note-title [] { "Field notes" }
+export def main [] { note-title }
 ```
 
-`image resize --output` returns metadata and requires a new destination in an existing directory.
+From the site root, run `tola nu @tola-modules/notes` to print `Field notes`.
 
-A module can also declare its site initializer:
+Example: Use a Typst query from Nu:
+
+After adding the `notes.nodes` query above, save this as `list-titles.nu` next to
+`tola.toml`:
+
+```nu
+use tola query
+
+query notes.nodes | get name | to text
+```
+
+Run `tola nu list-titles.nu` from the site root. It prints `Welcome`.
+
+Example: Add a guide command:
+
+Add this to `theme/tola-module.toml`:
+
+```toml
+[commands.guide]
+skill = "GUIDE.md"
+help = "Read the theme guide."
+```
+
+Save this as `theme/GUIDE.md`:
+
+```md
+# Notes theme
+
+## Writing
+
+Put posts in content/posts/.
+
+### Drafts
+
+Set draft to true in a post's metadata to keep it out of the published site.
+```
+
+From a site that uses this module as `notes`, run `tola notes guide --list` to see the
+available sections, then `tola notes guide writing drafts` to read the draft instructions.
+Use `tola notes guide writing --all -o writing.md` to export that section and its subsections.
+
+Example: Create a site from a module:
+
+Add this to `theme/tola-module.toml` to give the local module a site initializer:
 
 ```toml
 [init]
 nu = "tools/init.nu"
 ```
 
-Run `tola init notes --from path/to/module --alias forest -- --title "My notes"` before a site exists.
-An existing site can invoke the same operation as `tola forest init notes`.
-`[init]` and `[commands.init]` cannot both be declared.
+Save this as `theme/tools/init.nu`:
 
-The initializer runs in an empty temporary directory and writes a complete candidate site there.
-`TOLA_INIT_OUTPUT_DIR` names that directory; `TOLA_INIT_TARGET_DIR` names the final directory.
-`TOLA_INIT_INTERACTIVE` is `true` only when the caller requests interactive setup. The ordinary
-module and executable context remains available; project, content and config variables are absent
-because the new site does not yet exist. Module paths written into `tola.toml` must resolve from
-the final target, and the selected module must be registered under `TOLA_MODULE_NAME`.
+```nu
+use tola get-context
 
-Tola validates the candidate configuration and module options before creating target files.
-`--dry-run` runs generation and validation but writes no target files. `--force` permits an
-occupied target without overwriting existing files. Initializers write their proposed files
-to the temporary generation directory. Nu initializers read it through `get-init`.
+def main [--title: string = "Field notes"] {
+  let out = get-context | get init.outputDir
+  {
+    site: {title: $title}
+  } | to toml | save ($out | path join "tola.toml")
+  mkdir ($out | path join "content")
+  [
+    '#import "@tola/site:0.0.0": site'
+    '#document("index.html", format: "html")[#site.title]'
+  ] | str join (char newline) | save ($out | path join "site.typ")
+}
+```
 
-For another configuration, use `tola notes --config other.toml COMMAND ...`; after COMMAND,
-arguments belong to that command. A declared tool never silently falls back to a global plugin.
+From the directory containing `theme/`, run:
+
+```sh
+tola init new-site --from ./theme --alias forest --dry-run -- --title "My notes"
+tola init new-site --from ./theme --alias forest -- --title "My notes"
+cd new-site
+tola build
+```
+
+Open `public/index.html` to see “My notes”. Tola adds the source to `[modules.forest]`
+in the new `tola.toml`. The first `--` separates Tola's options from the initializer's
+arguments. Omit `--title` to use the script's default, “Field notes”.
+
+Example: Generate a file before packing a module:
+
+Create a module directory `labels-theme/`. Save the following as
+`labels-theme/tola-module.toml`:
+
+```toml
+[pack]
+include = ["assets"]
+
+[assets]
+files = [{ source = "assets/labels.json", url = "/labels.json" }]
+
+[[hooks.before-pack]]
+name = "build-labels"
+nu = "prepare-labels.nu"
+```
+
+In `labels-theme/labels.csv`, put:
+
+```csv
+id,label
+draft,Draft
+published,Published
+```
+
+Save this as `labels-theme/prepare-labels.nu`:
+
+```nu
+use tola get-context
+
+let source = get-context | get hook.inputDir
+let assets = $source | path join "assets"
+mkdir $assets
+open ($source | path join "labels.csv")
+| to json
+| save --force ($assets | path join "labels.json")
+```
+
+From the directory containing `labels-theme/`, run:
+
+```sh
+mkdir -p dist
+tola module pack ./labels-theme --output ./dist/labels-theme
+tola module check ./dist/labels-theme
+```
+
+Open `dist/labels-theme/assets/labels.json` to see the two labels. The hook writes into
+the module's source directory before pack selects the files. The shipped directory
+contains `assets/` and `tola-module.toml`. Its manifest omits `[pack]` and
+`[[hooks.before-pack]]`, so sites using this release can read the prepared JSON directly.
 "#;
 
 /// Resolve the declared modules' roots and read their manifests.

@@ -1,47 +1,57 @@
 // @tola/datalog:0.0.0 - relations, recursive rules, and queries
 //
-// Declare every relation in the database, including empty relations. An unknown
-// relation is an error in facts, rules, and queries. A name identifies a relation
-// within the database and has one arity.
+// Use Datalog to query relationships that take more than one step to follow. For example,
+// write down the direct links between pages, then query which pages you can reach by
+// following any number of links.
 //
-// Facts are ground atoms. Variables in a rule head, query selection, or negated
-// atom must appear in a positive atom of the same rule or query. A dependency
-// cycle cannot pass through negation.
+// A relation names a table and sets its column count (arity). A fact is a row of
+// constants, such as `edge.atom("a", "b")`. A rule derives a row when its conditions
+// hold. Declare every relation, including empty ones, before using it.
 //
-// Constants of different types are distinct. Their order is none, bool, int,
-// finite float, decimal, str, bytes, datetime. Within each type, booleans and
-// numbers use value order, strings and bytes use lexicographic order, and
-// datetimes order dates before times before date-times, each chronologically.
-// Decimal values lose trailing fractional zeros. Both float and decimal zeros
-// have one representation.
+// A variable in the rule head, in `select`, or inside `negate` must also occur in an
+// positive atom in the same rule or query, such as `reach.atom("a", z)`.
+// That atom supplies the values to try.
+// Recursive rules can follow links. A rule defining `visible` can use
+// `negate(hidden.atom(z))` only if `hidden` does not depend on `visible`, even through
+// other relations. This is stratified negation.
+//
+// Query rows are sorted by column and deduplicated. Different types stay distinct.
+// The type order is `none`, `bool`, `int`, finite `float`, `decimal`, `str`, `bytes`,
+// and `datetime`. Strings and bytes sort lexicographically. Dates, times, and
+// date-times sort separately in that order.
 
-/// Declare a relation by name and arity. Use `.atom(..terms)` to construct an atom.
-/// Arity can be zero.
+/// Declare a relation by name and column count. For example, `relation("edge", 2)`
+/// declares two columns for the start and end of a link. Use `atom` to write a fact
+/// or match rows in a rule or query.
 #import "@tola/host:0.0.0": datalog-relation as relation
 
-/// Create a nonempty variable name. Equal names identify the same variable within one rule or query.
+/// Create a logic variable. Within a rule or query, the same name refers to the same variable.
 #import "@tola/host:0.0.0": datalog-var as var
 
-/// Derive the head atom when all body conditions hold. Pass at least one condition.
+/// Add the row described by `head` when every condition holds. Pass at least one condition.
 #import "@tola/host:0.0.0": datalog-rule as rule
 
-/// Construct a literal that holds when the atom has no matching row for the current binding.
+/// Match when the relation has no row for the given values.
 #import "@tola/host:0.0.0": datalog-negate as negate
 
-/// Build an immutable database from relation declarations, ground atoms, and rules.
-/// Each name must be declared exactly once. A relation may have facts and deriving rules.
-/// Database equality compares declarations, facts, and the structure of rules.
+/// Create a database from relation declarations, known facts, and rules. Use each relation name once.
 ///
-/// `.query(select: ..., where: ...)` requires two arrays. The selection lists variables in
-/// output column order and may repeat a variable. The conditions form a conjunction.
-/// The result is an array of rows, sorted lexicographically and deduplicated using Datalog
-/// constant equality. Typst's equality can compare values of different numeric types as equal.
+/// Call `db.query(select: ..., where: ...)` to read rows from the database. For example,
+/// with the fact `edge.atom("a", "b")` and the variable `target = var("target")`, the query
+/// `db.query(select: (target,), where: (edge.atom("a", target),))` returns `(("b",),)`.
+///
+/// Rows are sorted by the selected columns and deduplicated. Datalog treats numeric types
+/// as distinct: `1` and `1.0` are different values.
 ///
 /// An empty selection returns `((),)` when the conditions hold and `()` otherwise.
 /// Empty conditions hold.
 ///
-/// This example finds nodes reachable from `a` and excludes those in `hidden`. The two rows
-/// are `("b",)` and `("c",)`.
+/// Example: Query reachable pages:
+///
+/// Replace `site.typ` in a new site with this example and run `tola build` from the site root.
+/// The rules add direct and indirect paths to `reach`. The query filters out `b` because
+/// it is in `hidden`. The path through `b` still reaches `c`, so `public/index.html`
+/// displays `Reachable pages: c` with the default publish directory.
 ///
 /// ```typst
 /// #import "@tola/datalog:0.0.0": relation, var, rule, negate, database
@@ -52,14 +62,16 @@
 /// #let y = var("y")
 /// #let z = var("z")
 /// #let db = database((edge, reach, hidden),
-///   facts: (edge.atom("a", "b"), edge.atom("b", "c")),
+///   facts: (edge.atom("a", "b"), edge.atom("b", "c"), hidden.atom("b")),
 ///   rules: (
 ///     rule(reach.atom(x, y), edge.atom(x, y)),
 ///     rule(reach.atom(x, z), reach.atom(x, y), edge.atom(y, z)),
 ///   ),
 /// )
-/// #assert.eq(db.query(select: (z,), where: (
+/// #let rows = db.query(select: (z,), where: (
 ///   reach.atom("a", z), negate(hidden.atom(z)),
-/// )), (("b",), ("c",)))
+/// ))
+/// #assert.eq(rows, (("c",),))
+/// #document("index.html")[Reachable pages: #rows.map(row => row.first()).join(", ")]
 /// ```
 #import "@tola/host:0.0.0": datalog-database as database

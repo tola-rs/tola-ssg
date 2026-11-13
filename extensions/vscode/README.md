@@ -28,9 +28,13 @@ Build the extension and Tola executable from the same checkout when using a deve
 ## Commands
 
 `Tola: Restart Language Services`, `Tola: Build Site`, `Tola: Start Preview Server`, `Tola: Open Preview`,
-`Tola: Open Preview in Browser`, `Tola: Open Page for Current Document`, `Tola: Copy Route`,
+`Tola: Open Preview in Browser`, `Tola: Open Page for Current Document`, `Tola: Search Site Routes`, `Tola: Copy Route`,
 `Tola: Reveal Site Output`, `Tola: Show Output`, `Tola: Vendor Packages`, `Tola: Go to Definition`,
 `Tola: Insert Newline`.
+
+Use **Tola: Search Site Routes** from the Command Palette or the search button in **Tola Pages**.
+Type part of a route, source file, or output path, then choose to open the preview in VS Code or
+your default browser. You can search without an active Typst editor.
 
 Build and setup commands show progress in the status bar. Build, preview, and copy commands leave their
 results in the editor or Output channel without success popups. Configuration errors appear in Problems. A

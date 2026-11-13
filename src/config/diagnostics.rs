@@ -11,15 +11,15 @@
 use serde::{Deserialize, Serialize};
 use tola_config::Config;
 
-/// Caps how many diagnostics the terminal shows.
+/// Limit how many errors and warnings appear in the terminal.
 #[derive(Debug, Clone, Serialize, Deserialize, Config)]
 #[serde(default)]
 #[config(section = "diagnostics")]
 pub(crate) struct DiagnosticsConfig {
-    /// Maximum errors shown per terminal batch; the default is 3.
+    /// Maximum number of errors to print at a time. If omitted, show up to 3. Use `0` to hide errors.
     pub(crate) max_errors: Option<usize>,
 
-    /// Maximum warnings shown per terminal batch; the default is 3.
+    /// Maximum number of warnings to print at a time. If omitted, show up to 3. Use `0` to hide warnings.
     pub(crate) max_warnings: Option<usize>,
 }
 
@@ -34,26 +34,31 @@ impl Default for DiagnosticsConfig {
 
 impl DiagnosticsConfig {
     /// What `tola help "[diagnostics]"` adds under its table.
-    pub const HELP: &'static str = "\
-`max_errors` and `max_warnings` limit how many diagnostics one batch of terminal output shows.
-Errors print before warnings, each severity counted against its own limit, and every development
-rebuild starts a new batch. Terminal positions follow the Typst CLI: lines count from 1 and
-columns from 0.
+    pub const HELP: &'static str = r#"
+To see up to ten errors per build and hide warnings in the terminal, add this to `tola.toml`.
 
 ```toml
 [diagnostics]
-max_errors = 3
-max_warnings = 3
+max_errors = 10
+max_warnings = 0
 ```
 
-Set a limit to `0` to hide that severity from the terminal — that is terminal output only: the
-`--log-file` record and the diagnostics your editor gets over LSP stay complete. Paths in the
-terminal render relative to where you run the command; the editor lists diagnostics at the open file
-and its lines. A batch that exceeds a limit ends by naming how many diagnostics it hid:
+Run `tola check` from the site root. Errors appear first. If there are more errors or warnings
+than the limit, the terminal says how many it left out. Each `tola dev` rebuild starts
+counting again.
 
-```
-3 errors not shown; increase `diagnostics.max_errors` to show more
+These limits only affect what you see in the terminal. An error still fails the build.
+
+### Read the full report
+
+From the site root, save the check report and render it with the built-in script:
+
+```sh
+tola check --json --pretty > check.json
+tola nu --stdin @tola-scripts/diagnostic render < check.json
 ```
 
-`[diagnostics]` does not change the outcome of the build itself.";
+The report includes diagnostics hidden by the terminal limits. Check the exit status of
+`tola check` to see whether the check passed. The render command only displays the report.
+See [`@tola-scripts/diagnostic`](tola-help://scripts/diagnostic) for the JSON fields."#;
 }

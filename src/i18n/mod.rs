@@ -1,5 +1,4 @@
-//! Markdown prose for `tola help`. The config schema and package declarations supply the
-//! identifiers and the English fallback.
+//! Markdown prose for `tola help`, keyed by configuration, package, and script declarations.
 
 use std::collections::BTreeMap;
 use std::sync::LazyLock;
@@ -14,6 +13,13 @@ pub(crate) enum HelpLanguage {
 }
 
 impl HelpLanguage {
+    pub(crate) fn colon(self) -> &'static str {
+        match self {
+            Self::English => ": ",
+            Self::SimplifiedChinese => "：",
+        }
+    }
+
     /// Accept locale spellings such as `zh_CN.UTF-8` and `zh-Hans-CN` as well as `en` and `zh`.
     pub(crate) fn parse(tag: &str) -> Option<Self> {
         let tag = tag.trim();
@@ -46,8 +52,8 @@ pub(crate) const CONFIG_USAGE: &str = "用法";
 type Catalog = BTreeMap<&'static str, Translation>;
 type Sections<'a> = BTreeMap<&'a str, &'a str>;
 
-/// A Markdown page starts with its title and introduction. Level-two headings name exports or
-/// parts of a configuration page. Level-three headings name parameters or configuration keys.
+/// A Markdown page starts with its title and introduction. Level-two headings name exports,
+/// script commands, or parts of a configuration page.
 pub(crate) struct Translation {
     intro: &'static str,
     sections: BTreeMap<&'static str, Section>,
@@ -60,13 +66,56 @@ struct Section {
 
 impl Translation {
     fn parse(markdown: &'static str) -> Self {
+        Self::parse_sections(markdown, |_, section| {
+            split_sections(section, HeadingLevel::H3)
+        })
+    }
+
+    fn parse_config(markdown: &'static str) -> Self {
+        Self::parse_sections(markdown, |name, section| {
+            if name == CONFIG_KEYS {
+                split_sections(section, HeadingLevel::H3)
+            } else {
+                (section, Sections::new())
+            }
+        })
+    }
+
+    fn parse_script(markdown: &'static str, language: HelpLanguage) -> Self {
+        let separator = language.colon();
+        Self::parse_sections(markdown, |_, section| {
+            let (body, groups) = split_sections(section, HeadingLevel::H3);
+            let mut fields = BTreeMap::new();
+            for list in groups.into_values() {
+                for line in list.lines() {
+                    let (name, description) = line
+                        .strip_prefix("- `")
+                        .and_then(|item| item.split_once(separator))
+                        .and_then(|(name, description)| {
+                            Some((name.strip_suffix('`')?, description))
+                        })
+                        .expect("script parameter descriptions use a colon after the name");
+                    assert!(
+                        fields.insert(name, description).is_none(),
+                        "duplicate script parameter `{name}`"
+                    );
+                }
+            }
+            (body, fields)
+        })
+    }
+
+    fn parse_sections(
+        markdown: &'static str,
+        fields: impl Fn(&'static str, &'static str) -> (&'static str, Sections<'static>),
+    ) -> Self {
         let (title, body) = markdown.split_once('\n').expect("a help page has a title");
         assert!(title.starts_with("# "), "invalid help title `{title}`");
         let (intro, sections) = split_sections(body, HeadingLevel::H2);
         let sections = sections
             .into_iter()
             .map(|(name, markdown)| {
-                let (body, fields) = split_sections(markdown, HeadingLevel::H3);
+                let (body, fields) = fields(name, markdown);
                 (name, Section { body, fields })
             })
             .collect();
@@ -135,10 +184,10 @@ fn split_sections(markdown: &str, level: HeadingLevel) -> (&str, Sections<'_>) {
 }
 
 macro_rules! catalog {
-    ($directory:literal, $($name:literal),+ $(,)?) => {
+    ($directory:literal, $parse:ident, $($name:literal),+ $(,)?) => {
         [$(($name, include_str!(concat!("zh-Hans/", $directory, "/", $name, ".md")))),+]
             .into_iter()
-            .map(|(name, markdown)| (name, Translation::parse(markdown)))
+            .map(|(name, markdown)| (name, Translation::$parse(markdown)))
             .collect()
     };
 }
@@ -146,6 +195,7 @@ macro_rules! catalog {
 static PACKAGES: LazyLock<Catalog> = LazyLock::new(|| {
     catalog!(
         "packages",
+        parse,
         "address",
         "code",
         "collection",
@@ -169,6 +219,7 @@ static PACKAGES: LazyLock<Catalog> = LazyLock::new(|| {
 static CONFIG: LazyLock<Catalog> = LazyLock::new(|| {
     catalog!(
         "config",
+        parse_config,
         "assets",
         "build",
         "build.minify",
@@ -190,6 +241,47 @@ static CONFIG: LazyLock<Catalog> = LazyLock::new(|| {
         "vendor",
     )
 });
+
+static SCRIPT_PROSE: LazyLock<BTreeMap<&'static str, (Translation, Translation)>> =
+    LazyLock::new(|| {
+        [
+            (
+                "image",
+                (
+                    Translation::parse_script(
+                        include_str!("en/scripts/image.md"),
+                        HelpLanguage::English,
+                    ),
+                    Translation::parse_script(
+                        include_str!("zh-Hans/scripts/image.md"),
+                        HelpLanguage::SimplifiedChinese,
+                    ),
+                ),
+            ),
+            (
+                "diagnostic",
+                (
+                    Translation::parse_script(
+                        include_str!("en/scripts/diagnostic.md"),
+                        HelpLanguage::English,
+                    ),
+                    Translation::parse_script(
+                        include_str!("zh-Hans/scripts/diagnostic.md"),
+                        HelpLanguage::SimplifiedChinese,
+                    ),
+                ),
+            ),
+        ]
+        .into()
+    });
+
+pub(crate) fn script(language: HelpLanguage, name: &str) -> Option<&'static Translation> {
+    let (english, chinese) = SCRIPT_PROSE.get(name)?;
+    Some(match language {
+        HelpLanguage::English => english,
+        HelpLanguage::SimplifiedChinese => chinese,
+    })
+}
 
 pub(crate) fn package(language: HelpLanguage, name: &str) -> Option<&'static Translation> {
     match language {

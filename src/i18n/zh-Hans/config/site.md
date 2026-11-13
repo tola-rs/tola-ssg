@@ -1,64 +1,58 @@
 # `[site]`
 
-站点的配置值：Tola 会解析并校验它们的格式，例如 `language` 必须符合 BCP 47 语言标签格式；模板通过 `@tola/site` 读取它们。
+设置站点地址、标题和语言。例如，要部署到 `https://example.com/docs/`，在 `tola.toml` 中写：
+
+```toml
+[site]
+origin = "https://example.com"
+base-path = "/docs/"
+title = "Typst 笔记"
+language = "zh-Hant-TW"
+```
+
+在用 `tola init` 创建的站点中，把 `= Guide` 写进 `content/guide/index.typ`。从站点根目录运行 `tola build`，会生成 `public/guide/index.html`。把 `public/` 部署到 `/docs/` 后，访问 `https://example.com/docs/guide/`。用 `tola dev` 在默认端口预览时，打开 `http://127.0.0.1:5277/docs/guide/`。
 
 ## 配置项
 
 ### `origin`
 
-站点的公开地址，例如 `https://example.com`，不带路径。未设置时只发布相对地址。
+URL 的协议、主机和可选端口，例如 `https://example.com`。路径写在 `base-path` 里。省略时 `site.url` 为 `none`。生成 feed 或 sitemap 时须填写 `origin`。
 
 ### `base-path`
 
-站点挂载在哪个部署路径之下，例如 `/docs/`。必须以 `/` 开头和结尾。
+站点在域名下的部署路径，例如 `/docs/`。开头和结尾都要有 `/`，默认是 `/`。
 
 ### `title`
 
-站点自称的名字，出现在浏览器标签页与 feed 里。
+站点名称，可用作模板和 feed 的标题。默认是空字符串。
 
 ### `authors`
 
-署名的作者，模板里读作 `site.authors`。每项形如 `{ name = "…", email = "…", url = "…" }`。
+站点作者，例如 `[{ name = "Alice", email = "alice@example.com" }]`。每位作者都要写 `name`，`email` 和 `url` 可以省略。省略 `authors` 时用空列表。
 
 ### `description`
 
-feed 与搜索引擎展示的站点摘要。
+站点简介，可用在 feed 和页面元数据中。默认是空字符串。
 
 ### `languages`
 
-多语言站点发布的语言，写成 `["en", "zh-Hans"]`，或按标签各部分写成 `[{ lang = "en" }, { lang = "zh", script = "Hans" }]`。每项的写法与校验都与 `site.language` 相同；`site.language` 是默认语言（未填写时为 `"en"`）；列表非空时，必须包含它。Tola 只把它当数据读取，不做任何处理：站点如何在语言之间路由、配对与切换，由站点自己决定。
+站点提供的语言，例如 `["en", "zh-Hans"]`，写法和 `language` 相同。默认是空数组。填了列表就要包含 `language` 的值。不同语言的页面和切换链接由模板生成。
 
 ### `language`
 
-语言标签，例如 `"zh-Hant-TW"`，或写成 `{ lang = "zh", script = "Hant", region = "TW" }`。模板读 `site.language.lang`（主语言）、`.script`（书写系统）、`.region` 与 `.tag`（组合形式）。Typst 文本使用各部分，HTML 的 `lang` 使用 `.tag`。ASCII 模式下把 `.lang` 传给 `slugify` 决定汉字读音：`ja` 取日文，其余语言取中文。书写系统与地区不参与 slug 化。
+站点的默认语言，省略时为 `"en"`。可以写 BCP 47 语言标签，如 `"zh-Hant-TW"`，也可以拆开写成 `{ lang = "zh", script = "Hant", region = "TW" }`。
 
 ## 用法
 
-模板把这些读作 `site.<key>`（`tola help "@tola/site"` 说明这个对象）：
+### 在 Typst 模板中读取设置
 
-```toml
-[site]
-origin = "https://example.com"    # The public address, with no path
-base-path = "/docs/"              # The path the site is served below
-title = "Example"
-description = "Notes on Typst, published with Tola"
-language = "zh-Hant-TW"           # Or { lang = "zh", script = "Hant", region = "TW" }
-authors = [{ name = "Alice", email = "alice@example.com" }]
-```
-
-`origin` 与 `base-path` 一起决定每一条发布地址：上面的站点把 `guide/index.html` 发布在
-`https://example.com/docs/guide/`。没有 `origin` 时，站点只发布相对地址——这正是 feed 与
-sitemap 需要它的原因：它们列出的每条地址都是绝对地址。`tola dev` 在本地按同一个挂载路径提供服务，例如
-`http://127.0.0.1:5277/docs/`；`--origin` 与 `--base-path` 可以为单次运行覆盖这一对值。
-
-这两个键还会派生出 `site.url`：站点的规范地址，没设 `origin` 时为 `none`。`site.language` 用
-`tag` 给出完整标签，用 `lang`、`script`、`region` 给出各部分——上面那种语言就是 `zh`、`Hant`、
-`TW`——而各部分正是 `#set text` 接受的东西：
+用 `@tola/site` 读取这些设置。`tola init` 创建的 `site.typ` 已经这样设置了文本语言。
 
 ```typst
 #import "@tola/site:0.0.0": site
-#let url = site.url                     // none when `origin` is unset
-#let tag = site.language.tag            // "zh-Hant-TW"
-#let script = site.language.script      // "Hant", or `auto` when none
-#let names = site.authors.map(author => author.name)
+#set text(lang: site.language.lang, script: site.language.script, region: site.language.region)
 ```
+
+手写 HTML 的 `lang` 属性时，用 `site.language.tag` 取完整语言标签，例如 `zh-Hant-TW`。需要把汉字转写成 ASCII slug 时，可把 `site.language.lang` 传给 `slugify` 的 `language` 参数。`ja` 按日语转写，其他值按中文转写。
+
+上面的配置对应的 `site.url` 是 `https://example.com/docs/`。省略 `origin` 时，`site.url` 为 `none`。想临时换个地址或部署路径，可以加 `--origin` 或 `--base-path`，只对本次运行生效。

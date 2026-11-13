@@ -1,22 +1,22 @@
-//! The `__tola_highlight` command: ANSI source text for terminal previews.
+//! Syntax highlighting for terminal previews.
 
 use nu_engine::CallExt;
 use nu_protocol::{
     Category, IntoPipelineData, PipelineData, ShellError, Signature, SyntaxShape, Type, Value,
-    engine::{Call, Command, EngineState, Stack},
+    engine::{Call, Command, CommandType, EngineState, Stack},
 };
 use tola_highlight::{ThemeChoice, render};
 
-pub(crate) fn declarations() -> Vec<Box<dyn Command>> {
-    vec![Box::new(Highlight)]
-}
-
 #[derive(Clone)]
-struct Highlight;
+pub(super) struct Highlight;
 
 impl Command for Highlight {
+    fn command_type(&self) -> CommandType {
+        CommandType::Custom
+    }
+
     fn name(&self) -> &str {
-        "__tola_highlight"
+        "syntax-highlight"
     }
 
     fn description(&self) -> &str {
@@ -37,7 +37,7 @@ impl Command for Highlight {
             .named(
                 "theme",
                 SyntaxShape::String,
-                "dark, light, or plain. Defaults to dark.",
+                "terminal, dark, light, or plain. Defaults to dark.",
                 None,
             )
             .category(Category::Formats)
@@ -52,11 +52,15 @@ impl Command for Highlight {
     ) -> Result<PipelineData, ShellError> {
         engine.signals().check(&call.head)?;
         let language: String = call.req(engine, stack, 0)?;
-        let theme = call
+        let mut theme = call
             .get_flag::<String>(engine, stack, "theme")?
             .as_deref()
             .and_then(ThemeChoice::parse)
             .unwrap_or(ThemeChoice::Dark);
+        if theme == ThemeChoice::Terminal && !stack.get_config(engine).use_ansi_coloring.get(engine)
+        {
+            theme = ThemeChoice::Plain;
+        }
         let text = match input {
             PipelineData::ByteStream(stream, _) => {
                 String::from_utf8_lossy(&stream.into_bytes()?).into_owned()

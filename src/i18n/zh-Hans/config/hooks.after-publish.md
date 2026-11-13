@@ -1,70 +1,106 @@
 # `[[hooks.after-publish]]`
 
-通过只读视图消费一个已提交的 revision，不再声明站点输出。
+文件发布后运行命令，例如上传站点。
 
 ## 配置项
 
 ### `enable`
 
-是否运行该 hook。
+默认启用。设为 `false` 跳过这个 hook。
 
 ### `name`
 
-该 hook 的名字，出现在状态行与诊断里。必须是一个不含空白的词，且在本阶段内唯一：为空、含空白、或在本阶段内重名都会报错。
+状态和错误消息里显示的名称。同一阶段内不能重名，名称不能为空或包含空白。
+
+### `order`
+
+非负整数，省略时为 `0`。同一站点或模块的 `after-publish` hook 按此数值从小到大执行。同序号的 hook 可以并行。
 
 ### `argv`
 
-运行的命令，从站点根执行，不经过隐式 shell。`TOLA_HOOK_INPUT_DIR` 是已发布站点的一份只读视图，因此这里失败不会撤销发布。
+从站点根目录运行的命令及参数。`argv` 和 `nu` 二选一。通过 `hook.inputDir` 读取已发布的文件。命令出错时，站点已经发布。
 
 ### `nu`
 
-嵌入式 Nu 脚本，相对于站点根。
+要运行的 Nu 脚本，路径相对于站点根目录。`nu` 和 `argv` 二选一。
 
 ### `args`
 
-传给 Nu 脚本的字面参数。
+传给 `nu` 脚本的参数，可省略。
 
 ### `enabled-by`
 
-启用该 hook 的站点顶层布尔选项。
+例如填 `"images.enable"`，只在 `[options.images]` 的 `enable` 为 `true` 时运行。省略时不检查选项。
 
 ### `dev`
 
-`tola dev` 是否运行该 hook：`"skip"`（默认）或 `"run"`。
+省略或设为 `"skip"` 时，`tola dev` 跳过。设为 `"run"` 时，开发构建成功后运行。
 
 ### `rerun-on`
 
-额外观察的站点相对模式，使用必填的 `include` 与可选的 `exclude`。所选输入变化触发一次完整的 `tola dev` 构建。
+开发模式下额外监听的输入。指定后须填 `include`，可省略 `exclude`。例如，用 `{ include = ["tools/upload.toml"] }` 在部署配置变更时触发重建，并让已启用的发布 hook 重新读取它。
 
 ## 用法
 
-这个阶段消费已成功提交的站点，例如把它同步到主机：
+### 读取发布结果
 
-`justfile`：
+从 `hook.inputDir` 读取本次发布的只读文件。跨次保留的文件放进 `hook.cacheDir`，只用一次的文件放进 `hook.tempDir`。要给站点添加发布文件，用 `generate-outputs`。
 
-```just
-rsync:
-    rsync -a --delete "$TOLA_HOOK_INPUT_DIR/" user@example.com:/srv/site/
+### 开发时什么时候运行
+
+`tola dev` 默认跳过这一步。设 `dev = "run"` 后，页面更新时会在后台运行 hook。如果 hook 还没跑完，期间又完成了多次构建，等它结束后只处理最新的一次。
+
+站点文件、命令和 `rerun-on` 监听的文件都没变时，沿用上次结果，即使上次失败了。退出 `tola dev` 会取消正在运行或还在排队的任务。
+
+示例：上传站点：
+
+确认能运行 `rsync` 后，把下面的脚本保存到站点根目录的 `upload.nu`。把示例目的地换成你有权限写入的目录。源路径末尾的 `/` 告诉 `rsync` 复制目录里的文件。
+
+```nu
+use tola get-context
+
+let input_dir = get-context | get hook.inputDir
+^rsync -a -- ($input_dir + "/") "user@example.com:/srv/site/"
 ```
 
-`tola.toml`：
+在 `tola.toml` 中加入以下配置。
 
 ```toml
 [[hooks.after-publish]]
-name = "rsync"
-argv = ["just", "rsync"]
+name = "upload"
+nu = "upload.nu"
 ```
 
-上面的 recipe 把刚发布的站点同步到主机。after-publish 在发布完成之后运行：`TOLA_HOOK_INPUT_DIR` 是一份只读快照，就是刚发布的那个站点，命令读取期间不会变。该阶段的 hook 执行时，视作先前构建已经成功：命令失败不会撤销发布（站点的构建结果已经写入 `build.publish-dir`）。这个阶段是发布之后的收尾：hook 可以用这份站点做事（上传、通知等）；它在这里写出的文件不属于这次发布，也不会被检查。要让站点多出文件，请在 `generate-outputs` 里生成——那里的输出会在发布前被检查，并随站点发布。
+从站点根目录运行 `tola build`。Tola 先发布站点，脚本再从 `hook.inputDir` 上传文件。上传失败时，`tola build` 返回错误，本地发布的文件仍在。
 
-`tola build` 等这些命令完成才退出；即使 output 已写出，消费者失败仍使命令结果失败。`check`、`preview`、`inspect` 与 `vendor` 从不运行它们。
+示例：检查发布后的首页有没有草稿标记：
 
-与所有 hook 阶段一样，这里的命令也只跑单次：开发监听由 Tola 负责，命令自己的增量与缓存由生产者自己编写（可用 `TOLA_HOOK_CACHE_DIR`）。
+在用 `tola init` 创建的站点中，给 `content/index.typ` 写一行 `DRAFT-MARKER`。把下面的脚本存为 `check-home.nu`，与 `tola.toml` 放在一起：
 
-开发模式默认跳过此阶段。设 `dev = "run"` 后，消费者串行运行，不阻塞浏览器更新。一个 revision 运行期间，只保留最新的等待 revision，因此中间 revision 可能没有消费者调用。重建如果没有带来任何变化（站点、命令与 `rerun-on` 内容都与上一次运行相同），就沿用上一次运行的结果（包括失败），不再重新运行命令。停止 `tola dev` 会取消正在运行的命令，并丢弃等待任务。这个模式适合处理最新站点的消费者，不适合审计每一个 revision。
+```nu
+use tola [get-context diagnostic]
 
-本阶段的命令环境：
-- `TOLA_HOOK_INPUT_DIR`：命令的输入——刚提交的那个站点的只读快照，布局与发布后的目录一致，整棵就是要上传的站点。
-- `TOLA_HOOK_STAGE`、`TOLA_BUILD_MODE`、`TOLA_HOOK_CACHE_DIR`、`TOLA_HOOK_TEMP_DIR`：与其它阶段相同——阶段名、模式（`prod` 或 `dev`）、跨次缓存目录、本次临时目录。
+let home = get-context | get hook.inputDir | path join "index.html"
 
-没有 `TOLA_HOOK_OUTPUT_DIR`：本阶段不添加 output。
+let issues = if (open --raw $home | str contains "DRAFT-MARKER") {
+  [
+    (
+      diagnostic make "Remove DRAFT-MARKER from the home page." --code draft-marker
+    )
+  ]
+} else {
+  []
+}
+$issues | diagnostic submit
+```
+
+把 hook 加到 `tola.toml`：
+
+```toml
+[[hooks.after-publish]]
+name = "check-home"
+nu = "check-home.nu"
+dev = "run"
+```
+
+从站点根目录运行 `tola build`。首页照常发布，Tola 会显示一条关于草稿标记的警告。删掉标记并重新构建，警告就会消失。设了 `dev = "run"`，开发构建发布后也会运行这项检查。

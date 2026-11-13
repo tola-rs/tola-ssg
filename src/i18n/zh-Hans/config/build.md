@@ -1,57 +1,58 @@
 # `[build]`
 
-站点如何构建：Typst 入口程序、源文件目录，以及发布目录。
+下面是 `tola.toml` 中的默认构建设置。
+
+```toml
+[build]
+entry = "site.typ"
+content-dir = "content"
+publish-dir = "public"
+```
+
+用 `tola init` 创建站点后，在 `content/index.typ` 写一行 `= Hello`。从站点根目录运行 `tola build`，会生成 `public/index.html`。
 
 ## 配置项
 
+### `par-hooks`
+
+默认允许同一站点或同一模块实例中，阶段和 `order` 都相同的 hook 并行。设为 `false` 后，仍按 `order` 逐个运行。
+
+### `hook-jobs`
+
+同时运行的 hook 数量上限，各模块和构建阶段共用。默认 `"auto"`，Tola 启动时按本机可用的并行度决定。也可以填正整数。设了 `par-hooks = false` 时，每次只运行一个。
+
 ### `entry`
 
-站点相对的 Typst 文件路径，或指定模块别名的表，例如 `{ module = "notes" }`。
+Typst 入口文件，默认是站点根目录下的 `site.typ`。也可以用 `{ module = "notes" }` 读 `notes` 模块声明的入口。
 
 ### `content-dir`
 
-站点源文件所在的目录，相对站点根。Tola 读取其下的 `.typ` 文件。
+从这个目录查找内容文件。路径相对于站点根目录，默认是 `content/`。
 
 ### `publish-dir`
 
-构建结果发布到的目录，相对站点根。该目录整棵归 Tola：Tola 没写过的非空目录会让构建失败；Tola 写过的目录，每次成功构建都会整棵替换。不要往里放其他东西。
+把站点发布到这个目录。路径相对于站点根目录，默认是 `public/`。请选择空目录或本站上次发布的目录，构建成功后会替换整个目录。
 
 ## 用法
 
-站点是一个 Typst Bundle，`entry` 是它的入口程序。它 import 的模板、helper 与页面程序都进入同一次编译。`tola init` 默认生成的脚手架将 `entry` 设置为站点根目录下的 `site.typ`。可指定其他站点文件，或设置 `entry = { module = "notes" }`，由已声明的模块实例提供 `[build].entry`。
+入口文件构建一个 Typst Bundle。它决定发布哪些源文件，并为每个 `#document` 指定输出路径。
 
-`content-dir` 决定源的身份：`content/guide/install.typ` 在 `all-sources()` 对应的 source 里，其 `path` 字段是 `guide/install.typ`。文件层级不影响 `permalink`；route segments 是由文件层级映射而来的“默认路由的分段”，方便你自定义路由。改名或移动源文件，身份与这些 segments 都会随之改变。`entry` 本身永远不是源；共享 helper 与模板请放在这个目录之外，这样就不会被当成内容。
+例如，`all-sources()` 读到 `content/guide/install.typ` 时，返回的 `path` 是 `guide/install.typ`。移动文件也会改变它的 `path` 和默认的 `route-segments`。Tola 会跳过入口文件。共用函数和模板请放在内容目录之外。
 
-发现过程不会发布页面：哪些源成为文档、各自使用哪个 output 路径，都由 `entry` 决定。例如，下面把已发现的 segments 转成默认 output 路径：
+`tola init` 生成的 `site.typ` 用下面的循环发布页面。新建 `content/guide/index.typ` 后运行 `tola build`，会生成 `public/guide/index.html`。
 
 ```typst
 #import "@tola/address:0.0.0": join-route, output-of
 #import "@tola/source:0.0.0": all-sources
-#let outputs = all-sources().map(source => output-of(join-route(source.route-segments)))
-```
-
-站点如果在入口里校验 metadata，也可以在这里筛掉草稿、把每个 source 的 `route-segments` slugify；这些策略由你自己定义。schema 用 `url-path` 解析 `permalink`，因此选中的 metadata 已经持有解码后的 route。它会覆盖文件布局给出的默认 route，使源移动后 URL 保持不变。
-
-```typst
-#let source-route(source) = {
-  if source.meta.permalink == none {
-    join-route(source.route-segments.map(segment => slugify(segment, language: site.language.lang)))
-  } else {
-    source.meta.permalink
-  }
-}
-
-#let select-pages(sources) = {
-  // Every source is validated here, drafts included, before choosing which to publish.
-  parse-sources(sources, page-schema)
-    .filter(source => not source.meta.draft)
-    .map(source => (
-      source: source,
-      output: output-of(source-route(source)),
-    ))
+#for source in all-sources() {
+  document(output-of(join-route(source.route-segments)), format: "html")[
+    #include source.file
+  ]
 }
 ```
 
-`publish-dir` 是 `tola build` 整体接管的目录：每次成功构建都替换整棵目录，旧 output 一并清掉。它要么是空目录，要么是 Tola 为这个站点写过的目录；已经放着别的内容、又不是 Tola 写出的目录，会让构建失败。手工维护的文件请通过 `[assets]` 或 `[[hooks.generate-outputs]]` 声明的 output 发布。发布前失败或取消会保留上次输出；`check`、`dev` 与 `preview` 不替换这个目录。
+要跳过草稿，可先用 `parse-sources` 校验 metadata，再筛掉草稿。要让页面移动后保留原 URL，可用 `@tola/schema` 的 `url-path` 解析 `permalink`，再把得到的 route 传给 `output-of`。
 
-两张子表调整构建：`[build.minify]` 压缩支持的 output 字节；`[build.references]` 为无效引用选择 `error` 或 `warn`。顶层 `[hooks]` 在编译前、output 生成时或发布后运行站点自己的命令。所有 output 汇入同一份完整结果，发布前统一检查冲突与引用，因此一个生产者不能悄悄替换另一个的文件。
+静态文件用 `[assets]` 发布，脚本生成的文件用 `[[hooks.generate-outputs]]` 声明。Tola 在发布前检查所有输出路径和引用。发布前出错或取消会保留上次的文件。
+
+`[build.minify]` 控制文件压缩。`[build.references]` 设置无效引用的诊断级别。

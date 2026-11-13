@@ -101,6 +101,7 @@ fn assert_default_compiles(source: &str) {
 /// The example site's configuration: one published asset tree and one icon collection.
 const EXAMPLE_SITE_CONFIG: &str = r#"[site]
 title = "Example site"
+origin = "https://example.test"
 
 [assets]
 [[assets.trees]]
@@ -226,14 +227,15 @@ const EXAMPLE_CONTENT: [(&str, &str); 7] = [
 /// - `assets/` is published below `/assets` and holds `logo.png`, an 8×4 opaque PNG, and
 ///   `mark.svg`.
 /// - `brand` is an icon collection with the icons `brand:mark` and `brand:logo`.
-/// - `site.base-path` is `/` and `site.title` is `Example site`.
+/// - `site.base-path` is `/`, `site.title` is `Example site`, and `site.origin` is
+///   `https://example.test`.
 /// - The world has Tola's embedded fonts and no system fonts, so an example that lays
 ///   content out — a math frame in a feed, for instance — renders offline.
 ///
 /// `source` becomes the site root's `main.typ`, so a relative path such as `assets/logo.png`
 /// reads from the site root. The example's own file is not a content source, so
 /// `current-source()` names no record here.
-fn world_from_example_site(source: &str) -> (TempDir, TypstWorld) {
+fn world_from_example_site(source: &str, files: &[(String, String)]) -> (TempDir, TypstWorld) {
     let directory = TempDir::new().unwrap();
     let config = crate::config::tests::load_test_config(directory.path(), EXAMPLE_SITE_CONFIG);
     let root = config.get_root();
@@ -263,6 +265,12 @@ fn world_from_example_site(source: &str) -> (TempDir, TypstWorld) {
     fs::create_dir_all(&icons).unwrap();
     fs::write(icons.join("mark.svg"), MARK_SVG).unwrap();
     fs::write(icons.join("logo.svg"), LOGO_SVG).unwrap();
+
+    for (path, contents) in files {
+        let path = root.join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, contents).unwrap();
+    }
 
     let cancellation = crate::cancellation::BuildCancellation::default();
     let collections = crate::icon::prepare(
@@ -329,15 +337,28 @@ impl ExampleWorld {
     }
 }
 
-/// The examples `docs` has: the documentation line each fence opens at, the fence body
-/// verbatim, and the world it compiles in.
+struct Example {
+    line: usize,
+    source: String,
+    world: ExampleWorld,
+    files: Vec<(String, String)>,
+}
+
+enum ExampleFence {
+    Typst(ExampleWorld),
+    File(String),
+    Output,
+}
+
+/// A named SVG or JSON fence supplies a file to the next `typst site` fence.
 ///
-/// A fence's info string is `typ`, `typc`, or `typst`, optionally followed by `site`, which
-/// selects the example site. Any other info string is an error naming its line.
-fn documented_examples(docs: &str) -> Result<Vec<(usize, String, ExampleWorld)>, String> {
+/// Typst fences without `site` compile with the default configuration. HTML fences show
+/// output and are not compiled.
+fn documented_examples(docs: &str) -> Result<Vec<Example>, String> {
     let mut examples = Vec::new();
-    let mut fence = None;
+    let mut fence: Option<(Option<u8>, usize, usize, ExampleFence)> = None;
     let mut source = String::new();
+    let mut files = Vec::new();
     for (index, line) in docs.lines().enumerate() {
         let trimmed = line.trim_start();
         let marker = trimmed.as_bytes().first().copied();
@@ -346,38 +367,69 @@ fn documented_examples(docs: &str) -> Result<Vec<(usize, String, ExampleWorld)>,
             .take_while(|byte| Some(*byte) == marker)
             .count();
         let is_fence = matches!(marker, Some(b'`' | b'~')) && length >= 3;
-        if let Some((opening, minimum, start, world)) = fence {
+        if let Some((opening, minimum, start, kind)) = &fence {
             if is_fence
-                && marker == opening
-                && length >= minimum
+                && marker == *opening
+                && length >= *minimum
                 && trimmed[length..].trim().is_empty()
             {
-                examples.push((start, std::mem::take(&mut source), world));
+                let contents = std::mem::take(&mut source);
+                match kind {
+                    ExampleFence::Typst(world) => {
+                        if *world == ExampleWorld::Default && !files.is_empty() {
+                            return Err(format!(
+                                "files before line {start} need a `typst site` fence"
+                            ));
+                        }
+                        examples.push(Example {
+                            line: *start,
+                            source: contents,
+                            world: *world,
+                            files: std::mem::take(&mut files),
+                        });
+                    }
+                    ExampleFence::File(path) => files.push((path.clone(), contents)),
+                    ExampleFence::Output => {}
+                }
                 fence = None;
-            } else {
+            } else if !matches!(kind, ExampleFence::Output) {
                 source.push_str(line);
                 source.push('\n');
             }
         } else if is_fence {
             let info = trimmed[length..].trim();
-            let world = match info.split_whitespace().collect::<Vec<_>>().as_slice() {
-                ["typ" | "typst" | "typc"] => ExampleWorld::Default,
-                ["typ" | "typst" | "typc", "site"] => ExampleWorld::ExampleSite,
+            let kind = match info.split_whitespace().collect::<Vec<_>>().as_slice() {
+                ["typ" | "typst" | "typc"] => ExampleFence::Typst(ExampleWorld::Default),
+                ["typ" | "typst" | "typc", "site"] => {
+                    ExampleFence::Typst(ExampleWorld::ExampleSite)
+                }
+                ["html"] => ExampleFence::Output,
+                [format @ ("svg" | "json"), path]
+                    if Path::new(path).extension().and_then(|ext| ext.to_str()) == Some(format)
+                        && Path::new(path)
+                            .components()
+                            .all(|part| matches!(part, std::path::Component::Normal(_))) =>
+                {
+                    ExampleFence::File((*path).to_owned())
+                }
                 _ => {
                     return Err(format!(
-                        "API examples must use a `typ`, `typc`, or `typst` fence, optionally \
-                         followed by `site`, at documentation line {}; found `{info}`",
+                        "invalid API example fence at documentation line {}: `{info}`; expected \
+                         a Typst fence, an `html` output fence, or `svg PATH` or `json PATH`",
                         index + 1
                     ));
                 }
             };
-            fence = Some((marker, length, index + 1, world));
+            fence = Some((marker, length, index + 1, kind));
         }
     }
     if let Some((_, _, start, _)) = fence {
         return Err(format!(
             "unclosed API example fence at documentation line {start}"
         ));
+    }
+    if !files.is_empty() {
+        return Err("example files must be followed by a `typst site` fence".to_owned());
     }
     Ok(examples)
 }
@@ -402,23 +454,33 @@ fn documented_examples_compile() {
             let Some(docs) = docs else { continue };
             let examples = documented_examples(&docs)
                 .unwrap_or_else(|error| panic!("{} / {name}: {error}", package.spec()));
-            for (index, (line, source, selected)) in examples.into_iter().enumerate() {
+            for (
+                index,
+                Example {
+                    line,
+                    source,
+                    world,
+                    files,
+                },
+            ) in examples.into_iter().enumerate()
+            {
                 // Compile exactly what the author can copy: injected imports or document
                 // wrappers would conceal missing dependencies and invalid placement.
-                let (_directory, world) = match selected {
+                let (_directory, compilation_world) = match world {
                     ExampleWorld::Default => {
                         world_from_default_config(&source, SourceRecords::default())
                     }
-                    ExampleWorld::ExampleSite => world_from_example_site(&source),
+                    ExampleWorld::ExampleSite => world_from_example_site(&source, &files),
                 };
-                let compilation = tola_typst::compile_bundle_world(&world, &Default::default());
+                let compilation =
+                    tola_typst::compile_bundle_world(&compilation_world, &Default::default());
                 assert!(
                     compilation.is_ok(),
                     "{} / {name} / example {} (documentation line {line}) in the {} world\n\
                      {source}\n{}",
                     package.spec(),
                     index + 1,
-                    selected.name(),
+                    world.name(),
                     compilation.unwrap_err(),
                 );
                 checked += 1;

@@ -5,13 +5,11 @@
 //! and no domain or build module may depend on this layer. Configuration loading shared by commands
 //! is `config`; process setup, cancellation, and exit status are `run`.
 mod args;
-mod argv;
 mod color;
 mod commands;
 mod config;
 mod dispatch;
 mod external;
-mod input;
 mod interaction;
 pub(crate) mod log;
 pub(crate) mod output;

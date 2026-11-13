@@ -35,23 +35,34 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tola_config::Config;
 
-/// How the site is built: its Typst entry, content directory, and published output.
+/// The Typst entry, content directory, and publish directory. These are the defaults in
+/// `tola.toml`.
+///
+/// ```toml
+/// [build]
+/// entry = "site.typ"
+/// content-dir = "content"
+/// publish-dir = "public"
+/// ```
+///
+/// With the `site.typ` created by `tola init`, write `= Hello` in `content/index.typ`. Run
+/// `tola build` from the site directory to write `public/index.html`.
 #[derive(Debug, Clone, Serialize, Deserialize, Config)]
 #[serde(default)]
 #[config(section = "build")]
 pub struct BuildSectionConfig {
-    /// Project Typst file relative to the site root, or a table with the selected module alias.
+    /// Typst file to run, relative to the site root. If omitted, use `site.typ`.
+    /// Set `{ module = "notes" }` to use the `notes` module's entry.
     pub entry: BuildEntry,
 
-    /// Directory the site's sources are written in, relative to the site root. Tola reads the
-    /// `.typ` files below it.
+    /// Directory to search for content files, relative to the site root. If omitted, use `content/`.
     #[config(name = "content-dir")]
     #[serde(rename = "content-dir")]
     pub content_dir: PathBuf,
 
-    /// Directory the built site is published to, relative to the site root. Tola owns everything
-    /// below it: a non-empty directory Tola did not write fails the build, and every successful
-    /// build replaces the whole directory. Keep nothing else there.
+    /// Where to write the site, relative to the site root. If omitted, use `public/`.
+    /// Choose an empty directory or the one where Tola published this site before.
+    /// A successful `tola build` replaces the directory contents.
     #[config(name = "publish-dir")]
     #[serde(rename = "publish-dir")]
     pub publish_dir: PathBuf,
@@ -114,62 +125,39 @@ impl Default for BuildSectionConfig {
 impl BuildSectionConfig {
     /// What `tola help "[build]"` adds under its table.
     pub const HELP: &'static str = "\
-The site is one Typst Bundle, and `entry` is its starting program. Its imports — templates,
-helpers, and page programs — join the same compilation. The `tola init` scaffold sets `entry` to
-the site root's `site.typ`. Set `entry` to a different project file, or use
-`entry = { module = \"notes\" }` to compile the configured module's `build.entry`.
+The entry builds one Typst Bundle. It decides which sources to publish and passes an output path
+to `#document` for each page.
 
-`content-dir` defines source identity: `content/guide/install.typ` arrives in `all-sources()` as
-a source whose `path` field is `guide/install.typ`. The file layout does not affect `permalink`;
-the route segments it suggests are just the default route's segments, which you can replace with
-your own. Moving or renaming it changes that identity and those segments. The entry file is never
-a source; keep shared helpers and templates outside this directory so discovery does not treat
-them as content.
+`all-sources()` reports `content/guide/install.typ` as `guide/install.typ`. Moving the file
+changes its `path` and default `route-segments`. The entry file is excluded from discovery.
+Keep shared helpers and templates outside `content-dir`.
 
-Discovery does not publish a page. The entry chooses which sources become documents and which
-output paths they use. For example, this converts the discovered segments to default output paths:
+The template from `tola init` uses this loop in `site.typ`. With a new `content/guide/index.typ`,
+`tola build` writes `public/guide/index.html`.
 
 ```typst
 #import \"@tola/address:0.0.0\": join-route, output-of
 #import \"@tola/source:0.0.0\": all-sources
-#let outputs = all-sources().map(source => output-of(join-route(source.route-segments)))
-```
-
-A site that validates metadata can drop drafts and slugify each source's `route-segments` in its
-entry; these policies are yours to define and handle. A schema parses `permalink` with
-`url-path`, so the selected metadata already holds a decoded route. That route overrides the
-file layout, keeping the URL unchanged when the source moves.
-
-```typst
-#let source-route(source) = {
-  if source.meta.permalink == none {
-    join-route(source.route-segments.map(segment => slugify(segment, language: site.language.lang)))
-  } else {
-    source.meta.permalink
-  }
-}
-
-#let select-pages(sources) = {
-  // Every source is validated here, drafts included, before choosing which to publish.
-  parse-sources(sources, page-schema)
-    .filter(source => not source.meta.draft)
-    .map(source => (
-      source: source,
-      output: output-of(source-route(source)),
-    ))
+#for source in all-sources() {
+  document(output-of(join-route(source.route-segments)), format: \"html\")[
+    #include source.file
+  ]
 }
 ```
 
-`publish-dir` is the directory `tola build` replaces as a whole, removing stale outputs. Choose an
-empty directory or one Tola already owns for this site; a non-empty directory Tola did not write
-fails the build. Hand-maintained files belong in `[assets]` or in outputs declared under
-`[[hooks.generate-outputs]]`. Errors or cancellation before publication leave the previous
-output intact. `check`, `dev`, and `preview` do not replace this directory.
+To skip drafts, validate metadata with `parse-sources` before filtering. To keep a page URL
+when the source moves, parse its `permalink` with `@tola/schema`'s `url-path` and use that route
+in `output-of`.
 
-`[build.minify]` compacts supported output bytes, and `[build.references]` chooses `error`
-or `warn` for broken references. The top-level `[hooks]` table runs the site's commands before
-compilation, during output generation, or after publication. Conflicts and references are
-checked across all outputs before publication.";
+Put static files in `[assets]` and declare generated files in `[[hooks.generate-outputs]]`.
+Tola checks all output paths and references before publication. A failure or cancellation
+before publication leaves the previous files in place.
+
+`par-hooks` defaults to true, allowing hooks with the same order to run together. Set it to false
+to run one hook at a time. `hook-jobs` defaults to `\"auto\"`, using the available parallelism for
+the site session; a positive integer sets an explicit shared limit across modules and stages.
+
+`[build.minify]` controls minification. `[build.references]` sets the severity of broken references.";
 
     pub(crate) fn validate_paths(&self, diag: &mut ConfigDiagnostics) {
         if let Some(entry) = self.entry.project_path() {

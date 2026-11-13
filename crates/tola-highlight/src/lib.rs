@@ -41,7 +41,9 @@ pub fn code_language(language: &str) -> &str {
 /// The palette used to paint a preview.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ThemeChoice {
-    /// A dark palette for the default TUI surface.
+    /// The terminal's ANSI colors and default foreground.
+    Terminal,
+    /// A dark palette for terminal previews.
     Dark,
     /// A light palette for terminal previews.
     Light,
@@ -53,6 +55,7 @@ impl ThemeChoice {
     /// Parse a theme name. Unknown names return `None` so the caller can decide.
     pub fn parse(name: &str) -> Option<Self> {
         match name.trim().to_ascii_lowercase().as_str() {
+            "terminal" => Some(Self::Terminal),
             "dark" => Some(Self::Dark),
             "light" => Some(Self::Light),
             "plain" | "none" | "never" => Some(Self::Plain),
@@ -63,6 +66,7 @@ impl ThemeChoice {
     /// The canonical name of this choice.
     pub const fn name(self) -> &'static str {
         match self {
+            Self::Terminal => "terminal",
             Self::Dark => "dark",
             Self::Light => "light",
             Self::Plain => "plain",
@@ -85,13 +89,15 @@ static EXTRA_SYNTAXES: LazyLock<Vec<SyntaxSet>> = LazyLock::new(|| {
         })
         .collect()
 });
-static DARK: LazyLock<Theme> = LazyLock::new(|| palette(true));
-static LIGHT: LazyLock<Theme> = LazyLock::new(|| palette(false));
+static TERMINAL: LazyLock<Theme> = LazyLock::new(|| palette(ThemeChoice::Terminal));
+static DARK: LazyLock<Theme> = LazyLock::new(|| palette(ThemeChoice::Dark));
+static LIGHT: LazyLock<Theme> = LazyLock::new(|| palette(ThemeChoice::Light));
 
 /// Styles over the original source. Layout and source offsets are preserved.
 pub struct Highlighted<'a> {
     source: &'a str,
     runs: Vec<(Range<usize>, Style)>,
+    terminal_colors: bool,
 }
 
 impl Highlighted<'_> {
@@ -106,7 +112,7 @@ impl Highlighted<'_> {
             let start = span.start.max(range.start);
             let end = span.end.min(range.end);
             out.push_str(&self.source[offset..start]);
-            push_ansi(out, *style, &self.source[start..end]);
+            push_ansi(out, *style, &self.source[start..end], self.terminal_colors);
             offset = end;
         }
         out.push_str(&self.source[offset..range.end]);
@@ -116,11 +122,16 @@ impl Highlighted<'_> {
 /// Find terminal styles for a fence tag or file extension. Unknown languages read plain.
 pub fn highlight<'a>(source: &'a str, language: &str, theme: ThemeChoice) -> Highlighted<'a> {
     let mut runs = Vec::new();
+    let terminal_colors = theme == ThemeChoice::Terminal;
     if let Some(theme) = theme_of(theme) {
         let highlighter = Highlighter::new(theme);
         collect(source, language, theme, &highlighter, 0, &mut runs);
     }
-    Highlighted { source, runs }
+    Highlighted {
+        source,
+        runs,
+        terminal_colors,
+    }
 }
 
 /// Sanitize source for a terminal preview and paint the whole result.
@@ -134,6 +145,7 @@ pub fn render(source: &str, language: &str, theme: ThemeChoice) -> String {
 
 fn theme_of(choice: ThemeChoice) -> Option<&'static Theme> {
     match choice {
+        ThemeChoice::Terminal => Some(&TERMINAL),
         ThemeChoice::Dark => Some(&DARK),
         ThemeChoice::Light => Some(&LIGHT),
         ThemeChoice::Plain => None,
@@ -266,12 +278,18 @@ fn raw_body(node: &LinkedNode<'_>) -> Option<Range<usize>> {
     Some(first.start..end)
 }
 
-fn push_ansi(out: &mut String, style: Style, text: &str) {
+fn push_ansi(out: &mut String, style: Style, text: &str, terminal_colors: bool) {
     if text.is_empty() {
         return;
     }
     let fg = style.foreground;
-    let mut codes = format!("38;2;{};{};{}", fg.r, fg.g, fg.b);
+    // Syntect stores only RGB colors. The terminal palette stores SGR foreground codes
+    // in the blue channel so the same syntax scopes can use the terminal's own colors.
+    let mut codes = if terminal_colors {
+        fg.b.to_string()
+    } else {
+        format!("38;2;{};{};{}", fg.r, fg.g, fg.b)
+    };
     let font = style.font_style;
     if font.contains(FontStyle::BOLD) {
         codes.push_str(";1");
@@ -350,7 +368,7 @@ fn item(scope: &str, foreground: Option<u32>, font_style: Option<FontStyle>) -> 
     }
 }
 
-fn palette(dark: bool) -> Theme {
+fn palette(choice: ThemeChoice) -> Theme {
     let (
         foreground,
         comment,
@@ -372,28 +390,27 @@ fn palette(dark: bool) -> Theme {
         key,
         value,
         invalid,
-    ) = if dark {
-        (
+    ) = match choice {
+        ThemeChoice::Terminal => (
+            39, 90, 36, 36, 39, 35, 36, 35, 33, 32, 36, 36, 33, 35, 35, 32, 31, 36, 32, 31,
+        ),
+        ThemeChoice::Dark => (
             0xc9d1d9, 0x8b949e, 0x56d4dd, 0x56d4dd, 0xe6edf3, 0xd2a8ff, 0x79c0ff, 0xff7b72,
             0xffa657, 0xa5d6a7, 0x79c0ff, 0x79c0ff, 0xffa657, 0xd2a8ff, 0xd2a8ff, 0x7ee787,
             0xff7b72, 0x79c0ff, 0xa5d6a7, 0xff7b72,
-        )
-    } else {
-        (
+        ),
+        ThemeChoice::Light => (
             0x24292f, 0x74747c, 0x1d6c76, 0x1d6c76, 0x1f2328, 0x8b41b1, 0x1d6c76, 0xd73948,
             0xb60157, 0x198810, 0x4b69c6, 0x16718d, 0x301414, 0x8b41b1, 0x8b41b1, 0x198810,
             0xd73948, 0x4b69c6, 0x198810, 0xd73948,
-        )
+        ),
+        ThemeChoice::Plain => unreachable!("plain text has no theme"),
     };
     let bold = Some(FontStyle::BOLD);
     let italic = Some(FontStyle::ITALIC);
     let underline = Some(FontStyle::UNDERLINE);
     Theme {
-        name: Some(if dark {
-            "Tola Dark".into()
-        } else {
-            "Tola Light".into()
-        }),
+        name: Some(choice.name().into()),
         author: Some("The Tola Project Developers".into()),
         settings: ThemeSettings {
             foreground: color(foreground),

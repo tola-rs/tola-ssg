@@ -1,16 +1,17 @@
 # `@tola/diagnostic`
 
-从 Typst 运行中的代码提交结构化报告
+在 Typst 中报告警告和错误。
 
 ## `report`
 
-在不中断 Typst 求值的情况下报告问题。
+报告问题后继续处理 Typst 文档。
 
-默认位置是本函数的实际调用处。把 content 传给 `at` 会改用该内容自身的原生源码位置；传 `none` 则得到一个没有源码位置的问题。生成或经过变换的内容可能没有位置，此时不会猜测源码位置。排版位置、字符串路径或字典都不能代替源码内容。
+默认在调用处显示消息。要指出某个标题或链接，把该元素传给 `at`。传 `none` 时不显示位置。
 
-Tola 收集 error、warning、info 和 hint 四种级别的报告。error 会让求值之后的检查或发布失败；要立即停止求值，请改用 Typst 自身的错误路径。报告和它可选的规则代码都归调用的项目或包所有。
+检查或构建遇到 `error` 会失败，遇到 `warning` 可以继续。想直接停下 Typst 编译，用 `panic`。
 
-Example - 针对作者写的内容报告问题，附上提示，并关联另一个源码值：
+
+把下面的代码放到 `tola init` 站点的 `content/index.typ`。运行 `tola check`，警告会指向 `value`，并附上提示和 `original` 的位置。
 
 ```typst
 #import "@tola/diagnostic:0.0.0": report
@@ -27,20 +28,20 @@ Example - 针对作者写的内容报告问题，附上提示，并关联另一�
 
 ### `severity`
 
-`"error"`、`"warning"`、`"info"` 或 `"hint"`，默认为 `"warning"`。
+省略时报告 `"warning"`。也可设为 `"error"`、`"info"` 或 `"hint"`。
 
 ### `code`
 
-可选的、由调用方负责的非空规则代码。
+规则名。省略时不附规则名，提供时不能是空字符串。
 
 ### `at`
 
-调用处本身、某个内容值的原生位置，或没有位置。
+省略或传 `auto` 时指向调用处。传入 Typst 内容时，指向其源码位置。传 `none` 时省略位置。
 
 ### `hints`
 
-用作解释的字符串数组。
+给站点作者看的提示，例如修复建议。可省略。
 
 ### `related`
 
-字典数组，每项只有 `message`（str）和 `at`（content 或 none）。
+相关位置的列表。每项填 `message`（字符串）和 `at`（Typst 内容或 `none`）。

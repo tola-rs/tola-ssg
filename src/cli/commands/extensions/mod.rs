@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 
 use anyhow::{Context, Result, ensure};
-use clap::{Args, CommandFactory, FromArgMatches, parser::ValueSource};
+use clap::{Args, CommandFactory, FromArgMatches};
 use tola_build::report::{REPORT_PATH_ENV, ReportChannel, ReportSources};
 use tola_input::InputMode;
 use tola_module::{Action, CommandAction};
@@ -20,9 +20,8 @@ mod help;
 mod init;
 
 use argv::{complete_report, process_command};
-pub(in crate::cli) use help::module_command_signatures;
 use help::{
-    command_help, command_signatures, is_help, namespace_command, namespace_help, render_help,
+    command_help, command_signature, is_help, namespace_command, namespace_help, render_help,
     signature_command,
 };
 use init::run_initializer;
@@ -59,47 +58,24 @@ impl ExtensionArgs {
     pub(in crate::cli) fn parse(
         namespace: &str,
         arguments: &[OsString],
-        global: &mut ProcessArgs,
-    ) -> Result<Self, clap::Error> {
-        let command = namespace_options(namespace)
-            .color(crate::cli::parse::stream_color(
-                global.color,
-                crate::terminal::color::Stream::Stderr,
-            ))
-            .arg(
-                clap::Arg::new("command_args")
-                    .value_name("COMMAND")
-                    .num_args(1..)
-                    .trailing_var_arg(true)
-                    .value_parser(clap::value_parser!(OsString)),
-            );
-        let mut command = observe_help(command);
-        let mut matches = command.try_get_matches_from_mut(
+    ) -> Result<(Self, ProcessArgs), clap::Error> {
+        let command = namespace_options(namespace).arg(
+            clap::Arg::new("command_args")
+                .value_name("COMMAND")
+                .num_args(1..)
+                .trailing_var_arg(true)
+                .value_parser(clap::value_parser!(OsString)),
+        );
+        let mut matches = observe_help(command).try_get_matches_from(
             std::iter::once(std::ffi::OsStr::new(namespace))
                 .chain(arguments.iter().map(OsString::as_os_str)),
         )?;
-        let color_is_explicit = matches.value_source("color") == Some(ValueSource::CommandLine);
         let NamespaceOptions {
             process,
             input,
             config,
         } = NamespaceOptions::from_arg_matches(&matches)?;
-        if (global.log_file.is_some() && process.no_log_file)
-            || (global.no_log_file && process.log_file.is_some())
-        {
-            return Err(command.error(
-                clap::error::ErrorKind::ArgumentConflict,
-                "--log-file conflicts with --no-log-file",
-            ));
-        }
-        if color_is_explicit {
-            global.color = process.color;
-        }
-        global.log_file = process.log_file.or(global.log_file.take());
-        global.no_log_file |= process.no_log_file;
-        global.quiet |= process.quiet;
-        global.verbose = global.verbose.saturating_add(process.verbose);
-        Ok(Self {
+        let args = Self {
             namespace: namespace.to_owned(),
             config,
             input,
@@ -109,7 +85,8 @@ impl ExtensionArgs {
                 .into_iter()
                 .flatten()
                 .collect(),
-        })
+        };
+        Ok((args, process))
     }
 }
 
@@ -119,10 +96,7 @@ pub(in crate::cli) fn run(
     output: &CommandOutput,
     cancellation: &Cancellation,
 ) -> Result<()> {
-    let resources = crate::cli::config::build_resources_with_fonts(
-        mode,
-        &crate::cli::CompilerFontArgs::default(),
-    )?;
+    let resources = crate::cli::config::build_resources(mode);
     let loaded = match crate::cli::config::load_optional_config(
         &args.config,
         &TypstPackageArgs::default(),
@@ -136,6 +110,9 @@ pub(in crate::cli) fn run(
         Err(error) => return Err(error),
     };
     let config = std::sync::Arc::new(loaded.into_config());
+    if !config.modules().contains_key(&args.namespace) {
+        return Err(unrecognized_subcommand(&args.namespace));
+    }
     let modules = tola_build::modules::select_command_modules(
         config.get_root(),
         config.vendor().path.as_deref(),
@@ -148,16 +125,8 @@ pub(in crate::cli) fn run(
         .get(&args.namespace)
         .with_context(|| format!("no site module declares `{}`", args.namespace))?;
     if args.command_args.is_empty() || args.help.is_some() {
-        let signatures = command_signatures(
-            module,
-            module.commands.keys().map(String::as_str),
-            config.get_root(),
-            config.config_path(),
-            mode.scope(),
-        )?;
         return output.write_stdout(namespace_help(
             module,
-            &signatures,
             output.terminal().stdout_uses_color(),
             args.help == Some(HelpLength::Long),
         ));
@@ -170,12 +139,11 @@ pub(in crate::cli) fn run(
         return run_initializer(module, tail, &config, mode, output, cancellation);
     }
     let Some(declared) = module.commands.get(name) else {
-        let command =
-            namespace_command(module, &BTreeMap::new()).color(if output.terminal().uses_color() {
-                clap::ColorChoice::Always
-            } else {
-                clap::ColorChoice::Never
-            });
+        let command = namespace_command(module).color(if output.terminal().uses_color() {
+            clap::ColorChoice::Always
+        } else {
+            clap::ColorChoice::Never
+        });
         let error = command
             .try_get_matches_from([module.name.as_str(), name])
             .expect_err("an undeclared module command is rejected");
@@ -186,19 +154,24 @@ pub(in crate::cli) fn run(
         let color = output.terminal().stdout_uses_color();
         let long = tail[0] == "--help";
         if matches!(&action, CommandAction::Execute(Action::Nu { .. })) {
-            let mut signatures = command_signatures(
+            match command_signature(
                 module,
-                std::iter::once(name),
+                name,
                 config.get_root(),
                 config.config_path(),
                 mode.scope(),
-            )?;
-            if let Some(signature) = signatures.remove(name).transpose()? {
-                return output.write_stdout(render_help(
-                    signature_command(module, name, signature),
-                    color,
-                    long,
-                ));
+            )
+            .transpose()
+            {
+                Ok(Some(signature)) => {
+                    return output.write_stdout(render_help(
+                        signature_command(module, name, signature),
+                        color,
+                        long,
+                    ));
+                }
+                Err(error) if declared.help.trim().is_empty() => return Err(error),
+                _ => {}
             }
         }
         return output.write_stdout(command_help(module, name, declared, color, long));

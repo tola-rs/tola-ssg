@@ -83,7 +83,7 @@ impl Parameter {
 /// value it returns.
 #[derive(Debug, Clone)]
 pub struct Signature {
-    /// The name a caller imports.
+    /// The function or method name.
     pub name: String,
     /// The parameters callers pass, in declaration order.
     pub parameters: Vec<Parameter>,

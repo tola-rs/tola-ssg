@@ -303,9 +303,9 @@ impl Repr for LocatedRelation {
 #[func]
 fn datalog_relation(
     span: Span,
-    /// Exact nonempty relation name.
+    /// A nonempty, case-sensitive relation name.
     name: Spanned<Str>,
-    /// The nonnegative number of terms in an atom of this relation.
+    /// Number of columns. A nonnegative integer.
     arity: Spanned<i64>,
 ) -> SourceResult<LocatedRelation> {
     if name.v.is_empty() {
@@ -330,7 +330,9 @@ impl LocatedRelation {
     fn atom(
         self,
         span: Span,
-        /// One constant or variable per column.
+        /// Pass one constant or variable per column. For `edge = relation("edge", 2)`,
+        /// `edge.atom("a", "b")` can go in `facts`. In a query, `edge.atom("a", var("target"))`
+        /// matches links from `"a"`. For a zero-column relation, call `atom()`.
         #[variadic]
         terms: Vec<Spanned<Value>>,
     ) -> SourceResult<Value> {
@@ -364,7 +366,7 @@ impl LocatedRelation {
 
 #[func]
 fn datalog_var(
-    /// Exact nonempty variable name.
+    /// A nonempty, case-sensitive variable name.
     name: Spanned<Str>,
 ) -> SourceResult<Value> {
     if name.v.is_empty() {
@@ -378,7 +380,7 @@ fn datalog_var(
 
 #[func]
 fn datalog_negate(
-    /// Atom that must have no matching row.
+    /// The atom to look up. The condition holds if no row matches.
     atom: Spanned<Value>,
 ) -> SourceResult<Value> {
     let atom = get_atom(&atom.v, atom.span)?;
@@ -391,9 +393,9 @@ fn datalog_negate(
 fn datalog_rule(
     /// Atom to derive.
     head: Spanned<Value>,
-    /// First body literal.
+    /// The first condition, a positive atom or a `negate` condition.
     literal: Spanned<Value>,
-    /// Further body literals.
+    /// Additional conditions, passed one at a time.
     #[variadic]
     rest: Vec<Spanned<Value>>,
 ) -> SourceResult<Value> {
@@ -409,7 +411,7 @@ fn datalog_database(
     span: Span,
     /// Relation declarations, including relations with no facts or rules.
     relations: Spanned<Array>,
-    /// Ground atoms, default `()`.
+    /// Known rows. Each row must contain only constants. Defaults to `()`.
     #[named]
     #[default(Spanned::detached(Array::new()))]
     facts: Spanned<Array>,
@@ -561,13 +563,13 @@ static QUERY: NativeFuncData = NativeFuncData {
             parameter("self", "", DatalogDatabase::input(), false),
             parameter(
                 "select",
-                "Variables in output column order.",
+                "Pass an array of variables in output column order. You can repeat a variable.",
                 Array::input(),
                 true,
             ),
             parameter(
                 "where",
-                "Atoms and negated atoms that must hold.",
+                "Pass an array of conditions. Each atom or `negate` condition must hold. Use `()` for no conditions.",
                 Array::input(),
                 true,
             ),

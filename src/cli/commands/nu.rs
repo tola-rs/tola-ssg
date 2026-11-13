@@ -1,15 +1,17 @@
 //! Select a Nu environment without running hooks or compiling the page driver.
 
+pub(super) mod diagnostic;
+
 use crate::cancellation::Cancellation;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tola_build::BuildResources;
 use tola_build::cancellation::BuildCancellation;
 use tola_build::config::ResolvedSiteConfig;
-use tola_build::report::{ReportBatch, ReportSources};
+use tola_build::report::{REPORT_PATH_ENV, ReportSources};
 use tola_diagnostic::{Diagnostic, DiagnosticError};
 use tola_nu::Host;
 
@@ -18,9 +20,37 @@ use tola_build::config::ConfigSource;
 use tola_build::modules::read_nu_modules;
 use tola_input::{InputMode, InputScope};
 use tola_module::manifest::NuModule;
-use tola_nu::{ConfiguredModule, InvocationContext, Runtime, SourceOverlay, serve_lsp};
+use tola_nu::{BuiltinModule, ConfiguredModule, InvocationContext, Runtime, SourceOverlay, serve_lsp};
 
 use crate::cli::args::NuArgs;
+
+pub(in crate::cli) const BUILTIN_MODULES: &[BuiltinModule] = &[BuiltinModule {
+    name: "nu-helpers",
+    summary: "Pick original values from a searchable table",
+    executable: false,
+    entry: "mod.nu",
+    sources: &[
+        (
+            "mod.nu",
+            include_bytes!("../../../modules/nu-helpers/mod.nu"),
+        ),
+        (
+            "pick.nu",
+            include_bytes!("../../../modules/nu-helpers/pick.nu"),
+        ),
+    ],
+}];
+
+pub(super) fn prepare_runtime(
+    modules: Vec<ConfiguredModule>,
+    dependencies: Vec<PathBuf>,
+    context: InvocationContext,
+    overlays: Vec<SourceOverlay>,
+) -> Result<Runtime> {
+    Ok(Runtime::for_invocation_with_builtins(
+        modules, dependencies, context, overlays, BUILTIN_MODULES,
+    )?)
+}
 
 pub(in crate::cli) fn run(args: &NuArgs, input_scope: Option<&str>) -> ExitCode {
     match execute(args, input_scope) {
@@ -79,7 +109,7 @@ fn execute(args: &NuArgs, input_scope: Option<&str>) -> Result<i32> {
     let cancellation = Cancellation::install()?;
     let token = cancellation.token();
     let inherited = if args.no_site {
-        Host::default()
+        host()
     } else {
         external_host()
     };
@@ -244,7 +274,7 @@ pub(super) fn environment(scope: InputScope) -> BTreeMap<String, Option<String>>
         "TOLA_INIT_TARGET_DIR",
         "TOLA_INIT_OUTPUT_DIR",
         "TOLA_INIT_INTERACTIVE",
-        "TOLA_REPORT_PATH",
+        REPORT_PATH_ENV,
     ] {
         env.insert(name.into(), None);
     }
@@ -292,7 +322,7 @@ fn runtime(
             });
         }
     }
-    Ok(Runtime::for_invocation_with_overlays(
+    prepare_runtime(
         libraries,
         dependencies,
         InvocationContext {
@@ -300,7 +330,7 @@ fn runtime(
             environment: environment(scope),
         },
         overlays.to_vec(),
-    )?)
+    )
 }
 
 fn module_records(
@@ -384,7 +414,7 @@ fn prepare(
         entry,
         overlays,
         site,
-        Host::default(),
+        host(),
         &token,
     )
 }
@@ -404,7 +434,7 @@ fn prepare_invocation(
             alias.is_none(),
             "a configured Nu module requires a site with tola.toml"
         );
-        return Ok(Runtime::for_invocation_with_overlays(
+        return Ok(prepare_runtime(
             Vec::new(),
             Vec::new(),
             InvocationContext {
@@ -452,8 +482,17 @@ fn prepare_invocation(
     Ok(runtime.with_host(inherited)?)
 }
 
+pub(super) fn host() -> Host {
+    Host {
+        render_diagnostics: Some(Arc::new(|directory, issues, color| {
+            diagnostic::render(directory, issues, color).map_err(|error| error.to_string())
+        })),
+        ..Host::default()
+    }
+}
+
 fn external_host() -> Host {
-    let mut host = Host::default();
+    let mut host = host();
     let variable = |name| std::env::var(name).ok().filter(|value| !value.is_empty());
     if let Some(stage) = variable("TOLA_HOOK_STAGE") {
         host.hook = Some(json!({
@@ -474,12 +513,10 @@ fn external_host() -> Host {
     } else if variable("TOLA_CONFIG_PATH").is_some() {
         host.module = variable("TOLA_MODULE_NAME");
     }
-    if let Some(path) = variable("TOLA_REPORT_PATH") {
-        host.diagnostic = Some(Arc::new(move |issues| {
-            let batch = json!({ "schemaVersion": 1, "diagnostics": issues });
-            let bytes = serde_json::to_vec(&batch).map_err(|error| error.to_string())?;
-            std::fs::write(&path, bytes)
-                .map_err(|error| format!("write diagnostic report: {error}"))
+    if let Some(path) = std::env::var_os(REPORT_PATH_ENV).filter(|value| !value.is_empty()) {
+        let path = PathBuf::from(path);
+        host.submit_diagnostics = Some(Arc::new(move |issues| {
+            diagnostic::submit_file(&path, issues)
         }));
     }
     host
@@ -533,27 +570,6 @@ fn query_operation(
     })
 }
 
-pub(super) fn diagnostic_collector(
-    producer: String,
-    sources: ReportSources,
-) -> (tola_nu::Diagnostic, Arc<Mutex<Vec<Diagnostic>>>) {
-    let diagnostics = Arc::new(Mutex::new(Vec::new()));
-    let collected = diagnostics.clone();
-    let submit: tola_nu::Diagnostic = Arc::new(move |issues| {
-        let diagnostics = serde_json::from_value(issues).map_err(|error| error.to_string())?;
-        let batch = ReportBatch {
-            schema_version: 1,
-            diagnostics,
-        };
-        let issues = batch
-            .validate(&producer, &sources)
-            .map_err(|error| error.to_string())?;
-        *collected.lock().expect("diagnostic collector") = issues;
-        Ok(())
-    });
-    (submit, diagnostics)
-}
-
 pub(crate) fn hook_runner() -> tola_build::hooks::HookRunner {
     use tola_build::build::BuildMode;
     tola_build::hooks::HookRunner::new(|hook| {
@@ -592,7 +608,7 @@ pub(crate) fn hook_runner() -> tola_build::hooks::HookRunner {
             Some(origin) => format!("hook:{stage}:{}.{}", origin.name, name),
             None => format!("hook:{stage}:{name}"),
         };
-        let (submit, diagnostics) = diagnostic_collector(producer, ReportSources::new());
+        let (submit, diagnostics) = diagnostic::collector(producer, ReportSources::new());
         let runtime = runtime(directory, &config, &modules, &[], hook.scope)?.with_host(Host {
             site: Some(site_record(&config)), modules: module_records(&modules, directory, hook.assets)?,
             module: hook.origin.map(|origin| origin.name.clone()),
@@ -601,11 +617,15 @@ pub(crate) fn hook_runner() -> tola_build::hooks::HookRunner {
                 "output-dir": hook.output_dir, "cache-dir": hook.cache_dir, "temp-dir": hook.temp_dir,
             })),
             query: Some(query_operation(config.clone(), resources, token.clone())),
-            diagnostic: Some(submit), ..Default::default()
+            submit_diagnostics: Some(submit), ..host()
         })?.with_cancellation(token.signal_flag());
         let status = runtime.run_embedded(hook.path, hook.args)?;
         token.ensure_active()?;
-        let diagnostics = std::mem::take(&mut *diagnostics.lock().expect("diagnostic collector"));
+        let diagnostics = diagnostics
+            .lock()
+            .expect("diagnostic collector")
+            .take()
+            .unwrap_or_default();
         if status != 0 {
             return Err(DiagnosticError::new(
                 format!("{stage} hook `{name}` exited with status {status}"),
@@ -637,20 +657,24 @@ pub(super) fn run_action(
         &token,
     )?;
     let (submit, diagnostics) =
-        diagnostic_collector(format!("command:{alias}.{command}"), ReportSources::new());
+        diagnostic::collector(format!("command:{alias}.{command}"), ReportSources::new());
     let runtime = runtime(directory, &config, &modules, &[], scope)?
         .with_host(Host {
             site: Some(site_record(&config)),
             modules: module_records(&modules, directory, None)?,
             module: Some(alias.into()),
             query: Some(query_operation(config.clone(), resources, token.clone())),
-            diagnostic: Some(submit),
-            ..Default::default()
+            submit_diagnostics: Some(submit),
+            ..host()
         })?
         .with_cancellation(token.signal_flag());
     let status = runtime.run_embedded(path, arguments)?;
     token.ensure_active()?;
-    let diagnostics = std::mem::take(&mut *diagnostics.lock().expect("diagnostic collector"));
+    let diagnostics = diagnostics
+        .lock()
+        .expect("diagnostic collector")
+        .take()
+        .unwrap_or_default();
     if status != 0 || super::holds_error(&diagnostics) {
         let message = if status != 0 {
             format!("module command `{alias} {command}` exited with status {status}")
@@ -841,5 +865,12 @@ mod tests {
         assert!(runtime.resolve_locator("@tola-scripts/image").is_ok());
         assert!(runtime.resolve_locator("@tola-scripts/diagnostic").is_ok());
         assert!(argument_values(&runtime, "TOLA_CONFIG_PATH").is_none());
+        let script = root.join("pick.nu");
+        std::fs::write(
+            &script,
+            "use std/assert\nuse tola nu-helpers\nassert equal ([] | nu-helpers pick) []\n",
+        )
+        .unwrap();
+        assert_eq!(runtime.run_embedded(&script, &[]).unwrap(), 0);
     }
 }

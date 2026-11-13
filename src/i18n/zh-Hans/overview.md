@@ -1,5 +1,6 @@
-查看命令选项，请用 `tola <command> --help`。
+查看命令选项，用 `tola <command> --help`。
 
-`tola help` 提供 Tola 内置的离线文档：`tola.toml` 配置（`tola help "[build]"`）和 `@tola/xxx` 内置包（`tola help "@tola/address" slugify`）。加上 `-i` 或 `--interactive` 可交互式浏览：筛选章节和链接列表，按 Enter 打开选项，选择 Back 返回，按 Esc 结束浏览。文档默认使用英文；加上 `--lang zh` 可阅读简体中文。
+查配置用 `tola help "[build]"`，查 Typst 函数用 `tola help "@tola/address" slugify`，查内置脚本用 `tola help scripts`。加 `--lang zh` 读简体中文。
+`tola help -i` 打开文档目录。按 → 展开分组，按 / 搜索，按 Tab 切到搜索结果，按 Ctrl+G 回目录。按 Enter 阅读选中的内容，按 `q` 返回，再按 `q` 退出。关闭分页时，按 Enter 会直接打印内容并退出。
 
-`tola skill` 提供按任务组织的写作指南入口。使用 `tola skill writing math` 或 `tola skill modules create` 只读取当前任务需要的内容。`--list` 显示标题树，`--all` 包含所选主题的所有子章节。
+`tola skill` 是写站指南。例如，`tola skill writing math` 查看公式写法，`tola skill modules create` 查看如何创建模块。用 `--list` 看目录，用 `--all` 连同子章节一起阅读。

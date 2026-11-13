@@ -1,4 +1,4 @@
-use tola ui
+use tola [nu-helpers syntax-highlight]
 
 def value-browser [input: record] {
     let view = if $input.value == null {
@@ -15,11 +15,18 @@ def value-browser [input: record] {
 def main [input_json: path, result_json: path] {
     let input = open --raw $input_json | from json
     let result = if 'rows' in $input {
-        $input.rows | ui choose --title $input.title
+        let picked = ($input.rows | nu-helpers pick --title $input.title --preview {|row|
+            $row | to json --indent 2 | syntax-highlight json --theme terminal
+        })
+        if ($picked | is-empty) {
+            {action: quit}
+        } else {
+            {action: submit, selected: ($picked | first)}
+        }
     } else {
         let outcome = (value-browser $input | tui run)
         if $outcome.action == submit {
-            {action: submit, selected: $input.value}
+            {action: submit, selected: $outcome.selected}
         } else {
             {action: quit}
         }

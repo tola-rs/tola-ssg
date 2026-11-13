@@ -280,7 +280,6 @@ impl<F: FnMut(&Path, &[SourceOverlay]) -> Result<Runtime>> Supervisor<F> {
         let Some(initialize) = self.initialize.as_ref() else {
             return Ok(());
         };
-        let initialize_id = initialize.id.clone();
         let initialize_params = initialize.params.clone();
         let overlays = self
             .documents
@@ -310,7 +309,7 @@ impl<F: FnMut(&Path, &[SourceOverlay]) -> Result<Runtime>> Supervisor<F> {
             self.events.clone(),
         )?;
         worker.send(&Message::Request(Request::new(
-            initialize_id,
+            worker.initialize_id.clone(),
             "initialize".into(),
             initialize_params,
         )))?;

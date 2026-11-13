@@ -1,6 +1,5 @@
 //! The clap-facing help and signatures of module commands.
 
-use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::Path;
 
@@ -18,122 +17,64 @@ pub(super) fn is_help(arguments: &[OsString]) -> bool {
     )
 }
 
-pub(super) fn namespace_command(
-    module: &ModuleCommands,
-    signatures: &BTreeMap<String, Result<tola_nu::Signature>>,
-) -> clap::Command {
+pub(super) fn namespace_command(module: &ModuleCommands) -> clap::Command {
     let mut command = super::namespace_options(&module.name).subcommand_required(true);
     if module.initializer.is_some() {
         command =
             command.subcommand(clap::Command::new("init").about("Create a site using this module"));
     }
     for (name, declared) in &module.commands {
-        let description = signatures
-            .get(name)
-            .and_then(|signature| signature.as_ref().ok())
-            .map(|signature| signature.description.as_str())
-            .unwrap_or(&declared.help);
-        command = command.subcommand(
-            clap::Command::new(name.clone())
-                .about(description.lines().next().unwrap_or("").to_owned()),
-        );
+        let description = declared.help.lines().next().unwrap_or("");
+        command =
+            command.subcommand(clap::Command::new(name.clone()).about(description.to_owned()));
     }
     command
 }
 
-pub(super) fn namespace_help(
+pub(super) fn namespace_help(module: &ModuleCommands, use_color: bool, long: bool) -> String {
+    render_help(namespace_command(module), use_color, long)
+}
+
+pub(super) fn command_signature(
     module: &ModuleCommands,
-    signatures: &BTreeMap<String, Result<tola_nu::Signature>>,
-    use_color: bool,
-    long: bool,
-) -> String {
-    render_help(namespace_command(module, signatures), use_color, long)
-}
-
-pub(super) fn command_signatures<'a>(
-    module: &'a ModuleCommands,
-    names: impl Iterator<Item = &'a str>,
+    name: &str,
     project: &Path,
     config: &Path,
     scope: InputScope,
-) -> Result<BTreeMap<String, Result<tola_nu::Signature>>> {
-    let commands = names.map(|name| (module, name));
-    Ok(module_command_signatures(commands, project, config, scope)?
-        .into_iter()
-        .map(|((_, name), signature)| (name, signature))
-        .collect())
-}
-
-/// One module command's argv spelling and its resolved signature.
-pub(in crate::cli) type ModuleCommandSignature = ((String, String), Result<tola_nu::Signature>);
-
-pub(in crate::cli) fn module_command_signatures<'a>(
-    commands: impl Iterator<Item = (&'a ModuleCommands, &'a str)>,
-    project: &Path,
-    config: &Path,
-    scope: InputScope,
-) -> Result<Vec<ModuleCommandSignature>> {
-    let selected = commands
-        .filter_map(|(module, name)| {
-            let declared = module.commands.get(name)?;
-            let CommandAction::Execute(Action::Nu { path, args }) = declared
-                .action()
-                .expect("module command actions are validated")
-            else {
-                return None;
-            };
-            let path = tola_module::module_set::validate_module_path(
-                project,
-                &module.name,
-                &module.root,
-                &path,
-                false,
-            );
-            Some((module, name, declared, (path, args)))
-        })
-        .collect::<Vec<_>>();
-    if selected.is_empty() {
-        return Ok(Vec::new());
+) -> Option<Result<tola_nu::Signature>> {
+    let declared = module.commands.get(name)?;
+    let CommandAction::Execute(Action::Nu { path, args }) = declared
+        .action()
+        .expect("module command actions are validated")
+    else {
+        return None;
+    };
+    let path = match tola_module::module_set::validate_module_path(
+        project,
+        &module.name,
+        &module.root,
+        &path,
+        false,
+    ) {
+        Ok(path) => path,
+        Err(error) => return Some(Err(error.into())),
+    };
+    let signature = super::super::nu::command_signatures(&[(path, args)], project, config, scope)
+        .pop()
+        .expect("one signature result per script");
+    let mut signature = match signature {
+        Ok(signature) => signature?,
+        Err(error) => return Some(Err(error)),
+    };
+    if !declared.help.trim().is_empty() {
+        let (short, long) = declared
+            .help
+            .split_once('\n')
+            .unwrap_or((&declared.help, ""));
+        signature.description = short.to_owned();
+        signature.extra_description = long.trim().to_owned();
     }
-    let invocations = selected
-        .iter()
-        .filter_map(|(_, _, _, (path, args))| {
-            path.as_ref().ok().map(|path| (path.clone(), args.clone()))
-        })
-        .collect::<Vec<_>>();
-    let mut signatures =
-        super::super::nu::command_signatures(&invocations, project, config, scope).into_iter();
-    Ok(selected
-        .into_iter()
-        .filter_map(|(module, name, declared, (path, _))| {
-            let signature = match path {
-                Ok(_) => signatures
-                    .next()
-                    .expect("one signature per valid script path"),
-                Err(error) => Err(error.into()),
-            };
-            let key = (module.name.clone(), name.to_owned());
-            match signature {
-                Ok(None) => None,
-                Err(error) => Some((key, Err(error))),
-                Ok(Some(mut signature)) => {
-                    if !declared.help.trim().is_empty() {
-                        signature.description =
-                            declared.help.lines().next().unwrap_or("").to_owned();
-                        signature.extra_description = declared
-                            .help
-                            .lines()
-                            .skip(1)
-                            .collect::<Vec<_>>()
-                            .join("\n")
-                            .trim()
-                            .to_owned();
-                    }
-                    Some((key, Ok(signature)))
-                }
-            }
-        })
-        .collect())
+    Some(Ok(signature))
 }
 
 pub(super) fn render_help(mut command: clap::Command, use_color: bool, long: bool) -> String {

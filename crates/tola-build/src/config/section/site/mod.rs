@@ -33,47 +33,55 @@ pub struct SiteAuthor {
     pub url: Option<String>,
 }
 
-/// One site's values: Tola parses and validates their formats — `language` must be a BCP 47
-/// language tag, for example; templates read them through `@tola/site`.
+/// Set the site's address, title, and language. To deploy at
+/// `https://example.com/docs/`, add this to `tola.toml`:
+///
+/// ```toml
+/// [site]
+/// origin = "https://example.com"
+/// base-path = "/docs/"
+/// title = "Typst Notes"
+/// language = "zh-Hant-TW"
+/// ```
+///
+/// In a site created with `tola init`, write `= Guide` in `content/guide/index.typ`.
+/// Run `tola build` from the site root. The file is `public/guide/index.html`. Deploy
+/// `public/` under `/docs/` to serve it at `https://example.com/docs/guide/`.
+/// With `tola dev` on the default port, open `http://127.0.0.1:5277/docs/guide/`.
 #[derive(Debug, Clone, Serialize, Deserialize, Config)]
 #[serde(default)]
 #[config(section = "site")]
 pub struct SiteSectionConfig {
-    /// Public address of the site, such as `https://example.com`, with no path. A site without
-    /// it publishes relative addresses only.
+    /// Scheme and host, plus a port if needed. For example, `https://example.com`. Put the path
+    /// in `base-path`. If omitted, `site.url` is `none`. Feeds and sitemaps need `origin`.
     pub origin: Option<String>,
 
-    /// Deployment path the site is mounted below, such as `/docs/`. Begins and ends with `/`.
+    /// The path your site is served under, such as `/docs/`. It starts and ends with `/`.
+    /// The default is `/`.
     #[serde(rename = "base-path")]
     #[config(name = "base-path")]
     pub base_path: String,
 
-    /// The name the site calls itself, in browser tabs and feeds.
+    /// Site name used by templates and feeds. If omitted, use an empty string.
     pub title: String,
 
-    /// People credited as the site's authors, available to templates as `site.authors`. Each is
-    /// `{ name = "…", email = "…", url = "…" }`.
+    /// Site authors. For example, `[{ name = "Alice", email = "alice@example.com" }]`.
+    /// Each author needs a `name`. `email` and `url` are optional. If omitted, use an empty list.
     #[config(collection = inline)]
     pub authors: Vec<SiteAuthor>,
 
-    /// The summary feeds and search engines show for the site.
+    /// Short description for feeds and page metadata. If omitted, use an empty string.
     pub description: String,
 
-    /// The languages a multilingual site publishes, written as `["en", "zh-Hans"]` or with the
-    /// parts of a tag: `[{ lang = "en" }, { lang = "zh", script = "Hans" }]`. Each entry takes
-    /// the shape `language` takes, and is validated the same way. `language` names the site's
-    /// default language (`"en"` when omitted); a nonempty list must include it.
-    ///
-    /// Tola reads this as data and does not act on it. How a site routes, pairs, and switches
-    /// between its languages is the site's own to decide.
+    /// Languages your templates can use to build a multilingual site. Each entry uses the same
+    /// format as `language`, for example `["en", "zh-Hans"]`. If you set a nonempty list, include
+    /// the default `language`. If omitted, use an empty list. Your templates decide which pages
+    /// and links to generate.
     #[config(collection = inline)]
     pub languages: Vec<LanguageDeclaration>,
 
-    /// A tag such as `"zh-Hant-TW"`, or `{ lang = "zh", script = "Hant", region = "TW" }`.
-    /// Templates read `site.language.lang` (primary language), `.script` (writing system),
-    /// `.region`, and `.tag` (combined). Typst text uses the parts; HTML `lang` uses the tag.
-    /// Pass `.lang` to `slugify` for Han pronunciation in ASCII mode: `ja` selects Japanese,
-    /// other languages select Chinese. Script and region do not change slugification.
+    /// The default language (`"en"` if omitted). Write a BCP 47 tag such as `"zh-Hant-TW"` or
+    /// the equivalent `{ lang = "zh", script = "Hant", region = "TW" }`.
     pub language: LanguageDeclaration,
 }
 
@@ -94,36 +102,22 @@ impl Default for SiteSectionConfig {
 impl SiteSectionConfig {
     /// What `tola help "[site]"` adds under its table.
     pub const HELP: &'static str = "\
-A template reads these as `site.<key>` (`tola help \"@tola/site\"` documents the object):
+### Use the settings in Typst
 
-```toml
-[site]
-origin = \"https://example.com\"    # The public address, with no path
-base-path = \"/docs/\"              # The path the site is served below
-title = \"Example\"
-description = \"Notes on Typst, published with Tola\"
-language = \"zh-Hant-TW\"           # Or { lang = \"zh\", script = \"Hant\", region = \"TW\" }
-authors = [{ name = \"Alice\", email = \"alice@example.com\" }]
-```
-
-`origin` and `base-path` decide every published address: this site serves `guide/index.html` at
-`https://example.com/docs/guide/`. Without `origin` the site publishes relative addresses only,
-which is why a feed or sitemap asks for one — every address they list is absolute. `tola dev`
-serves the same mount locally, such as `http://127.0.0.1:5277/docs/`; `--origin` and `--base-path`
-override the pair for one run.
-
-Those two keys also produce the derived `site.url`: the site's canonical address, or `none` when
-no `origin` is set. `site.language` carries the whole tag as `tag` and its parts as `lang`,
-`script`, and `region` — `zh`, `Hant`, and `TW` for the language above — and the parts are what
-`#set text` takes:
+Read the settings through `@tola/site`. The `site.typ` created by `tola init` sets the text
+language like this.
 
 ```typst
 #import \"@tola/site:0.0.0\": site
-#let url = site.url                     // none when `origin` is unset
-#let tag = site.language.tag            // \"zh-Hant-TW\"
-#let script = site.language.script      // \"Hant\", or `auto` when none
-#let names = site.authors.map(author => author.name)
-```";
+#set text(lang: site.language.lang, script: site.language.script, region: site.language.region)
+```
+
+If you write the HTML `lang` attribute yourself, use `site.language.tag` for the full tag
+(`zh-Hant-TW` above). For `slugify` in ASCII mode, pass `site.language.lang` as `language`.
+It uses Japanese readings for Han characters with `ja` and Chinese readings otherwise.
+
+With the settings above, `site.url` is `https://example.com/docs/`. It is `none` when `origin`
+is unset. Use `--origin` or `--base-path` to override a setting for one run.";
 
     /// `site.language` and `site.languages`, which the site's own templates read.
     ///

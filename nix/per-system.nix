@@ -16,6 +16,7 @@ let
     ../Cargo.lock
     ../src
     ../crates
+    ../modules
     ../TOLA-SKILL.md
   ];
   src = lib.fileset.toSource {

@@ -1,32 +1,26 @@
 # `[dev]`
 
-`tola dev` 的开发监听设置。
+设置 `tola dev` 是否在文件变化后重建并刷新浏览器。
 
 ## 配置项
 
 ### `watch`
 
-`tola dev` 是否监听保存的文件并刷新浏览器。
+默认开启。`tola dev` 会在文件变化后重建站点，并刷新浏览器。
 
 ## 用法
 
-从源码到能在浏览器里读的页面，共有三条命令。`tola build` 构建一次、写出发布目录后退出。`tola dev` 构建并把站点在本地提供出来，同时持续监听它读过的每个源：一次编辑会重建并刷新浏览器。`tola preview` 用生产设置构建一次，把那个结果在本地提供出来，但不监听，也不写 `publish-dir`，好让你在提交之前先看一遍即将上线的页面。
-
-`watch` 属于 `tola dev`，三条命令里只有它会监听：
+在 `tola.toml` 里关闭文件监听：
 
 ```toml
 [dev]
-watch = true
+watch = false
 ```
 
-用三种方式跑同一个站点：
+运行 `tola dev`，打开终端给出的地址。关闭监听后，保存文件也只会看到第一次构建的页面。只想关这一次，用 `tola dev --watch=false`。
 
-```sh
-tola build      # write the publish directory and exit
-tola dev        # serve locally and rebuild on every edit
-tola preview    # serve the production build without watching
-```
+`tola dev` 按每个 hook 的 `dev` 设置运行。要预览一次生产构建，用 `tola preview`。两个命令都读取 `[server]`。
 
-两个提供服务的命令共用的监听器是 `[server]`；`watch = false` 让 `tola dev` 只构建一次，但继续提供服务。
+### 调试开发中的 hook
 
-但它和 `tola preview` 仍不一样：`tola dev` 始终以 `dev` 模式构建（命令里能读到 `TOLA_BUILD_MODE=dev`），hook 按各自的 `dev` 字段参与——`after-publish` 设成 `dev = "run"` 时在这里也会跑；`tola preview` 用生产设置构建，从不运行 `after-publish`。
+如果改数据文件也应重建，就把路径加到 hook 的 `rerun-on`。Tola 会自动监听 `nu` 指定的脚本。要让配置了 `dev = "reuse"` 的 `generate-outputs` hook 每次重建都运行，可以用 `tola dev --no-reuse`。各阶段的选项见 [`[hooks]`](tola-help://config/hooks)。

@@ -12,6 +12,29 @@ use crate::{
 };
 
 impl Runtime {
+    /// Read the signatures of the commands a script defines, without evaluating it.
+    pub fn script_signatures(&self, path: &Path) -> Result<Vec<Signature>> {
+        self.ensure_fresh()?;
+        let (path, source) = crate::execution::source(&self.engine, path)?;
+        let mut engine = self.engine.clone();
+        engine.file = Some(path.clone());
+        let name = path.to_str().ok_or(NuError::NotUtf8 { what: "script" })?;
+        let mut working = StateWorkingSet::new(&engine);
+        crate::execution::parse(&mut working, name, &source)?;
+        let mut signatures = crate::execution::main_declarations(&working, name)?
+            .into_iter()
+            .filter_map(|(name, id)| {
+                let command = working.get_decl(id);
+                let block = working.get_block(command.block_id()?);
+                let mut signature = block.signature.as_ref().clone();
+                signature.name = String::from_utf8_lossy(&name).into_owned();
+                Some(signature)
+            })
+            .collect::<Vec<_>>();
+        signatures.sort_by(|left, right| left.name.cmp(&right.name));
+        Ok(signatures)
+    }
+
     /// Read the signature of a script's `main` declaration without executing the script.
     pub fn command_signature(&self, path: &Path, prefix: &[String]) -> Result<Option<Signature>> {
         self.ensure_fresh()?;
