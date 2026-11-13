@@ -5,6 +5,7 @@ mod helix;
 mod neovim;
 mod sublime;
 mod vscode;
+pub(super) use vscode::{nu_launcher, nu_launcher_settings};
 mod zed;
 
 use std::path::Path;
@@ -81,10 +82,11 @@ impl Editor {
         self,
         source: Option<&str>,
         directory: &EditorDirectory,
+        nu: bool,
     ) -> Result<String> {
         match self {
-            Self::Vscode => vscode::merge(source, directory),
-            Self::Helix => helix::merge(source, directory),
+            Self::Vscode => vscode::merge(source, directory, nu),
+            Self::Helix => helix::merge(source, directory, nu),
             Self::Neovim => Ok(neovim::snippet(directory)),
             Self::Emacs => Ok(emacs::snippet(directory)),
             Self::Zed => Ok(zed::snippet(directory)),
@@ -98,7 +100,7 @@ pub(crate) fn settings(
     root: &Path,
     packages: &tola_typst::PackageLocations,
 ) -> Result<String> {
-    editor.required_settings(None, &EditorDirectory::initial(root, packages)?)
+    editor.required_settings(None, &EditorDirectory::initial(root, packages)?, false)
 }
 
 /// The selected editors whose settings Tola prints instead of writing, each named once.
@@ -122,10 +124,19 @@ pub(super) fn setup(
     writes: &mut FileWrites,
     directory: &EditorDirectory,
     editors: &[Editor],
+    nu: bool,
 ) -> Result<Vec<(Editor, String)>> {
     let mut manual_settings = Vec::new();
     for editor in unique(editors) {
-        match prepare_settings(writes, directory, editor)? {
+        anyhow::ensure!(
+            !nu || matches!(editor, Editor::Vscode | Editor::Helix),
+            "`editor setup --nu` supports VS Code and Helix; configure `tola nu --lsp` in {}",
+            editor.name()
+        );
+        if nu && editor == Editor::Vscode {
+            vscode::stage_nu_launcher(writes, directory)?;
+        }
+        match prepare_settings(writes, directory, editor, nu)? {
             PreparedSettings::File { relative, settings } => {
                 if !settings.is_current() {
                     writes.replace_file_if_unchanged(relative, settings.read, settings.publish)?;
@@ -175,10 +186,11 @@ pub(super) fn prepare_settings(
     writes: &FileWrites,
     directory: &EditorDirectory,
     editor: Editor,
+    nu: bool,
 ) -> Result<PreparedSettings> {
     let Some(relative) = editor.settings_file() else {
         return Ok(PreparedSettings::Manual(
-            editor.required_settings(None, directory)?,
+            editor.required_settings(None, directory, nu)?,
         ));
     };
     let relative_path = crate::terminal::display_path_as_given(relative);
@@ -201,7 +213,7 @@ pub(super) fn prepare_settings(
             )
         })?;
     let publish = editor
-        .required_settings(source, directory)
+        .required_settings(source, directory, nu)
         .map_err(|error| {
             if tola_diagnostic::attached(&error).is_some() {
                 return error;
@@ -325,7 +337,8 @@ mod tests {
         std::fs::write(&selected, "[site]\ntitle = 'Selected'\n").unwrap();
         let loaded = loaded_config(Some(&selected));
         let directory = EditorDirectory::from_config(loaded.config()).unwrap();
-        let helix: toml::Value = toml::from_str(&helix::merge(None, &directory).unwrap()).unwrap();
+        let helix: toml::Value =
+            toml::from_str(&helix::merge(None, &directory, false).unwrap()).unwrap();
         let helix = &helix["language-server"]["tola-lsp"];
         let helix_command = std::iter::once(helix["command"].as_str().unwrap().to_owned())
             .chain(
@@ -372,8 +385,13 @@ mod tests {
         let package_inputs =
             crate::editor::prepare_package_inputs(loaded.config(), &Default::default()).unwrap();
         assert!(
-            crate::editor::setup(&directory, &[Editor::Helix, Editor::Vscode], package_inputs)
-                .is_err()
+            crate::editor::setup(
+                &directory,
+                &[Editor::Helix, Editor::Vscode],
+                package_inputs,
+                false
+            )
+            .is_err()
         );
         assert_eq!(std::fs::read_to_string(settings_path).unwrap(), original);
         assert!(!root.path().join(".helix").exists());

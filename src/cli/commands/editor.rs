@@ -33,6 +33,7 @@ pub(in crate::cli) fn run(
         EditorCommand::Setup {
             site,
             editors,
+            nu,
             list,
             dry_run,
             ..
@@ -56,7 +57,7 @@ pub(in crate::cli) fn run(
                 scope,
                 &cancellation.token(),
             )?;
-            let setup = crate::editor::setup(&directory, &editors, package_inputs)?;
+            let setup = crate::editor::setup(&directory, &editors, package_inputs, nu)?;
             for file in setup.writes.file_paths() {
                 destination::check_file(output.log().map(LogFile::path), file)?;
             }
@@ -68,7 +69,7 @@ pub(in crate::cli) fn run(
                 output.block(crate::editor::dry_run_report(&setup, &obsolete))?;
                 return Ok(());
             }
-            let settings_report = crate::editor::settings_report(&setup, &editors);
+            let settings_report = crate::editor::settings_report(&setup, &editors, nu);
             setup.writes.apply(&cancellation.token())?;
             setup.package_inputs.apply(&cancellation.token())?;
             crate::editor::remove_obsolete_package_paths(directory.root())?;
@@ -81,7 +82,11 @@ pub(in crate::cli) fn run(
                 ))?;
             }
             output.summary("Editor setup complete")?;
-            output.status(crate::editor::startup_instructions(&editors))?;
+            output.status(crate::editor::startup_instructions(
+                &editors,
+                nu,
+                setup.writes.root(),
+            ))?;
             Ok(())
         }
         EditorCommand::Packages { site, .. } => {
@@ -188,7 +193,8 @@ fn start_session_log(
 #[derive(Serialize)]
 struct EditorChoice {
     index: usize,
-    editor: String,
+    editor: &'static str,
+    settings: Option<&'static Path>,
 }
 
 fn select_editors(scope: InputScope, cancellation: &Cancellation) -> Result<Vec<Editor>> {
@@ -199,11 +205,11 @@ fn select_editors(scope: InputScope, cancellation: &Cancellation) -> Result<Vec<
         );
     }
     let choices = crate::editor::selection_choices()
-        .into_iter()
         .enumerate()
-        .map(|(index, label)| EditorChoice {
+        .map(|(index, (editor, settings))| EditorChoice {
             index,
-            editor: label,
+            editor,
+            settings,
         })
         .collect::<Vec<_>>();
     let selected: Option<Vec<usize>> = crate::cli::interaction::run(

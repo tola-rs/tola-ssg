@@ -5,7 +5,7 @@ mod packages;
 mod site;
 
 use std::fmt::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
@@ -24,16 +24,25 @@ pub(crate) use packages::{
     prepare_package_inputs, read_package_directory, remove_obsolete_package_paths,
 };
 
-pub(crate) fn startup_instructions(editors: &[Editor]) -> String {
+pub(crate) fn startup_instructions(editors: &[Editor], nu: bool, root: &Path) -> String {
     let mut steps = Vec::new();
     if editors.contains(&Editor::Vscode) {
-        steps.push("VS Code: install the Tola extension if needed.");
+        steps.push(if nu {
+            let settings = serde_json::Value::Object(config::nu_launcher_settings(root));
+            format!(
+                "Reload VS Code to apply these Nushell settings.\n\n\
+                 {settings:#}\n\n\
+                 To use the Tola extension directly, set `tola.nu.enabled` to `true` and run `Nushell: Stop Language Server` if available."
+            )
+        } else {
+            "VS Code: install the Tola extension if needed.".into()
+        });
     }
     if editors.contains(&Editor::Helix) {
-        steps.push("Helix: run `:lsp-restart` to apply the settings.");
+        steps.push("Helix: run `:lsp-restart` to apply the settings.".into());
     }
     if !manual_editors(editors).is_empty() {
-        steps.push("Save the copied settings, then restart the selected language services.");
+        steps.push("Save the copied settings, then restart the selected language services.".into());
     }
     steps.join("\n")
 }
@@ -59,15 +68,11 @@ pub(crate) fn manual_settings_instructions(editor: Editor, settings: &str) -> St
     )
 }
 
-/// One line per supported editor: its name and what `editor setup` does with its settings.
-pub(crate) fn selection_choices() -> Vec<String> {
+/// Each editor's name and the settings file setup merges, if any.
+pub(crate) fn selection_choices() -> impl Iterator<Item = (&'static str, Option<&'static Path>)> {
     <Editor as clap::ValueEnum>::value_variants()
         .iter()
-        .map(|editor| match editor.settings_file() {
-            Some(path) => format!("{} — {}", editor.name(), path.display()),
-            None => format!("{} — copy settings", editor.name()),
-        })
-        .collect()
+        .map(|editor| (editor.name(), editor.settings_file()))
 }
 
 /// One screen for a client Tola does not configure: every editor it can configure, and the
@@ -89,6 +94,7 @@ pub(crate) fn client_list(directory: &EditorDirectory) -> String {
             }
         );
     }
+    text.push_str("\nAdd `--nu` to set up a launcher for the VS Code Nushell extension (macOS/Linux) or configure Helix directly.\n");
     text.push_str("\nAny other LSP client, over stdio:\n");
     let _ = writeln!(text, "  command: {}", command.command);
     let _ = writeln!(
@@ -117,7 +123,7 @@ pub(crate) struct EditorSetup {
     pub(crate) package_inputs: EditorPackageInputs,
 }
 
-pub(crate) fn settings_report(setup: &EditorSetup, editors: &[Editor]) -> String {
+pub(crate) fn settings_report(setup: &EditorSetup, editors: &[Editor], nu: bool) -> String {
     let mut text = String::new();
     for editor in config::unique(editors) {
         let Some(relative) = editor.settings_file() else {
@@ -133,6 +139,19 @@ pub(crate) fn settings_report(setup: &EditorSetup, editors: &[Editor]) -> String
             "{}: `{}` {action}",
             editor.name(),
             display_path_as_given(relative),
+        );
+    }
+    if nu && editors.contains(&Editor::Vscode) {
+        let launcher = config::nu_launcher();
+        let action = if setup.writes.file_contents(&launcher).is_some() {
+            "updated"
+        } else {
+            "already current"
+        };
+        let _ = writeln!(
+            text,
+            "Nushell: `{}` {action}",
+            display_path_as_given(&launcher)
         );
     }
     text
@@ -164,10 +183,11 @@ pub(crate) fn setup(
     directory: &EditorDirectory,
     editors: &[Editor],
     package_inputs: EditorPackageInputs,
+    nu: bool,
 ) -> Result<EditorSetup> {
     let refresh = refresh_packages(directory, package_inputs)?;
     let mut writes = refresh.writes;
-    let manual_settings = config::setup(&mut writes, directory, editors)?;
+    let manual_settings = config::setup(&mut writes, directory, editors, nu)?;
 
     Ok(EditorSetup {
         writes,
@@ -198,7 +218,7 @@ pub(crate) fn dry_run_report(setup: &EditorSetup, obsolete: &[PathBuf]) -> Strin
         display_path(root)
     );
 
-    text.push_str("\nEditor settings files:\n");
+    text.push_str("\nEditor settings and launchers:\n");
     if settings_files.is_empty() {
         text.push_str("  (none)\n");
     }

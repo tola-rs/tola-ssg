@@ -29,6 +29,7 @@ struct FileWrite {
     path: PathBuf,
     contents: Vec<u8>,
     expected: ExpectedContents,
+    permissions: Option<cap_std::fs::Permissions>,
 }
 
 /// Files and directories to write beneath one root.
@@ -110,6 +111,32 @@ impl FileWrites {
         self.files.iter().map(|file| file.path.as_path())
     }
 
+    #[cfg(unix)]
+    pub(crate) fn write_executable(
+        &mut self,
+        relative: &Path,
+        expected: Option<Vec<u8>>,
+        contents: Vec<u8>,
+    ) -> Result<()> {
+        use cap_std::fs::PermissionsExt as _;
+        use std::os::unix::fs::PermissionsExt as _;
+        let path = self.resolve(relative)?;
+        if expected.as_deref() == Some(contents.as_slice()) {
+            let parent = Directory::open_existing(path.parent().expect("file has a parent"))?;
+            let file = tola_fs::open_file_for_read(
+                parent.dir(),
+                path.file_name().expect("file has a name"),
+            )?;
+            if file.metadata()?.permissions().mode() & 0o100 != 0 {
+                return Ok(());
+            }
+        }
+        self.push_file(path, contents, ExpectedContents::Exact(expected))?;
+        self.files.last_mut().expect("file was staged").permissions =
+            Some(cap_std::fs::Permissions::from_mode(0o755));
+        Ok(())
+    }
+
     pub(crate) fn directory_paths(&self) -> impl Iterator<Item = &Path> {
         self.directories.iter().map(PathBuf::as_path)
     }
@@ -175,7 +202,13 @@ impl FileWrites {
                     ExpectedContents::Exact(contents) => contents.as_deref(),
                 };
                 let backup = directory
-                    .replace(name, expected, &file.contents, cancellation)
+                    .replace(
+                        name,
+                        expected,
+                        &file.contents,
+                        file.permissions.as_ref(),
+                        cancellation,
+                    )
                     .with_context(|| {
                         format!(
                             "cannot write `{}`; review the file and its directory, then retry",
@@ -250,6 +283,7 @@ impl FileWrites {
             path,
             contents,
             expected,
+            permissions: None,
         });
         Ok(())
     }
@@ -450,9 +484,14 @@ impl Directory {
         name: &OsStr,
         expected: Option<&[u8]>,
         contents: &[u8],
+        permissions: Option<&cap_std::fs::Permissions>,
         cancellation: &BuildCancellation,
     ) -> Result<Option<StoredFile>> {
         let staged = self.stage(contents, "tmp")?;
+        if let Some(permissions) = permissions {
+            self.dir()
+                .set_permissions(&staged.name, permissions.clone())?;
+        }
         cancellation.ensure_active()?;
         let Some(expected) = expected else {
             self.publish(&staged.name, name)?;
@@ -466,10 +505,12 @@ impl Directory {
             if self.read(&saved.name)? != expected {
                 bail!("file changed before replacement");
             }
-            self.dir().set_permissions(
-                &staged.name,
-                self.dir().metadata(&saved.name)?.permissions(),
-            )?;
+            if permissions.is_none() {
+                self.dir().set_permissions(
+                    &staged.name,
+                    self.dir().metadata(&saved.name)?.permissions(),
+                )?;
+            }
             cancellation.ensure_active()?;
             self.publish(&staged.name, name)?;
             Ok(())
@@ -705,7 +746,13 @@ mod tests {
         fs::rename(&path, root.join("original")).unwrap();
         std::os::unix::fs::symlink(outside.path(), &path).unwrap();
         directory
-            .replace(OsStr::new("page.typ"), None, b"inside", &Default::default())
+            .replace(
+                OsStr::new("page.typ"),
+                None,
+                b"inside",
+                None,
+                &Default::default(),
+            )
             .unwrap();
         assert_eq!(fs::read(root.join("original/page.typ")).unwrap(), b"inside");
         assert!(!outside.path().join("page.typ").exists());
@@ -726,7 +773,7 @@ mod tests {
 
         let name = OsStr::new("settings");
         let previous = directory
-            .replace(name, Some(b"original"), b"ours", &Default::default())
+            .replace(name, Some(b"original"), b"ours", None, &Default::default())
             .unwrap();
         let moved = root.join("moved/nested");
         assert_eq!(fs::read(moved.join(name)).unwrap(), b"ours");
@@ -754,7 +801,13 @@ mod tests {
 
         assert!(fs::rename(root.join("parent"), root.join("moved")).is_err());
         directory
-            .replace(OsStr::new("settings"), None, b"ours", &Default::default())
+            .replace(
+                OsStr::new("settings"),
+                None,
+                b"ours",
+                None,
+                &Default::default(),
+            )
             .unwrap();
         drop(directory);
         fs::rename(root.join("parent"), root.join("moved")).unwrap();
@@ -774,6 +827,7 @@ mod tests {
                     OsStr::new("settings"),
                     Some(b"expected"),
                     b"ours",
+                    None,
                     &Default::default()
                 )
                 .is_err()
@@ -802,6 +856,7 @@ mod tests {
                 OsStr::new("settings"),
                 Some(b"original"),
                 b"ours",
+                None,
                 &Default::default(),
             )
             .unwrap();

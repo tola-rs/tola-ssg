@@ -895,7 +895,7 @@ mod tests {
         std::os::unix::fs::symlink(external.path(), &package).unwrap();
         let directory = crate::editor::EditorDirectory::from_config(config).unwrap();
         let package_inputs = prepare_package_inputs(config, &Default::default()).unwrap();
-        let error = crate::editor::setup(&directory, &[], package_inputs)
+        let error = crate::editor::setup(&directory, &[], package_inputs, false)
             .err()
             .expect("symlinked generated package path unexpectedly accepted");
 

@@ -863,6 +863,9 @@ pub enum EditorCommand {
         /// Editors to configure; omit to choose interactively.
         #[arg(value_enum)]
         editors: Vec<Editor>,
+        /// Use Tola for Nushell. Adds a launcher for the VS Code Nushell extension (macOS/Linux), or configures Helix directly.
+        #[arg(long, conflicts_with = "list")]
+        nu: bool,
         /// Print the editors Tola configures and the settings any other LSP client needs, then stop.
         #[arg(long)]
         list: bool,

@@ -8,7 +8,7 @@ use toml_edit::{Array, ArrayOfTables, DocumentMut, InlineTable, Item, Table, Val
 
 use super::EditorDirectory;
 
-pub(super) fn merge(source: Option<&str>, directory: &EditorDirectory) -> Result<String> {
+pub(super) fn merge(source: Option<&str>, directory: &EditorDirectory, nu: bool) -> Result<String> {
     let mut document = DocumentMut::from_str(source.unwrap_or("")).context(
         "`.helix/languages.toml` is not valid TOML; fix the syntax, then rerun `tola editor setup`",
     )?;
@@ -35,7 +35,49 @@ pub(super) fn merge(source: Option<&str>, directory: &EditorDirectory) -> Result
         toml_edit::value(super::package_source_directory()),
     );
     merge_language_servers(&mut document)?;
+    if nu {
+        configure_nushell(&mut document, directory, command.command)?;
+    }
     Ok(crate::writes::with_final_newline(document.to_string()))
+}
+
+fn configure_nushell(
+    document: &mut DocumentMut,
+    directory: &EditorDirectory,
+    command: &str,
+) -> Result<()> {
+    let server = ensure_table(document, &["language-server", "tola-nu"])?;
+    if !server.contains_key("command") {
+        server.insert("command", toml_edit::value(command));
+    }
+    let mut args = Array::from_iter(["nu", "--lsp"]);
+    if let Some(file) = directory.configuration_file()
+        && !directory.configuration_file_is_discoverable()
+    {
+        args.push("--config");
+        args.push(file.to_str().expect("validated editor configuration path"));
+    }
+    set_if_absent_or_equal(
+        server,
+        "language-server.tola-nu",
+        "args",
+        Value::Array(args),
+    )?;
+    let servers = language_servers(document, "nu")?;
+    let mut present = false;
+    for index in (0..servers.len()).rev() {
+        match servers.get(index).and_then(server_name).as_deref() {
+            Some("nu-lsp") => {
+                servers.remove(index);
+            }
+            Some("tola-nu") => present = true,
+            _ => {}
+        }
+    }
+    if !present {
+        servers.insert(0, "tola-nu");
+    }
+    Ok(())
 }
 
 fn merge_language_servers(document: &mut DocumentMut) -> Result<()> {
@@ -293,7 +335,7 @@ mod tests {
     #[test]
     fn foreign_mirror_path_is_rewritten() {
         let source = "[language-server.tola-lsp.config]\npackageSourceDirectory = \"/other/host/packages\"\n";
-        let merged = merge(Some(source), &editor_directory(".")).unwrap();
+        let merged = merge(Some(source), &editor_directory("."), false).unwrap();
         let value: toml::Value = toml::from_str(&merged).unwrap();
         let packages = super::super::package_source_directory();
         assert_eq!(
@@ -306,7 +348,7 @@ mod tests {
     #[test]
     fn discovered_configuration_argument_is_dropped() {
         let source = "[language-server.tola-lsp]\nargs = [\"lsp\", \"--config\", \"/other/host/tola.toml\"]\n";
-        let merged = merge(Some(source), &editor_directory(".")).unwrap();
+        let merged = merge(Some(source), &editor_directory("."), false).unwrap();
         let value: toml::Value = toml::from_str(&merged).unwrap();
         assert_eq!(
             value["language-server"]["tola-lsp"]["args"]
@@ -319,7 +361,7 @@ mod tests {
     #[test]
     fn merge_preserves_author_servers() {
         let source = "# keep\n[language-server.other-typst]\ncommand = '/custom/other-typst'\nargs = ['lsp']\n[[language]]\nname = 'rust'\nlanguage-servers = ['rust-analyzer']\n[[language]]\nname = 'typst'\nlanguage-servers = ['other-typst'] # assistance\n";
-        let merged = merge(Some(source), &editor_directory(".")).unwrap();
+        let merged = merge(Some(source), &editor_directory("."), false).unwrap();
         let value: toml::Value = toml::from_str(&merged).unwrap();
         assert_eq!(
             value["language-server"]["other-typst"]["command"].as_str(),
