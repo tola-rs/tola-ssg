@@ -301,7 +301,11 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
         let root = checked_root(checked.configuration.as_ref(), &workspace.root);
         let entry = checked.configuration.as_ref().map_or_else(
             || workspace.root.join("site.typ"),
-            |config| config.build().entry.clone(),
+            |config| {
+                config
+                    .project_entry_path()
+                    .unwrap_or_else(|| config.config_path().to_path_buf())
+            },
         );
         // The index answers for the revision this check checked: the report below reads it now,
         // and a correction requested while that revision is still the checked one reads it too.
@@ -379,6 +383,57 @@ mod tests {
     use std::time::Instant;
     use tola_typst::typst::syntax::Source;
     use tola_typst_syntax::names::SelectedInterfaces;
+
+    #[test]
+    fn unlocated_module_diagnostic_points_to_config() {
+        let directory = tempfile::tempdir().unwrap();
+        let site = directory.path();
+        std::fs::create_dir(site.join("theme")).unwrap();
+        let config_path = site.join("tola.toml");
+        std::fs::write(
+            &config_path,
+            "[build]\nentry = { module = 'theme' }\n[modules.theme]\npath = 'theme'\n",
+        )
+        .unwrap();
+        let configuration = Arc::new(
+            tola_build::config::loading::load_site_config(
+                Some(&config_path),
+                tola_typst::PackageLocations::from_absolute_roots(None, None).unwrap(),
+                &tola_build::config::loading::BuildOverrides::default(),
+            )
+            .unwrap()
+            .into_config(),
+        );
+        let mut connection = ready_at(Vec::new(), site.to_path_buf());
+        connection
+            .publish(
+                CheckedSources {
+                    configuration: Some(configuration),
+                    compiled: false,
+                    diagnostics: vec![Diagnostic::new(
+                        tola_diagnostic::codes::check::SOURCE,
+                        tola_diagnostic::Severity::Error,
+                        "site check failed",
+                    )],
+                    read_paths: None,
+                    selected: Arc::new(SelectedInterfaces::default()),
+                },
+                0,
+            )
+            .unwrap();
+        let sent = messages(&mut connection);
+        let [Message::Notification(report)] = sent.as_slice() else {
+            panic!("expected one diagnostic report: {sent:?}");
+        };
+        assert_eq!(report.method, notification::PublishDiagnostics::METHOD);
+        let report: lsp_types::PublishDiagnosticsParams =
+            serde_json::from_value(report.params.clone()).unwrap();
+        assert_eq!(
+            report.uri,
+            crate::uri::from_file_path(&config_path).unwrap()
+        );
+        assert_eq!(report.diagnostics.len(), 1);
+    }
 
     #[test]
     fn prepared_site_status_precedes_definition() {

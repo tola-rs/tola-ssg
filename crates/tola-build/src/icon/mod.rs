@@ -590,12 +590,14 @@ fn load_remote(
 }
 
 /// Fetch and validate selected remote collections, recording entries without writing the lock.
+/// Calls `started` before reading each collection.
 pub fn refresh_icon_collections(
     config: &ResolvedSiteConfig,
     names: &[String],
     resources: &BuildResources,
     cancellation: &BuildCancellation,
     lock: &mut InputLock,
+    mut started: impl FnMut(&str),
 ) -> Result<(), IconError> {
     if !resources.input_mode().may_write_lock() {
         return Err(IconError::RefreshLocked);
@@ -603,6 +605,7 @@ pub fn refresh_icon_collections(
     let boundary = resources.source_boundary(config);
     for name in names {
         cancellation.ensure_active()?;
+        started(name);
         let request = remote_request(config, name, cancellation, resources, &boundary, None)?;
         let (_, verified) = remote::load_collection(request)?;
         cancellation.ensure_active()?;
@@ -873,6 +876,7 @@ mod tests {
             &BuildResources::new(),
             &cancellation,
             &mut updated,
+            |_| {},
         )
         .unwrap();
         server.join().unwrap();

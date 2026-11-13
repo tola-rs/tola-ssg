@@ -71,6 +71,11 @@ pub enum FetchError {
         #[source]
         source: gix::Error,
     },
+    #[error("the remote did not provide the requested revision")]
+    RevisionUnavailable {
+        #[source]
+        source: gix::Error,
+    },
     #[error("Tola could not fetch the module revision")]
     Other {
         #[source]
@@ -93,6 +98,8 @@ pub(crate) fn fetch(
     if !matches!(url.scheme, gix::url::Scheme::Https | gix::url::Scheme::Ssh) {
         return Err(address());
     }
+    let ssh = url.scheme == gix::url::Scheme::Ssh;
+    let classify = |error| classify(error, ssh, request.revision.is_some());
     let revision = request.revision.map(|revision| match revision {
         RemoteRevision::Tag(tag) => format!("refs/tags/{tag}"),
         RemoteRevision::Branch(branch) => format!("refs/heads/{branch}"),
@@ -179,7 +186,7 @@ fn configure_connection(
 }
 
 /// Turn one gix failure into the remedy its author can act on.
-fn classify(error: gix::Error) -> FetchError {
+fn classify(error: gix::Error, ssh: bool, explicit_revision: bool) -> FetchError {
     if error.is_unauthenticated() || error.is_permission_denied() {
         return FetchError::Authentication { source: error };
     }
@@ -197,8 +204,12 @@ fn classify(error: gix::Error) -> FetchError {
     if io_kinds(&error).any(is_network_kind) {
         return FetchError::Network { source: error };
     }
-    if io_kinds(&error).any(|kind| kind == ErrorKind::NotFound) {
+    let missing_file = io_kinds(&error).any(|kind| kind == ErrorKind::NotFound);
+    if ssh && missing_file {
         return FetchError::MissingSsh { source: error };
+    }
+    if explicit_revision && error.is_not_found() && !missing_file {
+        return FetchError::RevisionUnavailable { source: error };
     }
     FetchError::Other { source: error }
 }

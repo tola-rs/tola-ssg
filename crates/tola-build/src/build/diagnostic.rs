@@ -101,6 +101,7 @@ pub(super) fn reports(
 
 fn classify(error: &anyhow::Error, root: &Path) -> Option<Vec<Diagnostic>> {
     crate::compiler::error_diagnostics(error, root)
+        .or_else(|| tola_module::source_diagnostic(error).map(|diagnostic| vec![diagnostic]))
         .or_else(|| crate::icon::error_diagnostic(error, root).map(|diagnostic| vec![diagnostic]))
         .or_else(|| {
             crate::output::graph::error_diagnostic(error).map(|diagnostic| vec![diagnostic])

@@ -69,10 +69,12 @@ pub fn record_module_roots_with_bundle(
         lock,
         cancellation,
     }
-    .record(declarations)
+    .record(declarations, |_, _| {})
 }
 
 /// Forget the fact of every selected module, then read and record it again.
+///
+/// Calls `started` before reading each module.
 ///
 /// Refreshing a module starts by dropping what the lock knew, so the next resolution asks the
 /// repository for the declared selector instead of reusing the recorded commit.
@@ -83,11 +85,19 @@ pub fn refresh_module_roots_with_bundle(
     declarations: &BTreeMap<String, ModuleDeclaration>,
     lock: &mut InputLock,
     cancellation: &BundleCancellation,
+    started: impl FnMut(&str, &ModuleSource),
 ) -> Result<BTreeMap<String, PathBuf>, ModuleRootError> {
     for alias in declarations.keys() {
         lock.modules.remove(alias);
     }
-    record_module_roots(site_root, mode, vendor, declarations, lock, cancellation)
+    ModuleAcquisition {
+        site_root,
+        mode,
+        vendor,
+        lock,
+        cancellation,
+    }
+    .record(declarations, started)
 }
 
 /// The directory one declaration points at, without fetching or verifying it.
@@ -171,10 +181,12 @@ impl ModuleAcquisition<'_> {
     fn record(
         &mut self,
         declarations: &BTreeMap<String, ModuleDeclaration>,
+        mut started: impl FnMut(&str, &ModuleSource),
     ) -> Result<BTreeMap<String, PathBuf>, ModuleRootError> {
         let mut roots = BTreeMap::new();
         for (alias, declaration) in declarations {
             ensure_active(self.cancellation)?;
+            started(alias, &declaration.source);
             let root = self.read(alias, declaration)?;
             roots.insert(alias.clone(), root);
         }
@@ -390,9 +402,11 @@ impl ModuleAcquisition<'_> {
         source: &TarballSource,
         recorded: Option<(Sha256Digest, Sha256Digest)>,
     ) -> Result<(PathBuf, Sha256Digest, Sha256Digest), ModuleRootError> {
-        let failure = |source: anyhow::Error| ModuleRootError::Tarball {
+        let failure = |stage, cause: anyhow::Error| ModuleRootError::Tarball {
             alias: alias.to_owned(),
-            source,
+            location: source.location.clone(),
+            stage,
+            source: cause,
         };
         let download = match &source.location {
             TarballLocation::Url { url } => {
@@ -431,13 +445,14 @@ impl ModuleAcquisition<'_> {
             }
         };
         ensure_active(self.cancellation)?;
-        let mut download = download.map_err(failure)?;
+        let mut download = download.map_err(|error| failure(ArchiveStage::Read, error))?;
         let expected = source.sha256.or(recorded.map(|(digest, _)| digest));
         if let Some(expected) = expected
             && expected != download.digest
         {
             return Err(ModuleRootError::TarballDigestMismatch {
                 alias: alias.to_owned(),
+                declared: source.sha256.is_some(),
                 expected,
                 found: download.digest,
             });
@@ -446,21 +461,22 @@ impl ModuleAcquisition<'_> {
         let parent = destination.parent().expect("module cache has a parent");
         std::fs::create_dir_all(parent)
             .context("could not prepare the module cache")
-            .map_err(failure)?;
+            .map_err(|error| failure(ArchiveStage::Cache, error))?;
         let stage = tola_fs::DirectoryReplacement::new(&destination)
             .context("could not stage the module directory")
-            .map_err(failure)?;
+            .map_err(|error| failure(ArchiveStage::Cache, error))?;
         let root = stage.staged();
         crate::archive::extract(download.file.as_file_mut(), &root, self.cancellation)
-            .map_err(failure)?;
+            .map_err(|error| failure(ArchiveStage::Extract, error))?;
         let manifest = crate::manifest::read_one(
             &root,
             alias,
             root.clone(),
             InputMode::new(InputScope::Online, false),
         )
-        .map_err(|error| failure(error.into()))?;
-        crate::check::check_loaded(&manifest).map_err(failure)?;
+        .map_err(|error| failure(ArchiveStage::Manifest, error.into()))?;
+        crate::check::check_loaded(&manifest)
+            .map_err(|error| failure(ArchiveStage::Manifest, error))?;
         let tree = tree_digest(alias, &root)?;
         if let Some((_, expected)) = recorded
             && expected != tree
@@ -476,7 +492,7 @@ impl ModuleAcquisition<'_> {
         stage
             .publish()
             .context("could not publish the module cache")
-            .map_err(failure)?;
+            .map_err(|error| failure(ArchiveStage::Cache, error))?;
         Ok((destination, download.digest, tree))
     }
 
@@ -505,7 +521,7 @@ impl ModuleAcquisition<'_> {
                 found: commit,
             });
         }
-        let root = select_subdir(alias, &staging.source(), subdir)?;
+        let root = select_subdir(alias, &staging.source(), subdir, &commit)?;
         let digest = tree_digest(alias, &root)?;
         store_checkout(
             alias,
@@ -572,6 +588,7 @@ fn acquire(
             ensure_active(cancellation)?;
             return Err(ModuleRootError::Fetch {
                 alias: alias.to_owned(),
+                revision: revision.cloned(),
                 source,
             });
         }
@@ -603,26 +620,27 @@ fn ensure_active(cancellation: &BundleCancellation) -> Result<(), ModuleRootErro
 }
 
 /// The declared subdirectory of one snapshot, which must stay inside it and name a directory.
-fn select_subdir(alias: &str, snapshot: &Path, subdir: &Path) -> Result<PathBuf, ModuleRootError> {
+fn select_subdir(
+    alias: &str,
+    snapshot: &Path,
+    subdir: &Path,
+    commit: &str,
+) -> Result<PathBuf, ModuleRootError> {
+    let failure = |source| ModuleRootError::Subdir {
+        alias: alias.to_owned(),
+        subdir: subdir.to_owned(),
+        commit: commit.to_owned(),
+        source,
+    };
     let declared = snapshot.join(subdir);
     let root = declared
         .canonicalize()
-        .map_err(|source| ModuleRootError::Root {
-            alias: alias.to_owned(),
-            path: declared,
-            source,
-        })?;
+        .map_err(|source| failure(Some(source)))?;
     let snapshot = snapshot
         .canonicalize()
-        .map_err(|source| ModuleRootError::Root {
-            alias: alias.to_owned(),
-            path: snapshot.to_path_buf(),
-            source,
-        })?;
+        .map_err(|source| failure(Some(source)))?;
     if !root.starts_with(&snapshot) || !root.is_dir() {
-        return Err(ModuleRootError::Subdir {
-            alias: alias.to_owned(),
-        });
+        return Err(failure(None));
     }
     Ok(root)
 }
@@ -751,6 +769,15 @@ fn locked_revision(revision: Option<&RemoteRevision>) -> Option<LockedRevision> 
     })
 }
 
+/// The archive operation that failed.
+#[derive(Debug, Clone, Copy)]
+pub enum ArchiveStage {
+    Read,
+    Cache,
+    Extract,
+    Manifest,
+}
+
 /// Why one declared module has no readable directory.
 #[derive(Debug, thiserror::Error)]
 pub enum ModuleRootError {
@@ -761,6 +788,8 @@ pub enum ModuleRootError {
     #[error("Tola could not obtain the tarball for module `{alias}`: {source}")]
     Tarball {
         alias: String,
+        location: TarballLocation,
+        stage: ArchiveStage,
         #[source]
         source: anyhow::Error,
     },
@@ -769,6 +798,7 @@ pub enum ModuleRootError {
     )]
     TarballDigestMismatch {
         alias: String,
+        declared: bool,
         expected: Sha256Digest,
         found: Sha256Digest,
     },
@@ -826,11 +856,18 @@ pub enum ModuleRootError {
         expected: Sha256Digest,
         found: Sha256Digest,
     },
-    #[error("the `subdir` of module `{alias}` does not exist inside the read revision")]
-    Subdir { alias: String },
+    #[error("module `{alias}` cannot read `{subdir}` as a directory in commit `{commit}`")]
+    Subdir {
+        alias: String,
+        subdir: PathBuf,
+        commit: String,
+        #[source]
+        source: Option<std::io::Error>,
+    },
     #[error("Tola could not fetch module `{alias}`: {source}")]
     Fetch {
         alias: String,
+        revision: Option<RemoteRevision>,
         #[source]
         source: crate::remote::FetchError,
     },
@@ -932,6 +969,7 @@ mod tests {
             &declarations,
             &mut updated,
             &cancellation,
+            |_, _| {},
         )
         .unwrap();
         assert_ne!(updated, original);

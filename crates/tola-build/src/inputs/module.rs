@@ -47,7 +47,7 @@ pub fn record_module_roots(
     )
 }
 
-/// Forget the fact of every selected module, then resolve and record it again.
+/// Refresh and record selected modules, reporting when each module starts.
 pub fn refresh_module_roots(
     site_root: &Path,
     mode: InputMode,
@@ -55,6 +55,7 @@ pub fn refresh_module_roots(
     declarations: &BTreeMap<String, tola_module::ModuleDeclaration>,
     lock: &mut tola_input::InputLock,
     cancellation: &crate::cancellation::BuildCancellation,
+    started: impl FnMut(&str, &ModuleSource),
 ) -> std::result::Result<BTreeMap<String, PathBuf>, ModuleRootError> {
     refresh_module_roots_with_bundle(
         site_root,
@@ -63,6 +64,7 @@ pub fn refresh_module_roots(
         declarations,
         lock,
         &cancellation.bundle_cancellation(),
+        started,
     )
 }
 

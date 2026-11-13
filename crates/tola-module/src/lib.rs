@@ -8,6 +8,7 @@ pub mod assets;
 pub mod check;
 pub mod checkout;
 pub mod declaration;
+mod diagnostic;
 pub mod entities;
 pub mod hooks;
 pub mod inputs;
@@ -24,6 +25,7 @@ pub use action::Action;
 pub use arguments::expand_argument;
 pub use checkout::CheckoutError;
 pub use declaration::*;
+pub use diagnostic::source_diagnostic;
 pub use hooks::{
     BeforePackHook, CommandOutput, DevParticipation, HookDeclarationError, HookStage,
     ModuleHookOrigin, ModuleHooks,

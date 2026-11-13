@@ -2,10 +2,13 @@
 
 use std::collections::BTreeMap;
 
-use anyhow::{Result, ensure};
+use anyhow::{Error, Result, ensure};
 use tola_build::config::section::IconCollectionSource;
 use tola_build::inputs::refresh_module_roots;
-use tola_input::{InputLock, InputMode, LockedModule, LockedRevision};
+use tola_diagnostic::DiagnosticError;
+use tola_input::{
+    InputLock, InputMode, LockedModule, LockedRevision, Sha256Digest, TarballLocation,
+};
 use tola_module::{ModuleDeclaration, ModuleSource, RemoteRevision};
 
 use crate::cancellation::Cancellation;
@@ -21,10 +24,6 @@ pub(in crate::cli) fn run(
     output: &CommandOutput,
     cancellation: &Cancellation,
 ) -> Result<()> {
-    ensure!(
-        mode.may_write_lock(),
-        "`tola update` writes `tola.lock`; run it without `--locked` or `--pure`"
-    );
     let loaded = crate::cli::config::load_site(
         &config_file,
         &packages,
@@ -51,39 +50,211 @@ pub(in crate::cli) fn run(
     }
     let icons = selected_icons(&config.icons().collections, &update.names)?;
     let selected = refreshable(config.modules(), &update.names, &original)?;
-    refresh_module_roots(site_root, mode, vendor, &selected, &mut lock, &token)?;
+    refresh_module_roots(
+        site_root,
+        mode,
+        vendor,
+        &selected,
+        &mut lock,
+        &token,
+        |alias, source| match source {
+            ModuleSource::Git { git } => {
+                let selector = match &git.revision {
+                    Some(RemoteRevision::Tag(tag)) => format!("tag {tag}"),
+                    Some(RemoteRevision::Branch(branch)) => format!("branch {branch}"),
+                    Some(RemoteRevision::Rev(rev)) => format!("commit {}", short_commit(rev)),
+                    None => "default branch".into(),
+                };
+                let verb = if mode.may_use_network() {
+                    "Fetching"
+                } else {
+                    "Checking"
+                };
+                let _ = status(output, verb, format_args!("{alias} ({selector})"));
+            }
+            ModuleSource::Tarball { tarball } => {
+                let (verb, archive) = match &tarball.location {
+                    TarballLocation::Url { url } => {
+                        let address = url.split(['?', '#']).next().unwrap_or(url);
+                        let file = address
+                            .splitn(4, '/')
+                            .nth(3)
+                            .and_then(|path| path.trim_end_matches('/').rsplit('/').next())
+                            .filter(|file| !file.is_empty())
+                            .unwrap_or("archive");
+                        let verb = if mode.may_use_network() {
+                            "Downloading"
+                        } else {
+                            "Checking"
+                        };
+                        (verb, file.to_owned())
+                    }
+                    TarballLocation::File { path } => (
+                        "Reading",
+                        tola_diagnostic::display_path(&site_root.join(path), site_root),
+                    ),
+                };
+                let _ = status(output, verb, format_args!("{alias} ({archive})"));
+            }
+            ModuleSource::Local { .. } => {}
+        },
+    )
+    .map_err(|error| refresh_failed(error.into()))?;
     let resources = crate::cli::config::build_resources(mode);
-    tola_build::refresh_icon_collections(&config, &icons, &resources, &token, &mut lock)?;
+    tola_build::refresh_icon_collections(&config, &icons, &resources, &token, &mut lock, |name| {
+        let verb = if mode.may_use_network() {
+            "Fetching"
+        } else {
+            "Checking"
+        };
+        let _ = status(output, verb, format_args!("{name} (icon collection)"));
+    })
+    .map_err(|error| refresh_failed(error.into()))?;
     token.ensure_active()?;
 
+    let mut pinned_count = 0;
+    for (alias, declaration) in config.modules() {
+        if !update.names.contains(alias) {
+            continue;
+        }
+        if let ModuleSource::Git { git } = &declaration.source
+            && let Some(RemoteRevision::Rev(rev)) = &git.revision
+            && pinned(git, original.modules.get(alias))
+        {
+            status(
+                output,
+                "Pinned",
+                format_args!("{alias}  {}", short_commit(rev)),
+            )?;
+            pinned_count += 1;
+        }
+    }
+
+    let checked = selected.len() + icons.len();
+    if lock == original {
+        if checked == 1 && !update.names.is_empty() {
+            if let Some(alias) = selected.keys().next() {
+                status(
+                    output,
+                    "Unchanged",
+                    format_args!("{alias}  {}", module_value(&lock.modules[alias])),
+                )?;
+            } else {
+                let name = &icons[0];
+                status(
+                    output,
+                    "Unchanged",
+                    format_args!(
+                        "{name} (icon collection)  {}",
+                        short_digest(lock.icons[name].sha256)
+                    ),
+                )?;
+            }
+        } else if checked > 0 {
+            status(
+                output,
+                "Unchanged",
+                crate::terminal::progress::plural_count(checked, "input"),
+            )?;
+        } else if pinned_count == 0 {
+            output.status("No inputs to refresh")?;
+        }
+        return dry_run_outcome(output, update.dry_run);
+    }
+
+    if !update.dry_run {
+        token.ensure_active()?;
+        if !lock
+            .commit(site_root, &original)
+            .map_err(|error| refresh_failed(error.into()))?
+        {
+            output.status("`tola.lock` already records the refreshed inputs")?;
+            return Ok(());
+        }
+    }
+    let verb = if update.dry_run {
+        "Would update"
+    } else {
+        "Updated"
+    };
+    let mut changed = 0;
     for alias in selected.keys() {
         let before = original.modules.get(alias);
-        let after = lock.modules.get(alias);
-        if before != after {
-            output.status(format!("module `{alias}`: {}", describe(after)))?;
+        let after = &lock.modules[alias];
+        if before != Some(after) {
+            status(
+                output,
+                verb,
+                format_args!("{alias}  {}", module_change(before, after)),
+            )?;
+            changed += 1;
         }
     }
     for name in &icons {
-        if original.icons.get(name) != lock.icons.get(name) {
-            output.status(format!(
-                "icon collection `{name}` now has SHA-256 {}",
-                lock.icons[name].sha256
-            ))?;
+        let after = &lock.icons[name];
+        let before = original.icons.get(name);
+        if before != Some(after) {
+            let detail = match before {
+                Some(before) if before.sha256 != after.sha256 => {
+                    format!("sha256:{}", digest_change(before.sha256, after.sha256))
+                }
+                Some(_) => "source changed".into(),
+                None => short_digest(after.sha256),
+            };
+            status(
+                output,
+                verb,
+                format_args!("{name} (icon collection)  {detail}"),
+            )?;
+            changed += 1;
         }
     }
-    if lock == original {
-        output.status("every declared input is already current")?;
-        return Ok(());
+    if !update.dry_run {
+        status(
+            output,
+            "Wrote",
+            format_args!(
+                "tola.lock ({changed} changed, {} unchanged)",
+                checked - changed
+            ),
+        )?;
+        if vendor.is_some() {
+            output.status("Run `tola vendor --refresh` to update the frozen copies")?;
+        }
     }
-    if update.dry_run {
-        output.status("`--dry-run` wrote no `tola.lock`")?;
-        return Ok(());
+    dry_run_outcome(output, update.dry_run)
+}
+
+fn dry_run_outcome(output: &CommandOutput, dry_run: bool) -> Result<()> {
+    if dry_run {
+        output
+            .status("`--dry-run` leaves `tola.lock` untouched and may populate the input cache")?;
     }
-    token.ensure_active()?;
-    lock.commit(site_root, &original)?;
-    output.status("`tola.lock` records the refreshed inputs")?;
-    output.status("run `tola vendor --refresh` to update the frozen copies")?;
     Ok(())
+}
+
+fn status(
+    output: &CommandOutput,
+    verb: &str,
+    detail: impl std::fmt::Display,
+) -> std::io::Result<()> {
+    output.status(format!("{verb:>12} {detail}"))
+}
+
+fn refresh_failed(error: Error) -> Error {
+    if tola_build::cancellation::is_cancelled(&error) {
+        return error;
+    }
+    let mut diagnostics = match tola_module::source_diagnostic(&error) {
+        Some(diagnostic) => vec![diagnostic],
+        None => crate::cli::output::attached_or_fallback(&error, crate::codes::command::FAILED),
+    };
+    if let Some(diagnostic) = diagnostics.first_mut() {
+        diagnostic
+            .notes
+            .push("this update did not write `tola.lock`".into());
+    }
+    DiagnosticError::attach(error, diagnostics).into()
 }
 
 /// The declared modules one update refreshes.
@@ -139,25 +310,128 @@ fn selected_icons(
     Ok(selected)
 }
 
-/// One sentence naming what a module entry now records.
-fn describe(module: Option<&LockedModule>) -> String {
+fn module_value(module: &LockedModule) -> String {
     match module {
-        Some(LockedModule::Git {
-            commit, revision, ..
-        }) => {
-            let selector = match revision {
-                Some(LockedRevision::Tag(tag)) => format!("tag `{tag}`"),
-                Some(LockedRevision::Branch(branch)) => format!("branch `{branch}`"),
-                Some(LockedRevision::Rev(rev)) => format!("revision `{rev}`"),
-                None => "the default branch".to_owned(),
-            };
-            format!("{selector} now resolves to `{commit}`")
+        LockedModule::Git { commit, .. } => short_commit(commit).into(),
+        LockedModule::Tarball { tarball_sha256, .. } => short_digest(*tarball_sha256),
+        LockedModule::Local { .. } => "local directory".into(),
+    }
+}
+
+fn module_change(before: Option<&LockedModule>, after: &LockedModule) -> String {
+    let mut changes = Vec::new();
+    match (before, after) {
+        (
+            Some(LockedModule::Git {
+                git,
+                subdir,
+                revision,
+                commit,
+                tree_sha256,
+            }),
+            LockedModule::Git {
+                git: new_git,
+                subdir: new_subdir,
+                revision: new_revision,
+                commit: new_commit,
+                tree_sha256: new_tree,
+            },
+        ) => {
+            if commit != new_commit {
+                let (old, new) = (short_commit(commit), short_commit(new_commit));
+                changes.push(if old == new {
+                    format!("{commit} → {new_commit}")
+                } else {
+                    format!("{old} → {new}")
+                });
+            }
+            if git != new_git {
+                changes.push("git.url changed".into());
+            }
+            if revision != new_revision {
+                changes.push(format!(
+                    "ref: {} → {}",
+                    locked_selector(revision),
+                    locked_selector(new_revision)
+                ));
+            }
+            if subdir != new_subdir {
+                let old = if subdir.as_os_str().is_empty() {
+                    ".".into()
+                } else {
+                    subdir.display().to_string()
+                };
+                let new = if new_subdir.as_os_str().is_empty() {
+                    ".".into()
+                } else {
+                    new_subdir.display().to_string()
+                };
+                changes.push(format!("subdir: {old} → {new}"));
+            }
+            if changes.is_empty() && tree_sha256 != new_tree {
+                changes.push(format!(
+                    "tree SHA-256: {}",
+                    digest_change(*tree_sha256, *new_tree)
+                ));
+            }
         }
-        Some(LockedModule::Tarball { tarball_sha256, .. }) => {
-            format!("tarball SHA-256 {tarball_sha256}")
+        (
+            Some(LockedModule::Tarball {
+                tarball,
+                tarball_sha256,
+                tree_sha256,
+            }),
+            LockedModule::Tarball {
+                tarball: new_tarball,
+                tarball_sha256: new_digest,
+                tree_sha256: new_tree,
+            },
+        ) => {
+            if tarball_sha256 != new_digest {
+                changes.push(format!(
+                    "sha256:{}",
+                    digest_change(*tarball_sha256, *new_digest)
+                ));
+            }
+            if tarball != new_tarball {
+                changes.push("archive source changed".into());
+            }
+            if changes.is_empty() && tree_sha256 != new_tree {
+                changes.push(format!(
+                    "tree SHA-256: {}",
+                    digest_change(*tree_sha256, *new_tree)
+                ));
+            }
         }
-        Some(LockedModule::Local { .. }) => "recorded as a local directory".to_owned(),
-        None => "no longer records a fact".to_owned(),
+        (Some(before), _) => return format!("{} → {}", module_value(before), module_value(after)),
+        (None, _) => return format!("locked to {}", module_value(after)),
+    }
+    changes.join(", ")
+}
+
+fn locked_selector(revision: &Option<LockedRevision>) -> String {
+    match revision {
+        Some(LockedRevision::Tag(tag)) => format!("tag {tag}"),
+        Some(LockedRevision::Branch(branch)) => format!("branch {branch}"),
+        Some(LockedRevision::Rev(rev)) => format!("commit {}", short_commit(rev)),
+        None => "default branch".into(),
+    }
+}
+
+fn short_commit(commit: &str) -> &str {
+    commit.get(..7).unwrap_or(commit)
+}
+
+fn short_digest(digest: Sha256Digest) -> String {
+    format!("sha256:{}…", &digest.to_string()[..8])
+}
+
+fn digest_change(before: Sha256Digest, after: Sha256Digest) -> String {
+    let (before, after) = (before.to_string(), after.to_string());
+    if before[..8] == after[..8] {
+        format!("{before} → {after}")
+    } else {
+        format!("{}… → {}…", &before[..8], &after[..8])
     }
 }
 

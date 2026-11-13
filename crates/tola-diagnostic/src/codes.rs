@@ -84,6 +84,14 @@ pub mod icons {
     pub const COLLECTION: DiagnosticCode = DiagnosticCode::new("icons.collection");
 }
 
+/// Site module sources.
+pub mod module {
+    use super::DiagnosticCode;
+
+    /// A declared module could not be acquired.
+    pub const SOURCE: DiagnosticCode = DiagnosticCode::new("module.source");
+}
+
 /// Private model query results.
 pub mod query {
     use super::DiagnosticCode;
