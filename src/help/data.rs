@@ -74,6 +74,7 @@ pub(super) struct Method {
     pub anchor: String,
     #[serde(flatten)]
     pub signature: Signature,
+    pub blocks: Vec<Block>,
 }
 
 #[derive(Serialize)]

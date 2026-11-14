@@ -65,6 +65,10 @@ pub(super) fn tola_render_code(
         return Ok(raw);
     }
 
+    let raw = super::code_syntaxes::with_bundled_syntax(element, engine, styles)?
+        .map(Packed::pack)
+        .unwrap_or(raw);
+    let element = raw.to_packed::<RawElem>().expect("a raw element");
     let lines = element.lines.as_deref().unwrap_or_default();
     let dark = match dark {
         Some(dark_element) => Some(synthesize_dark(engine, &raw, &dark_element, styles, span)?),

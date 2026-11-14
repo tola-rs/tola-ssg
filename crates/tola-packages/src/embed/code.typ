@@ -17,8 +17,8 @@
 
 /// Additional syntax definitions keyed by language.
 ///
-/// Pass one definition to `raw.syntaxes`, or enable them all before your code blocks with
-/// `#set raw(syntaxes: code-syntaxes.values())`.
+/// Tola uses these definitions when rendering code in a site. A matching syntax supplied
+/// through `raw.syntaxes` takes precedence. Use this dictionary to access the syntax files.
 #import "@tola/host:0.0.0": code-syntaxes
 
 /// Select a built-in Typst syntax for a source-code label.

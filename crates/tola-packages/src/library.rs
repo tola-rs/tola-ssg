@@ -76,8 +76,10 @@ impl SiteLibrary {
             inputs.asset_origins.into_value(),
         );
 
+        let mut library = tola_typst::create_library_with_inputs(values).into_inner();
+        crate::code_syntaxes::install(&mut library.rules);
         Self {
-            library: Arc::new(tola_typst::create_library_with_inputs(values)),
+            library: Arc::new(library.into()),
         }
     }
 

@@ -601,6 +601,18 @@ fn package_page(name: &str, requested: &[String], language: HelpLanguage) -> Res
         }
         let mut methods = Vec::new();
         for method in &export.methods {
+            let receiver = export
+                .name
+                .chars()
+                .next()
+                .expect("export names are nonempty");
+            let name = &export.name;
+            let receiver_help = match language {
+                HelpLanguage::English => {
+                    format!("`{receiver}` is the value returned by `{name}(...)`.")
+                }
+                HelpLanguage::SimplifiedChinese => format!("`{receiver}` 是 `{name}(...)` 的返回值。"),
+            };
             let parameters = translation
                 .map(|translation| translation.method_parameters(&export.name, &method.name))
                 .unwrap_or_default();
@@ -610,9 +622,9 @@ fn package_page(name: &str, requested: &[String], language: HelpLanguage) -> Res
                     .copied()
                     .filter(|text| !text.is_empty())
             };
-            let declaration = method.method_code();
+            let declaration = method.method_code(receiver);
             text.push_str(&format!(
-                "\n### `{}`\n\n{}\n",
+                "\n### `{}`\n\n{}\n{receiver_help}\n",
                 method.name,
                 code_block("typst-code", &declaration),
             ));
@@ -621,6 +633,7 @@ fn package_page(name: &str, requested: &[String], language: HelpLanguage) -> Res
                 name: method.name.clone(),
                 anchor: anchor(&method.name).as_str().to_owned(),
                 signature: reference_signature(&page, method, declaration, prose),
+                blocks: page.prose(&receiver_help),
             });
         }
         text.push_str(&related_section(&target, &export.related, &names, language));

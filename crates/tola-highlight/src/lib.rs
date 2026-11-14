@@ -89,6 +89,14 @@ static EXTRA_SYNTAXES: LazyLock<Vec<SyntaxSet>> = LazyLock::new(|| {
         })
         .collect()
 });
+
+/// Whether a bundled syntax recognizes this language name or extension.
+pub fn has_bundled_syntax(language: &str) -> bool {
+    EXTRA_SYNTAXES
+        .iter()
+        .any(|set| set.find_syntax_by_token(language).is_some())
+}
+
 static TERMINAL: LazyLock<Theme> = LazyLock::new(|| palette(ThemeChoice::Terminal));
 static DARK: LazyLock<Theme> = LazyLock::new(|| palette(ThemeChoice::Dark));
 static LIGHT: LazyLock<Theme> = LazyLock::new(|| palette(ThemeChoice::Light));
