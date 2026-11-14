@@ -140,8 +140,7 @@ impl<C> RelationRows<C> {
 impl<C: Ord> RelationRows<C> {
     /// Rows of `rows` whose values in the leading `columns` equal the ones `key` returns.
     ///
-    /// Those columns are fixed across the match, so the matches are one contiguous run and two
-    /// binary searches bound it.
+    /// The matches form one contiguous run. Exponential probing from its start bounds its end.
     pub(crate) fn matching_prefix<'a, 'b>(
         &self,
         rows: RowIds<'a>,
@@ -162,8 +161,7 @@ impl<C: Ord> RelationRows<C> {
                 .unwrap_or(Ordering::Equal)
         };
         let first = rows.partition_point(|row| compare(row).is_lt());
-        let rest = rows.slice(first..rows.len());
-        let last = first + rest.partition_point(|row| !compare(row).is_gt());
+        let last = rows.gallop(first, |row| !compare(row).is_gt());
         rows.slice(first..last)
     }
 

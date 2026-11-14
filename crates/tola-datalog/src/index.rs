@@ -65,7 +65,7 @@ impl<'a> RowIds<'a> {
 
     /// First position at or after `start` whose row fails `before`; `before` must hold for the
     /// rows from `start` up to that position.
-    fn gallop(&self, start: usize, before: impl Fn(usize) -> bool) -> usize {
+    pub(crate) fn gallop(&self, start: usize, before: impl Fn(usize) -> bool) -> usize {
         gallop(self.len(), start, |position| before(self.at(position)))
     }
 }
@@ -122,8 +122,7 @@ impl<'a, C: Ord> ColumnIndex<'a, C> {
     /// The rows whose value in this column is `value`.
     pub(crate) fn lookup(&self, value: &C) -> RowIds<'a> {
         let first = self.lower_bound(value);
-        let rest = self.rows.slice(first..self.rows.len());
-        let last = first + rest.partition_point(|row| self.cell(row) <= value);
+        let last = self.rows.gallop(first, |row| self.cell(row) <= value);
         self.rows.slice(first..last)
     }
 

@@ -138,10 +138,22 @@ impl<C: Ord + Copy> RowBlock<C> {
         gallop(self.len, start, |index| self.row(index) < target)
     }
 
-    /// Whether `row` occurs in this strictly increasing block.
+    /// Whether `row` occurs in this nonempty, strictly increasing block.
     fn contains(&self, row: &[C]) -> bool {
-        let index = self.lower_bound(0, row);
-        index < self.len && self.row(index) == row
+        if self.width == 1 {
+            let key = row[0];
+            let first = self.values[0].cmp(&key);
+            if !first.is_lt() {
+                return first.is_eq();
+            }
+            let last = self.values[self.len - 1].cmp(&key);
+            if !last.is_gt() {
+                return last.is_eq();
+            }
+            // An isolated lookup has no nearby cursor to start from.
+            return self.values[1..self.len - 1].binary_search(&key).is_ok();
+        }
+        self.contains_from(&mut 0, row)
     }
 
     /// Removes the rows that occur in any `known` block and leaves this block strictly increasing.
@@ -161,6 +173,10 @@ impl<C: Ord + Copy> RowBlock<C> {
             return Ok(());
         }
         if self.is_strictly_increasing(is_cancelled)? {
+            return self.remove_known_rows(known, is_cancelled);
+        }
+        if self.width == 1 {
+            self.sort_single_column(is_cancelled)?;
             return self.remove_known_rows(known, is_cancelled);
         }
         let mut order = self.sorted_order(is_cancelled)?;
@@ -219,7 +235,8 @@ impl<C: Ord + Copy> RowBlock<C> {
         Ok(())
     }
 
-    fn contains_from(&self, cursor: &mut usize, row: &[C]) -> bool {
+    /// Tests membership, reusing a cursor from a lookup for a smaller or equal row.
+    pub(super) fn contains_from(&self, cursor: &mut usize, row: &[C]) -> bool {
         *cursor = self.lower_bound(*cursor, row);
         *cursor < self.len && self.row(*cursor) == row
     }
@@ -246,9 +263,23 @@ impl<C: Ord + Copy> RowBlock<C> {
             self.strictly_sorted = true;
             return Ok(());
         }
+        if self.width == 1 {
+            return self.sort_single_column(is_cancelled);
+        }
         let order = self.sorted_order(is_cancelled)?;
         self.reorder_sorted(order, is_cancelled)
     }
+
+    fn sort_single_column(&mut self, is_cancelled: &mut impl FnMut() -> bool) -> Result<(), Error> {
+        ensure_not_cancelled(is_cancelled)?;
+        // A stable sort keeps the first representation of equal constants.
+        self.values.sort();
+        self.values.dedup();
+        self.len = self.values.len();
+        self.strictly_sorted = true;
+        ensure_not_cancelled(is_cancelled)
+    }
+
     /// The rows in ascending row order; equal rows keep the earliest arrival, so this is the
     /// order a stable sort would produce.
     fn sorted_order(&self, is_cancelled: &mut impl FnMut() -> bool) -> Result<Vec<usize>, Error> {

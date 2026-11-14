@@ -123,6 +123,8 @@ impl<C: Clone + Ord> Database<C> {
 
 /// The columns a demand binds, in column order.
 type BoundColumns<'a, C> = SmallVec<[Option<ConstantRef<'a, C>>; 2]>;
+type GroundTuple<'a, C> = SmallVec<[ConstantRef<'a, C>; 2]>;
+type DemandGroups<'a, C> = BTreeMap<BoundColumns<'a, C>, Rows<'a, C>>;
 /// Memo-table key: a relation and the values its demand binds.
 #[derive(Eq, PartialEq, Ord, PartialOrd)]
 struct Demand<'a, C: Ord> {
@@ -226,14 +228,21 @@ struct Table<'a, C> {
     answers: Vec<Rows<'a, C>>,
     consumers: Vec<Consumer<'a, C>>,
 }
+/// Ground negative demands that can share one completed table for their common columns.
+struct NegativeBatch<'a, C: Ord> {
+    cover: Demand<'a, C>,
+    continuation: Continuation<'a, C>,
+}
 /// One evaluator step.
-enum Work<'a, C> {
+enum Work<'a, C: Ord> {
     /// Continue a clause from its next body atom.
     Advance(Continuation<'a, C>),
     /// New answers for a table.
     Answer(usize, Rows<'a, C>),
     /// Drop rows whose negative atom found an answer.
     CheckNegative(usize, Continuation<'a, C>),
+    /// Look for a shared table after the first ground demand finishes.
+    CheckNegativeBatch(Box<NegativeBatch<'a, C>>),
 }
 fn push_continuation<'a, C: Ord>(queue: &mut VecDeque<Work<'a, C>>, next: Continuation<'a, C>) {
     if next.is_query_output()
@@ -265,11 +274,11 @@ struct Evaluator<'a, C: Ord, F> {
 fn group_demands<'a, C: Ord>(
     continuation: &Continuation<'a, C>,
     atom: &Stage,
-    rows: Rows<'a, C>,
+    rows: &Rows<'a, C>,
     is_cancelled: &mut impl FnMut() -> bool,
-) -> Result<BTreeMap<BoundColumns<'a, C>, Rows<'a, C>>, Error> {
+) -> Result<DemandGroups<'a, C>, Error> {
     let mut columns = BoundColumns::new();
-    let mut groups = BTreeMap::<BoundColumns<'a, C>, Rows<'a, C>>::new();
+    let mut groups = DemandGroups::new();
     for row in rows.iter() {
         ensure_not_cancelled(is_cancelled)?;
         columns.clear();
@@ -424,6 +433,7 @@ impl<'a, C: Clone + Ord, F: FnMut() -> bool> Evaluator<'a, C, F> {
                 Work::CheckNegative(table, continuation) => {
                     self.check_negative(level, table, continuation)
                 }
+                Work::CheckNegativeBatch(batch) => self.check_negative_batch(level, *batch),
                 Work::Advance(continuation) => self.advance(level, continuation),
             }?;
         }
@@ -486,12 +496,73 @@ impl<'a, C: Clone + Ord, F: FnMut() -> bool> Evaluator<'a, C, F> {
         &mut self,
         level: usize,
         table: usize,
+        continuation: Continuation<'a, C>,
+    ) -> Result<(), Error> {
+        if self.tables[table].answers.is_empty() {
+            self.resume_negative(level, continuation)?;
+        }
+        Ok(())
+    }
+    fn check_negative_batch(
+        &mut self,
+        level: usize,
+        batch: NegativeBatch<'a, C>,
+    ) -> Result<(), Error> {
+        let NegativeBatch {
+            cover,
+            mut continuation,
+        } = batch;
+        debug_assert!(self.stratum(cover.relation) < level);
+        let atom = continuation.clause.stage(continuation.position - 1);
+        let Some(&table) = self.table_ids.get(&cover) else {
+            let groups = group_demands(&continuation, atom, &continuation.rows, self.is_cancelled)?;
+            for (columns, rows) in groups {
+                self.dispatch_demand(level, columns, continuation.with_rows(rows))?;
+            }
+            return Ok(());
+        };
+        // The table's lower stratum has drained. Its answers cover every ground tuple in
+        // the batch, including the values in columns left unbound by the shared demand.
+        let answers = &self.tables[table].answers;
+        let mut cursors: SmallVec<[usize; 8]> = answers.iter().map(|_| 0).collect();
+        let mut output = Rows::new(atom.width());
+        let mut tuple = GroundTuple::new();
+        let mut previous = GroundTuple::new();
+        for binding in continuation.rows.iter() {
+            ensure_not_cancelled(self.is_cancelled)?;
+            tuple.clear();
+            tuple.extend(demand_columns(&continuation, atom, binding).map(Option::unwrap));
+            if tuple < previous {
+                cursors.fill(0);
+            }
+            let present = answers
+                .iter()
+                .zip(cursors.iter_mut())
+                .any(|(block, cursor)| block.contains_from(cursor, &tuple));
+            if !present {
+                output.push(atom.values(
+                    &continuation.clause,
+                    binding,
+                    &continuation.parameters,
+                    &|_| unreachable!(),
+                ));
+                if atom.width() == 0 {
+                    break;
+                }
+            }
+            std::mem::swap(&mut previous, &mut tuple);
+        }
+        if !output.is_empty() {
+            continuation.rows = output;
+            self.enqueue(level, Work::Advance(continuation));
+        }
+        Ok(())
+    }
+    fn resume_negative(
+        &mut self,
+        level: usize,
         mut continuation: Continuation<'a, C>,
     ) -> Result<(), Error> {
-        if !self.tables[table].answers.is_empty() {
-            return Ok(());
-        }
-        // The stage that demanded this table is the one to keep rows for.
         let atom = continuation.clause.stage(continuation.position - 1);
         continuation.rows = project_bindings(
             &continuation.clause,
@@ -555,17 +626,68 @@ impl<'a, C: Clone + Ord, F: FnMut() -> bool> Evaluator<'a, C, F> {
     fn dispatch_tabled_stage(
         &mut self,
         level: usize,
-        mut continuation: Continuation<'a, C>,
+        continuation: Continuation<'a, C>,
     ) -> Result<(), Error> {
         let atom = continuation.clause.stage(continuation.position - 1);
         if continuation.rows.len() == 1 || !atom.reads_input() {
             let columns = demand_columns(&continuation, atom, continuation.rows.row(0)).collect();
             return self.dispatch_demand(level, columns, continuation);
         }
-        let rows = std::mem::replace(&mut continuation.rows, Rows::new(0));
-        for (columns, bindings) in group_demands(&continuation, atom, rows, self.is_cancelled)? {
+        if atom.negative {
+            return self.dispatch_negative_batch(level, continuation);
+        }
+        let groups = group_demands(&continuation, atom, &continuation.rows, self.is_cancelled)?;
+        for (columns, bindings) in groups {
             self.dispatch_demand(level, columns, continuation.with_rows(bindings))?;
         }
+        Ok(())
+    }
+
+    fn dispatch_negative_batch(
+        &mut self,
+        level: usize,
+        continuation: Continuation<'a, C>,
+    ) -> Result<(), Error> {
+        let atom = continuation.clause.stage(continuation.position - 1);
+        let relation = continuation.clause.relation(atom);
+        let first: BoundColumns<'a, C> =
+            demand_columns(&continuation, atom, continuation.rows.row(0)).collect();
+        // Keep shared values so a selective query can reuse a partially bound table.
+        let mut columns = first.clone();
+        for binding in continuation.rows.iter().skip(1) {
+            ensure_not_cancelled(self.is_cancelled)?;
+            for (shared, value) in
+                columns
+                    .iter_mut()
+                    .zip(demand_columns(&continuation, atom, binding))
+            {
+                if *shared != value {
+                    *shared = None;
+                }
+            }
+            if columns.iter().all(Option::is_none) {
+                break;
+            }
+        }
+        if columns == first {
+            return self.dispatch_demand(level, first, continuation);
+        }
+        let cover = Demand { relation, columns };
+        // A ground demand may open the shared table through recursion. Try that before
+        // evaluating the rest of the ground demands.
+        if !self.table_ids.contains_key(&cover) {
+            self.ensure_table(Demand {
+                relation,
+                columns: first,
+            })?;
+        }
+        self.enqueue(
+            level,
+            Work::CheckNegativeBatch(Box::new(NegativeBatch {
+                cover,
+                continuation,
+            })),
+        );
         Ok(())
     }
 

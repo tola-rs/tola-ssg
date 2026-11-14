@@ -409,10 +409,29 @@ mod tests {
             let facts: Vec<_> = (0..9)
                 .filter(|bit| mask & (1 << bit) != 0)
                 .map(|bit| edge(bit / 3, bit % 3))
+                .chain((0..3).map(|node| (relation("node", 1), vec![node])))
                 .collect();
             let expected = reference_answers(&facts, &rules, &[0, 1, 2]);
             let database = new_database(facts, rules.clone());
             for source in 0..3 {
+                let missing: Vec<_> = (0..3)
+                    .map(|target| vec![target])
+                    .filter(|target| !expected.contains(&("path".into(), vec![source, target[0]])))
+                    .collect();
+                assert_eq!(
+                    answer_rows(
+                        &database,
+                        &query(
+                            &["y"],
+                            vec![
+                                positive("node", vec![var("y")]),
+                                negative("path", vec![constant(source), var("y")]),
+                            ],
+                        ),
+                    ),
+                    missing,
+                    "mask {mask}, missing paths from {source}"
+                );
                 for name in ["path", "indirect"] {
                     let actual = answer_rows(
                         &database,
@@ -955,6 +974,27 @@ mod tests {
             ),
             vec![vec![0], vec![1]]
         );
+    }
+
+    #[test]
+    fn negative_lookup_handles_descending_keys() {
+        let candidates = relation("candidate", 2);
+        let facts = vec![
+            edge(0, 1),
+            edge(1, 2),
+            (candidates.clone(), vec![0, 3]),
+            (candidates.clone(), vec![1, 2]),
+            (candidates, vec![2, 1]),
+        ];
+        let database = new_database(facts, paths());
+        let query = query(
+            &["id"],
+            vec![
+                positive("candidate", vec![var("id"), var("target")]),
+                negative("path", vec![constant(0), var("target")]),
+            ],
+        );
+        assert_eq!(answer_rows(&database, &query), vec![vec![0]]);
     }
 
     #[test]
