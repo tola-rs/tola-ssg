@@ -207,6 +207,9 @@ pub struct AssetTreeDeclaration {
     /// Site-root URL prefix for descendants of `source`.
     #[serde(rename = "url-prefix")]
     pub url_prefix: AssetUrlPrefix,
+    /// Follow selected symbolic links to regular files while scanning this tree.
+    #[serde(rename = "follow-file-symlinks")]
+    pub follow_file_symlinks: bool,
     /// Whether this declaration may publish.
     pub enable: bool,
     /// TOML key path to a boolean in the owner's options.
@@ -224,6 +227,8 @@ struct AssetTreeFields {
     source: PathBuf,
     #[serde(rename = "url-prefix")]
     url_prefix: AssetUrlPrefix,
+    #[serde(default, rename = "follow-file-symlinks")]
+    follow_file_symlinks: bool,
     #[serde(default = "enabled")]
     enable: bool,
     #[serde(default, rename = "enabled-by")]
@@ -259,6 +264,7 @@ impl TryFrom<AssetTreeFields> for AssetTreeDeclaration {
         Ok(Self {
             source: fields.source,
             url_prefix: fields.url_prefix,
+            follow_file_symlinks: fields.follow_file_symlinks,
             enable: fields.enable,
             enabled_by: fields.enabled_by,
             minify: fields.minify,
@@ -273,6 +279,7 @@ impl AssetTreeDeclaration {
         AssetTreeFields {
             source: source.into(),
             url_prefix,
+            follow_file_symlinks: false,
             enable: true,
             enabled_by: None,
             minify: true,

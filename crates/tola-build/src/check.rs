@@ -489,7 +489,12 @@ impl SourceDiagnosticSession {
             .with_local_packages(Arc::clone(site.local_packages()));
         let bindings = crate::package::SiteBindings::from_config(
             config,
-            crate::asset::AssetUrls::for_check_with(config, site.applied_assets(), cancellation)?,
+            crate::asset::AssetUrls::for_check_with(
+                config,
+                site.applied_assets(),
+                &boundary,
+                cancellation,
+            )?,
         )
         .prepare_modules(site.prepared())?;
         Ok((host, content, bindings))

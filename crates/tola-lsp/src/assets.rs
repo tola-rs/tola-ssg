@@ -257,7 +257,7 @@ mod tests {
     }
 
     fn published_urls(config: &ResolvedSiteConfig) -> AssetUrls {
-        AssetUrls::for_check_project(config, &Default::default())
+        AssetUrls::for_check_project(config, &Default::default(), &Default::default())
             .expect("the site's asset URLs resolve")
     }
 

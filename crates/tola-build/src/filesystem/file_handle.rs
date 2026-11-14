@@ -100,7 +100,8 @@ mod windows_tests {
                     cancellation: &cancellation,
                     display_root: &root,
                     member_label: "source member",
-                    validate_member: &|_, _| Ok(()),
+                    follow_file_symlinks: false,
+                    validate_member: &|_, _, _| Ok(()),
                 },
                 &|_, _| true,
             )

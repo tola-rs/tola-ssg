@@ -1,6 +1,7 @@
 //! Immutable source bytes, digests, and directory membership.
 
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -22,6 +23,7 @@ const SOURCE_ROOT_NOUN: &str = "source root";
 pub(crate) struct FilesystemSourceFile {
     relative: PathBuf,
     canonical_target: PathBuf,
+    followed_symlink: bool,
     digest: tola_typst::ContentDigest,
     bytes: Arc<[u8]>,
 }
@@ -46,6 +48,7 @@ impl FilesystemSourceFile {
     fn same_evidence_as(&self, other: &Self) -> bool {
         self.relative == other.relative
             && self.canonical_target == other.canonical_target
+            && self.followed_symlink == other.followed_symlink
             && self.digest == other.digest
     }
 }
@@ -65,6 +68,24 @@ impl FilesystemSourceObservation {
 
     pub(crate) fn canonical_root(&self) -> Option<&Path> {
         self.canonical_root.as_deref()
+    }
+
+    pub(crate) fn linked_files(&self) -> impl Iterator<Item = &FilesystemSourceFile> {
+        self.files.iter().filter(|file| file.followed_symlink)
+    }
+
+    pub(crate) fn link_targets_changed(&self, root: &Path, changed_paths: &[PathBuf]) -> bool {
+        !changed_paths.is_empty()
+            && self.linked_files().any(|file| {
+                let target = file.canonical_target();
+                changed_paths
+                    .iter()
+                    .any(|changed| paths_intersect(changed, target))
+                    || !root
+                        .join(file.relative_path())
+                        .canonicalize()
+                        .is_ok_and(|current| current == target)
+            })
     }
 
     pub(crate) fn same_evidence_as(&self, other: &Self) -> bool {
@@ -87,14 +108,14 @@ pub(crate) struct TreeObservation<'a> {
     pub(crate) cancellation: &'a crate::cancellation::BuildCancellation,
     pub(crate) display_root: &'a Path,
     pub(crate) member_label: &'a str,
-    pub(crate) validate_member: &'a dyn Fn(&Path, &Path) -> Result<()>,
+    pub(crate) follow_file_symlinks: bool,
+    pub(crate) validate_member: &'a dyn Fn(&Path, &Path, Option<&Path>) -> Result<()>,
 }
 
 /// Observe selected files from an already-resolved tree while retaining their root identity.
 ///
-/// The caller must resolve the canonical root immediately before this call and
-/// apply its root-symlink policy. Members that are symlinks or reparse points
-/// are rejected. `display_root` is the site root that reported paths are relative to.
+/// The caller must resolve the canonical root immediately before this call.
+/// `display_root` is the site root that reported paths are relative to.
 pub(crate) fn observe_tree_source_selected(
     observation: TreeObservation<'_>,
     selected: &dyn Fn(&Path, bool) -> bool,
@@ -107,12 +128,14 @@ pub(crate) fn observe_tree_source_selected(
         cancellation,
         display_root,
         member_label,
+        follow_file_symlinks,
         validate_member,
     } = observation;
     cancellation.ensure_active()?;
     boundary.check(source_identity.logical_path())?;
     let canonical_root = canonical_source_path(source_identity, display_root)?;
-    if let Some(previous) = previous
+    if !follow_file_symlinks
+        && let Some(previous) = previous
         && !changed_paths.is_empty()
         && previous.canonical_root() == Some(canonical_root)
         && let Some(update) = refresh_tree_files(
@@ -134,15 +157,17 @@ pub(crate) fn observe_tree_source_selected(
         cancellation,
         display_root,
         member_label,
+        follow_file_symlinks,
         selected,
         validate_member,
-        &mut |path, relative| {
+        &mut |path, relative, target| {
             files.push(read_source_file(
                 path,
                 relative.to_path_buf(),
                 previous,
                 display_root,
                 boundary,
+                target,
             )?);
             Ok(())
         },
@@ -160,9 +185,10 @@ pub(crate) fn walk_tree_members_selected(
     cancellation: &crate::cancellation::BuildCancellation,
     display_root: &Path,
     member_label: &str,
+    follow_file_symlinks: bool,
     selected: &dyn Fn(&Path, bool) -> bool,
-    validate_member: &dyn Fn(&Path, &Path) -> Result<()>,
-    visitor: &mut dyn FnMut(&Path, &Path) -> Result<()>,
+    validate_member: &dyn Fn(&Path, &Path, Option<&Path>) -> Result<()>,
+    visitor: &mut dyn FnMut(&Path, &Path, Option<&Path>) -> Result<()>,
 ) -> Result<()> {
     cancellation.ensure_active()?;
     if selected(Path::new(""), true) {
@@ -173,6 +199,7 @@ pub(crate) fn walk_tree_members_selected(
             &TreeMemberWalk {
                 display_root,
                 member_label,
+                follow_file_symlinks,
                 validate_member,
             },
             selected,
@@ -201,6 +228,7 @@ pub(crate) fn observe_file_source(
         previous,
         display_root,
         boundary,
+        None,
     )?;
     if file.canonical_target != canonical_source {
         return Err(source_repointed_error(
@@ -222,7 +250,7 @@ fn refresh_tree_files(
     changed_paths: &[PathBuf],
     cancellation: &crate::cancellation::BuildCancellation,
     display_root: &Path,
-    validate_member: &dyn Fn(&Path, &Path) -> Result<()>,
+    validate_member: &dyn Fn(&Path, &Path, Option<&Path>) -> Result<()>,
 ) -> Result<Option<FilesystemSourceObservation>> {
     let canonical_root = canonical_source_path(source_identity, display_root)?;
     let mut changed_indices = Vec::new();
@@ -257,7 +285,7 @@ fn refresh_tree_files(
         if !metadata.is_file() || is_link_like(&metadata) {
             return Ok(None);
         }
-        validate_member(&expected.relative, &logical_source)?;
+        validate_member(&expected.relative, &logical_source, None)?;
         changed_indices.push(index);
     }
     changed_indices.sort_unstable();
@@ -276,6 +304,7 @@ fn refresh_tree_files(
             Some(previous),
             display_root,
             boundary,
+            None,
         )?;
         if files[*index].canonical_target != expected.canonical_target {
             // A parent may have been replaced by a symlink even when the event names only
@@ -296,7 +325,8 @@ fn refresh_tree_files(
 struct TreeMemberWalk<'a> {
     display_root: &'a Path,
     member_label: &'a str,
-    validate_member: &'a dyn Fn(&Path, &Path) -> Result<()>,
+    follow_file_symlinks: bool,
+    validate_member: &'a dyn Fn(&Path, &Path, Option<&Path>) -> Result<()>,
 }
 
 /// One recursive walk over the membership rules every caller shares: a member that is a symbolic
@@ -308,7 +338,7 @@ fn scan_tree_directory(
     cancellation: &crate::cancellation::BuildCancellation,
     walk: &TreeMemberWalk<'_>,
     selected: &dyn Fn(&Path, bool) -> bool,
-    visit: &mut dyn FnMut(&Path, &Path) -> Result<()>,
+    visit: &mut dyn FnMut(&Path, &Path, Option<&Path>) -> Result<()>,
 ) -> Result<()> {
     cancellation.ensure_active()?;
     let entries = crate::filesystem::read_sorted_entries(
@@ -331,21 +361,44 @@ fn scan_tree_directory(
             .strip_prefix(root)
             .expect("walked source remains below its root");
         let is_link = entry_is_link_like(&entry, &file_type)?;
-        if !selected(relative, file_type.is_dir() || is_link) {
+        if is_link {
+            let selected_file = selected(relative, false);
+            if (selected_file || selected(relative, true))
+                && std::fs::metadata(&path).is_ok_and(|target| target.is_dir())
+            {
+                return Err(directory_link_error(&path, walk.display_root));
+            }
+            if !selected_file {
+                continue;
+            }
+            if file_type.is_symlink() && walk.follow_file_symlinks {
+                let target = regular_file_symlink_target(&path, walk.display_root)?;
+                (walk.validate_member)(relative, &path, Some(&target))?;
+                visit(&path, relative, Some(&target))?;
+                continue;
+            }
+            let help = if file_type.is_symlink() && !walk.follow_file_symlinks {
+                "Set `follow-file-symlinks = true` on this asset tree to follow links to regular files, or exclude this path"
+            } else {
+                "Replace it with a real file or directory, or exclude this path"
+            };
+            return Err(tree_link_error(
+                format!(
+                    "{} `{}` is a symbolic link or reparse point",
+                    walk.member_label,
+                    display_path(&path, walk.display_root)
+                ),
+                help,
+            ));
+        }
+        if !selected(relative, file_type.is_dir()) {
             continue;
         }
-        if is_link {
-            anyhow::bail!(
-                "{} `{}` is a symbolic link or reparse point; replace it with a real file or directory",
-                walk.member_label,
-                display_path(&path, walk.display_root)
-            );
-        }
-        (walk.validate_member)(relative, &path)?;
+        (walk.validate_member)(relative, &path, None)?;
         if file_type.is_dir() {
             scan_tree_directory(root, &path, cancellation, walk, selected, visit)?;
         } else if file_type.is_file() {
-            visit(&path, relative)?;
+            visit(&path, relative, None)?;
         } else {
             anyhow::bail!(
                 "{} `{}` is not a regular file; move or delete it",
@@ -357,23 +410,79 @@ fn scan_tree_directory(
     Ok(())
 }
 
+pub(crate) fn regular_file_symlink_target(path: &Path, display_root: &Path) -> Result<PathBuf> {
+    let shown = display_path(path, display_root);
+    let unreadable = |error: std::io::Error| {
+        tree_link_error(
+            format!(
+                "cannot follow asset link `{shown}`: {}",
+                path_failure_reason(&error)
+            ),
+            "Check that the target exists and is readable and that the link does not form a cycle",
+        )
+    };
+    let target = std::fs::canonicalize(path).map_err(unreadable)?;
+    let metadata = std::fs::symlink_metadata(&target).map_err(unreadable)?;
+    if metadata.is_dir() {
+        return Err(directory_link_error(path, display_root));
+    }
+    if !metadata.is_file() || is_link_like(&metadata) {
+        return Err(tree_link_error(
+            format!("asset link `{shown}` must point to a regular file"),
+            "Link to a regular file or exclude this path",
+        ));
+    }
+    Ok(target)
+}
+
+fn directory_link_error(path: &Path, display_root: &Path) -> anyhow::Error {
+    let shown = display_path(path, display_root);
+    tree_link_error(
+        format!(
+            "asset link `{shown}` points to a directory. Tola does not follow directory links within an asset tree"
+        ),
+        "Declare the directory as a separate `assets.trees` source or exclude this path",
+    )
+}
+
+pub(crate) fn tree_link_error(message: String, help: &str) -> anyhow::Error {
+    let diagnostic = tola_diagnostic::Diagnostic::new(
+        tola_diagnostic::codes::build::SITE,
+        tola_diagnostic::Severity::Error,
+        &message,
+    )
+    .with_help(help);
+    tola_diagnostic::DiagnosticError::new(message, vec![diagnostic]).into()
+}
+
 fn read_source_file(
     logical_source: &Path,
     relative: PathBuf,
     previous: Option<&FilesystemSourceObservation>,
     display_root: &Path,
     boundary: &tola_typst::SourceBoundary,
+    target: Option<&Path>,
 ) -> Result<FilesystemSourceFile> {
     let logical_source = absolute_path(logical_source);
     boundary.check(&logical_source)?;
     let canonical_target = canonical_source_target(&logical_source, SOURCE_NOUN, display_root)?;
-    let source = std::fs::read(&logical_source).map_err(|error| {
-        anyhow::anyhow!(
-            "cannot read source `{}`: {}",
-            display_path(&logical_source, display_root),
-            path_failure_reason(&error),
-        )
-    })?;
+    if target.is_some_and(|target| target != canonical_target) {
+        return Err(source_repointed_error(
+            &logical_source,
+            SOURCE_NOUN,
+            display_root,
+        ));
+    }
+    let mut source = Vec::new();
+    tola_fs::open_regular_file(&canonical_target, false)
+        .and_then(|mut file| file.read_to_end(&mut source))
+        .map_err(|error| {
+            anyhow::anyhow!(
+                "cannot read source `{}`: {}",
+                display_path(&logical_source, display_root),
+                path_failure_reason(&error),
+            )
+        })?;
     let target_after = canonical_source_target(&logical_source, SOURCE_NOUN, display_root)?;
     if target_after != canonical_target {
         return Err(source_repointed_error(
@@ -397,6 +506,7 @@ fn read_source_file(
     Ok(FilesystemSourceFile {
         relative,
         canonical_target,
+        followed_symlink: target.is_some(),
         digest,
         bytes,
     })
@@ -500,7 +610,8 @@ mod tests {
             cancellation: &crate::cancellation::BuildCancellation::default(),
             display_root: root,
             member_label: "asset",
-            validate_member: &|_, _| Ok(()),
+            follow_file_symlinks: false,
+            validate_member: &|_, _, _| Ok(()),
         })
         .unwrap()
     }
@@ -551,7 +662,8 @@ mod tests {
             cancellation: &crate::cancellation::BuildCancellation::default(),
             display_root: &root,
             member_label: "asset",
-            validate_member: &|_, _| Ok(()),
+            follow_file_symlinks: false,
+            validate_member: &|_, _, _| Ok(()),
         })
         .unwrap_err();
         assert!(error.to_string().contains("nested"), "{error:#}");

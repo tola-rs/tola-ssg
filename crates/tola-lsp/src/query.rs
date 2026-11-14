@@ -385,7 +385,11 @@ impl<'a> Selection<'a> {
         let client_root = answer.site.client_root;
         // A written asset URL resolves to the file its declaration names, before the ordinary
         if let Some((_, bytes)) = self.asset_url_argument(semantics)? {
-            let urls = AssetUrls::for_check_project(configuration, cancellation)?;
+            let urls = AssetUrls::for_check_project(
+                configuration,
+                &answer.site.packages.boundary,
+                cancellation,
+            )?;
             if let Some(definition) =
                 crate::assets::written_definition(&urls, client_root, self.source, bytes)
             {
@@ -615,7 +619,12 @@ impl<'a> Selection<'a> {
             hover = crate::assets::hover(configuration, self.source, self.cursor);
         }
         if hover.is_none() {
-            hover = self.asset_url_hover(configuration, semantics, cancellation)?;
+            hover = self.asset_url_hover(
+                configuration,
+                &answer.site.packages.boundary,
+                semantics,
+                cancellation,
+            )?;
         }
         if hover.is_none() {
             hover = crate::links::hover(
@@ -653,7 +662,11 @@ impl<'a> Selection<'a> {
         // An argument the site's own declarations constrain to published asset URLs
         // completes with those URLs alone: a name this file holds names no URL.
         if let Some((typed, bytes)) = self.asset_url_argument(semantics)? {
-            let urls = AssetUrls::for_check_project(configuration, cancellation)?;
+            let urls = AssetUrls::for_check_project(
+                configuration,
+                &answer.site.packages.boundary,
+                cancellation,
+            )?;
             return Ok(SourceReply::Completion(crate::assets::url_completions(
                 &urls,
                 configuration.get_root(),

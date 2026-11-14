@@ -36,6 +36,7 @@ pub(super) fn inspect(
             crate::modules::prepared::AppliedAssets {
                 modules: &prepared.assets,
             },
+            &resources.source_boundary(config),
             cancellation,
         )?,
     )

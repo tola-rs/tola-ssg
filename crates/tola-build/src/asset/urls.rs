@@ -13,7 +13,9 @@ use crate::filesystem::FilesystemSourceKind;
 use super::AssetSourceError;
 use super::declarations;
 use super::output::check_paths;
-use super::source::{TREE_MEMBER_LABEL, check_source_boundary, check_tree_overlap, read_source};
+use super::source::{
+    TREE_MEMBER_LABEL, check_source_boundary, check_tree_overlap, read_source, validate_tree_member,
+};
 
 /// The site-root URL of one published asset with the deployment mount and identity applied.
 pub(super) fn browser_url(
@@ -72,11 +74,13 @@ impl AssetUrls {
     /// Read the project declarations’ mounted URLs without reading asset bytes.
     pub fn for_check_project(
         config: &ResolvedSiteConfig,
+        boundary: &tola_typst::SourceBoundary,
         cancellation: &crate::cancellation::BuildCancellation,
     ) -> Result<Self> {
         Self::for_check_with(
             config,
             crate::modules::prepared::AppliedAssets::project_only(config),
+            boundary,
             cancellation,
         )
     }
@@ -84,6 +88,7 @@ impl AssetUrls {
     pub(crate) fn for_check_with(
         config: &ResolvedSiteConfig,
         assets: crate::modules::prepared::AppliedAssets<'_>,
+        boundary: &tola_typst::SourceBoundary,
         cancellation: &crate::cancellation::BuildCancellation,
     ) -> Result<Self> {
         let declarations = declarations::collect(config, assets)?;
@@ -104,6 +109,7 @@ impl AssetUrls {
                 FilesystemSourceKind::File => {
                     let identity = FilesystemSourceIdentity::from_path(&id.logical_source);
                     check_source_boundary(config, id, &identity)?;
+                    boundary.check(&id.logical_source)?;
                     record(&id.logical_source, Path::new(""))?;
                 }
                 FilesystemSourceKind::Tree => {
@@ -117,20 +123,25 @@ impl AssetUrls {
                         {
                             let identity = FilesystemSourceIdentity::from_path(&id.logical_source);
                             check_source_boundary(config, id, &identity)?;
+                            boundary.check(&id.logical_source)?;
                             continue;
                         }
                         Err(error) => return Err(error),
                     };
+                    boundary.check(&id.logical_source)?;
                     crate::filesystem::walk_tree_members_selected(
                         &source.source_identity,
                         cancellation,
                         config.get_root(),
                         TREE_MEMBER_LABEL,
+                        id.follow_file_symlinks,
                         &|relative, directory| {
                             id.selects_tree_member(&source.source_identity, relative, directory)
                         },
-                        &|_, _| Ok(()),
-                        &mut record,
+                        &|relative, logical, target| {
+                            validate_tree_member(config, boundary, id, relative, logical, target)
+                        },
+                        &mut |logical, relative, _| record(logical, relative),
                     )?;
                     trees.push(source);
                 }
@@ -251,12 +262,8 @@ mod tests {
             file_declaration("assets/%E5%9B%BE.svg", "/%E5%9B%BE.svg"),
         ]);
 
-        let urls = AssetUrls::for_check_with(
-            &config,
-            crate::modules::prepared::AppliedAssets::project_only(&config),
-            &Default::default(),
-        )
-        .unwrap();
+        let urls = AssetUrls::for_check_project(&config, &Default::default(), &Default::default())
+            .unwrap();
 
         assert_eq!(
             published_url(&urls, "/app.js").as_deref(),
@@ -301,12 +308,8 @@ mod tests {
             crate::config::section::AssetUrlPrefix::parse("/assets").unwrap(),
         )];
 
-        let urls = AssetUrls::for_check_with(
-            &config,
-            crate::modules::prepared::AppliedAssets::project_only(&config),
-            &Default::default(),
-        )
-        .unwrap();
+        let urls = AssetUrls::for_check_project(&config, &Default::default(), &Default::default())
+            .unwrap();
 
         assert_eq!(
             published_url(&urls, "/assets/app.css").as_deref(),
@@ -334,12 +337,8 @@ mod tests {
             crate::config::section::AssetUrlPrefix::parse("/assets").unwrap(),
         )];
 
-        let urls = AssetUrls::for_check_with(
-            &config,
-            crate::modules::prepared::AppliedAssets::project_only(&config),
-            &Default::default(),
-        )
-        .unwrap();
+        let urls = AssetUrls::for_check_project(&config, &Default::default(), &Default::default())
+            .unwrap();
 
         assert_eq!(urls.address("/brand/logo.svg"), Some("/brand/logo.svg"));
         assert_eq!(

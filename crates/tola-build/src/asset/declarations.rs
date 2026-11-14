@@ -245,6 +245,7 @@ fn append_declarations(
                     within,
                     exact_files: DeclaredFileSources::default(),
                     selection: None,
+                    follow_file_symlinks: false,
                 },
                 output: DeclaredOutput::File {
                     output,
@@ -309,9 +310,23 @@ fn append_declarations(
                 let logical = root.join(&source);
                 let identity = FilesystemSourceIdentity::from_path(&logical);
                 if exact_files.owns(identity.logical_path(), identity.canonical_path())
-                    || !is_tree_file(&root.join(tree.source()), relative)
+                    || !is_tree_file(
+                        &root.join(tree.source()),
+                        relative,
+                        tree.follow_file_symlinks,
+                    )
                 {
                     continue;
+                }
+                if !identity
+                    .physical_path()
+                    .starts_with(tola_input::normalize_existing_prefix(root))
+                {
+                    let member = tola_diagnostic::display_path(&logical, site_root);
+                    return Err(crate::filesystem::tree_link_error(
+                        format!("asset link `{member}` points outside the module"),
+                        "Link to a file inside the module",
+                    ));
                 }
                 replaced_members[index].push(logical);
                 matched = true;
@@ -340,6 +355,7 @@ fn append_declarations(
                     within: within.clone(),
                     exact_files,
                     selection: Some((source_prefix, Arc::new(tree.selection().clone()))),
+                    follow_file_symlinks: tree.follow_file_symlinks,
                 },
                 output: DeclaredOutput::TreePrefix(tree.url_prefix().clone()),
                 mount: mount.clone(),
@@ -351,8 +367,8 @@ fn append_declarations(
     Ok(())
 }
 
-/// The tree walker refuses symlinked members, including intermediate directories.
-fn is_tree_file(root: &Path, member: &Path) -> bool {
+/// Match a replacement through real directories to a file or an enabled file link.
+fn is_tree_file(root: &Path, member: &Path, follow_file_symlinks: bool) -> bool {
     let mut path = root.to_path_buf();
     let mut components = member.components().peekable();
     while let Some(component) = components.next() {
@@ -361,9 +377,15 @@ fn is_tree_file(root: &Path, member: &Path) -> bool {
             return false;
         };
         if components.peek().is_none() {
-            return metadata.is_file();
+            return if tola_fs::is_link_like(&metadata) {
+                follow_file_symlinks
+                    && metadata.is_symlink()
+                    && crate::filesystem::regular_file_symlink_target(&path, root).is_ok()
+            } else {
+                metadata.is_file()
+            };
         }
-        if !metadata.is_dir() {
+        if !metadata.is_dir() || tola_fs::is_link_like(&metadata) {
             return false;
         }
     }

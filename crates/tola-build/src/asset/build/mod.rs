@@ -68,9 +68,12 @@ impl ConfiguredAssetGeneration {
 
     /// Whether a changed path falls under a source this generation read.
     fn reads_changed_path(&self, changed_paths: &[PathBuf]) -> bool {
-        self.assets
-            .iter()
-            .any(|asset| asset.source_identity.changed_paths_intersect(changed_paths))
+        self.assets.iter().any(|asset| {
+            asset.source_identity.changed_paths_intersect(changed_paths)
+                || asset
+                    .observation
+                    .link_targets_changed(asset.source_identity.logical_path(), changed_paths)
+        })
     }
 
     /// What this generation offers the next build.
@@ -180,6 +183,15 @@ impl ConfiguredAssets {
                     source_prefix,
                     selection,
                 );
+                for file in asset.observation.linked_files() {
+                    observation.path_pair(
+                        InputKind::ConfiguredAssets,
+                        InputPathScope::Exact,
+                        true,
+                        &source.logical_path().join(file.relative_path()),
+                        file.canonical_target(),
+                    );
+                }
             } else {
                 observation.path_pair(
                     InputKind::ConfiguredAssets,
@@ -428,6 +440,10 @@ fn observe_resolved_sources(
             source
                 .source_identity
                 .changed_paths_intersect(changed_paths)
+                || previous_observation.is_some_and(|previous| {
+                    previous
+                        .link_targets_changed(source.source_identity.logical_path(), changed_paths)
+                })
         });
         let observation = match (previous_observation, changed_source) {
             (Some(previous), None) if config_unchanged => Arc::clone(previous),
@@ -500,9 +516,9 @@ mod tests {
     use crate::config::section::assets::{AssetTreeDeclaration, AssetUrlPrefix};
 
     fn check_urls(config: &ResolvedSiteConfig) -> super::super::AssetUrls {
-        super::super::AssetUrls::for_check_with(
+        super::super::AssetUrls::for_check_project(
             config,
-            crate::modules::prepared::AppliedAssets::project_only(config),
+            &crate::resources::source_boundary(config, tola_input::InputScope::Online),
             &crate::cancellation::BuildCancellation::default(),
         )
         .expect("configured declarations resolve before building")
@@ -559,6 +575,46 @@ mod tests {
                 &[],
             )
             .is_err()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn opted_in_asset_tree_tracks_external_file_links() {
+        let directory = TempDir::new().unwrap();
+        let root = directory.path().join("site");
+        let config = crate::config::tests::load_test_config(
+            &root,
+            r#"
+[[assets.trees]]
+source = "assets"
+url-prefix = "/papers"
+follow-file-symlinks = true
+"#,
+        );
+        let assets = root.join("assets");
+        fs::create_dir(&assets).unwrap();
+        let target = directory.path().join("store-paper.pdf");
+        fs::write(&target, b"first").unwrap();
+        std::os::unix::fs::symlink(&target, assets.join("paper.pdf")).unwrap();
+
+        let previous = built(&config);
+        let mut entries = previous.entries();
+        let (output, bytes) = entries.next().expect("one published file");
+        assert!(entries.next().is_none());
+        assert_eq!(output.output.as_str(), "papers/paper.pdf");
+        assert_eq!(bytes.as_ref(), b"first");
+
+        fs::write(&target, b"second").unwrap();
+        let updated = build(&config, Some(&previous), &[target.canonicalize().unwrap()]).unwrap();
+        assert_eq!(updated.entries().next().unwrap().1.as_ref(), b"second");
+
+        let pure = crate::resources::source_boundary(&config, tola_input::InputScope::Pure);
+        let assets = crate::modules::prepared::AppliedAssets::project_only(&config);
+        let cancellation = crate::cancellation::BuildCancellation::default();
+        assert!(build_configured_assets(&config, assets, &pure, &cancellation, None, &[]).is_err());
+        assert!(
+            super::super::AssetUrls::for_check_with(&config, assets, &pure, &cancellation).is_err()
         );
     }
 
@@ -681,7 +737,7 @@ mod tests {
         for (label, reason) in [
             ("live.sock", "not a regular file"),
             ("file-link", "symbolic link"),
-            ("directory-link", "symbolic link"),
+            ("directory-link", "points to a directory"),
             ("missing-link", "symbolic link"),
             ("query?name.txt", "cannot be published"),
             ("fragment#name.txt", "cannot be published"),
@@ -717,9 +773,9 @@ mod tests {
             assert!(message.contains(reason), "{label}: {message}");
             if label.ends_with(".txt") {
                 // The read-only check refuses the same member before reading asset bytes.
-                let checked = super::super::AssetUrls::for_check_with(
+                let checked = super::super::AssetUrls::for_check_project(
                     &config,
-                    crate::modules::prepared::AppliedAssets::project_only(&config),
+                    &crate::resources::source_boundary(&config, tola_input::InputScope::Online),
                     &crate::cancellation::BuildCancellation::default(),
                 )
                 .unwrap_err()

@@ -21,6 +21,7 @@ pub(super) struct AssetSource {
     pub(super) within: Option<PathBuf>,
     pub(super) exact_files: DeclaredFileSources,
     pub(super) selection: Option<(PathBuf, Arc<FileSelection>)>,
+    pub(super) follow_file_symlinks: bool,
 }
 
 impl AssetSource {
@@ -49,6 +50,7 @@ pub(super) struct ObservationKey {
     owner: Option<String>,
     exact_files: DeclaredFileSources,
     selection: Option<(PathBuf, Arc<FileSelection>)>,
+    follow_file_symlinks: bool,
     canonical: PathBuf,
 }
 
@@ -59,6 +61,7 @@ impl ObservationKey {
             owner: id.owner.clone(),
             exact_files: id.exact_files.clone(),
             selection: id.selection.clone(),
+            follow_file_symlinks: id.follow_file_symlinks,
             canonical: source
                 .canonical_path()
                 .expect("resolved configured sources have canonical targets")
@@ -234,8 +237,8 @@ pub(super) fn observe_source(
     let display_root = config.get_root();
     match id.kind {
         FilesystemSourceKind::Tree => {
-            let validate = |relative: &Path, logical_source: &Path| {
-                validate_tree_member_output_path(relative, logical_source, display_root)
+            let validate = |relative: &Path, logical_source: &Path, target: Option<&Path>| {
+                validate_tree_member(config, boundary, id, relative, logical_source, target)
             };
             crate::filesystem::observe_tree_source_selected(
                 crate::filesystem::TreeObservation {
@@ -246,6 +249,7 @@ pub(super) fn observe_source(
                     cancellation,
                     display_root,
                     member_label: TREE_MEMBER_LABEL,
+                    follow_file_symlinks: id.follow_file_symlinks,
                     validate_member: &validate,
                 },
                 &|relative, directory| id.selects_tree_member(source_identity, relative, directory),
@@ -261,12 +265,31 @@ pub(super) fn observe_source(
     }
 }
 
-fn validate_tree_member_output_path(
+pub(super) fn validate_tree_member(
+    config: &ResolvedSiteConfig,
+    boundary: &tola_typst::SourceBoundary,
+    id: &AssetSource,
     relative: &Path,
     logical_source: &Path,
-    display_root: &Path,
+    target: Option<&Path>,
 ) -> Result<()> {
-    let member = tola_diagnostic::display_path(logical_source, display_root);
+    let member = tola_diagnostic::display_path(logical_source, config.get_root());
+    if let Some(target) = target {
+        let identity =
+            FilesystemSourceIdentity::canonical(logical_source.to_path_buf(), target.to_path_buf());
+        if matches!(
+            boundary.refusal(target)?,
+            Some(tola_typst::SourceRefusal::OutsideSite)
+        ) {
+            return Err(crate::filesystem::tree_link_error(
+                format!("asset link `{member}` points outside the site, which `--pure` forbids"),
+                "Copy the target into the site or exclude this path",
+            ));
+        }
+        check_source_boundary(config, id, &identity)?;
+        boundary.check(logical_source)?;
+        boundary.check(target)?;
+    }
     output::member_path_segments(relative)
         .map(|_| ())
         .map_err(|violation| {

@@ -340,13 +340,14 @@ impl Selection<'_> {
     pub(super) fn asset_url_hover(
         &self,
         config: &ResolvedSiteConfig,
+        boundary: &tola_typst::SourceBoundary,
         semantics: &mut Semantic<'_>,
         cancellation: &BuildCancellation,
     ) -> Result<Option<Hover>> {
         let Some((typed, bytes)) = self.asset_url_argument(semantics)? else {
             return Ok(None);
         };
-        let urls = AssetUrls::for_check_project(config, cancellation)?;
+        let urls = AssetUrls::for_check_project(config, boundary, cancellation)?;
         let described = match crate::assets::written(&urls, &typed) {
             crate::assets::Written::Published(asset) => {
                 let declared = asset
