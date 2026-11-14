@@ -31,16 +31,18 @@ export def license-archive-name [version: string]: nothing -> string {
   $"tola-($version)-licenses.tar.gz"
 }
 
-# The one target this host builds natively; every other target belongs to CI.
-export def host-target []: nothing -> string {
+export def matches-host [entry: record]: nothing -> bool {
   let host = $nu.os-info
-  let system = if $host.name == 'macos' { 'darwin' } else if $host.name == 'windows' { 'windows' } else { 'linux' }
-  let matches = (target-names | where { |name|
-    let entry = ($TARGETS | get $name)
-    $entry.system == $system and $entry.machine == $host.arch
-  })
-  if ($matches | is-empty) {
+  let system = if $host.name == 'macos' { 'darwin' } else { $host.name }
+  $entry.system == $system and $entry.machine == $host.arch
+}
+
+# The default target this host builds.
+export def host-target []: nothing -> string {
+  let name = (target-names | where {|name| matches-host (target $name) } | first)
+  if $name == null {
+    let host = $nu.os-info
     error make { msg: $"no release target is built on this host (($host.name)/($host.arch))" }
   }
-  $matches | first
+  $name
 }

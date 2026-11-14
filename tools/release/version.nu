@@ -53,7 +53,7 @@ def show-change [before: string, after: string] {
 
 def plan [root: string, version: string]: nothing -> record {
   let current = (workspace-version $root)
-  if (compare-versions (parse-version $version) (parse-version $current)) < 0 {
+  if (version-precedence $version) < (version-precedence $current) {
     error make { msg: $"refusing version downgrade from ($current) to ($version)" }
   }
   let manifest = (open ($root | path join 'Cargo.toml'))

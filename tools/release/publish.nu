@@ -2,7 +2,9 @@
 # Create or update verified GitHub release artifacts with an explicit publication mode.
 
 use ../lib/repo.nu [check-tag, require-clean, release-mode]
+use ../lib/release-archives.nu [checksum-text, verify-release]
 use ../lib/semver.nu [is-prerelease, tag-version]
+use ../lib/targets.nu [target-names]
 
 const API = 'https://api.github.com'
 const UPLOADS = 'https://uploads.github.com'
@@ -69,7 +71,7 @@ def verify-update [base: string, release: record, original: record, token: strin
 def upload-asset [repository: string, id: int, asset: record, token: string] {
     let query = ({name: $asset.name} | url build-query)
     let upload = $"($UPLOADS)/repos/($repository)/releases/($id)/assets?($query)"
-    let bytes = (open --raw $asset.path | into binary)
+    let bytes = if $asset.path? == null { $asset.bytes } else { open --raw $asset.path | into binary }
     http post $upload $bytes --headers (github-headers $token) --content-type 'application/octet-stream' | ignore
 }
 
@@ -122,17 +124,18 @@ def main [
         if not ($notes | path exists) { fail $"notes file does not exist: ($notes)" }
         open --raw $notes
     }
-    let assets = (
-        ls $archives | where type == 'file' | each {|file|
-            {
-                name: ($file.name | path basename)
-                path: $file.name
-                size: ($file.size | into int)
-                sha256: (open --raw $file.name | hash sha256)
-            }
-        }
-    )
-    if ($assets | is-empty) { fail $"no assets in ($archives)" }
+    let directory = ($archives | path expand --no-symlink)
+    let verified = (verify-release $directory $version (target-names))
+    let manifest = (checksum-text $verified.archives | into binary)
+    let checksums = {
+        name: 'checksums.txt'
+        bytes: $manifest
+        size: ($manifest | bytes length)
+        sha256: ($manifest | hash sha256)
+    }
+    let assets = ($verified.archives ++ [$verified.licenses $checksums])
+    require-clean $root
+    check-tag $root $tag $selected --mode $mode | ignore
     let token = ($env | get -o GH_TOKEN | default '')
     if $token == '' { fail 'GH_TOKEN is required' }
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env nu
 # Render release notes for one tag from the commits after the previous tag.
 
-use ../lib/semver.nu [compare-versions, parse-version, tag-version]
+use ../lib/semver.nu [version-precedence, tag-version]
 use ../lib/repo.nu [git-output, check-tag]
 
 const CATEGORIES = [
@@ -15,20 +15,17 @@ const SUBJECT = '^(?<prefix>[A-Za-z]+)(?:\([^)]*\))?!?: *(?<body>.+)$'
 
 # The greatest tag below this version, or null for the first release.
 def previous-tag [root: string, tag: string] {
-    let current = (parse-version (tag-version $tag))
+    let current = (version-precedence (tag-version $tag))
     let below = (
         git-output $root ['tag' '--list' 'v[0-9]*']
         | lines
         | each {|candidate|
-            let version = (try { parse-version (tag-version $candidate) } catch { null })
-            {tag: $candidate, version: $version}
+            try { {tag: $candidate, version: (version-precedence (tag-version $candidate))} } catch { null }
         }
-        | where {|candidate|
-            if $candidate.version == null { false } else { (compare-versions $candidate.version $current) < 0 }
-        }
+        | where {|candidate| $candidate.version < $current }
     )
     let best = ($below | reduce --fold null {|candidate, best|
-        if $best == null { $candidate } else if (compare-versions $candidate.version $best.version) >= 0 { $candidate } else { $best }
+        if $best == null or $candidate.version >= $best.version { $candidate } else { $best }
     })
     if $best == null { null } else { $best.tag }
 }
