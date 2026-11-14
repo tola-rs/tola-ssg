@@ -80,9 +80,11 @@ type SiteOptions = {
 export function recordSiteSurfaces(): {
   siteSelected(): boolean | undefined
   pages(): Promise<vscode.TreeItem[]>
+  pagesMessage(): string | undefined
 } {
   let selected: boolean | undefined
   let pages: vscode.TreeDataProvider<vscode.TreeItem> | undefined
+  let pagesView: vscode.TreeView<vscode.TreeItem> | undefined
   const execute = vscode.commands.executeCommand
   vscode.commands.executeCommand = ((command: string, ...args: unknown[]) => {
     if (command === 'setContext' && args[0] === 'tola.site') selected = args[1] as boolean
@@ -90,8 +92,12 @@ export function recordSiteSurfaces(): {
   }) as typeof vscode.commands.executeCommand
   const create = vscode.window.createTreeView
   vscode.window.createTreeView = ((id: string, options: vscode.TreeViewOptions<vscode.TreeItem>) => {
-    if (id === 'tolaPages') pages = options.treeDataProvider
-    return create(id, options)
+    const view = create(id, options)
+    if (id === 'tolaPages') {
+      pages = options.treeDataProvider
+      pagesView = view
+    }
+    return view
   }) as typeof vscode.window.createTreeView
   return {
     siteSelected: () => selected,
@@ -99,6 +105,7 @@ export function recordSiteSurfaces(): {
       assert.ok(pages, 'The extension did not register its pages view')
       return await pages.getChildren() ?? []
     },
+    pagesMessage: () => pagesView?.message,
   }
 }
 
@@ -655,7 +662,6 @@ export async function workbenchText(
     status?: string
     pages?: string
     page?: string
-    pagesMessage?: string
     completion?: string
     capture?: boolean
   },
@@ -715,8 +721,9 @@ export async function openPublishedPage(
   opened: OpenedPreview[],
 ): Promise<OpenedPreview> {
   await vscode.window.showTextDocument(source)
+  const next = opened.length
   await vscode.commands.executeCommand(command, source)
-  const page = opened.at(-1)
+  const page = opened[next]
   assert.ok(page, `${command} opened no page`)
   assert.equal(page.status, 200)
   assert.match(page.html, /Published editor page\./)

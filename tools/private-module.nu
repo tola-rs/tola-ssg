@@ -19,7 +19,6 @@ def main [
   let https_url = ($env.TOLA_FIXTURE_HTTPS_URL? | default "https://github.com/tola-rs/private-tola-module-for-ci-tests.git")
   let ssh_url = ($env.TOLA_FIXTURE_SSH_URL? | default "git@github.com:tola-rs/private-tola-module-for-ci-tests.git")
   let ssh_url_alt = ($env.TOLA_FIXTURE_SSH_URL_ALT? | default "ssh://git@github.com/tola-rs/private-tola-module-for-ci-tests.git")
-  let public_url = ($env.TOLA_FIXTURE_PUBLIC_URL? | default "https://github.com/octocat/Hello-World.git")
   let tag = ($env.TOLA_FIXTURE_TAG? | default "v0.2.1")
   let branch = ($env.TOLA_FIXTURE_BRANCH? | default "codex/module-fixture")
   let subdir = ($env.TOLA_FIXTURE_SUBDIR? | default "theme")
@@ -78,7 +77,7 @@ def main [
     print "negative: bad credentials rejected"
     missing-repo-check $ctx $root $tag $subdir
     print "negative: missing repository rejected"
-    no-git-check $ctx $root $public_url
+    no-git-check $ctx $root
     print "negative: public fetch works without git"
     no-ssh-check $ctx $root $ssh_url $tag $subdir
     print "negative: missing ssh rejected"
@@ -284,13 +283,19 @@ def missing-repo-check [ctx, root, tag, subdir] {
   if ($result.exit_code == 0) { fail "missing repository" "unexpectedly succeeded" }
 }
 
-def no-git-check [ctx, root, public_url] {
+def no-git-check [ctx, root] {
   let home = ($root | path join "no-git-home")
   let site = ($root | path join "no-git-site")
   let path = ($root | path join "no-git-bin")
   mkdir $home
   mkdir $path
-  write-site $site $public_url {} "" false
+  let override_url = $env.TOLA_FIXTURE_PUBLIC_URL?
+  let module = if $override_url == null {
+    {url: "https://github.com/tola-rs/tola-ssg.git", subdir: "modules/nu-helpers"}
+  } else {
+    {url: $override_url, subdir: ""}
+  }
+  write-site $site $module.url {} $module.subdir false
   let result = (run-tola $ctx $site $home "update" "" {PATH: $path})
   if ($result.exit_code != 0) { print $result.stderr; fail "no git" "public fetch failed" }
   if not (($site | path join "tola.lock") | path exists) { fail "no git" "public fetch wrote no lock" }

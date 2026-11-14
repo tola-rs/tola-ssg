@@ -181,7 +181,7 @@ struct ServedSite {
 }
 
 async fn serve_connection(
-    stream: tokio::net::TcpStream,
+    stream: impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
     peer: SocketAddr,
     served: ServedSite,
     idle_lifetime: Duration,
@@ -241,15 +241,14 @@ async fn serve_connection(
 
 #[cfg(test)]
 mod tests {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream, duplex};
     use tola_build::build::{BuildMode, BuildSession};
     use tola_build::config::ResolvedSiteConfig;
 
     use super::*;
 
-    /// Far above what the socket buffers hold, so a client that stops reading leaves the response
-    /// in flight.
-    const LARGE_ASSET_BYTES: usize = 32 * 1024 * 1024;
+    /// Larger than the test connection's buffer so the response pauses when the client stops.
+    const LARGE_ASSET_BYTES: usize = 256 * 1024;
     const SMALL_ASSET_BYTES: usize = 4 * 1024;
     const IDLE_LIFETIME: Duration = Duration::from_millis(250);
 
@@ -276,19 +275,15 @@ mod tests {
         (root, sites, config)
     }
 
-    /// Serve one loopback connection, returning the client end and the serving task.
-    async fn serve_client(
+    /// Serve a connection with a fixed buffer, returning the client end and the serving task.
+    fn serve_client(
         sites: CurrentSite,
         config: Arc<ResolvedSiteConfig>,
-    ) -> (tokio::net::TcpStream, tokio::task::JoinHandle<Result<()>>) {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let client = tokio::net::TcpStream::connect(listener.local_addr().unwrap())
-            .await
-            .unwrap();
-        let (server, peer) = listener.accept().await.unwrap();
+    ) -> (DuplexStream, tokio::task::JoinHandle<Result<()>>) {
+        let (client, server) = duplex(16 * 1024);
         let serving = tokio::spawn(serve_connection(
             server,
-            peer,
+            ([127, 0, 0, 1], 0).into(),
             ServedSite {
                 sites,
                 initial_config: config,
@@ -301,7 +296,7 @@ mod tests {
         (client, serving)
     }
 
-    async fn request(stream: &mut tokio::net::TcpStream, path: &str) {
+    async fn request(stream: &mut DuplexStream, path: &str) {
         stream
             .write_all(format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n").as_bytes())
             .await
@@ -309,7 +304,7 @@ mod tests {
     }
 
     /// The response head and the body bytes that arrived with it.
-    async fn response_head(stream: &mut tokio::net::TcpStream) -> (Vec<u8>, Vec<u8>) {
+    async fn response_head(stream: &mut DuplexStream) -> (Vec<u8>, Vec<u8>) {
         let mut received = Vec::new();
         let mut unscanned = 0;
         loop {
@@ -329,7 +324,7 @@ mod tests {
     }
 
     /// The bytes a client receives from `stream` until the server closes it.
-    async fn drain(stream: &mut tokio::net::TcpStream) -> Vec<u8> {
+    async fn drain(stream: &mut DuplexStream) -> Vec<u8> {
         let mut rest = Vec::new();
         stream.read_to_end(&mut rest).await.unwrap();
         rest
@@ -338,7 +333,7 @@ mod tests {
     #[tokio::test]
     async fn response_outliving_connection_lifetime_arrives_complete() {
         let (_root, sites, config) = served_site();
-        let (mut client, serving) = serve_client(sites, config).await;
+        let (mut client, serving) = serve_client(sites, config);
         request(&mut client, "/large.bin").await;
         let (head, body) = response_head(&mut client).await;
         let head = String::from_utf8(head).unwrap();
@@ -348,9 +343,7 @@ mod tests {
             "{head}"
         );
 
-        // Only the client is missing here: the server is blocked writing a body larger than the
-        // socket buffers, so the lifetime deadline arrives mid-response. A finished task here
-        // would mean the kernel buffered the whole asset and the deadline missed the response.
+        // Leave the body unread so the fixed buffer keeps the response in flight at the deadline.
         tokio::time::sleep(IDLE_LIFETIME * 3).await;
         assert!(
             !serving.is_finished(),
@@ -366,7 +359,7 @@ mod tests {
     #[tokio::test]
     async fn idle_connection_closes_at_connection_lifetime() {
         let (_root, sites, config) = served_site();
-        let (mut client, serving) = serve_client(sites, config).await;
+        let (mut client, serving) = serve_client(sites, config);
         request(&mut client, "/small.bin").await;
         let (head, mut body) = response_head(&mut client).await;
         assert!(

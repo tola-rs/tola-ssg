@@ -1360,7 +1360,7 @@ export async function run(): Promise<void> {
         '#document("updated/index.html", format: "html")[#include "content/page.typ"]\n',
       )
       await workbenchText({ status: 'not checked', capture: true })
-      await workbenchText({ pagesMessage: 'Source changes not checked', capture: true })
+      assert.match(surfaces.pagesMessage() ?? '', /Source changes not checked/)
       assert.equal(await program.save(), true)
       const saved = await workbenchText({ pages: '/updated/', capture: true })
       assert.doesNotMatch(saved, /\/preview\//)

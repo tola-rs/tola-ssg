@@ -77,10 +77,11 @@ def upload-asset [repository: string, id: int, asset: record, token: string] {
 
 def verify-tag [base: string, tag: string, selected: string, token: string, --create] {
     for attempt in 1..3 {
-        let response = (http get $"($base)/commits/tags/($tag)" --headers (github-headers $token) --full --allow-errors)
+        let response = (http get $"($base)/git/ref/tags/($tag)" --headers (github-headers $token) --full --allow-errors)
         if $response.status == 200 {
-            if $response.body.sha != $selected {
-                fail $"tag ($tag) points to ($response.body.sha), expected ($selected)"
+            let commit = (http get $"($base)/commits/tags/($tag)" --headers (github-headers $token))
+            if $commit.sha != $selected {
+                fail $"tag ($tag) points to ($commit.sha), expected ($selected)"
             }
             return
         }

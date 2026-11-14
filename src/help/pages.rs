@@ -1047,6 +1047,47 @@ mod tests {
     }
 
     #[test]
+    fn config_usage_headings_match_in_markdown_and_json() {
+        for section in ["include", "hooks", "modules", "options"] {
+            let id = PageId::Config {
+                section: section.into(),
+            };
+            let target = LinkTarget::Page(id.clone());
+            for language in [HelpLanguage::English, HelpLanguage::SimplifiedChinese] {
+                let page = page_of(&id, language).unwrap();
+                let markdown = HelpDocument::parse(&page);
+                let json = serde_json::to_value(
+                    crate::help::data::reference(page, &target, language).unwrap(),
+                )
+                .unwrap();
+                let headings = json["blocks"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|block| block["kind"] == "heading");
+                assert_eq!(
+                    headings
+                        .clone()
+                        .filter_map(|block| block["level"].as_u64())
+                        .min(),
+                    Some(3),
+                    "{section} ({})",
+                    language.tag()
+                );
+                for heading in headings {
+                    assert!(markdown.blocks.iter().any(|block| {
+                        let Block::Heading { level, anchor, .. } = block else {
+                            return false;
+                        };
+                        heading["level"].as_u64() == Some(u64::from(*level))
+                            && heading["anchor"] == anchor.as_str()
+                    }));
+                }
+            }
+        }
+    }
+
+    #[test]
     fn config_translations_name_existing_tables_and_keys() {
         for section in i18n::config_names() {
             assert!(

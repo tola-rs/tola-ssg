@@ -536,7 +536,7 @@ impl RebuildLoop {
                         cancellation_started = Some(std::time::Instant::now());
                         cancel(&self.build_session);
                         let reason = if batch.paths().is_empty() {
-                            "The watched inputs need to be checked again"
+                            "File watching lost change details"
                         } else {
                             "Files changed during the build"
                         };

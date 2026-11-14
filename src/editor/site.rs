@@ -264,7 +264,7 @@ mod tests {
         assert_eq!(directory.server_command().arguments, ["lsp".to_owned()]);
         assert_eq!(
             directory.tola_settings()["configPath"],
-            serde_json::json!("./tola.toml")
+            serde_json::json!(Path::new(".").join("tola.toml"))
         );
     }
 

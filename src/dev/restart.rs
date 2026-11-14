@@ -82,11 +82,13 @@ impl Restarts {
                 .map(|watch| format!("Watched by: {watch}")),
         );
         if self.warned {
-            lines.push(if watches.is_empty() {
-                "Check whether a tool is repeatedly rewriting these inputs.".to_owned()
-            } else {
-                "Check these hooks' `rerun-on` inputs. Keep temporary files in `hook.tempDir`, and persistent backups in `hook.cacheDir`.".to_owned()
-            });
+            if !paths.is_empty() {
+                lines.push(if watches.is_empty() {
+                    "Check whether a tool is repeatedly rewriting these inputs.".to_owned()
+                } else {
+                    "Check these hooks' `rerun-on` inputs. Keep temporary files in `hook.tempDir`, and persistent backups in `hook.cacheDir`.".to_owned()
+                });
+            }
             lines.push(if has_preview {
                 "Preview still shows the last successful build. Retrying; Ctrl+C to stop."
                     .to_owned()

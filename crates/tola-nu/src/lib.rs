@@ -887,6 +887,15 @@ mod tests {
     }
 
     #[test]
+    fn script_main_runs_with_a_dot_component() {
+        let scenario = Scenario::new();
+        let script = scenario.root().join("./main.nu");
+        std::fs::write(&script, "def main [code: int] { exit $code }").unwrap();
+        let runtime = Runtime::new(Vec::new(), Vec::new()).unwrap();
+        assert_eq!(runtime.run_embedded(&script, &["7".into()]).unwrap(), 7);
+    }
+
+    #[test]
     fn overlay_replaces_disk_text() {
         let scenario = Scenario::new();
         let root = module_root(&scenario, "catalog", "export use ../shared.nu name\n");

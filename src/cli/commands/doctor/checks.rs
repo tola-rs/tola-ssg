@@ -481,7 +481,7 @@ mod tests {
         // A directory where one generated file belongs: a path Tola will not write, which is not a
         // file that differs from the sources this Tola ships.
         std::fs::create_dir_all(directory.path().join(&relative)).unwrap();
-        let displayed = relative.to_string_lossy().into_owned();
+        let displayed = crate::terminal::display_path_as_given(&relative);
 
         let reported = diagnose_at(&path);
         let refused = reported

@@ -208,6 +208,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn restore_releases_screen_and_cursor() {
         let mut bytes = Vec::new();
         leave_commands(&mut bytes).unwrap();

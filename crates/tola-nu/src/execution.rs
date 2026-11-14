@@ -60,11 +60,9 @@ pub(super) fn check_errors(working: &StateWorkingSet) -> Result<()> {
 /// Find the `main` commands defined in this script, excluding imported declarations.
 pub(super) fn main_declarations(
     working: &StateWorkingSet,
-    filename: &str,
+    script: &Block,
 ) -> Result<Vec<(Vec<u8>, DeclId)>> {
-    let script_span = working
-        .get_span_for_filename(filename)
-        .ok_or(NuError::ModuleSourceUnloaded)?;
+    let script_span = script.span.ok_or(NuError::ModuleSourceUnloaded)?;
     Ok(working
         .last_overlay()
         .decls
@@ -157,7 +155,7 @@ fn evaluate_source(
         report_parse_warning(Some(stack), &working, warning);
     }
     let script_name = filename.file_name().unwrap().to_string_lossy();
-    let declarations = main_declarations(&working, name)?;
+    let declarations = main_declarations(&working, &block)?;
     let has_main = !declarations.is_empty();
     let mut aliases = Vec::new();
     for (name, id) in declarations {

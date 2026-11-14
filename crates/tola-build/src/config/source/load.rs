@@ -737,14 +737,16 @@ fn same_metadata(a: &std::fs::Metadata, b: &std::fs::Metadata) -> bool {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
-    use super::*;
+    use std::os::unix::fs::symlink;
+
+    use tola_input::InputScope;
+
+    use super::load;
 
     #[test]
-    #[cfg(unix)]
     fn optional_dangling_link_tracks_target_and_its_creation() {
-        use std::os::unix::fs::symlink;
         let directory = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(directory.path()).unwrap();
         let entry = root.join("tola.toml");
@@ -765,9 +767,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
     fn pure_scope_rejects_optional_dangling_link_outside_site() {
-        use std::os::unix::fs::symlink;
         let directory = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(directory.path()).unwrap();

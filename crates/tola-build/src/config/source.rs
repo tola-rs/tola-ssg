@@ -666,7 +666,6 @@ impl<T> ParsedConfig<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::ConfigError;
     use crate::config::loading::{BuildOverrides, resolve_parsed_site_config};
 
     #[test]
@@ -1018,6 +1017,8 @@ argv = ["true"]
     #[test]
     #[cfg(unix)]
     fn pure_refuses_configuration_outside_the_site() {
+        use crate::config::ConfigError;
+
         let directory = tempfile::tempdir().unwrap();
         let site = directory.path().join("site");
         let outside = tempfile::tempdir().unwrap();
@@ -1051,6 +1052,8 @@ argv = ["true"]
     #[test]
     #[cfg(unix)]
     fn pure_refuses_internal_state() {
+        use crate::config::ConfigError;
+
         let directory = tempfile::tempdir().unwrap();
         let site = directory.path().join("site");
         let internal = site.join(tola_input::INTERNAL_DIR);

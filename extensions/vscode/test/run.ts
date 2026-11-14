@@ -25,7 +25,6 @@ interface WorkbenchAction {
   status?: string
   pages?: string
   page?: string
-  pagesMessage?: string
   completion?: string
   capture?: boolean
 }
@@ -74,11 +73,9 @@ async function main(): Promise<void> {
         response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ text }))
         return
       }
-      if (action.pages !== undefined || action.page !== undefined || action.pagesMessage !== undefined) {
+      if (action.pages !== undefined || action.page !== undefined) {
         const target = action.page !== undefined
           ? page.getByRole('treeitem', { name: action.page }).last()
-          : action.pagesMessage !== undefined
-          ? page.locator('.monaco-pane-view .pane').filter({ hasText: action.pagesMessage }).last()
           : page.getByRole('tree', { name: 'Tola Pages' }).filter({ hasText: action.pages ?? '' })
         await target.waitFor({ state: 'visible', timeout: 15_000 })
         const text = await target.innerText()

@@ -1280,6 +1280,13 @@ fn resolve_symlinks(path: &Path, tree_prefix_depth: usize) -> ResolvedWatchPath 
         let mut replacement = None;
         for (index, component) in components.iter().enumerate() {
             prefix.push(component.as_os_str());
+            // A Windows drive or share prefix alone is not a directory entry.
+            if matches!(
+                component,
+                std::path::Component::Prefix(_) | std::path::Component::RootDir
+            ) {
+                continue;
+            }
             match std::fs::symlink_metadata(&prefix) {
                 Ok(metadata) if metadata.file_type().is_symlink() => {
                     // A tree can have a symlinked root, but its walk skips symlinked members.

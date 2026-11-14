@@ -1,6 +1,11 @@
 name: Check
 on:
   workflow_call:
+    inputs:
+      full:
+        description: "Also run the Windows matrix and the extension suite."
+        type: boolean
+        default: false
   # A manual run carries the complete set only when its `full` input asks for it.
   workflow_dispatch:
     inputs:
@@ -48,18 +53,16 @@ jobs:
         id: decide
         env:
           EVENT: ${{ github.event_name }}
-          REQUESTED: ${{ github.event.inputs.full || 'false' }}
+          REQUESTED: ${{ inputs.full || false }}
           MESSAGE: ${{ github.event.head_commit.message || '' }}
           LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
           BASE: ${{ github.event.pull_request.base.sha }}
           BEFORE: ${{ github.event.before }}
         run: |
           set -euo pipefail
-          full=false
+          full="$REQUESTED"
           watch=true
           case "$EVENT" in
-            workflow_call) full=true ;;
-            workflow_dispatch) if [ "$REQUESTED" = "true" ]; then full=true; fi ;;
             push) case "$MESSAGE" in *'[full-ci]'*) full=true ;; esac ;;
             pull_request) case ",$LABELS," in *,full-ci,*) full=true ;; esac ;;
           esac
@@ -196,7 +199,8 @@ jobs:
   windows-msvc:
     name: Check Windows x86_64-pc-windows-msvc
     runs-on: windows-latest
-    timeout-minutes: 45
+    # A cold runner builds the native test targets after checking isolated feature sets.
+    timeout-minutes: 90
     # The native Windows compile and test suite is the slow leg, so it waits for a run that
     # carries the complete set; the GNU cross-check above rides every push.
     needs: [scope]

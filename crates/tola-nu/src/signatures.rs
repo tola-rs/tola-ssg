@@ -20,8 +20,8 @@ impl Runtime {
         engine.file = Some(path.clone());
         let name = path.to_str().ok_or(NuError::NotUtf8 { what: "script" })?;
         let mut working = StateWorkingSet::new(&engine);
-        crate::execution::parse(&mut working, name, &source)?;
-        let mut signatures = crate::execution::main_declarations(&working, name)?
+        let block = crate::execution::parse(&mut working, name, &source)?;
+        let mut signatures = crate::execution::main_declarations(&working, &block)?
             .into_iter()
             .filter_map(|(name, id)| {
                 let command = working.get_decl(id);

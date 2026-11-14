@@ -672,6 +672,13 @@ impl WatchMessageSink for WatchEventQueue {
             return None;
         }
 
+        tracing::debug!(
+            target: "tola::watch",
+            queued_events = state.messages.len(),
+            queued_paths = state.queued_paths,
+            incoming_paths = path_count,
+            "filesystem event queue overflowed"
+        );
         let mut overflow = EventOverflow {
             producers: ProducerSet::default(),
             revision: 0,
@@ -1508,21 +1515,11 @@ fn generated_source_identities(
 }
 
 fn forward_watch_result<S: WatchMessageSink>(
-    mut event: notify::Result<notify::Event>,
+    event: notify::Result<notify::Event>,
     event_epoch: &EventEpoch,
     events: &S,
     log_file: Option<&Path>,
 ) {
-    if let (Ok(event), Some(log_file)) = (&mut event, log_file)
-        && !event.need_rescan()
-    {
-        event
-            .paths
-            .retain(|path| tola_input::normalize_existing_prefix(path).as_path() != log_file);
-        if event.paths.is_empty() {
-            return;
-        }
-    }
     // Logical subscription changes, callback acceptance, and revision replacement share
     // this lock. The native observer never runs or shuts down while it is held.
     let mut epoch = event_epoch.lock();
@@ -1552,8 +1549,29 @@ fn forward_watch_result<S: WatchMessageSink>(
             return;
         }
     }
+    // Most events name temporary hook files. Reject their known prefixes before resolving the
+    // log file's aliases: canonicalizing thousands of removed files stalls the native callback.
+    if let Some(log_file) = log_file
+        && !event.need_rescan()
+    {
+        event
+            .paths
+            .retain(|path| tola_input::normalize_existing_prefix(path).as_path() != log_file);
+        if event.paths.is_empty() {
+            return;
+        }
+    }
     let boundary = epoch.boundary.clone();
     let rescan = event.need_rescan();
+    if rescan {
+        tracing::debug!(
+            target: "tola::watch",
+            kind = ?event.kind,
+            info = event.info(),
+            paths = ?event.paths,
+            "filesystem watcher requested a rescan"
+        );
+    }
     let hook_rescan = rescan
         && !event.paths.is_empty()
         && event::normalized_event_paths(&event)
@@ -1567,8 +1585,7 @@ fn forward_watch_result<S: WatchMessageSink>(
     if rescan && !hook_rescan {
         dispatch_watch_message(
             WatchMessage::Event {
-                event: notify::Event::new(notify::EventKind::Other)
-                    .set_flag(notify::event::Flag::Rescan),
+                event,
                 revision: 0,
                 classified_paths: Vec::new(),
                 producers,
@@ -1625,13 +1642,11 @@ fn forward_watch_result<S: WatchMessageSink>(
         .collect::<Vec<_>>();
     for classified_paths in classified.chunks(EVENT_DETAIL_CAPACITY) {
         let mut accepted = notify::Event::new(event.kind);
+        accepted.attrs = event.attrs.clone();
         accepted.paths = classified_paths
             .iter()
             .map(|(path, _)| path.clone())
             .collect();
-        if hook_rescan {
-            accepted = accepted.set_flag(notify::event::Flag::Rescan);
-        }
         let producers = classified_paths.iter().fold(
             ProducerSet::default(),
             |mut producers, (_, classified)| {
@@ -1754,14 +1769,13 @@ impl RebuildPathFilter {
     }
 
     fn accepts(&self, path: &Path) -> bool {
-        let path = tola_input::FilesystemSourceIdentity::from_path(path);
-        !self.excluded.iter().any(|boundary| {
-            [path.logical_path(), path.physical_path()]
-                .into_iter()
-                .any(|path| {
-                    path.starts_with(boundary.logical_path())
-                        || path.starts_with(boundary.physical_path())
-                })
+        !self.excludes_path(&tola_input::lexical_path_identity(path))
+            && !self.excludes_path(&tola_input::normalize_existing_prefix(path))
+    }
+
+    fn excludes_path(&self, path: &Path) -> bool {
+        self.excluded.iter().any(|boundary| {
+            path.starts_with(boundary.logical_path()) || path.starts_with(boundary.physical_path())
         })
     }
 }
@@ -2003,6 +2017,30 @@ mod tests {
             epoch.claim_candidate().rebuild_scope(),
             RebuildScope::FullSite
         );
+    }
+
+    #[test]
+    fn rescan_keeps_its_path_and_backend_hint() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let config = watch_config(directory.path());
+        let root = config.get_root().to_path_buf();
+        let epoch = watching_epoch(&config, &WatchRequirements::default());
+        let (events, mut received) = mpsc::unbounded_channel();
+        let event = notify::Event::new(notify::EventKind::Other)
+            .add_path(root.clone())
+            .set_flag(notify::event::Flag::Rescan)
+            .set_info("rescan: user dropped");
+
+        forward_watch_result(Ok(event), &epoch, &events, None);
+
+        let WatchMessage::Event { event, .. } = received.try_recv().unwrap() else {
+            panic!("a rescan must reach the consumer");
+        };
+        assert_eq!(event.paths, [root]);
+        assert_eq!(event.info(), Some("rescan: user dropped"));
+        assert!(event.need_rescan());
+        assert!(epoch.requires_directory_refresh());
+        assert!(epoch.guard_relevant(0, |_| true).unwrap().is_none());
     }
 
     #[test]
