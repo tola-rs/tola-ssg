@@ -34,11 +34,11 @@ def main [
     mut results = []
 
     if (($token | str length) > 0) {
-      let tagged = (run-case $ctx "https-tag" $https_url $"tag = '($tag)'" "tag" $tag $subdir "update" "https")
+      let tagged = (run-case $ctx "https-tag" $https_url {tag: $tag} $subdir "update" "https")
       $results = ($results | append $tagged)
-      $results = ($results | append (run-case $ctx "https-branch" $https_url $"branch = '($branch)'" "branch" $branch $subdir "update" "https"))
-      $results = ($results | append (run-case $ctx "https-rev" $https_url $"rev = '($tagged.commit)'" "rev" $tagged.commit $subdir "build" "https"))
-      $results = ($results | append (run-case $ctx "https-default" $https_url "" "none" "" $subdir "update" "https"))
+      $results = ($results | append (run-case $ctx "https-branch" $https_url {branch: $branch} $subdir "update" "https"))
+      $results = ($results | append (run-case $ctx "https-rev" $https_url {rev: $tagged.commit} $subdir "build" "https"))
+      $results = ($results | append (run-case $ctx "https-default" $https_url {} $subdir "update" "https"))
     } else {
       print "https: skipped (TOLA_CI_HTTPS_TOKEN is empty)"
     }
@@ -46,8 +46,8 @@ def main [
     let has_key = (($ssh_key | str length) > 0)
     let has_hosts = (($known_hosts | str length) > 0)
     if ($has_key and $has_hosts) {
-      $results = ($results | append (run-case $ctx "ssh-scp" $ssh_url $"tag = '($tag)'" "tag" $tag $subdir "update" "ssh"))
-      $results = ($results | append (run-case $ctx "ssh-url" $ssh_url_alt $"tag = '($tag)'" "tag" $tag $subdir "update" "ssh"))
+      $results = ($results | append (run-case $ctx "ssh-scp" $ssh_url {tag: $tag} $subdir "update" "ssh"))
+      $results = ($results | append (run-case $ctx "ssh-url" $ssh_url_alt {tag: $tag} $subdir "update" "ssh"))
     } else {
       print "ssh: skipped (TOLA_CI_SSH_KEY / TOLA_CI_SSH_KNOWN_HOSTS is empty)"
     }
@@ -97,15 +97,16 @@ def fail [label, message] {
 def newline [] { char newline }
 def tab [] { char tab }
 
-def write-site [site, url, selector, subdir, vendor: bool = true] {
+def write-site [site: path, url: string, selector: record, subdir: string, vendor: bool = true] {
   mkdir $site
-  mut lines = ["[build]", "entry = 'site.typ'", "", "[modules.ci.git]", $"url = '($url)'"]
-  if (($selector | str length) > 0) { $lines = ($lines | append $selector) }
-  if (($subdir | str length) > 0) { $lines = ($lines | append $"subdir = '($subdir)'") }
-  if $vendor {
-    $lines = ($lines | append "" "[vendor]" "path = 'vendor'")
+  let git = {url: $url, ...$selector}
+  let git = if ($subdir | is-empty) { $git } else { $git | insert subdir $subdir }
+  let config = {
+    build: {entry: "site.typ"}
+    modules: {ci: {git: $git}}
   }
-  (($lines | str join (newline))) | save --force ($site | path join "tola.toml")
+  let config = if $vendor { $config | insert vendor {path: "vendor"} } else { $config }
+  $config | to toml | save --force ($site | path join "tola.toml")
   write-entry $site
 }
 
@@ -146,14 +147,7 @@ def run-tola [ctx, site, home, action, flag: string = "", extra_env: record = {}
   }
 }
 
-def check-revision [label, module, kind, value] {
-  if $kind == "tag" { if ($module.revision.tag != $value) { fail $label "tag mismatch" } }
-  if $kind == "branch" { if ($module.revision.branch != $value) { fail $label "branch mismatch" } }
-  if $kind == "rev" { if ($module.revision.rev != $value) { fail $label "rev mismatch" } }
-  if $kind == "none" { if (($module.revision? | default null) != null) { fail $label "default branch recorded a selector" } }
-}
-
-def run-case [ctx, label, url, selector, kind, value, subdir, action, transport] {
+def run-case [ctx: record, label: string, url: string, selector: record, subdir: string, action: string, transport: string] {
   let home = ($ctx.root | path join $"($label)-home")
   let site = ($ctx.root | path join $"($label)-site")
   mkdir $home
@@ -174,7 +168,7 @@ def run-case [ctx, label, url, selector, kind, value, subdir, action, transport]
   if (($module.commit | str length) != 40) { fail $label "commit is not a full object id" }
   if (($module.tree_sha256 | str length) != 64) { fail $label "tree_sha256 is not 64 hex digits" }
   if ($module.subdir != $subdir) { fail $label "subdir was not recorded" }
-  check-revision $label $module $kind $value
+  if ($module.revision? | default {}) != $selector { fail $label "revision selector mismatch" }
 
   let crlf = ((char cr) + (char lf))
   let cache = ($site | path join ".tola" "modules" $module.commit ($subdir | hash sha256))
@@ -182,6 +176,7 @@ def run-case [ctx, label, url, selector, kind, value, subdir, action, transport]
   if not ($cache_file | path exists) { fail $label "cache file missing" }
   if ((open --raw $cache_file) | str contains $crlf) { fail $label "EOL pin did not hold" }
 
+  let kind = ($selector | columns | get -o 0 | default "none")
   let expected = if $kind == "branch" { "branch" } else { "tag" }
   if ((open --raw ($cache | path join "revision.txt") | str trim) != $expected) { fail $label "wrong module revision was fetched" }
   if ($cache | path join "tola.toml" | path exists) { fail $label "site files leaked into the module cache" }
@@ -274,7 +269,7 @@ def bad-credentials-check [ctx, root, url, tag, subdir] {
   let site = ($root | path join "bad-creds-site")
   mkdir $home
   prepare-https $home "bad" $ctx.os
-  write-site $site $url $"tag = '($tag)'" $subdir
+  write-site $site $url {tag: $tag} $subdir
   let result = (run-tola $ctx $site $home "update")
   if ($result.exit_code == 0) { fail "bad credentials" "unexpectedly succeeded" }
 }
@@ -284,7 +279,7 @@ def missing-repo-check [ctx, root, tag, subdir] {
   let site = ($root | path join "missing-repo-site")
   mkdir $home
   prepare-https $home "bad" $ctx.os
-  write-site $site "https://github.com/tola-rs/definitely-no-such-private-module.git" $"tag = '($tag)'" $subdir
+  write-site $site "https://github.com/tola-rs/definitely-no-such-private-module.git" {tag: $tag} $subdir
   let result = (run-tola $ctx $site $home "update")
   if ($result.exit_code == 0) { fail "missing repository" "unexpectedly succeeded" }
 }
@@ -295,7 +290,7 @@ def no-git-check [ctx, root, public_url] {
   let path = ($root | path join "no-git-bin")
   mkdir $home
   mkdir $path
-  write-site $site $public_url "" "" false
+  write-site $site $public_url {} "" false
   let result = (run-tola $ctx $site $home "update" "" {PATH: $path})
   if ($result.exit_code != 0) { print $result.stderr; fail "no git" "public fetch failed" }
   if not (($site | path join "tola.lock") | path exists) { fail "no git" "public fetch wrote no lock" }
@@ -308,7 +303,7 @@ def no-ssh-check [ctx, root, url, tag, subdir] {
   mkdir $home
   mkdir $path
   ("[core]" + (newline) + (tab) + "autocrlf = true" + (newline) + (tab) + "eol = crlf" + (newline)) | save --force ($home | path join ".gitconfig")
-  write-site $site $url $"tag = '($tag)'" $subdir
+  write-site $site $url {tag: $tag} $subdir
   let result = (run-tola $ctx $site $home "update" "" {PATH: $path})
   if ($result.exit_code == 0) { fail "no ssh" "unexpectedly succeeded" }
 }

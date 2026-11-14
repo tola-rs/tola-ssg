@@ -2,9 +2,8 @@
 # Regenerate the fonts this repository carries from the pinned typst-assets release.
 #
 # The version and checksum come from Cargo.lock. The crate is downloaded, verified, and
-# unpacked, then the container, NOTICE, and provenance are rewritten. Passing --check writes
-# nothing: it decodes the committed container's zstd frame and compares the payload, so a
-# frame that differs while the content does not is not a difference.
+# unpacked, then the container, NOTICE, and provenance are rewritten. Passing --check compares
+# the committed index and decoded payload without rewriting the carried files.
 
 use ../lib/assets.nu *
 
@@ -36,13 +35,15 @@ const MAGIC = 'TOLAFNT1'
 
 # The typst-assets version and checksum the workspace locks.
 def pinned [lock: string] {
-    let entry = (
-        $lock
-        | parse -r '\[\[package\]\]\nname = "typst-assets"\nversion = "(?<version>[^"]+)"\n[^\n]*\nchecksum = "(?<sha256>[0-9a-f]{64})"'
-        | get -o 0
-    )
+    let entries = ($lock | from toml | get -o package | default [] | where name == 'typst-assets')
+    if ($entries | length) > 1 { error make { msg: 'Cargo.lock names multiple typst-assets releases' } }
+    let entry = ($entries | get -o 0)
     if $entry == null { error make { msg: 'Cargo.lock names no locked typst-assets release' } }
-    { version: $entry.version, sha256: $entry.sha256 }
+    let checksum = ($entry.checksum? | default '')
+    if not ($checksum =~ '^[0-9a-f]{64}$') {
+        error make { msg: $"Cargo.lock has no valid checksum for typst-assets ($entry.version)" }
+    }
+    { version: $entry.version, sha256: $checksum }
 }
 
 # The little-endian u32 spelling of a length or offset.
@@ -52,45 +53,15 @@ def le32 [value: int] {
 
 # An index naming each font's offset and length: the container before its frame.
 def indexed [fonts: list] {
-    let offsets = (
-        0..<($fonts | length) | each {|row|
-            if $row == 0 { 0 } else { ($fonts | first $row | get length | math sum) }
-        }
-    )
-    let entries = (
-        $fonts | enumerate | each {|entry|
-            let font = $entry.item
-            bytes build ($font.name | str length) ($font.name | into binary) (le32 ($offsets | get $entry.index)) (le32 $font.length)
-        }
-    )
-    ([($MAGIC | into binary) (le32 ($fonts | length))] ++ $entries | bytes collect)
-}
-
-# One byte of a hex string.
-def read-byte [hex: string, at: int] {
-    let start = ($at * 2)
-    let end = ($start + 2)
-    $hex | str substring $start..<$end | into int --radix 16
-}
-
-# The little-endian u32 four bytes at `at` in a hex string.
-def read-u32 [hex: string, at: int] {
-    let bytes = (0..<4 | each {|index| read-byte $hex ($at + $index) })
-    ($bytes | get 0) + 256 * ($bytes | get 1) + 65536 * ($bytes | get 2) + 16777216 * ($bytes | get 3)
-}
-
-# The byte where a container's zstd frame starts.
-def frame-start [container: binary] {
-    let hex = ($container | encode hex)
-    if not ($hex | str starts-with ($MAGIC | into binary | encode hex)) {
-        error make { msg: 'the embedded font container does not open with its magic' }
+    mut index = (bytes build ($MAGIC | into binary) (le32 ($fonts | length)))
+    mut offset = 0
+    for font in $fonts {
+        let name = ($font.name | into binary)
+        let entry = (bytes build ($name | bytes length) $name (le32 $offset) (le32 $font.length))
+        $index = ($index ++ $entry)
+        $offset += $font.length
     }
-    let count = (read-u32 $hex 8)
-    mut at = 12
-    for row in 0..<$count {
-        $at = ($at + 9 + (read-byte $hex $at))
-    }
-    $at
+    $index
 }
 
 # Unpack the carried fonts and the notice out of the release's crate.
@@ -130,13 +101,13 @@ def holds [path: string, text: string] {
     (open --raw $path) == $text
 }
 
-# The digest of the payload a committed container decodes to.
-def decoded-hash [path: string, work: string] {
+# The committed payload's digest if the index matches.
+def decoded-hash [path: string, index: binary, work: string] {
     if not ($path | path exists) { return null }
-    let container = (open --raw $path)
+    let container = (open --raw $path | into binary)
+    if not ($container | bytes starts-with $index) { return null }
     let frame = ($work | path join 'committed.zst')
-    let bytes = ($container | bytes at (frame-start $container)..)
-    $bytes | save --force $frame
+    $container | bytes at ($index | bytes length).. | save --force $frame
     let payload = ($work | path join 'committed.bin')
     let decoded = (^zstd -d -q -f -o $payload $frame | complete)
     if $decoded.exit_code != 0 {
@@ -170,16 +141,12 @@ def main [--check] {
                 if not ($path | path exists) {
                     error make { msg: $"typst-assets ($release.version) carries no ($name)" }
                 }
-                let bytes = (open --raw $path)
+                let bytes = (open --raw $path | into binary)
                 { name: $name, bytes: $bytes, length: ($bytes | bytes length), sha256: ($bytes | hash sha256) }
             }
         )
         let payload = ($fonts | each {|font| $font.bytes } | bytes collect)
-        let raw = ($work | path join 'payload.bin')
-        $payload | save --force $raw
-        let frame = ($work | path join 'payload.zst')
-        compress-zstd $raw $frame
-        let framed = ([(indexed $fonts) (open --raw $frame)] | bytes collect)
+        let index = (indexed $fonts)
 
         let notice = (open --raw ($work | path join 'NOTICE'))
         let readme = (provenance $release.version $release.sha256 $fonts)
@@ -189,7 +156,7 @@ def main [--check] {
 
         if $check {
             mut stale = []
-            let decoded = (decoded-hash $container $work)
+            let decoded = (decoded-hash $container $index $work)
             if $decoded == null or $decoded != ($payload | hash sha256) {
                 $stale = ($stale | append $CONTAINER)
             }
@@ -200,6 +167,11 @@ def main [--check] {
             }
             print $"the carried fonts are current with typst-assets ($release.version)"
         } else {
+            let raw = ($work | path join 'payload.bin')
+            $payload | save --force $raw
+            let frame = ($work | path join 'payload.zst')
+            compress-zstd $raw $frame
+            let framed = ([$index (open --raw $frame | into binary)] | bytes collect)
             write-file $container $framed $root
             write-file $notice_path $notice $root
             write-file $readme_path $readme $root

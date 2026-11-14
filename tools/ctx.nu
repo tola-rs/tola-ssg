@@ -27,18 +27,15 @@ def read-doc [file] {
 
 def with-paths [heads] {
     $heads | reduce --fold {stack: [], out: []} {|h, acc|
-        if $h.level == 1 {
-            {
-                stack: [],
-                out: ($acc.out | append {level: $h.level, line: $h.line, title: $h.title, path: []})
-            }
+        let stack = if $h.level == 1 {
+            []
         } else {
-            let stack = ($acc.stack | where {|s| $s.level < $h.level})
-            let path = (($stack | each {|s| $s.title}) | append $h.title)
-            {
-                stack: ($stack | append $h),
-                out: ($acc.out | append {level: $h.level, line: $h.line, title: $h.title, path: $path})
-            }
+            $acc.stack | where {|s| $s.level < $h.level} | append $h
+        }
+        let path = ($stack | each {|s| $s.title})
+        {
+            stack: $stack,
+            out: ($acc.out | append ($h | insert path $path))
         }
     } | get out
 }

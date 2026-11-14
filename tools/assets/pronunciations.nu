@@ -37,17 +37,19 @@ const TONES = [
 
 # The source text: a local file or a URL, either of which may be gzipped.
 def read-source [source: string, work: string] {
-    let gzipped = ($source | str ends-with '.gz')
-    if ($source =~ '^https?://') {
+    let path = if ($source =~ '^https?://') {
         let downloaded = ($work | path join 'source')
         download $source $downloaded
-        if $gzipped { ^gzip -d -c $downloaded } else { open --raw $downloaded }
+        $downloaded
     } else if not ($source | path exists) {
         error make { msg: $"($source) names no file" }
-    } else if $gzipped {
-        ^gzip -d -c $source
     } else {
-        open --raw $source
+        $source
+    }
+    if (open --raw $path | bytes starts-with 0x[1F 8B]) {
+        ^gzip -d -c -- $path
+    } else {
+        open --raw $path
     }
 }
 
@@ -128,7 +130,6 @@ def unihan [source: string] {
                 }
             }
         }
-        | compact
         | sort-by name
     )
     if ($entries | is-empty) { error make { msg: 'the source file names no pronunciation' } }
@@ -173,7 +174,7 @@ def cedict [source: string] {
         $source
         | lines
         | where {|line| not ($line | str starts-with '#') and ($line | str trim) != ''}
-        | each {|line|
+        | each --flatten {|line|
             let parsed = ($line | parse -r '^(?<traditional>\S+) (?<simplified>\S+) \[(?<pinyin>[^\]]+)\] /')
             if ($parsed | is-empty) {
                 error make { msg: $"the source line `($line)` is not a CC-CEDICT entry" }
@@ -188,7 +189,6 @@ def cedict [source: string] {
                 | each {|word| { name: $word, pronunciation: $pronunciation } }
             }
         }
-        | flatten
         | uniq-by name
         | sort-by name
     )
@@ -218,13 +218,13 @@ def jmdict [source: string] {
         | parse -r '(?s)<entry>(?<entry>.*?)</entry>'
         | get -o entry
         | default []
-        | each {|block|
+        | each --flatten {|block|
             let kanji = ($block | parse -r '<keb>(?<word>[^<]+)</keb>' | get -o word | default [])
             $block
             | parse -r '(?s)<r_ele>(?<reading>.*?)</r_ele>'
             | get -o reading
             | default []
-            | each {|reading|
+            | each --flatten {|reading|
                 if ($reading =~ '<re_nokanji[^>]*>') {
                     []
                 } else {
@@ -239,9 +239,7 @@ def jmdict [source: string] {
                     }
                 }
             }
-            | flatten
         }
-        | flatten
         | uniq-by name
         | sort-by name
     )
@@ -292,21 +290,17 @@ def main [source?: string, location?: string] {
         if ($source == null) and ($location == null) { return }
         exit 1
     }
+    let parser = match $source {
+        'unihan' => ({|text| unihan $text })
+        'cedict' => ({|text| cedict $text })
+        'jmdict' => ({|text| jmdict $text })
+        _ => { error make { msg: $"`($source)` is not a source this command generates" } }
+    }
     let root = ($env.FILE_PWD | path dirname | path dirname)
     let work = (mktemp --directory)
     try {
         let text = (read-source $location $work)
-        let table = (
-            if $source == 'unihan' {
-                unihan $text
-            } else if $source == 'cedict' {
-                cedict $text
-            } else if $source == 'jmdict' {
-                jmdict $text
-            } else {
-                error make { msg: $"`($source)` is not a source this command generates" }
-            }
-        )
+        let table = (do $parser $text)
         write-table $root $table $work
     } finally {
         rm --recursive --force $work

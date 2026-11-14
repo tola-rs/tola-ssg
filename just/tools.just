@@ -5,10 +5,6 @@ set working-directory := '..'
 check:
     for file in tools/*.nu tools/*/*.nu; do nu -c "use $file *" || exit 1; done
 
-# Regenerate the Iconify collection index Tola pins; name collections to refresh only those.
-icons-index *collections:
-    nu tools/assets/icons.nu {{ collections }}
-
 # Regenerate a pronunciation table from the source file it is derived from.
 pronunciations *args:
     nu tools/assets/pronunciations.nu {{ args }}
