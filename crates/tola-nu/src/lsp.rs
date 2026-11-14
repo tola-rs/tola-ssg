@@ -48,6 +48,7 @@ impl Worker {
     fn spawn(
         executable: &Path,
         runtime: Runtime,
+        builtin_dev: bool,
         generation: u64,
         events: Sender<Event>,
     ) -> Result<Self> {
@@ -65,6 +66,9 @@ impl Worker {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
+        if builtin_dev {
+            command.arg("--builtin-dev");
+        }
         if let Some(config) = runtime.site_config() {
             command.arg("--config").arg(config);
         }
@@ -188,6 +192,7 @@ fn check_position(
 
 struct Supervisor<F> {
     executable: PathBuf,
+    builtin_dev: bool,
     reload: F,
     events: Sender<Event>,
     worker: Option<Worker>,
@@ -305,6 +310,7 @@ impl<F: FnMut(&Path, &[SourceOverlay]) -> Result<Runtime>> Supervisor<F> {
         let mut worker = Worker::spawn(
             &self.executable,
             runtime,
+            self.builtin_dev,
             self.generation,
             self.events.clone(),
         )?;
@@ -653,11 +659,11 @@ fn workspace(params: &Value) -> std::result::Result<PathBuf, String> {
 }
 
 /// Supervise fresh official Nu workers, rebuilding selected module bindings and replaying buffers.
-pub fn serve_lsp<F>(executable: &Path, reload: F) -> i32
+pub fn serve_lsp<F>(executable: &Path, builtin_dev: bool, reload: F) -> i32
 where
     F: FnMut(&Path, &[SourceOverlay]) -> Result<Runtime>,
 {
-    match serve(executable, reload) {
+    match serve(executable, builtin_dev, reload) {
         Ok(code) => code,
         Err(error) => {
             eprintln!("{error:#}");
@@ -668,6 +674,7 @@ where
 
 fn serve<F: FnMut(&Path, &[SourceOverlay]) -> Result<Runtime>>(
     executable: &Path,
+    builtin_dev: bool,
     reload: F,
 ) -> Result<i32> {
     let cancelled = Arc::new(AtomicBool::new(false));
@@ -686,6 +693,7 @@ fn serve<F: FnMut(&Path, &[SourceOverlay]) -> Result<Runtime>>(
     });
     let mut server = Supervisor {
         executable: executable.into(),
+        builtin_dev,
         reload,
         events: send,
         worker: None,

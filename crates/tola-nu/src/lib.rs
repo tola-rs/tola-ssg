@@ -42,8 +42,8 @@ use std::{
 use crate::error::Result;
 
 use nu_protocol::{
-    ByteStream, Config, Handlers, IntoValue, PipelineData, SignalAction, Signals, Span, Type,
-    Value,
+    ByteStream, Config, Handlers, IntoValue, ModuleId, PipelineData, SignalAction, Signals, Span,
+    Type, Value,
     engine::{EngineState, Stack, StateWorkingSet},
     record, report_shell_error,
 };
@@ -105,6 +105,7 @@ pub const BUILTIN_MODULES: &[BuiltinModule] = &[
 /// One prepared Nu environment for CLI evaluation or LSP service.
 pub struct Runtime {
     engine: EngineState,
+    native_module: ModuleId,
     stack: Stack,
     entries: BTreeMap<String, ModuleEntry>,
     dependencies: Vec<Dependency>,
@@ -229,7 +230,7 @@ impl Runtime {
         let mut observed_sources = BTreeSet::new();
         let mut attempts = 0;
         let host = Arc::new(OnceLock::new());
-        let entries = loop {
+        let (entries, native_module) = loop {
             attempts += 1;
             let count = directories.len();
             engine = base.clone();
@@ -339,6 +340,7 @@ impl Runtime {
         }
         let runtime = Self {
             engine,
+            native_module,
             stack,
             entries,
             dependencies,
@@ -505,13 +507,24 @@ impl Runtime {
     }
 
     /// Serve one prepared project context. Restart/replay after its inventory changes.
-    pub fn lsp(&self) -> i32 {
+    pub fn lsp(&self, builtin_dev: bool) -> i32 {
         if let Err(error) = self.ensure_fresh() {
             eprintln!("{error:#}");
             return 1;
         }
         let mut engine = self.engine.clone();
         engine.is_lsp = true;
+        if builtin_dev {
+            let mut working = StateWorkingSet::new(&engine);
+            working.use_modules(vec![(
+                modules::NATIVE_MODULE.as_bytes().to_vec(),
+                self.native_module,
+            )]);
+            if let Err(error) = engine.merge_delta(working.render()) {
+                eprintln!("{error:#}");
+                return 1;
+            }
+        }
         if install_ctrlc_handler(&mut engine).is_err() {
             return 1;
         }

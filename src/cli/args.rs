@@ -454,10 +454,14 @@ pub struct NuArgs {
     pub config: ConfigFileArgs,
 
     /// Start the Nushell language server over stdio.
-    #[arg(long, display_order = 43, conflicts_with_all = ["stdin", "invocation", "lsp_worker", "lsp_snapshot"])]
+    #[arg(long, display_order = 43, group = "nu_lsp", conflicts_with_all = ["stdin", "invocation", "lsp_worker", "lsp_snapshot"])]
     pub lsp: bool,
 
-    #[arg(long, hide = true, requires = "lsp_snapshot", conflicts_with_all = ["stdin", "invocation", "lsp"])]
+    /// Make Tola's private native module visible while editing built-in Nushell sources.
+    #[arg(long, display_order = 44, requires = "nu_lsp")]
+    pub builtin_dev: bool,
+
+    #[arg(long, hide = true, group = "nu_lsp", requires = "lsp_snapshot", conflicts_with_all = ["stdin", "invocation", "lsp"])]
     pub lsp_worker: bool,
 
     #[arg(long, hide = true, requires = "lsp_worker", value_name = "FILE")]

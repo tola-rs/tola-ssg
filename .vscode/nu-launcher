@@ -1,0 +1,7 @@
+#!/usr/bin/env sh
+if [ "${1-}" = --lsp ]; then
+    shift
+    cd "$(dirname "$0")/.." || exit 1
+    exec "$PWD/target/release/tola" nu --lsp --builtin-dev "$@"
+fi
+exec nu "$@"

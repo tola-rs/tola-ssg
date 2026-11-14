@@ -11,6 +11,8 @@ use nu_protocol::{
     engine::{Command, EngineState, StateWorkingSet},
 };
 
+pub(super) const NATIVE_MODULE: &str = "tola-native";
+
 /// One site module's public Nu entry, as the CLI resolved it from configuration.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ConfiguredModule {
@@ -152,7 +154,7 @@ pub(super) fn register<'a>(
     directories: &mut BTreeSet<PathBuf>,
     observed_sources: &mut BTreeSet<PathBuf>,
     host: &std::sync::Arc<std::sync::OnceLock<crate::Host>>,
-) -> Result<BTreeMap<String, ModuleEntry>> {
+) -> Result<(BTreeMap<String, ModuleEntry>, ModuleId)> {
     let mut entries = BTreeMap::new();
     let mut working = StateWorkingSet::new(engine);
     directories.extend(
@@ -169,7 +171,7 @@ pub(super) fn register<'a>(
     working.enter_scope();
     // Register declarations without leaving their unqualified names in scope.
     working.enter_scope();
-    let mut native = Module::new(b"tola-native".to_vec());
+    let mut native = Module::new(NATIVE_MODULE.as_bytes().to_vec());
     for command in crate::image::declarations() {
         add_command(&mut working, &mut native, command);
     }
@@ -202,7 +204,7 @@ pub(super) fn register<'a>(
     }
     working.exit_scope();
     // These commands are Custom so Nu's forced-builtin lookup cannot bypass the import.
-    working.add_module("tola-native", native, Vec::new());
+    let native = working.add_module(NATIVE_MODULE, native, Vec::new());
     for builtin in builtins {
         let library = Library::builtin(builtin);
         crate::resources::register(&mut working, &library.root, builtin.sources);
@@ -276,7 +278,7 @@ pub(super) fn register<'a>(
         }
         pending = next;
     }
-    Ok(entries)
+    Ok((entries, native))
 }
 
 fn add_command(working: &mut StateWorkingSet, module: &mut Module, command: Box<dyn Command>) {

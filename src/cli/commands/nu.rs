@@ -112,13 +112,17 @@ fn execute(args: &NuArgs, input_scope: Option<&str>) -> Result<i32> {
             &overlays,
             true,
         )?;
-        return Ok(runtime.lsp());
+        return Ok(runtime.lsp(args.builtin_dev));
     }
     if args.lsp {
         let executable = crate::cli::external::current_executable()?;
-        return Ok(serve_lsp(&executable, |workspace, overlays| {
-            prepare(workspace, explicit.as_deref(), scope, None, overlays, true)
-        }));
+        return Ok(serve_lsp(
+            &executable,
+            args.builtin_dev,
+            |workspace, overlays| {
+                prepare(workspace, explicit.as_deref(), scope, None, overlays, true)
+            },
+        ));
     }
     let entry = args.invocation[0]
         .to_str()
