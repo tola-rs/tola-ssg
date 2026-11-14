@@ -172,36 +172,30 @@ mod tests {
         /// Executed as an independent hook child, never directly by the test harness.
         #[test]
         fn module_hook_child() {
-            let Some(stage) = std::env::var_os("TOLA_HOOK_STAGE") else {
+            let Some(context) = crate::build::tests::hook_context() else {
                 return;
             };
-            assert_eq!(stage, "before-build");
-            let root = PathBuf::from(std::env::var_os("TOLA_PROJECT_ROOT").unwrap());
+            assert_eq!(context.hook.unwrap().stage, "before-build");
+            let site = context.site.unwrap();
+            let root = site.root;
             assert_eq!(root, std::env::current_dir().unwrap());
             assert_eq!(
-                PathBuf::from(std::env::var_os("TOLA_CONFIG_PATH").unwrap())
-                    .canonicalize()
-                    .unwrap(),
+                site.config_path.canonicalize().unwrap(),
                 root.join("tola.toml").canonicalize().unwrap()
             );
-            assert_eq!(
-                PathBuf::from(std::env::var_os("TOLA_CONTENT_ROOT").unwrap()),
-                root.join("content")
-            );
-            let module = std::env::var_os("TOLA_MODULE_NAME");
+            assert_eq!(site.content_root, root.join("content"));
             let mut log = OpenOptions::new()
                 .create(true)
                 .append(true)
                 .open(root.join("hook-log"))
                 .unwrap();
-            match module {
+            match context.module {
                 None => {
-                    assert!(std::env::var_os("TOLA_MODULE_OPTIONS").is_none());
                     writeln!(log, "project").unwrap();
                 }
-                Some(name) => {
-                    assert_eq!(name, "demo");
-                    let module_root = PathBuf::from(std::env::var_os("TOLA_MODULE_ROOT").unwrap());
+                Some(module) => {
+                    assert_eq!(module.name, "demo");
+                    let module_root = module.root;
                     assert_eq!(
                         module_root,
                         root.parent()
@@ -210,17 +204,8 @@ mod tests {
                             .canonicalize()
                             .unwrap()
                     );
-                    assert_eq!(
-                        PathBuf::from(std::env::var_os("TOLA_MODULE_MANIFEST").unwrap()),
-                        module_root.join("tola-module.toml")
-                    );
-                    let options_path =
-                        PathBuf::from(std::env::var_os("TOLA_MODULE_OPTIONS").unwrap());
-                    assert!(options_path.starts_with(PathBuf::from(
-                        std::env::var_os("TOLA_HOOK_TEMP_DIR").unwrap()
-                    )));
-                    let options: serde_json::Value =
-                        serde_json::from_slice(&fs::read(options_path).unwrap()).unwrap();
+                    assert_eq!(module.manifest, module_root.join("tola-module.toml"));
+                    let options = module.options.unwrap();
                     assert_eq!(options["enabled"], true);
                     assert_eq!(options["dependency"], "original");
                     writeln!(log, "module:{}", options["action"].as_str().unwrap()).unwrap();

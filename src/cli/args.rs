@@ -144,7 +144,7 @@ fn version_text() -> String {
 /// The language one `--lang` value names.
 fn parse_help_language(value: &str) -> Result<HelpLanguage, String> {
     HelpLanguage::parse(value).ok_or_else(|| {
-        format!("`{value}` is not a language Tola writes `tola help` in; use `en` or `zh`")
+        format!("unknown help language `{value}`; use `en` or `zh`")
     })
 }
 
@@ -463,6 +463,9 @@ pub struct NuArgs {
     #[arg(long, hide = true, requires = "lsp_worker", value_name = "FILE")]
     pub lsp_snapshot: Option<PathBuf>,
 
+    #[arg(long, hide = true, value_name = "FILE", conflicts_with_all = ["stdin", "invocation", "lsp", "lsp_worker", "no_site", "path"])]
+    pub hook_worker: Option<PathBuf>,
+
     #[arg(long, hide = true, conflicts_with_all = ["path", "lsp", "lsp_worker", "lsp_snapshot"])]
     pub no_site: bool,
 
@@ -471,7 +474,7 @@ pub struct NuArgs {
     pub stdin: bool,
 
     /// A .nu file, @tola-scripts/<NAME>, or @tola-modules/<ALIAS>, followed by script arguments.
-    #[arg(value_name = "ENTRY", num_args = 1.., trailing_var_arg = true, required_unless_present_any = ["lsp", "lsp_worker"])]
+    #[arg(value_name = "ENTRY", num_args = 1.., trailing_var_arg = true, required_unless_present_any = ["lsp", "lsp_worker", "hook_worker"])]
     pub invocation: Vec<OsString>,
 }
 
@@ -500,6 +503,10 @@ pub struct HelpArgs {
         conflicts_with = "interactive"
     )]
     pub format: HelpFormat,
+
+    /// Indent the JSON output. Requires --format json.
+    #[arg(long, conflicts_with = "interactive")]
+    pub pretty: bool,
 
     /// Write `tola help` documentation in `en` (default) or `zh`.
     #[arg(long, value_name = "LANGUAGE", value_parser = parse_help_language)]

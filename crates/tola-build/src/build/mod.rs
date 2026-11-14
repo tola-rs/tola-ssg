@@ -67,72 +67,53 @@ pub(crate) mod tests {
         ]
     }
 
-    pub(crate) fn is_hook_child_for(stage: &str) -> bool {
-        std::env::var_os("TOLA_HOOK_STAGE").as_deref() == Some(std::ffi::OsStr::new(stage))
+    pub(crate) fn hook_context() -> Option<crate::context::Context> {
+        crate::context::Context::read().unwrap()
     }
 
-    /// The file names a hook environment record is read back from, below the site root.
+    pub(crate) fn is_hook_child_for(stage: &str) -> bool {
+        hook_context()
+            .and_then(|context| context.hook)
+            .is_some_and(|hook| hook.stage == stage)
+    }
+
     const RECORDED_CACHE_DIRECTORY: &str = "hook-cache-directory.txt";
     const RECORDED_BUILD_MODE: &str = "hook-build-mode.txt";
 
-    /// Assert the environment Tola supplies to one hook command child process.
-    ///
-    /// The caller names the stage it configured, so a wrong stage or a leaked directory
-    /// variable fails here rather than passing as an unread value.
     pub(crate) fn assert_hook_environment(stage: &str) {
-        assert_eq!(
-            std::env::var_os("TOLA_HOOK_STAGE").as_deref(),
-            Some(std::ffi::OsStr::new(stage))
-        );
-        let temporary = std::env::var_os("TMPDIR").expect("a hook child receives TMPDIR");
-        assert_eq!(
-            std::env::var_os("TMP").as_deref(),
-            Some(temporary.as_os_str())
-        );
-        assert_eq!(
-            std::env::var_os("TEMP").as_deref(),
-            Some(temporary.as_os_str())
-        );
-        assert_eq!(
-            std::env::var_os("TOLA_HOOK_TEMP_DIR").as_deref(),
-            Some(temporary.as_os_str())
-        );
+        let hook = hook_context().unwrap().hook.unwrap();
+        assert_eq!(hook.stage, stage);
+        for name in ["TMPDIR", "TMP", "TEMP"] {
+            assert_eq!(
+                std::env::var_os(name).as_deref(),
+                Some(hook.temp_dir.as_os_str())
+            );
+        }
         let root = std::env::current_dir().unwrap();
-        let temporary = std::fs::canonicalize(temporary).unwrap();
-        let expected_parent =
-            std::fs::canonicalize(tola_input::layout::hook_scratch(&root)).unwrap();
-        assert!(temporary.starts_with(expected_parent));
-        let cache = std::env::var_os("TOLA_HOOK_CACHE_DIR")
-            .expect("a hook child receives a cache directory");
-        assert!(std::path::Path::new(&cache).is_absolute());
-        assert!(std::path::Path::new(&cache).is_dir());
-        for (name, applicable) in [
-            ("TOLA_HOOK_INPUT_DIR", stage != "before-build"),
-            ("TOLA_HOOK_OUTPUT_DIR", stage == "generate-outputs"),
-        ] {
-            match (std::env::var_os(name), applicable) {
-                (Some(value), true) => assert!(
-                    std::path::Path::new(&value).is_absolute()
-                        && std::path::Path::new(&value).is_dir()
-                ),
-                (Some(value), false) => panic!(
-                    "the {stage} child received `{name}` = {value:?}, which its stage does not define"
-                ),
-                (None, true) => panic!("the {stage} child received no `{name}`"),
-                (None, false) => {}
-            }
+        let expected_parent = tola_input::layout::hook_scratch(&root)
+            .canonicalize()
+            .unwrap();
+        assert!(
+            hook.temp_dir
+                .canonicalize()
+                .unwrap()
+                .starts_with(expected_parent)
+        );
+        let cache = hook.cache_dir.unwrap();
+        assert!(cache.is_absolute() && cache.is_dir());
+        assert_eq!(hook.input_dir.is_some(), stage != "before-build");
+        assert_eq!(hook.output_dir.is_some(), stage == "generate-outputs");
+        for directory in [hook.input_dir, hook.output_dir].into_iter().flatten() {
+            assert!(directory.is_absolute() && directory.is_dir());
         }
     }
 
-    /// Record the hook environment Tola supplied beside the site root, and note the run in
-    /// the cache directory, so a parent test can compare runs of one identity.
     pub(crate) fn record_hook_environment() {
-        let cache = std::env::var_os("TOLA_HOOK_CACHE_DIR")
-            .expect("a hook child receives a cache directory");
-        let mode = std::env::var_os("TOLA_BUILD_MODE").expect("a hook child receives a build mode");
+        let hook = hook_context().unwrap().hook.unwrap();
+        let cache = hook.cache_dir.unwrap();
         std::fs::write(RECORDED_CACHE_DIRECTORY, cache.to_string_lossy().as_bytes()).unwrap();
-        std::fs::write(RECORDED_BUILD_MODE, mode.to_string_lossy().as_bytes()).unwrap();
-        let log = std::path::Path::new(&cache).join("invocations.txt");
+        std::fs::write(RECORDED_BUILD_MODE, hook.mode.unwrap()).unwrap();
+        let log = cache.join("invocations.txt");
         let runs = std::fs::read_to_string(&log).unwrap_or_default();
         std::fs::write(log, format!("{runs}run\n")).unwrap();
     }
@@ -146,7 +127,7 @@ pub(crate) mod tests {
     /// Re-executed by hook environment tests as the command's child process.
     #[test]
     fn child_records_hook_environment() {
-        if std::env::var_os("TOLA_HOOK_CACHE_DIR").is_none() {
+        if hook_context().is_none() {
             return;
         }
         record_hook_environment();

@@ -1,6 +1,7 @@
 //! Select a Nu environment without running hooks or compiling the page driver.
 
 pub(super) mod diagnostic;
+mod hook;
 
 use crate::cancellation::Cancellation;
 use serde_json::{Value, json};
@@ -11,7 +12,8 @@ use std::sync::Arc;
 use tola_build::BuildResources;
 use tola_build::cancellation::BuildCancellation;
 use tola_build::config::ResolvedSiteConfig;
-use tola_build::report::{REPORT_PATH_ENV, ReportSources};
+use tola_build::context::{Context as CallContext, Module};
+use tola_build::report::ReportSources;
 use tola_diagnostic::{Diagnostic, DiagnosticError};
 use tola_nu::Host;
 
@@ -20,7 +22,9 @@ use tola_build::config::ConfigSource;
 use tola_build::modules::read_nu_modules;
 use tola_input::{InputMode, InputScope};
 use tola_module::manifest::NuModule;
-use tola_nu::{BuiltinModule, ConfiguredModule, InvocationContext, Runtime, SourceOverlay, serve_lsp};
+use tola_nu::{
+    BuiltinModule, ConfiguredModule, InvocationContext, Runtime, SourceOverlay, serve_lsp,
+};
 
 use crate::cli::args::NuArgs;
 
@@ -48,7 +52,11 @@ pub(super) fn prepare_runtime(
     overlays: Vec<SourceOverlay>,
 ) -> Result<Runtime> {
     Ok(Runtime::for_invocation_with_builtins(
-        modules, dependencies, context, overlays, BUILTIN_MODULES,
+        modules,
+        dependencies,
+        context,
+        overlays,
+        BUILTIN_MODULES,
     )?)
 }
 
@@ -63,7 +71,17 @@ pub(in crate::cli) fn run(args: &NuArgs, input_scope: Option<&str>) -> ExitCode 
 }
 
 fn execute(args: &NuArgs, input_scope: Option<&str>) -> Result<i32> {
-    let scope = effective_scope(input_scope)?;
+    if let Some(path) = &args.hook_worker {
+        return hook::run_worker(path);
+    }
+    let call = if args.no_site {
+        None
+    } else {
+        CallContext::read()?
+    };
+    let scope = effective_scope(
+        input_scope.or_else(|| call.as_ref().and_then(|call| call.input_scope.as_deref())),
+    )?;
     let current = InvocationContext::current()?;
     let explicit = if args.no_site {
         None
@@ -71,7 +89,12 @@ fn execute(args: &NuArgs, input_scope: Option<&str>) -> Result<i32> {
         args.config
             .path
             .clone()
-            .or_else(|| std::env::var_os("TOLA_CONFIG_PATH").map(PathBuf::from))
+            .or_else(|| {
+                call.as_ref()?
+                    .site
+                    .as_ref()
+                    .map(|site| site.config_path.clone())
+            })
             .map(std::path::absolute)
             .transpose()?
     };
@@ -108,29 +131,31 @@ fn execute(args: &NuArgs, input_scope: Option<&str>) -> Result<i32> {
     }
     let cancellation = Cancellation::install()?;
     let token = cancellation.token();
-    let inherited = if args.no_site {
-        host()
-    } else {
-        external_host()
-    };
-    let author_hook = inherited
-        .hook
+    let inherited = call_host(call.as_ref())?;
+    let before_pack = call
         .as_ref()
-        .and_then(|hook| hook.get("stage"))
-        .and_then(Value::as_str)
-        == Some("before-pack");
+        .and_then(|call| call.hook.as_ref())
+        .is_some_and(|hook| hook.stage == "before-pack");
     let site = if args.no_site
+        || entry == "@tola-scripts/context"
         || inherited.init.is_some()
-        || author_hook
+        || before_pack
         || (entry.starts_with("@tola-scripts/") && explicit.is_none())
     {
         None
     } else {
         site_modules(&current.directory, explicit.as_deref(), scope, &token)?
     };
+    let mut env = environment(scope);
+    if call.is_some() {
+        let path = std::env::var(tola_build::context::PATH_ENV)
+            .context("the Tola call context path must be valid UTF-8")?;
+        env.insert(tola_build::context::PATH_ENV.into(), Some(path));
+    }
     let runtime = prepare_invocation(
         &current.directory,
         scope,
+        env,
         Some(entry),
         &[],
         site,
@@ -143,11 +168,12 @@ fn execute(args: &NuArgs, input_scope: Option<&str>) -> Result<i32> {
         let module = runtime.resolve_locator(entry)?;
         return Ok(runtime.run_module(&module, &arguments, args.stdin, input_scope));
     }
-    let module_root = (!args.no_site)
-        .then(|| std::env::var_os("TOLA_MODULE_ROOT"))
-        .flatten()
-        .map(PathBuf::from);
-    let path = file_path(entry, &current.directory, module_root.as_deref());
+    let module_root = call.as_ref().and_then(|call| call.module.as_ref());
+    let path = file_path(
+        entry,
+        &current.directory,
+        module_root.map(|module| module.root.as_path()),
+    );
     Ok(runtime.run_file(&path, &arguments, args.stdin, input_scope))
 }
 
@@ -201,8 +227,7 @@ fn file_path(entry: &str, directory: &Path, module_root: Option<&Path>) -> PathB
 }
 
 fn effective_scope(explicit: Option<&str>) -> Result<InputScope> {
-    let inherited = std::env::var("TOLA_INPUT_SCOPE").ok();
-    let name = explicit.or(inherited.as_deref()).unwrap_or("online");
+    let name = explicit.unwrap_or("online");
     InputScope::parse(name).with_context(|| {
         format!("`{name}` is not an input scope; use `online`, `offline`, or `pure`")
     })
@@ -256,29 +281,22 @@ pub(super) fn environment(scope: InputScope) -> BTreeMap<String, Option<String>>
     for (name, value) in crate::cli::color::child_environment() {
         env.insert(name.into(), Some(value));
     }
-    for name in [
-        "TOLA_PROJECT_ROOT",
-        "TOLA_CONFIG_PATH",
-        "TOLA_CONTENT_ROOT",
-        "TOLA_MODULE_ROOT",
-        "TOLA_MODULE_MANIFEST",
-        "TOLA_MODULE_NAME",
-        "TOLA_MODULE_OPTIONS",
-        "TOLA_HOOK_NAME",
-        "TOLA_HOOK_STAGE",
-        "TOLA_BUILD_MODE",
-        "TOLA_HOOK_INPUT_DIR",
-        "TOLA_HOOK_OUTPUT_DIR",
-        "TOLA_HOOK_CACHE_DIR",
-        "TOLA_HOOK_TEMP_DIR",
-        "TOLA_INIT_TARGET_DIR",
-        "TOLA_INIT_OUTPUT_DIR",
-        "TOLA_INIT_INTERACTIVE",
-        REPORT_PATH_ENV,
-    ] {
-        env.insert(name.into(), None);
-    }
+    env.insert(tola_build::context::PATH_ENV.into(), None);
     env
+}
+
+pub(super) fn call_environment(
+    scope: InputScope,
+    call: &CallContext,
+    directory: &Path,
+) -> Result<BTreeMap<String, Option<String>>> {
+    let mut env = environment(scope);
+    let path = call.write(directory)?;
+    let path = path
+        .to_str()
+        .context("the Tola call context path must be valid UTF-8")?;
+    env.insert(tola_build::context::PATH_ENV.into(), Some(path.into()));
+    Ok(env)
 }
 
 pub(crate) fn site_record(config: &ResolvedSiteConfig) -> Value {
@@ -302,13 +320,10 @@ pub(crate) fn site_record(config: &ResolvedSiteConfig) -> Value {
     })
 }
 
-fn runtime(
-    directory: &Path,
+fn runtime_inputs(
     config: &ResolvedSiteConfig,
     modules: &BTreeMap<String, NuModule>,
-    overlays: &[SourceOverlay],
-    scope: InputScope,
-) -> Result<Runtime> {
+) -> (Vec<ConfiguredModule>, Vec<PathBuf>) {
     let mut dependencies = vec![config.config_path().to_owned()];
     let mut libraries = Vec::new();
     for module in modules.values() {
@@ -322,15 +337,7 @@ fn runtime(
             });
         }
     }
-    prepare_runtime(
-        libraries,
-        dependencies,
-        InvocationContext {
-            directory: directory.to_owned(),
-            environment: environment(scope),
-        },
-        overlays.to_vec(),
-    )
+    (libraries, dependencies)
 }
 
 fn module_records(
@@ -411,6 +418,7 @@ fn prepare(
     prepare_invocation(
         workspace,
         scope,
+        environment(scope),
         entry,
         overlays,
         site,
@@ -422,6 +430,7 @@ fn prepare(
 fn prepare_invocation(
     workspace: &Path,
     scope: InputScope,
+    environment: BTreeMap<String, Option<String>>,
     entry: Option<&str>,
     overlays: &[SourceOverlay],
     site: Option<SiteModules>,
@@ -439,7 +448,7 @@ fn prepare_invocation(
             Vec::new(),
             InvocationContext {
                 directory: workspace.to_owned(),
-                environment: environment(scope),
+                environment,
             },
             overlays.to_vec(),
         )?
@@ -460,7 +469,16 @@ fn prepare_invocation(
     } else {
         workspace
     };
-    let runtime = runtime(directory, &site.config, &site.modules, overlays, scope)?;
+    let (libraries, dependencies) = runtime_inputs(&site.config, &site.modules);
+    let runtime = prepare_runtime(
+        libraries,
+        dependencies,
+        InvocationContext {
+            directory: directory.to_owned(),
+            environment,
+        },
+        overlays.to_vec(),
+    )?;
     ensure!(
         runtime
             .dependencies()
@@ -491,35 +509,31 @@ pub(super) fn host() -> Host {
     }
 }
 
-fn external_host() -> Host {
+pub(super) fn call_host(call: Option<&CallContext>) -> Result<Host> {
     let mut host = host();
-    let variable = |name| std::env::var(name).ok().filter(|value| !value.is_empty());
-    if let Some(stage) = variable("TOLA_HOOK_STAGE") {
-        host.hook = Some(json!({
-            "name": variable("TOLA_HOOK_NAME"), "stage": stage, "mode": variable("TOLA_BUILD_MODE"),
-            "input-dir": variable("TOLA_HOOK_INPUT_DIR"), "output-dir": variable("TOLA_HOOK_OUTPUT_DIR"),
-            "cache-dir": variable("TOLA_HOOK_CACHE_DIR"), "temp-dir": variable("TOLA_HOOK_TEMP_DIR"),
-        }));
-    }
-    if let Some(output) = variable("TOLA_INIT_OUTPUT_DIR") {
+    let Some(call) = call else { return Ok(host) };
+    host.context = Some(serde_json::to_value(call)?);
+    host.module = call.module.as_ref().map(|module| module.name.clone());
+    host.hook = call.hook.as_ref().map(|hook| {
+        json!({
+            "name": hook.name, "stage": hook.stage, "mode": hook.mode,
+            "input-dir": hook.input_dir, "output-dir": hook.output_dir,
+            "cache-dir": hook.cache_dir, "temp-dir": hook.temp_dir,
+        })
+    });
+    if let Some(init) = &call.init {
         host.init = Some(json!({
-            "target-dir": variable("TOLA_INIT_TARGET_DIR"), "output-dir": output,
-            "interactive": variable("TOLA_INIT_INTERACTIVE").as_deref() == Some("true"),
-            "module": {
-                "name": variable("TOLA_MODULE_NAME"), "root": variable("TOLA_MODULE_ROOT"),
-                "manifest": variable("TOLA_MODULE_MANIFEST"),
-            },
+            "target-dir": init.target_dir, "output-dir": init.output_dir,
+            "interactive": init.interactive, "module": call.module,
         }));
-    } else if variable("TOLA_CONFIG_PATH").is_some() {
-        host.module = variable("TOLA_MODULE_NAME");
     }
-    if let Some(path) = std::env::var_os(REPORT_PATH_ENV).filter(|value| !value.is_empty()) {
-        let path = PathBuf::from(path);
+    if let Some(path) = &call.report_path {
+        let path = path.clone();
         host.submit_diagnostics = Some(Arc::new(move |issues| {
             diagnostic::submit_file(&path, issues)
         }));
     }
-    host
+    Ok(host)
 }
 
 fn query_operation(
@@ -571,7 +585,6 @@ fn query_operation(
 }
 
 pub(crate) fn hook_runner() -> tola_build::hooks::HookRunner {
-    use tola_build::build::BuildMode;
     tola_build::hooks::HookRunner::new(|hook| {
         let config = Arc::new(hook.config.clone());
         let directory = config.get_root();
@@ -598,40 +611,36 @@ pub(crate) fn hook_runner() -> tola_build::hooks::HookRunner {
                 );
             }
         }
-        let mode = match hook.mode {
-            BuildMode::Production => "prod",
-            BuildMode::Development => "dev",
-        };
-        let stage = hook.stage.as_str();
-        let name = hook.name;
-        let producer = match hook.origin {
-            Some(origin) => format!("hook:{stage}:{}.{}", origin.name, name),
+        let call = &hook.context;
+        let current = call.hook.as_ref().context("missing build hook context")?;
+        let stage = &current.stage;
+        let name = &current.name;
+        let producer = match &call.module {
+            Some(module) => format!("hook:{stage}:{}.{name}", module.name),
             None => format!("hook:{stage}:{name}"),
         };
         let (submit, diagnostics) = diagnostic::collector(producer, ReportSources::new());
-        let runtime = runtime(directory, &config, &modules, &[], hook.scope)?.with_host(Host {
-            site: Some(site_record(&config)), modules: module_records(&modules, directory, hook.assets)?,
-            module: hook.origin.map(|origin| origin.name.clone()),
-            hook: Some(json!({
-                "name": name, "stage": stage, "mode": mode, "input-dir": hook.input_dir,
-                "output-dir": hook.output_dir, "cache-dir": hook.cache_dir, "temp-dir": hook.temp_dir,
-            })),
+        let host = Host {
+            site: Some(site_record(&config)),
+            modules: module_records(&modules, directory, hook.assets)?,
             query: Some(query_operation(config.clone(), resources, token.clone())),
-            submit_diagnostics: Some(submit), ..host()
-        })?.with_cancellation(token.signal_flag());
-        let status = runtime.run_embedded(hook.path, hook.args)?;
+            submit_diagnostics: Some(submit),
+            ..call_host(Some(call))?
+        };
+        let (libraries, dependencies) = runtime_inputs(&config, &modules);
+        let completion = hook::run(&hook, libraries, dependencies, host);
         token.ensure_active()?;
         let diagnostics = diagnostics
             .lock()
             .expect("diagnostic collector")
             .take()
             .unwrap_or_default();
-        if status != 0 {
-            return Err(DiagnosticError::new(
-                format!("{stage} hook `{name}` exited with status {status}"),
-                diagnostics,
-            )
-            .into());
+        if let Err(error) = completion {
+            return if diagnostics.is_empty() {
+                Err(error)
+            } else {
+                Err(DiagnosticError::attach(error, diagnostics).into())
+            };
         }
         Ok(diagnostics)
     })
@@ -656,18 +665,38 @@ pub(super) fn run_action(
         resources.input_mode(),
         &token,
     )?;
+    let module = modules
+        .get(alias)
+        .context("the calling module is missing")?;
+    let mut call = CallContext::new(crate::cli::external::current_executable()?, Some(scope));
+    call.site = Some(config.as_ref().into());
+    call.module = Some(Module {
+        name: module.name.clone(),
+        root: module.root.clone(),
+        manifest: module.manifest.clone(),
+        options: Some(serde_json::to_value(&module.options)?),
+    });
     let (submit, diagnostics) =
         diagnostic::collector(format!("command:{alias}.{command}"), ReportSources::new());
-    let runtime = runtime(directory, &config, &modules, &[], scope)?
-        .with_host(Host {
-            site: Some(site_record(&config)),
-            modules: module_records(&modules, directory, None)?,
-            module: Some(alias.into()),
-            query: Some(query_operation(config.clone(), resources, token.clone())),
-            submit_diagnostics: Some(submit),
-            ..host()
-        })?
-        .with_cancellation(token.signal_flag());
+    let temporary = tempfile::tempdir().context("could not prepare the module command context")?;
+    let (libraries, dependencies) = runtime_inputs(&config, &modules);
+    let runtime = prepare_runtime(
+        libraries,
+        dependencies,
+        InvocationContext {
+            directory: directory.to_owned(),
+            environment: call_environment(scope, &call, temporary.path())?,
+        },
+        Vec::new(),
+    )?
+    .with_host(Host {
+        site: Some(site_record(&config)),
+        modules: module_records(&modules, directory, None)?,
+        query: Some(query_operation(config.clone(), resources, token.clone())),
+        submit_diagnostics: Some(submit),
+        ..call_host(Some(&call))?
+    })?
+    .with_cancellation(token.signal_flag());
     let status = runtime.run_embedded(path, arguments)?;
     token.ensure_active()?;
     let diagnostics = diagnostics
@@ -689,6 +718,103 @@ pub(super) fn run_action(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const CONTEXT_CLI: &str = "cli::commands::nu::tests::context_cli_child";
+    const CONTEXT_HOOK: &str = "cli::commands::nu::tests::context_hook_child";
+    const CONTEXT_ROLE: &str = "TOLA_CONTEXT_TEST_ROLE";
+
+    #[test]
+    fn hook_can_read_context_without_tola_on_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let executable = std::env::current_exe().unwrap();
+        std::fs::create_dir(root.join("content")).unwrap();
+        std::fs::create_dir(root.join("empty-path")).unwrap();
+        std::fs::write(root.join("site.typ"), r#"#document("index.html")[Site]"#).unwrap();
+        let argv = std::iter::once(executable.to_str().unwrap())
+            .chain(["--exact", CONTEXT_HOOK, "--nocapture"])
+            .collect::<Vec<_>>();
+        std::fs::write(
+            root.join("tola.toml"),
+            format!(
+                r#"
+[[hooks.generate-outputs]]
+name = "context"
+argv = {}
+outputs = [{{ file = "context.txt" }}]
+"#,
+                serde_json::to_string(&argv).unwrap()
+            ),
+        )
+        .unwrap();
+
+        let result = std::process::Command::new(&executable)
+            .args(["--exact", CONTEXT_CLI, "--nocapture"])
+            .current_dir(&root)
+            .env("PATH", root.join("empty-path"))
+            .env(CONTEXT_ROLE, "build")
+            .env_remove("TOLA_EXECUTABLE")
+            .env_remove(tola_build::context::PATH_ENV)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&result.stderr),
+            String::from_utf8_lossy(&result.stdout),
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("public/context.txt")).unwrap(),
+            "generate-outputs",
+        );
+    }
+
+    #[test]
+    fn context_cli_child() {
+        let arguments: &[&str] = match std::env::var(CONTEXT_ROLE).as_deref() {
+            Ok("build") => &["tola", "build", "--offline"],
+            Ok("context") => &["tola", "nu", "@tola-scripts/context", "--json"],
+            _ => return,
+        };
+        let arguments = arguments
+            .iter()
+            .copied()
+            .map(Into::into)
+            .collect::<Vec<_>>();
+        assert_eq!(crate::cli::run(&arguments), ExitCode::SUCCESS);
+    }
+
+    #[test]
+    fn context_hook_child() {
+        if std::env::var(CONTEXT_ROLE).as_deref() != Ok("build") {
+            return;
+        }
+        let executable = PathBuf::from(std::env::var_os("TOLA_EXECUTABLE").unwrap());
+        assert!(executable.is_absolute());
+        let result = std::process::Command::new(executable)
+            .args(["--exact", CONTEXT_CLI, "--nocapture"])
+            .env(CONTEXT_ROLE, "context")
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        // The test runner also writes its progress to stdout.
+        let stdout = String::from_utf8(result.stdout).unwrap();
+        let context: Value = stdout
+            .lines()
+            .find_map(|line| serde_json::from_str(line).ok())
+            .expect("context prints a JSON object");
+        assert_eq!(context["inputScope"], "offline");
+        let hook = &context["hook"];
+        assert_eq!(hook["name"], "context");
+        let input = Path::new(hook["inputDir"].as_str().unwrap());
+        assert!(input.join("index.html").is_file());
+        let output = Path::new(hook["outputDir"].as_str().unwrap());
+        std::fs::write(output.join("context.txt"), hook["stage"].as_str().unwrap()).unwrap();
+    }
 
     fn module(root: &Path, directory: &str, nu: bool) {
         let module = root.join(directory);
@@ -733,7 +859,7 @@ mod tests {
         let config = selected_config(&root, "catalog", "module tools");
         std::fs::write(root.join("tola.toml"), "invalid = [").unwrap();
         let current_directory = std::env::current_dir().unwrap();
-        let current_config = std::env::var_os("TOLA_CONFIG_PATH");
+        let current_config = std::env::var_os(tola_build::context::PATH_ENV);
         let runtime = prepare(
             &root,
             Some(&config),
@@ -747,7 +873,10 @@ mod tests {
         assert_eq!(entry.path, root.join("module tools/public tools.nu"));
         assert_eq!(argument_values(&runtime, "TOLA_INPUT_SCOPE"), Some("pure"));
         assert_eq!(std::env::current_dir().unwrap(), current_directory);
-        assert_eq!(std::env::var_os("TOLA_CONFIG_PATH"), current_config);
+        assert_eq!(
+            std::env::var_os(tola_build::context::PATH_ENV),
+            current_config
+        );
     }
 
     #[test]
@@ -864,7 +993,7 @@ mod tests {
         .unwrap();
         assert!(runtime.resolve_locator("@tola-scripts/image").is_ok());
         assert!(runtime.resolve_locator("@tola-scripts/diagnostic").is_ok());
-        assert!(argument_values(&runtime, "TOLA_CONFIG_PATH").is_none());
+        assert!(argument_values(&runtime, tola_build::context::PATH_ENV).is_none());
         let script = root.join("pick.nu");
         std::fs::write(
             &script,

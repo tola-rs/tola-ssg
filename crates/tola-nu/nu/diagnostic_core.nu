@@ -13,15 +13,17 @@ export def make [
   if $severity not-in [error warning info hint] {
     error make {msg: "severity must be error, warning, info, or hint"}
   }
-  mut issue = {severity: $severity, message: $message}
-  if $code != null { $issue = ($issue | insert code $code) }
-  if not ($hints | is-empty) { $issue = ($issue | insert hints $hints) }
-  if not ($notes | is-empty) { $issue = ($issue | insert notes $notes) }
-  if not ($related | is-empty) { $issue = ($issue | insert related $related) }
-  $issue
+  {
+    severity: $severity
+    message: $message
+    code: $code
+    hints: (if not ($hints | is-empty) { $hints })
+    notes: (if not ($notes | is-empty) { $notes })
+    related: (if not ($related | is-empty) { $related })
+  } | compact
 }
 
 # Print diagnostics for an independent check. Locations use file paths.
 export def render []: list<record> -> nothing {
-  print --no-newline ($in | render-diagnostics)
+  render-diagnostics | print --no-newline
 }

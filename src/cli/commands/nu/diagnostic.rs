@@ -90,6 +90,8 @@ struct Issue {
     #[serde(default)]
     hints: Vec<String>,
     #[serde(default)]
+    help: Vec<IssueRelated>,
+    #[serde(default)]
     notes: Vec<String>,
     #[serde(default)]
     related: Vec<IssueRelated>,
@@ -184,14 +186,28 @@ fn into_diagnostic(issue: Issue, number: usize) -> Result<Diagnostic, RenderInpu
         name: Some(issue.code.unwrap_or_else(|| "nu.issue".to_owned())),
         code: None,
     });
-    diagnostic.help = issue
-        .hints
+    let mut help = issue
+        .help
         .into_iter()
-        .map(|message| Help {
-            message,
-            location: None,
+        .enumerate()
+        .map(|(index, help)| {
+            let location = help
+                .location
+                .map(|location| {
+                    into_location(location, number, || format!("help[{index}].location"))
+                })
+                .transpose()?;
+            Ok(Help {
+                message: help.message,
+                location,
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>, RenderInputError>>()?;
+    help.extend(issue.hints.into_iter().map(|message| Help {
+        message,
+        location: None,
+    }));
+    diagnostic.help = help;
     diagnostic.notes = issue.notes;
     diagnostic.related = issue
         .related
@@ -289,5 +305,26 @@ mod tests {
             Err(RenderInputError::MissingPath { number: 2, field })
                 if field == "related[0].location"
         ));
+    }
+
+    #[test]
+    fn render_keeps_suggestions_from_check_reports() {
+        let mut issue = Diagnostic::new(
+            DiagnosticCode::new("test.issue"),
+            Severity::Warning,
+            "Missing title",
+        );
+        issue.help.push(Help {
+            message: "Add a title here".into(),
+            location: Some(Location {
+                path: "content/index.typ".into(),
+                line: Some(2),
+                column: None,
+                range: None,
+                source_lines: Vec::new(),
+            }),
+        });
+        let parsed = parse_diagnostics(&json!([issue])).unwrap();
+        assert_eq!(parsed[0].help, issue.help);
     }
 }

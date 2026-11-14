@@ -134,6 +134,19 @@ pub(super) fn generate(
     let initializer = tola_build::modules::find_initializer(&module_root, Some(alias), mode)?;
     let candidate = workspace.join("site");
     fs::create_dir(&candidate)?;
+    let mut call =
+        tola_build::context::Context::new(crate::cli::external::current_executable()?, Some(scope));
+    call.module = Some(tola_build::context::Module {
+        name: initializer.name.clone(),
+        root: initializer.root.clone(),
+        manifest: initializer.manifest.clone(),
+        options: None,
+    });
+    call.init = Some(tola_build::context::Init {
+        target_dir: target.to_owned(),
+        output_dir: candidate.clone(),
+        interactive: args.interactive,
+    });
     match &initializer.action {
         tola_module::Action::Nu { path, args: prefix } => {
             let path = tola_module::module_set::validate_module_path(
@@ -147,17 +160,16 @@ pub(super) fn generate(
             arguments.extend(super::super::nu::utf8_arguments(&args.args)?);
             let context = tola_nu::InvocationContext {
                 directory: candidate.clone(),
-                environment: super::super::nu::environment(scope),
+                environment: super::super::nu::call_environment(scope, &call, &workspace)?,
             };
-            let runtime = super::super::nu::prepare_runtime(Vec::new(), vec![initializer.manifest.clone()], context, Vec::new())?
-                .with_host(tola_nu::Host {
-                    init: Some(serde_json::json!({
-                        "target-dir": target, "output-dir": candidate, "interactive": args.interactive,
-                        "module": { "name": initializer.name, "root": initializer.root, "manifest": initializer.manifest },
-                    })),
-                    ..super::super::nu::host()
-                })?
-                .with_cancellation(cancellation.token().signal_flag());
+            let runtime = super::super::nu::prepare_runtime(
+                Vec::new(),
+                vec![initializer.manifest.clone()],
+                context,
+                Vec::new(),
+            )?
+            .with_host(super::super::nu::call_host(Some(&call))?)?
+            .with_cancellation(cancellation.token().signal_flag());
             let status = runtime.run_embedded(&path, &arguments)?;
             cancellation.token().ensure_active()?;
             ensure!(
@@ -168,10 +180,10 @@ pub(super) fn generate(
         tola_module::Action::Argv(argv) => {
             ensure!(
                 !argv.iter().any(|word| word.contains("{project}")),
-                "initializer argv cannot use `{}` before a site exists; use TOLA_INIT_TARGET_DIR",
+                "initializer argv cannot use `{}` before a site exists; use the initializer context targetDir",
                 "{project}"
             );
-            let executable = crate::cli::external::current_executable()?;
+            let executable = &call.executable;
             let expand = |word: &str| {
                 tola_module::expand_argument(
                     word,
@@ -185,30 +197,8 @@ pub(super) fn generate(
             let command = Command::new(expand(&argv[0]))
                 .args(argv[1..].iter().map(|word| expand(word)))
                 .args(args.args.iter().cloned())
-                .cwd(&candidate)
-                .env("TOLA_INIT_OUTPUT_DIR", candidate.as_os_str())
-                .env("TOLA_INIT_TARGET_DIR", target.as_os_str())
-                .env(
-                    "TOLA_INIT_INTERACTIVE",
-                    if args.interactive { "true" } else { "false" },
-                )
-                .env("TOLA_MODULE_NAME", initializer.name.as_str())
-                .env("TOLA_MODULE_ROOT", initializer.root.as_os_str())
-                .env("TOLA_MODULE_MANIFEST", initializer.manifest.as_os_str())
-                .env("TOLA_EXECUTABLE", executable)
-                .env("TOLA_INPUT_SCOPE", scope.as_str())
-                .env_remove("TOLA_PROJECT_ROOT")
-                .env_remove("TOLA_CONFIG_PATH")
-                .env_remove("TOLA_CONTENT_ROOT")
-                .env_remove("TOLA_MODULE_OPTIONS")
-                .env_remove("TOLA_HOOK_STAGE")
-                .env_remove("TOLA_HOOK_NAME")
-                .env_remove("TOLA_REPORT_PATH")
-                .env_remove("TOLA_BUILD_MODE")
-                .env_remove("TOLA_HOOK_INPUT_DIR")
-                .env_remove("TOLA_HOOK_OUTPUT_DIR")
-                .env_remove("TOLA_HOOK_TEMP_DIR")
-                .env_remove("TOLA_HOOK_CACHE_DIR");
+                .cwd(&candidate);
+            let command = call.command(command, &workspace)?;
             crate::cli::external::run(command, cancellation)?;
         }
     }

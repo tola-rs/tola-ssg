@@ -5,7 +5,7 @@ use std::ffi::OsString;
 
 use anyhow::{Context, Result, ensure};
 use clap::{Args, CommandFactory, FromArgMatches};
-use tola_build::report::{REPORT_PATH_ENV, ReportChannel, ReportSources};
+use tola_build::report::{ReportChannel, ReportSources};
 use tola_input::InputMode;
 use tola_module::{Action, CommandAction};
 
@@ -206,17 +206,14 @@ pub(in crate::cli) fn run(
                 format!("command:{}.{name}", module.name),
                 ReportSources::new(),
             )?;
-            let (command, _options) = process_command(
+            let command = process_command(
                 argv,
                 tail,
-                config.get_root(),
-                config.config_path(),
+                config.as_ref().into(),
                 module,
                 mode.scope(),
+                &reports,
             )?;
-            let command = command
-                .env("TOLA_CONTENT_ROOT", config.build().content_dir.as_os_str())
-                .env(REPORT_PATH_ENV, reports.path());
             let completion = crate::cli::external::run(command, cancellation);
             cancellation.token().ensure_active()?;
             complete_report(completion, reports, output)

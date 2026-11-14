@@ -2,8 +2,7 @@ use tola-native [inspect-image resize-image]
 
 # Inspect an image from a path or piped bytes.
 export def metadata [source?: path]: [nothing -> record, binary -> record] {
-  let path = if $source != null { $source | path expand --no-symlink }
-  $in | inspect-image $path
+  inspect-image (if $source != null { $source | path expand --no-symlink })
 }
 
 # Resize an image from a path or piped bytes. SVG requires an explicit raster format.
@@ -21,10 +20,12 @@ export def resize [
   --filter: string = "lanczos3" # Raster resampling: nearest, triangle, catmull-rom, gaussian, or lanczos3.
   --background: string # Opaque sRGB color, #RRGGBB.
 ]: [nothing -> any, binary -> any] {
-  let source_path = if $source != null { $source | path expand --no-symlink }
-  let output_path = if $output != null { $output | path expand --no-symlink }
-  $in | resize-image {
+  resize-image {
     width: $width, height: $height, op: $op, anchor: $anchor,
     format: $format, quality: $quality, filter: $filter, background: $background
-  } $source_path $output_path
+  } (if $source != null {
+    $source | path expand --no-symlink
+  }) (if $output != null {
+    $output | path expand --no-symlink
+  })
 }

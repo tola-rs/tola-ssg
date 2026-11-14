@@ -116,7 +116,7 @@ fn declared_argv_reaches_the_process() {
         &script,
         r#"record="$1"
 shift
-printf '%s\n' "$@" "$TOLA_PROJECT_ROOT" "$TOLA_MODULE_NAME" "$TOLA_INPUT_SCOPE" > "$record"
+printf '%s\n' "$@" > "$record"
 exit 37
 "#,
     )
@@ -126,13 +126,18 @@ exit 37
         "{module}/record.sh".into(),
         "{project}/arguments.txt".into(),
     ];
-    let (command, _options) = process_command(
+    let reports = ReportChannel::new("command:notes.record", ReportSources::new()).unwrap();
+    let command = process_command(
         &argv,
         &["a title".into(), "--".into(), "$(literal)".into()],
-        project,
-        &project.join("tola.toml"),
+        tola_build::context::Site {
+            root: project.to_owned(),
+            config_path: project.join("tola.toml"),
+            content_root: project.join("content"),
+        },
         &module,
         InputScope::Offline,
+        &reports,
     )
     .unwrap();
     let error = run_process(command, &Cancellation::default()).unwrap_err();
@@ -142,8 +147,5 @@ exit 37
     );
     let recorded = std::fs::read_to_string(&record).unwrap();
     let lines = recorded.lines().collect::<Vec<_>>();
-    assert_eq!(&lines[..3], ["a title", "--", "$(literal)"]);
-    assert_eq!(Path::new(lines[3]), project);
-    assert_eq!(lines[4], "notes");
-    assert_eq!(lines[5], "offline");
+    assert_eq!(lines, ["a title", "--", "$(literal)"]);
 }

@@ -40,19 +40,18 @@ impl Command {
 }
 
 impl ParsedCommand {
-    pub fn parse() -> Result<Self, ExitCode> {
-        let arguments = std::env::args_os().collect::<Vec<_>>();
+    pub fn parse(arguments: &[std::ffi::OsString]) -> Result<Self, ExitCode> {
         let mut command = Cli::command();
         if arguments.len() == 1 {
             return Err(super::usage::root(command.render_help()));
         }
-        let matches = match command.try_get_matches_from_mut(&arguments) {
+        let matches = match command.try_get_matches_from_mut(arguments) {
             Ok(matches) => matches,
             Err(error) if error.kind() == ErrorKind::DisplayHelp => {
-                return Err(super::usage::render(&arguments, error));
+                return Err(super::usage::render(arguments, error));
             }
             Err(mut error) => {
-                add_placement_hint(&mut error, &arguments);
+                add_placement_hint(&mut error, arguments);
                 error.exit();
             }
         };

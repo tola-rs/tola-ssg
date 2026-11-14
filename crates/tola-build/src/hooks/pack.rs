@@ -7,9 +7,10 @@ use tola_diagnostic::Diagnostic;
 use tola_subprocess::Command;
 
 use crate::cancellation::BuildCancellation;
-use crate::report::{REPORT_PATH_ENV, ReportChannel, ReportSources};
+use crate::context::{Context, Hook};
+use crate::report::{ReportChannel, ReportSources};
 
-use super::command::{clear_tola_environment, finish_report, run_observed};
+use super::command::{finish_report, run_observed};
 
 /// Run a module's external before-pack action in the author source directory.
 pub fn run_before_pack(
@@ -43,19 +44,38 @@ pub fn run_before_pack(
         format!("hook:before-pack:{name}"),
         ReportSources::new(),
     )?;
-    let command = clear_tola_environment(Command::from_args(arguments))
-        .cwd(source)
-        .env("TOLA_EXECUTABLE", executable)
-        .env("TOLA_HOOK_STAGE", "before-pack")
-        .env("TOLA_HOOK_NAME", name)
-        .env("TOLA_HOOK_INPUT_DIR", source)
-        .env("TOLA_HOOK_TEMP_DIR", temp)
-        .env("TMPDIR", temp)
-        .env("TMP", temp)
-        .env("TEMP", temp)
-        .env(REPORT_PATH_ENV, reports.path());
+    let mut context = before_pack_context(executable, name, source, temp);
+    context.report_path = Some(reports.path().to_owned());
+    let command = context.command(
+        Command::from_args(arguments)
+            .cwd(source)
+            .env("TMPDIR", temp)
+            .env("TMP", temp)
+            .env("TEMP", temp),
+        reports.directory(),
+    )?;
     let completion = run_observed(&command, name, &|| cancellation.is_cancelled());
     let mut diagnostics = Vec::new();
     finish_report(reports, completion, Some(cancellation), &mut diagnostics)?;
     Ok(diagnostics)
+}
+
+/// Describe a before-pack invocation for either execution mode.
+pub fn before_pack_context(
+    executable: std::path::PathBuf,
+    name: &str,
+    source: &Path,
+    temp: &Path,
+) -> Context {
+    let mut context = Context::new(executable, None);
+    context.hook = Some(Hook {
+        name: name.to_owned(),
+        stage: "before-pack".into(),
+        mode: None,
+        input_dir: Some(source.to_owned()),
+        output_dir: None,
+        cache_dir: None,
+        temp_dir: temp.to_owned(),
+    });
+    context
 }

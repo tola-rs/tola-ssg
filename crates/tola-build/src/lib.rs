@@ -18,6 +18,7 @@ pub mod cancellation;
 pub mod check;
 mod compiler;
 pub mod config;
+pub mod context;
 mod content;
 pub mod filesystem;
 pub mod hooks;

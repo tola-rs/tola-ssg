@@ -7,13 +7,15 @@ use std::collections::BTreeSet;
 use std::iter::Peekable;
 use std::ops::Range;
 
-use pulldown_cmark::{Event, Options, Parser, Tag};
+use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag};
+use serde::Serialize;
 
 pub(crate) use super::target::{CROSS_REFERENCE_SCHEME, HelpCategory, LinkTarget, PageId};
 
 /// One page a `tola help` builder writes, before it is parsed.
 pub(crate) struct HelpPage {
     pub id: PageId,
+    pub reference: super::data::Reference,
     sections: Vec<HelpSection>,
 }
 
@@ -27,12 +29,29 @@ impl HelpPage {
     pub(crate) fn new(id: PageId, markdown: String) -> Self {
         Self {
             id,
+            reference: super::data::Reference::default(),
             sections: vec![HelpSection::Markdown(markdown)],
         }
     }
 
+    pub(super) fn prose(&self, markdown: &str) -> Vec<Block> {
+        let nodes =
+            plain_nodes(&mut Parser::new_ext(markdown, Options::ENABLE_TABLES).into_offset_iter());
+        let mut blocks = blocks(&nodes, &self.id);
+        unique_anchors(
+            &mut blocks,
+            &mut BTreeSet::new(),
+            HeadingRole::Documentation,
+        );
+        blocks
+    }
+
     pub(crate) fn push_export(&mut self, markdown: String) {
         self.sections.push(HelpSection::Export(markdown));
+    }
+
+    pub(super) fn push_markdown(&mut self, markdown: String) {
+        self.sections.push(HelpSection::Markdown(markdown));
     }
 
     pub(crate) fn markdown(&self) -> String {
@@ -59,12 +78,14 @@ pub(crate) enum HeadingRole {
 }
 
 /// One block-level element of a page.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum Block {
     Heading {
         level: u8,
         spans: Vec<Inline>,
         anchor: Anchor,
+        #[serde(skip)]
         role: HeadingRole,
     },
     Paragraph {
@@ -72,13 +93,16 @@ pub(crate) enum Block {
     },
     /// A list; each item holds its own blocks.
     List {
+        start: Option<u64>,
         items: Vec<Vec<Block>>,
     },
     Code {
+        language: Option<String>,
         source: String,
     },
     /// A table; its first row heads the rest.
     Table {
+        alignments: Vec<&'static str>,
         headers: Vec<Vec<Inline>>,
         rows: Vec<Vec<Vec<Inline>>>,
     },
@@ -90,7 +114,8 @@ pub(crate) enum Block {
 }
 
 /// One inline span of a paragraph or heading.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub(crate) enum Inline {
     Text(String),
     Code(String),
@@ -98,12 +123,13 @@ pub(crate) enum Inline {
     Strong(Vec<Inline>),
     Link {
         label: Vec<Inline>,
+        #[serde(serialize_with = "super::data::serialize_target")]
         target: LinkTarget,
     },
 }
 
 /// Heading slugs are unique throughout a parsed document, including nested blocks.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub(crate) struct Anchor(String);
 
 impl Anchor {
@@ -288,11 +314,16 @@ fn block(nodes: &[Node<'_>], position: usize, page: &PageId) -> Option<Block> {
                 role: *role,
             })
         }
-        Node::Branch(Tag::CodeBlock(_), children) => {
+        Node::Branch(Tag::CodeBlock(kind), children) => {
             let source = code_source(children);
-            Some(Block::Code { source })
+            let language = match kind {
+                CodeBlockKind::Fenced(info) => info.split_whitespace().next().map(str::to_owned),
+                _ => None,
+            };
+            Some(Block::Code { language, source })
         }
-        Node::Branch(Tag::List(_), children) => Some(Block::List {
+        Node::Branch(Tag::List(start), children) => Some(Block::List {
+            start: *start,
             items: children
                 .iter()
                 .filter_map(|node| match node {
@@ -301,7 +332,7 @@ fn block(nodes: &[Node<'_>], position: usize, page: &PageId) -> Option<Block> {
                 })
                 .collect(),
         }),
-        Node::Branch(Tag::Table(_), children) => {
+        Node::Branch(Tag::Table(alignments), children) => {
             let mut rows = children
                 .iter()
                 .filter_map(|node| match node {
@@ -323,7 +354,20 @@ fn block(nodes: &[Node<'_>], position: usize, page: &PageId) -> Option<Block> {
             } else {
                 rows.remove(0)
             };
-            Some(Block::Table { headers, rows })
+            let alignments = alignments
+                .iter()
+                .map(|alignment| match alignment {
+                    pulldown_cmark::Alignment::None => "auto",
+                    pulldown_cmark::Alignment::Left => "left",
+                    pulldown_cmark::Alignment::Center => "center",
+                    pulldown_cmark::Alignment::Right => "right",
+                })
+                .collect();
+            Some(Block::Table {
+                alignments,
+                headers,
+                rows,
+            })
         }
         Node::Branch(Tag::BlockQuote(_), children) => Some(Block::Quote {
             blocks: blocks(children, page),
@@ -551,7 +595,19 @@ mod tests {
     #[test]
     fn lists_keep_items() {
         let document = document("7. first\n8. second\n");
-        assert!(matches!(&document.blocks[0], Block::List { items } if items.len() == 2));
+        assert!(
+            matches!(&document.blocks[0], Block::List { start: Some(7), items } if items.len() == 2)
+        );
+    }
+
+    #[test]
+    fn code_language_excludes_the_example_site_marker() {
+        let document = document("```typst site\n#let size = 4\n```\n");
+        assert!(matches!(
+            &document.blocks[0],
+            Block::Code { language, source }
+                if language.as_deref() == Some("typst") && source == "#let size = 4\n"
+        ));
     }
 
     fn document(markdown: &str) -> HelpDocument {

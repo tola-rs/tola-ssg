@@ -44,13 +44,13 @@ pub(super) fn run<T: DeserializeOwned>(
     io::stdout().flush()?;
     io::stderr().flush()?;
     let executable = super::external::current_executable()?;
-    let mut command = Command::new(executable)
-        .arg("nu")
-        .arg("--no-site")
-        .arg(script_path)
-        .arg(input_path)
-        .arg(&result_path)
-        .env("TOLA_INPUT_SCOPE", scope.as_str());
+    let mut command = Command::new(executable).arg("nu").arg("--no-site");
+    command = match scope {
+        InputScope::Online => command,
+        InputScope::Offline => command.arg("--offline"),
+        InputScope::Pure => command.arg("--pure"),
+    };
+    command = command.arg(script_path).arg(input_path).arg(&result_path);
     for (name, value) in super::color::child_environment() {
         command = command.env(name, value);
     }

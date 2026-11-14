@@ -1,42 +1,178 @@
-//! The document projection of one help page: its Markdown plus the headings, links, and code
-//! blocks a program reads without parsing it.
+//! Reference data produced by the help page builders.
 
 use anyhow::{Result, bail};
 use pulldown_cmark::{Event, Options, Parser, Tag};
-use serde::Serialize;
+use serde::{Serialize, Serializer};
 
 use super::model::{Block, HelpDocument, HelpPage, Inline, LinkTarget, plain_text};
 
-#[derive(Serialize)]
-pub(crate) struct Heading {
-    pub level: u8,
-    pub title: String,
-    pub anchor: String,
+struct Heading {
+    level: u8,
+    anchor: String,
 }
 
-#[derive(Serialize)]
-pub(crate) struct Link {
-    pub label: String,
-    pub target: String,
+pub(super) fn serialize_target<S: Serializer>(
+    target: &LinkTarget,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(&target.uri())
 }
 
-#[derive(Serialize)]
 pub(crate) struct Document {
-    pub target: String,
     pub markdown: String,
-    pub headings: Vec<Heading>,
-    pub links: Vec<Link>,
-    pub code_blocks: Vec<String>,
+    pub links: Vec<LinkTarget>,
 }
 
-fn links(spans: &[Inline], result: &mut Vec<Link>) {
+#[derive(Serialize)]
+pub(super) struct ReferenceLink {
+    pub title: String,
+    #[serde(serialize_with = "serialize_target")]
+    pub target: LinkTarget,
+}
+
+#[derive(Default, Serialize)]
+pub(crate) struct Reference {
+    pub title: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub blocks: Vec<Block>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(super) entries: Vec<ReferenceLink>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(super) exports: Vec<Export>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(super) commands: Vec<Command>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(super) keys: Vec<Key>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(super) related: Vec<ReferenceLink>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub import: Option<String>,
+}
+
+#[derive(Serialize)]
+pub(super) struct Export {
+    pub name: String,
+    pub kind: &'static str,
+    pub anchor: String,
+    #[serde(flatten)]
+    pub signature: Signature,
+    pub blocks: Vec<Block>,
+    pub methods: Vec<Method>,
+    pub related: Vec<ReferenceLink>,
+}
+
+#[derive(Serialize)]
+pub(super) struct Signature {
+    pub declaration: String,
+    pub parameters: Vec<Parameter>,
+    pub returns: Option<String>,
+}
+
+#[derive(Serialize)]
+pub(super) struct Method {
+    pub name: String,
+    pub anchor: String,
+    #[serde(flatten)]
+    pub signature: Signature,
+}
+
+#[derive(Serialize)]
+pub(super) struct Command {
+    pub name: String,
+    pub anchor: String,
+    pub usage: String,
+    pub blocks: Vec<Block>,
+    pub parameters: Vec<Parameter>,
+    pub options: Vec<Parameter>,
+}
+
+#[derive(Serialize)]
+pub(super) struct Parameter {
+    pub name: String,
+    pub kind: &'static str,
+    pub ty: Option<String>,
+    pub required: bool,
+    pub default: Option<String>,
+    pub blocks: Vec<Block>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub short: Option<char>,
+}
+
+#[derive(Serialize)]
+pub(super) struct Key {
+    pub path: String,
+    pub blocks: Vec<Block>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct ReferenceDocument {
+    target: String,
+    page: String,
+    language: &'static str,
+    #[serde(flatten)]
+    reference: Reference,
+}
+
+pub(crate) fn reference(
+    mut page: HelpPage,
+    target: &LinkTarget,
+    language: crate::i18n::HelpLanguage,
+) -> Result<ReferenceDocument> {
+    if page.reference.title.is_empty() {
+        let parsed = HelpDocument::parse(&page);
+        let mut blocks = parsed.blocks.into_iter();
+        if let Some(Block::Heading { spans, .. }) = blocks.next() {
+            page.reference.title = plain_text(&spans);
+        }
+        if page.reference.entries.is_empty() {
+            page.reference.blocks = blocks.collect();
+        }
+    }
+    if let LinkTarget::PageAnchor(_, anchor) = target {
+        if page
+            .reference
+            .commands
+            .iter()
+            .any(|command| command.anchor == anchor.as_str())
+        {
+            page.reference
+                .commands
+                .retain(|command| command.anchor == anchor.as_str());
+            page.reference.blocks.clear();
+        } else if page
+            .reference
+            .exports
+            .iter()
+            .any(|export| export.anchor == anchor.as_str())
+        {
+            page.reference
+                .exports
+                .retain(|export| export.anchor == anchor.as_str());
+            page.reference.blocks.clear();
+        } else {
+            let selected = document(&page, target)?;
+            page.reference.blocks = page.prose(&selected.markdown);
+            page.reference.entries.clear();
+            page.reference.exports.clear();
+            page.reference.commands.clear();
+            page.reference.related.clear();
+            page.reference.keys.clear();
+            page.reference.import = None;
+        }
+    }
+    Ok(ReferenceDocument {
+        target: target.uri(),
+        page: page.id.canonical_uri(),
+        language: language.tag(),
+        reference: page.reference,
+    })
+}
+
+fn links(spans: &[Inline], result: &mut Vec<LinkTarget>) {
     for span in spans {
         match span {
             Inline::Link { label, target } => {
-                result.push(Link {
-                    label: plain_text(label),
-                    target: target.uri(),
-                });
+                result.push(target.clone());
                 links(label, result);
             }
             Inline::Emph(inner) | Inline::Strong(inner) => links(inner, result),
@@ -49,8 +185,7 @@ fn links(spans: &[Inline], result: &mut Vec<Link>) {
 #[derive(Default)]
 struct PageIndex {
     headings: Vec<Heading>,
-    links: Vec<Link>,
-    code_blocks: Vec<String>,
+    links: Vec<LinkTarget>,
 }
 
 impl PageIndex {
@@ -65,7 +200,6 @@ impl PageIndex {
                 } => {
                     self.headings.push(Heading {
                         level: *level,
-                        title: plain_text(spans),
                         anchor: anchor.as_str().to_owned(),
                     });
                     links(spans, &mut self.links);
@@ -77,19 +211,18 @@ impl PageIndex {
                     }
                 }
                 Block::Quote { blocks } => self.collect(blocks),
-                Block::Code { source, .. } => self.code_blocks.push(source.clone()),
-                Block::Table { headers, rows } => {
+                Block::Table { headers, rows, .. } => {
                     for cell in headers.iter().chain(rows.iter().flatten()) {
                         links(cell, &mut self.links);
                     }
                 }
-                Block::Rule => {}
+                Block::Code { .. } | Block::Rule => {}
             }
         }
     }
 }
 
-/// Return original Markdown and semantic indexes; no terminal rows or styles enter this output.
+/// Select the Markdown and links used by the terminal help browser.
 pub(crate) fn document(page: &HelpPage, target: &LinkTarget) -> Result<Document> {
     let parsed = HelpDocument::parse(page);
     let mut page_index = PageIndex::default();
@@ -122,24 +255,18 @@ pub(crate) fn document(page: &HelpPage, target: &LinkTarget) -> Result<Document>
                 .map_or(page_index.headings.len(), |(next, _)| next);
             let end = offsets.get(next).copied().unwrap_or(markdown.len());
             let selected = markdown[start..end].to_owned();
-            page_index.headings.truncate(next);
-            page_index.headings.drain(..position);
             let section = HelpDocument::parse(&HelpPage::new(page.id.clone(), selected.clone()));
             // The selected heading is already in `headings`; this pass supplies links and code only.
             let mut section_index = PageIndex::default();
             section_index.collect(&section.blocks);
             page_index.links = section_index.links;
-            page_index.code_blocks = section_index.code_blocks;
             selected
         }
         _ => markdown,
     };
     Ok(Document {
-        target: target.uri(),
         markdown,
-        headings: page_index.headings,
         links: page_index.links,
-        code_blocks: page_index.code_blocks,
     })
 }
 
@@ -164,10 +291,7 @@ mod tests {
         let document = document(&page, &target).unwrap();
         assert!(document.markdown.contains("#test()"));
         assert!(!document.markdown.contains("Prose"));
-        assert_eq!(document.code_blocks, ["#test()\n"]);
-        assert_eq!(document.headings.len(), 1);
-        assert_eq!(document.headings[0].anchor, "test-function");
         assert_eq!(document.links.len(), 1);
-        assert_eq!(document.links[0].target, "tola-help://config");
+        assert_eq!(document.links[0].uri(), "tola-help://config");
     }
 }

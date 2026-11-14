@@ -5,12 +5,9 @@ use std::path::{Path, PathBuf};
 use super::{DEFAULT_MAX_REPORT_BYTES, ReportBatch, ReportError, ReportSources};
 use tola_diagnostic::Diagnostic;
 
-/// Set only for a managed invocation that consumes the optional report after completion.
-pub const REPORT_PATH_ENV: &str = "TOLA_REPORT_PATH";
-
 /// Own the report directory until the command exits and its complete batch is read.
 pub struct ReportChannel {
-    _directory: tempfile::TempDir,
+    directory: tempfile::TempDir,
     path: PathBuf,
     producer: String,
     sources: ReportSources,
@@ -37,7 +34,7 @@ impl ReportChannel {
             .tempdir_in(base)?;
         let path = std::path::absolute(directory.path())?.join("report.json");
         Ok(Self {
-            _directory: directory,
+            directory,
             path,
             producer,
             sources,
@@ -47,6 +44,11 @@ impl ReportChannel {
     /// The child writes a complete schema-v1 report here, preferably by atomic replacement.
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Temporary directory shared by the context and report of one invocation.
+    pub fn directory(&self) -> &Path {
+        self.directory.path()
     }
 
     /// Consume one completed invocation's report.

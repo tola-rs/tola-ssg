@@ -41,8 +41,7 @@ fn default_session_log_path(config: &super::ConfigFileArgs) -> Option<std::path:
     Some(directory.join(format!("dev-{}.jsonl", super::log::session_stamp())))
 }
 
-fn hook_nested_build(parsed: &ParsedCommand) -> Option<String> {
-    let stage = std::env::var("TOLA_HOOK_STAGE").ok()?;
+fn hook_nested_build(parsed: &ParsedCommand) -> anyhow::Result<Option<String>> {
     let blocked = match &parsed.command {
         Command::Builtin(
             Commands::Build { .. } | Commands::Dev { .. } | Commands::Preview { .. },
@@ -50,16 +49,28 @@ fn hook_nested_build(parsed: &ParsedCommand) -> Option<String> {
         Command::Builtin(Commands::Check { no_build, .. }) => !no_build,
         _ => false,
     };
-    blocked.then_some(stage)
+    if !blocked {
+        return Ok(None);
+    }
+    Ok(tola_build::context::Context::read()?
+        .and_then(|call| call.hook)
+        .map(|hook| hook.stage))
 }
 
-pub(crate) fn run() -> ExitCode {
-    let parsed = match ParsedCommand::parse() {
+pub(crate) fn run(arguments: &[std::ffi::OsString]) -> ExitCode {
+    let parsed = match ParsedCommand::parse(arguments) {
         Ok(parsed) => parsed,
         Err(code) => return code,
     };
     super::color::install(parsed.process.color);
-    if let Some(stage) = hook_nested_build(&parsed) {
+    let hook = match hook_nested_build(&parsed) {
+        Ok(hook) => hook,
+        Err(error) => {
+            eprintln!("{error:#}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if let Some(stage) = hook {
         let diagnostic = Diagnostic::new(
             crate::codes::hook::NESTED_BUILD,
             Severity::Error,

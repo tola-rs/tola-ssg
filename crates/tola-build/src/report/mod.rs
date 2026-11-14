@@ -3,7 +3,7 @@
 mod channel;
 mod sources;
 
-pub use channel::{REPORT_PATH_ENV, ReportChannel};
+pub use channel::ReportChannel;
 pub use sources::{ReportSource, ReportSources};
 
 use std::fs::File;

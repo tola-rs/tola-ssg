@@ -13,7 +13,7 @@ use crate::cli::args::HelpFormat;
 use crate::cli::log::destination;
 use crate::cli::output::CommandOutput;
 use crate::help::data::{self, Document};
-use crate::help::model::{CROSS_REFERENCE_SCHEME, HelpCategory, LinkTarget, PageId};
+use crate::help::model::{HelpCategory, LinkTarget, PageId};
 use crate::help::{pages, search};
 use crate::i18n::HelpLanguage;
 
@@ -28,13 +28,32 @@ pub(in crate::cli) fn run(
         !args.interactive || crate::cli::interaction::available(),
         "`--interactive` needs a terminal; omit it to print the documentation"
     );
+    ensure!(
+        !args.pretty || matches!(args.format, HelpFormat::Json),
+        "`--pretty` requires `--format json`"
+    );
     let target = pages::request(&args.targets)?;
     destination::start(output, &cancellation.token())?;
     if args.interactive {
         return interactive(language, scope, output, cancellation);
     }
-    let document = load(&target, language)?;
-    write_document(&document, args.format, output)
+    match args.format {
+        HelpFormat::Json => {
+            let id = target.page().expect("a help request locates a page");
+            let page = pages::page_of(id, language)?;
+            let reference = data::reference(page, &target, language)?;
+            let json = if args.pretty {
+                serde_json::to_string_pretty(&reference)?
+            } else {
+                serde_json::to_string(&reference)?
+            };
+            output.write_stdout_line(json)
+        }
+        HelpFormat::Markdown => output.write_stdout(&load(&target, language)?.markdown),
+        HelpFormat::Text => {
+            write_text(&load(&target, language)?, &target, language, output).map(|_| ())
+        }
+    }
 }
 
 fn load(target: &LinkTarget, language: HelpLanguage) -> Result<Document> {
@@ -42,21 +61,40 @@ fn load(target: &LinkTarget, language: HelpLanguage) -> Result<Document> {
     data::document(&pages::page_of(id, language)?, target)
 }
 
-fn write_document(document: &Document, format: HelpFormat, output: &CommandOutput) -> Result<()> {
-    match format {
-        HelpFormat::Json => output.write_stdout_line(serde_json::to_string(document)?),
-        HelpFormat::Markdown => output.write_stdout(&document.markdown),
-        HelpFormat::Text => write_text(document, output).map(|_| ()),
-    }
-}
-
-fn write_text(document: &Document, output: &CommandOutput) -> Result<bool> {
+fn write_text(
+    document: &Document,
+    target: &LinkTarget,
+    language: HelpLanguage,
+    output: &CommandOutput,
+) -> Result<bool> {
+    let markdown = terminal_markdown(document, target, language);
     let rendered = pages::render(
-        &document.markdown,
+        &markdown,
         output.terminal().stdout_columns(),
         output.terminal().stdout_uses_color(),
     );
     output.write_documentation(rendered)
+}
+
+fn terminal_markdown(document: &Document, target: &LinkTarget, language: HelpLanguage) -> String {
+    let mut markdown = document.markdown.clone();
+    if let LinkTarget::Page(PageId::Package { name }) = target
+        && let Some(package) =
+            tola_packages::builtin_packages().find(|package| package.spec().name == name.as_str())
+    {
+        let examples = package.exports().take(2).collect::<Vec<_>>().join(" ");
+        if !examples.is_empty() {
+            let (label, lang) = match language {
+                HelpLanguage::English => ("Read selected exports", ""),
+                HelpLanguage::SimplifiedChinese => ("只查看指定成员", " --lang zh"),
+            };
+            markdown.push_str(&format!(
+                "\n{label}{}`tola help{lang} \"@tola/{name}\" {examples}`\n",
+                language.colon()
+            ));
+        }
+    }
+    markdown
 }
 
 #[derive(Serialize)]
@@ -68,6 +106,8 @@ struct Group {
 #[derive(Serialize)]
 struct TreeInput {
     title: &'static str,
+    language: &'static str,
+    overview: &'static str,
     contents_columns: usize,
     groups: Vec<Group>,
     bodies: BTreeMap<String, String>,
@@ -106,7 +146,12 @@ fn interactive(
         preview_columns,
         output.terminal().stdout_uses_color(),
     )?;
-    let mut input = tree_input(pages, contents_columns, output.terminal().has_pager());
+    let mut input = tree_input(
+        pages,
+        contents_columns,
+        output.terminal().has_pager(),
+        language,
+    );
     while let Some(selected) = crate::cli::interaction::run::<Selection>(
         include_str!("help.nu"),
         &input,
@@ -115,7 +160,7 @@ fn interactive(
     )? {
         let next = pages::request(&[selected.target])?;
         let document = load(&next, language)?;
-        if !write_text(&document, output)? {
+        if !write_text(&document, &next, language, output)? {
             break;
         }
         cancellation.token().ensure_active()?;
@@ -155,23 +200,33 @@ fn canonical_target(key: &PageKey) -> LinkTarget {
     }
 }
 
-fn page_title(id: &PageId) -> String {
+fn overview_name(language: HelpLanguage) -> &'static str {
+    match language {
+        HelpLanguage::English => "Overview",
+        HelpLanguage::SimplifiedChinese => "概览",
+    }
+}
+
+fn page_title(id: &PageId, language: HelpLanguage) -> String {
     match id {
-        PageId::Overview => "Overview".into(),
+        PageId::Overview => overview_name(language).into(),
         PageId::Config { section } => format!("[{section}]"),
         PageId::Package { name } | PageId::PackageSelection { name, .. } => {
             format!("@tola/{name}")
         }
         PageId::Script { name } => format!("@tola-scripts/{name}"),
-        PageId::Index(category) => group_name(*category).into(),
+        PageId::Index(category) => group_name(*category, language).into(),
     }
 }
 
-fn group_name(category: HelpCategory) -> &'static str {
-    match category {
-        HelpCategory::Config => "Configuration",
-        HelpCategory::Packages => "Packages",
-        HelpCategory::Scripts => "Scripts",
+fn group_name(category: HelpCategory, language: HelpLanguage) -> &'static str {
+    match (category, language) {
+        (HelpCategory::Config, HelpLanguage::English) => "Configuration",
+        (HelpCategory::Packages, HelpLanguage::English) => "Packages",
+        (HelpCategory::Scripts, HelpLanguage::English) => "Scripts",
+        (HelpCategory::Config, HelpLanguage::SimplifiedChinese) => "配置",
+        (HelpCategory::Packages, HelpLanguage::SimplifiedChinese) => "内置包",
+        (HelpCategory::Scripts, HelpLanguage::SimplifiedChinese) => "脚本",
     }
 }
 
@@ -207,8 +262,12 @@ fn collect(language: HelpLanguage, columns: usize, color: bool) -> Result<Vec<Pa
             }
             PageId::Script { .. } => Some(HelpCategory::Scripts),
         };
-        let body = pages::render(&document.markdown, Some(columns), color);
-        let title = page_title(&id);
+        let body = pages::render(
+            &terminal_markdown(&document, &target, language),
+            Some(columns),
+            color,
+        );
+        let title = page_title(&id, language);
         let sections = search::sections(&page, &title);
         pages.push(Page {
             title,
@@ -218,9 +277,7 @@ fn collect(language: HelpLanguage, columns: usize, color: bool) -> Result<Vec<Pa
             sections,
         });
         for link in &document.links {
-            if link.target.starts_with(CROSS_REFERENCE_SCHEME)
-                && let Some(next) = LinkTarget::from_uri(&link.target, &id)
-                && let Some(next_id) = next.page()
+            if let Some(next_id) = link.page()
                 && let Some(next_key) = page_key(next_id)
                 && !seen.contains(&next_key)
             {
@@ -231,14 +288,19 @@ fn collect(language: HelpLanguage, columns: usize, color: bool) -> Result<Vec<Pa
     Ok(pages)
 }
 
-fn tree_input(pages: Vec<Page>, contents_columns: usize, paged: bool) -> TreeInput {
+fn tree_input(
+    pages: Vec<Page>,
+    contents_columns: usize,
+    paged: bool,
+    language: HelpLanguage,
+) -> TreeInput {
     let categories = [
         HelpCategory::Config,
         HelpCategory::Packages,
         HelpCategory::Scripts,
     ];
     let mut groups = categories.map(|category| Group {
-        name: group_name(category),
+        name: group_name(category, language),
         pages: Vec::new(),
     });
     let mut bodies = BTreeMap::new();
@@ -255,7 +317,12 @@ fn tree_input(pages: Vec<Page>, contents_columns: usize, paged: bool) -> TreeInp
         sections.extend(page.sections);
     }
     TreeInput {
-        title: "Tola help",
+        title: match language {
+            HelpLanguage::English => "Tola help",
+            HelpLanguage::SimplifiedChinese => "Tola 帮助",
+        },
+        language: language.tag(),
+        overview: overview_name(language),
         contents_columns,
         groups: groups
             .into_iter()

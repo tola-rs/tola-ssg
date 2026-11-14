@@ -316,7 +316,7 @@ fn parameter_of(param: ParamInfo) -> Parameter {
         return Parameter {
             name: param.name().unwrap_or("_").to_owned(),
             ty: None,
-            required: param.required(),
+            required: kind != ParameterKind::Rest && param.required(),
             default: param.default().map(|default| default.repr().to_string()),
             docs: None,
             kind,
@@ -325,7 +325,7 @@ fn parameter_of(param: ParamInfo) -> Parameter {
     Parameter {
         name: native.name.to_owned(),
         ty: Some(cast_spelling(&native.input)),
-        required: native.required,
+        required: kind != ParameterKind::Rest && native.required,
         default: native.default.map(|default| default().repr().to_string()),
         docs: (!native.docs.is_empty()).then(|| native.docs.to_owned()),
         kind,

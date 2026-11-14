@@ -22,6 +22,13 @@ pub(crate) enum PageId {
 }
 
 impl PageId {
+    pub(crate) fn canonical_uri(&self) -> String {
+        match self {
+            Self::PackageSelection { name, .. } => Self::Package { name: name.clone() }.uri(),
+            _ => self.uri(),
+        }
+    }
+
     pub(crate) fn uri(&self) -> String {
         let host = match self {
             Self::Overview => "overview",

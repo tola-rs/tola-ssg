@@ -13,10 +13,31 @@ pub(crate) enum HelpLanguage {
 }
 
 impl HelpLanguage {
+    pub(crate) fn related(self) -> &'static str {
+        match self {
+            Self::English => "Related",
+            Self::SimplifiedChinese => "相关条目",
+        }
+    }
+
+    pub(crate) fn tag(self) -> &'static str {
+        match self {
+            Self::English => "en",
+            Self::SimplifiedChinese => "zh-Hans",
+        }
+    }
+
     pub(crate) fn colon(self) -> &'static str {
         match self {
             Self::English => ": ",
             Self::SimplifiedChinese => "：",
+        }
+    }
+
+    pub(crate) fn parentheses(self) -> (&'static str, &'static str) {
+        match self {
+            Self::English => (" (", ")"),
+            Self::SimplifiedChinese => ("（", "）"),
         }
     }
 
@@ -246,6 +267,19 @@ static SCRIPT_PROSE: LazyLock<BTreeMap<&'static str, (Translation, Translation)>
     LazyLock::new(|| {
         [
             (
+                "context",
+                (
+                    Translation::parse_script(
+                        include_str!("en/scripts/context.md"),
+                        HelpLanguage::English,
+                    ),
+                    Translation::parse_script(
+                        include_str!("zh-Hans/scripts/context.md"),
+                        HelpLanguage::SimplifiedChinese,
+                    ),
+                ),
+            ),
+            (
                 "image",
                 (
                     Translation::parse_script(
@@ -320,6 +354,25 @@ mod tests {
             let exports = package.export_documentation(&names).unwrap();
             for export in exports {
                 for field in translation.fields(&export.name) {
+                    if let Some((method, parameter)) = field
+                        .strip_prefix('.')
+                        .and_then(|field| field.split_once('.'))
+                    {
+                        assert!(
+                            export.methods.iter().any(|signature| signature
+                                .name
+                                .trim_start_matches('.')
+                                == method
+                                && signature
+                                    .parameters
+                                    .iter()
+                                    .any(|item| item.name == parameter)),
+                            "`{package}.{export}.{method}` has no parameter named `{parameter}`",
+                            package = name,
+                            export = export.name,
+                        );
+                        continue;
+                    }
                     assert!(
                         matches!(&export.declaration, ExportDeclaration::Function(signature)
                             if signature.parameters.iter().any(|parameter| parameter.name == field)),

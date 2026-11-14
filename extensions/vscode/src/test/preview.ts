@@ -92,9 +92,13 @@ async function publicationGate(hold: (html: string) => boolean) {
       await fs.writeFile(
         script,
         `
+        import { execFileSync } from 'node:child_process';
         import { readFile, readdir, writeFile } from 'node:fs/promises';
         import { join } from 'node:path';
-        const root = process.env.TOLA_HOOK_INPUT_DIR;
+        const { hook } = JSON.parse(execFileSync(
+          process.env.TOLA_EXECUTABLE, ['nu', '@tola-scripts/context', '--json'], { encoding: 'utf8' },
+        ));
+        const root = hook.inputDir;
         const files = await readdir(root, { recursive: true });
         const pages = await Promise.all(files.filter(file => file.endsWith('.html'))
           .map(async file => file + '\\n' + await readFile(join(root, file), 'utf8')));
@@ -104,7 +108,7 @@ async function publicationGate(hold: (html: string) => boolean) {
         });
         if (!response.ok) throw new Error('Publication gate rejected the candidate');
         await response.text();
-        await writeFile(join(process.env.TOLA_HOOK_OUTPUT_DIR, 'observed.txt'), 'observed');
+        await writeFile(join(hook.outputDir, 'observed.txt'), 'observed');
       `,
       )
       await fs.appendFile(

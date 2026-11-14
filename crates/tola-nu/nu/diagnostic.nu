@@ -8,7 +8,7 @@ export def main [] {
 
 # Read a JSON list or an object with a diagnostics list and print the diagnostics.
 def "main render" [] {
-  let input = ($in | from json --strict)
+  let input = (from json --strict)
   let diagnostics = match $input {
     {diagnostics: $items} => $items
     _ => $input

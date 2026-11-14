@@ -18,6 +18,7 @@ pub type RenderDiagnostics = Arc<dyn Fn(&Path, Json, bool) -> Result<String, Str
 
 #[derive(Default, Clone)]
 pub struct Host {
+    pub context: Option<Json>,
     pub site: Option<Json>,
     pub modules: BTreeMap<String, Json>,
     pub module: Option<String>,
@@ -30,6 +31,7 @@ pub struct Host {
 
 #[derive(Clone, Copy)]
 pub(super) enum Operation {
+    Context,
     Site,
     Module,
     Hook,
@@ -45,13 +47,14 @@ pub(super) struct HostCommand(pub Operation, pub Arc<OnceLock<Host>>);
 impl Command for HostCommand {
     fn command_type(&self) -> CommandType {
         match self.0 {
-            Operation::Submit | Operation::Render => CommandType::Custom,
+            Operation::Context | Operation::Submit | Operation::Render => CommandType::Custom,
             _ => CommandType::Builtin,
         }
     }
 
     fn name(&self) -> &str {
         match self.0 {
+            Operation::Context => "get-context",
             Operation::Site => "get-site",
             Operation::Module => "get-module",
             Operation::Hook => "get-hook",
@@ -64,6 +67,7 @@ impl Command for HostCommand {
 
     fn description(&self) -> &str {
         match self.0 {
+            Operation::Context => "Read the context Tola supplied for this invocation.",
             Operation::Site => "Read the current site's settings and paths.",
             Operation::Module => "Read the current or named module instance.",
             Operation::Hook => "Read the current hook's stage and directories.",
@@ -86,6 +90,7 @@ impl Command for HostCommand {
     fn signature(&self) -> Signature {
         let signature = Signature::build(self.name());
         match self.0 {
+            Operation::Context => signature.switch("json", "Return the context as JSON.", None),
             Operation::Module => signature.optional("name", SyntaxShape::String, "Module alias."),
             Operation::Query => signature
                 .required("target", SyntaxShape::String, "Query name or Typst file.")
@@ -130,6 +135,17 @@ impl Command for HostCommand {
         let empty = Host::default();
         let host = self.1.get().unwrap_or(&empty);
         let value = match self.0 {
+            Operation::Context => {
+                let context = host.context.as_ref().ok_or_else(|| {
+                    error("no Tola invocation context; run `tola help @tola-scripts/context` for details".into())
+                })?;
+                if call.has_flag(engine, stack, "json")? {
+                    let json =
+                        serde_json::to_string(context).map_err(|cause| error(cause.to_string()))?;
+                    return Ok(PipelineData::value(Value::string(json, span), None));
+                }
+                context.clone()
+            }
             Operation::Site => host
                 .site
                 .clone()

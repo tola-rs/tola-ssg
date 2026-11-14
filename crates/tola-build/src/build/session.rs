@@ -632,7 +632,7 @@ mod tests {
     /// Executed as an independent hook child, never directly by the test harness.
     #[test]
     fn child_copies_stylesheet_trigger() {
-        if std::env::var("TOLA_HOOK_STAGE").as_deref() != Ok("before-build") {
+        if !crate::build::tests::is_hook_child_for("before-build") {
             return;
         }
         fs::create_dir_all("generated").unwrap();

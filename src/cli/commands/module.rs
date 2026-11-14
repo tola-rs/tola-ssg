@@ -3,7 +3,6 @@
 use std::path::Path;
 
 use anyhow::Result;
-use serde_json::json;
 use tola_build::report::ReportSources;
 use tola_diagnostic::DiagnosticError;
 use tola_module::{Action, check, pack};
@@ -62,26 +61,25 @@ fn run_nu(
     cancelled: &BundleCancellation,
     output: &CommandOutput,
 ) -> Result<()> {
+    let call = tola_build::hooks::before_pack_context(
+        crate::cli::external::current_executable()?,
+        name,
+        source,
+        temp,
+    );
     let invocation = tola_nu::InvocationContext {
         directory: source.to_owned(),
-        environment: super::nu::environment(tola_input::InputScope::Online),
+        environment: super::nu::call_environment(tola_input::InputScope::Online, &call, temp)?,
     };
-    let (submit, diagnostics) =
-        super::nu::diagnostic::collector(format!("before-pack hook `{name}`"), ReportSources::new());
+    let (submit, diagnostics) = super::nu::diagnostic::collector(
+        format!("before-pack hook `{name}`"),
+        ReportSources::new(),
+    );
     let runtime = super::nu::prepare_runtime(vec![], vec![], invocation, vec![])?
         .with_cancellation(cancelled.signal_flag())
         .with_host(tola_nu::Host {
-            hook: Some(json!({
-                "name": name,
-                "stage": "before-pack",
-                "mode": null,
-                "input-dir": source,
-                "output-dir": null,
-                "cache-dir": null,
-                "temp-dir": temp,
-            })),
             submit_diagnostics: Some(submit),
-            ..super::nu::host()
+            ..super::nu::call_host(Some(&call))?
         })?;
     let status = runtime.run_embedded(&source.join(path), args)?;
     cancelled.ensure_active()?;

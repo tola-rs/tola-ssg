@@ -20,5 +20,5 @@ mod tree;
 mod writes;
 
 fn main() -> std::process::ExitCode {
-    cli::run()
+    cli::run(&std::env::args_os().collect::<Vec<_>>())
 }

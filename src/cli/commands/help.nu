@@ -1,6 +1,6 @@
 def node-page [data: record, node: any] {
     if $node == [] {
-        'Overview'
+        $data.overview
     } else if (($node | describe --detailed | get type) == 'string') {
         $node
     } else {
@@ -10,24 +10,34 @@ def node-page [data: record, node: any] {
 
 def browse [data: record, enter: string] {
     # An empty child list displays its key as a leaf in the tree.
-    let groups = ($data.groups | reduce -f {Overview: []} {|group, acc|
+    let roots = ({} | insert $data.overview [])
+    let groups = ($data.groups | reduce -f $roots {|group, acc|
         $acc | insert $group.name $group.pages
     })
     let tree = if $data.last_page == null {
         $groups
     } else {
-        {Recent: $data.last_page} | merge $groups
+        let recent = if $data.language == 'zh-Hans' { '最近查看' } else { 'Recent' }
+        {} | insert $recent $data.last_page | merge $groups
+    }
+    let chinese = ($data.language == 'zh-Hans')
+    let contents = if $chinese { '目录' } else { 'Contents' }
+    let preview = if $chinese { '正文' } else { 'Page' }
+    let status = if $chinese {
+        $'/: 搜索 · ↑/↓: 移动 · →/←: 展开或折叠 · Enter: ($enter) · q: 退出'
+    } else {
+        $'/: search · ↑/↓: move · →/←: expand/collapse · Enter: ($enter) · q: quit'
     }
     let app = ($tree
         | tui label --titlebar $data.title
         | tui split --sizes [$data.contents_columns '1fr'] [
-            (tui tree --id tree --title Contents --focus)
-            (tui preview --title Page --from tree {|node|
+            (tui tree --id tree --title $contents --focus)
+            (tui preview --title $preview --from tree {|node|
                 let page = (node-page $data $node)
                 if $page != null { $data.bodies | get $page }
             })
         ]
-        | tui label --status $'/: search · ↑/↓: move · →/←: expand · Enter: ($enter) · q: quit'
+        | tui label --status $status
         | tui bind / {|| {action: submit, selected: {search: true}}}
         | tui bind enter {|state|
             let page = (node-page $data $state.values.tree.value)
@@ -51,13 +61,7 @@ def excerpt [text: string, query: string] {
 def matches [sections: list, raw: string] {
     let query = ($raw | str trim | str lowercase | str replace --all --regex '\s+' ' ')
     if ($query | is-empty) { return [] }
-    let pattern = ($query | split chars | each {|char|
-        if $char in ['\' '.' '^' '$' '*' '+' '?' '(' ')' '[' ']' '{' '}' '|'] {
-            '\' + $char
-        } else {
-            $char
-        }
-    } | str join '.*?')
+    let pattern = ($query | split chars | str escape-regex | str join '.*?')
     $sections | each {|row|
         let title = if $row.section == '' { $row.page } else { $row.section }
         let name = ($title | str lowercase)
@@ -93,18 +97,29 @@ def matches [sections: list, raw: string] {
 }
 
 def search [data: record, enter: string] {
+    let chinese = ($data.language == 'zh-Hans')
+    let title = if $chinese { '搜索帮助' } else { 'Search help' }
+    let input_title = if $chinese { '搜索' } else { 'Search' }
+    let placeholder = if $chinese { '搜索标题和正文' } else { 'Search titles and text' }
+    let results_title = if $chinese { '结果' } else { 'Results' }
+    let columns = if $chinese { [页面 小节 摘录] } else { [page section excerpt] }
+    let status = if $chinese {
+        $'Tab: 切到结果 · ↑/↓: 移动 · Enter: ($enter) · Ctrl+G: 返回'
+    } else {
+        $'Tab: focus results · ↑/↓: move · Enter: ($enter) · Ctrl+G: back'
+    }
     mut query = ''
     loop {
-        let app = (results $data.sections $query
-            | tui label --titlebar 'Search help'
-            | tui textbox --id query --title Search --value $query --focus --placeholder 'Search titles and text'
-            | tui table --id results --title Results --columns [page section excerpt]
-            | tui label --status $'Tab: results · ↑/↓: move · Enter: ($enter) · Ctrl+G: back'
+        let app = (results $data.sections $query $chinese
+            | tui label --titlebar $title
+            | tui textbox --id query --title $input_title --value $query --focus --placeholder $placeholder
+            | tui table --id results --title $results_title --columns $columns
+            | tui label --status $status
             | tui bind ctrl+g {|| {action: quit}})
         let outcome = ($app | tui run --refresh 100ms {|state|
             let text = $state.values.query
             if ($state.values.results.row.query? | default null) != $text {
-                results $data.sections $text
+                results $data.sections $text $chinese
             }
         })
         if $outcome.action != 'submit' { return null }
@@ -119,16 +134,24 @@ def search [data: record, enter: string] {
     }
 }
 
-def results [sections: list, query: string] {
+def results [sections: list, query: string, chinese: bool] {
     let rows = (matches $sections $query)
-    if ($rows | is-not-empty) { return $rows }
-    let message = if ($query | str trim | is-empty) { '' } else { 'No matches' }
-    [{page: '', section: '', excerpt: $message, query: $query}]
+    let display = if ($rows | is-not-empty) { $rows } else {
+        let message = if ($query | str trim | is-empty) { '' } else if $chinese { '没有匹配结果' } else { 'No matches' }
+        [{page: '', section: '', excerpt: $message, query: $query}]
+    }
+    if $chinese {
+        $display | each {|row| $row | merge {页面: $row.page, 小节: $row.section, 摘录: $row.excerpt} }
+    } else {
+        $display
+    }
 }
 
 def main [input: path, output: path] {
     let data = (open --raw $input | from json)
-    let enter = if $data.paged { 'read in pager' } else { 'print page' }
+    let enter = if $data.language == 'zh-Hans' {
+        if $data.paged { '阅读' } else { '输出正文' }
+    } else if $data.paged { 'read in pager' } else { 'print page' }
     mut result = {action: quit}
     loop {
         let choice = (browse $data $enter)

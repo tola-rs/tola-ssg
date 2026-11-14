@@ -13,6 +13,7 @@ use tola_build::config::section::{
 use tola_diagnostic::{Diagnostic, DiagnosticCode, DiagnosticError, Severity};
 use tola_packages::{ExportDeclaration, RelatedTarget, Signature};
 
+use super::data::{Export, Key, Method, Parameter, ReferenceLink, Signature as ReferenceSignature};
 use super::documentation::Documentation;
 use crate::config::{DevConfig, DiagnosticsConfig, ServerConfig};
 use crate::help::model::{Anchor, HelpCategory, HelpPage, LinkTarget, PageId, anchor};
@@ -170,6 +171,7 @@ fn overview_page(language: HelpLanguage) -> HelpPage {
 fn index_page(category: HelpCategory, language: HelpLanguage) -> HelpPage {
     let id = PageId::Index(category);
     let mut markdown = String::new();
+    let mut entries = Vec::new();
     match category {
         HelpCategory::Config => {
             markdown.push_str(match language {
@@ -184,7 +186,11 @@ fn index_page(category: HelpCategory, language: HelpLanguage) -> HelpPage {
                     || children > 1
                     || (children == 0 && section_help(table.section).is_some())
             }) {
-                let label = named(&table.header(), table_target(table.section));
+                let title = table.header();
+                let target =
+                    table_target(table.section).expect("the index lists registered tables");
+                let label = cross_reference(&title, &target);
+                entries.push(ReferenceLink { title, target });
                 markdown.push_str(&format!("- {label}\n"));
             }
         }
@@ -195,22 +201,25 @@ fn index_page(category: HelpCategory, language: HelpLanguage) -> HelpPage {
             });
             for package in tola_packages::builtin_packages() {
                 let name = package.spec().name.to_string();
-                let label = named(&format!("@tola/{name}"), package_target(&name, &[]));
+                let title = format!("@tola/{name}");
+                let target = LinkTarget::Page(PageId::Package { name });
+                let label = cross_reference(&title, &target);
+                entries.push(ReferenceLink { title, target });
                 markdown.push_str(&format!("- {label}\n"));
             }
         }
         HelpCategory::Scripts => {
             markdown.push_str(match language {
-                HelpLanguage::English => "# Built-in scripts\n\nUse `tola nu` to inspect or resize images and render JSON diagnostics. The script pages list commands, options, and examples.\n\n",
-                HelpLanguage::SimplifiedChinese => "# 内置脚本\n\n用 `tola nu` 查看或缩放图片，也可以把 JSON 诊断显示在终端。点开脚本页可查命令、选项和示例。\n\n",
+                HelpLanguage::English => "# Built-in scripts\n\nRun these scripts with `tola nu`.\n\n",
+                HelpLanguage::SimplifiedChinese => "# 内置脚本\n\n用 `tola nu` 运行以下脚本。\n\n",
             });
             for script in super::scripts::builtins() {
-                let label = cross_reference(
-                    &format!("@tola-scripts/{}", script.name),
-                    &LinkTarget::Page(PageId::Script {
-                        name: script.name.to_owned(),
-                    }),
-                );
+                let title = format!("@tola-scripts/{}", script.name);
+                let target = LinkTarget::Page(PageId::Script {
+                    name: script.name.to_owned(),
+                });
+                let label = cross_reference(&title, &target);
+                entries.push(ReferenceLink { title, target });
                 let intro = i18n::script(language, script.name)
                     .and_then(Translation::intro)
                     .unwrap_or(script.summary);
@@ -218,7 +227,9 @@ fn index_page(category: HelpCategory, language: HelpLanguage) -> HelpPage {
             }
         }
     }
-    HelpPage::new(id, markdown)
+    let mut page = HelpPage::new(id, markdown);
+    page.reference.entries = entries;
+    page
 }
 
 /// The table page one section names, when the index names a real table.
@@ -265,17 +276,20 @@ fn table_page(target: &str, language: HelpLanguage) -> Result<HelpPage> {
     let id = PageId::Config {
         section: table.section.to_owned(),
     };
-    let mut markdown = format!("# {} - configuration table\n", table.header());
+    let mut markdown = format!("# {}\n", table.header());
     let translation = i18n::config(language, table.section);
-    if let Some(documentation) = documented(table.section)
-        .map(|english| translation.and_then(Translation::intro).unwrap_or(english))
-    {
+    let intro = documented(table.section)
+        .map(|english| translation.and_then(Translation::intro).unwrap_or(english));
+    if let Some(documentation) = intro {
         markdown.push_str(&format!("\n{documentation}\n"));
     }
     if has_own_key(table.section) {
         markdown.push_str(&declared_keys(table.section, language));
     } else if child_tables(table.section).next().is_some() {
-        markdown.push_str("\nConfigure this section through its child tables:\n");
+        markdown.push_str(match language {
+            HelpLanguage::English => "\n**Tables**\n\n",
+            HelpLanguage::SimplifiedChinese => "\n**子表**\n\n",
+        });
         for child in child_tables(table.section) {
             let child_id = PageId::Config {
                 section: child.section.to_owned(),
@@ -284,25 +298,58 @@ fn table_page(target: &str, language: HelpLanguage) -> Result<HelpPage> {
             // A table header is an array when its declaration is, so it includes its own brackets.
             let table = cross_reference(&header, &LinkTarget::Page(child_id));
             markdown.push_str(&format!(
-                "- {table} - {}\n",
+                "- {table}{}{}\n",
+                language.colon(),
                 child_description(child, language)
             ));
         }
     }
-    if let Some(english) = section_help(table.section) {
-        let help = translation
+    let usage = section_help(table.section).map(|english| {
+        translation
             .and_then(|translation| translation.section(CONFIG_USAGE))
-            .unwrap_or(english);
+            .unwrap_or(english)
+    });
+    if let Some(help) = usage {
         markdown.push_str(&format!("\n{help}\n"));
     }
     let packages = related_packages(table.section);
     if !packages.is_empty() {
-        markdown.push_str("\n### Related\n\n");
-        for package in packages {
-            markdown.push_str(&package_bullet(&package));
+        markdown.push_str(&format!("\n### {}\n\n", language.related()));
+        for package in &packages {
+            markdown.push_str(&package_bullet(package));
         }
     }
-    Ok(HelpPage::new(id, markdown))
+    let mut page = HelpPage::new(id, markdown);
+    page.reference.title = table.header();
+    page.reference.blocks = page.prose(
+        &[intro, usage]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join("\n\n"),
+    );
+    page.reference.entries = child_tables(table.section)
+        .map(|child| ReferenceLink {
+            title: child.header(),
+            target: table_target(child.section).expect("child tables are registered"),
+        })
+        .collect();
+    page.reference.keys = documented_fields(table.section)
+        .into_iter()
+        .filter(|path| child_table(path).is_none())
+        .map(|path| Key {
+            path: path.to_owned(),
+            blocks: page.prose(key_prose(path, translation)),
+        })
+        .collect();
+    page.reference.related = packages
+        .into_iter()
+        .map(|name| ReferenceLink {
+            title: format!("@tola/{name}"),
+            target: LinkTarget::Page(PageId::Package { name }),
+        })
+        .collect();
+    Ok(page)
 }
 
 /// Every key this section's declaration writes, in schema order, without the nested ones: its
@@ -386,11 +433,7 @@ fn sole_child_table(section: &str) -> Option<&'static ConfigTable> {
         .flatten()
 }
 
-/// Every key the section's own declaration writes, one bullet each: a setting with its
-/// documentation, a child table with the description its own page opens with.
-///
-/// The meaning is the declaration's documentation, and one key is one rendered line: the page
-/// wraps it.
+/// Describe each setting or link to its child table. Keep examples inside their list item.
 fn declared_keys(section: &str, language: HelpLanguage) -> String {
     let translation = i18n::config(language, section);
     let mut markdown = String::new();
@@ -403,22 +446,25 @@ fn declared_keys(section: &str, language: HelpLanguage) -> String {
                 }),
             );
             markdown.push_str(&format!(
-                "\n- {header} - {}",
+                "\n- {header}{}{}",
+                language.colon(),
                 child_description(child, language)
             ));
             continue;
         }
         let name = path.rsplit_once('.').map_or(path, |(_, name)| name);
-        let english = documented(path).expect("the enumeration documents every field");
-        let meaning = one_line(
-            translation
-                .and_then(|translation| translation.field(CONFIG_KEYS, name))
-                .unwrap_or(english),
-        );
-        markdown.push_str(&format!("\n- `{name}` - {meaning}"));
+        markdown.push_str(&format!("\n- `{name}`"));
+        append_description(&mut markdown, key_prose(path, translation), language);
     }
     markdown.push('\n');
     markdown
+}
+
+fn key_prose<'a>(path: &str, translation: Option<&'a Translation>) -> &'a str {
+    let name = path.rsplit_once('.').map_or(path, |(_, name)| name);
+    translation
+        .and_then(|translation| translation.field(CONFIG_KEYS, name))
+        .unwrap_or_else(|| documented(path).expect("the enumeration documents every field"))
 }
 
 /// One documentation paragraph whose lines the rendered page wraps itself.
@@ -466,19 +512,28 @@ fn package_page(name: &str, requested: &[String], language: HelpLanguage) -> Res
     };
     let translation = i18n::package(language, name);
     let import = format!("#import \"{}\": {imports}", package.spec());
+    let import_heading = match language {
+        HelpLanguage::English => "Import in Typst:",
+        HelpLanguage::SimplifiedChinese => "导入",
+    };
     let mut text = format!(
-        "# {target}\n\n## Import in Typst:\n\n{}",
+        "# {target}\n\n## {import_heading}\n\n{}",
         code_block("typst", &import)
     );
-    if whole_package && let Some(overview) = package.overview() {
-        let overview = translation
-            .and_then(Translation::intro)
-            .unwrap_or(&overview);
+    let overview = whole_package.then(|| package.overview()).flatten();
+    let overview = overview
+        .as_deref()
+        .map(|english| translation.and_then(Translation::intro).unwrap_or(english));
+    if let Some(overview) = overview {
         text.push_str(&format!("\n{overview}\n"));
     }
     let exports = package.export_documentation(&names)?;
     if whole_package {
-        text.push_str("\n## Exports:\n\n");
+        let heading = match language {
+            HelpLanguage::English => "Exports:",
+            HelpLanguage::SimplifiedChinese => "导出成员",
+        };
+        text.push_str(&format!("\n## {heading}\n\n"));
         for export in &exports {
             let summary = translation
                 .and_then(|translation| translation.section(&export.name))
@@ -489,27 +544,38 @@ fn package_page(name: &str, requested: &[String], language: HelpLanguage) -> Res
                 Some(LinkTarget::PageAnchor(id.clone(), export_anchor(export))),
             );
             match summary {
-                Some(summary) => text.push_str(&format!("- {name} - {summary}\n")),
+                Some(summary) => {
+                    text.push_str(&format!("- {name}{}{summary}\n", language.colon()));
+                }
                 None => text.push_str(&format!("- {name}\n")),
             }
         }
-        let example = names
-            .iter()
-            .take(2)
-            .map(|name| format!(" {name}"))
-            .collect::<String>();
-        text.push_str(&format!(
-            "\nRead selected exports: `tola help \"@tola/{name}\"{example}`\n",
-        ));
     }
-    if let Some(section) = package_config_table(name) {
+    let config = package_config_table(name);
+    if let Some(section) = config {
         let header = table_header(section);
         text.push_str(&format!(
-            "\n## Related\n\n- {}\n",
+            "\n## {}\n\n- {}\n",
+            language.related(),
             named(&header, table_target(section))
         ));
     }
     let mut page = HelpPage::new(id.clone(), text);
+    page.reference.title = target.clone();
+    page.reference.blocks = page.prose(overview.unwrap_or_default());
+    page.reference.import = Some(import);
+    page.reference.related = config
+        .into_iter()
+        .filter_map(|section| {
+            Some(ReferenceLink {
+                title: table_header(section),
+                target: table_target(section)?,
+            })
+        })
+        .collect();
+    let canonical = PageId::Package {
+        name: name.to_owned(),
+    };
     for (position, export) in exports.iter().enumerate() {
         let mut text = String::new();
         if position > 0 {
@@ -539,12 +605,119 @@ fn package_page(name: &str, requested: &[String], language: HelpLanguage) -> Res
                 method.name,
                 code_block("typst-code", &method.method_code()),
             ));
-            write_parameters(&mut text, method, language, |_| None);
+            write_parameters(&mut text, method, language, |name| {
+                method_parameter_prose(translation, &export.name, &method.name, name)
+            });
         }
-        text.push_str(&related_section(&target, &export.related, &names));
+        text.push_str(&related_section(&target, &export.related, &names, language));
         page.push_export(text);
+        let signature = match &export.declaration {
+            ExportDeclaration::Function(signature) => {
+                reference_signature(&page, signature, signature.code(), parameter_prose)
+            }
+            ExportDeclaration::Value(value) => ReferenceSignature {
+                declaration: value.clone(),
+                parameters: Vec::new(),
+                returns: None,
+            },
+        };
+        let methods = export
+            .methods
+            .iter()
+            .map(|method| Method {
+                name: method.name.clone(),
+                anchor: format!(".{}", anchor(&method.name).as_str()),
+                signature: reference_signature(&page, method, method.method_code(), |name| {
+                    method_parameter_prose(translation, &export.name, &method.name, name)
+                }),
+            })
+            .collect();
+        let mut related = Vec::new();
+        for item in &export.related {
+            let link = match item {
+                RelatedTarget::Export(name) if name != &export.name => {
+                    let other =
+                        if let Some(other) = exports.iter().find(|export| &export.name == name) {
+                            export_anchor(other)
+                        } else {
+                            let other = package.export_documentation(std::slice::from_ref(name))?;
+                            export_anchor(&other[0])
+                        };
+                    ReferenceLink {
+                        title: name.clone(),
+                        target: LinkTarget::PageAnchor(canonical.clone(), other),
+                    }
+                }
+                RelatedTarget::Package(package) if package != name => ReferenceLink {
+                    title: format!("@tola/{package}"),
+                    target: LinkTarget::Page(PageId::Package {
+                        name: package.clone(),
+                    }),
+                },
+                _ => continue,
+            };
+            if !related
+                .iter()
+                .any(|item: &ReferenceLink| item.target == link.target)
+            {
+                related.push(link);
+            }
+        }
+        page.reference.exports.push(Export {
+            name: export.name.clone(),
+            kind: export_kind(export),
+            anchor: export_anchor(export).as_str().to_owned(),
+            signature,
+            blocks: page.prose(summary),
+            methods,
+            related,
+        });
     }
     Ok(page)
+}
+
+fn method_parameter_prose<'a>(
+    translation: Option<&'a Translation>,
+    export: &str,
+    method: &str,
+    parameter: &str,
+) -> Option<&'a str> {
+    let method = method.trim_start_matches('.');
+    translation?.field(export, &format!(".{method}.{parameter}"))
+}
+
+fn reference_signature<'a>(
+    page: &HelpPage,
+    signature: &Signature,
+    declaration: String,
+    prose: impl Fn(&str) -> Option<&'a str>,
+) -> ReferenceSignature {
+    use tola_packages::ParameterKind::{Named, Positional, Rest};
+    ReferenceSignature {
+        declaration,
+        parameters: signature
+            .parameters
+            .iter()
+            .map(|parameter| Parameter {
+                name: parameter.name.clone(),
+                kind: match parameter.kind {
+                    Positional => "positional",
+                    Named => "named",
+                    Rest => "rest",
+                },
+                ty: Some(parameter.ty_spelling().to_owned()),
+                required: parameter.required,
+                default: parameter.default.clone(),
+                blocks: page.prose(
+                    prose(&parameter.name)
+                        .or(parameter.docs.as_deref())
+                        .unwrap_or_default(),
+                ),
+                short: None,
+            })
+            .collect(),
+        returns: signature.returns.clone(),
+    }
 }
 
 /// The declaration block every export is configured with: a function's signature, or a value's
@@ -556,7 +729,7 @@ fn declaration(declaration: &ExportDeclaration) -> String {
     }
 }
 
-/// List the parameters by argument kind. Their defaults appear in the signature.
+/// Describe parameters by name. Their types and defaults appear in the signature.
 fn write_parameters<'a>(
     text: &mut String,
     signature: &Signature,
@@ -570,8 +743,9 @@ fn write_parameters<'a>(
             "Named parameters",
             "required",
         ),
-        HelpLanguage::SimplifiedChinese => ("位置参数", "剩余参数", "命名参数", "必填"),
+        HelpLanguage::SimplifiedChinese => ("位置参数", "可变参数", "命名参数", "必填"),
     };
+    let (open, close) = language.parentheses();
     for (heading, group) in [
         (positional, signature.positional()),
         (rest, signature.rest()),
@@ -587,30 +761,31 @@ fn write_parameters<'a>(
             } else {
                 ""
             };
-            text.push_str(&format!(
-                "- `{prefix}{}: {}`",
-                parameter.name,
-                parameter.ty_spelling()
-            ));
+            text.push_str(&format!("- `{prefix}{}`", parameter.name));
             if parameter.required {
-                text.push_str(&format!(" · {required}"));
+                text.push_str(&format!("{open}{required}{close}"));
             }
             let documentation = prose(&parameter.name).or(parameter.docs.as_deref());
             if let Some(documentation) = documentation {
-                let mut lines = documentation.lines();
-                if let Some(first) = lines.next() {
-                    text.push_str(language.colon());
-                    text.push_str(first);
-                }
-                for line in lines {
-                    text.push('\n');
-                    if !line.is_empty() {
-                        text.push_str("  ");
-                        text.push_str(line);
-                    }
-                }
+                append_description(text, documentation, language);
             }
             text.push('\n');
+        }
+    }
+}
+
+/// Finish a list item with its Markdown description, including any nested blocks.
+fn append_description(text: &mut String, documentation: &str, language: HelpLanguage) {
+    let mut lines = documentation.lines();
+    if let Some(first) = lines.next() {
+        text.push_str(language.colon());
+        text.push_str(first);
+    }
+    for line in lines {
+        text.push('\n');
+        if !line.is_empty() {
+            text.push_str("  ");
+            text.push_str(line);
         }
     }
 }
@@ -618,7 +793,12 @@ fn write_parameters<'a>(
 /// The related-targets section one export renders: the package's own exports as one command,
 /// then each bundled package as its own, in the order the block first names them. A target the
 /// page renders anyway is left out, and a block whose targets are all rendered has no section.
-fn related_section(target: &str, related: &[RelatedTarget], rendered: &[String]) -> String {
+fn related_section(
+    target: &str,
+    related: &[RelatedTarget],
+    rendered: &[String],
+    language: HelpLanguage,
+) -> String {
     let mut exports: Vec<&str> = Vec::new();
     let mut packages: Vec<&str> = Vec::new();
     for related in related {
@@ -639,7 +819,7 @@ fn related_section(target: &str, related: &[RelatedTarget], rendered: &[String])
     if exports.is_empty() && packages.is_empty() {
         return String::new();
     }
-    let mut text = String::from("\n### Related\n\n");
+    let mut text = format!("\n### {}\n\n", language.related());
     if !exports.is_empty() {
         let selection = PageId::PackageSelection {
             name: target.trim_start_matches("@tola/").to_owned(),
@@ -975,7 +1155,7 @@ mod tests {
                     walk_block(block, found);
                 }
             }
-            Block::Table { headers, rows } => {
+            Block::Table { headers, rows, .. } => {
                 for spans in headers.iter().chain(rows.iter().flatten()) {
                     walk_spans(spans, found);
                 }

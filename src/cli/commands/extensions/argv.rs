@@ -3,7 +3,8 @@
 use std::ffi::OsString;
 use std::path::Path;
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Result, bail, ensure};
+use tola_build::context::{Context as CallContext, Module, Site};
 use tola_build::report::ReportChannel;
 use tola_diagnostic::{Diagnostic, DiagnosticError, Severity};
 use tola_input::InputScope;
@@ -27,11 +28,12 @@ fn expand(argument: &str, project: &Path, module: &ModuleCommands, executable: &
 pub(super) fn process_command(
     argv: &[String],
     tail: &[OsString],
-    project: &Path,
-    config: &Path,
+    site: Site,
     module: &ModuleCommands,
     scope: InputScope,
-) -> Result<(Command, tempfile::NamedTempFile)> {
+    reports: &ReportChannel,
+) -> Result<Command> {
+    let project = &site.root;
     let Some(program) = argv.first() else {
         bail!("declared command has no executable");
     };
@@ -41,18 +43,6 @@ pub(super) fn process_command(
         !program.is_empty(),
         "declared command has an empty executable"
     );
-    let mut options =
-        tempfile::NamedTempFile::new().context("Tola could not create module options")?;
-    serde_json::to_writer(options.as_file_mut(), &module.options)
-        .context("Tola could not write module options")?;
-    options
-        .as_file_mut()
-        .sync_all()
-        .context("Tola could not flush module options")?;
-    let options_path = options
-        .path()
-        .to_str()
-        .context("the module options path must be valid UTF-8")?;
     let command = Command::new(program)
         .args(
             argv[1..]
@@ -60,26 +50,17 @@ pub(super) fn process_command(
                 .map(|arg| expand(arg, project, module, &executable)),
         )
         .args(tail.iter().cloned())
-        .cwd(project)
-        .env_remove("TOLA_HOOK_NAME")
-        .env_remove("TOLA_HOOK_STAGE")
-        .env_remove("TOLA_BUILD_MODE")
-        .env_remove("TOLA_HOOK_INPUT_DIR")
-        .env_remove("TOLA_HOOK_OUTPUT_DIR")
-        .env_remove("TOLA_HOOK_CACHE_DIR")
-        .env_remove("TOLA_HOOK_TEMP_DIR")
-        .env_remove("TOLA_INIT_TARGET_DIR")
-        .env_remove("TOLA_INIT_OUTPUT_DIR")
-        .env_remove("TOLA_INIT_INTERACTIVE")
-        .env("TOLA_PROJECT_ROOT", project.as_os_str())
-        .env("TOLA_MODULE_ROOT", module.root.as_os_str())
-        .env("TOLA_MODULE_NAME", module.name.as_str())
-        .env("TOLA_MODULE_MANIFEST", module.manifest.as_os_str())
-        .env("TOLA_MODULE_OPTIONS", options_path)
-        .env("TOLA_CONFIG_PATH", config.as_os_str())
-        .env("TOLA_INPUT_SCOPE", scope.as_str())
-        .env("TOLA_EXECUTABLE", executable);
-    Ok((command, options))
+        .cwd(project);
+    let mut context = CallContext::new(executable, Some(scope));
+    context.site = Some(site);
+    context.module = Some(Module {
+        name: module.name.clone(),
+        root: module.root.clone(),
+        manifest: module.manifest.clone(),
+        options: Some(serde_json::to_value(&module.options)?),
+    });
+    context.report_path = Some(reports.path().to_owned());
+    context.command(command, reports.directory())
 }
 
 pub(super) fn complete_report(

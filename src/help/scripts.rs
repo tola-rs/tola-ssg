@@ -6,7 +6,8 @@ use anyhow::{Result, ensure};
 use tola_nu::{BuiltinModule, Runtime, Signature};
 
 use super::{
-    model::{HelpPage, PageId},
+    data::{Command, Parameter},
+    model::{HelpPage, PageId, anchor},
     pages::{code_block, target_error},
 };
 use crate::i18n::{self, HelpLanguage, Translation};
@@ -37,6 +38,9 @@ pub(super) fn page(id: PageId, name: &str, language: HelpLanguage) -> Result<Hel
         .and_then(|prose| prose.intro())
         .unwrap_or(script.summary);
     let mut markdown = format!("# {locator}\n\n{intro}\n");
+    let mut page = HelpPage::new(id, String::new());
+    page.reference.title = locator.clone();
+    page.reference.blocks = page.prose(intro);
     for signature in &signatures {
         let command = signature
             .name
@@ -52,22 +56,39 @@ pub(super) fn page(id: PageId, name: &str, language: HelpLanguage) -> Result<Hel
         if usage != invocation {
             markdown.push_str(&code_block("sh", &usage));
         }
-        if let Some(example) = prose.and_then(|prose| prose.section(command)) {
-            writeln!(markdown, "\n{example}").unwrap();
-        } else {
-            writeln!(markdown, "\n{}", signature.description).unwrap();
-            if !signature.extra_description.is_empty() {
-                writeln!(markdown, "\n{}", signature.extra_description).unwrap();
-            }
-        }
-        write_parameters(&mut markdown, signature, prose, command, language);
+        let description = prose.and_then(|prose| prose.section(command)).map_or_else(
+            || {
+                format!(
+                    "{}\n\n{}",
+                    signature.description, signature.extra_description
+                )
+            },
+            str::to_owned,
+        );
+        writeln!(markdown, "\n{description}").unwrap();
+        let (parameters, options) =
+            write_parameters(&mut markdown, &page, signature, prose, command, language);
+        page.reference.commands.push(Command {
+            name: command.to_owned(),
+            anchor: anchor(command).as_str().to_owned(),
+            usage,
+            blocks: page.prose(&description),
+            parameters,
+            options,
+        });
         let native_help = match language {
             HelpLanguage::English => "Nu help",
             HelpLanguage::SimplifiedChinese => "查看 Nu 帮助",
         };
-        writeln!(markdown, "\n{native_help} · `{invocation} --help`").unwrap();
+        writeln!(
+            markdown,
+            "\n{native_help}{}`{invocation} --help`",
+            language.colon()
+        )
+        .unwrap();
     }
-    Ok(HelpPage::new(id, markdown))
+    page.push_markdown(markdown);
+    Ok(page)
 }
 
 fn usage(invocation: &str, signature: &Signature) -> String {
@@ -89,14 +110,17 @@ fn usage(invocation: &str, signature: &Signature) -> String {
 
 fn write_parameters(
     markdown: &mut String,
+    page: &HelpPage,
     signature: &Signature,
     prose: Option<&Translation>,
     command: &str,
     language: HelpLanguage,
-) {
-    let (positionals, options, required, default) = match language {
-        HelpLanguage::English => ("Positional parameters", "Options", "required", "default"),
-        HelpLanguage::SimplifiedChinese => ("位置参数", "选项", "必填", "默认"),
+) -> (Vec<Parameter>, Vec<Parameter>) {
+    let mut parameters = Vec::new();
+    let mut options_data = Vec::new();
+    let (positionals, options) = match language {
+        HelpLanguage::English => ("Positional parameters", "Options"),
+        HelpLanguage::SimplifiedChinese => ("位置参数", "选项"),
     };
     if !signature.required_positional.is_empty()
         || !signature.optional_positional.is_empty()
@@ -121,23 +145,32 @@ fn write_parameters(
                 .map(|arg| (arg, false, "...")),
         )
     {
-        write!(
-            markdown,
-            "- `{prefix}{}: {}`",
-            argument.name, argument.shape
-        )
-        .unwrap();
-        if is_required {
-            write!(markdown, " · {required}").unwrap();
-        }
-        if let Some(value) = &argument.default_value {
-            let value = value.to_parsable_string(", ", &Default::default());
-            write!(markdown, " · {default} `{value}`").unwrap();
-        }
         let description = prose
             .and_then(|prose| prose.field(command, &argument.name))
             .unwrap_or(&argument.desc);
-        writeln!(markdown, "{}{description}", language.colon()).unwrap();
+        writeln!(
+            markdown,
+            "- `{prefix}{}`{}{description}",
+            argument.name,
+            language.colon()
+        )
+        .unwrap();
+        parameters.push(Parameter {
+            name: argument.name.clone(),
+            kind: if prefix.is_empty() {
+                "positional"
+            } else {
+                "rest"
+            },
+            ty: Some(argument.shape.to_string()),
+            required: is_required,
+            default: argument
+                .default_value
+                .as_ref()
+                .map(|value| value.to_parsable_string(", ", &Default::default())),
+            blocks: page.prose(description),
+            short: None,
+        });
     }
     let mut flags = signature
         .named
@@ -154,21 +187,23 @@ fn write_parameters(
             (None, Some(short)) => format!("`-{short}`"),
             (None, None) => continue,
         };
-        write!(markdown, "- {heading}").unwrap();
-        if let Some(shape) = &flag.arg {
-            write!(markdown, " `<{shape}>`").unwrap();
-        }
-        if flag.required {
-            write!(markdown, " · {required}").unwrap();
-        }
-        if let Some(value) = &flag.default_value {
-            let value = value.to_parsable_string(", ", &Default::default());
-            write!(markdown, " · {default} `{value}`").unwrap();
-        }
         let name = format!("--{}", flag.long);
         let description = prose
             .and_then(|prose| prose.field(command, &name))
             .unwrap_or(&flag.desc);
-        writeln!(markdown, "{}{description}", language.colon()).unwrap();
+        writeln!(markdown, "- {heading}{}{description}", language.colon()).unwrap();
+        options_data.push(Parameter {
+            name,
+            kind: "option",
+            ty: flag.arg.as_ref().map(ToString::to_string),
+            required: flag.required,
+            default: flag
+                .default_value
+                .as_ref()
+                .map(|value| value.to_parsable_string(", ", &Default::default())),
+            blocks: page.prose(description),
+            short: flag.short,
+        });
     }
+    (parameters, options_data)
 }

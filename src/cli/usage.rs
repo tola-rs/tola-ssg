@@ -77,14 +77,17 @@ fn site_help(matches: &ArgMatches) -> Option<SiteHelp> {
     help_flag(leaf)?;
     let mut config = leaf.get_one::<PathBuf>("path").cloned();
     let mut scope = ScopeArgs::from_arg_matches(leaf).ok()?.scope();
-    if page == Page::Nu {
+    if page == Page::Nu
+        && let Some(call) = tola_build::context::Context::read().ok().flatten()
+    {
         if config.is_none() {
-            config = std::env::var_os("TOLA_CONFIG_PATH").map(PathBuf::from);
+            config = call.site.map(|site| site.config_path);
         }
         if scope == InputScope::Online {
-            scope = std::env::var("TOLA_INPUT_SCOPE")
-                .ok()
-                .and_then(|value| InputScope::parse(&value))
+            scope = call
+                .input_scope
+                .as_deref()
+                .and_then(InputScope::parse)
                 .unwrap_or(scope);
         }
     }

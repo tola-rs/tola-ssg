@@ -12,7 +12,7 @@ use nu_protocol::{
 };
 
 /// One site module's public Nu entry, as the CLI resolved it from configuration.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ConfiguredModule {
     pub alias: String,
     pub root: PathBuf,
@@ -173,7 +173,7 @@ pub(super) fn register<'a>(
     for command in crate::image::declarations() {
         add_command(&mut working, &mut native, command);
     }
-    for operation in [Operation::Render, Operation::Submit] {
+    for operation in [Operation::Context, Operation::Render, Operation::Submit] {
         add_command(
             &mut working,
             &mut native,
@@ -187,6 +187,7 @@ pub(super) fn register<'a>(
         Box::new(crate::highlight::Highlight),
     );
     for operation in [
+        Operation::Context,
         Operation::Site,
         Operation::Module,
         Operation::Hook,

@@ -302,7 +302,7 @@ fn read_generated_files(
     {
         return Err(super::hook_contract_error(
             format!("{identity} did not leave a regular output directory"),
-            "write files inside `TOLA_HOOK_OUTPUT_DIR`",
+            "write files inside the hook context output directory",
         ));
     }
     let mut files = GeneratedFiles::default();
@@ -388,7 +388,12 @@ mod tests {
     use std::sync::mpsc;
 
     fn generated_root() -> std::path::PathBuf {
-        std::env::var_os("TOLA_HOOK_OUTPUT_DIR").unwrap().into()
+        crate::build::tests::hook_context()
+            .unwrap()
+            .hook
+            .unwrap()
+            .output_dir
+            .unwrap()
     }
 
     fn output_command_config(
@@ -426,7 +431,12 @@ mod tests {
             return;
         }
         crate::build::tests::assert_hook_environment("generate-outputs");
-        let candidate = std::path::PathBuf::from(std::env::var_os("TOLA_HOOK_INPUT_DIR").unwrap());
+        let candidate = crate::build::tests::hook_context()
+            .unwrap()
+            .hook
+            .unwrap()
+            .input_dir
+            .unwrap();
         let html = fs::read_to_string(candidate.join("index.html")).unwrap();
         #[cfg(unix)]
         {
@@ -459,7 +469,12 @@ mod tests {
             .and_then(|runs| runs.trim().parse::<u32>().ok())
             .unwrap_or(0);
         fs::write(path, (count + 1).to_string()).unwrap();
-        let candidate = std::path::PathBuf::from(std::env::var_os("TOLA_HOOK_INPUT_DIR").unwrap());
+        let candidate = crate::build::tests::hook_context()
+            .unwrap()
+            .hook
+            .unwrap()
+            .input_dir
+            .unwrap();
         let html = fs::read_to_string(candidate.join("index.html")).unwrap();
         fs::write(
             generated_root().join("search.json"),
@@ -468,14 +483,19 @@ mod tests {
         .unwrap();
     }
 
-    /// A command that keeps its index in `TOLA_HOOK_CACHE_DIR` and restores it into every
+    /// A command that keeps its index in its cache directory and restores it into every
     /// fresh generated root; a cache hit still has to write the declared outputs.
     #[test]
     fn child_restores_cached_search_index() {
         if !is_hook_child_for("generate-outputs") {
             return;
         }
-        let cache = std::path::PathBuf::from(std::env::var_os("TOLA_HOOK_CACHE_DIR").unwrap());
+        let cache = crate::build::tests::hook_context()
+            .unwrap()
+            .hook
+            .unwrap()
+            .cache_dir
+            .unwrap();
         let cached = cache.join("search/index.json");
         let target = generated_root().join("search/index.json");
         fs::create_dir_all(target.parent().unwrap()).unwrap();
@@ -485,8 +505,12 @@ mod tests {
                 fs::write(target, bytes).unwrap();
             }
             Err(_) => {
-                let candidate =
-                    std::path::PathBuf::from(std::env::var_os("TOLA_HOOK_INPUT_DIR").unwrap());
+                let candidate = crate::build::tests::hook_context()
+                    .unwrap()
+                    .hook
+                    .unwrap()
+                    .input_dir
+                    .unwrap();
                 let html = fs::read_to_string(candidate.join("index.html")).unwrap();
                 let bytes = serde_json::to_vec(&serde_json::json!({"html": html})).unwrap();
                 fs::create_dir_all(cached.parent().unwrap()).unwrap();
@@ -514,7 +538,12 @@ mod tests {
         if !is_hook_child_for("generate-outputs") {
             return;
         }
-        let candidate = std::path::PathBuf::from(std::env::var_os("TOLA_HOOK_INPUT_DIR").unwrap());
+        let candidate = crate::build::tests::hook_context()
+            .unwrap()
+            .hook
+            .unwrap()
+            .input_dir
+            .unwrap();
         let output = generated_root();
         if Path::new("replace-output-root").exists() {
             fs::remove_dir(&output).unwrap();

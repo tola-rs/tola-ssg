@@ -68,6 +68,16 @@ pub struct BuiltinModule {
 /// Built-in Nu modules available through `use tola`.
 pub const BUILTIN_MODULES: &[BuiltinModule] = &[
     BuiltinModule {
+        name: "context",
+        summary: "Show the context Tola supplied to this invocation",
+        executable: true,
+        entry: "context.nu",
+        sources: &[
+            ("context.nu", include_bytes!("../nu/context.nu")),
+            ("context_core.nu", include_bytes!("../nu/context_core.nu")),
+        ],
+    },
+    BuiltinModule {
         name: "image",
         summary: "Inspect, resize, and convert images",
         executable: true,

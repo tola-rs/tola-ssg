@@ -57,7 +57,7 @@ fn round_stamp(observed_at: DateTime<Local>, today: NaiveDate) -> String {
 struct Job {
     run: HookRun,
     stage: String,
-    lines: VecDeque<(usize, Vec<Segment>)>,
+    lines: VecDeque<Vec<Segment>>,
     partial: [Vec<Segment>; 2],
     parsers: [ansi::Parser; 2],
     omitted_lines: usize,
@@ -80,7 +80,7 @@ impl Job {
         for segment in self.parsers[stream].push(chunk) {
             if segment.text == "\n" {
                 self.lines
-                    .push_back((stream, std::mem::take(&mut self.partial[stream])));
+                    .push_back(std::mem::take(&mut self.partial[stream]));
                 if self.lines.len() > HOOK_LINES {
                     self.lines.pop_front();
                     self.omitted_lines += 1;
@@ -99,23 +99,9 @@ impl Job {
             header.push_str(&format!(" · {omitted} not shown"));
         }
         let mut lines = vec![Line::from(header)];
-        let partial = self
-            .partial
-            .iter()
-            .enumerate()
-            .filter(|(_, segments)| !segments.is_empty());
-        for (stream, segments) in self
-            .lines
-            .iter()
-            .map(|(stream, segments)| (*stream, segments.as_slice()))
-            .chain(partial.map(|(stream, segments)| (stream, segments.as_slice())))
-        {
-            let label = if stream == 0 {
-                "[stdout] "
-            } else {
-                "[stderr] "
-            };
-            let mut spans = vec![Span::raw(label)];
+        let partial = self.partial.iter().filter(|segments| !segments.is_empty());
+        for segments in self.lines.iter().chain(partial) {
+            let mut spans = vec![Span::raw("  ")];
             for segment in segments {
                 let style = if styled {
                     segment.style
