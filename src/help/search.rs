@@ -123,7 +123,7 @@ mod tests {
         let sections = sections(&page, "@tola/datalog");
         let method = sections
             .iter()
-            .find(|section| section.section == ".atom")
+            .find(|section| section.section == "atom")
             .unwrap();
         let target = pages::request(std::slice::from_ref(&method.target)).unwrap();
         let export =

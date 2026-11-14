@@ -22,7 +22,9 @@
 
 关系的列数，必须是非负整数。
 
-### `.atom.terms`
+### `atom`
+
+#### `terms`
 
 每列传一个常量或变量。如果 `edge = relation("edge", 2)`，`edge.atom("a", "b")` 可作为一条事实传给 `database` 的 `facts`。在查询中，`edge.atom("a", var("target"))` 匹配从 `"a"` 出发的链接。零列关系直接调用 `atom()`。要引用 Typst 内容或函数，可用字符串 ID。
 
@@ -104,10 +106,12 @@
 
 推导规则，默认为 `()`。
 
-### `.query.select`
+### `query`
+
+#### `select`
 
 按结果的列顺序传入变量数组。可以重复使用同一个变量。
 
-### `.query.where`
+#### `where`
 
 传入条件数组，可以包含正原子和 `negate` 条件。所有条件都要成立。传 `()` 表示没有条件。

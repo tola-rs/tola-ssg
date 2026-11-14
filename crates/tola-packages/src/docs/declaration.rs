@@ -192,9 +192,9 @@ impl Signature {
         block
     }
 
-    /// A method signature with the receiver omitted.
+    /// A method signature showing the receiver before the method name.
     pub fn method_code(&self) -> String {
-        let mut block = format!("{}(", self.name);
+        let mut block = format!("self.{}(", self.name);
         self.write_parameters(&mut block);
         if let Some(returns) = &self.returns {
             block.push_str(" -> ");

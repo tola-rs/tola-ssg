@@ -155,6 +155,13 @@ impl Translation {
         nonempty(self.sections.get(section)?.fields.get(name)?)
     }
 
+    /// Parameter descriptions under a method's heading.
+    pub(crate) fn method_parameters(&self, export: &str, method: &str) -> Sections<'_> {
+        self.field(export, method)
+            .map(|section| split_sections(section, HeadingLevel::H4).1)
+            .unwrap_or_default()
+    }
+
     #[cfg(test)]
     pub(crate) fn sections(&self) -> impl Iterator<Item = &str> {
         self.sections.keys().copied()
@@ -354,23 +361,15 @@ mod tests {
             let exports = package.export_documentation(&names).unwrap();
             for export in exports {
                 for field in translation.fields(&export.name) {
-                    if let Some((method, parameter)) = field
-                        .strip_prefix('.')
-                        .and_then(|field| field.split_once('.'))
+                    if let Some(method) = export.methods.iter().find(|method| method.name == field)
                     {
-                        assert!(
-                            export.methods.iter().any(|signature| signature
-                                .name
-                                .trim_start_matches('.')
-                                == method
-                                && signature
-                                    .parameters
-                                    .iter()
-                                    .any(|item| item.name == parameter)),
-                            "`{package}.{export}.{method}` has no parameter named `{parameter}`",
-                            package = name,
-                            export = export.name,
-                        );
+                        for parameter in translation.method_parameters(&export.name, field).keys() {
+                            assert!(
+                                method.parameters.iter().any(|item| item.name == *parameter),
+                                "`{name}.{}.{field}` has no parameter named `{parameter}`",
+                                export.name,
+                            );
+                        }
                         continue;
                     }
                     assert!(

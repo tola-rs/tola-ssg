@@ -120,7 +120,7 @@ impl BuiltinPackage {
                     Declaration::Native(func) => match func.returns() {
                         Some(CastInfo::Type(ty)) => crate::datalog::methods(*ty)
                             .map(|(name, func)| {
-                                let mut signature = Signature::of(&format!(".{name}"), func);
+                                let mut signature = Signature::of(name, func);
                                 signature.parameters.remove(0);
                                 signature
                             })

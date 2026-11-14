@@ -599,14 +599,28 @@ fn package_page(name: &str, requested: &[String], language: HelpLanguage) -> Res
         if let ExportDeclaration::Function(signature) = &export.declaration {
             write_parameters(&mut text, signature, language, parameter_prose);
         }
+        let mut methods = Vec::new();
         for method in &export.methods {
+            let parameters = translation
+                .map(|translation| translation.method_parameters(&export.name, &method.name))
+                .unwrap_or_default();
+            let prose = |name: &str| {
+                parameters
+                    .get(name)
+                    .copied()
+                    .filter(|text| !text.is_empty())
+            };
+            let declaration = method.method_code();
             text.push_str(&format!(
                 "\n### `{}`\n\n{}\n",
                 method.name,
-                code_block("typst-code", &method.method_code()),
+                code_block("typst-code", &declaration),
             ));
-            write_parameters(&mut text, method, language, |name| {
-                method_parameter_prose(translation, &export.name, &method.name, name)
+            write_parameters(&mut text, method, language, prose);
+            methods.push(Method {
+                name: method.name.clone(),
+                anchor: anchor(&method.name).as_str().to_owned(),
+                signature: reference_signature(&page, method, declaration, prose),
             });
         }
         text.push_str(&related_section(&target, &export.related, &names, language));
@@ -621,17 +635,6 @@ fn package_page(name: &str, requested: &[String], language: HelpLanguage) -> Res
                 returns: None,
             },
         };
-        let methods = export
-            .methods
-            .iter()
-            .map(|method| Method {
-                name: method.name.clone(),
-                anchor: format!(".{}", anchor(&method.name).as_str()),
-                signature: reference_signature(&page, method, method.method_code(), |name| {
-                    method_parameter_prose(translation, &export.name, &method.name, name)
-                }),
-            })
-            .collect();
         let mut related = Vec::new();
         for item in &export.related {
             let link = match item {
@@ -674,16 +677,6 @@ fn package_page(name: &str, requested: &[String], language: HelpLanguage) -> Res
         });
     }
     Ok(page)
-}
-
-fn method_parameter_prose<'a>(
-    translation: Option<&'a Translation>,
-    export: &str,
-    method: &str,
-    parameter: &str,
-) -> Option<&'a str> {
-    let method = method.trim_start_matches('.');
-    translation?.field(export, &format!(".{method}.{parameter}"))
 }
 
 fn reference_signature<'a>(
