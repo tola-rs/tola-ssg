@@ -1,32 +1,39 @@
-def detail-text [row: any]: nothing -> string {
-    if ($row | describe --detailed | get type) == 'string' {
-        $row
+def detail-text [value: any]: nothing -> string {
+    if ($value | describe) == 'string' {
+        $value
     } else {
-        $row | to nuon --indent 2 --serialize
+        $value | to nuon --indent 2 --serialize
     }
 }
 
-def marked-cell [row: record, column: string, original: string, marked: bool]: nothing -> record {
-    let value = ($row | get $original)
-    let text = if $value == null { '' } else { detail-text $value }
-    let mark = if $marked { '✓ ' } else { '  ' }
-    $row | upsert $column $"($mark)($text)"
+def unused-column [name: string, columns: list<string>]: nothing -> string {
+    mut column = $name
+    while $column in $columns { $column += '_' }
+    $column
 }
 
-def toggle-mark [state: record, index_column: string, column: string, original: string]: nothing -> any {
+def marked-text [value: any, marked: bool]: nothing -> string {
+    let text = if $value == null { '' } else { detail-text $value }
+    let mark = if $marked { '✓ ' } else { '  ' }
+    $"($mark)($text)"
+}
+
+def toggle-mark [state: record, index_column: string, first_column: string, original_column: string]: nothing -> any {
     let row = $state.values.rows.row
     if $state.focused != 'rows' or $row == null { return }
     let selection = $state.values.marks.row
     let index = ($row | get $index_column)
-    let marked = if $index in $selection.marked {
+    let was_marked = $index in $selection.marked
+    let marked = if $was_marked {
         $selection.marked | where {|item| $item != $index }
     } else {
-        $selection.marked | append $index | sort
+        $selection.marked | append $index
     }
-    let candidates = $selection.candidates | update $index {|item|
-        marked-cell $item $column $original ($index in $marked)
+    let candidates = $selection.candidates | update $index {|candidate|
+        let value = ($candidate | get $original_column)
+        $candidate | update $first_column (marked-text $value (not $was_marked))
     }
-    [{candidates: $candidates, marked: $marked, status: $"Marked: ($marked | length)"}]
+    [{candidates: $candidates, marked: $marked}]
 }
 
 # Pick original values from a searchable table. Cancel or pass an empty list to return [].
@@ -41,35 +48,34 @@ export def main [
     let rows = $in
     if ($rows | is-empty) { return [] }
     let records = $rows | each {|row|
-        if ($row | describe --detailed | get type) == 'record' { $row } else { {item: $row} }
+        match $row {
+            {} => $row
+            _ => { {item: $row} }
+        }
     }
-    let fields = $records | each {|row| $row | columns } | flatten | uniq
-    let all_columns = if ($fields | is-empty) { ['item'] } else { $fields }
+    let all_columns = ($records | columns | default --empty ['item'])
     let table_columns = if ($columns | is-empty) { $all_columns | first 4 } else { $columns }
     let search_fields = if ($search_columns | is-empty) { $all_columns } else { $search_columns }
     let used = $all_columns | append $table_columns | append $search_fields
-    mut index_column = '__index'
-    while $index_column in $used { $index_column += '_' }
-    mut original_column = '__first'
-    while $original_column in $used { $original_column += '_' }
-    let index_column = $index_column
-    let original_column = $original_column
+    let index_column = (unused-column '__index' $used)
+    let original_column = (unused-column '__first' $used)
     let first_column = ($table_columns | first)
+    # Search the original value even when the first cell displays a check mark.
     let filter_columns = $search_fields | each {|field|
         if $multi and $field == $first_column { $original_column } else { $field }
     }
     let indexed = $records | enumerate | each {|row|
         let item = $row.item | insert $index_column $row.index
         if $multi {
-            let item = ($item | insert $original_column ($item | get -o $first_column))
-            marked-cell $item $first_column $original_column false
+            let value = ($item | get -o $first_column)
+            $item | insert $original_column $value | upsert $first_column (marked-text $value false)
         } else {
             $item
         }
     }
 
     let preview_error = if $preview != null { mktemp -t 'tui-pick-preview.XXXXXXXX' }
-    try {
+    let outcome = (try {
         let detail = tui preview --id details --title Preview --from rows {|row|
             let original = ($rows | get ($row | get $index_column))
             if $preview == null { return (detail-text $original) }
@@ -92,11 +98,13 @@ export def main [
         let preview_pane = tui box '' --border frameless [$detail]
         let panes = [$candidates $preview_pane]
         let app = if $multi {
-            [{candidates: $indexed, marked: [], status: 'Marked: 0'}]
+            [{candidates: $indexed, marked: []}]
             | tui label --titlebar $title
             | tui split --vertical --sizes ['1fr' 3] [
                 (tui split $panes)
-                (tui select --id marks --display status --title ' ' --border frameless)
+                (tui select --id marks --title ' ' --border frameless --display {|row|
+                    $"Marked: ($row.marked | length)"
+                })
             ]
             | tui label --status '/: filter · Tab: focus · Space: mark · Enter: pick · q: quit'
             | tui bind space {|state| toggle-mark $state $index_column $first_column $original_column }
@@ -109,17 +117,17 @@ export def main [
             let message = (open --raw $preview_error)
             if ($message | is-not-empty) { error make {msg: $"Preview failed: ($message)"} }
         }
-        if $outcome.action != 'submit' { return [] }
-        let marked = ($outcome.values.marks?.row?.marked? | default [])
-        let picked = if ($marked | is-not-empty) {
-            $marked
-        } else if $outcome.values.rows.row == null {
-            []
-        } else {
-            [($outcome.values.rows.row | get $index_column)]
-        }
-        $picked | each --keep-empty {|index| $rows | get $index }
+        $outcome
     } finally {
         if $preview_error != null { rm --force $preview_error }
+    })
+
+    if $outcome.action != 'submit' { return [] }
+    let marked = ($outcome.values.marks?.row?.marked? | default [])
+    let picked = if ($marked | is-not-empty) {
+        $marked | sort
+    } else {
+        [($outcome.values.rows.row | get -o $index_column)] | compact
     }
+    $picked | each --keep-empty {|index| $rows | get $index }
 }
