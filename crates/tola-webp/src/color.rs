@@ -130,8 +130,10 @@ impl YuvRow {
                 bottom,
                 top_y,
                 bottom_y,
-                &mut self.u[cell * chroma_stride..][..chroma_stride],
-                &mut self.v[cell * chroma_stride..][..chroma_stride],
+                [
+                    &mut self.u[cell * chroma_stride..][..chroma_stride],
+                    &mut self.v[cell * chroma_stride..][..chroma_stride],
+                ],
             );
         }
         pad_rows(&mut self.y, y_stride, rows);
@@ -150,8 +152,10 @@ impl YuvRow {
                 last,
                 top_y,
                 bottom_y,
-                &mut self.u[chroma_rows * chroma_stride..][..chroma_stride],
-                &mut self.v[chroma_rows * chroma_stride..][..chroma_stride],
+                [
+                    &mut self.u[chroma_rows * chroma_stride..][..chroma_stride],
+                    &mut self.v[chroma_rows * chroma_stride..][..chroma_stride],
+                ],
             );
             chroma_rows += 1;
         }
@@ -236,8 +240,7 @@ fn row_pair<S: Simd>(
     bottom: &[u8],
     top_y: &mut [u8],
     bottom_y: &mut [u8],
-    u: &mut [u8],
-    v: &mut [u8],
+    [u, v]: [&mut [u8]; 2],
 ) {
     let width = top.len() / 4;
     let columns = width.div_ceil(2);

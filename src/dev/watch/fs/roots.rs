@@ -1682,6 +1682,7 @@ mod tests {
             .contains(producer)
     }
 
+    #[cfg(unix)]
     fn has_assets_requirement(
         requirements: &[WatchRequirement],
         path: &std::path::Path,

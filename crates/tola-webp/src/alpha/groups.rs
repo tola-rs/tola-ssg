@@ -143,11 +143,11 @@ pub(super) fn codes_for(
     if *group_count != 1 {
         bits.write(side.ilog2() - 2, 3);
         bits.write(0, 1); // no colour cache in the entropy image
-        let map_codes = bits.write_green_codes(&counts);
+        let map_codes = bits.write_green_codes(counts);
         for _ in 0..4 {
             bits.write_single_tree(0);
         }
-        bits.write_literals(&groups, &map_codes, cancelled)?;
+        bits.write_literals(groups, &map_codes, cancelled)?;
     }
     let mut green_codes = [[(0, 0); GREEN_SYMBOLS]; GROUPS];
     let mut distance_codes = [[(0, 0); DISTANCE_SYMBOLS]; GROUPS];
@@ -294,53 +294,6 @@ fn copy_prefixes(packed: u16) -> ((u32, u32, u32), (u32, u32, u32)) {
     )
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn grouped_alpha_decodes_a_copy_across_entropy_groups() {
-        let (width, height) = (51, 3);
-        let mut samples = vec![0; width * height];
-        let copies: Vec<_> = samples
-            .chunks_exact_mut(width)
-            .enumerate()
-            .map(|(y, row)| {
-                row[15..33].fill(3);
-                // This copy begins in the middle tile and ends in the next.
-                // Its length is the only green symbol in its entropy group.
-                ((y * width + 16) as u32, 16 | (1 << 12))
-            })
-            .collect();
-        let tiles = classify(&samples, width, &|| false).unwrap().unwrap();
-        let alpha = codes_for(
-            &tiles,
-            &samples,
-            width,
-            Bits::bare(Stream::Filtered(1)),
-            255,
-            &copies,
-            &|| false,
-        )
-        .unwrap()
-        .write(&tiles, &samples, width, &copies, &|| false)
-        .unwrap();
-        let rgba: Vec<_> = samples
-            .iter()
-            .flat_map(|&alpha| [12, 93, 160, alpha])
-            .collect();
-        let mut options = crate::EncodeOptions::with_workers(80, 1);
-        options.has_transparency = Some(false);
-        let mut frame =
-            crate::encoder::encode(&rgba, width as u32, height as u32, options, &|| false).unwrap();
-        frame.alpha = Some(alpha);
-        let decoded = image::load_from_memory(&frame.into_bytes())
-            .unwrap()
-            .into_rgba8();
-        assert!(decoded.as_raw().iter().skip(3).step_by(4).eq(&samples));
-    }
-}
-
 pub(super) fn squared_residuals(
     samples: &[u8],
     width: usize,
@@ -447,7 +400,7 @@ pub(super) fn clustered(
             from += length;
         }
         if start < samples.len() {
-            if !signed || start % 4 == 0 {
+            if !signed || start.is_multiple_of(4) {
                 hist[tile(start)][16] += 2;
             }
             from = start + usize::from(packed & 4095) + 1;
@@ -524,4 +477,51 @@ fn log_cost(n: u32) -> u32 {
     let log = n.ilog2();
     let fraction = ((n << (31 - log)) >> 24) & 127;
     log * 128 + u32::from(FRACTION[fraction as usize])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn grouped_alpha_decodes_a_copy_across_entropy_groups() {
+        let (width, height) = (51, 3);
+        let mut samples = vec![0; width * height];
+        let copies: Vec<_> = samples
+            .chunks_exact_mut(width)
+            .enumerate()
+            .map(|(y, row)| {
+                row[15..33].fill(3);
+                // This copy begins in the middle tile and ends in the next.
+                // Its length is the only green symbol in its entropy group.
+                ((y * width + 16) as u32, 16 | (1 << 12))
+            })
+            .collect();
+        let tiles = classify(&samples, width, &|| false).unwrap().unwrap();
+        let alpha = codes_for(
+            &tiles,
+            &samples,
+            width,
+            Bits::bare(Stream::Filtered(1)),
+            255,
+            &copies,
+            &|| false,
+        )
+        .unwrap()
+        .write(&tiles, &samples, width, &copies, &|| false)
+        .unwrap();
+        let rgba: Vec<_> = samples
+            .iter()
+            .flat_map(|&alpha| [12, 93, 160, alpha])
+            .collect();
+        let mut options = crate::EncodeOptions::with_workers(80, 1);
+        options.has_transparency = Some(false);
+        let mut frame =
+            crate::encoder::encode(&rgba, width as u32, height as u32, options, &|| false).unwrap();
+        frame.alpha = Some(alpha);
+        let decoded = image::load_from_memory(&frame.into_bytes())
+            .unwrap()
+            .into_rgba8();
+        assert!(decoded.as_raw().iter().skip(3).step_by(4).eq(&samples));
+    }
 }

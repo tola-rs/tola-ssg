@@ -908,9 +908,10 @@ mod tests {
     /// a read it depends on marks it affected, and a source's own change is direct.
     #[test]
     fn changed_paths_set_rebuild_priority() {
+        let source = reader_path("/site/content/post.typ");
         let evidence = captured_dependencies(
             Path::new("/site"),
-            [PathBuf::from("/site/content/post.typ")],
+            [source.clone()],
             Path::new("/site/program.typ"),
             vec![evidence("templates/document.typ")],
             vec![evidence("site.typ")],
@@ -928,7 +929,7 @@ mod tests {
                 RebuildPriority::Affected,
                 RebuildPriority::Affected,
                 vec![
-                    TypstDependencyReader::ContentSource(PathBuf::from("/site/content/post.typ")),
+                    TypstDependencyReader::ContentSource(source.clone()),
                     TypstDependencyReader::SiteProgram,
                 ],
             ),
@@ -946,9 +947,7 @@ mod tests {
         assert_eq!(parent.source_analysis, RebuildPriority::Direct);
         assert_eq!(
             parent.direct_readers,
-            vec![TypstDependencyReader::ContentSource(reader_path(
-                "/site/content/post.typ"
-            ))]
+            vec![TypstDependencyReader::ContentSource(source)]
         );
 
         // An inventory change rebuilds the analysis without naming any reader of a changed path.

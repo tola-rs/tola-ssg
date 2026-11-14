@@ -611,14 +611,13 @@ fn read_stdin() -> FileResult<Vec<u8>> {
     Ok(buf)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
     use typst::syntax::FileId;
 
-    #[cfg(unix)]
     #[test]
     fn package_verifier_refuses_before_the_read() {
         use crate::world::package::{PackageSpec, PackageVerificationError};

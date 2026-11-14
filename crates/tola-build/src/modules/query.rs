@@ -756,13 +756,9 @@ mod tests {
             format!("blake3:{}", blake3::hash(original.as_bytes()).to_hex())
         );
         assert_eq!(serialized["origin"], "disk");
-        assert!(
-            serialized["diskPath"]
-                .as_str()
-                .unwrap()
-                .ends_with("content/glossary.typ")
-        );
-        assert_eq!(serialized["path"], "content/glossary.typ");
+        let relative = Path::new("content/glossary.typ");
+        assert!(Path::new(serialized["diskPath"].as_str().unwrap()).ends_with(relative));
+        assert_eq!(Path::new(serialized["path"].as_str().unwrap()), relative);
     }
 
     #[test]

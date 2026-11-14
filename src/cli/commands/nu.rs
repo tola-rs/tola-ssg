@@ -157,9 +157,11 @@ fn execute(args: &NuArgs, input_scope: Option<&str>) -> Result<i32> {
         env.insert(tola_build::context::PATH_ENV.into(), Some(path));
     }
     let runtime = prepare_invocation(
-        &current.directory,
+        InvocationContext {
+            directory: current.directory.clone(),
+            environment: env,
+        },
         scope,
-        env,
         Some(entry),
         &[],
         site,
@@ -420,9 +422,11 @@ fn prepare(
         site_modules(workspace, explicit, scope, &token)?
     };
     prepare_invocation(
-        workspace,
+        InvocationContext {
+            directory: workspace.to_owned(),
+            environment: environment(scope),
+        },
         scope,
-        environment(scope),
         entry,
         overlays,
         site,
@@ -432,9 +436,8 @@ fn prepare(
 }
 
 fn prepare_invocation(
-    workspace: &Path,
+    mut context: InvocationContext,
     scope: InputScope,
-    environment: BTreeMap<String, Option<String>>,
     entry: Option<&str>,
     overlays: &[SourceOverlay],
     site: Option<SiteModules>,
@@ -447,16 +450,10 @@ fn prepare_invocation(
             alias.is_none(),
             "a configured Nu module requires a site with tola.toml"
         );
-        return Ok(prepare_runtime(
-            Vec::new(),
-            Vec::new(),
-            InvocationContext {
-                directory: workspace.to_owned(),
-                environment,
-            },
-            overlays.to_vec(),
-        )?
-        .with_host(inherited)?);
+        return Ok(
+            prepare_runtime(Vec::new(), Vec::new(), context, overlays.to_vec())?
+                .with_host(inherited)?,
+        );
     };
     if let Some(alias) = alias {
         let module = site
@@ -468,21 +465,11 @@ fn prepare_invocation(
             "module `{alias}` declares no `[nu]` entry"
         );
     }
-    let directory = if alias.is_some() {
-        site.config.get_root()
-    } else {
-        workspace
-    };
+    if alias.is_some() {
+        context.directory = site.config.get_root().to_owned();
+    }
     let (libraries, dependencies) = runtime_inputs(&site.config, &site.modules);
-    let runtime = prepare_runtime(
-        libraries,
-        dependencies,
-        InvocationContext {
-            directory: directory.to_owned(),
-            environment,
-        },
-        overlays.to_vec(),
-    )?;
+    let runtime = prepare_runtime(libraries, dependencies, context, overlays.to_vec())?;
     ensure!(
         runtime
             .dependencies()

@@ -356,9 +356,14 @@ mod tests {
         let edge = [4, 80, 160, 128];
         let rgba = [hidden, hidden, hidden, ink, hidden, hidden, edge, hidden].concat();
         let filled = extend(&rgba, 2, 4, &|| false).unwrap().unwrap();
-        for (before, after) in rgba.chunks_exact(4).zip(filled.chunks_exact(4)) {
+        for (before, after) in rgba
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(filled.as_chunks::<4>().0)
+        {
             if before[3] == 0 {
-                assert_eq!(after, [4, 80, 160, 0]);
+                assert_eq!(*after, [4, 80, 160, 0]);
             } else {
                 assert_eq!(before, after);
             }

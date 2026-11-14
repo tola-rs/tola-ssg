@@ -143,22 +143,25 @@ fn version_text() -> String {
 
 /// The language one `--lang` value names.
 fn parse_help_language(value: &str) -> Result<HelpLanguage, String> {
-    HelpLanguage::parse(value).ok_or_else(|| {
-        format!("unknown help language `{value}`; use `en` or `zh`")
-    })
+    HelpLanguage::parse(value)
+        .ok_or_else(|| format!("unknown help language `{value}`; use `en` or `zh`"))
 }
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum ModuleCommand {
     /// Check the manifest and declared files without running any code.
-    #[command(after_long_help = "Run tola module check ./theme from the parent directory, or tola module check\nfrom the directory containing tola-module.toml. Tola checks the manifest and its declared\npaths, such as library entries, scripts, assets, and font directories.\nTo compile the module and run its build hooks, use it in a site and run tola check there.")]
+    #[command(
+        after_long_help = "Run tola module check ./theme from the parent directory, or tola module check\nfrom the directory containing tola-module.toml. Tola checks the manifest and its declared\npaths, such as library entries, scripts, assets, and font directories.\nTo compile the module and run its build hooks, use it in a site and run tola check there."
+    )]
     Check {
         /// Directory containing `tola-module.toml`. If omitted, use the current directory.
         #[arg(default_value = ".", value_hint = clap::ValueHint::DirPath)]
         directory: PathBuf,
     },
     /// Run `before-pack` hooks and write the files to ship.
-    #[command(after_long_help = "In theme/tola-module.toml, declare the files to ship. For a module with a lib.typ file:\n  [pack]\n  include = [\"lib.typ\"]\n\nFrom the directory containing theme/, run:\n  mkdir -p dist\n  tola module pack theme --output dist/theme\n\nTola checks the release before replacing dist/theme. It contains lib.typ and\ntola-module.toml. For an example that generates a file before packing, see tola help \"[modules]\".")]
+    #[command(
+        after_long_help = "In theme/tola-module.toml, declare the files to ship. For a module with a lib.typ file:\n  [pack]\n  include = [\"lib.typ\"]\n\nFrom the directory containing theme/, run:\n  mkdir -p dist\n  tola module pack theme --output dist/theme\n\nTola checks the release before replacing dist/theme. It contains lib.typ and\ntola-module.toml. For an example that generates a file before packing, see tola help \"[modules]\"."
+    )]
     Pack {
         /// Directory containing `tola-module.toml`. If omitted, use the current directory.
         #[arg(default_value = ".", value_hint = clap::ValueHint::DirPath)]
@@ -174,7 +177,9 @@ pub enum ModuleCommand {
 #[derive(Subcommand, Debug, Clone)]
 pub enum Commands {
     /// Create a new Tola site.
-    #[command(after_long_help = "From the directory that should contain the new site, run tola init my-site.\nTola creates my-site/tola.toml, site.typ, ignore files, and an empty content/ directory.\nUse tola init my-site --dry-run to see the planned files first.\n\nTo initialize from a module in ./theme, run:\n  tola init my-site --from ./theme --alias notes\nThe module must declare an initializer. Pass its own arguments after --.\nRun tola help \"[modules]\" for a complete initializer example.")]
+    #[command(
+        after_long_help = "From the directory that should contain the new site, run tola init my-site.\nTola creates my-site/tola.toml, site.typ, ignore files, and an empty content/ directory.\nUse tola init my-site --dry-run to see the planned files first.\n\nTo initialize from a module in ./theme, run:\n  tola init my-site --from ./theme --alias notes\nThe module must declare an initializer. Pass its own arguments after --.\nRun tola help \"[modules]\" for a complete initializer example."
+    )]
     Init {
         #[command(flatten)]
         process: ProcessArgs,
@@ -292,7 +297,9 @@ pub enum Commands {
     },
 
     /// Format the site's Typst sources.
-    #[command(after_long_help = "From the site root, run tola fmt --check to see which .typ files need formatting.\nRun tola fmt to apply the changes. With no site configuration, Tola formats .typ files\nunder the current directory with its default settings.")]
+    #[command(
+        after_long_help = "From the site root, run tola fmt --check to see which .typ files need formatting.\nRun tola fmt to apply the changes. With no site configuration, Tola formats .typ files\nunder the current directory with its default settings."
+    )]
     Fmt {
         #[command(flatten)]
         process: ProcessArgs,
@@ -306,11 +313,15 @@ pub enum Commands {
     },
 
     /// Check site configuration, source paths, and local tools.
-    #[command(after_long_help = "From the site root, run tola doctor --json --pretty to print the environment and diagnostic report as JSON.")]
+    #[command(
+        after_long_help = "From the site root, run tola doctor --json --pretty to print the environment and diagnostic report as JSON."
+    )]
     Doctor(DoctorArgs),
 
     /// Refresh locked dependencies in `tola.lock`.
-    #[command(after_long_help = "From the site root, run tola update --dry-run to see what would change in tola.lock.\nTo update just a configured collection named lucide, run tola update lucide.")]
+    #[command(
+        after_long_help = "From the site root, run tola update --dry-run to see what would change in tola.lock.\nTo update just a configured collection named lucide, run tola update lucide."
+    )]
     Update {
         #[command(flatten)]
         process: ProcessArgs,
@@ -340,7 +351,9 @@ pub enum Commands {
     },
 
     /// Check or package a standalone module directory.
-    #[command(after_long_help = "From a directory containing theme/tola-module.toml, run tola module check theme\nto check the manifest and declared files. See tola module pack --help for a release example.")]
+    #[command(
+        after_long_help = "From a directory containing theme/tola-module.toml, run tola module check theme\nto check the manifest and declared files. See tola module pack --help for a release example."
+    )]
     Module {
         #[command(flatten)]
         process: ProcessArgs,
@@ -349,7 +362,9 @@ pub enum Commands {
     },
 
     /// Inspect site inputs and the settings Tola uses.
-    #[command(after_long_help = "From the site root, run tola inspect config to read the settings Tola will use,\nor tola inspect sources to list the content files it finds.")]
+    #[command(
+        after_long_help = "From the site root, run tola inspect config to read the settings Tola will use,\nor tola inspect sources to list the content files it finds."
+    )]
     Inspect {
         #[command(flatten)]
         process: ProcessArgs,
@@ -360,7 +375,9 @@ pub enum Commands {
     },
 
     /// Run a module query or read a labeled metadata value from a Typst file.
-    #[command(after_long_help = "In the site root, create query.typ containing this line:\n  #metadata((title: \"Field notes\")) <result>\n\nRun tola query ./query.typ --label result --json from the same directory.\nIt prints {\"title\":\"Field notes\"}.")]
+    #[command(
+        after_long_help = "In the site root, create query.typ containing this line:\n  #metadata((title: \"Field notes\")) <result>\n\nRun tola query ./query.typ --label result --json from the same directory.\nIt prints {\"title\":\"Field notes\"}."
+    )]
     Query {
         #[command(flatten)]
         process: ProcessArgs,
@@ -383,7 +400,9 @@ pub enum Commands {
     Nu(NuArgs),
 
     /// Configure or display editor integration.
-    #[command(after_long_help = "From the site root, run tola editor setup vscode --dry-run to see the files\nTola would write. Run it without --dry-run to apply those changes.")]
+    #[command(
+        after_long_help = "From the site root, run tola editor setup vscode --dry-run to see the files\nTola would write. Run it without --dry-run to apply those changes."
+    )]
     Editor {
         #[command(subcommand)]
         command: EditorCommand,
@@ -392,7 +411,9 @@ pub enum Commands {
     /// Provide Tola source diagnostics and language queries over stdio.
     ///
     /// If the workspace has no `tola.toml`, the server uses the default settings.
-    #[command(after_long_help = "Start tola lsp as a stdio language server in your editor's site workspace.\nFor example, run tola editor template helix to print the client settings for Helix.")]
+    #[command(
+        after_long_help = "Start tola lsp as a stdio language server in your editor's site workspace.\nFor example, run tola editor template helix to print the client settings for Helix."
+    )]
     Lsp {
         #[command(flatten)]
         process: ProcessArgs,
@@ -405,11 +426,15 @@ pub enum Commands {
     },
 
     /// Read configuration, package, and built-in script documentation.
-    #[command(after_long_help = "You can read the built-in reference from any directory.\nRun tola help \"[assets]\" for static-file settings, or\n  tola help \"@tola/image\" resize-image\nfor the function's signature and examples.")]
+    #[command(
+        after_long_help = "You can read the built-in reference from any directory.\nRun tola help \"[assets]\" for static-file settings, or\n  tola help \"@tola/image\" resize-image\nfor the function's signature and examples."
+    )]
     Help(HelpArgs),
 
     /// Print or export the Tola site authoring skill.
-    #[command(after_long_help = "Run these commands from any directory:\n  tola skill --list\n  tola skill site assets files\n  tola skill site assets --all -o assets-guide.md\nThe first lists sections, the second reads one section, and the third exports a section\nwith its subsections to assets-guide.md in the current directory.\nFor a module's own guide command, see tola help \"[modules]\".")]
+    #[command(
+        after_long_help = "Run these commands from any directory:\n  tola skill --list\n  tola skill site assets files\n  tola skill site assets --all -o assets-guide.md\nThe first lists sections, the second reads one section, and the third exports a section\nwith its subsections to assets-guide.md in the current directory.\nFor a module's own guide command, see tola help \"[modules]\"."
+    )]
     Skill {
         #[command(flatten)]
         process: ProcessArgs,
@@ -418,15 +443,21 @@ pub enum Commands {
     },
 
     /// Write a shell completion script to stdout.
-    #[command(after_long_help = "From any directory, run tola completions zsh > _tola to write the Zsh completion script\nto _tola in the current directory.")]
+    #[command(
+        after_long_help = "From any directory, run tola completions zsh > _tola to write the Zsh completion script\nto _tola in the current directory."
+    )]
     Completions(CompletionsArgs),
 
     /// Generate a roff manual page.
-    #[command(after_long_help = "From any directory, run tola manpage --output tola.1 to write a manual page in the current directory.\nRun man ./tola.1 to read it.")]
+    #[command(
+        after_long_help = "From any directory, run tola manpage --output tola.1 to write a manual page in the current directory.\nRun man ./tola.1 to read it."
+    )]
     Manpage(ManpageArgs),
 
     /// Print the Tola, Typst, and embedded Nu versions.
-    #[command(after_long_help = "From any directory, run tola version --json --pretty to print the three version numbers as indented JSON.")]
+    #[command(
+        after_long_help = "From any directory, run tola version --json --pretty to print the three version numbers as indented JSON."
+    )]
     Version(VersionArgs),
 
     /// Run a command declared by one of this site’s modules.
@@ -725,13 +756,19 @@ pub struct DevelopmentArgs {
 pub enum InspectCommand {
     /// List the site's content source files.
     #[command(override_usage = "tola inspect [-C <FILE>] sources [OPTIONS] [PATH]...")]
-    #[command(after_long_help = "From the site root, run tola inspect sources content/guide.typ to check whether that file\nis selected as a content source. Omit the path to list all sources.")]
+    #[command(
+        after_long_help = "From the site root, run tola inspect sources content/guide.typ to check whether that file\nis selected as a content source. Omit the path to list all sources."
+    )]
     Sources(SourceInspectArgs),
     /// List configured icon collections or the names in one collection.
-    #[command(after_long_help = "From the site root, run tola inspect icons brand to list icons in the site's brand collection.\nUse tola inspect icons brand --module notes to read the collection from the notes module.")]
+    #[command(
+        after_long_help = "From the site root, run tola inspect icons brand to list icons in the site's brand collection.\nUse tola inspect icons brand --module notes to read the collection from the notes module."
+    )]
     Icons(IconInspectArgs),
     /// List the fonts available when Typst compiles the site.
-    #[command(after_long_help = "From the site root, run tola inspect fonts --json to list the fonts available to the Typst compiler.")]
+    #[command(
+        after_long_help = "From the site root, run tola inspect fonts --json to list the fonts available to the Typst compiler."
+    )]
     Fonts {
         #[command(flatten)]
         input: ScopeArgs,
@@ -743,7 +780,9 @@ pub enum InspectCommand {
         display: OutputArgs,
     },
     /// Show the settings, modules, and paths Tola uses for this site.
-    #[command(after_long_help = "From the site root, run tola inspect config --mode dev --json --pretty.\nLook in hooks.stages for the hook order and skip reasons. If you use include,\nconfig_sources lists the loaded files and field_origins shows where each setting came from.\nInspection never runs hooks.")]
+    #[command(
+        after_long_help = "From the site root, run tola inspect config --mode dev --json --pretty.\nLook in hooks.stages for the hook order and skip reasons. If you use include,\nconfig_sources lists the loaded files and field_origins shows where each setting came from.\nInspection never runs hooks."
+    )]
     Config(InspectConfigArgs),
 }
 
@@ -861,7 +900,9 @@ pub struct CompilerFontArgs {
 #[derive(Subcommand, Debug, Clone)]
 pub enum EditorCommand {
     /// Regenerate editor packages and merge workspace settings.
-    #[command(after_long_help = "From the site root, run tola editor setup helix --dry-run to preview the Helix setup.\nOmit --dry-run to write the files.")]
+    #[command(
+        after_long_help = "From the site root, run tola editor setup helix --dry-run to preview the Helix setup.\nOmit --dry-run to write the files."
+    )]
     Setup {
         #[command(flatten)]
         process: ProcessArgs,
@@ -885,7 +926,9 @@ pub enum EditorCommand {
         dry_run: bool,
     },
     /// Regenerate editor packages without changing editor settings.
-    #[command(after_long_help = "From the site root, run tola editor packages after updating a module to refresh the Typst packages used by your editor.")]
+    #[command(
+        after_long_help = "From the site root, run tola editor packages after updating a module to refresh the Typst packages used by your editor."
+    )]
     Packages {
         #[command(flatten)]
         process: ProcessArgs,
@@ -896,7 +939,9 @@ pub enum EditorCommand {
         site: SiteArgs,
     },
     /// Print one editor's configuration and where it belongs, without writing files.
-    #[command(after_long_help = "From any directory, run tola editor template helix to print the configuration for .helix/languages.toml.")]
+    #[command(
+        after_long_help = "From any directory, run tola editor template helix to print the configuration for .helix/languages.toml."
+    )]
     Template {
         #[command(flatten)]
         process: ProcessArgs,

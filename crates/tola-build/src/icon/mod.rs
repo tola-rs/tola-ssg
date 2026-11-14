@@ -904,18 +904,6 @@ mod tests {
         assert!(next.collections.get("brand", "mark").is_none());
     }
 
-    fn brand_icons_config(root: &Path) -> ResolvedSiteConfig {
-        crate::config::tests::load_test_config(root, BRAND_COLLECTION_TOML)
-    }
-
-    const SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill="currentColor" d="M0 0h24v24H0z"/></svg>"#;
-
-    const BRAND_COLLECTION_TOML: &str = r#"
-            [icons.collections.brand]
-            source-type = "local-svg-dir"
-            path = "brand"
-        "#;
-
     fn prepare_icons(
         config: &ResolvedSiteConfig,
         cancellation: &BuildCancellation,
@@ -958,11 +946,19 @@ mod tests {
     #[test]
     fn reuse_rejects_internal_sources() {
         use std::os::unix::fs::symlink;
+        const SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill="currentColor" d="M0 0h24v24H0z"/></svg>"#;
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path();
         std::fs::create_dir(root.join("brand")).unwrap();
         std::fs::write(root.join("brand/mark.svg"), SVG).unwrap();
-        let config = brand_icons_config(root);
+        let config = crate::config::tests::load_test_config(
+            root,
+            r#"
+            [icons.collections.brand]
+            source-type = "local-svg-dir"
+            path = "brand"
+        "#,
+        );
         let inventory = prepare_icons(&config, &BuildCancellation::new(), None).unwrap();
         symlink(root.join("brand"), root.join(tola_input::INTERNAL_DIR)).unwrap();
 

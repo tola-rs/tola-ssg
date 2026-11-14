@@ -1,4 +1,5 @@
 use super::*;
+#[cfg(unix)]
 use crate::cli::external::{CommandExit, run as run_process};
 use std::path::{Path, PathBuf};
 use tola_diagnostic::Severity;

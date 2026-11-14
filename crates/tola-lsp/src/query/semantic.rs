@@ -1172,7 +1172,7 @@ fn signature_information(
                 parameter.docs.as_deref(),
             ) {
                 (ParameterKind::Named, true, Some(docs)) => {
-                    Some(super::markdown_documentation(&format!("Required. {docs}")))
+                    Some(super::markdown_documentation(format!("Required. {docs}")))
                 }
                 (ParameterKind::Named, true, None) => {
                     Some(super::markdown_documentation("Required."))
@@ -1366,7 +1366,7 @@ pub(super) fn parameter_completions(
                     parameter.docs.as_deref(),
                 ) {
                     (ParameterKind::Named, true, Some(docs)) => {
-                        Some(super::markdown_documentation(&format!("Required. {docs}")))
+                        Some(super::markdown_documentation(format!("Required. {docs}")))
                     }
                     (ParameterKind::Named, true, None) => {
                         Some(super::markdown_documentation("Required."))

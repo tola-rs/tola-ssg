@@ -386,7 +386,8 @@ export async function run(): Promise<void> {
         ).join('\n'),
         /get-site/,
       )
-    }))
+    // Nushell 0.117 panics when its symbol provider converts a bracketed path to an LSP URI.
+    }, { folderName: 'selected site' }))
 
   await check('Documents folders answer language requests', () =>
     withSite(async (workspace) => {

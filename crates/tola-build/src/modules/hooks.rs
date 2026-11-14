@@ -178,7 +178,10 @@ mod tests {
             assert_eq!(context.hook.unwrap().stage, "before-build");
             let site = context.site.unwrap();
             let root = site.root;
-            assert_eq!(root, std::env::current_dir().unwrap());
+            assert_eq!(
+                root.canonicalize().unwrap(),
+                std::env::current_dir().unwrap().canonicalize().unwrap()
+            );
             assert_eq!(
                 site.config_path.canonicalize().unwrap(),
                 root.join("tola.toml").canonicalize().unwrap()

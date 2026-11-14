@@ -2027,6 +2027,7 @@ mod tests {
         epoch
     }
 
+    #[cfg(unix)]
     fn deliver_event(changes: &mut FileChangeSource, event: &notify::Event) {
         forward_watch_result(
             Ok(event.clone()),

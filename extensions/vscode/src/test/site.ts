@@ -69,6 +69,7 @@ export type EditorSite = {
 }
 
 type SiteOptions = {
+  folderName?: string
   program?: string
   content?: string
   configuration?: string
@@ -156,7 +157,10 @@ export async function withSites(
   const plain = vscode.Uri.file(path.join(plainRoot, 'ordinary.typ'))
   const roots = Array.from(
     { length: count },
-    (_, index) => path.join(temporary, index === 0 ? 'selected site [one]' : `selected site [${index + 1}]`),
+    (_, index) => path.join(
+      temporary,
+      index === 0 ? options.folderName ?? 'selected site [one]' : `selected site [${index + 1}]`,
+    ),
   )
   const sites: EditorSite[] = roots.map((root, index) => ({
     name: path.basename(root),

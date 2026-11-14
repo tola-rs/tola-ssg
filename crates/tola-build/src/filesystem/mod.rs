@@ -90,7 +90,7 @@ pub use dev_server::DevServerAddress;
 pub(crate) use identity::{FilesystemSourceKind, FilesystemWatchEvidence};
 pub(crate) use lock::{FileLock, FileLockError};
 pub(crate) use observation::{
-    FilesystemSourceObservation, TreeObservation, observe_file_source,
+    FilesystemSourceObservation, TreeMemberWalk, TreeObservation, observe_file_source,
     observe_tree_source_selected, regular_file_symlink_target, tree_link_error,
     walk_tree_members_selected,
 };

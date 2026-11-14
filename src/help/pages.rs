@@ -210,7 +210,9 @@ fn index_page(category: HelpCategory, language: HelpLanguage) -> HelpPage {
         }
         HelpCategory::Scripts => {
             markdown.push_str(match language {
-                HelpLanguage::English => "# Built-in scripts\n\nRun these scripts with `tola nu`.\n\n",
+                HelpLanguage::English => {
+                    "# Built-in scripts\n\nRun these scripts with `tola nu`.\n\n"
+                }
                 HelpLanguage::SimplifiedChinese => "# 内置脚本\n\n用 `tola nu` 运行以下脚本。\n\n",
             });
             for script in super::scripts::builtins() {
@@ -611,7 +613,9 @@ fn package_page(name: &str, requested: &[String], language: HelpLanguage) -> Res
                 HelpLanguage::English => {
                     format!("`{receiver}` is the value returned by `{name}(...)`.")
                 }
-                HelpLanguage::SimplifiedChinese => format!("`{receiver}` 是 `{name}(...)` 的返回值。"),
+                HelpLanguage::SimplifiedChinese => {
+                    format!("`{receiver}` 是 `{name}(...)` 的返回值。")
+                }
             };
             let parameters = translation
                 .map(|translation| translation.method_parameters(&export.name, &method.name))

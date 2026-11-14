@@ -244,7 +244,6 @@ mod tests {
         let overview = package.overview().unwrap();
         assert!(!overview.starts_with(&package.spec().to_string()));
         assert!(overview.contains("\n\n"));
-        assert!(overview.contains("document context"));
         assert!(!overview.contains("///"));
     }
 

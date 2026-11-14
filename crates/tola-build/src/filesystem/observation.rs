@@ -109,7 +109,7 @@ pub(crate) struct TreeObservation<'a> {
     pub(crate) display_root: &'a Path,
     pub(crate) member_label: &'a str,
     pub(crate) follow_file_symlinks: bool,
-    pub(crate) validate_member: &'a dyn Fn(&Path, &Path, Option<&Path>) -> Result<()>,
+    pub(crate) validate_member: &'a ValidateTreeMember<'a>,
 }
 
 /// Observe selected files from an already-resolved tree while retaining their root identity.
@@ -155,11 +155,13 @@ pub(crate) fn observe_tree_source_selected(
     walk_tree_members_selected(
         source_identity,
         cancellation,
-        display_root,
-        member_label,
-        follow_file_symlinks,
+        &TreeMemberWalk {
+            display_root,
+            member_label,
+            follow_file_symlinks,
+            validate_member,
+        },
         selected,
-        validate_member,
         &mut |path, relative, target| {
             files.push(read_source_file(
                 path,
@@ -183,12 +185,9 @@ pub(crate) fn observe_tree_source_selected(
 pub(crate) fn walk_tree_members_selected(
     source_identity: &FilesystemSourceIdentity,
     cancellation: &crate::cancellation::BuildCancellation,
-    display_root: &Path,
-    member_label: &str,
-    follow_file_symlinks: bool,
+    walk: &TreeMemberWalk<'_>,
     selected: &dyn Fn(&Path, bool) -> bool,
-    validate_member: &dyn Fn(&Path, &Path, Option<&Path>) -> Result<()>,
-    visitor: &mut dyn FnMut(&Path, &Path, Option<&Path>) -> Result<()>,
+    visitor: &mut VisitTreeMember<'_>,
 ) -> Result<()> {
     cancellation.ensure_active()?;
     if selected(Path::new(""), true) {
@@ -196,17 +195,12 @@ pub(crate) fn walk_tree_members_selected(
             source_identity.logical_path(),
             source_identity.logical_path(),
             cancellation,
-            &TreeMemberWalk {
-                display_root,
-                member_label,
-                follow_file_symlinks,
-                validate_member,
-            },
+            walk,
             selected,
             visitor,
         )?;
     }
-    ensure_root_target_unchanged(source_identity, display_root)
+    ensure_root_target_unchanged(source_identity, walk.display_root)
 }
 
 /// Observe one already-resolved exact regular file.
@@ -250,7 +244,7 @@ fn refresh_tree_files(
     changed_paths: &[PathBuf],
     cancellation: &crate::cancellation::BuildCancellation,
     display_root: &Path,
-    validate_member: &dyn Fn(&Path, &Path, Option<&Path>) -> Result<()>,
+    validate_member: &ValidateTreeMember<'_>,
 ) -> Result<Option<FilesystemSourceObservation>> {
     let canonical_root = canonical_source_path(source_identity, display_root)?;
     let mut changed_indices = Vec::new();
@@ -321,12 +315,15 @@ fn refresh_tree_files(
     }))
 }
 
+type ValidateTreeMember<'a> = dyn Fn(&Path, &Path, Option<&Path>) -> Result<()> + 'a;
+type VisitTreeMember<'a> = dyn FnMut(&Path, &Path, Option<&Path>) -> Result<()> + 'a;
+
 /// How one tree walk names and validates the members it reports.
-struct TreeMemberWalk<'a> {
-    display_root: &'a Path,
-    member_label: &'a str,
-    follow_file_symlinks: bool,
-    validate_member: &'a dyn Fn(&Path, &Path, Option<&Path>) -> Result<()>,
+pub(crate) struct TreeMemberWalk<'a> {
+    pub(crate) display_root: &'a Path,
+    pub(crate) member_label: &'a str,
+    pub(crate) follow_file_symlinks: bool,
+    pub(crate) validate_member: &'a ValidateTreeMember<'a>,
 }
 
 /// One recursive walk over the membership rules every caller shares: a member that is a symbolic
@@ -338,7 +335,7 @@ fn scan_tree_directory(
     cancellation: &crate::cancellation::BuildCancellation,
     walk: &TreeMemberWalk<'_>,
     selected: &dyn Fn(&Path, bool) -> bool,
-    visit: &mut dyn FnMut(&Path, &Path, Option<&Path>) -> Result<()>,
+    visit: &mut VisitTreeMember<'_>,
 ) -> Result<()> {
     cancellation.ensure_active()?;
     let entries = crate::filesystem::read_sorted_entries(

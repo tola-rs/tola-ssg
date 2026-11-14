@@ -132,14 +132,18 @@ impl AssetUrls {
                     crate::filesystem::walk_tree_members_selected(
                         &source.source_identity,
                         cancellation,
-                        config.get_root(),
-                        TREE_MEMBER_LABEL,
-                        id.follow_file_symlinks,
+                        &crate::filesystem::TreeMemberWalk {
+                            display_root: config.get_root(),
+                            member_label: TREE_MEMBER_LABEL,
+                            follow_file_symlinks: id.follow_file_symlinks,
+                            validate_member: &|relative, logical, target| {
+                                validate_tree_member(
+                                    config, boundary, id, relative, logical, target,
+                                )
+                            },
+                        },
                         &|relative, directory| {
                             id.selects_tree_member(&source.source_identity, relative, directory)
-                        },
-                        &|relative, logical, target| {
-                            validate_tree_member(config, boundary, id, relative, logical, target)
                         },
                         &mut |logical, relative, _| record(logical, relative),
                     )?;

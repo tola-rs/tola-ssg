@@ -323,50 +323,6 @@ fn matches(
     Ok(copies)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn layered_prediction_round_trips_right_edge() {
-        let (width, height) = (133, 81);
-        let rgba: Vec<_> = (0..height)
-            .flat_map(|y| {
-                (0..width)
-                    .flat_map(move |x| [30, 70, 110, ((x * 3 + y * 7 + (x + y) % 11) & 255) as u8])
-            })
-            .collect();
-        let mut residual = vec![0; width * height];
-        super::super::filter(
-            Predictor::Gradient,
-            rgba.as_chunks::<4>().0,
-            width,
-            &mut residual,
-            &|| false,
-        )
-        .unwrap();
-        let alpha = encode(&mut residual, width, 13, usize::MAX / 2, &|| false)
-            .unwrap()
-            .unwrap();
-        let mut options = crate::EncodeOptions::with_workers(80, 1);
-        options.has_transparency = Some(false);
-        let mut image =
-            crate::encoder::encode(&rgba, width as u32, height as u32, options, &|| false).unwrap();
-        image.alpha = Some(alpha);
-        let decoded = image::load_from_memory(&image.into_bytes())
-            .unwrap()
-            .into_rgba8();
-        assert!(
-            decoded
-                .as_raw()
-                .iter()
-                .skip(3)
-                .step_by(4)
-                .eq(rgba.iter().skip(3).step_by(4))
-        );
-    }
-}
-
 pub(super) fn average(
     samples: &mut [u8],
     width: usize,
@@ -471,4 +427,48 @@ fn tile_entropy(histogram: &[u16; 256]) -> u32 {
         costs
     };
     histogram.iter().map(|&n| COSTS[usize::from(n)]).sum()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn layered_prediction_round_trips_right_edge() {
+        let (width, height) = (133, 81);
+        let rgba: Vec<_> = (0..height)
+            .flat_map(|y| {
+                (0..width)
+                    .flat_map(move |x| [30, 70, 110, ((x * 3 + y * 7 + (x + y) % 11) & 255) as u8])
+            })
+            .collect();
+        let mut residual = vec![0; width * height];
+        super::super::filter(
+            Predictor::Gradient,
+            rgba.as_chunks::<4>().0,
+            width,
+            &mut residual,
+            &|| false,
+        )
+        .unwrap();
+        let alpha = encode(&mut residual, width, 13, usize::MAX / 2, &|| false)
+            .unwrap()
+            .unwrap();
+        let mut options = crate::EncodeOptions::with_workers(80, 1);
+        options.has_transparency = Some(false);
+        let mut image =
+            crate::encoder::encode(&rgba, width as u32, height as u32, options, &|| false).unwrap();
+        image.alpha = Some(alpha);
+        let decoded = image::load_from_memory(&image.into_bytes())
+            .unwrap()
+            .into_rgba8();
+        assert!(
+            decoded
+                .as_raw()
+                .iter()
+                .skip(3)
+                .step_by(4)
+                .eq(rgba.iter().skip(3).step_by(4))
+        );
+    }
 }
