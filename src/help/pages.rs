@@ -22,6 +22,7 @@ use crate::i18n::{self, CONFIG_KEYS, CONFIG_USAGE, HelpLanguage, Translation};
 struct ConfigTable {
     section: &'static str,
     array: bool,
+    key: bool,
 }
 
 impl ConfigTable {
@@ -30,6 +31,7 @@ impl ConfigTable {
         Self {
             section,
             array: false,
+            key: false,
         }
     }
 
@@ -38,11 +40,23 @@ impl ConfigTable {
         Self {
             section,
             array: true,
+            key: false,
+        }
+    }
+
+    /// One top-level key, rather than a TOML table.
+    const fn new_key(section: &'static str) -> Self {
+        Self {
+            section,
+            array: false,
+            key: true,
         }
     }
 
     fn header(&self) -> String {
-        if self.array {
+        if self.key {
+            self.section.to_owned()
+        } else if self.array {
             format!("[[{}]]", self.section)
         } else {
             format!("[{}]", self.section)
@@ -51,6 +65,7 @@ impl ConfigTable {
 }
 
 const TABLES: &[ConfigTable] = &[
+    ConfigTable::new_key("include"),
     ConfigTable::new(SiteSectionConfig::TEMPLATE_SECTION),
     ConfigTable::new(BuildSectionConfig::TEMPLATE_SECTION),
     ConfigTable::new(MinifyConfig::TEMPLATE_SECTION),
@@ -175,8 +190,8 @@ fn index_page(category: HelpCategory, language: HelpLanguage) -> HelpPage {
     match category {
         HelpCategory::Config => {
             markdown.push_str(match language {
-                HelpLanguage::English => "# Configuration tables\n\nLook up settings in `tola.toml`. Use `tola help \"[build]\"` to find the publish directory, or `tola help \"[hooks]\"` to see when build scripts run.\n\n",
-                HelpLanguage::SimplifiedChinese => "# 配置表\n\n查阅 `tola.toml`。用 `tola help --lang zh \"[build]\"` 查发布目录，用 `tola help --lang zh \"[hooks]\"` 查脚本在哪个构建阶段运行。\n\n",
+                HelpLanguage::English => "# Configuration\n\nLook up settings in `tola.toml`. Use `tola help \"[build]\"` to find the publish directory, or `tola help \"[hooks]\"` to see when build scripts run.\n\n",
+                HelpLanguage::SimplifiedChinese => "# 配置\n\n查阅 `tola.toml`。用 `tola help --lang zh \"[build]\"` 查发布目录，用 `tola help --lang zh \"[hooks]\"` 查脚本在哪个构建阶段运行。\n\n",
             });
             // A table with settings of its own is an entry; so is a container grouping several
             // child tables.
@@ -905,7 +920,7 @@ fn choice_line(label: &str, choices: impl IntoIterator<Item = String>) -> String
 }
 
 fn table_choices() -> String {
-    choice_line("Configuration tables", config_sections())
+    choice_line("Configuration entries", config_sections())
 }
 
 fn package_choices() -> String {
@@ -1002,11 +1017,13 @@ mod tests {
             targets(&["package"]),
             targets(&["scripts"]),
         ];
-        requests.extend(
-            TABLES
-                .iter()
-                .map(|table| vec![format!("[{}]", table.section)]),
-        );
+        requests.extend(TABLES.iter().map(|table| {
+            vec![if table.key {
+                table.section.to_owned()
+            } else {
+                format!("[{}]", table.section)
+            }]
+        }));
         for package in tola_packages::builtin_packages() {
             let name = package.spec().name.to_string();
             requests.push(vec![format!("@tola/{name}")]);
@@ -1015,6 +1032,18 @@ mod tests {
             requests.push(selected);
         }
         requests
+    }
+
+    #[test]
+    fn include_is_a_top_level_key_in_help() {
+        for language in [HelpLanguage::English, HelpLanguage::SimplifiedChinese] {
+            let index = page(&targets(&["config"]), language).unwrap().markdown();
+            let include = page(&targets(&["include"]), language).unwrap().markdown();
+            assert!(index.contains("`include`"));
+            assert!(include.starts_with("# include\n"));
+            assert!(include.contains("include = ["));
+            assert!(!include.contains("[include]"));
+        }
     }
 
     #[test]

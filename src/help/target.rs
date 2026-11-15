@@ -216,6 +216,9 @@ pub(crate) fn request(targets: &[String]) -> Option<LinkTarget> {
             } else {
                 match target.as_str() {
                     "config" => PageId::Index(HelpCategory::Config),
+                    "include" => PageId::Config {
+                        section: "include".into(),
+                    },
                     "package" => PageId::Index(HelpCategory::Packages),
                     "scripts" => PageId::Index(HelpCategory::Scripts),
                     _ => return None,

@@ -260,6 +260,7 @@ static CONFIG: LazyLock<Catalog> = LazyLock::new(|| {
         "hooks.before-build",
         "hooks.generate-outputs",
         "icons",
+        "include",
         "modules",
         "options",
         "server",
