@@ -1,7 +1,7 @@
 //! Host-selected I/O resources shared across build sessions and attempts.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::cancellation::{BuildCancellation, BuildCancelled};
@@ -12,7 +12,7 @@ use tola_input::{InputScope, NetworkAccess};
 /// Shared native I/O resources, independent of a session's accepted build results.
 ///
 /// Clones share the parsed-file cache and lazily created HTTP connection pool
-/// and runtime. Construction reads and writes no file and opens no connection. Icons are
+/// for remote resources. Construction reads and writes no file and opens no connection. Icons are
 /// cached under the site's `.tola/cache/icons/sha256` directory.
 #[derive(Clone)]
 pub struct BuildResources {
@@ -291,28 +291,17 @@ pub enum HttpDownloadError {
 
 struct HttpDownloads {
     client: reqwest::Client,
-    runtime: DownloadRuntime,
 }
 
 impl HttpDownloads {
     fn new() -> Result<Self, HttpDownloadError> {
-        let runtime = DownloadRuntime(Some(
-            tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(1)
-                .enable_all()
-                .build()
-                .map_err(HttpDownloadError::Runtime)?,
-        ));
-        let client = {
-            let _entered = runtime.get().enter();
-            reqwest::Client::builder()
-                .connect_timeout(Duration::from_secs(10))
-                .timeout(Duration::from_secs(30))
-                .redirect(reqwest::redirect::Policy::limited(5))
-                .build()
-                .map_err(request_error)?
-        };
-        Ok(Self { client, runtime })
+        let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(30))
+            .redirect(reqwest::redirect::Policy::limited(5))
+            .build()
+            .map_err(request_error)?;
+        Ok(Self { client })
     }
 
     fn download(
@@ -321,62 +310,18 @@ impl HttpDownloads {
         limit: usize,
         cancellation: &BuildCancellation,
     ) -> Result<Vec<u8>, HttpDownloadError> {
-        cancellation.ensure_active()?;
+        use tola_input::http::WaitError;
+
         let url = url.to_owned();
         let client = self.client.clone();
-        let worker_cancellation = cancellation.clone();
-        let (completed, completion) = mpsc::sync_channel(1);
-        let _task = DownloadTask(self.runtime.get().spawn(async move {
-            let response = tokio::select! {
-                biased;
-                cancelled = wait_cancelled(&worker_cancellation) => {
-                    Err(HttpDownloadError::Cancelled(cancelled))
-                }
-                bytes = download_bytes(&client, &url, limit) => bytes,
-            };
-            let _ = completed.send(response);
-        }));
-        let response = completion
-            .recv()
-            .map_err(|_| HttpDownloadError::WorkerStopped)?;
-        cancellation.ensure_active()?;
-        response
-    }
-}
-
-struct DownloadTask(tokio::task::JoinHandle<()>);
-
-impl Drop for DownloadTask {
-    fn drop(&mut self) {
-        self.0.abort();
-    }
-}
-
-/// Uses nonblocking shutdown because it may be dropped on an async thread.
-struct DownloadRuntime(Option<tokio::runtime::Runtime>);
-
-impl DownloadRuntime {
-    fn get(&self) -> &tokio::runtime::Runtime {
-        self.0
-            .as_ref()
-            .expect("HTTP runtime exists until its owner is dropped")
-    }
-}
-
-impl Drop for DownloadRuntime {
-    fn drop(&mut self) {
-        if let Some(runtime) = self.0.take() {
-            runtime.shutdown_background();
-        }
-    }
-}
-
-async fn wait_cancelled(cancellation: &BuildCancellation) -> BuildCancelled {
-    loop {
-        if let Err(cancelled) = cancellation.ensure_active() {
-            return cancelled;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
+        tola_input::http::wait(cancellation.flag(), async move {
+            download_bytes(&client, &url, limit).await
+        })
+        .map_err(|error| match error {
+            WaitError::Cancelled => HttpDownloadError::Cancelled(BuildCancelled),
+            WaitError::Runtime(error) => HttpDownloadError::Runtime(error),
+            WaitError::Stopped => HttpDownloadError::WorkerStopped,
+        })?
     }
 }
 

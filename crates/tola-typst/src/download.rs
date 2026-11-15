@@ -5,11 +5,11 @@
 //! Typst packages travel the same `rustls` client as the rest of the workspace.
 
 use std::any::Any;
-use std::io::{self, Read};
+use std::io::{self, Cursor, Read};
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use reqwest::blocking::Client;
+use reqwest::Client;
 use reqwest::header::USER_AGENT;
 use typst_kit::downloader::Downloader;
 
@@ -17,22 +17,25 @@ use typst_kit::downloader::Downloader;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Downloads Typst Universe packages and mirrors over the workspace TLS stack.
-#[derive(Debug, Clone)]
-pub struct HttpDownloader {
+pub(crate) struct HttpDownloader {
     user_agent: String,
+    cancellation: crate::BundleCancellation,
 }
 
 impl HttpDownloader {
     /// Create a downloader that identifies itself as `user_agent`.
-    pub fn new(user_agent: impl Into<String>) -> Self {
+    pub(crate) fn new(
+        user_agent: impl Into<String>,
+        cancellation: crate::BundleCancellation,
+    ) -> Self {
         Self {
             user_agent: user_agent.into(),
+            cancellation,
         }
     }
 }
 
-/// The process-wide blocking client. One client shares one connection pool and one runtime
-/// thread, however many package stores a build creates.
+/// One connection pool for all Typst package stores.
 fn client() -> io::Result<&'static Client> {
     static CLIENT: OnceLock<Client> = OnceLock::new();
     if let Some(client) = CLIENT.get() {
@@ -47,24 +50,38 @@ fn client() -> io::Result<&'static Client> {
 
 impl Downloader for HttpDownloader {
     fn stream(&self, _: &dyn Any, url: &str) -> io::Result<(Option<usize>, Box<dyn Read>)> {
-        let response = client()?
-            .get(url)
-            .header(USER_AGENT, &self.user_agent)
-            .send()
-            .map_err(io::Error::other)?;
-        let status = response.status();
-        if status == reqwest::StatusCode::NOT_FOUND {
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("{url} is not available"),
-            ));
-        }
-        if !status.is_success() {
-            return Err(io::Error::other(format!("{url} answered {status}")));
-        }
-        Ok((
-            response.content_length().map(|size| size as usize),
-            Box::new(response),
-        ))
+        let bytes = self.download(&(), url)?;
+        Ok((Some(bytes.len()), Box::new(Cursor::new(bytes))))
     }
+
+    fn download(&self, _: &dyn Any, url: &str) -> io::Result<Vec<u8>> {
+        let request = client()?.get(url).header(USER_AGENT, &self.user_agent);
+        tola_input::http::wait(
+            self.cancellation.flag(),
+            async move { download(request).await },
+        )
+        .map_err(io::Error::other)?
+    }
+}
+
+async fn download(request: reqwest::RequestBuilder) -> io::Result<Vec<u8>> {
+    let response = request.send().await.map_err(io::Error::other)?;
+    let status = response.status();
+    if status == reqwest::StatusCode::NOT_FOUND {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("{} is not available", response.url()),
+        ));
+    }
+    if !status.is_success() {
+        return Err(io::Error::other(format!(
+            "{} answered {status}",
+            response.url()
+        )));
+    }
+    response
+        .bytes()
+        .await
+        .map(|bytes| bytes.to_vec())
+        .map_err(io::Error::other)
 }

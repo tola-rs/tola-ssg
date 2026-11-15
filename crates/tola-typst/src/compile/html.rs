@@ -162,8 +162,14 @@ fn with_session(
     world: &TypstWorld,
     session: CompileSession<'_>,
 ) -> Result<CompileResult, CompileFailure> {
+    if let Err(error) = world.cancellation().ensure_active() {
+        return Err(CompileFailure::new(error, session.finish()));
+    }
     let typst::diag::Warned { output, warnings } =
         typst::compile::<ObservedOutput<typst_html::HtmlDocument>>(&session);
+    if let Err(error) = world.cancellation().ensure_active() {
+        return Err(CompileFailure::new(error, session.finish()));
+    }
     if let Some(error) = world.font_failure() {
         return Err(CompileFailure::new(error.into(), session.finish()));
     }
@@ -177,6 +183,9 @@ fn with_session(
     };
 
     let (accessed, diagnostics, _) = session.finish_with_diagnostics(warnings);
+    if let Err(error) = world.cancellation().ensure_active() {
+        return Err(CompileFailure::new(error, accessed));
+    }
 
     Ok(CompileResult {
         document,

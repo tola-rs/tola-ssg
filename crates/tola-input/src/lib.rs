@@ -9,6 +9,8 @@
 
 mod access;
 mod hash;
+#[cfg(feature = "http")]
+pub mod http;
 mod identity;
 pub mod layout;
 mod lock;

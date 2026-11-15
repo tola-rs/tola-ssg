@@ -67,6 +67,7 @@ pub struct TypstWorld {
     fonts: FontMode,
     library: LibraryMode,
     time: Option<typst_kit::datetime::Time>,
+    cancellation: crate::BundleCancellation,
 }
 
 impl TypstWorld {
@@ -84,6 +85,7 @@ impl TypstWorld {
         WorldBuilder::new_id(main, project_root)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         main: MainSource,
         root: &Path,
@@ -92,6 +94,7 @@ impl TypstWorld {
         fonts: FontMode,
         library: LibraryMode,
         time: Option<typst_kit::datetime::Time>,
+        cancellation: crate::BundleCancellation,
     ) -> Result<Self, WorldBuildError> {
         let root = normalize_path(root);
         let main = match main {
@@ -156,7 +159,12 @@ impl TypstWorld {
             fonts,
             library,
             time,
+            cancellation,
         })
+    }
+
+    pub(crate) fn cancellation(&self) -> &crate::BundleCancellation {
+        &self.cancellation
     }
 
     pub(crate) fn font_failure(&self) -> Option<crate::world::font::FontLoadError> {
@@ -249,7 +257,7 @@ impl TypstWorld {
         read: ReadAttempt<Bytes>,
     ) -> ReadAttempt<Loaded<Source>> {
         if let Some(source) = files.source(id) {
-            return read.with_loaded_result(Ok(source.value));
+            return read.map_loaded(|_| Ok(source.value));
         }
         self.parsed.source_from_observation(id, &self.root, read)
     }
@@ -261,19 +269,27 @@ impl TypstWorld {
         read: ReadAttempt<Bytes>,
     ) -> ReadAttempt<Loaded<Bytes>> {
         if let Some(bytes) = files.file(id) {
-            return read.with_loaded_result(Ok(bytes.value));
+            return read.map_loaded(|_| Ok(bytes.value));
         }
         self.parsed.file_from_observation(id, &self.root, read)
     }
 
     pub(crate) fn get_source(&self, id: FileId) -> ReadAttempt<Loaded<Source>> {
         let files = self.file_view();
-        self.source_from_read(&files, id, files.read(id))
+        self.source_from_read(
+            &files,
+            id,
+            files.read_with_cancellation(id, &self.cancellation),
+        )
     }
 
     pub(crate) fn get_file(&self, id: FileId) -> ReadAttempt<Loaded<Bytes>> {
         let files = self.file_view();
-        self.file_from_read(&files, id, files.read(id))
+        self.file_from_read(
+            &files,
+            id,
+            files.read_with_cancellation(id, &self.cancellation),
+        )
     }
 }
 

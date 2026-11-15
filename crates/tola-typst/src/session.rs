@@ -237,6 +237,7 @@ pub fn capture_source_value(engine: &mut Engine, span: Span, value: Value) {
 
 pub(crate) struct CompileSession<'a> {
     world: &'a TypstWorld,
+    cancellation: &'a crate::BundleCancellation,
     /// The file this session compiles: the world's own main, unless a caller chose another file.
     main: FileId,
     view: Arc<FileView>,
@@ -254,11 +255,17 @@ impl<'a> CompileSession<'a> {
     pub(crate) fn start_at(world: &'a TypstWorld, main: FileId) -> Self {
         Self {
             world,
+            cancellation: world.cancellation(),
             main,
             view: world.file_view(),
             files: SessionFiles::default(),
             source_capture: SourceCaptureScope::Disabled,
         }
+    }
+
+    pub(crate) fn with_cancellation(mut self, cancellation: &'a crate::BundleCancellation) -> Self {
+        self.cancellation = cancellation;
+        self
     }
 
     #[cfg(feature = "scan")]
@@ -295,6 +302,7 @@ impl<'a> CompileSession<'a> {
         // observe a newer source or change the program's branches between the two evaluations.
         let Self {
             world,
+            cancellation,
             main,
             view,
             files,
@@ -303,6 +311,7 @@ impl<'a> CompileSession<'a> {
         (
             Self {
                 world,
+                cancellation,
                 main,
                 view,
                 files,
@@ -348,11 +357,18 @@ impl<'a> CompileSession<'a> {
         &self,
         diagnostics: impl IntoIterator<Item = SourceDiagnostic>,
     ) -> CompileError {
+        if let Err(error) = self.cancellation.ensure_active() {
+            return error;
+        }
         let raw = diagnostics
             .into_iter()
             .map(NativeDiagnostic::from)
             .collect::<Vec<_>>();
-        CompileError::from_resolved(self.resolve(raw, &self.package_importers()))
+        let diagnostics = self.resolve(raw, &self.package_importers());
+        self.cancellation
+            .ensure_active()
+            .err()
+            .unwrap_or_else(|| CompileError::from_resolved(diagnostics))
     }
 
     /// The site files that import each package this session read.
@@ -443,11 +459,11 @@ impl<'a> CompileSession<'a> {
     }
 
     fn read_source(&self, id: FileId) -> FileResult<Source> {
-        self.files.slot(id).source(self.world, &self.view)
+        self.files.slot(id).source(self)
     }
 
     fn read_file(&self, id: FileId) -> FileResult<Bytes> {
-        self.files.slot(id).file(self.world, &self.view)
+        self.files.slot(id).file(self)
     }
 }
 
@@ -544,18 +560,28 @@ struct SessionFile {
 }
 
 impl SessionFile {
-    fn source(&self, world: &TypstWorld, files: &FileView) -> FileResult<Source> {
+    fn source(&self, session: &CompileSession<'_>) -> FileResult<Source> {
         self.source
-            .get_or_init(|| world.source_from_read(files, self.id, files.read(self.id)))
+            .get_or_init(|| {
+                let read = session
+                    .view
+                    .read_with_cancellation(self.id, session.cancellation);
+                session.world.source_from_read(&session.view, self.id, read)
+            })
             .result
             .as_ref()
             .map(|loaded| loaded.value.clone())
             .map_err(Clone::clone)
     }
 
-    fn file(&self, world: &TypstWorld, files: &FileView) -> FileResult<Bytes> {
+    fn file(&self, session: &CompileSession<'_>) -> FileResult<Bytes> {
         self.bytes
-            .get_or_init(|| world.file_from_read(files, self.id, files.read(self.id)))
+            .get_or_init(|| {
+                let read = session
+                    .view
+                    .read_with_cancellation(self.id, session.cancellation);
+                session.world.file_from_read(&session.view, self.id, read)
+            })
             .result
             .as_ref()
             .map(|loaded| loaded.value.clone())

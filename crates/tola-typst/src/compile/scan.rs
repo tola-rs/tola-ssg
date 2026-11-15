@@ -392,7 +392,7 @@ pub fn scan_world_observed(
     let header = header.into_iter().collect::<Vec<_>>();
     let (result, sink) = evaluate_source(&session, &source, &header);
     let (session, capture_requested) = session.freeze_source_capture();
-    let (result, mut sink) = if capture_requested {
+    let (result, mut sink) = if capture_requested && !world.cancellation().is_cancelled() {
         evaluate_source(&session, &source, &header)
     } else {
         (result, sink)
@@ -406,6 +406,9 @@ pub fn scan_world_observed(
     };
     let delayed = sink.delayed();
     let warnings = sink.warnings().to_vec();
+    if let Err(error) = world.cancellation().ensure_active() {
+        return ObservedScan::new(captured, Err(ScanFailure::new(error, session.finish())));
+    }
     if let Some(error) = world.font_failure() {
         return ObservedScan::new(
             captured,
@@ -427,6 +430,9 @@ pub fn scan_world_observed(
     }
 
     let (accessed, diagnostics, _) = session.finish_with_diagnostics(warnings);
+    if let Err(error) = world.cancellation().ensure_active() {
+        return ObservedScan::new(captured, Err(ScanFailure::new(error, accessed)));
+    }
     ObservedScan::new(
         captured,
         Ok(ScanResult {

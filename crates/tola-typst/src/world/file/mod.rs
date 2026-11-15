@@ -24,3 +24,7 @@ pub use provider::{EmptyFiles, FileMap, FileProvider, FileTarget};
 pub use read::{EMPTY_ID, STDIN_ID, decode_utf8, file_id, file_id_from_path, virtual_file_id};
 pub use resolver::FileResolver;
 pub use view::FileView;
+
+pub(crate) fn cancelled() -> typst::diag::FileError {
+    typst::diag::FileError::Other(Some("operation cancelled".into()))
+}

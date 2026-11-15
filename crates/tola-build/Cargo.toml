@@ -30,7 +30,7 @@ tola-address.workspace = true
 tola-config.workspace = true
 tola-diagnostic.workspace = true
 tola-icons.workspace = true
-tola-input.workspace = true
+tola-input = { workspace = true, features = ["http"] }
 tola-minify.workspace = true
 tola-module.workspace = true
 tola-typst = { workspace = true, features = ["embed-fonts", "network"] }

@@ -1,18 +1,20 @@
 //! Explicit and first-observed compiler files.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
+use std::time::Duration;
 
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use rustc_hash::FxHashMap;
 use typst::foundations::Bytes;
 use typst::syntax::{FileId, Source};
 
 use super::{FileRead, FileResolver, Loaded, ReadAttempt};
+use crate::BundleCancellation;
 use crate::world::ExplicitSources;
 use crate::world::package::{PackageCheck, PackageSpec, PackageStore};
 
-type ObservationCell<V> = Arc<OnceLock<V>>;
+type ObservationCell<V> = Arc<Mutex<Option<V>>>;
 type FileObservation = ObservationCell<ReadAttempt<Bytes>>;
 type PackageObservationCell = ObservationCell<PackageObservation>;
 
@@ -31,11 +33,30 @@ where
         return Arc::clone(cell);
     }
     let mut cells = cells.write();
-    Arc::clone(
-        cells
-            .entry(key.clone())
-            .or_insert_with(|| Arc::new(OnceLock::new())),
-    )
+    Arc::clone(cells.entry(key.clone()).or_default())
+}
+
+fn observe<V: Clone>(
+    cell: &Mutex<Option<V>>,
+    cancellation: &BundleCancellation,
+    read: impl FnOnce() -> V,
+) -> Option<V> {
+    let mut stored = loop {
+        if cancellation.is_cancelled() {
+            return None;
+        }
+        if let Some(stored) = cell.try_lock_for(Duration::from_millis(25)) {
+            break stored;
+        }
+    };
+    if let Some(value) = stored.as_ref() {
+        return Some(value.clone());
+    }
+    let value = read();
+    if !cancellation.is_cancelled() {
+        *stored = Some(value.clone());
+    }
+    Some(value)
 }
 
 /// One file view shared by compilations that must observe the same inputs.
@@ -90,7 +111,19 @@ impl FileView {
         self.sources.as_ref()?.get_file(id)
     }
 
+    #[cfg(test)]
     pub(crate) fn read(&self, id: FileId) -> ReadAttempt<Bytes> {
+        self.read_with_cancellation(id, &BundleCancellation::default())
+    }
+
+    pub(crate) fn read_with_cancellation(
+        &self,
+        id: FileId,
+        cancellation: &BundleCancellation,
+    ) -> ReadAttempt<Bytes> {
+        if cancellation.is_cancelled() {
+            return ReadAttempt::without_inputs(Err(super::cancelled()));
+        }
         if let Some(bytes) = self.file(id) {
             return ReadAttempt {
                 result: Ok(bytes.value),
@@ -99,24 +132,30 @@ impl FileView {
                 package_checks: Vec::new(),
             };
         }
-        observation_cell(&self.observations, &id)
-            .get_or_init(|| {
-                let read = self
-                    .files
-                    .read_attempt_with_packages(id, self.root(), &self.packages);
+        observe(
+            &observation_cell(&self.observations, &id),
+            cancellation,
+            || {
+                let read = self.files.read_attempt_with_packages(
+                    id,
+                    self.root(),
+                    (&self.packages, cancellation),
+                );
                 ReadAttempt {
                     result: read.result.map(Bytes::new),
                     reads: read.reads,
                     disk_reads: read.disk_reads,
                     package_checks: read.package_checks,
                 }
-            })
-            .clone()
+            },
+        )
+        .unwrap_or_else(|| ReadAttempt::without_inputs(Err(super::cancelled())))
     }
 
     /// Observe a file and compare its exact successful read identity.
     pub fn matches_read(&self, id: FileId, expected: &FileRead) -> bool {
-        self.matching_accessed(id, expected).is_some()
+        self.matching_accessed(id, expected, &BundleCancellation::default())
+            .is_some()
     }
 
     /// Observe a file and return its inputs when the successful identity matches.
@@ -124,8 +163,9 @@ impl FileView {
         &self,
         id: FileId,
         expected: &FileRead,
+        cancellation: &BundleCancellation,
     ) -> Option<crate::session::AccessedDeps> {
-        let observed = self.read(id);
+        let observed = self.read_with_cancellation(id, cancellation);
         (observed.result.is_ok() && observed.reads.as_ref() == Some(expected)).then_some(
             crate::session::AccessedDeps {
                 reads: observed.reads.into_iter().collect(),
@@ -152,9 +192,12 @@ impl PackageObservations {
         &self,
         package: &PackageSpec,
         store: &PackageStore,
+        cancellation: &BundleCancellation,
     ) -> PackageObservation {
-        observation_cell(&self.observations, package)
-            .get_or_init(|| match store.prepare(package) {
+        observe(
+            &observation_cell(&self.observations, package),
+            cancellation,
+            || match store.prepare_with_cancellation(package, cancellation) {
                 Ok(prepared) => {
                     let (directory, checks) = prepared.into_directory_and_checks();
                     PackageObservation {
@@ -169,8 +212,12 @@ impl PackageObservations {
                         checks,
                     }
                 }
-            })
-            .clone()
+            },
+        )
+        .unwrap_or_else(|| PackageObservation {
+            directory: Err(super::cancelled()),
+            checks: Vec::new(),
+        })
     }
 }
 
@@ -182,6 +229,20 @@ mod tests {
     use typst::syntax::{FileId, RootedPath, VirtualPath, VirtualRoot};
 
     use super::*;
+
+    #[test]
+    fn a_cancelled_read_leaves_the_observation_unset() {
+        let cell = Mutex::default();
+        let cancelled = BundleCancellation::new();
+        assert_eq!(
+            observe(&cell, &cancelled, || {
+                cancelled.cancel();
+                1
+            }),
+            Some(1)
+        );
+        assert_eq!(observe(&cell, &BundleCancellation::new(), || 2), Some(2));
+    }
 
     fn id(path: &str) -> FileId {
         FileId::new(RootedPath::new(

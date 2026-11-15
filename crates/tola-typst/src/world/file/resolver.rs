@@ -291,7 +291,7 @@ impl FileResolver {
         &self,
         id: FileId,
         root: &Path,
-        packages: &PackageObservations,
+        packages: (&PackageObservations, &crate::BundleCancellation),
     ) -> ReadAttempt<Arc<[u8]>> {
         self.read_attempt_inner(id, root, Some(packages))
     }
@@ -300,7 +300,7 @@ impl FileResolver {
         &self,
         id: FileId,
         root: &Path,
-        packages: Option<&PackageObservations>,
+        packages: Option<(&PackageObservations, &crate::BundleCancellation)>,
     ) -> ReadAttempt<Arc<[u8]>> {
         if id == *EMPTY_ID {
             return successful_provider_read(
@@ -465,13 +465,13 @@ impl FileResolver {
         &self,
         root: &Path,
         id: FileId,
-        package_observations: Option<&PackageObservations>,
+        package_observations: Option<(&PackageObservations, &crate::BundleCancellation)>,
     ) -> Result<(PathBuf, Vec<PackageCheck>), (FileError, Vec<PackageCheck>)> {
         let (root, package_checks) = match id.root() {
             typst::syntax::VirtualRoot::Project => (root.to_path_buf(), Vec::new()),
             typst::syntax::VirtualRoot::Package(spec) => {
-                if let Some(observations) = package_observations {
-                    let observation = observations.observe(spec, &self.packages);
+                if let Some((observations, cancellation)) = package_observations {
+                    let observation = observations.observe(spec, &self.packages, cancellation);
                     match observation.directory {
                         Ok(directory) => (directory, observation.checks),
                         Err(error) => return Err((error, observation.checks)),

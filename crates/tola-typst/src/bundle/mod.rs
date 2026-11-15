@@ -103,7 +103,7 @@ pub fn compile_bundle_world(
             CompileError::cancelled(),
         ));
     }
-    let session = CompileSession::start(world);
+    let session = CompileSession::start(world).with_cancellation(cancellation);
     let compiled = typst::compile::<ObservedOutput<Bundle>>(&session);
     let warnings = compiled.warnings;
 

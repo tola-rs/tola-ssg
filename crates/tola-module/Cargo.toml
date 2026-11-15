@@ -13,7 +13,7 @@ anyhow = "1.0.104"
 blake3 = "1.8.7"
 flate2 = "1.1.10"
 gix = { version = "=0.90.0", default-features = false, features = ["blocking-http-transport-reqwest-rust-tls", "worktree-mutation", "sha1"] }
-reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls", "system-proxy"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "system-proxy"] }
 ruzstd = "0.9.1"
 serde = { version = "1.0.229", default-features = false, features = ["derive"] }
 serde_json = { version = "1.0.151", features = ["preserve_order"] }
@@ -24,8 +24,9 @@ toml = "1.1.4"
 toml_edit = "0.25.13"
 tola-address.workspace = true
 tola-diagnostic.workspace = true
-tola-input.workspace = true
+tola-input = { workspace = true, features = ["http"] }
 tola-packages.workspace = true
 tola-typst.workspace = true
+tokio = { version = "1.53.1", features = ["fs", "io-util"] }
 typst.workspace = true
 zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2"] }

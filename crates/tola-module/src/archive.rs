@@ -8,7 +8,8 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail, ensure};
-use reqwest::blocking::Client;
+use reqwest::Client;
+use tokio::io::AsyncWriteExt;
 use tola_input::{Sha256Digest, file_sha256};
 use tola_typst::BundleCancellation;
 
@@ -56,17 +57,20 @@ pub(super) fn from_url(url: &str, cancellation: &BundleCancellation) -> Result<D
             CLIENT.get_or_init(|| client)
         }
     };
-    download(client, url, cancellation)
+    let file = tola_input::http::wait(
+        cancellation.flag(),
+        download(client.clone(), url.to_owned()),
+    );
+    cancellation.ensure_active()?;
+    finish_download(file??, cancellation)
 }
 
-fn download(client: &Client, url: &str, cancellation: &BundleCancellation) -> Result<Download> {
-    cancellation.ensure_active()?;
-    let response = client
+async fn download(client: Client, url: String) -> Result<tempfile::NamedTempFile> {
+    let mut response = client
         .get(url)
         .header(reqwest::header::ACCEPT_ENCODING, "identity")
-        .send();
-    cancellation.ensure_active()?;
-    let mut response = response
+        .send()
+        .await
         .map_err(reqwest::Error::without_url)
         .context("could not download the module archive")?;
     ensure!(
@@ -80,13 +84,36 @@ fn download(client: &Client, url: &str, cancellation: &BundleCancellation) -> Re
             .is_none_or(|size| size <= MAX_DOWNLOAD),
         "module archive exceeds 128 MiB"
     );
-    copy_download(&mut response, cancellation)
+    let file = tempfile::NamedTempFile::new().context("could not stage the module download")?;
+    let mut output = tokio::fs::File::from_std(file.reopen()?);
+    let mut bytes = 0;
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(reqwest::Error::without_url)?
+    {
+        bytes += chunk.len() as u64;
+        ensure!(
+            bytes <= MAX_DOWNLOAD,
+            "module archive exceeds its byte limit"
+        );
+        output.write_all(&chunk).await?;
+    }
+    output.flush().await?;
+    Ok(file)
 }
 
 fn copy_download(source: &mut impl Read, cancellation: &BundleCancellation) -> Result<Download> {
     let mut file = tempfile::NamedTempFile::new().context("could not stage the module download")?;
     copy_bounded(source, file.as_file_mut(), MAX_DOWNLOAD, cancellation)?;
     file.flush()?;
+    finish_download(file, cancellation)
+}
+
+fn finish_download(
+    mut file: tempfile::NamedTempFile,
+    cancellation: &BundleCancellation,
+) -> Result<Download> {
     cancellation.ensure_active()?;
     let digest = file_sha256(file.path()).context("could not checksum the module archive")?;
     cancellation.ensure_active()?;

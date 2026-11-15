@@ -1,12 +1,10 @@
 //! Typst package location and retrieval.
 
-use std::ffi::OsString;
-use std::path::{Path, PathBuf};
-#[cfg(feature = "network")]
-use std::sync::Arc;
-
+use crate::BundleCancellation;
 #[cfg(feature = "network")]
 use crate::download::HttpDownloader;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 use typst::diag::{FileError, FileResult, PackageError};
 pub use typst::syntax::package::{PackageSpec, PackageVersion};
 use typst_kit::packages::FsPackages;
@@ -487,7 +485,7 @@ pub struct PackageStore {
     boundary: crate::world::SourceBoundary,
     /// Typst Universe downloader, absent from a build without the `network` feature.
     #[cfg(feature = "network")]
-    universe: Arc<UniversePackages>,
+    user_agent: String,
     /// The caller's pre-read check of each selected package root.
     verifier: Option<PackageVerifier>,
 }
@@ -523,7 +521,7 @@ impl PackageStore {
             locations: Ok(locations),
             fetch_policy,
             boundary: crate::world::SourceBoundary::default(),
-            universe: Arc::new(UniversePackages::new(HttpDownloader::new(user_agent))),
+            user_agent: user_agent.into(),
             verifier: None,
         }
     }
@@ -535,10 +533,7 @@ impl PackageStore {
             locations,
             fetch_policy,
             boundary: crate::world::SourceBoundary::default(),
-            universe: Arc::new(UniversePackages::new(HttpDownloader::new(concat!(
-                "tola-typst/",
-                env!("CARGO_PKG_VERSION")
-            )))),
+            user_agent: concat!("tola-typst/", env!("CARGO_PKG_VERSION")).to_owned(),
             verifier: None,
         }
     }
@@ -575,6 +570,14 @@ impl PackageStore {
         &self,
         package: &PackageSpec,
     ) -> Result<PreparedPackage, PackagePreparationFailure> {
+        self.prepare_with_cancellation(package, &BundleCancellation::default())
+    }
+
+    pub(crate) fn prepare_with_cancellation(
+        &self,
+        package: &PackageSpec,
+        cancellation: &BundleCancellation,
+    ) -> Result<PreparedPackage, PackagePreparationFailure> {
         let locations = match &self.locations {
             Ok(locations) => locations,
             Err(error) => {
@@ -587,6 +590,12 @@ impl PackageStore {
         let mut checks = Vec::new();
 
         for (tier, location) in locations.tiers() {
+            if cancellation.is_cancelled() {
+                return Err(PackagePreparationFailure {
+                    error: super::file::cancelled(),
+                    checks,
+                });
+            }
             if let Some(prepared) = settle(
                 package,
                 check_package_directory(package, tier, location.root(), &self.boundary),
@@ -601,13 +610,21 @@ impl PackageStore {
                 && self.fetch_policy == PackageFetchPolicy::AllowNetwork
                 && package.namespace == UniversePackages::NAMESPACE
             {
-                let mut archive =
-                    self.universe
-                        .package(package)
-                        .map_err(|error| PackagePreparationFailure {
-                            error: FileError::from(error),
-                            checks: checks.clone(),
-                        })?;
+                let universe = UniversePackages::new(HttpDownloader::new(
+                    &self.user_agent,
+                    cancellation.clone(),
+                ));
+                let archive = universe.package(package);
+                if cancellation.is_cancelled() {
+                    return Err(PackagePreparationFailure {
+                        error: super::file::cancelled(),
+                        checks,
+                    });
+                }
+                let mut archive = archive.map_err(|error| PackagePreparationFailure {
+                    error: FileError::from(error),
+                    checks: checks.clone(),
+                })?;
                 FsPackages::new(location.root())
                     .store(package, |directory| {
                         archive.unpack(directory).map_err(|error| {

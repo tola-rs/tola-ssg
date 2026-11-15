@@ -232,6 +232,7 @@ impl WorldBuilder {
                 ),
                 TimeMode::System => Some(typst_kit::datetime::Time::system()),
             },
+            cancellation.clone(),
         )
     }
 }

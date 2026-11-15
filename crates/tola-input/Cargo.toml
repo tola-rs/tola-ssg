@@ -7,6 +7,9 @@ description = "Tola input layer: checksums, lock entries, filesystem identities,
 license = "MIT"
 repository = "https://github.com/tola-rs/tola-ssg"
 
+[features]
+http = ["dep:tokio"]
+
 [dependencies]
 url = "2.5.8"
 tola-fs.workspace = true
@@ -17,4 +20,5 @@ hex = "0.4.3"
 thiserror = "2.0.20"
 toml = "1.1.4"
 tempfile = "3.27.0"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "net", "time"], optional = true }
 tola-address.workspace = true

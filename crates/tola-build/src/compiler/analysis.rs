@@ -905,7 +905,7 @@ impl AnalysisRound<'_> {
         if !entry.inputs_match(self.package_bindings, sources_input) {
             return None;
         }
-        let accessed = entry_candidate_accessed(entry, self.candidate_files)?;
+        let accessed = entry_candidate_accessed(entry, self.candidate_files, self.cancellation)?;
         Some(SourceRoundOutcome::Complete {
             source: source_path.clone(),
             accessed,
@@ -1141,11 +1141,12 @@ fn duplicate_declaration_error(
 fn entry_candidate_accessed(
     entry: &AnalyzedSource,
     candidate: &tola_typst::FileView,
+    cancellation: &tola_typst::BundleCancellation,
 ) -> Option<tola_typst::AccessedDeps> {
     let mut accessed = tola_typst::AccessedDeps::default();
     for read in &entry.evidence {
         let id = file_id_for_locator(read.evidence().locator())?;
-        let observed = candidate.matching_accessed(id, read)?;
+        let observed = candidate.matching_accessed(id, read, cancellation)?;
         accessed.reads.extend(observed.reads);
         accessed.disk_reads.extend(observed.disk_reads);
         accessed.package_checks.extend(observed.package_checks);
