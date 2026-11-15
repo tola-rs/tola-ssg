@@ -7,47 +7,37 @@ use std::cmp::Reverse;
 /// A declared name suppresses the suggestion. The distance is optimal string alignment, so an
 /// adjacent transposition costs one edit, and the allowed edits grow with the name's length.
 ///
-/// Ties prefer a candidate one adjacent transposition away, then the longer shared prefix, then
-/// the smaller name.
+/// A case-only correction wins first. Ties prefer an adjacent transposition, then the longer
+/// shared prefix. Equally close distinct names leave the choice to the author.
 pub fn closest<'a>(written: &str, declared: impl Iterator<Item = &'a str>) -> Option<&'a str> {
     let allowed = maximum_edits(written.chars().count());
-    let mut exact = false;
-    let closest = declared
-        .filter_map(|candidate| {
-            if candidate == written {
-                exact = true;
-                return None;
-            }
-            let distance = osa_distance(written, candidate, allowed)?;
-            Some(NearMiss {
-                name: candidate,
-                distance,
-                transposed: is_adjacent_transposition(written, candidate),
-                prefix: common_prefix_length(written, candidate),
-            })
-        })
-        .min_by_key(|near_miss| {
+    let mut best = None;
+    let mut ambiguous = false;
+    for candidate in declared {
+        if candidate == written {
+            return None;
+        }
+        let rank = if candidate.eq_ignore_ascii_case(written) {
+            (0, false, Reverse(0))
+        } else if let Some(distance) = osa_distance(written, candidate, allowed) {
             (
-                near_miss.distance,
-                !near_miss.transposed,
-                Reverse(near_miss.prefix),
-                near_miss.name,
+                distance,
+                !is_adjacent_transposition(written, candidate),
+                Reverse(common_prefix_length(written, candidate)),
             )
-        });
-    // The exact name may follow a neighbour in the scan, so suppression waits for the whole set.
-    if exact {
-        None
-    } else {
-        closest.map(|near_miss| near_miss.name)
+        } else {
+            continue;
+        };
+        match best {
+            Some((_, previous)) if rank > previous => {}
+            Some((name, previous)) if rank == previous => ambiguous |= name != candidate,
+            _ => {
+                best = Some((candidate, rank));
+                ambiguous = false;
+            }
+        }
     }
-}
-
-/// A declared name within the typo distance, with the facts that break a tie.
-struct NearMiss<'a> {
-    name: &'a str,
-    distance: usize,
-    transposed: bool,
-    prefix: usize,
+    best.filter(|_| !ambiguous).map(|(name, _)| name)
 }
 
 /// The edit distance a written name of `length` characters may have.
@@ -197,5 +187,13 @@ mod tests {
                 "{written:?} was corrected to {candidate:?}"
             );
         }
+    }
+
+    #[test]
+    fn suggestions_require_one_best_spelling() {
+        assert_eq!(closest_of("Site", &["site", "SITE"]), None);
+        assert_eq!(closest_of("Title", &["title", "title"]), Some("title"));
+        assert_eq!(closest_of("siet", &["site", "siet"]), None);
+        assert_eq!(closest_of("cat", &["cab", "car"]), None);
     }
 }
