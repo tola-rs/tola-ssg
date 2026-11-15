@@ -259,21 +259,34 @@ impl RerunOn {
             }
         }
         let mut scopes = Vec::new();
-        if !site_patterns.include.is_empty() || !site_patterns.exclude.is_empty() {
-            scopes.push((site_root.to_owned(), FileSelection::new(&site_patterns)?));
-        }
-        if let Some((alias, root)) = module
-            && (!module_patterns.include.is_empty() || !module_patterns.exclude.is_empty())
-        {
-            let selection = FileSelection::new(&module_patterns)?;
-            for path in selection.roots() {
-                ensure!(
-                    tola_input::normalize_existing_prefix(&root.join(&path)).starts_with(root),
-                    "the `rerun-on` path `{}` leaves module `{alias}`",
-                    path.display()
-                );
+        let roots = std::iter::once((site_root, site_patterns, None))
+            .chain(module.map(|(alias, root)| (root, module_patterns, Some(alias))));
+        for (root, patterns, alias) in roots {
+            if patterns.include.is_empty() {
+                if !patterns.exclude.is_empty() {
+                    scopes.push((root.to_owned(), FileSelection::new(&patterns)?));
+                }
+                continue;
             }
-            scopes.push((root.to_owned(), selection));
+            // Each include decides whether it explicitly names a VCS directory. A `.git/HEAD`
+            // dependency must not admit unrelated Git files through another, broad pattern.
+            for include in patterns.include {
+                let selection = FileSelection::new(&FilePatterns {
+                    include: vec![include],
+                    exclude: patterns.exclude.clone(),
+                })?;
+                if let Some(alias) = alias {
+                    for path in selection.roots() {
+                        ensure!(
+                            tola_input::normalize_existing_prefix(&root.join(&path))
+                                .starts_with(root),
+                            "the `rerun-on` path `{}` leaves module `{alias}`",
+                            path.display()
+                        );
+                    }
+                }
+                scopes.push((root.to_owned(), selection));
+            }
         }
         Ok(RerunSelection { scopes })
     }
@@ -290,7 +303,7 @@ impl RerunSelection {
     pub fn includes(&self, path: &Path) -> bool {
         self.scopes.iter().any(|(root, selection)| {
             path.strip_prefix(root)
-                .is_ok_and(|path| selection.includes(path))
+                .is_ok_and(|path| admits_vcs_path(path, selection) && selection.includes(path))
         })
     }
 
@@ -312,7 +325,7 @@ impl RerunSelection {
         !self.excludes(path)
             && self.scopes.iter().any(|(root, selection)| {
                 if let Ok(path) = path.strip_prefix(root) {
-                    selection.could_match_below(path)
+                    admits_vcs_path(path, selection) && selection.could_match_below(path)
                 } else {
                     root.starts_with(path) && selection.could_match_below(Path::new(""))
                 }
@@ -342,6 +355,20 @@ impl RerunSelection {
                 .map(move |path| root.join(path))
         })
     }
+}
+
+/// Metadata is an input only when this include names its `.git` or `.jj` component.
+fn admits_vcs_path(path: &Path, selection: &FileSelection) -> bool {
+    let directory = path
+        .components()
+        .find(|part| part.as_os_str() == ".git" || part.as_os_str() == ".jj");
+    directory.is_none_or(|directory| {
+        selection.patterns().include.iter().any(|pattern| {
+            Path::new(pattern)
+                .components()
+                .any(|part| part == directory)
+        })
+    })
 }
 
 /// A hook declaration a module manifest cannot use.
@@ -684,6 +711,42 @@ impl DevParticipation {
 #[cfg(test)]
 mod tests {
     use super::ModuleHooks;
+
+    #[test]
+    fn rerun_patterns_require_named_vcs_inputs() {
+        use super::{RerunOn, RerunPath};
+
+        let root = std::path::absolute("site").unwrap();
+        let selection = RerunOn {
+            include: [
+                "**/*.typ",
+                ".gitignore",
+                ".git/HEAD",
+                ".git/refs/*/main",
+                ".jj/repo/store/**",
+            ]
+            .into_iter()
+            .map(|path| RerunPath::Relative(path.to_owned()))
+            .collect(),
+            exclude: Vec::new(),
+        }
+        .compile(&root, None)
+        .unwrap();
+        for path in [".git/objects", ".jj/working_copy", "nested/.git/refs"] {
+            assert!(!selection.could_match_below(&root.join(path)), "{path}");
+        }
+        for path in [
+            ".git/HEAD",
+            ".git/refs/heads/main",
+            ".jj/repo/store/change",
+            "docs/.hidden.typ",
+            ".gitignore",
+        ] {
+            assert!(selection.matches(&root.join(path)), "{path}");
+        }
+        assert!(!selection.matches(&root.join(".git/refs/heads/other.typ")));
+        assert!(!selection.matches(&root.join(".jj/working_copy/input.typ")));
+    }
 
     #[test]
     fn order_belongs_to_build_hooks_only() {
