@@ -27,6 +27,8 @@ pub struct Host {
     pub query: Option<Query>,
     pub submit_diagnostics: Option<SubmitDiagnostics>,
     pub render_diagnostics: Option<RenderDiagnostics>,
+    /// The invocation's SVG fonts, or a configuration error reported when an SVG needs them.
+    pub svg_fonts: Option<Result<Arc<tola_typst::FontStore>, String>>,
 }
 
 #[derive(Clone, Copy)]

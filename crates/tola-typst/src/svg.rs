@@ -5,16 +5,21 @@
 //! linked images follow the same policy as `image()`; rendering uses `resvg` into a target pixmap.
 //! The output is row-major RGBA8 with straight alpha, ready for the image encoders.
 
+use std::path::Path;
+use std::sync::Arc;
+
 use resvg::tiny_skia::{Pixmap, Transform};
 use thiserror::Error;
 use typst::World;
-use typst::comemo::Tracked;
+use typst::comemo::{Track, Tracked};
 use typst::diag::LoadedWithin;
 use typst::foundations::{Bytes, StyleChain};
 use typst::loading::{LoadSource, Loaded};
 use typst::syntax::{FileId, Span, Spanned};
 use typst::utils::hash128;
 use typst::visualize::SvgImage;
+
+use crate::{BundleCancellation, FontLoadError, FontStore, TypstWorld, WorldBuildError, file_id};
 
 /// One parsed SVG source.
 #[derive(Clone)]
@@ -33,6 +38,17 @@ pub struct SvgCrop {
     pub width: f64,
     /// The rectangle's height.
     pub height: f64,
+}
+
+impl From<(f64, f64, f64, f64)> for SvgCrop {
+    fn from((x, y, width, height): (f64, f64, f64, f64)) -> Self {
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
 }
 
 /// Why an SVG could not be parsed or rendered.
@@ -59,6 +75,31 @@ pub enum SvgError {
 }
 
 impl SvgSource {
+    /// Parse standalone SVG bytes using the same font lookup as in a compilation.
+    pub fn parse_with_fonts(
+        bytes: Bytes,
+        root: &Path,
+        fonts: Arc<FontStore>,
+        cancellation: &BundleCancellation,
+    ) -> Result<Self, SvgError> {
+        let file = file_id("/_tola/standalone.svg");
+        let world = TypstWorld::builder_with_id(file, root)
+            .with_fonts(Arc::clone(&fonts))
+            .with_local_cache()
+            .build(cancellation)
+            .map_err(|error| match error {
+                WorldBuildError::Font(error) => svg_font_error(&fonts, error),
+                error => SvgError::Load {
+                    message: error.to_string(),
+                },
+            })?;
+        let parsed = Self::parse(bytes, (&world as &dyn World).track(), file);
+        if let Some(error) = world.font_failure() {
+            return Err(svg_font_error(&fonts, error));
+        }
+        parsed
+    }
+
     /// Parse `bytes`, resolving text and linked images through `world`.
     ///
     /// Linked images other than data URIs are refused: their reads would fall outside the
@@ -91,6 +132,12 @@ impl SvgSource {
     /// The SVG's intrinsic height in pixels, at usvg's 96 DPI.
     pub fn height(&self) -> f64 {
         self.image.height()
+    }
+
+    /// The intrinsic size rounded to whole pixels, with at least one pixel per side.
+    pub fn pixel_dimensions(&self) -> (u32, u32) {
+        let round = |size: f64| size.round().clamp(1.0, f64::from(u32::MAX)) as u32;
+        (round(self.width()), round(self.height()))
     }
 
     /// A hash of the SVG bytes and the fonts the parse actually used.
@@ -143,6 +190,20 @@ impl SvgSource {
         resvg::render(self.image.tree(), transform, &mut pixmap.as_mut());
         Ok(straight_rgba(&pixmap))
     }
+}
+
+fn svg_font_error(fonts: &FontStore, error: FontLoadError) -> SvgError {
+    let message = error.path().map_or_else(
+        || error.to_string(),
+        |path| {
+            let path = fonts.options().source_boundary.display_path(path);
+            format!(
+                "could not use SVG font input `{}`. Check the font directories and files",
+                path.display()
+            )
+        },
+    );
+    SvgError::Load { message }
 }
 
 fn svg_document(bytes: &[u8]) -> Option<roxmltree::Document<'_>> {

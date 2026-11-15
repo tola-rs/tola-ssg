@@ -9719,6 +9719,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tola-highlight",
  "tola-image",
+ "tola-typst",
  "toml 1.1.8+spec-1.1.0",
  "url",
 ]

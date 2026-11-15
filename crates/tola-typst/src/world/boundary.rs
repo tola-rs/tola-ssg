@@ -3,17 +3,18 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use serde::{Deserialize, Serialize};
 use typst::diag::{FileError, FileResult};
 
 /// Physical source containment and excluded generated directories.
 ///
 /// The default accepts host paths. Embedded bytes do not cross this boundary.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceBoundary {
     limits: Option<Arc<SourceLimits>>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct SourceLimits {
     root: Option<PathBuf>,
     contained: bool,
@@ -21,7 +22,7 @@ struct SourceLimits {
     excluded: Vec<GeneratedSourceBoundary>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct GeneratedSourceBoundary {
     directory: PathBuf,
     candidates: Vec<PathBuf>,
@@ -156,7 +157,7 @@ impl SourceBoundary {
     }
 
     /// The path as a diagnostic names it: relative to the root when it is inside.
-    fn display_path<'a>(&self, path: &'a Path) -> &'a Path {
+    pub(crate) fn display_path<'a>(&self, path: &'a Path) -> &'a Path {
         self.limits
             .as_ref()
             .and_then(|limits| limits.root.as_ref())

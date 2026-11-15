@@ -23,6 +23,7 @@ toml = "1.1.4"
 url = "2.5.8"
 tola-highlight.workspace = true
 tola-image.workspace = true
+tola-typst.workspace = true
 ctrlc = "3.5.2"
 same-file = "1.0.6"
 nu-cli = { version = "=0.117.0", features = ["sqlite"] }

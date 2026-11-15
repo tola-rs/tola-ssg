@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use parking_lot::Mutex;
+use serde::{Deserialize, Serialize};
 use typst::diag::FileError;
 use typst::foundations::Bytes;
 use typst::text::{Font, FontAxis, FontInfo, FontVariant};
@@ -48,7 +49,7 @@ const FONT_READ_CHUNK_BYTES: usize = 64 * 1024;
 ///
 /// let fonts = FontStore::with_options(options);
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FontOptions {
     /// Whether to include system fonts.
     pub include_system_fonts: bool,
@@ -64,7 +65,7 @@ pub struct FontOptions {
     pub source_boundary: crate::world::SourceBoundary,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct ContainedFontPath {
     path: PathBuf,
     boundary: crate::world::SourceBoundary,

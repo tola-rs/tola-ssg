@@ -3,6 +3,7 @@
 use std::fs;
 use std::io::{BufWriter, Write};
 use std::path::Path;
+use std::sync::{Arc, OnceLock};
 
 use nu_engine::CallExt;
 use nu_protocol::{
@@ -13,12 +14,21 @@ use nu_protocol::{
     shell_error::generic::GenericError,
 };
 use tola_image::{
-    Background, CropAnchor, DecodedSource, ImageFormat, ImageMetadata, ImageRecipe, OutputFormat,
-    ResampledPixels, ResizeFilter, ResizeOperation, ResizeOptions,
+    Background, CropAnchor, DecodedSource, ImageMetadata, ImageRecipe, OutputFormat,
+    ResampledPixels, ResizeFilter, ResizeOperation, ResizeOptions, SvgRender,
 };
+use tola_typst::svg::looks_like_svg;
+use tola_typst::typst::foundations::Bytes;
+use tola_typst::{BundleCancellation, FontStore, SvgSource};
 
-pub(crate) fn declarations() -> Vec<Box<dyn Command>> {
-    vec![Box::new(Metadata), Box::new(Resize)]
+pub(crate) fn declarations(host: Arc<OnceLock<crate::Host>>) -> Vec<Box<dyn Command>> {
+    vec![
+        Box::new(Metadata),
+        Box::new(Resize {
+            host,
+            fonts: Arc::default(),
+        }),
+    ]
 }
 
 #[derive(Clone)]
@@ -62,7 +72,63 @@ impl Command for Metadata {
 }
 
 #[derive(Clone)]
-struct Resize;
+struct Resize {
+    host: Arc<OnceLock<crate::Host>>,
+    fonts: Arc<FontStore>,
+}
+
+impl Resize {
+    fn svg_pixels(
+        &self,
+        bytes: Vec<u8>,
+        request: ResizeRequest,
+        engine: &EngineState,
+        stack: &Stack,
+        span: Span,
+    ) -> Result<(ResampledPixels, ImageRecipe), ShellError> {
+        let fonts = self
+            .host
+            .get()
+            .and_then(|host| host.svg_fonts.as_ref())
+            .map(Result::as_ref)
+            .transpose()
+            .map_err(|error| image_error(error.as_str(), span))?
+            .unwrap_or(&self.fonts);
+        let cancellation = engine
+            .signals()
+            .interrupt_flag()
+            .map_or_else(BundleCancellation::new, BundleCancellation::from_flag);
+        let directory = engine.cwd(Some(stack))?;
+        let svg = SvgSource::parse_with_fonts(
+            Bytes::new(bytes),
+            directory.as_ref(),
+            fonts.clone(),
+            &cancellation,
+        );
+        engine.signals().check(&span)?;
+        let svg = svg.map_err(|error| image_error(error.to_string(), span))?;
+        let (width, height) = svg.pixel_dimensions();
+        let recipe = ImageRecipe::resolve_svg(
+            (svg.width(), svg.height()),
+            request.with_source_size(width, height),
+            SvgRender::new(svg.hash()),
+        )
+        .map_err(|error| image_error(error.to_string(), span))?;
+        let pixels = recipe.pixels();
+        let crop = pixels
+            .vector_geometry()
+            .expect("an SVG recipe has a source rectangle")
+            .crop();
+        engine.signals().check(&span)?;
+        let rgba = svg.render(pixels.width(), pixels.height(), Some(crop.into()));
+        engine.signals().check(&span)?;
+        let rgba = rgba.map_err(|error| image_error(error.to_string(), span))?;
+        let cancelled = || engine.signals().interrupted();
+        let rendered = ResampledPixels::from_rendered(pixels, rgba, &cancelled)
+            .map_err(|error| render_error(error, span))?;
+        Ok((rendered, recipe))
+    }
+}
 
 impl Command for Resize {
     fn command_type(&self) -> CommandType {
@@ -73,7 +139,7 @@ impl Command for Resize {
         "resize-image"
     }
     fn description(&self) -> &str {
-        "Resize a raster image from a path or pipeline bytes."
+        "Resize an image from a path or pipeline bytes."
     }
     fn signature(&self) -> Signature {
         Signature::build(self.name())
@@ -110,7 +176,11 @@ impl Command for Resize {
         let output = destination
             .map(|path| Ok::<_, ShellError>((temporary_output(&path, call.head)?, path)))
             .transpose()?;
-        let (pixels, recipe) = resize_pixels(bytes, request, engine, call.head)?;
+        let (pixels, recipe) = if looks_like_svg(&bytes) {
+            self.svg_pixels(bytes, request, engine, stack, call.head)?
+        } else {
+            resize_pixels(bytes, request, engine, call.head)?
+        };
         if let Some((file, path)) = output {
             return write_file(file, path, source, &pixels, &recipe, engine, call.head);
         }
@@ -222,6 +292,17 @@ struct ResizeRequest {
     keep_size: bool,
 }
 
+impl ResizeRequest {
+    fn with_source_size(self, width: u32, height: u32) -> ResizeOptions {
+        let mut options = self.options;
+        if self.keep_size {
+            options.width = Some(width);
+            options.height = Some(height);
+        }
+        options
+    }
+}
+
 fn resize_pixels(
     bytes: Vec<u8>,
     request: ResizeRequest,
@@ -230,17 +311,7 @@ fn resize_pixels(
 ) -> Result<(ResampledPixels, ImageRecipe), ShellError> {
     let source = tola_image::inspect(&bytes).map_err(|error| render_error(error, span))?;
     engine.signals().check(&span)?;
-    if source.format == ImageFormat::Svg {
-        return Err(image_error(
-            "SVG resizing requires the build engine's font and resource context; image resize supports raster images only",
-            span,
-        ));
-    }
-    let mut options = request.options;
-    if request.keep_size {
-        options.width = Some(source.width);
-        options.height = Some(source.height);
-    }
+    let options = request.with_source_size(source.width, source.height);
     let recipe = ImageRecipe::resolve(&source, options)
         .map_err(|error| image_error(error.to_string(), span))?;
     let cancelled = || engine.signals().interrupted();
@@ -463,7 +534,8 @@ fn resize_request(options: &Record) -> Result<ResizeRequest, ShellError> {
 mod tests {
     use super::*;
     use nu_protocol::{Signals, debugger::WithoutDebug, engine::StateWorkingSet};
-    use std::sync::{Arc, atomic::AtomicBool};
+    use std::sync::atomic::AtomicBool;
+    use tola_image::ImageFormat;
 
     const PNG: &[u8] = &[
         137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 2, 0, 0, 0, 1, 8, 6,
@@ -638,8 +710,8 @@ mod tests {
     }
 
     #[test]
-    fn svg_metadata_but_resize_needs_context() {
-        let svg = b"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"8\" height=\"4\"/>";
+    fn svg_resizes_to_explicit_raster_format() {
+        let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 4"><path fill="red" d="M0 0H8V4H0Z"/></svg>"#;
         let literal = format!(
             "0x[{}]",
             svg.iter()
@@ -657,12 +729,34 @@ mod tests {
                 .unwrap(),
             "svg"
         );
-        let error = eval(
-            &format!("{literal} | image resize --width 4 --op fit-width"),
-            Signals::empty(),
+        assert!(
+            eval(
+                &format!("{literal} | image resize --width 4 --op fit-width"),
+                Signals::empty(),
+            )
+            .is_err()
+        );
+        let png = value(&format!("{literal} | image resize --width 4 --format png"))
+            .into_binary()
+            .unwrap();
+        let cancelled = || false;
+        let source = DecodedSource::open(&png, &cancelled).unwrap();
+        let info = source.metadata();
+        assert_eq!(
+            (info.format, info.width, info.height),
+            (ImageFormat::Png, 4, 2)
+        );
+        let recipe = ImageRecipe::resolve(
+            info,
+            ResizeOptions {
+                width: Some(4),
+                height: Some(2),
+                ..ResizeOptions::default()
+            },
         )
-        .unwrap_err();
-        assert!(format!("{error:?}").contains("font and resource context"));
+        .unwrap();
+        let pixels = source.into_pixels(recipe.pixels(), &cancelled).unwrap();
+        assert_eq!(pixels.rgba(), [255u8, 0, 0, 255].repeat(8));
     }
 
     #[test]

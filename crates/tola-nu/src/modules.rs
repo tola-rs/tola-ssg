@@ -172,7 +172,7 @@ pub(super) fn register<'a>(
     // Register declarations without leaving their unqualified names in scope.
     working.enter_scope();
     let mut native = Module::new(NATIVE_MODULE.as_bytes().to_vec());
-    for command in crate::image::declarations() {
+    for command in crate::image::declarations(host.clone()) {
         add_command(&mut working, &mut native, command);
     }
     for operation in [Operation::Context, Operation::Render, Operation::Submit] {
