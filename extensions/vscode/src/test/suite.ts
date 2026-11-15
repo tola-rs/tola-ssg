@@ -1396,6 +1396,9 @@ export async function run(): Promise<void> {
         site.configuration,
         '[site]\ntitle = "Editor contract"\ndescript|io = "Typo"\n',
       )
+      await waitForDiagnostics(document.uri, (reports) => reports.some((report) =>
+        report.message.includes('`site.descriptio`') && report.message.includes('`site.description`')
+      ))
       const actions = await vscode.commands.executeCommand<(vscode.CodeAction | vscode.Command)[]>(
         'vscode.executeCodeActionProvider',
         document.uri,
@@ -1412,6 +1415,32 @@ export async function run(): Promise<void> {
       )
       assert.match(document.getText(), /\ndescription = "Typo"/)
       await waitForDiagnostics(document.uri, (diagnostics) => diagnostics.length === 0)
+    }))
+  await check('A variable typo suggests a visible binding and can be fixed', () =>
+    withSite(async (site) => {
+      const { document, position } = await openMarked(
+        site.source,
+        '#let article-caption = [Text]\n#article-capt|oin\n',
+      )
+      const isTypo = (report: vscode.Diagnostic) =>
+        report.message.includes('`article-captoin`') && report.message.includes('`article-caption`')
+      await waitForDiagnostics(document.uri, (reports) => reports.some(isTypo))
+      const actions = await vscode.commands.executeCommand<(vscode.CodeAction | vscode.Command)[]>(
+        'vscode.executeCodeActionProvider',
+        document.uri,
+        new vscode.Range(position, position),
+      )
+      const fix = actions.find((action): action is vscode.CodeAction =>
+        'kind' in action && action.command !== undefined &&
+        action.kind?.value === vscode.CodeActionKind.QuickFix.value && action.title.includes('`article-caption`')
+      )
+      assert.ok(fix?.command)
+      assert.equal(
+        await vscode.commands.executeCommand(fix.command.command, ...(fix.command.arguments ?? [])),
+        true,
+      )
+      assert.match(document.getText(), /\n#article-caption\n/)
+      await waitForDiagnostics(document.uri, (reports) => reports.every((report) => !isTypo(report)))
     }))
   await check('CLI operations show background progress', async () => {
     if (process.platform === 'win32') return

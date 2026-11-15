@@ -123,7 +123,7 @@ pub(super) async fn respond(
             Ok(Err(errors)) => {
                 let current = sites.revision();
                 let message = format!(
-                    "Tola could not publish the saved site ({errors} build errors). The previous preview is unchanged."
+                    "Tola could not publish the saved site ({errors} build errors). Fix the errors in Problems or Tola output, then open the preview again."
                 );
                 return refuse(StatusCode::CONFLICT, current.as_deref(), &message);
             }

@@ -2,7 +2,7 @@ import { type ChildProcess, spawn } from 'node:child_process'
 import { createInterface } from 'node:readline'
 import * as vscode from 'vscode'
 
-import { type BuildDiagnostic, showBuildDiagnostics } from './build-diagnostics.ts'
+import { type BuildDiagnostic, type BuildReports, buildErrorMessage, savedDocuments } from './build-diagnostics.ts'
 import type { Selection } from './selection.ts'
 
 type BuildOutcome = 'succeeded' | 'failed' | 'cancelled'
@@ -52,6 +52,9 @@ export class PreviewServer {
   private buildAttempt = 0
   private revision: string | null = null
   private buildReports: readonly BuildDiagnostic[] = []
+  private attemptSnapshot = savedDocuments()
+  private reportSnapshot = this.attemptSnapshot
+  private terminalFailure = false
   private readonly hooks = new Map<string | null, {
     readonly status: Exclude<BuildOutcome, 'cancelled'>
     readonly diagnostics: readonly BuildDiagnostic[]
@@ -61,7 +64,7 @@ export class PreviewServer {
     private readonly selection: Selection,
     lifetime: vscode.CancellationToken,
     private readonly output: vscode.OutputChannel,
-    private readonly diagnostics: vscode.DiagnosticCollection,
+    private readonly diagnostics: BuildReports,
     private readonly changed: (published?: boolean) => void,
   ) {
     const [subcommand, ...args] = selection.args
@@ -115,6 +118,7 @@ export class PreviewServer {
         this.cancellation.abort()
         this.lifetime.dispose()
         events.close()
+        if (!this.terminalFailure) this.diagnostics.clear()
         this.rejectStartup(
           new Error(
             'Tola development server stopped before serving. Open Tola output for details and run Start Preview again',
@@ -154,6 +158,7 @@ export class PreviewServer {
         if (event.build <= this.buildAttempt) break
         this.buildAttempt = event.build
         this.build = 'building'
+        this.attemptSnapshot = savedDocuments()
         break
       case 'build-finished':
         if (event.build !== this.buildAttempt || this.build !== 'building') break
@@ -162,7 +167,10 @@ export class PreviewServer {
         }
         this.build = event.status
         this.setRevision(event.revision)
-        if (event.status !== 'cancelled') this.buildReports = event.diagnostics
+        if (event.status !== 'cancelled') {
+          this.buildReports = event.diagnostics
+          this.reportSnapshot = this.attemptSnapshot
+        }
         this.showDiagnostics()
         return event.published === true
       case 'hook-finished':
@@ -178,14 +186,17 @@ export class PreviewServer {
         this.showDiagnostics()
         break
       case 'stopped':
-        if (event.diagnostics.length) {
+        this.terminalFailure = event.diagnostics.length > 0
+        if (this.terminalFailure) {
           this.buildReports = event.diagnostics
+          this.reportSnapshot = this.attemptSnapshot
           this.hooks.clear()
           this.showDiagnostics()
         }
         this.cancellation.abort()
         this.rejectStartup(
-          new Error('Tola stopped before its preview became available. Open Tola output for details'),
+          new Error(buildErrorMessage(event.diagnostics) ??
+            'Tola stopped before the preview opened. Use Show Output for details'),
         )
         this.lifetime.dispose()
         break
@@ -203,7 +214,7 @@ export class PreviewServer {
 
   private showDiagnostics(): void {
     const hooks = Array.from(this.hooks.values(), (hook) => hook.diagnostics)
-    showBuildDiagnostics(this.diagnostics, this.selection, [this.buildReports, ...hooks].flat())
+    this.diagnostics.set([this.buildReports, ...hooks].flat(), this.reportSnapshot)
   }
 
   get buildStatus(): BuildStatus {
@@ -294,6 +305,7 @@ export class PreviewServer {
   }
 
   stop(): void {
+    this.diagnostics.clear()
     if (this.cancellation.signal.aborted) return
     this.cancellation.abort()
     this.rejectStartup(new vscode.CancellationError())

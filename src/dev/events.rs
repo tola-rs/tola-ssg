@@ -29,6 +29,7 @@ enum DevEvent<'a> {
         status: &'a str,
         published: bool,
         revision: Option<&'a str>,
+        #[serde(serialize_with = "crate::editor::diagnostics::serialize")]
         diagnostics: &'a [Diagnostic],
     },
     HookFinished {
@@ -38,12 +39,14 @@ enum DevEvent<'a> {
         hook: Option<&'a str>,
         revision: &'a str,
         status: &'a str,
+        #[serde(serialize_with = "crate::editor::diagnostics::serialize")]
         diagnostics: &'a [Diagnostic],
     },
     Stopped {
         #[serde(rename = "formatVersion")]
         format_version: u8,
         reason: &'a str,
+        #[serde(serialize_with = "crate::editor::diagnostics::serialize")]
         diagnostics: &'a [Diagnostic],
     },
 }

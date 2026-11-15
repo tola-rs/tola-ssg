@@ -4,6 +4,7 @@ import type { ServerResponse } from 'node:http'
 import * as path from 'node:path'
 import * as vscode from 'vscode'
 import { startGate } from './gate.ts'
+import { BuildDiagnostics } from '../build-diagnostics.ts'
 import { SiteCli } from '../site-cli.ts'
 import { selectSite } from '../selection.ts'
 import {
@@ -172,9 +173,10 @@ export async function runPreviewChecks(): Promise<void> {
           return typeof value === 'function' ? value.bind(target) : value
         },
       })
+      const diagnostics = new BuildDiagnostics(recorded, () => [])
       const cli = new SiteCli(recorded, (error) => {
         throw error
-      })
+      }, diagnostics)
       const lifetime = cli.register()
       try {
         const folder = vscode.workspace.getWorkspaceFolder(site.source)!
@@ -185,6 +187,7 @@ export async function runPreviewChecks(): Promise<void> {
         assert.doesNotMatch(output.join(''), /"output"\s*:/)
       } finally {
         lifetime.dispose()
+        diagnostics.dispose()
         channel.dispose()
       }
     }))
@@ -267,7 +270,7 @@ export async function runPreviewChecks(): Promise<void> {
         )
         await vscode.commands.executeCommand(lens.command.command, ...(lens.command.arguments ?? []))
         const refusal = await workbenchText({ error: true, dismiss: true })
-        assert.match(refusal, /selected route.*refresh Pages/i)
+        assert.match(refusal, /\/preview\//)
         assert.deepEqual(opened, [])
       })
     ))
@@ -614,11 +617,11 @@ export async function runPreviewChecks(): Promise<void> {
         await workbenchText({ error: true, dismiss: true })
         assert.equal(source.isDirty, false)
         assert.equal(opened.length, 1)
-        await waitForDiagnostics(site.source, (reports) =>
-          reports.some((report) =>
-            report.source === 'tola build' && report.severity === vscode.DiagnosticSeverity.Error &&
-            report.message.includes('Preview regression failed') && report.range.start.line === 0
-          ))
+        await waitForDiagnostics(site.source, (reports) => {
+          const failures = reports.filter((report) => report.message.includes('Preview regression failed'))
+          return failures.length === 1 && failures[0]?.source === 'tola' &&
+            failures[0].severity === vscode.DiagnosticSeverity.Error && failures[0].range.start.line === 0
+        })
         const response = await fetch(previous.url, { signal: AbortSignal.timeout(15_000) })
         assert.equal(response.status, 200)
         assert.match(await response.text(), /Published editor page\./)
@@ -626,9 +629,39 @@ export async function runPreviewChecks(): Promise<void> {
         const repaired = vscode.commands.executeCommand('tola.openPreview', site.source)
         await workbenchText({ button: 'Save and Preview' })
         await within(repaired, 'Repaired preview')
-        await waitForDiagnostics(site.source, (reports) => reports.every((report) => report.source !== 'tola build'))
+        await waitForDiagnostics(site.source, (reports) =>
+          reports.every((report) => !report.message.includes('Preview regression failed')))
       })
     ))
+
+  await check('Manifest errors address the field in the editor and build', () =>
+    withSite(async (site) => {
+      const manifest = vscode.Uri.file(path.join(site.root, 'theme', 'tola-module.toml'))
+      const document = await vscode.workspace.openTextDocument(manifest)
+      await vscode.window.showTextDocument(document)
+      await replace(document, '# Module\n[buid]\n')
+      const isManifestError = (report: vscode.Diagnostic) =>
+        report.code === 'module.manifest' && report.message.includes('`buid`') &&
+        report.message.includes('`build`') && report.range.start.line === 1
+      await waitForDiagnostics(manifest, (reports) => reports.some(isManifestError))
+      assert.equal(await fs.readFile(manifest.fsPath, 'utf8'), '# Module\n')
+      assert.equal(await document.save(), true)
+      await vscode.commands.executeCommand('tola.build')
+      const notice = await workbenchText({ error: true, dismiss: true })
+      assert.match(notice, /tola-module\.toml/)
+      assert.match(notice, /`buid`/)
+      assert.match(notice, /`build`/)
+      await waitForDiagnostics(manifest, (reports) => reports.filter(isManifestError).length === 1)
+      await replace(document, '# Module\n')
+      assert.equal(await document.save(), true)
+      await waitForDiagnostics(manifest, (reports) => reports.every((report) => !isManifestError(report)))
+    }, {
+      configuration: '[modules.theme]\npath = "theme"\n',
+      prepare: async (site) => {
+        await fs.mkdir(path.join(site.root, 'theme'))
+        await fs.writeFile(path.join(site.root, 'theme', 'tola-module.toml'), '# Module\n')
+      },
+    }))
 
   await check(
     'Mounted lenses open their published URL',

@@ -3,6 +3,7 @@ import * as vscode from 'vscode'
 
 import { type Publication, PreviewServer, type PublishedRoute } from './preview-server.ts'
 import { containsFile } from './selection.ts'
+import type { BuildDiagnostics } from './build-diagnostics.ts'
 import type { Selection } from './selection.ts'
 import type { Route, SiteRoute } from './routes.ts'
 import type { SourceCheckStatus } from './sites.ts'
@@ -26,9 +27,53 @@ export interface PreviewStatus {
   readonly state: 'starting' | 'ready' | 'stopped'
 }
 
+type PreviewTarget = 'simpleBrowser' | 'external'
+
+function matchesRouteTerm(text: string, term: string): boolean {
+  let offset = 0
+  for (const character of term) {
+    const match = text.indexOf(character, offset)
+    if (match < 0) return false
+    offset = match + character.length
+  }
+  return true
+}
+
+async function pickSiteRoute(site: PreviewSite, routes: SiteRoute[]): Promise<string | undefined> {
+  const picker = vscode.window.createQuickPick()
+  picker.title = `Tola: Search Site Routes · ${site.selection.folder.name}`
+  picker.placeholder = 'Type a route, source file, or output path'
+  const rows = routes.map((page) => ({
+    // Keep our fuzzy matches visible even when the built-in filter would hide them.
+    item: { label: page.route, description: page.source, detail: page.output, alwaysShow: true },
+    fields: [page.route, page.source ?? '', page.output].map((field) => field.toLowerCase()),
+  }))
+  picker.items = rows.map(({ item }) => item)
+  const selected = new Promise<string | undefined>((resolve) => {
+    picker.onDidChangeValue((query) => {
+      const terms = query.trim().toLowerCase().split(/\s+/)
+      picker.items = rows
+        .filter(({ fields }) => terms.every((term) => fields.some((field) => matchesRouteTerm(field, term))))
+        .map(({ item }) => item)
+    })
+    picker.onDidAccept(() => {
+      const [item] = picker.selectedItems
+      if (item) resolve(item.label)
+    })
+    picker.onDidHide(() => resolve(undefined))
+  })
+  const cancellation = site.lifetime.onCancellationRequested(() => picker.hide())
+  try {
+    picker.show()
+    return await selected
+  } finally {
+    cancellation.dispose()
+    picker.dispose()
+  }
+}
+
 export class Preview {
   private readonly servers = new Map<string, PreviewServer>()
-  private readonly buildDiagnostics = new Map<string, vscode.DiagnosticCollection>()
   private readonly children = new Set<PreviewServer>()
   private readonly statusPublications = new WeakMap<PreviewServer, {
     source: string
@@ -43,6 +88,8 @@ export class Preview {
     private readonly siteFor: (uri?: vscode.Uri, siteKey?: string) => PreviewSite | undefined,
     private readonly report: (error: unknown) => void,
     private readonly statusFor: (uri?: vscode.Uri) => PreviewStatus | undefined,
+    private readonly chooseSite: () => Promise<PreviewSite | undefined>,
+    private readonly buildDiagnostics: BuildDiagnostics,
   ) {}
 
   register(): vscode.Disposable {
@@ -65,6 +112,10 @@ export class Preview {
       vscode.commands.registerCommand(
         'tola.openPage',
         (uri?: vscode.Uri | string) => this.handle(() => this.openPage(uri)),
+      ),
+      vscode.commands.registerCommand(
+        'tola.searchSiteRoutes',
+        () => this.handle(() => this.searchSiteRoutes()),
       ),
       vscode.commands.registerCommand(
         'tola.openPreviewFragment',
@@ -227,7 +278,7 @@ export class Preview {
     uri?: vscode.Uri | string,
     route?: string | { route?: string },
     siteKey?: string,
-    target: 'simpleBrowser' | 'external' = 'simpleBrowser',
+    target: PreviewTarget = 'simpleBrowser',
   ): Promise<void> {
     // A lens hands over its route as a string, while a command that carries the lens data passes
     // the object: both name the same page.
@@ -242,7 +293,41 @@ export class Preview {
     if (!source && siteKey === undefined) {
       throw new Error('Tola cannot tell which file to preview because no editor is active')
     }
-    const site = this.requireSite(source, siteKey)
+    await this.openSite(this.requireSite(source, siteKey), source, preferred, target)
+  }
+
+  private async searchSiteRoutes(): Promise<void> {
+    const site = await this.chooseSite()
+    if (!site) return
+    const routes = await site.siteRoutes()
+    if (site.lifetime.isCancellationRequested) return
+    if (!routes.length) {
+      const message = site.check() === 'failed'
+        ? 'Tola could not check this site. See Problems for diagnostics.'
+        : 'Tola found no HTML routes for this site.'
+      void vscode.window.showInformationMessage(message)
+      return
+    }
+    const route = await pickSiteRoute(site, routes)
+    if (!route) return
+    const destinations: (vscode.QuickPickItem & { target: PreviewTarget })[] = [
+      { label: 'Open in VS Code', target: 'simpleBrowser' },
+      { label: 'Open in Default Browser', target: 'external' },
+    ]
+    const destination = await vscode.window.showQuickPick(
+      destinations,
+      { title: `Tola: Open ${route}`, placeHolder: 'Choose where to open the preview' },
+      site.lifetime,
+    )
+    if (destination) await this.openSite(site, undefined, route, destination.target)
+  }
+
+  private async openSite(
+    site: PreviewSite,
+    source: vscode.Uri | undefined,
+    preferred: string | undefined,
+    target: PreviewTarget,
+  ): Promise<void> {
     if (!await this.save(site)) return
     const versions = this.documentVersions(site)
     const server = this.ensure(site)
@@ -349,7 +434,7 @@ export class Preview {
   }
 
   /** Where a published page opens: the in-editor Simple Browser, or the system browser. */
-  private async openUrl(url: URL, target: 'simpleBrowser' | 'external'): Promise<void> {
+  private async openUrl(url: URL, target: PreviewTarget): Promise<void> {
     if (target === 'external') {
       await vscode.env.openExternal(vscode.Uri.parse(url.href))
       return
@@ -485,14 +570,14 @@ export class Preview {
     preferred?: string,
     kind: 'checked' | 'published' = 'published',
   ): Promise<string | undefined> {
-    const [first] = routes
-    if (!first) throw new Error('Tola published no HTML page for this file; no new preview was opened')
     if (preferred !== undefined) {
       if (routes.some((route) => route.route === preferred)) return preferred
       throw new Error(
-        `Tola no longer publishes the selected route ${preferred}; refresh Pages or run Open Preview to choose again. No new preview was opened`,
+        `Tola no longer publishes the selected route ${preferred}; choose a current route and try again`,
       )
     }
+    const [first] = routes
+    if (!first) throw new Error('Tola published no HTML page for this file; no new preview was opened')
     if (routes.length === 1) return first.route
     const chosen = await vscode.window.showQuickPick(
       routes.map((route) => ({ label: route.route, description: route.output })),
@@ -515,9 +600,7 @@ export class Preview {
     const key = this.key(site.selection)
     const existing = this.servers.get(key)
     if (existing?.active) return existing
-    const diagnostics = this.buildDiagnostics.get(key) ?? vscode.languages.createDiagnosticCollection()
-    this.buildDiagnostics.set(key, diagnostics)
-    diagnostics.clear()
+    const diagnostics = this.buildDiagnostics.open(site.selection, 'preview')
     const server = new PreviewServer(
       site.selection,
       site.lifetime,
@@ -537,8 +620,7 @@ export class Preview {
   async stop(selection: Selection): Promise<void> {
     const key = this.key(selection)
     const server = this.servers.get(key)
-    this.buildDiagnostics.get(key)?.dispose()
-    this.buildDiagnostics.delete(key)
+    this.buildDiagnostics.clear(selection, 'preview')
     if (!server) return
     server.stop()
     await server.exited
@@ -549,8 +631,6 @@ export class Preview {
     this.statusRequest += 1
     const servers = [...this.children]
     for (const server of servers) server.stop()
-    for (const diagnostics of this.buildDiagnostics.values()) diagnostics.dispose()
-    this.buildDiagnostics.clear()
     await Promise.all(servers.map((server) => server.exited))
     this.servers.clear()
   }

@@ -1,6 +1,7 @@
 //! Site-local editor configuration and explicit package input preparation.
 
 mod config;
+pub(crate) mod diagnostics;
 mod packages;
 mod site;
 

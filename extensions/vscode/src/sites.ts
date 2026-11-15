@@ -13,6 +13,7 @@ import {
   State,
 } from 'vscode-languageclient/node'
 import { Assets, type AssetSite, type AssetSources } from './assets.ts'
+import { BuildDiagnostics } from './build-diagnostics.ts'
 import { SiteCli } from './site-cli.ts'
 import { type PagesSite, PagesView } from './pages-view.ts'
 import { type EnterSite, insertNewline } from './enter.ts'
@@ -50,6 +51,7 @@ export interface SourceCheckStatus {
     readonly root: string
     readonly entry: string
     readonly packageRoots: readonly string[]
+    readonly moduleRoots: readonly string[]
     readonly assetSources: AssetSources
     readonly generatedRoots: readonly string[]
     readonly configVersions: Readonly<Record<string, number>>
@@ -123,6 +125,7 @@ export class Sites {
   private readonly tasks = new SiteTasks(() => [...this.selections.values()])
   private readonly pages: PagesView
   private readonly siteCli: SiteCli
+  readonly buildDiagnostics: BuildDiagnostics
 
   constructor(
     private readonly output: vscode.OutputChannel,
@@ -130,7 +133,11 @@ export class Sites {
     private readonly changed: () => void,
   ) {
     this.pages = new PagesView(() => this.pagesSites(), output)
-    this.siteCli = new SiteCli(output, (error) => this.report(error))
+    this.buildDiagnostics = new BuildDiagnostics(output, (selection, uri) => {
+      const site = this.clientForSite(selection.folder.uri.toString())
+      return site && sameSelection(site.selection, selection) ? site.client.diagnostics?.get(uri) ?? [] : []
+    })
+    this.siteCli = new SiteCli(output, (error) => this.report(error), this.buildDiagnostics)
   }
 
   register(): vscode.Disposable {
@@ -289,6 +296,7 @@ export class Sites {
     return [
       ...site.selection.inputRoots,
       ...(site.sourceCheck.site?.packageRoots ?? []).map((root) => vscode.Uri.parse(root).fsPath),
+      ...(site.sourceCheck.site?.moduleRoots ?? []).map((root) => vscode.Uri.parse(root).fsPath),
     ]
   }
 
@@ -463,6 +471,16 @@ export class Sites {
     const selected = this.selectionForUri(source)
     const site = selected && this.clientForSite(selected.folder.uri.toString())
     return site ? this.previewSiteFor(site) : undefined
+  }
+
+  async choosePreviewSite(): Promise<PreviewSite | undefined> {
+    const selected = await this.commandSite()
+    if (!selected) return undefined
+    const site = this.previewSite(undefined, selected.folder.uri.toString())
+    if (!site) {
+      throw new Error(`Tola language services are unavailable for ${selected.folder.name}`)
+    }
+    return site
   }
 
   /** The preview surface one site offers: its routes, its lifetime, and the state of its language client. */
@@ -864,6 +882,7 @@ export class Sites {
 
   private async stop(site: WorkspaceClient): Promise<void> {
     site.cancellation.cancel()
+    if (site.selection.kind === 'site') this.buildDiagnostics.forget(site.selection)
     this.virtual.forget(site)
     for (const resource of site.resources) resource.dispose()
     try {
@@ -1188,6 +1207,7 @@ export class Sites {
     this.workspaces.clear()
     const stopped = await Promise.allSettled(sites.map((site) => this.stop(site)))
     this.virtual.dispose()
+    this.buildDiagnostics.dispose()
     this.settled.dispose()
     const failures = stopped.filter((result) => result.status === 'rejected').map((result) => result.reason)
     if (failures.length) {

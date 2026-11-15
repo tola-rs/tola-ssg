@@ -1,6 +1,7 @@
 import { type ChildProcess, spawn } from 'node:child_process'
 import * as vscode from 'vscode'
 
+import { type BuildDiagnostic, type BuildDiagnostics, buildErrorMessage, savedDocuments } from './build-diagnostics.ts'
 import { type Selection, siteArguments } from './selection.ts'
 
 /** The site's own CLI verbs the editor drives, with their output on the Tola channel; their children die with the extension. */
@@ -11,6 +12,7 @@ export class SiteCli {
   constructor(
     private readonly output: vscode.OutputChannel,
     private readonly report: (error: unknown) => void,
+    private readonly diagnostics: BuildDiagnostics,
   ) {}
 
   register(): vscode.Disposable {
@@ -29,10 +31,13 @@ export class SiteCli {
       void vscode.window.showInformationMessage(`Tola is already building ${selection.folder.name}.`)
       return
     }
-    const args = siteArguments(selection, 'build')
+    const args = [...siteArguments(selection, 'build'), '--json']
+    const reports = this.diagnostics.open(selection, 'build')
+    const snapshot = savedDocuments()
+    const chunks: Buffer[] = []
     this.output.appendLine(`Tola builds ${selection.configurationFile}`)
     const started = Date.now()
-    const child = this.start(selection.command, args, selection.folder.uri.fsPath)
+    const child = this.start(selection.command, args, selection.folder.uri.fsPath, (chunk) => chunks.push(chunk))
     this.building.set(key, child)
     const completed = new Promise<void>((resolve) => {
       let failedToStart = false
@@ -42,6 +47,7 @@ export class SiteCli {
       }
       child.once('error', () => {
         failedToStart = true
+        reports.clear()
         this.report(
           new Error(`Tola could not start the build for ${selection.folder.name}.`),
         )
@@ -49,15 +55,31 @@ export class SiteCli {
       })
       child.once('close', (code, signal) => {
         if (failedToStart) return
+        const output = Buffer.concat(chunks).toString('utf8')
+        let report: { diagnostics: readonly BuildDiagnostic[]; cancelled: boolean } | undefined
+        try {
+          const parsed = JSON.parse(output)
+          if (parsed?.formatVersion !== 1 || parsed.operation !== 'build' || !Array.isArray(parsed.diagnostics)) {
+            throw new Error('Unsupported build report format')
+          }
+          report = parsed
+          if (parsed.cancelled) reports.clear()
+          else reports.set(parsed.diagnostics, snapshot)
+        } catch (error) {
+          reports.clear()
+          if (output.trim()) this.output.append(output)
+          this.output.appendLine(`Tola did not return a build report: ${String(error)}`)
+        }
         const seconds = ((Date.now() - started) / 1000).toFixed(1)
+        const error = buildErrorMessage(report?.diagnostics ?? [])
         if (code === 0) {
           this.output.appendLine(`Tola built ${selection.folder.name} in ${seconds}s.`)
-        } else {
+        } else if (!report?.cancelled) {
           this.report(
             new Error(
-              `Tola could not build ${selection.folder.name} (${
-                signal ?? `exit ${code ?? 'unknown'}`
-              }); the Tola output channel holds its diagnostics.`,
+              `Tola could not build ${selection.folder.name}. ${
+                error ?? `Open Tola output for details (${signal ?? `exit ${code ?? 'unknown'}`}).`
+              }`,
             ),
           )
         }

@@ -17,6 +17,7 @@ pub(in crate::cli) struct SiteReport {
     cancelled: bool,
     pub published: bool,
     input: ReportInput,
+    #[serde(serialize_with = "crate::editor::diagnostics::serialize")]
     diagnostics: Vec<Diagnostic>,
     #[serde(flatten)]
     build: BuildReport,

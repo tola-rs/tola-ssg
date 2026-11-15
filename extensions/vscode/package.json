@@ -263,6 +263,11 @@
         "title": "Tola: Open Page for Current Document"
       },
       {
+        "command": "tola.searchSiteRoutes",
+        "title": "Tola: Search Site Routes",
+        "icon": "$(search)"
+      },
+      {
         "command": "tola.openPreviewFragment",
         "title": "Tola: Open Published Fragment for Current Document"
       },
@@ -434,6 +439,10 @@
       ],
       "commandPalette": [
         {
+          "command": "tola.searchSiteRoutes",
+          "when": "tola.site"
+        },
+        {
           "command": "tola.openPage",
           "when": "editorLangId == typst"
         },
@@ -485,6 +494,11 @@
         }
       ],
       "view/title": [
+        {
+          "command": "tola.searchSiteRoutes",
+          "when": "view == tolaPages",
+          "group": "navigation"
+        },
         {
           "command": "tola.refreshPages",
           "when": "view == tolaPages",

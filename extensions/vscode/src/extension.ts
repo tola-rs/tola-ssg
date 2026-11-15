@@ -17,6 +17,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     (uri, siteKey) => connections.previewSite(uri, siteKey),
     (error) => connections.report(error),
     (uri) => connections.statusSite(uri),
+    () => connections.choosePreviewSite(),
+    connections.buildDiagnostics,
   )
   preview = previews
   sites = connections
