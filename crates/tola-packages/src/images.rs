@@ -224,13 +224,16 @@ fn load_source_image(
         .map_err(|error| error.to_string())
         .at(span)?;
     let metadata = match &svg {
-        Some(svg) => ImageMetadata {
-            width: rounded_pixels(svg.width()),
-            height: rounded_pixels(svg.height()),
-            format: ImageFormat::Svg,
-            has_alpha: true,
-            is_lossy: false,
-        },
+        Some(svg) => {
+            let (width, height) = svg.pixel_dimensions();
+            ImageMetadata {
+                width,
+                height,
+                format: ImageFormat::Svg,
+                has_alpha: true,
+                is_lossy: false,
+            }
+        }
         None => inspect(&loaded.data)
             .map_err(|error| error.to_string())
             .at(span)?,
@@ -242,11 +245,6 @@ fn load_source_image(
         metadata,
         svg,
     })
-}
-
-/// The integer pixel size an SVG reports at usvg's 96 DPI.
-fn rounded_pixels(value: f64) -> u32 {
-    value.round().clamp(1.0, f64::from(u32::MAX)) as u32
 }
 
 /// Request one derivative and return what a document needs to name it.

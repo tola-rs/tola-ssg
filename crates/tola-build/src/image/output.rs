@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use anyhow::{Result, ensure};
 use rayon::prelude::*;
-use tola_typst::svg::{SvgCrop, SvgError, SvgSource, looks_like_svg};
+use tola_typst::svg::{SvgError, SvgSource, looks_like_svg};
 use tola_typst::{AccessedDeps, ContentDigest, ReadEvidence, TypstWorld};
 use typst::comemo::Track;
 use typst::foundations::Bytes;
@@ -203,18 +203,8 @@ impl SourceGroup {
                 let pixels = geometry.pixels;
                 let rendered = (|| -> Result<ResampledPixels, ImageCause> {
                     let vector = pixels.vector_geometry().ok_or(ImageCause::RasterGeometry)?;
-                    let (x, y, width, height) = vector.crop();
                     let rgba = svg
-                        .render(
-                            pixels.width(),
-                            pixels.height(),
-                            Some(SvgCrop {
-                                x,
-                                y,
-                                width,
-                                height,
-                            }),
-                        )
+                        .render(pixels.width(), pixels.height(), Some(vector.crop().into()))
                         .map_err(ImageCause::Svg)?;
                     ResampledPixels::from_rendered(pixels, rgba, cancellation)
                         .map_err(ImageCause::Image)
@@ -298,11 +288,6 @@ impl SourceGroup {
         }
         outcomes
     }
-}
-
-/// The integer pixel size an SVG reports at usvg's 96 DPI.
-fn svg_pixels(value: f64) -> u32 {
-    value.round().clamp(1.0, f64::from(u32::MAX)) as u32
 }
 
 impl RenderGeometry {
@@ -722,13 +707,16 @@ impl ImageOutputs {
                                 None
                             };
                             let metadata = match &svg {
-                                Some(svg) => ImageMetadata {
-                                    width: svg_pixels(svg.width()),
-                                    height: svg_pixels(svg.height()),
-                                    format: ImageFormat::Svg,
-                                    has_alpha: true,
-                                    is_lossy: false,
-                                },
+                                Some(svg) => {
+                                    let (width, height) = svg.pixel_dimensions();
+                                    ImageMetadata {
+                                        width,
+                                        height,
+                                        format: ImageFormat::Svg,
+                                        has_alpha: true,
+                                        is_lossy: false,
+                                    }
+                                }
                                 None => inspect(bytes.as_slice()).map_err(|error| {
                                     image_failure(
                                         source_id,
