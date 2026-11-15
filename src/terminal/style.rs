@@ -1,7 +1,7 @@
 //! The styling roles terminal status text is drawn with.
 
 use owo_colors::OwoColorize;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use tracing::Level;
 
 /// Every role of terminal status text, under one color decision.
@@ -98,6 +98,17 @@ impl Palette {
     pub(crate) fn dim_style(self) -> Style {
         if self.uses_color {
             Style::default().add_modifier(Modifier::DIM)
+        } else {
+            Style::default()
+        }
+    }
+
+    pub(crate) fn copy_style(self) -> Style {
+        if self.uses_color {
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+                .remove_modifier(Modifier::DIM)
         } else {
             Style::default()
         }

@@ -525,19 +525,17 @@ impl DevScreen {
         self.dirty = true;
     }
 
-    /// Put the visible round's text on the reader's clipboard.
+    /// Copy the current build status, or the visible round when no build is running.
     ///
     /// The terminal's own escape is best effort — a terminal only reads it when it allows
     /// programs to write the clipboard — so the system's pasteboard decides what the reader
     /// can trust.
     fn copy(&mut self, cancellation: &crate::cancellation::Cancellation) {
-        if !self.rounds.live(Action::Copy) {
-            return;
-        }
-        let Some(round) = self.rounds.current().cloned() else {
-            return;
-        };
-        let text = plain_text(&round.transcript);
+        let text = copy_text(
+            self.build_progress.as_ref(),
+            self.rounds.current().map(|round| round.as_ref()),
+        );
+        let text = plain_text(&text);
         let text = text.trim_end();
         if text.is_empty() {
             return;
@@ -557,9 +555,17 @@ impl DevScreen {
             }
             None => true,
         };
-        let what = match round.diagnostics.len() {
-            0 => "build output".to_owned(),
-            count => crate::terminal::progress::plural_count(count, "diagnostic"),
+        let what = if self.build_progress.is_some() {
+            "build status".to_owned()
+        } else {
+            match self
+                .rounds
+                .current()
+                .map_or(0, |round| round.diagnostics.len())
+            {
+                0 => "build output".to_owned(),
+                count => crate::terminal::progress::plural_count(count, "diagnostic"),
+            }
         };
         self.notice = Some(Notice {
             text: if copied {
@@ -687,6 +693,7 @@ impl DevScreen {
                 footer_area,
                 self.notice.as_ref().map(|notice| notice.text.as_str()),
                 &self.rounds,
+                self.build_progress.is_some(),
                 palette,
             );
         });
@@ -731,13 +738,14 @@ fn draw_footer(
     area: Rect,
     notice: Option<&str>,
     rounds: &Rounds,
+    has_progress: bool,
     palette: Palette,
 ) {
     hints::draw(
         frame,
         area,
         notice.unwrap_or(""),
-        &live_actions(rounds),
+        &live_actions(rounds, has_progress),
         palette,
     );
 }
@@ -787,11 +795,19 @@ fn job_paragraph(lines: Vec<Line<'static>>) -> Paragraph<'static> {
 }
 
 /// The dev keys whose action still changes the view.
-fn live_actions(rounds: &Rounds) -> Vec<Action> {
+fn live_actions(rounds: &Rounds, has_progress: bool) -> Vec<Action> {
     ACCEPTED
         .into_iter()
-        .filter(|action| rounds.live(*action))
+        .filter(|action| (*action == Action::Copy && has_progress) || rounds.live(*action))
         .collect()
+}
+
+fn copy_text(progress: Option<&crate::dev::round::BuildProgress>, round: Option<&Round>) -> String {
+    match (progress, round) {
+        (Some(progress), _) => format!("{}\n{}", progress.title, progress.detail),
+        (None, Some(round)) => round.transcript.clone(),
+        (None, None) => String::new(),
+    }
 }
 
 /// The dev view's text as styled lines, every control sequence applied or consumed whole.
@@ -836,5 +852,25 @@ fn push_span(line: &mut Line<'static>, text: &str, style: Style) {
         last.content.to_mut().push_str(text);
     } else {
         line.spans.push(Span::styled(text.to_owned(), style));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn copy_is_available_before_a_round_finishes() {
+        let rounds = Rounds::default();
+        let progress = crate::dev::round::BuildProgress {
+            title: "Restarting".to_owned(),
+            detail: "generated/previous".to_owned(),
+            warning: true,
+        };
+        assert!(live_actions(&rounds, true).contains(&Action::Copy));
+        let text = copy_text(Some(&progress), None);
+        assert!(text.contains(&progress.title));
+        assert!(text.contains(&progress.detail));
+        assert!(!live_actions(&rounds, false).contains(&Action::Copy));
     }
 }

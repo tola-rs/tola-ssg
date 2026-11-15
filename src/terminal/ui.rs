@@ -89,6 +89,7 @@ pub(crate) mod keymap {
 
 pub(crate) mod hints {
     use super::{Action, Frame, Palette, Paragraph, Rect};
+    use ratatui::text::{Line, Span};
 
     pub(crate) fn draw(
         frame: &mut Frame<'_>,
@@ -102,21 +103,28 @@ pub(crate) mod hints {
         }
         let mut parts = Vec::new();
         if live.contains(&Action::PreviousRound) || live.contains(&Action::NextRound) {
-            parts.push("←/→ rounds");
+            parts.push(Span::raw("←/→ rounds"));
         }
         if live.contains(&Action::Up) || live.contains(&Action::Down) {
-            parts.push("↑/↓ scroll");
+            parts.push(Span::raw("↑/↓ scroll"));
         }
         if live.contains(&Action::Copy) {
-            parts.push("c copy");
+            parts.push(Span::styled("c for copy", palette.copy_style()));
         }
-        parts.push("Ctrl-C quit");
-        let text = if notice.is_empty() {
-            parts.join("  ")
+        parts.push(Span::raw("Ctrl-C quit"));
+        let mut keys = Line::default();
+        for part in parts {
+            if !keys.spans.is_empty() {
+                keys.spans.push(Span::raw("  "));
+            }
+            keys.spans.push(part);
+        }
+        let lines = if notice.is_empty() {
+            vec![keys]
         } else {
-            format!("{notice}\n{}", parts.join("  "))
+            vec![Line::from(notice), keys]
         };
-        frame.render_widget(Paragraph::new(text).style(palette.dim_style()), area);
+        frame.render_widget(Paragraph::new(lines).style(palette.dim_style()), area);
     }
 }
 
@@ -135,5 +143,24 @@ mod tests {
             KeyCode::Char('c'),
             KeyModifiers::CONTROL
         )));
+    }
+
+    #[test]
+    fn copy_hint_stays_emphasized_in_dim_footer() {
+        use ratatui::backend::TestBackend;
+        use ratatui::style::{Color, Modifier};
+
+        let size = Size::new(40, 1);
+        let mut screen = Terminal::new(TestBackend::new(size.width, size.height)).unwrap();
+        screen
+            .draw(|frame| {
+                let area = frame.area();
+                hints::draw(frame, area, "", &[Action::Copy], Palette::new(true));
+            })
+            .unwrap();
+        let key = &screen.backend().buffer()[(0, 0)];
+        assert_eq!(key.fg, Color::Cyan);
+        assert!(key.modifier.contains(Modifier::BOLD));
+        assert!(!key.modifier.contains(Modifier::DIM));
     }
 }

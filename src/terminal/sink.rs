@@ -142,6 +142,8 @@ impl OutputSink {
         let claim = Claim::take().map_err(io::Error::other)?;
         let mut presentation = self.lock()?;
         self.finish_hook_line(&mut presentation)?;
+        // The backend must use the CLI's color choice, including an explicit override of NO_COLOR.
+        crossterm::style::force_color_output(palette.uses_color());
         presentation.development = Some(DevScreen::open(
             StreamWriter(self.inner.stderr.clone()),
             palette,
