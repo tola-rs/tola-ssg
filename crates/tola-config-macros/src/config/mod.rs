@@ -50,6 +50,7 @@ pub fn derive(input: &DeriveInput) -> TokenStream {
 }
 
 fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
+    reject_generic(input)?;
     let name = &input.ident;
     let fields_struct_name = syn::Ident::new(&format!("{}Fields", pascal_case(name)), name.span());
 
@@ -129,6 +130,8 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
             let boolean = field_type::path_type_ident(ty).is_some_and(|name| name == "bool");
             boolean.then(|| quote! { (#runtime_crate::FieldPath::new(#path), &["true", "false"]) })
         });
+
+    let fragment_code = generate_fragment(name, &config_fields, &runtime_crate);
 
     let template_code = generate_template_code(&config_fields, &runtime_crate)?;
 
@@ -213,6 +216,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
     };
 
     Ok(quote! {
+        #fragment_code
         /// Generated field path accessors.
         pub struct #fields_struct_name {
             #(#field_defs)*
@@ -305,4 +309,85 @@ fn generate_runtime_status_code(
         FieldStatus::Experimental => Some(quote! { #runtime_crate::FieldStatus::Experimental }),
         FieldStatus::Normal | FieldStatus::Hidden => None,
     }
+}
+
+/// Generate only the fragment validator, using the same field parser as Config.
+pub fn derive_fragment(input: &DeriveInput) -> TokenStream {
+    match expand_fragment(input) {
+        Ok(tokens) => tokens,
+        Err(error) => error.into_compile_error(),
+    }
+}
+
+fn expand_fragment(input: &DeriveInput) -> syn::Result<TokenStream> {
+    reject_generic(input)?;
+    let attrs = ConfigAttrs::parse(&input.attrs, ConfigAttrScope::Struct)?;
+    let runtime = attrs
+        .crate_path
+        .unwrap_or_else(|| syn::parse_quote!(::tola_config));
+    reject_serde_rename_all(&input.attrs)?;
+    let Data::Struct(data) = &input.data else {
+        return Err(syn::Error::new_spanned(
+            input,
+            "Fragment requires a named struct",
+        ));
+    };
+    let Fields::Named(fields) = &data.fields else {
+        return Err(syn::Error::new_spanned(
+            input,
+            "Fragment requires named fields",
+        ));
+    };
+    let fields = fields
+        .named
+        .iter()
+        .map(ConfigField::from_fragment_field)
+        .collect::<syn::Result<Vec<_>>>()?;
+    Ok(generate_fragment(&input.ident, &fields, &runtime))
+}
+
+fn generate_fragment(
+    name: &syn::Ident,
+    fields: &[ConfigField],
+    runtime: &syn::Path,
+) -> TokenStream {
+    let arms = fields
+        .iter()
+        .filter(|field| !field.deserialize_skip)
+        .map(|field| {
+            let key = &field.toml_name;
+            let ty = &field.ty;
+            let check = if let Some(adapter) = &field.fragment_with {
+                quote! { #adapter(value, context); }
+            } else {
+                quote! { <#ty as #runtime::ValidateFragment>::validate_fragment(value, context); }
+            };
+            quote! { #key => context.key(key, |context| { #check }), }
+        });
+    quote! {
+        impl #runtime::ValidateFragment for #name {
+            fn validate_fragment(value: &#runtime::toml::Value, context: &mut #runtime::FragmentContext<'_>) {
+                let #runtime::toml::Value::Table(table) = value else {
+                    #runtime::wrong_type(value, "table", context);
+                    return;
+                };
+                for (key, value) in table {
+                    match key.as_str() {
+                        #(#arms)*
+                        _ => context.key(key, |context| context.issue(#runtime::FragmentIssueKind::UnknownKey)),
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn reject_generic(input: &DeriveInput) -> syn::Result<()> {
+    if !input.generics.params.is_empty() || input.generics.where_clause.is_some() {
+        return Err(syn::Error::new_spanned(
+            &input.generics,
+            "fragment derives do not support generic records",
+        ));
+    }
+    Ok(())
 }

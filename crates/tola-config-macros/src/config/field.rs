@@ -22,6 +22,8 @@ pub struct ConfigField {
     pub sub: bool,
     pub collection: Option<CollectionShape>,
     pub ty: Type,
+    pub fragment_with: Option<syn::Path>,
+    pub deserialize_skip: bool,
 }
 
 impl ConfigField {
@@ -29,6 +31,14 @@ impl ConfigField {
     ///
     /// The derive accepts only structs with named fields, so every field has an identifier.
     pub fn from_field(field: &syn::Field) -> syn::Result<Self> {
+        Self::parse(field, false)
+    }
+
+    pub fn from_fragment_field(field: &syn::Field) -> syn::Result<Self> {
+        Self::parse(field, true)
+    }
+
+    fn parse(field: &syn::Field, fragment: bool) -> syn::Result<Self> {
         let ident = field
             .ident
             .as_ref()
@@ -74,7 +84,7 @@ impl ConfigField {
                     "collection = inline requires a Vec<T> or Option<Vec<T>> field",
                 ));
             }
-            None if !attrs.skip && is_collection_type(&field.ty) => {
+            None if !fragment && !attrs.skip && is_collection_type(&field.ty) => {
                 return Err(syn::Error::new_spanned(
                     ident,
                     "Vec<T> fields require #[config(collection = inline)] or #[config(collection = array_table)]",
@@ -100,7 +110,10 @@ impl ConfigField {
         if attrs.sub {
             refuse_section_documentation(field)?;
         }
-        let (serde_name, key_span) = parse_serde_field(&field.attrs, attrs.skip, ident)?;
+        let deserialize_skip =
+            super::serde::fragment_field(&field.attrs, attrs.fragment_with.is_some())?;
+        let (serde_name, key_span) =
+            parse_serde_field(&field.attrs, attrs.skip || fragment, ident)?;
         let toml_name = match (attrs.name, serde_name) {
             (Some(config_name), Some(serde_name)) if config_name != serde_name => {
                 return Err(syn::Error::new_spanned(
@@ -118,7 +131,9 @@ impl ConfigField {
             (None, Some(serde_name)) => serde_name,
             (None, None) => ident.unraw().to_string(),
         };
-        validate_toml_key(&toml_name, key_span)?;
+        if !fragment {
+            validate_toml_key(&toml_name, key_span)?;
+        }
 
         Ok(Self {
             rust_ident: ident.clone(),
@@ -131,6 +146,8 @@ impl ConfigField {
             sub: attrs.sub,
             collection: attrs.collection,
             ty: field.ty.clone(),
+            fragment_with: attrs.fragment_with,
+            deserialize_skip,
         })
     }
 }

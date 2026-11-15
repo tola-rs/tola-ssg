@@ -33,6 +33,7 @@ pub struct ConfigAttrs {
     pub skip: bool,
     pub sub: bool,
     pub collection: Option<CollectionShape>,
+    pub fragment_with: Option<syn::Path>,
 }
 
 /// Attribute location, used to reject options on the wrong declaration kind.
@@ -107,6 +108,11 @@ impl ConfigAttrs {
                             return Err(meta.error("duplicate crate config attribute"));
                         }
                         parsed.crate_path = Some(meta.value()?.parse()?);
+                    }
+                    "fragment_with" => {
+                        require_scope(scope, ConfigAttrScope::Field, key)?;
+                        ensure_not_seen(parsed.fragment_with.is_some(), key)?;
+                        parsed.fragment_with = Some(meta.value()?.parse()?);
                     }
                     "name" => {
                         require_scope(scope, ConfigAttrScope::Field, key)?;

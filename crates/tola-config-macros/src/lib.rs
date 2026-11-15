@@ -88,3 +88,10 @@ pub fn derive_config(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     config::derive(&input).into()
 }
+
+/// Derive fragment validation for a named record without a configuration template.
+#[proc_macro_derive(Fragment, attributes(config, tola_config, serde))]
+pub fn derive_fragment(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    config::derive_fragment(&input).into()
+}

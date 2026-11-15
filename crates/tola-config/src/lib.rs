@@ -5,12 +5,16 @@
 
 extern crate self as tola_config;
 
+#[doc(hidden)]
+pub use toml;
+
 use serde::Serialize;
 use std::borrow::Cow;
 use thiserror::Error;
 
 mod diagnostic;
 mod field;
+mod fragment;
 mod presence;
 pub mod status;
 
@@ -19,10 +23,14 @@ pub use diagnostic::{
     ConfigError, ConfigSourceRefusal,
 };
 pub use field::FieldPath;
+pub use fragment::{
+    FragmentContext, FragmentIssue, FragmentIssueKind, ValidateFragment, ValueStep, validate_value,
+    wrong_type,
+};
 pub use presence::ConfigPresence;
 pub use status::FieldStatus;
 
-pub use tola_config_macros::Config;
+pub use tola_config_macros::{Config, Fragment};
 
 /// A failure to serialize a configuration value as TOML.
 #[derive(Debug, Error)]
@@ -185,6 +193,12 @@ preview = false
         assert!(diagnostics.into_result().is_err());
     }
     struct Unserializable(bool);
+
+    impl super::ValidateFragment for Unserializable {
+        fn validate_fragment(value: &toml::Value, context: &mut super::FragmentContext<'_>) {
+            super::validate_value::<String>(value, context);
+        }
+    }
 
     impl Default for Unserializable {
         fn default() -> Self {

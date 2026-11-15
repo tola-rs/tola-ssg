@@ -7,6 +7,15 @@ use syn::{Attribute, Expr, Lit, Meta, Token, ext::IdentExt, punctuated::Punctuat
 pub(super) fn reject_serde_rename_all(attrs: &[Attribute]) -> syn::Result<()> {
     for attr in serde_attributes(attrs) {
         for meta in serde_metadata(attr)? {
+            if ["from", "try_from", "transparent", "remote"]
+                .iter()
+                .any(|name| meta.path().is_ident(name))
+            {
+                return Err(syn::Error::new_spanned(
+                    meta,
+                    "custom record deserialization requires a handwritten ValidateFragment implementation",
+                ));
+            }
             if meta.path().is_ident("rename_all") {
                 return Err(syn::Error::new_spanned(
                     meta,
@@ -132,6 +141,38 @@ fn set_rename<T: quote::ToTokens>(
     }
     *target = Some(value);
     Ok(())
+}
+
+/// Record whether serde consumes a key and reject custom decoding without an adapter.
+pub(super) fn fragment_field(attrs: &[Attribute], adapted: bool) -> syn::Result<bool> {
+    let mut skipped = false;
+    for attr in serde_attributes(attrs) {
+        for meta in serde_metadata(attr)? {
+            let path = meta.path();
+            if path.is_ident("skip") || path.is_ident("skip_deserializing") {
+                skipped = true;
+            }
+            if path.is_ident("flatten") {
+                return Err(syn::Error::new_spanned(
+                    meta,
+                    "flatten requires an explicit validator for the containing record",
+                ));
+            }
+            if path.is_ident("alias") {
+                return Err(syn::Error::new_spanned(
+                    meta,
+                    "serde aliases require an explicit validator for the containing record",
+                ));
+            }
+            if (path.is_ident("deserialize_with") || path.is_ident("with")) && !adapted {
+                return Err(syn::Error::new_spanned(
+                    meta,
+                    "custom deserialization requires #[config(fragment_with = path)]",
+                ));
+            }
+        }
+    }
+    Ok(skipped)
 }
 
 #[cfg(test)]
