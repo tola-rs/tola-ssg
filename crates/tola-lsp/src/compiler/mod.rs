@@ -61,10 +61,12 @@ pub(crate) mod tests {
     /// A compiler lane answering from one site's configuration, with default build resources.
     pub(crate) fn compiler(
         configuration: &Arc<ResolvedSiteConfig>,
-    ) -> SourceCompiler<impl FnMut(&Path, &[UnsavedSource]) -> Result<ServedWorkspace>> {
+    ) -> SourceCompiler<
+        impl FnMut(&Path, &[UnsavedSource], &BuildCancellation) -> Result<ServedWorkspace>,
+    > {
         let configuration = Arc::clone(configuration);
         SourceCompiler::new(
-            move |_, _| Ok(ServedWorkspace::Site(Arc::clone(&configuration))),
+            move |_, _, _| Ok(ServedWorkspace::Site(Arc::clone(&configuration))),
             BuildResources::default(),
         )
     }

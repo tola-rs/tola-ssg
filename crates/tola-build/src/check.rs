@@ -16,7 +16,7 @@ const RETAINED_DERIVATION_GENERATIONS: usize = 1;
 /// Compiler resources for read-only checks of successive editor revisions.
 pub struct SourceDiagnosticSession {
     config: Arc<ResolvedSiteConfig>,
-    /// The contribution applied to `config`, when this session prepared its modules.
+    /// The modules selected for the current source snapshot.
     site: Option<Arc<crate::modules::PreparedSite>>,
     resources: crate::resources::BuildResources,
     environment: SourceEnvironment,
@@ -503,6 +503,7 @@ impl SourceDiagnosticSession {
     /// The configuration a check runs under, or why it stopped.
     fn check_configuration(
         &mut self,
+        overlays: &[(PathBuf, Arc<str>)],
         cancellation: &BuildCancellation,
     ) -> Result<Arc<ResolvedSiteConfig>, CheckStop> {
         cancellation.ensure_active().map_err(CheckStop::Cancelled)?;
@@ -514,16 +515,17 @@ impl SourceDiagnosticSession {
             &self.config,
             self.resources.input_mode(),
             &bundle,
+            overlays,
         )
         .map_err(|error| {
             CheckStop::Diagnostics(source_failure_diagnostics(&error, self.config.get_root()))
         })?;
-        self.config = site.config_arc().clone();
+        let config = Arc::clone(site.config_arc());
         self.site = Some(Arc::new(site));
         self.host = None;
         self.analysis = None;
         self.reused_analysis = false;
-        Ok(Arc::clone(&self.config))
+        Ok(config)
     }
 
     /// Check one source on its own, with the diagnostics it produced.
@@ -594,7 +596,7 @@ impl SourceDiagnosticSession {
         overlays: Vec<(PathBuf, Arc<str>)>,
         cancellation: &BuildCancellation,
     ) -> Result<PreparedSourceCheck, CheckStop> {
-        let configuration = self.check_configuration(cancellation)?;
+        let configuration = self.check_configuration(&overlays, cancellation)?;
         let prepared =
             crate::filesystem::SourceOverrides::new(overlays, cancellation).and_then(|overrides| {
                 let (host, content, bindings) =
@@ -845,7 +847,7 @@ impl SourceDiagnosticSession {
         overlays: Vec<(PathBuf, Arc<str>)>,
         cancellation: &BuildCancellation,
     ) -> Result<SourceRevision, BuildCancelled> {
-        let configuration = match self.check_configuration(cancellation) {
+        let configuration = match self.check_configuration(&overlays, cancellation) {
             Ok(configuration) => configuration,
             Err(CheckStop::Cancelled(error)) => return Err(error),
             Err(CheckStop::Diagnostics(diagnostics)) => {
@@ -925,6 +927,7 @@ fn source_failure_diagnostics(
     tola_diagnostic::attached(error)
         .map(<[tola_diagnostic::Diagnostic]>::to_vec)
         .or_else(|| crate::compiler::error_diagnostics(error, root))
+        .or_else(|| tola_module::error_diagnostic(error).map(|diagnostic| vec![diagnostic]))
         .unwrap_or_else(|| {
             vec![tola_diagnostic::fallback(
                 tola_diagnostic::codes::check::SOURCE,

@@ -1,14 +1,12 @@
 //! Icon collection sources available to `@tola/icon` during Bundle compilation.
 
 use std::collections::BTreeMap;
-use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use tola_config::Config;
 
 use crate::config::ConfigDiagnostics;
-use crate::icon::iconify;
 
 /// Import `icon` from `@tola/icon:0.0.0`; `icon("namespace:name")` inserts an SVG in HTML.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, Config, PartialEq, Eq)]
@@ -17,118 +15,11 @@ use crate::icon::iconify;
 pub struct IconsConfig {
     /// Each namespace names where its icons come from: a local SVG tree or IconifyJSON file, or
     /// a remote collection named by an npm-published preset or by a URL.
+    #[config(fragment_with = crate::config::fragment::icon_collections)]
     pub collections: BTreeMap<String, IconCollectionSource>,
 }
 
-/// Where one icon namespace's content comes from.
-#[derive(Clone, Serialize, PartialEq, Eq)]
-#[serde(tag = "source-type", rename_all = "kebab-case")]
-pub enum IconCollectionSource {
-    /// One local IconifyJSON collection file.
-    LocalJson { path: PathBuf },
-    /// A local SVG tree; relative path components become hyphenated icon names.
-    LocalSvgDir { path: PathBuf },
-    /// IconifyJSON fetched over HTTP, named either by an npm-published preset or by an address
-    /// the author writes.
-    RemoteJson {
-        /// The `@iconify-json` package that publishes this collection.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        preset: Option<String>,
-        /// The package release to resolve, or the registry's latest release when omitted.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        version: Option<String>,
-        /// The address serving this collection's IconifyJSON.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        url: Option<String>,
-        /// Addresses tried before the declared one, in the order written. Only a `preset` fills
-        /// `{name}` and `{version}`.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        mirrors: Option<Vec<String>>,
-    },
-}
-
-impl<'de> Deserialize<'de> for IconCollectionSource {
-    fn deserialize<D: serde::Deserializer<'de>>(
-        deserializer: D,
-    ) -> std::result::Result<Self, D::Error> {
-        #[derive(Deserialize)]
-        #[serde(tag = "source-type", rename_all = "kebab-case", deny_unknown_fields)]
-        enum Written {
-            LocalJson {
-                path: PathBuf,
-            },
-            LocalSvgDir {
-                path: PathBuf,
-            },
-            RemoteJson {
-                preset: Option<String>,
-                version: Option<String>,
-                url: Option<String>,
-                /// A key this model replaced; accepted only to name the repair.
-                sha256: Option<String>,
-                mirrors: Option<Vec<String>>,
-            },
-        }
-        match Written::deserialize(deserializer)? {
-            Written::LocalJson { path } => Ok(Self::LocalJson { path }),
-            Written::LocalSvgDir { path } => Ok(Self::LocalSvgDir { path }),
-            Written::RemoteJson {
-                sha256: Some(_), ..
-            } => Err(serde::de::Error::custom(
-                "`sha256` is no longer part of `[icons.collections]`: icon integrity lives in `tola.lock`; delete `sha256` and run `tola update`",
-            )),
-            Written::RemoteJson {
-                preset,
-                version,
-                url,
-                mirrors,
-                ..
-            } => Ok(Self::RemoteJson {
-                preset,
-                version,
-                url,
-                mirrors,
-            }),
-        }
-    }
-}
-
-impl fmt::Debug for IconCollectionSource {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::LocalJson { path } => formatter
-                .debug_struct("LocalJson")
-                .field("path", path)
-                .finish(),
-            Self::LocalSvgDir { path } => formatter
-                .debug_struct("LocalSvgDir")
-                .field("path", path)
-                .finish(),
-            Self::RemoteJson {
-                preset,
-                version,
-                url,
-                mirrors,
-            } => {
-                // A URL's query may hold credentials or a token, so it never reaches a log.
-                let mut entry = formatter.debug_struct("RemoteJson");
-                if let Some(preset) = preset {
-                    entry.field("preset", preset);
-                }
-                if let Some(version) = version {
-                    entry.field("version", version);
-                }
-                if url.is_some() {
-                    entry.field("url", &"<redacted>");
-                }
-                if mirrors.is_some() {
-                    entry.field("mirrors", &"<redacted>");
-                }
-                entry.finish()
-            }
-        }
-    }
-}
+pub use tola_module::icons::IconCollectionSource;
 
 impl IconsConfig {
     pub(crate) fn validate(&self, diagnostics: &mut ConfigDiagnostics) {
@@ -140,20 +31,10 @@ impl IconsConfig {
                     "Use 1–512 ASCII letters, digits, hyphens, or underscores, starting with a letter or digit and not ending with a hyphen",
                 );
             }
-            if let IconCollectionSource::RemoteJson {
-                preset,
-                version,
-                url,
-                mirrors,
-            } = source
-            {
-                validate_remote_json(
-                    namespace,
-                    preset.as_deref(),
-                    version.as_deref(),
-                    url.as_deref(),
-                    mirrors.as_deref(),
-                    diagnostics,
+            if let Err(message) = source.validate() {
+                diagnostics.error(
+                    Self::FIELDS.collections,
+                    format!("icon collection `{namespace}`: {message}"),
                 );
             }
         }
@@ -332,166 +213,6 @@ absolute dimensions. Explicit dimensions must use absolute units. Convert text t
                 IconCollectionSource::RemoteJson { .. } => continue,
             };
             *path = root.join(&*path);
-        }
-    }
-}
-
-/// Accept exactly one way of naming a remote collection.
-fn validate_remote_json(
-    namespace: &str,
-    preset: Option<&str>,
-    version: Option<&str>,
-    url: Option<&str>,
-    mirrors: Option<&[String]>,
-    diagnostics: &mut ConfigDiagnostics,
-) {
-    let field = IconsConfig::FIELDS.collections;
-    match (preset, url) {
-        (Some(preset), None) => {
-            if !iconify::usable_preset(preset) {
-                diagnostics.error_with_help(
-                    field,
-                    format!("icon collection `{namespace}`: `preset` `{preset}` is not an `@iconify-json` package name"),
-                    "Write the package name after the `@iconify-json/` scope, for example `lucide`",
-                );
-                return;
-            }
-            if let Some(version) = version
-                && !iconify::usable_version(version)
-            {
-                diagnostics.error_with_help(
-                    field,
-                    format!("icon collection `{namespace}`: `version` `{version}` is not a published release name"),
-                    "Write the `@iconify-json` release exactly as the registry publishes it, or omit `version` to follow the latest release",
-                );
-            }
-            if let Some(mirrors) = mirrors {
-                validate_mirrors(namespace, mirrors, true, diagnostics);
-            }
-        }
-        (None, Some(url)) => {
-            if version.is_some() {
-                version_needs_preset(namespace, diagnostics);
-                return;
-            }
-            if !usable_url(url) {
-                diagnostics.error_with_help(
-                    field,
-                    format!("icon collection `{namespace}`: `url` `{url}` is not a usable URL"),
-                    "Use an absolute `http` or `https` URL with no credentials or fragment",
-                );
-            }
-            if let Some(mirrors) = mirrors {
-                validate_mirrors(namespace, mirrors, false, diagnostics);
-            }
-        }
-        (Some(_), Some(_)) => diagnostics.error_with_help(
-            field,
-            format!("icon collection `{namespace}`: declare either `preset` or `url`, not both"),
-            "remove the declaration this namespace does not need",
-        ),
-        (None, None) if version.is_some() => version_needs_preset(namespace, diagnostics),
-        (None, None) => {
-            // A namespace that is itself a usable preset name is almost always an author who
-            // wrote the section header and stopped there.
-            let help = if iconify::usable_preset(namespace) {
-                format!(
-                    "write `preset = \"{namespace}\"` to download the `@iconify-json/{namespace}` package"
-                )
-            } else {
-                "write `preset` naming an `@iconify-json` package, or `url` naming an IconifyJSON file"
-                    .to_owned()
-            };
-            diagnostics.error_with_help(
-                field,
-                format!("icon collection `{namespace}` declares no source"),
-                help,
-            );
-        }
-    }
-}
-
-/// `version` pins the release of a `preset`, so it needs one.
-fn version_needs_preset(namespace: &str, diagnostics: &mut ConfigDiagnostics) {
-    diagnostics.error_with_help(
-        IconsConfig::FIELDS.collections,
-        format!("icon collection `{namespace}`: `version` needs the `preset` it names"),
-        "remove `version`, or write the `preset` whose release it is",
-    );
-}
-
-/// Whether one address names an absolute `http` or `https` URL Tola may fetch.
-fn usable_url(url: &str) -> bool {
-    url::Url::parse(url).is_ok_and(|url| {
-        matches!(url.scheme(), "https" | "http")
-            && url.host_str().is_some()
-            && url.fragment().is_none()
-            && url.username().is_empty()
-            && url.password().is_none()
-    })
-}
-
-/// The placeholders a `mirror` address may carry, and nothing else.
-const MIRROR_PLACEHOLDERS: [&str; 2] = ["name", "version"];
-
-/// Whether every `{...}` in a mirror address names a placeholder Tola fills.
-fn mirror_placeholders_are_known(mirror: &str) -> bool {
-    let mut rest = mirror;
-    while let Some(open) = rest.find('{') {
-        let Some(close) = rest[open..].find('}') else {
-            return false;
-        };
-        if !MIRROR_PLACEHOLDERS.contains(&&rest[open + 1..open + close]) {
-            return false;
-        }
-        rest = &rest[open + close + 1..];
-    }
-    !rest.contains('}')
-}
-
-/// Accept every mirror address of one remote collection.
-///
-/// A preset fills `{name}` and `{version}`; a declared `url` has nothing to fill, so its mirrors
-/// must already be complete addresses.
-fn validate_mirrors(
-    namespace: &str,
-    mirrors: &[String],
-    placeholders: bool,
-    diagnostics: &mut ConfigDiagnostics,
-) {
-    let field = IconsConfig::FIELDS.collections;
-    for mirror in mirrors {
-        if !placeholders {
-            if mirror.contains('{') || mirror.contains('}') {
-                diagnostics.error_with_help(
-                    field,
-                    format!(
-                        "icon collection `{namespace}`: `mirrors` needs a `preset` to fill `{mirror}`"
-                    ),
-                    "write the address out, or declare a `preset`",
-                );
-                continue;
-            }
-        } else if !mirror_placeholders_are_known(mirror) {
-            diagnostics.error_with_help(
-                field,
-                format!(
-                    "icon collection `{namespace}`: `mirrors` has an unknown placeholder in `{mirror}`"
-                ),
-                "use `{name}` or `{version}`",
-            );
-            continue;
-        }
-        // The preset fills the placeholders after this check, so a stand-in answers for them here.
-        let sample = mirror
-            .replace("{name}", "icons")
-            .replace("{version}", "1.0.0");
-        if !usable_url(&sample) {
-            diagnostics.error_with_help(
-                field,
-                format!("icon collection `{namespace}`: `mirrors` `{mirror}` is not a usable URL"),
-                "use an absolute `http` or `https` URL without credentials or a fragment",
-            );
         }
     }
 }

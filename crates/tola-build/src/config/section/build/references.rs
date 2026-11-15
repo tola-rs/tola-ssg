@@ -9,12 +9,15 @@ use tola_config::Config;
 #[config(section = "build.references")]
 pub struct ReferencesConfig {
     /// Use `warn` to report a missing page as a warning. If omitted, a missing page is an error.
+    #[config(fragment_with = tola_config::validate_value::<ReferenceLevel>)]
     pub navigation: ReferenceLevel,
 
     /// Use `warn` for a missing file or a media type mismatch. If omitted, both are errors.
+    #[config(fragment_with = tola_config::validate_value::<ReferenceLevel>)]
     pub resources: ReferenceLevel,
 
     /// Use `warn` when the anchor after `#` is missing. If omitted, a missing anchor is an error.
+    #[config(fragment_with = tola_config::validate_value::<ReferenceLevel>)]
     pub fragments: ReferenceLevel,
 }
 

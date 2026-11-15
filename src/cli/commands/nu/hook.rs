@@ -30,6 +30,7 @@ struct Invocation {
     module: Option<String>,
     hook: Option<Value>,
     context: Option<Value>,
+    fonts: tola_typst::FontOptions,
     address: SocketAddr,
     key: [u8; 32],
 }
@@ -68,6 +69,7 @@ pub(super) fn run(
         module: host.module,
         hook: host.hook,
         context: host.context,
+        fonts: hook.config.compiler_font_options(&hook.resources),
         address: listener.local_addr()?,
         key,
     };
@@ -188,6 +190,9 @@ pub(super) fn run_worker(path: &Path) -> Result<i32> {
         module: invocation.module,
         hook: invocation.hook,
         context: invocation.context,
+        svg_fonts: Some(Ok(Arc::new(tola_typst::FontStore::with_options(
+            invocation.fonts,
+        )))),
         query: Some(Arc::new(move |directory, target, config, label| {
             request(
                 address,
@@ -220,4 +225,70 @@ fn request(address: SocketAddr, key: &[u8; 32], request: Request) -> Result<Valu
         Ok(serde_json::from_reader(BufReader::new(stream))?)
     };
     exchange().map_err(|_| "could not reach the Tola build from the Nu hook".to_owned())?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tola_typst::typst::text::FontVariant;
+    use tola_typst::{BundleCancellation, FontOptions, FontStore};
+
+    #[test]
+    fn hook_worker_uses_supplied_svg_fonts() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let fonts = root.join("fonts");
+        fs::create_dir(&fonts).unwrap();
+        let bundled = FontStore::with_options(FontOptions::new().with_system_fonts(false));
+        let bundled = bundled.load(&BundleCancellation::new()).unwrap();
+        let font = bundled
+            .book()
+            .select("dejavu sans mono", FontVariant::default())
+            .and_then(|index| bundled.font(index))
+            .unwrap();
+        fs::write(fonts.join("wordmark.ttf"), font.data().as_slice()).unwrap();
+        fs::write(
+            root.join("wordmark.svg"),
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="80" height="24">
+  <text x="1" y="20" font-family="DejaVu Sans Mono" font-size="18">Tola</text>
+</svg>"#,
+        )
+        .unwrap();
+        let path = root.join("hook.nu");
+        fs::write(
+            &path,
+            "use tola image\nimage resize wordmark.svg --format png --output wordmark.png | ignore\n",
+        )
+        .unwrap();
+        let mut invocation = Invocation {
+            directory: root.clone(),
+            environment: BTreeMap::new(),
+            libraries: Vec::new(),
+            dependencies: Vec::new(),
+            path,
+            args: Vec::new(),
+            site: None,
+            modules: BTreeMap::new(),
+            module: None,
+            hook: None,
+            context: None,
+            fonts: FontOptions::new()
+                .with_system_fonts(false)
+                .with_embedded_fonts(false),
+            address: ([127, 0, 0, 1], 0).into(),
+            key: [0; 32],
+        };
+        let snapshot = root.join("hook.json");
+        let output = root.join("wordmark.png");
+        fs::write(&snapshot, serde_json::to_vec(&invocation).unwrap()).unwrap();
+        assert_eq!(run_worker(&snapshot).unwrap(), 0);
+        let without_font = fs::read(&output).unwrap();
+        fs::remove_file(&output).unwrap();
+
+        invocation.fonts = invocation.fonts.add_path(fonts);
+        fs::write(&snapshot, serde_json::to_vec(&invocation).unwrap()).unwrap();
+        assert_eq!(run_worker(&snapshot).unwrap(), 0);
+        assert_ne!(fs::read(output).unwrap(), without_font);
+    }
 }

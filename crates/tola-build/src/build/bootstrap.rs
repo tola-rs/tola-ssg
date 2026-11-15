@@ -3,6 +3,7 @@
 use std::collections::BTreeSet;
 
 use anyhow::{Result, ensure};
+use tola_module::prepared::HookParticipation;
 
 use crate::config::ConfigDiagnostics;
 use crate::config::section::build::hooks::{
@@ -10,7 +11,8 @@ use crate::config::section::build::hooks::{
 };
 use crate::modules::prepared::PreparedSite;
 
-pub(crate) fn install(site: &mut PreparedSite, resources: &crate::BuildResources) -> Result<()> {
+/// Install site and module hook declarations on a prepared configuration.
+pub fn install_hooks(site: &mut PreparedSite, resources: &crate::BuildResources) -> Result<()> {
     let modules = site.prepared().clone();
     let module_hooks = tola_module::hooks::hook_stages(site.get_root(), &modules.modules)?;
     let config = site.config_mut();
@@ -31,11 +33,18 @@ pub(crate) fn install(site: &mut PreparedSite, resources: &crate::BuildResources
     };
     for entry in module_hooks.entries() {
         let origin = Some(entry.origin.clone());
+        let declared_name = Some(entry.declared_name.clone());
+        let enable = entry.participation == HookParticipation::Enabled;
+        let option_disabled = entry.participation == HookParticipation::OptionDisabled;
         match entry.stage {
             HookStage::BeforeBuild => {
                 let mut hook = BeforeBuildHookConfig {
                     origin,
                     name: entry.name.clone(),
+                    declared_name,
+                    order: entry.order,
+                    enable,
+                    option_disabled,
                     dev: entry.dev,
                     rerun_on: entry.rerun_on.clone(),
                     generates: entry.generates.clone(),
@@ -48,6 +57,10 @@ pub(crate) fn install(site: &mut PreparedSite, resources: &crate::BuildResources
                 let mut hook = OutputCommandConfig {
                     origin,
                     name: entry.name.clone(),
+                    declared_name,
+                    order: entry.order,
+                    enable,
+                    option_disabled,
                     dev: entry.dev,
                     rerun_on: entry.rerun_on.clone(),
                     outputs: entry.outputs.clone(),
@@ -60,6 +73,10 @@ pub(crate) fn install(site: &mut PreparedSite, resources: &crate::BuildResources
                 let mut hook = AfterPublishHookConfig {
                     origin,
                     name: entry.name.clone(),
+                    declared_name,
+                    order: entry.order,
+                    enable,
+                    option_disabled,
                     dev: entry.dev,
                     rerun_on: entry.rerun_on.clone(),
                     ..Default::default()
@@ -86,7 +103,7 @@ pub(crate) fn install(site: &mut PreparedSite, resources: &crate::BuildResources
     crate::config::loading::validate_hook_output_boundaries(
         &hooks,
         config.get_root(),
-        config.config_path(),
+        config.config_paths(),
         &config.build.publish_dir,
         config.vendor.path.as_deref(),
         config.vendor_workspace.as_deref(),
@@ -153,7 +170,7 @@ argv = ["prepare-project"]
             .unwrap()
         };
         let mut first = prepare(&config);
-        install(&mut first, &resources).unwrap();
+        install_hooks(&mut first, &resources).unwrap();
 
         fs::write(
             &manifest,
@@ -165,7 +182,7 @@ argv = ["prepare-updated"]
         )
         .unwrap();
         let mut rebuilt = prepare(first.config());
-        install(&mut rebuilt, &resources).unwrap();
+        install_hooks(&mut rebuilt, &resources).unwrap();
 
         let hooks = rebuilt.config().hooks();
         let names: Vec<_> = crate::hooks::configured_hooks(hooks)

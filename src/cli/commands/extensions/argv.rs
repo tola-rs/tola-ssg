@@ -52,6 +52,7 @@ pub(super) fn process_command(
         .args(tail.iter().cloned())
         .cwd(project);
     let mut context = CallContext::new(executable, Some(scope));
+    context.hook = CallContext::read()?.and_then(|parent| parent.hook);
     context.site = Some(site);
     context.module = Some(Module {
         name: module.name.clone(),

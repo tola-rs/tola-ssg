@@ -340,7 +340,6 @@ mod tests {
                 .publish(crate::diagnostic::PublishInputs {
                     output: &mut self.bytes,
                     root: self.root.path(),
-                    entry: &path,
                     open: &self.open,
                     features: &features(),
                     selected: &selected,

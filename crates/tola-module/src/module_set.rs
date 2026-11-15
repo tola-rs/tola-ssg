@@ -8,14 +8,37 @@ use tola_input::InputMode;
 use crate::declaration::{Assets, Command, Entry, Initializer, ModuleDeclaration, Query};
 
 /// The paths and exact bytes from which a module manifest was parsed.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct ManifestEvidence {
     pub(crate) root: tola_input::FilesystemSourceIdentity,
     pub(crate) manifest: tola_input::FilesystemSourceIdentity,
     pub(crate) digest: blake3::Hash,
+    pub(crate) source: std::sync::Arc<str>,
 }
 
+impl PartialEq for ManifestEvidence {
+    fn eq(&self, other: &Self) -> bool {
+        self.root == other.root && self.manifest == other.manifest && self.digest == other.digest
+    }
+}
+
+impl Eq for ManifestEvidence {}
+
 impl ManifestEvidence {
+    /// The exact text used to parse this manifest.
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+
+    /// Written positions in the manifest snapshot, when it can be parsed for positions.
+    pub fn positions(&self) -> Option<tola_diagnostic::SourcePositions> {
+        let document = toml_edit::Document::parse(self.source.clone()).ok()?;
+        Some(tola_diagnostic::SourcePositions::of(
+            &document,
+            self.source.clone(),
+        ))
+    }
+
     pub fn paths(
         &self,
     ) -> (
@@ -71,6 +94,7 @@ pub struct LoadedModule {
     pub nu: Option<Entry>,
     pub build: Option<Entry>,
     pub assets: Option<Assets>,
+    pub icons: crate::icons::Icons,
     pub queries: BTreeMap<String, Query>,
     pub commands: BTreeMap<String, Command>,
     pub initializer: Option<Initializer>,
@@ -98,9 +122,9 @@ pub enum ModulePathError {
 /// Why one declared module path is unusable.
 #[derive(Debug, thiserror::Error)]
 pub enum ModuleLoadError {
-    #[error(transparent)]
+    #[error("{0}")]
     Manifest(#[from] crate::manifest::ManifestError),
-    #[error(transparent)]
+    #[error("{0}")]
     Roots(#[from] crate::inputs::ModuleRootError),
 }
 
@@ -167,7 +191,7 @@ pub fn select_command_modules(
         cancellation,
     )?;
     Ok(
-        crate::manifest::read_selected(site_root, declarations, &roots, mode)?
+        crate::manifest::read_selected(site_root, declarations, &roots, mode, &[])?
             .into_iter()
             .map(|(name, loaded)| {
                 (
@@ -192,9 +216,12 @@ pub fn load_modules_with_roots(
     declarations: &BTreeMap<String, ModuleDeclaration>,
     roots: &BTreeMap<String, PathBuf>,
     mode: InputMode,
+    sources: &[(PathBuf, std::sync::Arc<str>)],
 ) -> std::result::Result<BTreeMap<String, LoadedModule>, ModuleLoadError> {
     let mut result = BTreeMap::new();
-    for (name, loaded) in crate::manifest::read_selected(site_root, declarations, roots, mode)? {
+    for (name, loaded) in
+        crate::manifest::read_selected(site_root, declarations, roots, mode, sources)?
+    {
         let root = loaded.root;
         let canonical_manifest = loaded.path;
         let evidence = loaded.evidence;
@@ -210,6 +237,7 @@ pub fn load_modules_with_roots(
                 nu: manifest.nu,
                 build: manifest.build,
                 assets: manifest.assets,
+                icons: manifest.icons,
                 queries: manifest.queries,
                 commands: manifest.commands,
                 initializer: manifest.init,

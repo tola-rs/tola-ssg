@@ -1,13 +1,15 @@
 //! Structured diagnostics for configuration loading and warnings.
 
 use std::borrow::Cow;
+use std::collections::BTreeMap;
 use std::ops::Range;
 use std::path::Path;
 
 use crate::config::{ConfigDiagnostic, ConfigDiagnosticTag, ConfigDiagnostics, ConfigError};
+use tola_diagnostic::toml::{TomlMessage, UNKNOWN_FIELD_HELP, field_replacement};
 use tola_diagnostic::{
-    Diagnostic, DiagnosticCause, DiagnosticError, Severity, SourceExcerpt, SourcePositions,
-    UnknownField, key_at_span,
+    Diagnostic, DiagnosticCause, DiagnosticError, Location, RelatedInformation, Severity,
+    SourceLine, SourcePositions, UnknownField, WrittenPosition, display_path,
 };
 
 /// The site root of a configuration file is the directory that contains it, so its
@@ -17,223 +19,93 @@ fn configuration_root(path: &Path) -> &Path {
 }
 
 /// The site-root-relative spelling of a configuration file path.
-fn config_display_path(path: &Path) -> String {
-    tola_diagnostic::display_path(path, configuration_root(path))
+fn config_display_path(path: &Path, root: Option<&Path>) -> String {
+    display_path(path, root.unwrap_or_else(|| configuration_root(path)))
 }
 
-/// Help for an unknown configuration key, which is either a misspelling or a key a newer Tola
-/// release wrote.
-pub(crate) const UNKNOWN_FIELD_HELP: &str = "Correct the spelling, or remove the field; if a newer Tola wrote the file, update the executable to read it";
-
-/// A configuration file the parser stopped at.
-///
-/// The message is the parser's own reason and the location is the span it stopped at, so the
-/// author reads what is wrong with their TOML rather than that it is wrong somewhere.
-pub(crate) fn syntax_error(
+/// A TOML parser error in any file contributing to the site configuration.
+pub(super) fn syntax_error_at_root(
+    root: &Path,
     path: &Path,
     input: &str,
     reason: &str,
     span: Option<Range<usize>>,
 ) -> Diagnostic {
-    document_error(path, input, reason.to_owned(), span)
+    document_error(display_path(path, root), input, reason, span).with_file(path.to_owned())
 }
 
-/// A value in a valid configuration file that the configuration schema rejects.
-pub(crate) fn schema_error(
-    path: &Path,
-    document: &toml_edit::Document<std::sync::Arc<str>>,
-    message: &str,
-    span: Option<Range<usize>>,
-) -> Diagnostic {
-    let SchemaMessage { message, help } = schema_message(message);
-    let key = span.as_ref().and_then(|span| key_at_span(document, span));
-    let message = match key {
+fn named_schema_message(key: Option<&str>, message: Cow<'_, str>) -> String {
+    match key {
         Some(key)
             if message
                 .strip_prefix('`')
-                .and_then(|message| message.strip_prefix(key.as_str()))
+                .and_then(|message| message.strip_prefix(key))
                 .is_some_and(|suffix| suffix.starts_with('`')) =>
         {
             message.into_owned()
         }
         Some(key) => format!("`{key}`: {message}"),
         None => message.into_owned(),
-    };
-    let mut diagnostic = document_error(path, document.raw(), message, span);
+    }
+}
+
+fn document_error(
+    path: String,
+    input: &str,
+    reason: &str,
+    span: Option<Range<usize>>,
+) -> Diagnostic {
+    let TomlMessage { message, help } = TomlMessage::from_error(reason);
+    let mut diagnostic = Diagnostic::at_path(
+        tola_diagnostic::codes::config::TOML,
+        Severity::Error,
+        path,
+        message,
+    );
+    if let Some(help) = help {
+        diagnostic = diagnostic.with_help(help);
+    }
+    if let Some(span) = span {
+        diagnostic = diagnostic.with_source_span(input, span);
+    }
+    diagnostic
+}
+
+/// A rejected value or missing field in the effective configuration, located in a source file.
+pub(super) fn value_error(
+    path: &Path,
+    positions: &SourcePositions,
+    pointer: &str,
+    field: &str,
+    reason: &str,
+) -> Diagnostic {
+    let TomlMessage { message, help } = TomlMessage::from_error(reason);
+    let message = named_schema_message((!field.is_empty()).then_some(field), message);
+    let root = positions.root();
+    let diagnostic = Diagnostic::at_path(
+        tola_diagnostic::codes::config::TOML,
+        Severity::Error,
+        config_display_path(path, root),
+        message,
+    );
+    let written = positions
+        .at_pointer(pointer)
+        .map(WrittenPosition::value)
+        .or_else(|| {
+            let mut pointer = pointer;
+            while let Some((parent, _)) = pointer.rsplit_once('/') {
+                if let Some(written) = positions.at_pointer(parent) {
+                    return Some(written);
+                }
+                pointer = parent;
+            }
+            None
+        });
+    let mut diagnostic = attach_position(diagnostic, written, root);
     if let Some(help) = help {
         diagnostic = diagnostic.with_help(help);
     }
     diagnostic
-}
-
-fn document_error(
-    path: &Path,
-    input: &str,
-    message: String,
-    span: Option<Range<usize>>,
-) -> Diagnostic {
-    let mut diagnostic = Diagnostic::at_path(
-        tola_diagnostic::codes::config::TOML,
-        Severity::Error,
-        config_display_path(path),
-        message,
-    );
-    if let Some(span) = span
-        && let Some(excerpt) = SourceExcerpt::of(input, span)
-    {
-        diagnostic = diagnostic.with_source_excerpt(
-            excerpt.line,
-            excerpt.column,
-            excerpt.text,
-            Some(excerpt.highlight),
-        );
-    }
-    diagnostic
-}
-
-/// One TOML deserialization failure rewritten into configuration language.
-///
-/// Only the unknown-field rewrite has help: the key may come from a newer Tola release
-/// rather than from a mistake in the file.
-struct SchemaMessage<'a> {
-    message: Cow<'a, str>,
-    help: Option<&'static str>,
-}
-
-impl<'a> SchemaMessage<'a> {
-    fn new(message: Cow<'a, str>) -> Self {
-        Self {
-            message,
-            help: None,
-        }
-    }
-
-    fn with_help(mut self, help: &'static str) -> Self {
-        self.help = Some(help);
-        self
-    }
-}
-
-/// Rewrite one TOML deserialization failure into configuration language.
-fn schema_message(message: &str) -> SchemaMessage<'_> {
-    if let Some(rest) = message
-        .strip_prefix("invalid type: ")
-        .or_else(|| message.strip_prefix("invalid value: "))
-        && let Some((found, expected)) = rest.split_once(", expected ")
-    {
-        return SchemaMessage::new(Cow::Owned(format!(
-            "expected {}; found {}",
-            accepted_form(expected),
-            written_value(found)
-        )));
-    }
-    if let Some(rest) = message.strip_prefix("unknown variant `")
-        && let Some((variant, accepted)) = rest.split_once("`, expected ")
-    {
-        return SchemaMessage::new(Cow::Owned(format!(
-            "`{variant}` is not a supported value; use {accepted}"
-        )));
-    }
-    if let Some(rest) = message.strip_prefix("unknown field `")
-        && let Some((field, accepted)) = rest.split_once("`, expected ")
-    {
-        return SchemaMessage::new(Cow::Owned(format!(
-            "unknown field `{field}`; use {accepted}"
-        )))
-        .with_help(UNKNOWN_FIELD_HELP);
-    }
-    if let Some(field) = message.strip_prefix("missing field `")
-        && let Some(field) = field.strip_suffix('`')
-    {
-        return SchemaMessage::new(Cow::Owned(format!(
-            "the required field `{field}` is missing"
-        )));
-    }
-    if let Some(rest) = message.strip_prefix("unexpected keys in table: ")
-        && let Some((unknown, allowed)) = rest.split_once(", available keys: ")
-    {
-        return SchemaMessage::new(Cow::Owned(format!(
-            "unknown field: {unknown}; allowed fields are {allowed}"
-        )));
-    }
-    if let Some(found) = message.strip_prefix("expected table, found ") {
-        return SchemaMessage::new(Cow::Owned(format!(
-            "expected a table; found {}",
-            written_value(found)
-        )));
-    }
-    if message.starts_with("data did not match any variant of untagged enum ") {
-        return SchemaMessage::new(Cow::Borrowed(
-            "this value does not match any supported form",
-        ));
-    }
-    if message == "expected table with exactly 1 entry, found empty table" {
-        return SchemaMessage::new(Cow::Borrowed("this table must contain exactly one entry"));
-    }
-    if let Some(rest) = message.strip_prefix("expected table key `")
-        && let Some((key, found)) = rest.split_once("`, but was `")
-    {
-        return SchemaMessage::new(Cow::Owned(format!(
-            "expected the table key `{key}`; found `{}`",
-            found.trim_end_matches('`')
-        )));
-    }
-    SchemaMessage::new(Cow::Borrowed(message))
-}
-
-/// The TOML form one serde expectation asks for.
-fn accepted_form(expected: &str) -> Cow<'_, str> {
-    match expected {
-        "u8" => Cow::Owned(format!("an integer from {} to {}", u8::MIN, u8::MAX)),
-        "u16" => Cow::Owned(format!("an integer from {} to {}", u16::MIN, u16::MAX)),
-        "u32" => Cow::Owned(format!("an integer from {} to {}", u32::MIN, u32::MAX)),
-        "u64" => Cow::Owned(format!("an integer from {} to {}", u64::MIN, u64::MAX)),
-        "u128" => Cow::Owned(format!("an integer from {} to {}", u128::MIN, u128::MAX)),
-        "usize" => Cow::Owned(format!("an integer from {} to {}", usize::MIN, usize::MAX)),
-        "i8" => Cow::Owned(format!("an integer from {} to {}", i8::MIN, i8::MAX)),
-        "i16" => Cow::Owned(format!("an integer from {} to {}", i16::MIN, i16::MAX)),
-        "i32" => Cow::Owned(format!("an integer from {} to {}", i32::MIN, i32::MAX)),
-        "i64" => Cow::Owned(format!("an integer from {} to {}", i64::MIN, i64::MAX)),
-        "i128" => Cow::Owned(format!("an integer from {} to {}", i128::MIN, i128::MAX)),
-        "isize" => Cow::Owned(format!("an integer from {} to {}", isize::MIN, isize::MAX)),
-        "f32" | "f64" => Cow::Borrowed("a number"),
-        "bool" | "a boolean" => Cow::Borrowed("true or false"),
-        "str" | "string" | "a string" | "char" | "a character" => Cow::Borrowed("a string"),
-        "path string" => Cow::Borrowed("a path"),
-        "a sequence" => Cow::Borrowed("an array"),
-        "a map" => Cow::Borrowed("a table"),
-        // An enum expectation lists the accepted values as quoted keys.
-        expected if expected.contains('`') => Cow::Borrowed(expected),
-        expected if expected.starts_with("struct ") || expected.starts_with("tuple struct ") => {
-            Cow::Borrowed("a table")
-        }
-        expected if expected.starts_with("a tuple") => Cow::Borrowed("an array"),
-        _ => Cow::Borrowed("a supported value"),
-    }
-}
-
-/// The TOML value an author wrote, named in TOML terms.
-fn written_value(found: &str) -> Cow<'_, str> {
-    match found {
-        "array" | "sequence" => return Cow::Borrowed("an array"),
-        "map" | "table" | "inline table" => return Cow::Borrowed("a table"),
-        "datetime" => return Cow::Borrowed("a date"),
-        "unit value" => return Cow::Borrowed("an empty value"),
-        _ => {}
-    }
-    let (kind, value) = found
-        .strip_prefix("floating point ")
-        .map(|value| ("floating point", value))
-        .or_else(|| found.split_once(' '))
-        .unwrap_or(("", found));
-    let named = match kind {
-        "string" => "the string",
-        "character" => "the character",
-        "boolean" => "the boolean",
-        "integer" | "floating point" => "the number",
-        _ => return Cow::Borrowed("a value"),
-    };
-    Cow::Owned(format!("{named} `{}`", value.trim_matches('`')))
 }
 
 pub(super) fn report_source_error(
@@ -241,7 +113,8 @@ pub(super) fn report_source_error(
     path: Option<&Path>,
     positions: Option<&SourcePositions>,
 ) -> DiagnosticError {
-    let display = path.map(config_display_path);
+    let display =
+        path.map(|path| config_display_path(path, positions.and_then(SourcePositions::root)));
     let diagnostics = error_diagnostics(&error, display.as_deref(), positions);
     DiagnosticError::attach(
         error.into(),
@@ -271,7 +144,8 @@ fn attach(
     if tola_diagnostic::attached(&error).is_some() {
         return error;
     }
-    let display = path.map(config_display_path);
+    let display =
+        path.map(|path| config_display_path(path, positions.and_then(SourcePositions::root)));
     let config = error
         .chain()
         .find_map(|cause| cause.downcast_ref::<ConfigError>());
@@ -304,7 +178,8 @@ fn at_config_path(diagnostics: Vec<Diagnostic>, display: Option<&str>) -> Vec<Di
 
 /// Convert retained configuration warnings into the shared diagnostic protocol.
 pub fn warning_diagnostics(config: &crate::config::ResolvedSiteConfig) -> Vec<Diagnostic> {
-    let display = tola_diagnostic::display_path(config.config_path(), config.get_root());
+    let root = Some(config.get_root());
+    let display = display_path(config.config_path(), config.get_root());
     let positions = config.positions();
     let (experimental, other): (Vec<_>, Vec<_>) = config
         .warnings()
@@ -321,10 +196,33 @@ pub fn warning_diagnostics(config: &crate::config::ResolvedSiteConfig) -> Vec<Di
         for warning in &experimental {
             diagnostic = diagnostic.with_note(warning.field.as_str());
         }
-        diagnostic = attach_excerpt(
+        diagnostic = attach_position(
             diagnostic,
-            positions.and_then(|positions| positions.excerpt(experimental[0].field.as_str())),
+            positions.and_then(|positions| written_position(positions, experimental[0])),
+            root,
         );
+        for warning in &experimental[1..] {
+            let Some(written) =
+                positions.and_then(|positions| written_position(positions, warning))
+            else {
+                continue;
+            };
+            let Some(path) = written_display(written, root) else {
+                continue;
+            };
+            if diagnostic
+                .location
+                .as_ref()
+                .is_some_and(|location| location.path == path)
+            {
+                continue;
+            }
+            diagnostic.related.push(RelatedInformation {
+                message: warning.field.as_str().to_owned(),
+                location: Some(written_location(path, written)),
+                source: None,
+            });
+        }
         diagnostic = diagnostic.with_help("Remove these fields");
         diagnostics.push(diagnostic);
     }
@@ -336,9 +234,10 @@ pub fn warning_diagnostics(config: &crate::config::ResolvedSiteConfig) -> Vec<Di
             &warning.message,
         )
         .with_note(warning.field.as_str());
-        diagnostic = attach_excerpt(
+        diagnostic = attach_position(
             diagnostic,
-            positions.and_then(|positions| written_excerpt(positions, warning)),
+            positions.and_then(|positions| written_position(positions, warning)),
+            root,
         );
         if let Some(help) = &warning.help {
             diagnostic = diagnostic.with_help(help);
@@ -370,6 +269,7 @@ fn error_diagnostics(
     display: Option<&str>,
     positions: Option<&SourcePositions>,
 ) -> Vec<Diagnostic> {
+    let root = positions.and_then(SourcePositions::root);
     match error {
         ConfigError::Diagnostics(diagnostics) => diagnostics
             .errors()
@@ -380,7 +280,13 @@ fn error_diagnostics(
             path,
             input,
             source,
-        } => vec![syntax_error(path, input, source.message(), source.span())],
+        } => vec![syntax_error_at_root(
+            root.unwrap_or_else(|| configuration_root(path)),
+            path,
+            input,
+            source.message(),
+            source.span(),
+        )],
         ConfigError::Io(path, source) => {
             let message = match source.kind() {
                 std::io::ErrorKind::NotFound => "the configuration file does not exist",
@@ -390,7 +296,7 @@ fn error_diagnostics(
             vec![Diagnostic::at_path(
                 tola_diagnostic::codes::config::IO,
                 Severity::Error,
-                &*config_display_path(path),
+                config_display_path(path, root),
                 message,
             )]
         }
@@ -409,44 +315,22 @@ fn error_diagnostics(
                 Diagnostic::at_path(
                     tola_diagnostic::codes::config::IO,
                     Severity::Error,
-                    &*config_display_path(path),
+                    config_display_path(path, root),
                     message,
                 )
                 .with_help(help),
             ]
         }
-        ConfigError::UnknownFields { fields } => {
-            let named = fields
-                .iter()
-                .map(|field| format!("`{field}`"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            let message = format!("unknown configuration fields: {named}");
-            // The first key the document wrote is where the author corrects the spelling.
-            let diagnostic = attach_excerpt(
-                configuration_error(display, &message),
-                fields
-                    .first()
-                    .and_then(|field| positions.and_then(|positions| positions.excerpt(field))),
-            );
-            // Each key has both its line and the exact span that writes it, so a correction
-            // needs no search of the document for its spelling.
-            let written: Vec<UnknownField> = fields
-                .iter()
-                .map(|field| UnknownField {
-                    name: field.clone(),
-                    line: positions
-                        .and_then(|positions| positions.excerpt(field))
-                        .map(|excerpt| excerpt.line),
-                    written: positions.and_then(|positions| positions.written(field)),
-                })
-                .collect();
-            vec![
-                diagnostic
-                    .with_cause(DiagnosticCause::UnknownConfigurationFields { fields: written })
-                    .with_help(UNKNOWN_FIELD_HELP),
-            ]
-        }
+        ConfigError::UnknownFields { fields } => unknown_field_diagnostics(
+            display,
+            root,
+            fields.iter().map(|field| {
+                (
+                    field.as_str(),
+                    positions.and_then(|positions| positions.at(field)),
+                )
+            }),
+        ),
         ConfigError::PathNotAFile { .. } => {
             vec![Diagnostic::new(
                 tola_diagnostic::codes::config::INVALID,
@@ -457,15 +341,97 @@ fn error_diagnostics(
     }
 }
 
+/// Unknown fields with their display name and exact pointer, grouped by original file.
+pub(super) fn unknown_fields(
+    path: &Path,
+    positions: Option<&SourcePositions>,
+    fields: &[(String, String)],
+) -> Vec<Diagnostic> {
+    let root = positions.and_then(SourcePositions::root);
+    let display = config_display_path(path, root);
+    unknown_field_diagnostics(
+        Some(&display),
+        root,
+        fields.iter().map(|(field, pointer)| {
+            (
+                field.as_str(),
+                positions.and_then(|positions| positions.at_pointer(pointer)),
+            )
+        }),
+    )
+}
+
+fn unknown_field_diagnostics<'a>(
+    display: Option<&str>,
+    root: Option<&Path>,
+    fields: impl Iterator<Item = (&'a str, Option<WrittenPosition<'a>>)>,
+) -> Vec<Diagnostic> {
+    let mut by_file = BTreeMap::<Option<String>, Vec<_>>::new();
+    for (field, written) in fields {
+        let path = written
+            .and_then(|written| written_display(written, root))
+            .or_else(|| display.map(str::to_owned));
+        by_file.entry(path).or_default().push((field, written));
+    }
+    by_file
+        .into_iter()
+        .map(|(path, fields)| {
+            let names = fields
+                .iter()
+                .map(|(name, _)| format!("`{name}`"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let message = if fields.len() == 1 {
+                format!("unknown configuration field {names}")
+            } else {
+                format!("unknown configuration fields {names}")
+            };
+            let mut diagnostic = attach_position(
+                configuration_error(path.as_deref(), &message),
+                fields[0].1,
+                root,
+            );
+            for (name, _) in &fields {
+                if let Some(key) =
+                    field_replacement(name, super::field_paths().map(|field| field.as_str()))
+                {
+                    let replacement = name
+                        .rsplit_once('.')
+                        .map_or_else(|| key.to_owned(), |(table, _)| format!("{table}.{key}"));
+                    diagnostic = diagnostic.with_help(format!(
+                        "Check whether you meant `{replacement}` instead of `{name}`"
+                    ));
+                }
+            }
+            if diagnostic.help.is_empty() {
+                diagnostic = diagnostic.with_help(UNKNOWN_FIELD_HELP);
+            }
+            let fields = fields
+                .into_iter()
+                .map(|(name, written)| {
+                    let range = written.map(|written| written.range());
+                    UnknownField {
+                        name: name.to_owned(),
+                        line: range.map(|range| range.start.line + 1),
+                        written: range,
+                    }
+                })
+                .collect();
+            diagnostic.with_cause(DiagnosticCause::UnknownConfigurationFields { fields })
+        })
+        .collect()
+}
+
 /// One validation failure, pointed at the key it names when the source still holds it.
 fn validation_diagnostic(
     config_diagnostic: &ConfigDiagnostic,
     display: Option<&str>,
     positions: Option<&SourcePositions>,
 ) -> Diagnostic {
-    let mut diagnostic = attach_excerpt(
+    let mut diagnostic = attach_position(
         configuration_error(display, &config_diagnostic.message),
-        positions.and_then(|positions| written_excerpt(positions, config_diagnostic)),
+        positions.and_then(|positions| written_position(positions, config_diagnostic)),
+        positions.and_then(SourcePositions::root),
     )
     .with_note(config_diagnostic.field.as_str());
     if let Some(help) = &config_diagnostic.help {
@@ -474,35 +440,58 @@ fn validation_diagnostic(
     diagnostic
 }
 
-fn attach_excerpt(diagnostic: Diagnostic, excerpt: Option<SourceExcerpt>) -> Diagnostic {
-    match excerpt {
-        Some(excerpt) => diagnostic.with_source_excerpt(
-            excerpt.line,
-            excerpt.column,
-            excerpt.text,
-            Some(excerpt.highlight),
-        ),
-        None => diagnostic,
+fn attach_position(
+    mut diagnostic: Diagnostic,
+    position: Option<WrittenPosition<'_>>,
+    root: Option<&Path>,
+) -> Diagnostic {
+    if let Some(position) = position {
+        let path = written_display(position, root)
+            .or_else(|| diagnostic.location.take().map(|location| location.path));
+        if let Some(path) = path {
+            diagnostic.location = Some(written_location(path, position));
+        }
+    }
+    diagnostic
+}
+
+fn written_display(position: WrittenPosition<'_>, root: Option<&Path>) -> Option<String> {
+    Some(config_display_path(position.file()?, root))
+}
+
+fn written_location(path: String, position: WrittenPosition<'_>) -> Location {
+    let excerpt = position.excerpt();
+    Location {
+        path,
+        file: position.file().map(Path::to_owned),
+        line: excerpt.as_ref().map(|excerpt| excerpt.line),
+        column: excerpt.as_ref().map(|excerpt| excerpt.column),
+        range: Some(position.range()),
+        source_lines: excerpt
+            .into_iter()
+            .map(|excerpt| SourceLine::new(excerpt.line, excerpt.text, Some(excerpt.highlight)))
+            .collect(),
     }
 }
 
-/// The excerpt of the narrowest written key a configuration diagnostic names.
+/// The narrowest written key a configuration diagnostic names.
 ///
 /// A diagnostic raised inside an array-table entry asks for the field within that entry first and
 /// the entry's own key next, so a field its author left out still points at the entry to edit
 /// rather than at the first entry of the array.
-fn written_excerpt(
-    positions: &SourcePositions,
+fn written_position<'a>(
+    positions: &'a SourcePositions,
     config_diagnostic: &ConfigDiagnostic,
-) -> Option<SourceExcerpt> {
+) -> Option<WrittenPosition<'a>> {
     config_diagnostic
         .key_paths()
-        .find_map(|key| positions.excerpt(key.as_ref()))
+        .find_map(|key| positions.at(key.as_ref()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
     use tola_config::FieldPath;
 
     #[test]
@@ -538,5 +527,46 @@ mod tests {
         let location = diagnostic.location.as_ref().unwrap();
         assert_eq!(location.path, "tola.toml");
         assert_eq!(location.line, Some(2));
+    }
+
+    #[test]
+    fn unknown_field_corrections_stay_inside_their_file() {
+        let root = Path::new("site");
+        let entry = root.join("tola.toml");
+        let mut positions = SourcePositions::in_root(root.to_owned());
+        let fields = [
+            ("enabled".to_owned(), "/enabled".to_owned()),
+            ("limit".to_owned(), "/limit".to_owned()),
+        ];
+        for (file, text) in [
+            (&entry, "enabled = true\n"),
+            (&root.join("config/common.toml"), "\nlimit = 3\n"),
+        ] {
+            let text = Arc::<str>::from(text);
+            let document = toml_edit::Document::parse(Arc::clone(&text)).unwrap();
+            positions.copy_subtree(&SourcePositions::of(&document, text), "", "", file);
+        }
+
+        let diagnostics = unknown_fields(&entry, Some(&positions), &fields);
+        assert_eq!(diagnostics.len(), 2);
+        for (file, name, line) in [
+            ("config/common.toml", "limit", 2),
+            ("tola.toml", "enabled", 1),
+        ] {
+            let diagnostic = diagnostics
+                .iter()
+                .find(|diagnostic| diagnostic.location.as_ref().unwrap().path == file)
+                .unwrap();
+            assert_eq!(diagnostic.location.as_ref().unwrap().line, Some(line));
+            let Some(DiagnosticCause::UnknownConfigurationFields { fields }) = &diagnostic.cause
+            else {
+                panic!("expected unknown field corrections for {file}");
+            };
+            assert_eq!(fields.len(), 1);
+            assert_eq!(
+                (fields[0].name.as_str(), fields[0].line),
+                (name, Some(line))
+            );
+        }
     }
 }

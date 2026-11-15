@@ -1,6 +1,7 @@
 //! Build-side applied site view: the project configuration with one contribution applied.
 
-use std::path::Path;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result};
@@ -15,6 +16,81 @@ pub struct PreparedSite {
     config: Arc<ResolvedSiteConfig>,
     contribution: Contribution,
     scope: tola_input::InputScope,
+}
+pub(super) fn select_module_fonts<'a>(
+    config: &mut ResolvedSiteConfig,
+    scope: tola_input::InputScope,
+    modules: impl Iterator<Item = (&'a str, &'a Path, &'a [PathBuf])>,
+) -> Result<()> {
+    let modules = modules
+        .map(|(alias, root, fonts)| (alias, (root, fonts)))
+        .collect::<BTreeMap<_, _>>();
+    let mut directories = Vec::new();
+    for selection in &config.fonts().modules {
+        use crate::config::section::typst::fonts::ModuleFonts;
+
+        let (alias, rules) = match selection {
+            ModuleFonts::Alias(alias) => (alias, None),
+            ModuleFonts::Selection { module, rename } => (module, Some(rename)),
+        };
+        let &(root, fonts) = modules
+            .get(alias.as_str())
+            .with_context(|| format!("`typst.fonts.modules` names undeclared module `{alias}`"))?;
+        anyhow::ensure!(
+            !fonts.is_empty(),
+            "`typst.fonts.modules` selects module `{alias}`, which declares no `typst.fonts`"
+        );
+        let mut rename = BTreeMap::new();
+        for (family, target) in rules.into_iter().flatten() {
+            anyhow::ensure!(
+                !family.trim().is_empty() && !target.trim().is_empty(),
+                "`typst.fonts.modules` font rename for `{alias}` needs two nonempty family names"
+            );
+            anyhow::ensure!(
+                rename
+                    .insert(family.to_lowercase(), target.clone())
+                    .is_none(),
+                "`typst.fonts.modules` renames font family `{family}` more than once for `{alias}`"
+            );
+        }
+        let rename = Arc::new(rename);
+        for (index, directory) in fonts.iter().enumerate() {
+            tola_module::module_set::validate_module_path(
+                config.get_root(),
+                alias,
+                root,
+                directory,
+                true,
+            )
+            .with_context(|| {
+                format!("`tola-module.toml` `typst.fonts[{index}]` in module `{alias}`")
+            })?;
+            directories.push(crate::config::ModuleFontDirectory {
+                alias: alias.clone(),
+                root: root.to_path_buf(),
+                path: root.join(directory),
+                rename: rename.clone(),
+            });
+        }
+    }
+    let fresh_archive_roots = if scope == tola_input::InputScope::Pure {
+        modules
+            .iter()
+            .filter(|&(alias, _)| {
+                matches!(
+                    &config.modules()[*alias].source,
+                    tola_module::ModuleSource::Tarball { tarball }
+                        if matches!(tarball.location, tola_input::TarballLocation::File { .. })
+                )
+            })
+            .map(|(_, (root, _))| root.to_path_buf())
+            .collect()
+    } else {
+        Vec::new()
+    };
+    config.module_font_directories = directories;
+    config.fresh_archive_roots = fresh_archive_roots;
+    Ok(())
 }
 
 impl PreparedSite {
@@ -42,79 +118,19 @@ impl PreparedSite {
             });
             apply_entry(Arc::make_mut(&mut config), &entry)?;
         }
-        let mut directories = Vec::new();
-        for selection in &config.fonts().modules {
-            use crate::config::section::typst::fonts::ModuleFonts;
-
-            let (alias, rules) = match selection {
-                ModuleFonts::Alias(alias) => (alias, None),
-                ModuleFonts::Selection { module, rename } => (module, Some(rename)),
-            };
-            let module = contribution.prepared.modules.get(alias).with_context(|| {
-                format!("`typst.fonts.modules` names undeclared module `{alias}`")
-            })?;
-            let fonts = module
-                .typst
-                .as_ref()
-                .map(|typst| typst.fonts.as_slice())
-                .unwrap_or_default();
-            anyhow::ensure!(
-                !fonts.is_empty(),
-                "`typst.fonts.modules` selects module `{alias}`, which declares no `typst.fonts`"
-            );
-            let mut rename = std::collections::BTreeMap::new();
-            for (family, target) in rules.into_iter().flatten() {
-                anyhow::ensure!(
-                    !family.trim().is_empty() && !target.trim().is_empty(),
-                    "`typst.fonts.modules` font rename for `{alias}` needs two nonempty family names"
-                );
-                anyhow::ensure!(
-                    rename
-                        .insert(family.to_lowercase(), target.clone())
-                        .is_none(),
-                    "`typst.fonts.modules` renames font family `{family}` more than once for `{alias}`"
-                );
-            }
-            let rename = Arc::new(rename);
-            for (index, directory) in fonts.iter().enumerate() {
-                tola_module::module_set::validate_module_path(
-                    config.get_root(),
-                    alias,
-                    &module.root,
-                    directory,
-                    true,
-                )
-                .with_context(|| {
-                    format!("`tola-module.toml` `typst.fonts[{index}]` in module `{alias}`")
-                })?;
-                directories.push(crate::config::ModuleFontDirectory {
-                    alias: alias.clone(),
-                    root: module.root.clone(),
-                    path: module.root.join(directory),
-                    rename: rename.clone(),
-                });
-            }
-        }
-        let fresh_archive_roots = if scope == tola_input::InputScope::Pure {
-            contribution
-                .prepared
-                .modules
-                .iter()
-                .filter(|(alias, _)| {
-                    matches!(
-                        &config.modules()[*alias].source,
-                        tola_module::ModuleSource::Tarball { tarball }
-                            if matches!(tarball.location, tola_input::TarballLocation::File { .. })
-                    )
-                })
-                .map(|(_, module)| module.root.clone())
-                .collect()
-        } else {
-            Vec::new()
-        };
-        let applied = Arc::make_mut(&mut config);
-        applied.module_font_directories = directories;
-        applied.fresh_archive_roots = fresh_archive_roots;
+        select_module_fonts(
+            Arc::make_mut(&mut config),
+            scope,
+            contribution.prepared.modules.iter().map(|(alias, module)| {
+                let fonts = module
+                    .typst
+                    .as_ref()
+                    .map(|typst| typst.fonts.as_slice())
+                    .unwrap_or_default();
+                (alias.as_str(), module.root.as_path(), fonts)
+            }),
+        )?;
+        apply_module_icons(Arc::make_mut(&mut config), &contribution.prepared.modules)?;
         Ok(Self {
             config,
             contribution,
@@ -186,6 +202,69 @@ impl PreparedSite {
     }
 }
 
+/// Mount the acquired modules' icon collections, applying site-written replacements.
+pub fn apply_module_icons(
+    config: &mut ResolvedSiteConfig,
+    modules: &BTreeMap<String, tola_module::module_set::LoadedModule>,
+) -> Result<()> {
+    use crate::config::section::IconsConfig;
+
+    config
+        .icons
+        .collections
+        .retain(|name, _| !name.starts_with("modules/"));
+    for (alias, module) in modules {
+        let replacements = config.modules()[alias].icons.clone();
+        let replacements = replacements.as_ref();
+        for name in replacements
+            .into_iter()
+            .flat_map(|icons| icons.collections.keys())
+        {
+            anyhow::ensure!(
+                module.icons.collections.contains_key(name),
+                "`modules.{alias}.icons.collections.{name}` replaces a collection absent from the module manifest"
+            );
+        }
+        for (name, declared) in &module.icons.collections {
+            let replacement = replacements.and_then(|icons| icons.collections.get(name));
+            let root = if replacement.is_some() {
+                config.get_root()
+            } else {
+                module.root.as_path()
+            };
+            let source = replacement.unwrap_or(declared).clone();
+            let mut icons = IconsConfig {
+                collections: [(name.clone(), source)].into(),
+            };
+            let mut diagnostics = crate::config::ConfigDiagnostics::new();
+            icons.validate(&mut diagnostics);
+            icons.validate_paths(&mut diagnostics);
+            icons.validate_internal_boundaries(root, &mut diagnostics);
+            diagnostics
+                .into_result()
+                .with_context(|| format!("icon collection `{name}` of module `{alias}`"))?;
+            if replacement.is_none() {
+                for path in icons.local_paths() {
+                    anyhow::ensure!(
+                        tola_input::normalize_existing_prefix(&root.join(path)).starts_with(root),
+                        "`icons.collections.{name}.path` leaves module `{alias}`"
+                    );
+                }
+            }
+            icons.normalize(root);
+            let key = tola_icons::IconCollectionKey::new(Some(alias), name)?;
+            config.icons.collections.insert(
+                key.to_string(),
+                icons
+                    .collections
+                    .remove(name)
+                    .expect("validated collection"),
+            );
+        }
+    }
+    Ok(())
+}
+
 impl std::ops::Deref for PreparedSite {
     type Target = ResolvedSiteConfig;
     fn deref(&self) -> &Self::Target {
@@ -216,7 +295,7 @@ pub fn prepare_site(
     mode: tola_input::InputMode,
     cancellation: &crate::cancellation::BuildCancellation,
 ) -> Result<PreparedSite> {
-    prepare_site_with_bundle(config, mode, &cancellation.bundle_cancellation())
+    prepare_site_with_bundle(config, mode, &cancellation.bundle_cancellation(), &[])
 }
 
 /// Resolve the declared modules under the cancellation the build shares with its host.
@@ -224,12 +303,14 @@ pub fn prepare_site_with_bundle(
     config: &ResolvedSiteConfig,
     mode: tola_input::InputMode,
     cancellation: &BundleCancellation,
+    sources: &[(PathBuf, Arc<str>)],
 ) -> Result<PreparedSite> {
     let ctx = PrepareContext {
         site_root: config.get_root(),
         mode,
         vendor: config.vendor().path.as_deref(),
         cancellation,
+        sources,
     };
     let acquired = tola_module::prepared::acquire(&ctx, config.modules())?;
     let contribution = tola_module::prepared::prepare(&ctx, &acquired)?;

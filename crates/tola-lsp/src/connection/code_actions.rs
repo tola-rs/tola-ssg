@@ -580,7 +580,9 @@ mod tests {
         open_document(&mut connection, &uri, 1, text);
         // A correction reads the index the revision's own completed check returned.
         let mut compiler = crate::compiler::SourceCompiler::new(
-            |root: &Path, _: &[(PathBuf, Arc<str>)]| load_configuration(root),
+            |root: &Path,
+             _: &[(PathBuf, Arc<str>)],
+             _: &tola_build::cancellation::BuildCancellation| load_configuration(root),
             tola_build::BuildResources::default(),
         );
         answer_queued_check(&mut connection, |job| compiler.compile(job));

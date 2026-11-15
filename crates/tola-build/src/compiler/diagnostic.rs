@@ -400,7 +400,7 @@ pub(super) fn resolved_diagnostic(
         }
         _ => code,
     };
-    relativize_diagnostic(&mut diagnostic, root);
+    relativize_messages(&mut diagnostic, root);
     let severity = typst_severity(diagnostic.severity);
     let mut notes = Vec::new();
     if let Some(note) = imported_by_note(&diagnostic.imported_by) {
@@ -423,8 +423,17 @@ pub(super) fn resolved_diagnostic(
             location: None,
         });
     }
-    let location = reported_location(&diagnostic.location);
+    let location = reported_location(&diagnostic.location, root);
     let cause = unknown_variable_cause(&diagnostic.message, location.as_ref());
+    if let Some(DiagnosticCause::UnknownVariable { name }) = &cause {
+        diagnostic.message = format!("the name `{name}` is not defined here");
+        if diagnostic.hints.is_empty() {
+            help.push(tola_diagnostic::Help {
+                message: "Check the spelling or define the name before using it".into(),
+                location: None,
+            });
+        }
+    }
     tola_diagnostic::Diagnostic {
         severity,
         code,
@@ -436,10 +445,19 @@ pub(super) fn resolved_diagnostic(
         notes,
         help: help
             .into_iter()
-            .chain(diagnostic.hints.into_iter().map(help_from_hint))
+            .chain(
+                diagnostic
+                    .hints
+                    .into_iter()
+                    .map(|hint| help_from_hint(hint, root)),
+            )
             .collect(),
         related: Vec::new(),
-        trace: diagnostic.traces.into_iter().map(trace_frame).collect(),
+        trace: diagnostic
+            .traces
+            .into_iter()
+            .map(|trace| trace_frame(trace, root))
+            .collect(),
         cause,
     }
 }
@@ -504,15 +522,25 @@ fn resolved_report(
     root: &Path,
     report: tola_packages::ReportOrigin,
 ) -> Diagnostic {
-    relativize_diagnostic(&mut diagnostic, root);
+    relativize_messages(&mut diagnostic, root);
     let mut result = report_diagnostic(
         &report,
         diagnostic.message,
-        diagnostic.hints.into_iter().map(help_from_hint),
+        diagnostic
+            .hints
+            .into_iter()
+            .map(|hint| help_from_hint(hint, root)),
     );
-    result.location = reported_location(&diagnostic.location);
+    result.location = reported_location(&diagnostic.location, root).map(|mut at| {
+        at.file = at.editor_file(root);
+        at
+    });
     result.imported_by = diagnostic.imported_by;
-    result.trace = diagnostic.traces.into_iter().map(trace_frame).collect();
+    result.trace = diagnostic
+        .traces
+        .into_iter()
+        .map(|trace| trace_frame(trace, root))
+        .collect();
     result
 }
 
@@ -693,6 +721,12 @@ fn with_file_failure_reason(diagnostic: Diagnostic, error: &typst::diag::FileErr
 
 fn diagnostic_location(source: &tola_typst::SourceLocation) -> tola_diagnostic::Location {
     tola_diagnostic::Location {
+        file: source
+            .path
+            .as_deref()
+            .map(Path::new)
+            .filter(|path| path.is_absolute())
+            .map(Path::to_owned),
         path: source.path.clone().unwrap_or_default(),
         line: source.line,
         column: source.column,
@@ -724,24 +758,27 @@ pub(crate) fn source_location(
         .map(|source| diagnostic_location(&source))
 }
 
-fn reported_location(location: &tola_typst::SourceLocation) -> Option<tola_diagnostic::Location> {
-    location
-        .path
-        .as_ref()
-        .map(|_| diagnostic_location(location))
+fn reported_location(
+    location: &tola_typst::SourceLocation,
+    root: &Path,
+) -> Option<tola_diagnostic::Location> {
+    let path = location.path.as_ref()?;
+    let mut at = diagnostic_location(location);
+    at.path = tola_diagnostic::display_path(Path::new(path), root);
+    Some(at)
 }
 
-fn help_from_hint(hint: tola_typst::Hint) -> tola_diagnostic::Help {
+fn help_from_hint(hint: tola_typst::Hint, root: &Path) -> tola_diagnostic::Help {
     tola_diagnostic::Help {
         message: hint.message,
-        location: reported_location(&hint.location),
+        location: reported_location(&hint.location, root),
     }
 }
 
-fn trace_frame(trace: tola_typst::Trace) -> tola_diagnostic::TraceFrame {
+fn trace_frame(trace: tola_typst::Trace, root: &Path) -> tola_diagnostic::TraceFrame {
     tola_diagnostic::TraceFrame {
         message: trace.message,
-        location: reported_location(&trace.location),
+        location: reported_location(&trace.location, root),
     }
 }
 
@@ -755,23 +792,14 @@ fn imported_by_note(files: &[String]) -> Option<String> {
     })
 }
 
-fn relativize_diagnostic(diagnostic: &mut tola_typst::Diagnostic, root: &Path) {
-    fn relativize(location: &mut tola_typst::SourceLocation, root: &Path) {
-        if let Some(path) = &location.path {
-            location.path = Some(tola_diagnostic::display_path(Path::new(path), root));
-        }
-    }
-
+fn relativize_messages(diagnostic: &mut tola_typst::Diagnostic, root: &Path) {
     relativize_message(&mut diagnostic.message, root);
     for hint in &mut diagnostic.hints {
         relativize_message(&mut hint.message, root);
-        relativize(&mut hint.location, root);
     }
     for trace in &mut diagnostic.traces {
         relativize_message(&mut trace.message, root);
-        relativize(&mut trace.location, root);
     }
-    relativize(&mut diagnostic.location, root);
 }
 
 /// Rewrite every site-root prefix inside `text`; Typst names files absolutely.

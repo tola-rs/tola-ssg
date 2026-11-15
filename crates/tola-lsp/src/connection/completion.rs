@@ -299,14 +299,6 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
             self.open.exclude_generated(generated);
         }
         let root = checked_root(checked.configuration.as_ref(), &workspace.root);
-        let entry = checked.configuration.as_ref().map_or_else(
-            || workspace.root.join("site.typ"),
-            |config| {
-                config
-                    .project_entry_path()
-                    .unwrap_or_else(|| config.config_path().to_path_buf())
-            },
-        );
         // The index answers for the revision this check checked: the report below reads it now,
         // and a correction requested while that revision is still the checked one reads it too.
         workspace
@@ -315,7 +307,6 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
         workspace.diagnostics.publish(PublishInputs {
             output: &mut self.writer,
             root,
-            entry: &entry,
             open: &self.open,
             features: &workspace.features,
             selected: &checked.selected,
@@ -385,7 +376,7 @@ mod tests {
     use tola_typst_syntax::names::SelectedInterfaces;
 
     #[test]
-    fn unlocated_module_diagnostic_points_to_config() {
+    fn unlocated_module_diagnostic_keeps_its_message() {
         let directory = tempfile::tempdir().unwrap();
         let site = directory.path();
         std::fs::create_dir(site.join("theme")).unwrap();
@@ -425,14 +416,13 @@ mod tests {
         let [Message::Notification(report)] = sent.as_slice() else {
             panic!("expected one diagnostic report: {sent:?}");
         };
-        assert_eq!(report.method, notification::PublishDiagnostics::METHOD);
-        let report: lsp_types::PublishDiagnosticsParams =
-            serde_json::from_value(report.params.clone()).unwrap();
-        assert_eq!(
-            report.uri,
-            crate::uri::from_file_path(&config_path).unwrap()
+        assert_eq!(report.method, notification::LogMessage::METHOD);
+        assert!(
+            report.params["message"]
+                .as_str()
+                .unwrap()
+                .contains("site check failed")
         );
-        assert_eq!(report.diagnostics.len(), 1);
     }
 
     #[test]
@@ -650,7 +640,7 @@ mod tests {
         .unwrap();
         let config = crate::compiler::tests::site_configuration(directory.path(), "");
         let mut compiler = crate::compiler::SourceCompiler::new(
-            move |_, _| Ok(crate::server::ServedWorkspace::Site(Arc::clone(&config))),
+            move |_, _, _| Ok(crate::server::ServedWorkspace::Site(Arc::clone(&config))),
             tola_build::BuildResources::default(),
         );
         let mut connection = uninitialized();
@@ -688,7 +678,7 @@ mod tests {
             if notification.method == notification::PublishDiagnostics::METHOD)
         ));
         connection.request(Request::new(2.into(), request::DocumentDiagnosticRequest::METHOD.into(), json!({
-            "textDocument":{"uri":crate::uri::from_file_path(&directory.path().join("site.typ")).unwrap()}
+            "textDocument":{"uri":crate::uri::from_file_path(&directory.path().join("content/page.typ")).unwrap()}
         }))).unwrap();
         let report = response(&mut connection).response_result.unwrap();
         assert!(
@@ -702,7 +692,7 @@ mod tests {
                 )
         );
 
-        let uri = crate::uri::from_file_path(&directory.path().join("site.typ")).unwrap();
+        let uri = crate::uri::from_file_path(&directory.path().join("content/page.typ")).unwrap();
         let pull = |connection: &mut Connection<Vec<u8>, _>, id: i32, previous| {
             connection
                 .request(Request::new(

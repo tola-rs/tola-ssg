@@ -829,6 +829,16 @@ pub struct InspectConfigArgs {
     pub build: BuildOverrideArgs,
     #[command(flatten)]
     pub display: OutputArgs,
+    /// Show which hooks would run for this build mode.
+    #[arg(long, value_enum, default_value = "prod")]
+    pub mode: InspectConfigMode,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
+pub enum InspectConfigMode {
+    #[default]
+    Prod,
+    Dev,
 }
 
 #[derive(clap::Args, Debug, Clone, Default)]
@@ -838,6 +848,9 @@ pub struct IconInspectArgs {
     /// Collection name from `icons.collections`. Omit it to list configured collections.
     #[arg(value_name = "NAMESPACE")]
     pub namespace: Option<String>,
+    /// Inspect collections declared by this module instance.
+    #[arg(long)]
+    pub module: Option<String>,
     #[command(flatten)]
     pub display: OutputArgs,
 }

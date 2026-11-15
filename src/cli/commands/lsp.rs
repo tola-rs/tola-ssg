@@ -30,7 +30,6 @@ pub(in crate::cli) fn run(
     let input = std::io::stdin();
     let writer = std::io::stdout();
     let loader_output = output.clone();
-    let loader_cancel = token.clone();
     let diagnostics_output = output.clone();
     // The configuration the author named stays known to the server before a check resolves one, so
     // the editor's own document answers while the site does not compile.
@@ -40,8 +39,8 @@ pub(in crate::cli) fn run(
         writer,
         resources,
         cancellation: token,
-        load_configuration: move |root, sources| {
-            configuration.load(root, sources, &loader_output, &loader_cancel)
+        load_configuration: move |root, sources, cancellation| {
+            configuration.load(root, sources, &loader_output, cancellation)
         },
         record_diagnostics: move |diagnostics| {
             diagnostics_output.record_diagnostics(None, diagnostics)
@@ -94,19 +93,29 @@ impl SourceConfiguration {
         output: &CommandOutput,
         cancellation: &BuildCancellation,
     ) -> Result<ServedWorkspace> {
-        let file = self.configuration_file(root);
+        cancellation.ensure_active()?;
+        let file = self.configuration_file(root, sources);
         let report_path = file
             .clone()
             .unwrap_or_else(|| root.join(tola_build::config::loading::CONFIG_FILE_NAME));
-        self.serve_workspace(root, file, sources, output, cancellation)
+        let result = self.serve_workspace(root, file, sources, output, cancellation);
+        cancellation.ensure_active()?;
+        result
             .map_err(|error| configuration_failure(error, output, root, &report_path, cancellation))
     }
 
     /// The client's workspace bounds automatic discovery; an explicit --config may name another
     /// site, which CLI commands resolve through.
-    fn configuration_file(&self, root: &Path) -> Option<PathBuf> {
+    fn configuration_file(&self, root: &Path, sources: &[(PathBuf, Arc<str>)]) -> Option<PathBuf> {
         self.named.clone().or_else(|| {
             let path = root.join(tola_build::config::loading::CONFIG_FILE_NAME);
+            let physical = tola_input::normalize_existing_prefix(&path);
+            if sources
+                .iter()
+                .any(|(candidate, _)| tola_input::normalize_existing_prefix(candidate) == physical)
+            {
+                return Some(path);
+            }
             match std::fs::symlink_metadata(&path) {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
                 _ => Some(path),
@@ -130,7 +139,7 @@ impl SourceConfiguration {
         {
             self.open(root, file, sources, output, cancellation)?;
         }
-        self.adopt_changed_settings(sources, output)
+        self.adopt_changed_settings(sources, output, cancellation)
     }
 
     /// Resolve the configuration source this workspace holds, replacing any earlier one.
@@ -143,10 +152,12 @@ impl SourceConfiguration {
         cancellation: &BuildCancellation,
     ) -> Result<()> {
         let source = match file.as_deref() {
-            Some(path) => match configuration_text(path, sources)? {
-                Some(text) => ConfigSource::parse(path, text, self.scope)?,
-                None => ConfigSource::load(Some(path), self.scope)?,
-            },
+            Some(path) => ConfigSource::load_with_sources(
+                Some(path),
+                self.scope,
+                sources,
+                Some(cancellation),
+            )?,
             // A workspace that holds no site configuration is served as the documents it holds:
             // the schema's defaults, rooted at its own directory.
             None => ConfigSource::defaults(root, self.scope)?,
@@ -156,8 +167,10 @@ impl SourceConfiguration {
         let packages = crate::cli::config::package_locations(&self.packages, self.scope)?;
         let resolved =
             crate::config::resolve(source, packages, &crate::config::ConfigOverrides::default())?;
-        output.apply_diagnostic_limits(resolved.diagnostics());
+        cancellation.ensure_active()?;
         crate::cli::log::destination::start_site(output, resolved.config(), cancellation)?;
+        cancellation.ensure_active()?;
+        output.apply_diagnostic_limits(resolved.diagnostics());
         let (configuration, _, _, loader) = resolved.into_parts();
         self.loaded = Some(LoadedConfiguration {
             file,
@@ -172,6 +185,7 @@ impl SourceConfiguration {
         &mut self,
         sources: &[(PathBuf, Arc<str>)],
         output: &CommandOutput,
+        cancellation: &BuildCancellation,
     ) -> Result<ServedWorkspace> {
         let loaded = self.loaded.as_mut().expect("configuration is loaded");
         let site_root = tola_input::normalize_existing_prefix(
@@ -188,16 +202,14 @@ impl SourceConfiguration {
         // A workspace that holds no configuration document has no file to re-read: its defaults
         // stand until its author writes one.
         let candidate = match loaded.file.as_deref() {
-            Some(path) => match configuration_text(path, sources)? {
-                Some(text) => loaded.loader.load_text_candidate(text)?,
-                None => loaded.loader.load_candidate()?,
-            },
+            Some(_) => loaded
+                .loader
+                .load_sources_candidate(sources, Some(cancellation))?,
             None => None,
         };
+        cancellation.ensure_active()?;
         if let Some(candidate) = candidate {
-            if !candidate.has_same_effective_settings(&loaded.configuration)? {
-                loaded.configuration = candidate.config();
-            }
+            loaded.configuration = candidate.config();
             output.apply_diagnostic_limits(candidate.diagnostics());
             loaded.loader.acknowledge(&candidate);
         }
@@ -225,35 +237,42 @@ fn configuration_failure(
             let mut diagnostics = attached.to_vec();
             for diagnostic in &mut diagnostics {
                 establish_configuration_path(&mut diagnostic.location, report_path);
+                for location in diagnostic
+                    .help
+                    .iter_mut()
+                    .map(|help| &mut help.location)
+                    .chain(diagnostic.related.iter_mut().map(|item| &mut item.location))
+                    .chain(diagnostic.trace.iter_mut().map(|frame| &mut frame.location))
+                {
+                    establish_configuration_path(location, report_path);
+                }
             }
             diagnostics
         }
         None => {
             let diagnostic = tola_diagnostic::fallback(crate::codes::editor::CONFIGURATION, &error)
-                .with_path(absolute_configuration_path(report_path));
+                .with_path(tola_diagnostic::display_path(report_path, root))
+                .with_file(tola_input::normalize_existing_prefix(report_path));
             vec![diagnostic]
         }
     };
     DiagnosticError::attach(error, diagnostics).into()
 }
 
-fn absolute_configuration_path(path: &Path) -> String {
-    crate::terminal::display_path_as_given(&tola_input::normalize_existing_prefix(path))
-}
-
 fn establish_configuration_path(location: &mut Option<Location>, config_path: &Path) {
     let Some(location) = location else {
         return;
     };
-    if Path::new(&location.path).is_absolute() {
+    if location.file.is_some() || location.path.starts_with('@') {
         return;
     }
     let base = config_path.parent().unwrap_or(config_path);
-    location.path = crate::terminal::display_path_as_given(&tola_input::normalize_existing_prefix(
+    location.file = Some(tola_input::normalize_existing_prefix(
         &base.join(&location.path),
     ));
 }
 
+#[cfg(test)]
 fn configuration_text<'a>(
     path: &Path,
     sources: &'a [(PathBuf, Arc<str>)],

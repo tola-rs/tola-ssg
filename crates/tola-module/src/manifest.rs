@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde::Deserialize;
 use tola_input::{FilePatterns, InputMode, InputScope, RelativePathError, validate_relative_path};
@@ -10,7 +11,7 @@ use tola_input::{FilePatterns, InputMode, InputScope, RelativePathError, validat
 use crate::action::Action;
 use crate::declaration::{
     Assets, Command, CommandAction, CommandActionError, Entry, Initializer, ModuleDeclaration,
-    Parameter, Query, valid_name,
+    ModuleSource, Parameter, Query, valid_name,
 };
 use crate::hooks;
 use crate::module_set::ManifestEvidence;
@@ -27,6 +28,8 @@ pub struct Manifest {
     pub build: Option<Entry>,
     #[serde(default)]
     pub assets: Option<Assets>,
+    #[serde(default)]
+    pub icons: crate::icons::Icons,
     #[serde(default)]
     pub queries: BTreeMap<String, Query>,
     #[serde(default)]
@@ -66,6 +69,8 @@ pub struct NuModule {
     pub root: PathBuf,
     pub manifest: PathBuf,
     pub entry: Option<PathBuf>,
+    /// Font directories declared by the module, relative to its root.
+    pub font_directories: Vec<PathBuf>,
     pub assets_enabled: bool,
     pub options: toml::Table,
 }
@@ -75,6 +80,7 @@ pub fn read_selected(
     declarations: &BTreeMap<String, ModuleDeclaration>,
     roots: &BTreeMap<String, PathBuf>,
     mode: InputMode,
+    sources: &[(PathBuf, Arc<str>)],
 ) -> std::result::Result<BTreeMap<String, ReadManifest>, ManifestError> {
     let site = site_root
         .canonicalize()
@@ -88,7 +94,11 @@ pub fn read_selected(
                 .ok_or_else(|| ManifestError::Source {
                     message: format!("module @@{name}@@ was not found; run @@tola update {name}@@"),
                 })?;
-            let mut loaded = read_one(&site, name, root, mode)?;
+            let sources = match &declaration.source {
+                ModuleSource::Local { .. } => sources,
+                _ => &[],
+            };
+            let mut loaded = read_one(&site, name, root, mode, sources)?;
             crate::options::merge(&mut loaded.options, &declaration.options);
             Ok((name.clone(), loaded))
         })
@@ -142,33 +152,40 @@ pub enum ManifestError {
     OutsideSiteInPureMode { module: String },
     #[error("Tola could not read `{path}`")]
     ManifestPath {
+        file: PathBuf,
         path: String,
         #[source]
         source: std::io::Error,
     },
     #[error("`{path}` changed while Tola was reading it")]
-    ManifestChanged { path: String },
-    #[error("the manifest `{path}` points outside module `{module}`")]
-    ManifestEscapesRoot { module: String, path: String },
+    ManifestChanged { file: PathBuf, path: String },
+    #[error("`{path}` points outside module `{module}`")]
+    ManifestEscapesRoot {
+        file: PathBuf,
+        module: String,
+        path: String,
+    },
     #[error("Tola could not read `{path}`")]
     ManifestRead {
+        file: PathBuf,
         path: String,
         #[source]
         source: std::io::Error,
     },
     #[error("`{path}` changed while Tola was reading it")]
-    ManifestMoved { path: String },
+    ManifestMoved { file: PathBuf, path: String },
     #[error("`{path}` is not UTF-8 text")]
     ManifestEncoding {
+        file: PathBuf,
         path: String,
         #[source]
         source: std::str::Utf8Error,
     },
-    #[error("`{path}` is not valid TOML")]
-    ManifestParse {
-        path: String,
+    #[error("{}", .diagnostic.message)]
+    Rejected {
+        diagnostic: Box<tola_diagnostic::Diagnostic>,
         #[source]
-        source: toml::de::Error,
+        source: anyhow::Error,
     },
     #[error("module `{module}` declares an invalid hook: {source}")]
     Hooks {
@@ -203,8 +220,12 @@ pub enum ManifestError {
     InitializerDeclaredTwice { module: String },
     #[error("`{command}` is not a usable command name in module `{module}`")]
     CommandName { module: String, command: String },
-    #[error("command `{command}` names `{query}`, which the module does not declare")]
-    CommandUnknownQuery { command: String, query: String },
+    #[error("command `{command}` names an unknown query `{query}`")]
+    CommandUnknownQuery {
+        command: String,
+        query: String,
+        replacement: Option<String>,
+    },
     #[error("command `{command}` has an empty projection field")]
     CommandProjection { command: String },
     #[error("command `{command}`: {source}")]
@@ -231,6 +252,7 @@ pub fn read_one(
     name: &str,
     declared_root: PathBuf,
     mode: InputMode,
+    sources: &[(PathBuf, Arc<str>)],
 ) -> std::result::Result<ReadManifest, ManifestError> {
     if !valid_name(name) {
         return Err(ManifestError::Namespace {
@@ -268,16 +290,19 @@ pub fn read_one(
         manifest_path
             .canonicalize()
             .map_err(|source| ManifestError::ManifestPath {
+                file: manifest_path.clone(),
                 path: shown(&manifest_path),
                 source,
             })?;
     if manifest_identity.canonical_path() != Some(canonical_manifest.as_path()) {
         return Err(ManifestError::ManifestChanged {
+            file: manifest_path.clone(),
             path: shown(&manifest_path),
         });
     }
     if !canonical_manifest.starts_with(&root) {
         return Err(ManifestError::ManifestEscapesRoot {
+            file: manifest_path.clone(),
             module: name.to_owned(),
             path: shown(&manifest_path),
         });
@@ -286,6 +311,7 @@ pub fn read_one(
     tola_fs::open_regular_file(&manifest_path, true)
         .and_then(|mut file| file.read_to_end(&mut bytes))
         .map_err(|source| ManifestError::ManifestRead {
+            file: manifest_path.clone(),
             path: shown(&manifest_path),
             source,
         })?;
@@ -293,19 +319,106 @@ pub fn read_one(
         || manifest_identity != tola_input::FilesystemSourceIdentity::from_path(&manifest_path)
     {
         return Err(ManifestError::ManifestMoved {
+            file: manifest_path.clone(),
             path: shown(&manifest_path),
         });
     }
-    let digest = blake3::hash(&bytes);
-    let content =
-        std::str::from_utf8(&bytes).map_err(|source| ManifestError::ManifestEncoding {
+    let diagnostic = |message| {
+        tola_diagnostic::Diagnostic::at_path(
+            tola_diagnostic::codes::module::MANIFEST,
+            tola_diagnostic::Severity::Error,
+            shown(&manifest_path),
+            message,
+        )
+        .with_file(canonical_manifest.clone())
+    };
+    let overlay = || {
+        let mut buffers = sources
+            .iter()
+            .filter(|(path, _)| path == &canonical_manifest);
+        let Some((_, first)) = buffers.next() else {
+            return Ok(None);
+        };
+        if buffers.any(|(_, text)| text != first) {
+            let message = "two open copies of `tola-module.toml` contain different text";
+            return Err(ManifestError::Rejected {
+                diagnostic: Box::new(
+                    diagnostic(message.to_owned())
+                        .with_help("Save the version you want to keep, then close the other copy"),
+                ),
+                source: anyhow::anyhow!(message),
+            });
+        }
+        Ok(Some(first.as_ref()))
+    };
+    let content = match overlay()? {
+        Some(text) => text,
+        None => std::str::from_utf8(&bytes).map_err(|source| ManifestError::ManifestEncoding {
+            file: manifest_path.clone(),
             path: shown(&manifest_path),
             source,
-        })?;
-    let manifest: Manifest =
-        toml::from_str(content).map_err(|source| ManifestError::ManifestParse {
-            path: shown(&manifest_path),
-            source,
+        })?,
+    };
+    let digest = blake3::hash(content.as_bytes());
+    let manifest: Manifest = toml::from_str(content).map_err(|source: toml::de::Error| {
+        let tola_diagnostic::toml::TomlMessage { message, help } =
+            tola_diagnostic::toml::TomlMessage::from_error(source.message());
+        let span = source.span();
+        let key = span
+            .as_ref()
+            .filter(|_| message.starts_with("expected "))
+            .and_then(|span| {
+                let document = toml_edit::Document::parse(Arc::<str>::from(content)).ok()?;
+                tola_diagnostic::key_at_span(&document, span)
+            });
+        let mut diagnostic = diagnostic(match key {
+            Some(key) => format!("`{key}` {message}"),
+            None => message.into_owned(),
+        });
+        if let Some(help) = help {
+            diagnostic = diagnostic.with_help(help);
+        }
+        if let Some(span) = span {
+            diagnostic = diagnostic.with_source_span(content, span);
+        }
+        ManifestError::Rejected {
+            diagnostic: Box::new(diagnostic),
+            source: source.into(),
+        }
+    })?;
+    validate_manifest(name, &manifest).map_err(|source| {
+        let mut diagnostic = diagnostic(source.to_string());
+        if let ManifestError::CommandUnknownQuery { replacement, .. } = &source {
+            diagnostic = diagnostic.with_help(replacement.as_ref().map_or_else(
+                || "Use the name of a query declared in `[queries]`".to_owned(),
+                |query| format!("Check whether you meant the query `{query}`"),
+            ));
+        }
+        ManifestError::Rejected {
+            diagnostic: Box::new(diagnostic),
+            source: source.into(),
+        }
+    })?;
+    Ok(ReadManifest {
+        root,
+        path: canonical_manifest,
+        evidence: ManifestEvidence {
+            root: root_identity,
+            manifest: manifest_identity,
+            digest,
+            source: std::sync::Arc::from(content),
+        },
+        options: manifest.options.clone(),
+        manifest,
+    })
+}
+
+fn validate_manifest(name: &str, manifest: &Manifest) -> Result<(), ManifestError> {
+    manifest
+        .icons
+        .validate()
+        .map_err(|message| ManifestError::Source {
+            message: format!("module `{name}`: {message}"),
         })?;
     hooks::validate_declarations(&manifest.hooks).map_err(|source| ManifestError::Hooks {
         module: name.to_owned(),
@@ -341,6 +454,11 @@ pub fn read_one(
             relative(directory, format!("typst.fonts[{index}]"))?;
         }
     }
+    for (name, source) in &manifest.icons.collections {
+        if let Some(path) = source.path() {
+            relative(path, format!("icons.collections.{name}.path"))?;
+        }
+    }
     for (query_name, query) in &manifest.queries {
         if !valid_name(query_name) {
             return Err(ManifestError::QueryName {
@@ -354,7 +472,7 @@ pub fn read_one(
         }
         relative(&query.entry, format!("query {query_label} entry"))?;
     }
-    validate_query_parameters(name, &manifest)?;
+    validate_query_parameters(name, manifest)?;
     if manifest.init.is_some() && manifest.commands.contains_key("init") {
         return Err(ManifestError::InitializerDeclaredTwice {
             module: name.to_owned(),
@@ -378,9 +496,15 @@ pub fn read_one(
             CommandAction::Execute(_) => {}
             CommandAction::Query { query, projection } => {
                 if !manifest.queries.contains_key(&query) {
+                    let replacement = tola_typst::spelling::closest(
+                        &query,
+                        manifest.queries.keys().map(String::as_str),
+                    )
+                    .map(str::to_owned);
                     return Err(ManifestError::CommandUnknownQuery {
                         command: command_label,
                         query,
+                        replacement,
                     });
                 }
                 if !projection.iter().all(|field| !field.is_empty()) {
@@ -394,17 +518,7 @@ pub fn read_one(
             }
         }
     }
-    Ok(ReadManifest {
-        root,
-        path: canonical_manifest,
-        evidence: ManifestEvidence {
-            root: root_identity,
-            manifest: manifest_identity,
-            digest,
-        },
-        options: manifest.options.clone(),
-        manifest,
-    })
+    Ok(())
 }
 
 fn validate_query_parameters(module: &str, manifest: &Manifest) -> Result<(), ManifestError> {
@@ -457,6 +571,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn manifest_positions_use_the_loaded_snapshot() {
+        let module = tempfile::tempdir().unwrap();
+        let path = module.path().join("tola-module.toml");
+        let source = "[[hooks.before-build]]\nname = 'prepare'\nargv = ['tool']\n";
+        std::fs::write(&path, source).unwrap();
+        let loaded = read_one(
+            module.path(),
+            "module",
+            module.path().to_owned(),
+            InputMode::new(InputScope::Online, false),
+            &[],
+        )
+        .unwrap();
+        std::fs::write(&path, "\n\n[[hooks.before-build]]\nname = 'changed'\n").unwrap();
+        assert_eq!(loaded.evidence.source(), source);
+        let positions = loaded.evidence.positions().unwrap();
+        assert_eq!(
+            positions
+                .written("hooks.before-build.0.name")
+                .unwrap()
+                .start
+                .line,
+            1
+        );
+        assert!(!loaded.evidence.is_current(&Default::default()).unwrap());
+    }
+
+    #[test]
     fn fifo_manifest_does_not_block() {
         let module = tempfile::tempdir().unwrap();
         assert!(
@@ -471,6 +613,7 @@ mod tests {
             "module",
             module.path().to_owned(),
             InputMode::new(InputScope::Online, false),
+            &[],
         );
         assert!(matches!(
             result,

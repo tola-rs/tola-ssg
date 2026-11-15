@@ -217,6 +217,51 @@ mod tests {
     }
 
     #[test]
+    fn module_icons_keep_instance_scope_and_site_replacement_paths() {
+        let site = config_with_icons(
+            r#"
+#import "@tola/icon:0.0.0": icon-bytes, icon-url
+#import "@tola-modules/first:0.0.0" as first
+#import "@tola-modules/second:0.0.0" as second
+#assert.ne(first.mark(), icon-bytes("brand:mark"))
+#assert.eq(first.mark(), icon-bytes("brand:mark", module: "first"))
+#assert.ne(first.mark(), second.mark())
+#assert.eq(second.mark(), icon-bytes("brand:mark", module: "second"))
+#document("index.html")[#html.img(src: icon-url("brand:mark", module: "first"), alt: "First")]
+"#,
+        );
+        let root = site.config.get_root();
+        fs::create_dir(root.join("theme")).unwrap();
+        fs::write(root.join("theme/tola-module.toml"), "[typst]\nentry = 'lib.typ'\n[icons.collections.brand]\nsource-type = 'local-json'\npath = 'icons.json'\n").unwrap();
+        let collection = |body: &str| {
+            serde_json::json!({"prefix": "upstream", "width": 24, "height": 24, "icons": {"mark": {"body": body}}}).to_string()
+        };
+        fs::write(
+            root.join("theme/icons.json"),
+            collection("<rect width=\"10\" height=\"20\"/>"),
+        )
+        .unwrap();
+        fs::write(
+            root.join("replacement.json"),
+            collection("<circle cx=\"12\" cy=\"12\" r=\"4\"/>"),
+        )
+        .unwrap();
+        fs::write(root.join("theme/lib.typ"), "#import \"@tola/module:0.0.0\": get-module\n#import \"@tola/icon:0.0.0\": icon-bytes\n#let selected = icon-bytes.with(module: get-module().name)\n#let mark() = selected(\"brand:mark\")").unwrap();
+        let mut config = site.config.clone();
+        config.modules = toml::from_str("[first]\npath = 'theme'\n[second]\npath = 'theme'\n[second.icons.collections.brand]\nsource-type = 'local-json'\npath = 'replacement.json'\n").unwrap();
+        let built = crate::build::build_site(&config, BuildMode::Production).unwrap();
+        assert_eq!(
+            built
+                .graph()
+                .outputs()
+                .iter()
+                .filter(|out| out.path().as_str().starts_with("_tola/icons/"))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
     fn unused_icons_validate_ids() {
         for (id, message, suggestion) in [
             ("brand", "not a valid icon id", false),

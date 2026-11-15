@@ -91,7 +91,14 @@ pub(crate) fn start_site(
         config.get_root(),
         config.config_path(),
         SiteInputSections::from_config(config),
-    ) {
+    )
+    .and_then(|()| {
+        check_config_paths(
+            log.map(super::LogFile::path),
+            config.get_root(),
+            config.config_paths(),
+        )
+    }) {
         // Tola names the development session log itself, so a destination that cannot sit clear
         // of the site's inputs and outputs is refused rather than fatal: the log stops, or never
         // opens, and the site still runs. A `--log-file` the reader named stays an error.
@@ -259,6 +266,17 @@ impl<'a> SiteInputSections<'a> {
             vendor: &schema.vendor,
         }
     }
+}
+
+pub(crate) fn check_config_paths<'a>(
+    log: Option<&Path>,
+    root: &Path,
+    paths: impl IntoIterator<Item = &'a Path>,
+) -> Result<()> {
+    for path in paths {
+        check_file_within(log, path, Some(root))?;
+    }
+    Ok(())
 }
 
 /// Check site inputs and outputs, resolving relative paths against `root`.

@@ -94,8 +94,8 @@ pub fn resolve_parsed_site_config(
         parsed.schema,
         source.path().to_path_buf(),
         source.root().to_path_buf(),
+        Some(source.clone()),
         source.core_presence(),
-        std::sync::Arc::clone(source.positions()),
         package_locations,
         build,
     )
@@ -110,11 +110,15 @@ fn resolve_schema(
     mut schema: SiteConfigSchema,
     config_path: PathBuf,
     root: PathBuf,
+    config_source: Option<ConfigSource>,
     presence: &ConfigPresence,
-    positions: std::sync::Arc<tola_diagnostic::SourcePositions>,
     mut package_locations: tola_typst::PackageLocations,
     build: &BuildOverrides,
 ) -> Result<ResolvedSiteConfig> {
+    let positions = config_source
+        .as_ref()
+        .map(|source| std::sync::Arc::clone(source.positions()))
+        .unwrap_or_default();
     schema.validate_source_paths()?;
     schema.validate_entry()?;
     super::schema::validate_hook_options(&mut schema.hooks, &schema.options)?;
@@ -133,6 +137,10 @@ fn resolve_schema(
     let boundary = check_publish_dir(
         &schema,
         &config_path,
+        config_source
+            .as_ref()
+            .into_iter()
+            .flat_map(|source| source.paths()),
         &root,
         &package_locations,
         &module_roots,
@@ -143,6 +151,10 @@ fn resolve_schema(
         &schema,
         &root,
         &config_path,
+        &config_source
+            .as_ref()
+            .map(|source| source.paths().collect::<Vec<_>>())
+            .unwrap_or_default(),
         vendor_workspace.as_deref(),
         &module_roots,
         presence,
@@ -167,6 +179,7 @@ fn resolve_schema(
     Ok(ResolvedSiteConfig {
         package_locations,
         config_path,
+        config_source,
         root,
         warnings,
         positions,
@@ -174,6 +187,8 @@ fn resolve_schema(
             .contains(crate::config::section::FontsConfig::FIELDS.paths.as_str()),
         site: site.into_resolved(),
         build: ResolvedBuildConfig {
+            par_hooks: build_config.par_hooks,
+            hook_jobs: build_config.hook_jobs,
             entry,
             content_dir: build_config.content_dir,
             publish_dir: build_config.publish_dir,
@@ -238,6 +253,7 @@ fn validate_effective_config(
     config: &SiteConfigSchema,
     root: &Path,
     config_path: &Path,
+    config_paths: &[&Path],
     vendor_workspace: Option<&Path>,
     module_roots: &[PathBuf],
     presence: &ConfigPresence,
@@ -247,6 +263,7 @@ fn validate_effective_config(
         config,
         root,
         config_path,
+        config_paths,
         vendor_workspace,
         module_roots,
         &mut diagnostics,
@@ -440,8 +457,8 @@ impl SiteConfigSchema {
             self,
             path.clone(),
             root,
+            None,
             &presence,
-            std::sync::Arc::new(tola_diagnostic::SourcePositions::default()),
             package_locations,
             build,
         )
@@ -523,7 +540,10 @@ content-dir = "content"
         .unwrap();
 
         assert_eq!(parsed.config().site().title, "Supplied");
-        assert_eq!(parsed.source_hash(), blake3::hash(source.as_bytes()));
+        assert_eq!(
+            parsed.config().source().unwrap().sources()[0].hash(),
+            blake3::hash(source.as_bytes())
+        );
         assert!(parsed.config().warnings().is_empty());
         assert_eq!(
             std::fs::read_to_string(config_path).unwrap(),
@@ -603,7 +623,13 @@ content-dir = "content"
 
         assert_eq!(find_default_config(&nested), Some(path.clone()));
         let error = ConfigSource::load(Some(&path), tola_input::InputScope::Online).unwrap_err();
-        assert!(matches!(error, super::super::ConfigSourceError::Read(_)));
+        assert!(error.paths().contains(&path));
+        assert!(
+            error
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| { diagnostic.code == tola_diagnostic::codes::config::IO })
+        );
         let error = anyhow::Error::new(error);
         assert!(error.chain().any(|cause| {
             cause

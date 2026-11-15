@@ -18,6 +18,7 @@ pub struct SiteBuild {
     pub(super) config: std::sync::Arc<ResolvedSiteConfig>,
     pub(super) mode: BuildMode,
     pub(super) cancellation: BuildCancellation,
+    pub(super) hook_executor: hooks::HookExecutor,
     pub(crate) index: SiteIndex,
     pub(crate) graph: crate::output::graph::OutputGraph,
     pub(super) cache_update: BuildCacheUpdate,
@@ -261,6 +262,7 @@ pub struct WriteOutcome {
     config: std::sync::Arc<ResolvedSiteConfig>,
     mode: BuildMode,
     scope: tola_input::InputScope,
+    hook_executor: hooks::HookExecutor,
     consumer_graph: Option<crate::output::graph::OutputGraph>,
 }
 
@@ -299,6 +301,7 @@ impl WriteOutcome {
                 self.scope,
                 files.root(),
                 cancellation,
+                &self.hook_executor,
             );
         }
         Ok(Vec::new())
@@ -365,6 +368,7 @@ fn write_site_inner(build: &SiteBuild, lock: &super::SiteBuildLock) -> Result<Wr
         config: std::sync::Arc::clone(&build.config),
         mode,
         scope: build.scope,
+        hook_executor: build.hook_executor.clone(),
         consumer_graph: hooks::has_after_publish_hooks(config, mode).then(|| graph.clone()),
     })
 }

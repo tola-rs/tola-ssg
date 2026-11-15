@@ -112,6 +112,7 @@ fn payload_location(world: &TypstWorld, document: &VirtualPath, span: Span) -> L
     match crate::compiler::source_location(world, span) {
         Some(location) => location,
         None => Location {
+            file: None,
             path: document.get_without_slash().to_owned(),
             line: None,
             column: None,

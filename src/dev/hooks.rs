@@ -1,9 +1,10 @@
-//! Serial after-publish commands with one latest pending development revision.
+//! After-publish commands with one latest pending development revision.
 
 use std::sync::{Arc, Condvar, Mutex};
 
 use anyhow::{Context, Result, anyhow};
-use tola_build::cancellation::{BuildCancellation, BuildCancelled, BuildCanceller};
+use tola_build::cancellation::{BuildCancellation, BuildCanceller, is_cancelled};
+use tola_build::hooks::HookExecutor;
 use tola_build::site::SiteRevision;
 use tola_diagnostic::Diagnostic;
 
@@ -11,7 +12,6 @@ use tola_diagnostic::Diagnostic;
 pub(crate) struct HookSender {
     mailbox: Arc<HookMailbox>,
     cancellation: BuildCancellation,
-    shutdown: BuildCancellation,
 }
 
 /// One published revision waiting for its after-publish commands.
@@ -55,18 +55,14 @@ struct HookReceiver {
 }
 
 impl HookReceiver {
-    fn next(
-        &self,
-        cancellation: &BuildCancellation,
-        shutdown: &BuildCancellation,
-    ) -> Option<PendingRevision> {
+    fn next(&self, cancellation: &BuildCancellation) -> Option<PendingRevision> {
         let mut pending = self
             .mailbox
             .pending
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         loop {
-            if cancellation.is_cancelled() || shutdown.is_cancelled() {
+            if cancellation.is_cancelled() {
                 return None;
             }
             match &*pending {
@@ -103,29 +99,34 @@ impl HookSender {
     /// `round` is the development round that published it, or `None` for a session that numbers
     /// no rounds.
     pub(crate) fn enqueue(&self, site: Arc<SiteRevision>, round: Option<u64>) -> Result<()> {
-        if self.cancellation.is_cancelled()
-            || self.shutdown.is_cancelled()
-            || !tola_build::hooks::has_after_publish_hooks(site.config(), site.mode())
-        {
+        if self.cancellation.is_cancelled() {
             return Ok(());
         }
+        let participates = tola_build::hooks::has_after_publish_hooks(site.config(), site.mode());
         let discarded = {
             let mut pending = self
                 .mailbox
                 .pending
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if self.cancellation.is_cancelled() || self.shutdown.is_cancelled() {
+            if self.cancellation.is_cancelled() {
                 return Ok(());
             }
             if matches!(*pending, PendingHooks::Closed) {
+                if !participates {
+                    return Ok(());
+                }
                 return Err(anyhow!(
                     "Tola could no longer run after-publish commands; restart `tola dev`"
                 ));
             }
             std::mem::replace(
                 &mut *pending,
-                PendingHooks::Revision(PendingRevision { round, site }),
+                if participates {
+                    PendingHooks::Revision(PendingRevision { round, site })
+                } else {
+                    PendingHooks::Waiting
+                },
             )
         };
         self.mailbox.available.notify_one();
@@ -148,6 +149,7 @@ impl HookQueue {
         browser: Option<crate::dev::reload::transport::ReloadDiagnostics>,
         cancellation: crate::cancellation::Cancellation,
         events: super::events::Events,
+        executor: HookExecutor,
     ) -> Result<Self> {
         let mailbox = Arc::new(HookMailbox {
             pending: Mutex::new(PendingHooks::Waiting),
@@ -156,17 +158,20 @@ impl HookQueue {
         let pending = HookReceiver {
             mailbox: Arc::clone(&mailbox),
         };
-        let shutdown = BuildCanceller::new();
-        let worker_shutdown = shutdown.token();
+        let shutdown = BuildCanceller::child(&cancellation.token());
+        let worker_token = shutdown.token();
         let worker_cancellation = cancellation.clone();
-        let worker_token = worker_cancellation.token();
         let worker = std::thread::Builder::new()
             .name("tola-after-publish".into())
             .spawn(move || {
                 let mut completed: Option<CompletedRun> = None;
-                while let Some(pending) = pending.next(&worker_token, &worker_shutdown) {
+                while let Some(pending) = pending.next(&worker_token) {
                     let revision = pending.site.manifest().revision().as_str();
-                    match pending.site.after_publish_dependencies() {
+                    let dependencies = pending.site.after_publish_dependencies(&worker_token);
+                    if worker_token.is_cancelled() {
+                        break;
+                    }
+                    match dependencies {
                         Ok(dependencies)
                             if completed
                                 .as_ref()
@@ -191,24 +196,28 @@ impl HookQueue {
                             }
                         }
                         Ok(dependencies) => {
-                            let outcome = match consume_revision(&pending, &worker_shutdown, events)
-                            {
+                            let outcome = match consume_revision(
+                                &pending,
+                                &worker_token,
+                                &executor,
+                                events,
+                            ) {
                                 Ok(outcome) => outcome,
                                 Err(error) => {
                                     worker_cancellation.request();
                                     return Err(error);
                                 }
                             };
+                            if worker_token.is_cancelled() {
+                                break;
+                            }
                             let failure = match outcome {
                                 Ok(diagnostics) => {
                                     let _ = output.diagnostics(&diagnostics);
                                     None
                                 }
                                 Err(error) => {
-                                    if worker_cancellation.is_requested()
-                                        || worker_shutdown.is_cancelled()
-                                        || error.chain().any(|cause| cause.is::<BuildCancelled>())
-                                    {
+                                    if is_cancelled(&error) {
                                         break;
                                     }
                                     tracing::debug!(
@@ -257,8 +266,7 @@ impl HookQueue {
         Ok(Self {
             sender: HookSender {
                 mailbox,
-                cancellation: cancellation.token(),
-                shutdown: shutdown.token(),
+                cancellation: shutdown.token(),
             },
             shutdown,
             worker: Some(worker),
@@ -311,6 +319,7 @@ struct CompletedRun {
 fn consume_revision(
     pending: &PendingRevision,
     cancellation: &BuildCancellation,
+    executor: &HookExecutor,
     events: super::events::Events,
 ) -> Result<Result<Vec<Diagnostic>>> {
     let site = pending.site.as_ref();
@@ -347,6 +356,7 @@ fn consume_revision(
             site.scope(),
             files.root(),
             cancellation,
+            executor,
             |hook, outcome| {
                 if !events.0 {
                     return Ok(());
@@ -361,7 +371,7 @@ fn consume_revision(
                     status,
                     &diagnostics,
                 );
-                event_write_failed = written.is_err();
+                event_write_failed |= written.is_err();
                 written
             },
         )
@@ -373,8 +383,13 @@ fn consume_revision(
 }
 
 fn hook_failure(error: &anyhow::Error) -> (&'static str, Vec<Diagnostic>) {
-    if tola_build::cancellation::is_cancelled(error) {
-        ("cancelled", Vec::new())
+    if is_cancelled(error) {
+        (
+            "cancelled",
+            tola_diagnostic::attached(error)
+                .unwrap_or_default()
+                .to_vec(),
+        )
     } else {
         (
             "failed",
@@ -414,6 +429,7 @@ mod tests {
             None,
             cancellation.clone(),
             super::super::events::Events(false),
+            HookExecutor::new(),
         )
         .unwrap();
         let sender = queue.sender();

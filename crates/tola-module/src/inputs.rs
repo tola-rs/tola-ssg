@@ -473,6 +473,7 @@ impl ModuleAcquisition<'_> {
             alias,
             root.clone(),
             InputMode::new(InputScope::Online, false),
+            &[],
         )
         .map_err(|error| failure(ArchiveStage::Manifest, error.into()))?;
         crate::check::check_loaded(&manifest)

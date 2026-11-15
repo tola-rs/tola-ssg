@@ -1,46 +1,71 @@
-//! One parsed configuration source shared by schema decoding and resolution.
+//! A configuration snapshot, its include applications, and the authored origins of effective values.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use serde::Deserialize;
-use serde::de::DeserializeOwned;
-
-use super::ConfigSourceRefusal;
-use super::{ConfigError, ConfigPresence};
-use tola_diagnostic::{Diagnostic, DiagnosticError, SourcePositions};
+use serde::de::{DeserializeOwned, IntoDeserializer};
+use serde::{Deserialize, Serialize};
+use tola_config::{FragmentContext, FragmentIssueKind, ValidateFragment, ValueStep};
+use tola_diagnostic::{
+    Diagnostic, DiagnosticError, RelatedInformation, SourcePositions, WrittenPosition,
+};
 use tola_input::InputScope;
 
-/// Why a configuration source could not be found, read, or decoded.
+use super::{ConfigPresence, ConfigSourceRefusal};
+use crate::cancellation::{BuildCancellation, BuildCancelled};
+
+mod load;
+mod merge;
+pub use load::{ConfigApplication, ConfigFile, ConfigFileState, ConfigInclude};
+
+/// The original declaration that contributed an effective value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigOrigin {
+    pub source_id: usize,
+    pub key_path: Vec<ValueStep>,
+}
+
+/// Current contributions and declarations they replaced.
+#[derive(Debug, Clone, Default)]
+pub struct ConfigFieldOrigins {
+    pub origins: Vec<ConfigOrigin>,
+    pub overridden: Vec<ConfigOrigin>,
+}
+
+/// Why a configuration could not be selected, read, or decoded.
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigSourceError {
-    /// No configuration file was found in the current directory or its ancestors.
     #[error("{diagnostic}")]
     NotFound {
-        /// Directory from which the search began.
         start: PathBuf,
         #[source]
         diagnostic: DiagnosticError,
     },
-    /// The invocation could not select a configuration path.
     #[error("{0}")]
     Path(#[source] DiagnosticError),
-    /// A configuration file could not be read or is outside the allowed source paths.
     #[error("{0}")]
     Read(#[source] DiagnosticError),
-    /// The configuration text could not be parsed as TOML.
     #[error("{0}")]
     Syntax(#[source] DiagnosticError),
-    /// The parsed values could not be decoded as configuration fields.
     #[error("{0}")]
     Schema(#[source] DiagnosticError),
-    /// The source boundary could not determine where this file resolves.
     #[error("{0}")]
     SourcePath(#[from] typst::diag::FileError),
+    #[error("{0}")]
+    Resolution(#[source] anyhow::Error),
+    #[error(transparent)]
+    Cancelled(#[from] BuildCancelled),
+    /// Failed loads retain dependencies so the host can observe a repair.
+    #[error("{source}")]
+    Inputs {
+        #[source]
+        source: Box<ConfigSourceError>,
+        paths: Vec<PathBuf>,
+    },
 }
 
 impl ConfigSourceError {
-    /// The configuration diagnostics recorded when the operation failed.
     pub fn diagnostics(&self) -> &[Diagnostic] {
         match self {
             Self::NotFound { diagnostic, .. }
@@ -48,168 +73,277 @@ impl ConfigSourceError {
             | Self::Read(diagnostic)
             | Self::Syntax(diagnostic)
             | Self::Schema(diagnostic) => diagnostic.diagnostics(),
-            Self::SourcePath(_) => &[],
+            Self::Inputs { source, .. } => source.diagnostics(),
+            Self::Resolution(error) => tola_diagnostic::attached(error).unwrap_or_default(),
+            Self::SourcePath(_) | Self::Cancelled(_) => &[],
+        }
+    }
+
+    /// Include sources discovered before this failure, including missing targets.
+    pub fn paths(&self) -> &[PathBuf] {
+        match self {
+            Self::Inputs { paths, .. } => paths,
+            _ => &[],
+        }
+    }
+
+    pub(super) fn with_paths(self, mut paths: Vec<PathBuf>) -> Self {
+        paths.extend_from_slice(self.paths());
+        paths.sort();
+        paths.dedup();
+        match self {
+            Self::Inputs { source, .. } => Self::Inputs { source, paths },
+            source => Self::Inputs {
+                source: Box::new(source),
+                paths,
+            },
         }
     }
 }
 
-/// Exact TOML bytes, their parsed document, and the site root and input scope selected at loading.
+/// One immutable configuration graph bound to the primary file's site root.
 ///
-/// A host decodes its own sections beside the core ones without reading or parsing the
-/// document again. Reloads retain the original root and scope.
+/// Raw values are combined before defaults or schema construction. Source documents
+/// remain separate so diagnostics and source freshness never use synthetic TOML bytes.
 #[derive(Debug, Clone)]
 pub struct ConfigSource {
     path: PathBuf,
     root: PathBuf,
     scope: InputScope,
-    document: Arc<toml_edit::Document<Arc<str>>>,
-    positions: Arc<SourcePositions>,
+    graph: Arc<load::Loaded>,
     presence: Arc<ConfigPresence>,
     core_presence: Arc<ConfigPresence>,
-    hash: blake3::Hash,
+    overlays: Arc<[(PathBuf, Arc<str>)]>,
+    defaults: bool,
 }
 
 impl ConfigSource {
-    /// Parse supplied text. The path supplies diagnostic identity and its parent the root.
-    ///
-    /// `scope` decides which physical paths count as sources, so unsaved editor text for a file
-    /// this scope refuses is rejected exactly as a disk read would be.
     pub fn parse(path: &Path, source: &str, scope: InputScope) -> Result<Self, ConfigSourceError> {
+        Self::parse_with_sources(path, source, scope, &[], None)
+    }
+
+    /// Parse an authoritative primary text with the other editor or initializer overlays.
+    pub fn parse_with_sources(
+        path: &Path,
+        source: &str,
+        scope: InputScope,
+        overlays: &[(PathBuf, Arc<str>)],
+        cancellation: Option<&BuildCancellation>,
+    ) -> Result<Self, ConfigSourceError> {
         let (path, root) = super::loading::resolve_config_location(path)?;
-        check_source_path(&root, &path, scope, None)?;
-        Self::parse_at_root(path, root, source.into(), scope)
+        let primary = tola_input::lexical_path_identity(&path);
+        let mut texts = overlays
+            .iter()
+            .filter(|(candidate, _)| {
+                std::path::absolute(candidate).ok().is_none_or(|candidate| {
+                    tola_input::lexical_path_identity(&candidate) != primary
+                })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        texts.push((path.clone(), Arc::from(source)));
+        Self::load_at_root(path, root, scope, &texts, cancellation)
     }
 
-    /// Read and parse one configuration document under `scope`.
     pub fn load(explicit: Option<&Path>, scope: InputScope) -> Result<Self, ConfigSourceError> {
+        Self::load_with_sources(explicit, scope, &[], None)
+    }
+
+    /// Read every referenced document through one overlay and cancellation context.
+    pub fn load_with_sources(
+        explicit: Option<&Path>,
+        scope: InputScope,
+        overlays: &[(PathBuf, Arc<str>)],
+        cancellation: Option<&BuildCancellation>,
+    ) -> Result<Self, ConfigSourceError> {
+        if let Some(cancellation) = cancellation {
+            cancellation.ensure_active()?;
+        }
         let (path, root) = super::loading::select_config_location(explicit)?;
-        let source = read_source(&root, &path, scope, None)?;
-        Self::parse_at_root(path, root, source.into(), scope)
+        Self::load_at_root(path, root, scope, overlays, cancellation)
     }
 
-    /// The configuration a workspace that holds no site configuration resolves through.
-    ///
-    /// The schema's defaults apply at the workspace's own root, and the document reports the path
-    /// where a site configuration for that root would live. Nothing is read.
-    pub fn defaults(root: &Path, scope: InputScope) -> Result<Self, ConfigSourceError> {
-        let root = tola_input::normalize_path(root);
-        let path = root.join(super::loading::CONFIG_FILE_NAME);
-        check_source_path(&root, &path, scope, None)?;
-        Self::parse_at_root(path, root, Arc::from(""), scope)
-    }
-
-    /// Parse bytes whose source path has already been checked.
-    fn parse_at_root(
+    fn load_at_root(
         path: PathBuf,
         root: PathBuf,
-        source: Arc<str>,
         scope: InputScope,
+        overlays: &[(PathBuf, Arc<str>)],
+        cancellation: Option<&BuildCancellation>,
     ) -> Result<Self, ConfigSourceError> {
-        let document = toml_edit::Document::parse(Arc::clone(&source)).map_err(|error| {
-            let diagnostic =
-                super::diagnostic::syntax_error(&path, &source, error.message(), error.span());
-            ConfigSourceError::Syntax(DiagnosticError::attach(error.into(), vec![diagnostic]))
-        })?;
-        let mut value: toml::Value = toml::Value::deserialize(toml_edit::de::Deserializer::from(
-            document.clone(),
-        ))
-        .map_err(|error| {
-            let diagnostic =
-                super::diagnostic::schema_error(&path, &document, error.message(), error.span());
-            ConfigSourceError::Schema(DiagnosticError::attach(error.into(), vec![diagnostic]))
-        })?;
-        let positions = Arc::new(SourcePositions::of(&document, Arc::clone(&source)));
-        let presence = Arc::new(ConfigPresence::from_value(&value));
-        // Select real top-level keys before presence flattens paths. A host key
-        // containing dots must not impersonate a nested core configuration field.
-        value
-            .as_table_mut()
-            .expect("a parsed configuration document has a table root")
-            .retain(|field, _| is_core_key(field));
-        let core_presence = Arc::new(ConfigPresence::from_value(&value));
+        let graph = load::load(path.clone(), root.clone(), scope, overlays, cancellation)?;
+        let presence = Arc::new(ConfigPresence::from_value(&graph.value));
+        let core = toml::Value::Table(
+            graph
+                .value
+                .as_table()
+                .expect("TOML root")
+                .iter()
+                .filter(|(key, _)| is_core_key(key))
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+        );
         Ok(Self {
             path,
             root,
             scope,
-            document: Arc::new(document),
-            positions,
+            graph: Arc::new(graph),
             presence,
-            core_presence,
-            hash: blake3::hash(source.as_bytes()),
+            core_presence: Arc::new(ConfigPresence::from_value(&core)),
+            overlays: overlays.to_vec().into(),
+            defaults: false,
         })
     }
 
-    /// Decode a host schema from this parsed document, rejecting unknown fields.
-    pub fn decode<T: DeserializeOwned>(&self) -> Result<ParsedConfig<T>, ConfigSourceError> {
+    /// A workspace without a primary file uses virtual empty input, not a failed disk read.
+    pub fn defaults(root: &Path, scope: InputScope) -> Result<Self, ConfigSourceError> {
+        let root = tola_input::normalize_path(root);
+        let path = root.join(super::loading::CONFIG_FILE_NAME);
+        let mut source =
+            Self::load_at_root(path.clone(), root, scope, &[(path, Arc::from(""))], None)?;
+        source.defaults = true;
+        Ok(source)
+    }
+
+    pub fn decode<T: DeserializeOwned + ValidateFragment>(
+        &self,
+    ) -> Result<ParsedConfig<T>, ConfigSourceError> {
         self.decode_reporting_unknown_fields(|_| true)
     }
 
-    /// Read the formatter section without resolving site inputs.
     pub fn formatter(&self) -> Result<super::section::FormatterConfig, ConfigSourceError> {
         use super::section::FormatterConfig;
-
-        #[derive(Deserialize)]
+        #[derive(Deserialize, tola_config::Fragment)]
         struct FormatterSection {
             #[serde(default)]
             formatter: FormatterConfig,
         }
-
-        let parsed: ParsedConfig<FormatterSection> =
-            self.decode_reporting_unknown_fields(|path| {
-                root_field(path) == Some(FormatterConfig::TEMPLATE_SECTION)
-            })?;
-        Ok(parsed.into_schema().formatter)
+        self.decode_reporting_unknown_fields::<FormatterSection>(|root| {
+            root == FormatterConfig::TEMPLATE_SECTION
+        })
+        .map(|parsed| parsed.schema.formatter)
     }
 
-    /// Decode the core sections beside a host schema that declares only the rest.
-    pub fn decode_with_host<T: DeserializeOwned>(
+    pub fn decode_with_host<T: DeserializeOwned + ValidateFragment>(
         &self,
     ) -> Result<(ParsedConfig<super::SiteConfigSchema>, ParsedConfig<T>), ConfigSourceError> {
-        let core = self.decode_site()?;
-        let host = self.decode_reporting_unknown_fields(|path| {
-            root_field(path).is_none_or(|field| !is_core_key(field))
-        })?;
-        Ok((core, host))
+        Ok((
+            self.decode_site()?,
+            self.decode_reporting_unknown_fields(|key| !is_core_key(key))?,
+        ))
     }
 
     pub(super) fn decode_site(
         &self,
     ) -> Result<ParsedConfig<super::SiteConfigSchema>, ConfigSourceError> {
-        self.decode_reporting_unknown_fields(|path| root_field(path).is_some_and(is_core_key))
+        self.decode_reporting_unknown_fields(is_core_key)
     }
 
-    fn decode_reporting_unknown_fields<T: DeserializeOwned>(
+    fn validate_fragments<T: ValidateFragment>(
         &self,
-        report_unknown: impl Fn(&serde_ignored::Path<'_>) -> bool,
+        report_unknown: &dyn Fn(&str) -> bool,
+    ) -> Result<(), ConfigSourceError> {
+        let mut diagnostics = Vec::new();
+        for (file_index, file) in self.graph.files.iter().enumerate() {
+            let mut issues = Vec::new();
+            T::validate_fragment(
+                file.value(),
+                &mut FragmentContext::new(&mut issues, Some(report_unknown)),
+            );
+            let mut unknown = Vec::new();
+            for issue in issues {
+                let key = field_name(&issue.path);
+                let pointer = pointer(&issue.path);
+                let reason = match issue.kind {
+                    FragmentIssueKind::UnknownKey => {
+                        unknown.push((key, pointer));
+                        continue;
+                    }
+                    FragmentIssueKind::WrongType { expected, actual } => {
+                        format!("expected {expected}; found {actual}")
+                    }
+                    FragmentIssueKind::InvalidValue { message } => message,
+                };
+                let mut diagnostic = super::diagnostic::value_error(
+                    &self.path,
+                    file.positions(),
+                    &pointer,
+                    &key,
+                    &reason,
+                );
+                if let Some(application) = self
+                    .graph
+                    .application_files
+                    .iter()
+                    .position(|source| *source == Some(file_index))
+                {
+                    self.include_chain(&mut diagnostic, application);
+                }
+                diagnostics.push(diagnostic);
+            }
+            diagnostics.extend(super::diagnostic::unknown_fields(
+                &self.path,
+                Some(file.positions()),
+                &unknown,
+            ));
+            if !diagnostics.is_empty() {
+                break;
+            }
+        }
+        if diagnostics.is_empty() {
+            return Ok(());
+        }
+        let error = DiagnosticError::new(diagnostics[0].message.clone(), diagnostics);
+        Err(ConfigSourceError::Schema(error).with_paths(self.graph.paths.clone()))
+    }
+
+    fn decode_reporting_unknown_fields<T: DeserializeOwned + ValidateFragment>(
+        &self,
+        report_unknown: impl Fn(&str) -> bool,
     ) -> Result<ParsedConfig<T>, ConfigSourceError> {
-        // The declaration is classified before the document's unknown fields are reported.
+        self.validate_fragments::<T>(&report_unknown)?;
+        // Keep TOML types when entering Serde. toml::Value's own deserializer
+        // exposes a date as a string, which would change the accepted schema.
+        let value = self
+            .graph
+            .value
+            .serialize(toml_edit::ser::ValueSerializer::new())
+            .map_err(|error| self.schema_failure(&[], error.to_string(), error.into()))?;
+        let mut track = serde_path_to_error::Track::new();
         let mut ignored = Vec::new();
         let schema = serde_ignored::deserialize(
-            toml_edit::de::Deserializer::from(self.document.as_ref().clone()),
-            |path: serde_ignored::Path| {
-                if report_unknown(&path) {
-                    ignored.push(config_field_name(&path));
+            serde_path_to_error::Deserializer::new(value.into_deserializer(), &mut track),
+            |path| {
+                let mut steps = Vec::new();
+                ignored_steps(&path, &mut steps);
+                if steps.first().is_none_or(|step| match step {
+                    ValueStep::Key(key) => report_unknown(key),
+                    ValueStep::Index(_) => true,
+                }) {
+                    ignored.push((field_name(&steps), pointer(&steps)));
                 }
             },
         )
         .map_err(|error: toml_edit::de::Error| {
-            let diagnostic = super::diagnostic::schema_error(
-                &self.path,
-                &self.document,
-                error.message(),
-                error.span(),
-            );
-            ConfigSourceError::Schema(DiagnosticError::attach(error.into(), vec![diagnostic]))
+            let steps = track
+                .path()
+                .iter()
+                .filter_map(|step| match step {
+                    serde_path_to_error::Segment::Map { key } => Some(ValueStep::Key(key.clone())),
+                    serde_path_to_error::Segment::Seq { index } => Some(ValueStep::Index(*index)),
+                    serde_path_to_error::Segment::Enum { variant } => {
+                        Some(ValueStep::Key(variant.clone()))
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            self.schema_failure(&steps, error.message().to_owned(), error.into())
         })?;
         if !ignored.is_empty() {
-            let error = ConfigError::UnknownFields { fields: ignored };
-            return Err(ConfigSourceError::Schema(
-                super::diagnostic::report_source_error(
-                    error,
-                    Some(&self.path),
-                    Some(&self.positions),
-                ),
-            ));
+            return Err(ConfigSourceError::Schema(DiagnosticError::new(
+                "configuration contains unknown fields",
+                super::diagnostic::unknown_fields(&self.path, Some(self.positions()), &ignored),
+            ))
+            .with_paths(self.graph.paths.clone()));
         }
         Ok(ParsedConfig {
             schema,
@@ -217,83 +351,215 @@ impl ConfigSource {
         })
     }
 
+    fn schema_failure(
+        &self,
+        steps: &[ValueStep],
+        reason: String,
+        error: anyhow::Error,
+    ) -> ConfigSourceError {
+        let mut diagnostic = super::diagnostic::value_error(
+            &self.path,
+            self.positions(),
+            &pointer(steps),
+            &field_name(steps),
+            &reason,
+        );
+        let mut field = steps;
+        let origins = loop {
+            if let Some(origins) = self.graph.origins.get(field) {
+                break Some(origins);
+            }
+            if field.is_empty() {
+                break None;
+            }
+            field = &field[..field.len() - 1];
+        };
+        if let Some(origins) = origins {
+            let mut locations = Vec::new();
+            for origin in &origins.origins {
+                if let Some(position) = self.origin_positions(origin) {
+                    let file = &self.graph.applications[origin.source_id].path;
+                    let mut location = tola_diagnostic::Location {
+                        file: Some(file.to_owned()),
+                        path: tola_diagnostic::display_path(
+                            file,
+                            self.path.parent().unwrap_or(&self.root),
+                        ),
+                        line: None,
+                        column: None,
+                        range: None,
+                        source_lines: Vec::new(),
+                    };
+                    if let Some(excerpt) = position.excerpt() {
+                        location.line = Some(excerpt.line);
+                        location.column = Some(excerpt.column);
+                    }
+                    location.range = Some(position.range());
+                    if diagnostic.location.as_ref() != Some(&location)
+                        && !locations.contains(&location)
+                    {
+                        locations.push(location);
+                    }
+                }
+            }
+            diagnostic
+                .related
+                .extend(locations.into_iter().map(|location| RelatedInformation {
+                    message: "Contributing configuration declaration".into(),
+                    location: Some(location),
+                    source: None,
+                }));
+            if let Some(origin) = origins.origins.first() {
+                self.include_chain(&mut diagnostic, origin.source_id);
+            }
+        }
+        ConfigSourceError::Schema(DiagnosticError::attach(error, vec![diagnostic]))
+            .with_paths(self.graph.paths.clone())
+    }
+
+    fn include_chain(&self, diagnostic: &mut Diagnostic, mut id: usize) {
+        while let Some(include) = self
+            .graph
+            .applications
+            .get(id)
+            .and_then(|app| app.included_by.as_ref())
+        {
+            let parent = &self.graph.applications[include.source_id];
+            let mut location = tola_diagnostic::Location {
+                file: Some(parent.path.clone()),
+                path: tola_diagnostic::display_path(
+                    &parent.path,
+                    self.path.parent().unwrap_or(&self.root),
+                ),
+                line: None,
+                column: None,
+                range: None,
+                source_lines: Vec::new(),
+            };
+            location.line = Some(include.line);
+            location.column = Some(include.column);
+            location.range = include.range;
+            diagnostic.related.push(RelatedInformation {
+                message: "Included from here".into(),
+                location: Some(location),
+                source: None,
+            });
+            id = include.source_id;
+        }
+    }
+
     pub fn path(&self) -> &Path {
         &self.path
     }
-
     pub fn root(&self) -> &Path {
         &self.root
     }
-
     pub fn source_hash(&self) -> blake3::Hash {
-        self.hash
+        self.graph.hash
     }
-
+    pub fn sources(&self) -> &[ConfigFile] {
+        &self.graph.files
+    }
+    pub fn applications(&self) -> &[ConfigApplication] {
+        &self.graph.applications
+    }
+    pub fn paths(&self) -> impl Iterator<Item = &Path> {
+        self.graph.paths.iter().map(PathBuf::as_path)
+    }
+    pub fn origins(&self) -> &BTreeMap<Vec<ValueStep>, ConfigFieldOrigins> {
+        &self.graph.origins
+    }
+    pub fn origin_positions(&self, origin: &ConfigOrigin) -> Option<WrittenPosition<'_>> {
+        let index = self
+            .graph
+            .application_files
+            .get(origin.source_id)
+            .copied()
+            .flatten()?;
+        self.graph.files[index]
+            .positions()
+            .at_pointer(&pointer(&origin.key_path))
+    }
     pub fn presence(&self) -> &ConfigPresence {
         &self.presence
     }
-
     pub(super) fn core_presence(&self) -> &ConfigPresence {
         &self.core_presence
     }
-
-    /// Where this document writes each configuration key.
     pub(super) fn positions(&self) -> &Arc<SourcePositions> {
-        &self.positions
+        &self.graph.positions
     }
-
-    /// The load diagnostic an error from this document carries, located in this source.
     pub(super) fn attach_load(&self, error: anyhow::Error) -> anyhow::Error {
-        super::diagnostic::attach_load(
+        ConfigSourceError::Resolution(super::diagnostic::attach_load(
             error,
-            Some(self.path.as_path()),
-            Some(self.positions.as_ref()),
-        )
+            Some(&self.path),
+            Some(self.positions()),
+        ))
+        .with_paths(self.graph.paths.clone())
+        .into()
     }
 
-    /// Read the same source, parsing only changed bytes and retaining its original root and scope.
+    /// Re-read all include inputs; changing only a fragment still makes a candidate.
     pub fn read_changed(&self) -> Result<Option<Self>, ConfigSourceError> {
-        let source = read_source(&self.root, &self.path, self.scope, Some(&self.positions))?;
-        self.parse_changed(&source)
+        self.changed_sources(&[], None)
     }
 
-    /// Parse changed text from the same source while retaining its bound root and scope.
-    pub fn changed_text(&self, source: &str) -> Result<Option<Self>, ConfigSourceError> {
-        check_source_path(&self.root, &self.path, self.scope, Some(&self.positions))?;
-        self.parse_changed(source)
-    }
-
-    fn parse_changed(&self, source: &str) -> Result<Option<Self>, ConfigSourceError> {
-        if blake3::hash(source.as_bytes()) == self.hash {
-            return Ok(None);
-        }
-        Self::parse_at_root(
+    pub fn changed_sources(
+        &self,
+        overlays: &[(PathBuf, Arc<str>)],
+        cancellation: Option<&BuildCancellation>,
+    ) -> Result<Option<Self>, ConfigSourceError> {
+        let next = Self::load_at_root(
             self.path.clone(),
             self.root.clone(),
-            source.into(),
             self.scope,
+            overlays,
+            cancellation,
+        )?;
+        Ok((next.source_hash() != self.source_hash()).then_some(next))
+    }
+
+    pub fn changed_text(&self, source: &str) -> Result<Option<Self>, ConfigSourceError> {
+        let overlays = [(self.path.clone(), Arc::from(source))];
+        self.changed_sources(&overlays, None)
+    }
+
+    /// Revalidate the same disk/overlay view that selected this configuration.
+    pub fn is_current(
+        &self,
+        cancellation: Option<&BuildCancellation>,
+    ) -> Result<bool, ConfigSourceError> {
+        if let Some(cancellation) = cancellation {
+            cancellation.ensure_active()?;
+        }
+        if self.defaults {
+            return match std::fs::symlink_metadata(&self.path) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
+                Ok(_) => Ok(false),
+                Err(error) => Err(ConfigSourceError::Read(DiagnosticError::new(
+                    "Tola could not check the configuration source",
+                    vec![Diagnostic::at_path(
+                        tola_diagnostic::codes::config::IO,
+                        tola_diagnostic::Severity::Error,
+                        tola_diagnostic::display_path(&self.path, &self.root),
+                        error.to_string(),
+                    )],
+                ))
+                .with_paths(self.graph.paths.clone())),
+            };
+        }
+        Self::load_at_root(
+            self.path.clone(),
+            self.root.clone(),
+            self.scope,
+            &self.overlays,
+            cancellation,
         )
-        .map(Some)
+        .map(|current| current.source_hash() == self.source_hash())
     }
 }
 
-fn read_source(
-    root: &Path,
-    path: &Path,
-    scope: InputScope,
-    positions: Option<&SourcePositions>,
-) -> Result<String, ConfigSourceError> {
-    check_source_path(root, path, scope, positions)?;
-    std::fs::read_to_string(path).map_err(|error| {
-        ConfigSourceError::Read(super::diagnostic::report_source_error(
-            ConfigError::Io(path.to_owned(), error),
-            Some(path),
-            positions,
-        ))
-    })
-}
-
-fn check_source_path(
+pub(super) fn check_source_path(
     root: &Path,
     path: &Path,
     scope: InputScope,
@@ -309,7 +575,7 @@ fn check_source_path(
     };
     Err(ConfigSourceError::Read(
         super::diagnostic::report_source_error(
-            ConfigError::Refused {
+            super::ConfigError::Refused {
                 path: path.to_owned(),
                 reason,
             },
@@ -319,45 +585,52 @@ fn check_source_path(
     ))
 }
 
-/// Whether `field` names a top-level key the core schema reads: one of its sections.
 fn is_core_key(field: &str) -> bool {
     super::SiteConfigSchema::SECTIONS.contains(&field)
 }
 
-/// Spell map keys and sequence indices without Serde's wrapper markers.
-fn config_field_name(path: &serde_ignored::Path<'_>) -> String {
-    use serde_ignored::Path;
-    use std::borrow::Cow;
-
-    fn append(path: &Path<'_>, name: &mut String) -> bool {
-        let (parent, segment) = match path {
-            Path::Root => return false,
-            Path::Map { parent, key } => (parent, Cow::Borrowed(key.as_str())),
-            Path::Seq { parent, index } => (parent, Cow::Owned(index.to_string())),
-            Path::Some { parent }
-            | Path::NewtypeStruct { parent }
-            | Path::NewtypeVariant { parent } => return append(parent, name),
-        };
-        if append(parent, name) {
-            name.push('.');
+pub(super) fn pointer(path: &[ValueStep]) -> String {
+    let mut pointer = String::new();
+    for step in path {
+        match step {
+            ValueStep::Key(key) => tola_diagnostic::push_pointer(&mut pointer, key),
+            ValueStep::Index(index) => {
+                tola_diagnostic::push_pointer(&mut pointer, &index.to_string())
+            }
         }
-        name.push_str(&segment);
-        true
     }
-
-    let mut name = String::new();
-    append(path, &mut name);
-    name
+    pointer
 }
 
-fn root_field<'a>(path: &'a serde_ignored::Path<'_>) -> Option<&'a str> {
+fn field_name(path: &[ValueStep]) -> String {
+    let mut result = String::new();
+    for step in path {
+        if !result.is_empty() {
+            result.push('.');
+        }
+        match step {
+            ValueStep::Key(key) => result.push_str(&toml_edit::Key::new(key.as_str()).to_string()),
+            ValueStep::Index(index) => result.push_str(&index.to_string()),
+        }
+    }
+    result
+}
+
+fn ignored_steps(path: &serde_ignored::Path<'_>, steps: &mut Vec<ValueStep>) {
+    use serde_ignored::Path;
     match path {
-        serde_ignored::Path::Root => None,
-        serde_ignored::Path::Map { parent, key } => root_field(parent).or(Some(key.as_str())),
-        serde_ignored::Path::Seq { parent, .. }
-        | serde_ignored::Path::Some { parent }
-        | serde_ignored::Path::NewtypeStruct { parent }
-        | serde_ignored::Path::NewtypeVariant { parent } => root_field(parent),
+        Path::Root => {}
+        Path::Map { parent, key } => {
+            ignored_steps(parent, steps);
+            steps.push(ValueStep::Key(key.clone()));
+        }
+        Path::Seq { parent, index } => {
+            ignored_steps(parent, steps);
+            steps.push(ValueStep::Index(*index));
+        }
+        Path::Some { parent }
+        | Path::NewtypeStruct { parent }
+        | Path::NewtypeVariant { parent } => ignored_steps(parent, steps),
     }
 }
 
@@ -393,7 +666,176 @@ impl<T> ParsedConfig<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ConfigError;
     use crate::config::loading::{BuildOverrides, resolve_parsed_site_config};
+
+    #[test]
+    fn includes_merge_before_defaults_and_preserve_declarations() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        std::fs::create_dir(root.join("config")).unwrap();
+        std::fs::write(
+            root.join("config/base[1].toml"),
+            r#"
+[build]
+par-hooks = false
+hook-jobs = 2
+[options]
+widths = [480, 960]
+[[hooks.before-build]]
+name = "styles"
+order = 10
+argv = ["true"]
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("config/extra.toml"),
+            r#"
+[site]
+title = "Included"
+[options]
+widths = [1280]
+[[hooks.before-build]]
+name = "data"
+order = 0
+argv = ["true"]
+"#,
+        )
+        .unwrap();
+        let path = root.join("tola.toml");
+        std::fs::write(
+            &path,
+            "include = ['config/base[1].toml', 'config/extra.toml']\n",
+        )
+        .unwrap();
+        let source = ConfigSource::load(Some(&path), InputScope::Online).unwrap();
+        let parsed = source.decode_site().unwrap();
+        assert!(!parsed.schema().build.par_hooks);
+        assert_eq!(parsed.schema().build.hook_jobs.resolved(8), 2);
+        assert_eq!(
+            parsed.schema().options["widths"].as_array().unwrap().len(),
+            1
+        );
+        assert_eq!(parsed.schema().hooks.before_build.len(), 2);
+        assert_eq!(parsed.schema().hooks.before_build[0].order, 10);
+        assert_eq!(parsed.schema().hooks.before_build[1].order, 0);
+        let origin = source
+            .origins()
+            .get(&vec![
+                ValueStep::Key("hooks".into()),
+                ValueStep::Key("before-build".into()),
+                ValueStep::Index(1),
+                ValueStep::Key("name".into()),
+            ])
+            .unwrap()
+            .origins
+            .last()
+            .unwrap();
+        assert!(
+            source.applications()[origin.source_id]
+                .path
+                .ends_with("config/extra.toml")
+        );
+        assert_eq!(origin.key_path[2], ValueStep::Index(0));
+        let resolved = resolve_parsed_site_config(
+            parsed,
+            tola_typst::PackageLocations::default(),
+            &BuildOverrides::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            resolved.config().build().entry,
+            root.canonicalize().unwrap().join("site.typ")
+        );
+    }
+
+    #[test]
+    fn repeated_branches_apply_again_but_active_cycles_fail() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        std::fs::write(root.join("common.toml"), "[options]\nvalue = 0\n").unwrap();
+        std::fs::write(
+            root.join("first.toml"),
+            "include = ['common.toml']\n[options]\nvalue = 1\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("second.toml"), "include = ['common.toml']\n").unwrap();
+        let path = root.join("tola.toml");
+        std::fs::write(&path, "include = ['first.toml', 'second.toml']\n").unwrap();
+        let source = ConfigSource::load(Some(&path), InputScope::Online).unwrap();
+        assert_eq!(
+            source.decode_site().unwrap().schema().options["value"].as_integer(),
+            Some(0)
+        );
+        assert_eq!(source.applications().len(), 5);
+        assert_eq!(source.sources().len(), 4);
+        std::fs::write(root.join("common.toml"), "include = ['tola.toml']\n").unwrap();
+        let error = ConfigSource::load(Some(&path), InputScope::Online).unwrap_err();
+        assert!(
+            error
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| !diagnostic.related.is_empty())
+        );
+        assert!(
+            error
+                .paths()
+                .iter()
+                .any(|path| path.ends_with("common.toml"))
+        );
+    }
+
+    #[test]
+    fn optional_inputs_recover_but_invalid_written_values_still_fail() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let path = root.join("tola.toml");
+        let local = root.join("local.toml");
+        std::fs::write(
+            &path,
+            "include = [{path='local.toml', optional=true}]\n[build]\npar-hooks = false\n",
+        )
+        .unwrap();
+        let source = ConfigSource::load(Some(&path), InputScope::Online).unwrap();
+        assert_eq!(
+            source.applications()[1].state,
+            ConfigFileState::OptionalMissing
+        );
+        assert!(source.is_current(None).unwrap());
+        std::fs::write(&local, "[build]\npar-hooks = 'wrong type'\n").unwrap();
+        let changed = source.read_changed().unwrap().unwrap();
+        let error = changed.decode_site().unwrap_err();
+        assert_eq!(
+            error.diagnostics()[0].location.as_ref().unwrap().path,
+            "local.toml"
+        );
+        std::fs::write(&local, "[options]\nlocal = true\n").unwrap();
+        let repaired = source.read_changed().unwrap().unwrap();
+        assert!(!repaired.decode_site().unwrap().schema().build.par_hooks);
+        std::fs::write(&local, [0xff]).unwrap();
+        assert!(source.read_changed().is_err());
+    }
+
+    #[test]
+    fn closing_equal_text_overlay_restores_disk_freshness() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("tola.toml");
+        let text = "[site]\ntitle = 'First'\n";
+        std::fs::write(&path, text).unwrap();
+        let disk = ConfigSource::load(Some(&path), InputScope::Online).unwrap();
+        let overlay = disk
+            .changed_sources(&[(path.clone(), Arc::from(text))], None)
+            .unwrap()
+            .expect("opening a buffer changes the input view");
+        let closed = overlay
+            .changed_sources(&[], None)
+            .unwrap()
+            .expect("closing a buffer restores the disk input view");
+        std::fs::write(&path, "[site]\ntitle = 'Second'\n").unwrap();
+        assert!(!closed.is_current(None).unwrap());
+        assert!(overlay.is_current(None).unwrap());
+    }
 
     #[test]
     #[cfg(unix)]
@@ -427,7 +869,7 @@ mod tests {
 
     #[test]
     fn dotted_host_sections_stay_host_owned() {
-        #[derive(Default, serde::Deserialize)]
+        #[derive(Default, serde::Deserialize, tola_config::Fragment)]
         #[serde(default)]
         struct HostConfig {
             site: crate::config::section::SiteSectionConfig,
@@ -465,17 +907,20 @@ mod tests {
             )
             .unwrap();
             assert!(core.config().warnings().is_empty());
-            assert_eq!(core.source_hash(), blake3::hash(text.as_bytes()));
+            assert_eq!(
+                core.config().source().unwrap().sources()[0].hash(),
+                blake3::hash(text.as_bytes())
+            );
         }
     }
 
-    #[derive(Debug, serde::Deserialize)]
+    #[derive(Debug, serde::Deserialize, tola_config::Fragment)]
     struct NumericSettings {
         #[serde(rename = "server")]
         _server: NumericFields,
     }
 
-    #[derive(Debug, serde::Deserialize)]
+    #[derive(Debug, serde::Deserialize, tola_config::Fragment)]
     struct NumericFields {
         #[serde(rename = "port")]
         _port: u16,
@@ -628,13 +1073,13 @@ mod tests {
 
     #[test]
     fn composed_decode_refuses_unknown_keys() {
-        #[derive(Debug, Default, serde::Deserialize)]
+        #[derive(Debug, Default, serde::Deserialize, tola_config::Fragment)]
         #[serde(default)]
         struct EditorConfig {
             mode: String,
         }
 
-        #[derive(Debug, Default, serde::Deserialize)]
+        #[derive(Debug, Default, serde::Deserialize, tola_config::Fragment)]
         #[serde(default)]
         struct HostConfig {
             #[serde(rename = "host-editor")]
@@ -656,7 +1101,7 @@ mod tests {
             ("[site]\ntitel = \"Misspelled\"\n", "site.titel"),
             (
                 "[host-editor]\nmode = \"custom\"\n\"spe?ed\" = 2\n",
-                "host-editor.spe?ed",
+                "host-editor.\"spe?ed\"",
             ),
             // A root key this schema no longer declares, which earlier sites still hold.
             ("version = \"0.8.0\"\n", "version"),

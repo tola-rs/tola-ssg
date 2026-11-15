@@ -8,8 +8,69 @@ use crate::inputs::{ArchiveStage, ModuleRootError};
 use crate::manifest::ManifestError;
 use crate::remote::FetchError;
 
+pub(crate) fn manifest_diagnostic(error: &ManifestError) -> Option<Diagnostic> {
+    let (path, file, message, help) = match error {
+        ManifestError::Rejected { diagnostic, .. } => return Some(diagnostic.as_ref().clone()),
+        ManifestError::ManifestPath { path, file, source }
+        | ManifestError::ManifestRead { path, file, source } => {
+            let (message, help) = match source.kind() {
+                std::io::ErrorKind::NotFound => (
+                    format!("`{path}` is missing"),
+                    "Create the file at that path or choose a different module directory",
+                ),
+                std::io::ErrorKind::PermissionDenied => (
+                    format!("could not read `{path}` because access was denied"),
+                    "Make the file readable, then try again",
+                ),
+                std::io::ErrorKind::InvalidData => (
+                    format!("`{path}` must be a regular file"),
+                    "Replace it with a TOML file",
+                ),
+                _ => (
+                    error.to_string(),
+                    "Check that the file is accessible, then try again",
+                ),
+            };
+            (path, file, message, help)
+        }
+        ManifestError::ManifestEncoding { path, file, .. } => {
+            (path, file, error.to_string(), "Save the file as UTF-8 text")
+        }
+        ManifestError::ManifestChanged { path, file }
+        | ManifestError::ManifestMoved { path, file } => (
+            path,
+            file,
+            error.to_string(),
+            "Wait for the file to finish saving, then try again",
+        ),
+        ManifestError::ManifestEscapesRoot { path, file, .. } => (
+            path,
+            file,
+            error.to_string(),
+            "Place `tola-module.toml` inside the module directory",
+        ),
+        _ => return None,
+    };
+    Some(
+        Diagnostic::at_path(codes::module::MANIFEST, Severity::Error, path, message)
+            .with_file(file.clone())
+            .with_help(help),
+    )
+}
+
+/// Explain a module acquisition or manifest failure.
+pub fn error_diagnostic(error: &anyhow::Error) -> Option<Diagnostic> {
+    source_diagnostic(error).or_else(|| {
+        error.chain().find_map(|cause| {
+            cause
+                .downcast_ref::<ManifestError>()
+                .and_then(manifest_diagnostic)
+        })
+    })
+}
+
 /// Explain a module source failure using its declaration and the operation that failed.
-pub fn source_diagnostic(error: &anyhow::Error) -> Option<Diagnostic> {
+fn source_diagnostic(error: &anyhow::Error) -> Option<Diagnostic> {
     let error = error
         .chain()
         .find_map(|cause| cause.downcast_ref::<ModuleRootError>())?;
@@ -119,7 +180,7 @@ pub fn source_diagnostic(error: &anyhow::Error) -> Option<Diagnostic> {
                 ),
             };
             let reason = match source.downcast_ref::<ManifestError>() {
-                Some(ManifestError::ManifestParse { source, .. }) => source.message().to_owned(),
+                Some(ManifestError::Rejected { diagnostic, .. }) => diagnostic.message.clone(),
                 _ if source
                     .downcast_ref::<reqwest::Error>()
                     .is_some_and(reqwest::Error::is_timeout) =>

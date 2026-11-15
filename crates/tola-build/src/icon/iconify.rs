@@ -32,28 +32,6 @@ const MAX_TARBALL_ENTRIES: usize = 1024;
 /// The collection file a package tarball carries.
 const COLLECTION_FILE: &str = "icons.json";
 
-/// Whether `preset` names an `@iconify-json` package.
-pub(crate) fn usable_preset(preset: &str) -> bool {
-    !preset.is_empty()
-        && preset.len() <= 128
-        && preset.bytes().all(|byte| {
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'.' | b'_')
-        })
-        && preset
-            .bytes()
-            .next()
-            .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
-}
-
-/// Whether `version` could name a published release.
-pub(crate) fn usable_version(version: &str) -> bool {
-    !version.is_empty()
-        && version.len() <= 128
-        && version
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'+' | b'_'))
-}
-
 /// One published release of one preset.
 #[derive(Debug, Clone)]
 pub(super) struct Release {

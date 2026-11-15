@@ -18,7 +18,7 @@ pub fn read_nu_modules(
     cancellation: &crate::cancellation::BuildCancellation,
 ) -> std::result::Result<BTreeMap<String, NuModule>, ManifestError> {
     let roots = crate::inputs::module_roots(site_root, mode, vendor, declarations, cancellation)?;
-    read_selected(site_root, declarations, &roots, mode)?
+    read_selected(site_root, declarations, &roots, mode, &[])?
         .into_iter()
         .map(|(name, loaded)| {
             let assets_enabled = loaded.manifest.assets.is_some()
@@ -27,6 +27,10 @@ pub fn read_nu_modules(
                     .as_ref()
                     .is_none_or(|assets| assets.enable);
             let entry = loaded.manifest.nu.map(|nu| nu.entry);
+            let font_directories = loaded
+                .manifest
+                .typst
+                .map_or_else(Vec::new, |typst| typst.fonts);
             if let Some(entry) = &entry {
                 tola_module::module_set::validate_module_path(
                     site_root,
@@ -44,12 +48,34 @@ pub fn read_nu_modules(
                     manifest: loaded.path,
                     root,
                     entry,
+                    font_directories,
                     assets_enabled,
                     options: loaded.options,
                 },
             ))
         })
         .collect()
+}
+
+/// Select the same fonts as the compiler using the manifests already read for Nu.
+pub fn nu_font_options(
+    config: &crate::config::ResolvedSiteConfig,
+    resources: &crate::BuildResources,
+    modules: &BTreeMap<String, NuModule>,
+) -> anyhow::Result<tola_typst::FontOptions> {
+    let mut config = config.clone();
+    super::prepared::select_module_fonts(
+        &mut config,
+        resources.input_scope(),
+        modules.iter().map(|(alias, module)| {
+            (
+                alias.as_str(),
+                module.root.as_path(),
+                module.font_directories.as_slice(),
+            )
+        }),
+    )?;
+    Ok(config.compiler_font_options(resources))
 }
 
 /// Read an initializer declaration before a destination site exists.
@@ -62,7 +88,7 @@ pub fn find_initializer(
         .canonicalize()
         .map_err(|source| ManifestError::InitializerRoot { source })?;
     let alias = alias.ok_or(ManifestError::InitializerName)?;
-    let loaded = read_one(&root, alias, root.clone(), mode)?;
+    let loaded = read_one(&root, alias, root.clone(), mode, &[])?;
     let initializer = loaded
         .manifest
         .init
@@ -99,7 +125,7 @@ pub fn read_available_declarations(
         {
             continue;
         }
-        let Ok(loaded) = read_one(&site, name, root, mode) else {
+        let Ok(loaded) = read_one(&site, name, root, mode, &[]) else {
             continue;
         };
         let manifest = loaded.manifest;

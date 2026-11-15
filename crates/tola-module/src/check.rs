@@ -7,7 +7,7 @@ use tola_input::{InputMode, InputScope};
 
 use crate::Action;
 use crate::declaration::CommandAction;
-use crate::manifest::{ManifestError, ReadManifest, read_one};
+use crate::manifest::{ReadManifest, read_one};
 use crate::module_set::validate_module_path;
 
 /// Read and check a module directory without loading or executing its programs.
@@ -42,6 +42,19 @@ pub(crate) fn check_loaded(loaded: &ReadManifest) -> Result<()> {
     }
     for (name, query) in &manifest.queries {
         file(&format!("queries.{name}.entry"), &query.entry)?;
+    }
+    for (name, source) in &manifest.icons.collections {
+        if let Some(path) = source.path() {
+            check_path(
+                &loaded.root,
+                &format!("icons.collections.{name}.path"),
+                path,
+                matches!(
+                    source,
+                    crate::icons::IconCollectionSource::LocalSvgDir { .. }
+                ),
+            )?;
+        }
     }
     if let Some(assets) = &manifest.assets {
         for (index, asset) in assets.files.iter().enumerate() {
@@ -86,12 +99,17 @@ pub(crate) fn read(directory: &Path) -> Result<ReadManifest> {
         "module",
         cwd.join(directory),
         InputMode::new(InputScope::Online, false),
+        &[],
     )
-    .map_err(|error| match error {
-        ManifestError::ManifestParse { path, source } => {
-            anyhow::anyhow!("`{path}`: {}", source.message())
+    .map_err(|error| {
+        let diagnostic = crate::diagnostic::manifest_diagnostic(&error);
+        let error = anyhow::Error::new(error);
+        match diagnostic {
+            Some(diagnostic) => {
+                tola_diagnostic::DiagnosticError::attach(error, vec![diagnostic]).into()
+            }
+            None => error,
         }
-        error => error.into(),
     })
 }
 

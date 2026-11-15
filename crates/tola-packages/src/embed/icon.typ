@@ -53,6 +53,8 @@
 ///
 /// - id (string): `"collection:name"`, from the collections you declared under
 ///   `icons.collections`. Names are case-sensitive.
+/// - module (none | string): A configured module alias. Omit it to use site collections.
+///   Inside a module, bind `icon.with(module: get-module().name)` once to keep that instance.
 /// - label (none | string): Omit this option or pass `none` for a decorative icon. For an informative icon,
 ///   pass a label such as `"Site logo"` for screen readers. Blank labels are errors.
 /// - attrs (dictionary): Extra attributes on the root SVG, with string values, such as `class`, `width`,
@@ -60,9 +62,9 @@
 ///   `role`, and `focusable`, and naming any of them in `attrs` is an error. `class` and
 ///   `style` append to existing values. If omitted, no extra attributes are added.
 /// -> content
-#let icon(id, label: none, attrs: (:)) = {
+#let icon(id, module: none, label: none, attrs: (:)) = {
   import "@tola/host:0.0.0": icon as render, icon-bytes
-  let svg = icon-bytes(id)
+  let svg = icon-bytes(id, module: module)
   context {
     // The native reads the element's location, which only a call in context supplies.
     if target() != "html" {

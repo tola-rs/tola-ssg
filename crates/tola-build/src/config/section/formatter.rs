@@ -20,7 +20,7 @@ pub struct FormatterConfig {
     /// Omit this setting or use `none` to keep existing line breaks in prose. Use `fill` to wrap
     /// to the column width, or `sentence` to put each sentence on its own line.
     #[serde(rename = "prose-wrap")]
-    #[config(name = "prose-wrap")]
+    #[config(name = "prose-wrap", fragment_with = tola_config::validate_value::<ProseWrap>)]
     pub prose_wrap: ProseWrap,
 }
 

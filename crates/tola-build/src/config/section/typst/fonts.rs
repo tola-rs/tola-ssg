@@ -1,10 +1,10 @@
 //! `[typst.fonts]` section configuration.
 
-use crate::config::ConfigDiagnostics;
+use crate::config::{ConfigDiagnostics, fragment};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use tola_config::Config;
+use tola_config::{Config, Fragment, FragmentContext, ValidateFragment};
 
 /// Fonts the Typst compiler may use.
 ///
@@ -25,8 +25,8 @@ pub struct FontsConfig {
 }
 
 /// One module's compiler fonts, optionally registered under different family names.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged, deny_unknown_fields)]
+#[derive(Debug, Clone, Serialize)]
+#[serde(untagged)]
 pub enum ModuleFonts {
     /// Load a module's fonts using their original names.
     Alias(String),
@@ -35,9 +35,41 @@ pub enum ModuleFonts {
         /// Alias declared under `[modules]`.
         module: String,
         /// Original family name to compiler family name.
-        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        #[serde(skip_serializing_if = "BTreeMap::is_empty")]
         rename: BTreeMap<String, String>,
     },
+}
+
+#[derive(Deserialize, Fragment)]
+#[serde(deny_unknown_fields)]
+struct ModuleFontSelection {
+    module: String,
+    #[serde(default)]
+    rename: BTreeMap<String, String>,
+}
+
+impl<'de> Deserialize<'de> for ModuleFonts {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Written {
+            Alias(String),
+            Selection(ModuleFontSelection),
+        }
+        Ok(match Written::deserialize(deserializer)? {
+            Written::Alias(alias) => Self::Alias(alias),
+            Written::Selection(fields) => Self::Selection {
+                module: fields.module,
+                rename: fields.rename,
+            },
+        })
+    }
+}
+
+impl ValidateFragment for ModuleFonts {
+    fn validate_fragment(value: &toml::Value, context: &mut FragmentContext<'_>) {
+        fragment::string_or_table::<ModuleFontSelection>(value, context);
+    }
 }
 
 impl Default for FontsConfig {

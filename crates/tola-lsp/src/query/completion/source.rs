@@ -84,13 +84,7 @@ pub(crate) fn source_name_completion(
         for &declaration in names.scopes()[id].declarations.iter().rev() {
             cancellation.ensure_active()?;
             let declaration = &names.declarations()[declaration];
-            if super::name_matches(&declaration.name, prefix)
-                && (declaration.visible_from <= cursor
-                    || declaration
-                        .recursive_body
-                        .as_ref()
-                        .is_some_and(|body| body.contains(&cursor)))
-            {
+            if super::name_matches(&declaration.name, prefix) && declaration.visible_at(cursor) {
                 candidates.push(ScopeName::Declaration(declaration));
             }
         }

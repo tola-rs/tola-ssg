@@ -56,9 +56,11 @@ pub struct SiteConfigSchema {
 
     /// Site options available to Typst, Nu, and site hooks.
     #[serde(deserialize_with = "tola_module::options::deserialize_options")]
+    #[config(fragment_with = super::fragment::options)]
     pub options: toml::Table,
 
     /// Local modules selected by namespace.
+    #[config(fragment_with = super::fragment::modules)]
     pub modules: BTreeMap<String, tola_module::ModuleDeclaration>,
 }
 
@@ -124,9 +126,11 @@ impl SiteConfigSchema {
 /// Sections outside the core schema belong to the host that decodes them, so their keys are not
 /// listed here.
 pub fn field_paths() -> impl Iterator<Item = FieldPath> {
-    core_declarations()
-        .into_iter()
-        .flat_map(|(fields, _)| fields.iter().map(|(path, _)| *path))
+    std::iter::once(FieldPath::new("include")).chain(
+        core_declarations()
+            .into_iter()
+            .flat_map(|(fields, _)| fields.iter().map(|(path, _)| *path)),
+    )
 }
 
 /// The documentation a declared configuration key has.
@@ -136,6 +140,11 @@ pub fn field_paths() -> impl Iterator<Item = FieldPath> {
 /// table header and the key writing it read the same text. A key the schema does not declare
 /// answers nothing.
 pub fn field_documentation(path: &str) -> Option<&'static str> {
+    if path == "include" {
+        return Some(
+            "A top-level array of local TOML paths to apply before this configuration file.",
+        );
+    }
     core_declarations()
         .into_iter()
         .flat_map(|(fields, _)| fields.iter())

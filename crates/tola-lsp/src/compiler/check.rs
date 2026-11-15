@@ -8,7 +8,7 @@ use anyhow::Result;
 use tola_build::cancellation::BuildCancellation;
 use tola_build::check::{SourceDiagnosticSession, SourceRevision};
 use tola_build::config::ResolvedSiteConfig;
-use tola_diagnostic::{Diagnostic, Severity};
+use tola_diagnostic::Diagnostic;
 use tola_typst::typst::syntax::Source;
 use tola_typst_syntax::names::{SelectedInterfaces, SourceNames};
 
@@ -68,7 +68,7 @@ fn checked_selection(
 
 impl<F> SourceCompiler<F>
 where
-    F: FnMut(&Path, &[UnsavedSource]) -> Result<ServedWorkspace>,
+    F: FnMut(&Path, &[UnsavedSource], &BuildCancellation) -> Result<ServedWorkspace>,
 {
     pub(super) fn check(
         &mut self,
@@ -196,6 +196,11 @@ fn append_document_editor_diagnostics(
     selected: &SelectedInterfaces,
     cancellation: &BuildCancellation,
 ) -> Result<(), SourceFailure> {
+    use tola_typst::typst::World;
+    let library = world.map_or(&*tola_typst::world::library::GLOBAL_LIBRARY, |world| {
+        world.library()
+    });
+    crate::lint::names::add_spelling_help(diagnostics, path, root, names, library);
     let start = diagnostics.len();
     let hints = crate::lint::document_diagnostics(path, root, names, world, &diagnostics[..start]);
     diagnostics.extend(hints);
@@ -314,12 +319,9 @@ fn configuration_diagnostics(error: anyhow::Error) -> Vec<Diagnostic> {
     if let Some(attached) = tola_diagnostic::attached(&error) {
         return attached.to_vec();
     }
-    let fallback = tola_diagnostic::fallback(crate::codes::editor::CONFIGURATION, &error);
-    vec![Diagnostic::at_path(
+    vec![tola_diagnostic::fallback(
         crate::codes::editor::CONFIGURATION,
-        Severity::Error,
-        "tola.toml",
-        fallback.message,
+        &error,
     )]
 }
 
@@ -328,6 +330,7 @@ mod tests {
     use super::*;
     use crate::compiler::tests::{compiler, inputs_at, site_configuration};
     use crate::compiler::{CheckRequest, SourceCompilation, SourceCompiler, SourceJob};
+    use tola_diagnostic::Severity;
 
     #[test]
     fn selection_excludes_generated_consumers() {

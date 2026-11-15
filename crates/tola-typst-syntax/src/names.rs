@@ -109,6 +109,17 @@ pub struct Declaration {
     pub initializer: Initializer,
 }
 
+impl Declaration {
+    /// Whether this declaration is visible here within its owning scope.
+    pub fn visible_at(&self, offset: usize) -> bool {
+        self.visible_from <= offset
+            || self
+                .recursive_body
+                .as_ref()
+                .is_some_and(|body| body.contains(&offset))
+    }
+}
+
 /// The source of a module interface, without host path resolution or evaluation.
 #[derive(Clone, Debug)]
 pub enum ImportSource {
@@ -512,14 +523,7 @@ impl SourceNames {
                 .iter()
                 .rev()
                 .copied()
-                .find(|&id| {
-                    let declaration = &self.declarations[id];
-                    declaration.visible_from <= at
-                        || declaration
-                            .recursive_body
-                            .as_ref()
-                            .is_some_and(|body| body.contains(&at))
-                });
+                .find(|&id| self.declarations[id].visible_at(at));
             if found.is_some() {
                 return found;
             }

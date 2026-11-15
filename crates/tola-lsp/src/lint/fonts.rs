@@ -39,7 +39,7 @@ pub(super) fn warn_missing_families(
             code: codes::editor::UNKNOWN_FONT,
             message: format!("the font `{family}` is not available"),
             note: Some("the text falls back to another font".to_owned()),
-            help: help(&family, installed),
+            help: Some(help(&family, installed)),
             span,
             cause: None,
         });
@@ -143,7 +143,7 @@ fn family_literals(node: &LinkedNode<'_>, families: &mut Vec<(String, std::ops::
 }
 
 /// What an author can do about a font this environment does not include.
-fn help(family: &str, installed: &[&str]) -> Option<String> {
+fn help(family: &str, installed: &[&str]) -> String {
     if let Some((_, english_names)) = LOCALIZED_FONTS
         .iter()
         .find(|(localized, _)| *localized == family)
@@ -151,21 +151,16 @@ fn help(family: &str, installed: &[&str]) -> Option<String> {
             .iter()
             .find(|english| installed.contains(english))
     {
-        return Some(format!("this font is installed as `{english}`"));
+        return format!("Use the installed family name `{english}`");
     }
     if let Some(closest) = tola_typst::spelling::closest(family, installed.iter().copied()) {
-        return Some(format!("did you mean `{closest}`?"));
+        return format!("Check whether you meant the installed family `{closest}`");
     }
     if family.contains(',') {
-        return Some(
-            "write each font as its own string, as in `(\"Times New Roman\", \"Arial\")`"
-                .to_owned(),
-        );
+        return "Write each font as its own string, as in `(\"Times New Roman\", \"Arial\")`"
+            .to_owned();
     }
-    if !family.is_ascii() {
-        return Some("use the font's English (PostScript) name".to_owned());
-    }
-    Some("check the name, or add the font through `typst.fonts.paths`".to_owned())
+    "Check the family name or add the font through `typst.fonts.paths`".to_owned()
 }
 
 /// The English names a localized font name is usually installed under.

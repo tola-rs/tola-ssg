@@ -13,7 +13,10 @@ pub(crate) mod prepared;
 pub mod query;
 mod watch;
 
-pub use manifest::{find_initializer, read_available_declarations, read_nu_modules};
+pub use manifest::{
+    find_initializer, nu_font_options, read_available_declarations, read_nu_modules,
+};
+pub use prepared::apply_module_icons;
 pub use prepared::{PreparedSite, prepare_site};
 pub use watch::{PreparedHookWatch, prepare_hook_watch};
 
@@ -514,7 +517,7 @@ pub fn load_modules(
         declarations,
         &bundle,
     )?;
-    module_set::load_modules_with_roots(site_root, declarations, &roots, mode)
+    module_set::load_modules_with_roots(site_root, declarations, &roots, mode, &[])
 }
 
 /// Read every declared module's manifest through a resolved root.
@@ -524,7 +527,7 @@ pub fn load_modules_with_roots(
     roots: &BTreeMap<String, PathBuf>,
     mode: InputMode,
 ) -> std::result::Result<BTreeMap<String, LoadedModule>, module_set::ModuleLoadError> {
-    module_set::load_modules_with_roots(site_root, declarations, roots, mode)
+    module_set::load_modules_with_roots(site_root, declarations, roots, mode, &[])
 }
 
 /// Command declarations remain available when unrelated build inputs need repair.

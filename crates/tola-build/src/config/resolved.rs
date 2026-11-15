@@ -32,6 +32,7 @@ pub struct ResolvedSiteConfig {
 
     /// Absolute logical path identifying the configuration source.
     pub(crate) config_path: PathBuf,
+    pub(crate) config_source: Option<super::ConfigSource>,
 
     /// Site root: the configuration file's parent directory.
     pub(super) root: PathBuf,
@@ -94,7 +95,7 @@ pub struct GeneratedExclusion {
 
 impl ResolvedSiteConfig {
     /// Where the configuration source writes each key.
-    pub(crate) fn positions(&self) -> Option<&tola_diagnostic::SourcePositions> {
+    pub fn positions(&self) -> Option<&tola_diagnostic::SourcePositions> {
         Some(&self.positions)
     }
 
@@ -116,6 +117,7 @@ impl ResolvedSiteConfig {
             &self.package_locations,
         )
         .into_iter()
+        .chain(self.config_paths().map(|path| ("config", path)))
         .chain(
             self.module_roots
                 .iter()
@@ -132,6 +134,24 @@ impl ResolvedSiteConfig {
     /// Absolute logical path identifying the configuration source.
     pub fn config_path(&self) -> &Path {
         &self.config_path
+    }
+
+    /// The source graph used to resolve this configuration.
+    pub fn source(&self) -> Option<&super::ConfigSource> {
+        self.config_source.as_ref()
+    }
+
+    /// Logical and physical paths belonging to configuration sources.
+    pub fn config_paths(&self) -> impl Iterator<Item = &Path> {
+        self.config_source
+            .iter()
+            .flat_map(|source| source.paths())
+            .chain(
+                self.config_source
+                    .is_none()
+                    .then_some(self.config_path.as_path()),
+            )
+            .filter(|path| !path.as_os_str().is_empty())
     }
 
     /// The native source identity selected for this attempt, when one is explicit.

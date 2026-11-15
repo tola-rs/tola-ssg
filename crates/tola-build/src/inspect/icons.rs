@@ -37,16 +37,21 @@ pub fn icons(
         let collection = collections
             .collection(name)
             .expect("every configured icon namespace prepared a collection");
+        let key: tola_icons::IconCollectionKey = name.parse()?;
         if namespace.is_some() {
             rows.extend(collection.names().map(|icon| {
                 json!({
                     "namespace": name,
+                    "module": key.module(),
+                    "collection": key.name(),
                     "name": icon,
                 })
             }));
         } else {
             rows.push(json!({
                 "namespace": name,
+                "module": key.module(),
+                "collection": key.name(),
                 "source": source_json(source, root),
                 "prefix": collection.source_prefix(),
                 "icons": collection.len(),

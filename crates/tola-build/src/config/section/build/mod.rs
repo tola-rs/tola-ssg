@@ -30,10 +30,13 @@ pub use hooks::{AfterPublishHookConfig, BeforeBuildHookConfig, DevParticipation,
 pub use minify::MinifyConfig;
 pub use references::{ReferenceLevel, ReferencesConfig};
 
-use crate::config::ConfigDiagnostics;
+use crate::config::{ConfigDiagnostics, fragment};
 use serde::{Deserialize, Serialize};
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
-use tola_config::Config;
+use tola_config::{
+    Config, Fragment, FragmentContext, ValidateFragment, validate_value, wrong_type,
+};
 
 /// The Typst entry, content directory, and publish directory. These are the defaults in
 /// `tola.toml`.
@@ -51,6 +54,18 @@ use tola_config::Config;
 #[serde(default)]
 #[config(section = "build")]
 pub struct BuildSectionConfig {
+    /// Allow hooks sharing a stage, site or module instance, and order to run together.
+    /// Defaults to true. False runs one hook at a time without changing the batch order.
+    #[serde(rename = "par-hooks")]
+    #[config(name = "par-hooks")]
+    pub par_hooks: bool,
+
+    /// Maximum concurrent hooks shared by all modules and stages in this site session.
+    /// Defaults to "auto": the available parallelism sampled when the session starts.
+    /// A positive integer sets an explicit limit; this does not control a script's own threads.
+    #[serde(rename = "hook-jobs")]
+    #[config(name = "hook-jobs", fragment_with = hook_jobs_fragment)]
+    pub hook_jobs: HookJobs,
     /// Typst file to run, relative to the site root. If omitted, use `site.typ`.
     /// Set `{ module = "notes" }` to use the `notes` module's entry.
     pub entry: BuildEntry,
@@ -74,12 +89,95 @@ pub struct BuildSectionConfig {
     pub references: ReferencesConfig,
 }
 
+/// The site session's maximum number of concurrent hooks.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum HookJobs {
+    /// Use the session's sampled available parallelism, falling back to one if unavailable.
+    #[default]
+    Auto,
+    /// Use the author's limit, even when it exceeds the automatic value.
+    Limit(NonZeroUsize),
+}
+
+impl HookJobs {
+    /// Return the explicit limit or the host's automatic limit.
+    pub fn resolved(self, auto_limit: usize) -> usize {
+        match self {
+            Self::Auto => auto_limit.max(1),
+            Self::Limit(limit) => limit.get(),
+        }
+    }
+}
+
+impl Serialize for HookJobs {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Auto => serializer.serialize_str("auto"),
+            Self::Limit(limit) => serializer.serialize_u64(limit.get() as u64),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for HookJobs {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Written {
+            Name(String),
+            Limit(NonZeroUsize),
+        }
+        match Written::deserialize(deserializer)? {
+            Written::Name(name) if name == "auto" => Ok(Self::Auto),
+            Written::Limit(limit) => Ok(Self::Limit(limit)),
+            Written::Name(_) => Err(serde::de::Error::custom("use `auto` or a positive integer")),
+        }
+    }
+}
+
+fn hook_jobs_fragment(value: &toml::Value, context: &mut FragmentContext<'_>) {
+    match value {
+        toml::Value::String(_) | toml::Value::Integer(_) => {
+            validate_value::<HookJobs>(value, context)
+        }
+        _ => wrong_type(value, "a positive integer or \"auto\"", context),
+    }
+}
+
 /// The source of the site's Typst entry.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(untagged, deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(untagged)]
 pub enum BuildEntry {
     Project(PathBuf),
     Module { module: String },
+}
+
+#[derive(Deserialize, Fragment)]
+#[serde(deny_unknown_fields)]
+struct ModuleEntryFields {
+    module: String,
+}
+
+impl<'de> Deserialize<'de> for BuildEntry {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Written {
+            Project(PathBuf),
+            Module(ModuleEntryFields),
+        }
+        Ok(match Written::deserialize(deserializer)? {
+            Written::Project(path) => Self::Project(path),
+            Written::Module(fields) => Self::Module {
+                module: fields.module,
+            },
+        })
+    }
+}
+
+impl ValidateFragment for BuildEntry {
+    fn validate_fragment(value: &toml::Value, context: &mut FragmentContext<'_>) {
+        fragment::string_or_table::<ModuleEntryFields>(value, context);
+    }
 }
 
 impl From<&str> for BuildEntry {
@@ -101,6 +199,10 @@ impl BuildEntry {
 /// Build settings after path resolution.
 #[derive(Debug, Clone, Serialize)]
 pub struct ResolvedBuildConfig {
+    #[serde(rename = "par-hooks")]
+    pub par_hooks: bool,
+    #[serde(rename = "hook-jobs")]
+    pub hook_jobs: HookJobs,
     pub entry: PathBuf,
     #[serde(rename = "content-dir")]
     pub content_dir: PathBuf,
@@ -113,6 +215,8 @@ pub struct ResolvedBuildConfig {
 impl Default for BuildSectionConfig {
     fn default() -> Self {
         Self {
+            par_hooks: true,
+            hook_jobs: HookJobs::Auto,
             entry: "site.typ".into(),
             content_dir: "content".into(),
             publish_dir: "public".into(),
@@ -190,6 +294,19 @@ the site session; a positive integer sets an explicit shared limit across module
 #[cfg(test)]
 mod tests {
     use super::BuildSectionConfig;
+
+    #[test]
+    fn hook_jobs_accepts_auto_or_positive_integer() {
+        for (value, expected) in [("\"auto\"", 8), ("3", 3)] {
+            let config: BuildSectionConfig =
+                toml::from_str(&format!("hook-jobs = {value}")).unwrap();
+            assert!(config.par_hooks);
+            assert_eq!(config.hook_jobs.resolved(8), expected);
+        }
+        for value in ["0", "-1", "1.5", "true", "\"3\"", "\"default\""] {
+            assert!(toml::from_str::<BuildSectionConfig>(&format!("hook-jobs = {value}")).is_err());
+        }
+    }
 
     #[test]
     fn declared_paths_stay_site_relative() {

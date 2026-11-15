@@ -55,7 +55,7 @@ pub(in crate::cli) fn run(
                 output,
                 cancellation,
             )?;
-            let value = super::config::value(&request, &args.build)?;
+            let value = super::config::value(&request, &args.build, args.mode)?;
             super::read::write(&value, "config", &args.display, scope, output, cancellation)
         }
         command => {
@@ -102,18 +102,40 @@ fn icons(
     output: &CommandOutput,
     cancellation: &Cancellation,
 ) -> Result<()> {
-    if let Some(namespace) = args.namespace.as_deref()
+    let prepared =
+        tola_build::modules::prepare_site(config, resources.input_mode(), &cancellation.token())?;
+    let config = prepared.config();
+    let namespace = args
+        .namespace
+        .as_deref()
+        .map(|name| {
+            tola_icons::IconCollectionKey::new(args.module.as_deref(), name)
+                .map(|key| key.to_string())
+        })
+        .transpose()?;
+    if let Some(module) = &args.module {
+        anyhow::ensure!(
+            config.modules().contains_key(module),
+            "module `{module}` is not configured"
+        );
+    }
+    if let Some(namespace) = namespace.as_deref()
         && !config.icons().collections.contains_key(namespace)
     {
         return Err(unknown_icon_namespace(namespace, config.icons()));
     }
     output.status("Preparing icon collections…")?;
-    let value = tola_build::inspect::icons(
+    let mut value = tola_build::inspect::icons(
         config,
         resources,
         &cancellation.token(),
-        args.namespace.as_deref(),
+        namespace.as_deref(),
     )?;
+    if let Some(module) = args.module
+        && let Some(rows) = value.as_array_mut()
+    {
+        rows.retain(|row| row["module"].as_str() == Some(module.as_str()));
+    }
     super::read::write(&value, "icons", &args.display, scope, output, cancellation)
 }
 

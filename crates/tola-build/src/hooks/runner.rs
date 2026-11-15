@@ -1,11 +1,14 @@
 //! Runs trusted hook commands at their configured build stages.
 
-use super::command::{HookCall, HookDirectories, run_action};
+use super::command::{HookCall, HookDirectories, ObserveFailure, run_action};
 use super::evidence::{
     FailedHookOutputs, HookOutputEvidence, SourceHookOutputs, declared_output_files,
     validate_declared_output_boundaries,
 };
-use super::report::{hook_command_error, run_hook_entry};
+use super::report::{
+    BatchFailure, failed_to_start, genuinely_failed, hook_command_error, run_hook_entry,
+};
+use super::{HookExecutor, hook_batches, hook_participates};
 
 use crate::cancellation::{BuildCancellation, OptionalCancellation};
 use crate::config::ResolvedSiteConfig;
@@ -51,21 +54,17 @@ pub(crate) struct SourceHookFailure {
 
 impl SourceHookFailure {
     fn new(
-        mut error: anyhow::Error,
+        error: anyhow::Error,
         completed: SourceHookOutputs,
         paths: &BTreeSet<PathBuf>,
         cancellation: Option<&BuildCancellation>,
     ) -> Self {
-        let partial = if error.is::<crate::cancellation::BuildCancelled>() {
+        let partial = if crate::cancellation::is_cancelled(&error) {
             None
         } else {
-            match FailedHookOutputs::capture(paths, cancellation) {
-                Ok(partial) => partial,
-                Err(cancelled) => {
-                    error = cancelled;
-                    None
-                }
-            }
+            FailedHookOutputs::capture(paths, cancellation)
+                .ok()
+                .flatten()
         };
         Self {
             error,
@@ -83,6 +82,7 @@ impl SourceHookFailure {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_before_build_hook(
     hook: &BeforeBuildHookConfig,
     config: &ResolvedSiteConfig,
@@ -91,48 +91,48 @@ fn run_before_build_hook(
     cancellation: Option<&BuildCancellation>,
     executed_outputs: &mut BTreeSet<PathBuf>,
     diagnostics: &mut Vec<tola_diagnostic::Diagnostic>,
+    observe_failure: &ObserveFailure,
 ) -> Result<Vec<HookOutputEvidence>> {
     cancellation.ensure_active_if_present()?;
     let identity = super::hook_identity(HookStage::BeforeBuild, &hook.name);
-    run_hook_entry(HookStage::BeforeBuild, &hook.name, || {
-        let before = validate_declared_output_boundaries(hook, config, &config.build.publish_dir)?;
-        executed_outputs.extend(
-            before
-                .iter()
-                .map(|identity| identity.logical_path().to_path_buf()),
-        );
-        run_action(
-            config,
-            hook.action(),
-            HookCall {
-                site: super::command::HookSitePaths::new(config, scope),
-                name: &hook.name,
-                origin: hook.origin.as_ref(),
-                mode,
-                directories: HookDirectories::BeforeBuild,
-            },
-            cancellation,
-            diagnostics,
-        )
-        .map_err(|error| hook_command_error(HookStage::BeforeBuild, &identity, error))?;
-        let after = declared_output_files(hook, config, cancellation)?;
-        for files in &after {
-            if files.contents.is_none() {
-                let declared = tola_diagnostic::display_path(
-                    files.source_identity.logical_path(),
-                    config.get_root(),
-                );
-                return Err(super::hook_contract_error(
-                    format!("{identity} declares `{declared}`, but the hook wrote nothing"),
-                    "write it, or remove it from `generates`",
-                ));
-            }
+    let before = validate_declared_output_boundaries(hook, config, &config.build.publish_dir)?;
+    executed_outputs.extend(
+        before
+            .iter()
+            .map(|identity| identity.logical_path().to_path_buf()),
+    );
+    run_action(
+        config,
+        hook.action(),
+        HookCall {
+            site: super::command::HookSitePaths::new(config, scope),
+            name: &hook.name,
+            origin: hook.origin.as_ref(),
+            mode,
+            directories: HookDirectories::BeforeBuild,
+        },
+        cancellation,
+        diagnostics,
+        observe_failure,
+    )
+    .map_err(|error| hook_command_error(HookStage::BeforeBuild, &identity, error))?;
+    let after = declared_output_files(hook, config, cancellation)?;
+    for files in &after {
+        if files.contents.is_none() {
+            let declared = tola_diagnostic::display_path(
+                files.source_identity.logical_path(),
+                config.get_root(),
+            );
+            return Err(super::hook_contract_error(
+                format!("{identity} declares `{declared}`, but the hook wrote nothing"),
+                "write it, or remove it from `generates`",
+            ));
         }
-        after
-            .into_iter()
-            .map(|files| HookOutputEvidence::from_successful_output(files, cancellation))
-            .collect()
-    })
+    }
+    after
+        .into_iter()
+        .map(|files| HookOutputEvidence::from_successful_output(files, cancellation))
+        .collect()
 }
 
 pub(crate) fn run_before_build_hooks_with_cancellation(
@@ -142,6 +142,7 @@ pub(crate) fn run_before_build_hooks_with_cancellation(
     hook_execution: crate::hooks::HookExecution,
     cancellation: Option<&BuildCancellation>,
     diagnostics: &mut Vec<tola_diagnostic::Diagnostic>,
+    executor: &HookExecutor,
 ) -> Result<BeforeBuildExecution, SourceHookFailure> {
     if !hook_execution.runs() {
         return Ok(BeforeBuildExecution::empty());
@@ -156,33 +157,82 @@ pub(crate) fn run_before_build_hooks_with_cancellation(
             None,
         ));
     }
-    for hook in config.hooks.before_build.iter() {
-        if !super::hook_participates(hook.enable, hook.dev, mode) {
-            continue;
-        }
-        let mut started_outputs = BTreeSet::new();
-        let outputs = run_before_build_hook(
-            hook,
-            config,
-            mode,
-            scope,
+    let stage = HookStage::BeforeBuild;
+    let hooks = &config.hooks.before_build;
+    for mut batch in hook_batches(
+        hooks,
+        true,
+        |hook| hook.origin.as_ref().map(|origin| origin.name.as_str()),
+        |hook| hook.order,
+    ) {
+        batch.retain(|&index| hook_participates(hooks[index].enable, hooks[index].dev, mode));
+        let results = executor.run_batch(
+            batch.len(),
             cancellation,
-            &mut started_outputs,
-            diagnostics,
+            |member, stop, observe_failure| {
+                let hook = &hooks[batch[member]];
+                let mut started_outputs = BTreeSet::new();
+                let mut reported = Vec::new();
+                let outputs = run_hook_entry(stage, &hook.name, stop, || {
+                    let result = run_before_build_hook(
+                        hook,
+                        config,
+                        mode,
+                        scope,
+                        Some(stop),
+                        &mut started_outputs,
+                        &mut reported,
+                        observe_failure,
+                    );
+                    if genuinely_failed(&result) {
+                        observe_failure();
+                    }
+                    result
+                });
+                (outputs, started_outputs, reported)
+            },
+            |(outputs, _, _)| genuinely_failed(outputs),
         );
-        // A hook contributes successful evidence atomically; failure observations stay separate.
-        match outputs {
-            Ok(outputs) => completed.outputs.extend(outputs),
-            Err(error) => {
-                return Err(SourceHookFailure::new(
-                    error,
-                    completed,
-                    &started_outputs,
-                    cancellation,
-                ));
+        let mut failure = BatchFailure::default();
+        let mut partial_paths = BTreeSet::new();
+        for (member, result) in results.into_iter().enumerate() {
+            match result {
+                Some(Ok((outputs, started_outputs, reported))) => {
+                    diagnostics.extend(reported);
+                    match outputs {
+                        Ok(outputs) => {
+                            completed.outputs.extend(outputs);
+                            hooks_executed = true;
+                        }
+                        Err(error) => {
+                            partial_paths.extend(started_outputs);
+                            failure.record(error, diagnostics);
+                        }
+                    }
+                }
+                Some(Err(error)) => {
+                    let name = &hooks[batch[member]].name;
+                    failure.record(failed_to_start(stage, name, error), diagnostics);
+                }
+                None => {}
             }
         }
-        hooks_executed = true;
+        if let Some(error) = failure.error() {
+            return Err(SourceHookFailure::new(
+                error,
+                completed,
+                &partial_paths,
+                cancellation,
+            ));
+        }
+        if let Err(error) = cancellation.ensure_active_if_present() {
+            return Err(SourceHookFailure::new(
+                error.into(),
+                completed,
+                &partial_paths,
+                None,
+            ));
+        }
     }
     if let Err(error) = cancellation.ensure_active_if_present() {
         return Err(SourceHookFailure::new(
@@ -206,6 +256,24 @@ pub fn has_after_publish_hooks(config: &ResolvedSiteConfig, mode: BuildMode) -> 
         .any(|hook| super::hook_participates(hook.enable, hook.dev, mode))
 }
 
+pub(super) fn after_publish_batches(
+    config: &ResolvedSiteConfig,
+    mode: BuildMode,
+) -> impl Iterator<Item = Vec<usize>> {
+    let hooks = &config.hooks.after_publish;
+    hook_batches(
+        hooks,
+        false,
+        |hook| hook.origin.as_ref().map(|origin| origin.name.as_str()),
+        |hook| hook.order,
+    )
+    .into_iter()
+    .filter_map(move |mut batch| {
+        batch.retain(|&index| hook_participates(hooks[index].enable, hooks[index].dev, mode));
+        (!batch.is_empty()).then_some(batch)
+    })
+}
+
 /// Consume one committed output view using every participating hook.
 pub fn run_after_publish_hooks(
     config: &ResolvedSiteConfig,
@@ -213,6 +281,7 @@ pub fn run_after_publish_hooks(
     scope: tola_input::InputScope,
     output_root: &Path,
     cancellation: &BuildCancellation,
+    executor: &HookExecutor,
 ) -> Result<Vec<tola_diagnostic::Diagnostic>> {
     run_after_publish_hooks_observed(
         config,
@@ -220,6 +289,7 @@ pub fn run_after_publish_hooks(
         scope,
         output_root,
         cancellation,
+        executor,
         |_, _| Ok(()),
     )
 }
@@ -231,50 +301,74 @@ pub fn run_after_publish_hooks_observed(
     scope: tola_input::InputScope,
     output_root: &Path,
     cancellation: &BuildCancellation,
+    executor: &HookExecutor,
     mut completed: impl FnMut(&str, &Result<Vec<tola_diagnostic::Diagnostic>>) -> Result<()>,
 ) -> Result<Vec<tola_diagnostic::Diagnostic>> {
     let mut diagnostics = Vec::new();
-    for hook in config.hooks.after_publish.iter() {
+    let stage = HookStage::AfterPublish;
+    let hooks = &config.hooks.after_publish;
+    for batch in after_publish_batches(config, mode) {
         cancellation.ensure_active()?;
-        if super::hook_participates(hook.enable, hook.dev, mode) {
-            let identity = super::hook_identity(HookStage::AfterPublish, &hook.name);
-            let fail = |error| hook_command_error(HookStage::AfterPublish, &identity, error);
-            let outcome = run_hook_entry(HookStage::AfterPublish, &hook.name, || {
-                let mut reported = Vec::new();
-                run_action(
-                    config,
-                    hook.action(),
-                    HookCall {
-                        site: super::command::HookSitePaths::new(config, scope),
-                        name: &hook.name,
-                        origin: hook.origin.as_ref(),
-                        mode,
-                        directories: HookDirectories::AfterPublish { input: output_root },
-                    },
-                    Some(cancellation),
-                    &mut reported,
-                )
-                .map_err(fail)?;
-                Ok(reported)
-            });
-            completed(&hook.name, &outcome)?;
+        let results = executor.run_batch(
+            batch.len(),
+            Some(cancellation),
+            |member, stop, observe_failure| {
+                let hook = &hooks[batch[member]];
+                let identity = super::hook_identity(stage, &hook.name);
+                run_hook_entry(stage, &hook.name, stop, || {
+                    let mut reported = Vec::new();
+                    let result = run_action(
+                        config,
+                        hook.action(),
+                        HookCall {
+                            site: super::command::HookSitePaths::new(config, scope),
+                            name: &hook.name,
+                            origin: hook.origin.as_ref(),
+                            mode,
+                            directories: HookDirectories::AfterPublish { input: output_root },
+                        },
+                        Some(stop),
+                        &mut reported,
+                        observe_failure,
+                    );
+                    if genuinely_failed(&result) {
+                        observe_failure();
+                    }
+                    result.map_err(|error| hook_command_error(stage, &identity, error))?;
+                    Ok(reported)
+                })
+            },
+            genuinely_failed,
+        );
+        let mut failure = BatchFailure::default();
+        let mut callback_error = None;
+        for (member, result) in results.into_iter().enumerate() {
+            let hook = &hooks[batch[member]];
+            let outcome = match result {
+                Some(Ok(outcome)) => outcome,
+                Some(Err(error)) => Err(failed_to_start(stage, &hook.name, error)),
+                None => continue,
+            };
+            if let Err(error) = completed(&hook.name, &outcome) {
+                callback_error.get_or_insert(error);
+            }
             match outcome {
                 Ok(reported) => diagnostics.extend(reported),
-                Err(error)
-                    if crate::cancellation::is_cancelled(&error) || diagnostics.is_empty() =>
-                {
-                    return Err(error);
-                }
-                Err(error) => {
-                    diagnostics.extend(
-                        tola_diagnostic::attached(&error)
-                            .unwrap_or_default()
-                            .iter()
-                            .cloned(),
-                    );
-                    return Err(tola_diagnostic::DiagnosticError::attach(error, diagnostics).into());
-                }
+                Err(error) => failure.record(error, &mut diagnostics),
             }
+        }
+        if let Some(error) = callback_error {
+            return Err(error);
+        }
+        if let Some(error) = failure.error() {
+            if diagnostics.is_empty() {
+                return Err(error);
+            }
+            if !crate::cancellation::is_cancelled(&error) {
+                diagnostics
+                    .extend_from_slice(tola_diagnostic::attached(&error).unwrap_or_default());
+            }
+            return Err(tola_diagnostic::DiagnosticError::attach(error, diagnostics).into());
         }
     }
     cancellation.ensure_active()?;
@@ -423,6 +517,7 @@ mod tests {
                 HookExecution::Run,
                 None,
                 &mut Vec::new(),
+                &HookExecutor::new(),
             )
             .unwrap_err();
 
@@ -514,6 +609,7 @@ mod tests {
                 HookExecution::Run,
                 None,
                 &mut Vec::new(),
+                &HookExecutor::new(),
             )
             .unwrap();
             assert!(execution.hooks_executed());
@@ -531,6 +627,7 @@ mod tests {
             HookExecution::Run,
             None,
             &mut Vec::new(),
+            &HookExecutor::new(),
         )
         .unwrap();
         assert_eq!(
@@ -550,8 +647,10 @@ mod tests {
         let mut first = hook("child_counts_successful_runs");
         first.generates = vec!["generated/count.txt".into()];
         let mut middle = hook("child_writes_middle_chain_output");
+        middle.order = 10;
         middle.generates = vec!["generated/middle.txt".into()];
         let mut last = hook("child_writes_final_chain_output");
+        last.order = 20;
         last.generates = vec!["generated/final.txt".into()];
         config.hooks.before_build = vec![first, middle, last];
         let root = config.get_root();
@@ -563,6 +662,7 @@ mod tests {
             HookExecution::Run,
             None,
             &mut Vec::new(),
+            &HookExecutor::new(),
         )
         .unwrap();
         assert_eq!(
@@ -577,6 +677,7 @@ mod tests {
             HookExecution::Run,
             None,
             &mut Vec::new(),
+            &HookExecutor::new(),
         )
         .unwrap_err();
         assert_eq!(
@@ -609,6 +710,7 @@ mod tests {
             HookExecution::Run,
             None,
             &mut Vec::new(),
+            &HookExecutor::new(),
         )
         .unwrap()
         .into_source_hooks();
@@ -626,6 +728,107 @@ mod tests {
                 .iter()
                 .all(HookOutputEvidence::is_current)
         );
+    }
+
+    #[test]
+    fn hook_runner_panic_keeps_batch_output_evidence() {
+        use crate::config::section::build::HookJobs;
+        use crate::hooks::HookRunner;
+        use crate::hooks::report::{CommandFailure, InterruptionStep};
+        use std::num::NonZeroUsize;
+        use std::sync::{Mutex, mpsc};
+        use std::time::Duration;
+        use tola_diagnostic::{Diagnostic, Severity, codes};
+
+        let directory = TempDir::new().unwrap();
+        let (completed_peer, wait_for_peer) = mpsc::channel();
+        let wait_for_peer = Mutex::new(wait_for_peer);
+        let mut config = config(&directory).with_hook_runner(HookRunner::new(move |hook| {
+            let root = hook.config.get_root();
+            match hook.context.hook.as_ref().unwrap().name.as_str() {
+                "partial" => {
+                    fs::write(root.join("generated/partial.txt"), "partial")?;
+                    wait_for_peer
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(5))?;
+                    panic!("private hook runner panic payload");
+                }
+                "complete" => {
+                    fs::write(root.join("generated/complete.txt"), "complete")?;
+                    Ok(vec![Diagnostic::new(
+                        codes::hook::COMMAND,
+                        Severity::Warning,
+                        "The completed hook supplied this diagnostic",
+                    )])
+                }
+                "witness" => {
+                    // Two permits admit this member only after the complete hook
+                    // has collected its output evidence and relinquished a permit.
+                    completed_peer.send(())?;
+                    Ok(Vec::new())
+                }
+                _ => unreachable!(),
+            }
+        }));
+        let root = config.get_root().to_owned();
+        fs::write(root.join("hook.nu"), "").unwrap();
+        fs::create_dir(root.join("generated")).unwrap();
+        config.hooks.before_build = [
+            ("partial", vec!["generated/partial.txt".into()]),
+            ("complete", vec!["generated/complete.txt".into()]),
+            ("witness", Vec::new()),
+        ]
+        .into_iter()
+        .map(|(name, generates)| BeforeBuildHookConfig {
+            name: name.into(),
+            nu: Some("hook.nu".into()),
+            generates,
+            ..Default::default()
+        })
+        .collect();
+
+        let executor = HookExecutor::new();
+        let cancellation = BuildCancellation::new();
+        executor
+            .configure(
+                executor.begin_attempt(),
+                true,
+                HookJobs::Limit(NonZeroUsize::new(2).unwrap()),
+                &cancellation,
+            )
+            .unwrap();
+        let mut diagnostics = Vec::new();
+        let failure = run_before_build_hooks_with_cancellation(
+            &config,
+            BuildMode::Development,
+            tola_input::InputScope::Online,
+            HookExecution::Run,
+            Some(&cancellation),
+            &mut diagnostics,
+            &executor,
+        )
+        .unwrap_err();
+
+        assert!(failure.error.chain().any(|cause| matches!(
+            cause.downcast_ref::<CommandFailure>(),
+            Some(CommandFailure::Interrupted {
+                step: InterruptionStep::Run
+            })
+        )));
+        assert!(!format!("{:#}", failure.error).contains("private hook runner panic payload"));
+        assert_eq!(failure.completed().outputs().len(), 1);
+        assert_eq!(
+            failure.completed().outputs()[0].logical_path(),
+            root.join("generated/complete.txt")
+        );
+        assert!(failure.completed().outputs()[0].is_current());
+        let partial = failure.partial_outputs().unwrap();
+        assert!(partial.is_current());
+        assert!(partial.covers_path(&root.join("generated/partial.txt")));
+        assert!(!partial.covers_path(&root.join("generated/complete.txt")));
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].severity, Severity::Warning);
     }
 
     /// Blocks until Tola stops it, so a cancellation can observe what survives.
@@ -674,6 +877,7 @@ mod tests {
                 HookExecution::Run,
                 None,
                 &mut Vec::new(),
+                &HookExecutor::new(),
             )
             .unwrap();
             assert_eq!(
@@ -687,6 +891,7 @@ mod tests {
                 tola_input::InputScope::Online,
                 &config.build.publish_dir,
                 &BuildCancellation::new(),
+                &HookExecutor::new(),
             )
             .unwrap();
             assert_eq!(
@@ -721,6 +926,7 @@ mod tests {
                 HookExecution::Run,
                 None,
                 &mut Vec::new(),
+                &HookExecutor::new(),
             )
             .unwrap();
             let marker =
@@ -740,6 +946,7 @@ mod tests {
                         HookExecution::Run,
                         None,
                         &mut Vec::new(),
+                        &HookExecutor::new(),
                     )
                     .unwrap_err();
                     assert!(
@@ -763,6 +970,7 @@ mod tests {
                                 HookExecution::Run,
                                 Some(&cancellation),
                                 &mut Vec::new(),
+                                &HookExecutor::new(),
                             )
                         });
                         let ready = root.join("hook-ready.txt");

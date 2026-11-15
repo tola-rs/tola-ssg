@@ -12,6 +12,14 @@ use crate::config::ResolvedSiteConfig;
 /// Why this site's build lock could not be taken.
 #[derive(Debug, Error)]
 pub enum SiteBuildLockError {
+    #[error(
+        "the `{stage}` hook cannot start another site write; run this operation outside the hook"
+    )]
+    NestedHook { stage: String },
+
+    #[error("Tola could not read the calling hook context; run this operation outside the hook")]
+    HookContext(#[source] anyhow::Error),
+
     /// The waiter stopped before the lock became available.
     #[error(transparent)]
     Cancelled(#[from] crate::cancellation::BuildCancelled),
@@ -69,6 +77,16 @@ impl SiteBuildLock {
         on_wait: impl FnOnce(),
     ) -> Result<Self, SiteBuildLockError> {
         cancellation.ensure_active()?;
+        let stage = match crate::hooks::active::stage() {
+            Some(stage) => Some(stage.as_str().to_owned()),
+            None => crate::context::Context::read()
+                .map_err(SiteBuildLockError::HookContext)?
+                .and_then(|context| context.hook)
+                .map(|hook| hook.stage),
+        };
+        if let Some(stage) = stage {
+            return Err(SiteBuildLockError::NestedHook { stage });
+        }
         let site_root = std::fs::canonicalize(site_root).map_err(|source| {
             SiteBuildLockError::SiteDirectory {
                 reason: crate::filesystem::path_failure_reason(&source),
@@ -164,10 +182,10 @@ impl SiteBuildGuard {
         recover_output: bool,
     ) -> Result<Self, BuildFailure> {
         let lock = SiteBuildLock::acquire(&config, &request.cancellation, on_wait)
-            .map_err(|error| BuildFailure::before_attempt(anyhow::Error::new(error)))?;
+            .map_err(|error| BuildFailure::before_attempt(error.into(), config.get_root()))?;
         if recover_output {
             lock.recover_output(&config, &request.cancellation)
-                .map_err(BuildFailure::before_attempt)?;
+                .map_err(|error| BuildFailure::before_attempt(error, config.get_root()))?;
         }
         let build = session.prepare(config, request).run()?;
         Ok(Self { build, lock })
@@ -203,6 +221,26 @@ mod tests {
     use crate::config::tests::load_test_config;
     use crate::mode::BuildMode;
     use crate::resources::BuildResources;
+
+    #[test]
+    fn hook_cannot_reenter_a_site_write() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = load_test_config(directory.path(), "");
+        let token = BuildCancellation::new();
+        let owner = SiteBuildLock::acquire(&config, &token, || {}).unwrap();
+        let canceller = crate::cancellation::BuildCanceller::new();
+        let active = crate::hooks::active::enter(
+            crate::config::section::build::hooks::HookStage::BeforeBuild,
+        );
+        let refused = SiteBuildLock::acquire(&config, &canceller.token(), || canceller.cancel());
+        assert!(matches!(
+            refused,
+            Err(SiteBuildLockError::NestedHook { .. })
+        ));
+        drop(active);
+        drop(owner);
+        SiteBuildLock::acquire(&config, &token, || {}).unwrap();
+    }
 
     #[test]
     fn cancelled_wait_leaves_the_lock_held() {

@@ -19,7 +19,7 @@ use tola_nu::Host;
 
 use anyhow::{Context, Result, bail, ensure};
 use tola_build::config::ConfigSource;
-use tola_build::modules::read_nu_modules;
+use tola_build::modules::{nu_font_options, read_nu_modules};
 use tola_input::{InputMode, InputScope};
 use tola_module::manifest::NuModule;
 use tola_nu::{
@@ -74,11 +74,9 @@ fn execute(args: &NuArgs, input_scope: Option<&str>) -> Result<i32> {
     if let Some(path) = &args.hook_worker {
         return hook::run_worker(path);
     }
-    let call = if args.no_site {
-        None
-    } else {
-        CallContext::read()?
-    };
+    let parent = CallContext::read()?;
+    let active_hook = parent.as_ref().is_some_and(|call| call.hook.is_some());
+    let call = if args.no_site { None } else { parent };
     let scope = effective_scope(
         input_scope.or_else(|| call.as_ref().and_then(|call| call.input_scope.as_deref())),
     )?;
@@ -148,10 +146,10 @@ fn execute(args: &NuArgs, input_scope: Option<&str>) -> Result<i32> {
     {
         None
     } else {
-        site_modules(&current.directory, explicit.as_deref(), scope, &token)?
+        site_modules(&current.directory, explicit.as_deref(), scope, &[], &token)?
     };
     let mut env = environment(scope);
-    if call.is_some() {
+    if call.is_some() || active_hook {
         let path = std::env::var(tola_build::context::PATH_ENV)
             .context("the Tola call context path must be valid UTF-8")?;
         env.insert(tola_build::context::PATH_ENV.into(), Some(path));
@@ -241,14 +239,21 @@ fn effective_scope(explicit: Option<&str>) -> Result<InputScope> {
 
 struct SiteModules {
     config: Arc<ResolvedSiteConfig>,
-    config_digest: String,
     modules: BTreeMap<String, NuModule>,
+}
+
+fn config_overlays(overlays: &[SourceOverlay]) -> Vec<(PathBuf, Arc<str>)> {
+    overlays
+        .iter()
+        .map(|overlay| (overlay.path.clone(), Arc::from(overlay.text.as_str())))
+        .collect()
 }
 
 fn site_modules(
     directory: &Path,
     explicit: Option<&Path>,
     scope: InputScope,
+    overlays: &[SourceOverlay],
     cancellation: &BuildCancellation,
 ) -> Result<Option<SiteModules>> {
     cancellation.ensure_active()?;
@@ -258,8 +263,9 @@ fn site_modules(
     let Some(config) = config else {
         return Ok(None);
     };
-    let source = ConfigSource::load(Some(&config), scope)?;
-    let config_digest = format!("blake3:{}", source.source_hash().to_hex());
+    let overlays = config_overlays(overlays);
+    let source =
+        ConfigSource::load_with_sources(Some(&config), scope, &overlays, Some(cancellation))?;
     let config = Arc::new(
         crate::config::resolve(
             source,
@@ -275,11 +281,7 @@ fn site_modules(
         InputMode::new(scope, true),
         cancellation,
     )?;
-    Ok(Some(SiteModules {
-        config,
-        config_digest,
-        modules,
-    }))
+    Ok(Some(SiteModules { config, modules }))
 }
 
 pub(super) fn environment(scope: InputScope) -> BTreeMap<String, Option<String>> {
@@ -330,7 +332,16 @@ fn runtime_inputs(
     config: &ResolvedSiteConfig,
     modules: &BTreeMap<String, NuModule>,
 ) -> (Vec<ConfiguredModule>, Vec<PathBuf>) {
-    let mut dependencies = vec![config.config_path().to_owned()];
+    let mut dependencies = config
+        .source()
+        .map(|source| {
+            source
+                .sources()
+                .iter()
+                .map(|file| file.path().to_path_buf())
+                .collect()
+        })
+        .unwrap_or_else(|| vec![config.config_path().to_owned()]);
     let mut libraries = Vec::new();
     for module in modules.values() {
         dependencies.push(module.manifest.clone());
@@ -419,7 +430,7 @@ fn prepare(
     let site = if !load_site || (builtin && explicit.is_none()) {
         None
     } else {
-        site_modules(workspace, explicit, scope, &token)?
+        site_modules(workspace, explicit, scope, overlays, &token)?
     };
     prepare_invocation(
         InvocationContext {
@@ -445,11 +456,15 @@ fn prepare_invocation(
     token: &BuildCancellation,
 ) -> Result<Runtime> {
     let alias = entry.and_then(|entry| entry.strip_prefix("@tola-modules/"));
+    let resources = crate::cli::config::build_resources(InputMode::new(scope, false));
     let Some(site) = site else {
         ensure!(
             alias.is_none(),
             "a configured Nu module requires a site with tola.toml"
         );
+        inherited.svg_fonts = Some(Ok(Arc::new(tola_typst::FontStore::with_options(
+            tola_typst::FontOptions::new().with_system_fonts(resources.include_system_fonts()),
+        ))));
         return Ok(
             prepare_runtime(Vec::new(), Vec::new(), context, overlays.to_vec())?
                 .with_host(inherited)?,
@@ -468,27 +483,60 @@ fn prepare_invocation(
     if alias.is_some() {
         context.directory = site.config.get_root().to_owned();
     }
-    let (libraries, dependencies) = runtime_inputs(&site.config, &site.modules);
-    let runtime = prepare_runtime(libraries, dependencies, context, overlays.to_vec())?;
-    ensure!(
-        runtime
-            .dependencies()
+    let (libraries, mut dependencies) = runtime_inputs(&site.config, &site.modules);
+    let config_overlays = config_overlays(overlays);
+    let is_overlaid = |path: &Path| {
+        let physical = tola_input::normalize_existing_prefix(path);
+        config_overlays
             .iter()
-            .any(|dependency| dependency.path == site.config.config_path()
-                && dependency.digest == site.config_digest),
-        "site configuration changed while preparing Nu modules; run the command again"
-    );
+            .any(|(candidate, _)| tola_input::normalize_existing_prefix(candidate) == physical)
+    };
+    if let Some(source) = site.config.source() {
+        dependencies.retain(|path| {
+            !source
+                .sources()
+                .iter()
+                .any(|file| file.path() == path && is_overlaid(path))
+        });
+    }
+    let runtime = prepare_runtime(libraries, dependencies, context, overlays.to_vec())?;
+    if let Some(source) = site.config.source() {
+        ensure!(
+            source.sources().iter().all(|file| is_overlaid(file.path())
+                || runtime
+                    .dependencies()
+                    .iter()
+                    .any(|dependency| dependency.path == file.path()
+                        && dependency.digest == format!("blake3:{}", file.hash().to_hex())))
+                && source
+                    .changed_sources(&config_overlays, Some(token))?
+                    .is_none(),
+            "site configuration changed while preparing Nu modules; run the command again"
+        );
+    }
     inherited.site = Some(site_record(&site.config));
     inherited.modules = module_records(&site.modules, site.config.get_root(), None)?;
     if let Some(alias) = alias {
         inherited.module = Some(alias.to_owned());
     }
+    inherited.svg_fonts = Some(svg_fonts(&site.config, &resources, &site.modules));
     inherited.query = Some(query_operation(
         site.config.clone(),
-        crate::cli::config::build_resources(InputMode::new(scope, false)),
+        resources,
         token.clone(),
     ));
     Ok(runtime.with_host(inherited)?)
+}
+
+fn svg_fonts(
+    config: &ResolvedSiteConfig,
+    resources: &BuildResources,
+    modules: &BTreeMap<String, NuModule>,
+) -> Result<Arc<tola_typst::FontStore>, String> {
+    nu_font_options(config, resources, modules)
+        .map(tola_typst::FontStore::with_options)
+        .map(Arc::new)
+        .map_err(|error| error.to_string())
 }
 
 pub(super) fn host() -> Host {
@@ -596,6 +644,11 @@ pub(crate) fn hook_runner() -> tola_build::hooks::HookRunner {
                         root: module.root.clone(),
                         manifest: module.manifest.clone(),
                         entry: module.nu.as_ref().map(|nu| nu.entry.clone()),
+                        font_directories: module
+                            .typst
+                            .as_ref()
+                            .map(|typst| typst.fonts.clone())
+                            .unwrap_or_default(),
                         options: module.options.clone(),
                         assets_enabled: enabled.contains(name.as_str()),
                     },
@@ -611,6 +664,20 @@ pub(crate) fn hook_runner() -> tola_build::hooks::HookRunner {
             None => format!("hook:{stage}:{name}"),
         };
         let (submit, diagnostics) = diagnostic::collector(producer, ReportSources::new());
+        let reported = Arc::clone(&diagnostics);
+        let notify_failure = hook.failure_notifier();
+        let submit: tola_nu::SubmitDiagnostics = Arc::new(move |issues| {
+            submit(issues)?;
+            let has_error = reported
+                .lock()
+                .expect("diagnostic collector")
+                .as_ref()
+                .is_some_and(|issues| super::holds_error(issues));
+            if has_error {
+                notify_failure();
+            }
+            Ok(())
+        });
         let host = Host {
             site: Some(site_record(&config)),
             modules: module_records(&modules, directory, hook.assets)?,
@@ -620,12 +687,19 @@ pub(crate) fn hook_runner() -> tola_build::hooks::HookRunner {
         };
         let (libraries, dependencies) = runtime_inputs(&config, &modules);
         let completion = hook::run(&hook, libraries, dependencies, host);
-        token.ensure_active()?;
         let diagnostics = diagnostics
             .lock()
             .expect("diagnostic collector")
             .take()
             .unwrap_or_default();
+        if super::holds_error(&diagnostics) {
+            hook.observe_failure();
+            let error = completion
+                .err()
+                .filter(|error| !tola_build::cancellation::is_cancelled(error))
+                .unwrap_or_else(|| anyhow::anyhow!("hook `{name}` reported an error"));
+            return Err(DiagnosticError::attach(error, diagnostics).into());
+        }
         if let Err(error) = completion {
             return if diagnostics.is_empty() {
                 Err(error)
@@ -660,6 +734,7 @@ pub(super) fn run_action(
         .get(alias)
         .context("the calling module is missing")?;
     let mut call = CallContext::new(crate::cli::external::current_executable()?, Some(scope));
+    call.hook = CallContext::read()?.and_then(|parent| parent.hook);
     call.site = Some(config.as_ref().into());
     call.module = Some(Module {
         name: module.name.clone(),
@@ -683,6 +758,7 @@ pub(super) fn run_action(
     .with_host(Host {
         site: Some(site_record(&config)),
         modules: module_records(&modules, directory, None)?,
+        svg_fonts: Some(svg_fonts(&config, &resources, &modules)),
         query: Some(query_operation(config.clone(), resources, token.clone())),
         submit_diagnostics: Some(submit),
         ..call_host(Some(&call))?

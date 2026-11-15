@@ -14,6 +14,7 @@ mod session;
 pub use crate::hooks::HookExecution;
 pub use crate::mode::BuildMode;
 pub use crate::observation::{InputKind, InputObservation, InputPathScope, ObservedInputPath};
+pub use bootstrap::install_hooks;
 pub use diagnostic::{for_error as error_diagnostics, no_pages_diagnostic};
 pub(crate) use input::BuildAttemptInputs;
 pub use input::{BuildFailure, InputFreshness, configured_input_observation};
@@ -177,12 +178,20 @@ pub(crate) mod tests {
             config,
             producers.resources.input_mode(),
             &bundle,
+            &[],
         )?;
         let request = BuildRequest {
             mode,
             ..Default::default()
         };
-        build_site_inner(&site, &request, producers, |producers, _| {
+        let executor = crate::hooks::HookExecutor::new();
+        executor.configure(
+            executor.begin_attempt(),
+            site.config().build.par_hooks,
+            site.config().build.hook_jobs,
+            &producers.cancellation,
+        )?;
+        build_site_inner(&site, &request, producers, &executor, |producers, _| {
             if host.matches(site.config(), &producers.resources)
                 && host.font_inventory_is_fresh(&producers.cancellation)?
             {

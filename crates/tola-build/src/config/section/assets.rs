@@ -26,13 +26,13 @@ pub struct AssetsConfig {
     /// `{ source = "static/icons", url-prefix = "/icons" }`. Use `include` and `exclude`
     /// to choose which files to publish. Set `follow-file-symlinks = true` on a tree
     /// to publish the files its selected symbolic links point to.
-    #[config(collection = inline)]
+    #[config(collection = inline, fragment_with = crate::config::fragment::asset_trees)]
     pub trees: Vec<AssetTreeDeclaration>,
 
     /// Set the URL for each source file, for example
     /// `{ source = "static/robots.txt", url = "/robots.txt" }`. `source` is relative to the
     /// site root. `url` starts with `/`. For a file also matched by `trees`, `files` takes priority.
-    #[config(collection = inline)]
+    #[config(collection = inline, fragment_with = crate::config::fragment::asset_files)]
     pub files: Vec<AssetFileDeclaration>,
 }
 

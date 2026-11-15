@@ -32,25 +32,20 @@ pub(in crate::cli) fn run(
         output,
         cancellation,
     )?;
-    let config = loaded.into_config();
+    let mut config = loaded.into_config();
     let token = cancellation.token();
     let _guard = tola_build::build::SiteBuildLock::acquire(&config, &token, || {
         let _ = output.waiting_for_build();
     })?;
-    let site_root = config.get_root();
-    let vendor = config.vendor().path.as_deref();
+    let site_root = config.get_root().to_path_buf();
+    let site_root = site_root.as_path();
+    let vendor = config.vendor().path.clone();
+    let vendor = vendor.as_deref();
     let mut lock = InputLock::read(site_root)?.unwrap_or_default();
     let original = lock.clone();
 
-    for name in &update.names {
-        ensure!(
-            config.modules().contains_key(name) || config.icons().collections.contains_key(name),
-            "`{name}` is not a declared module or icon collection"
-        );
-    }
-    let icons = selected_icons(&config.icons().collections, &update.names)?;
     let selected = refreshable(config.modules(), &update.names, &original)?;
-    refresh_module_roots(
+    let mut roots = refresh_module_roots(
         site_root,
         mode,
         vendor,
@@ -100,6 +95,36 @@ pub(in crate::cli) fn run(
         },
     )
     .map_err(|error| refresh_failed(error.into()))?;
+    let remaining = config
+        .modules()
+        .iter()
+        .filter(|(alias, _)| !roots.contains_key(*alias))
+        .map(|(alias, source)| (alias.clone(), source.clone()))
+        .collect();
+    roots.extend(tola_module::inputs::record_module_roots(
+        site_root,
+        mode,
+        vendor,
+        &remaining,
+        &mut lock,
+        &tola_typst::BundleCancellation::from_flag(token.signal_flag()),
+    )?);
+    let modules = tola_module::module_set::load_modules_with_roots(
+        site_root,
+        config.modules(),
+        &roots,
+        mode,
+        &[],
+    )
+    .map_err(|error| refresh_failed(error.into()))?;
+    tola_build::modules::apply_module_icons(&mut config, &modules)?;
+    for name in &update.names {
+        ensure!(
+            config.modules().contains_key(name) || config.icons().collections.contains_key(name),
+            "`{name}` is not a declared module or icon collection"
+        );
+    }
+    let icons = selected_icons(&config.icons().collections, &update.names)?;
     let resources = crate::cli::config::build_resources(mode);
     tola_build::refresh_icon_collections(&config, &icons, &resources, &token, &mut lock, |name| {
         let verb = if mode.may_use_network() {
@@ -245,7 +270,7 @@ fn refresh_failed(error: Error) -> Error {
     if tola_build::cancellation::is_cancelled(&error) {
         return error;
     }
-    let mut diagnostics = match tola_module::source_diagnostic(&error) {
+    let mut diagnostics = match tola_module::error_diagnostic(&error) {
         Some(diagnostic) => vec![diagnostic],
         None => crate::cli::output::attached_or_fallback(&error, crate::codes::command::FAILED),
     };
@@ -296,11 +321,15 @@ fn selected_icons(
 ) -> Result<Vec<String>> {
     let mut selected = Vec::new();
     for (name, source) in collections {
-        if !names.is_empty() && !names.contains(name) {
+        let key: tola_icons::IconCollectionKey = name.parse()?;
+        let module_selected = key
+            .module()
+            .is_some_and(|module| names.iter().any(|name| name == module));
+        if !names.is_empty() && !names.contains(name) && !module_selected {
             continue;
         }
         ensure!(
-            names.is_empty() || matches!(source, IconCollectionSource::RemoteJson { .. }),
+            !names.contains(name) || matches!(source, IconCollectionSource::RemoteJson { .. }),
             "icon collection `{name}` is local site source and is never refreshed"
         );
         if matches!(source, IconCollectionSource::RemoteJson { .. }) {

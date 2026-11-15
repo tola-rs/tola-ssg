@@ -101,7 +101,7 @@ pub(super) fn reports(
 
 fn classify(error: &anyhow::Error, root: &Path) -> Option<Vec<Diagnostic>> {
     crate::compiler::error_diagnostics(error, root)
-        .or_else(|| tola_module::source_diagnostic(error).map(|diagnostic| vec![diagnostic]))
+        .or_else(|| tola_module::error_diagnostic(error).map(|diagnostic| vec![diagnostic]))
         .or_else(|| crate::icon::error_diagnostic(error, root).map(|diagnostic| vec![diagnostic]))
         .or_else(|| {
             crate::output::graph::error_diagnostic(error).map(|diagnostic| vec![diagnostic])
@@ -135,6 +135,41 @@ mod tests {
         assert!(diagnostics[0].message.contains("fonts/Arial.ttf"));
         assert!(!diagnostics[0].message.contains("/site"));
         assert!(!diagnostics[0].help.is_empty());
+    }
+
+    #[test]
+    fn invalid_manifest_keeps_its_diagnostic_before_compilation() {
+        let site = tempfile::tempdir().unwrap();
+        let root = site.path();
+        let directory = root.join("theme");
+        std::fs::create_dir(&directory).unwrap();
+        let manifest = directory.join("tola-module.toml");
+        std::fs::write(&manifest, "# Module\n[buid]\n").unwrap();
+        let config =
+            crate::config::tests::load_test_config(root, "[modules.theme]\npath = 'theme'\n");
+
+        let Err(failure) = super::super::build_site(&config, crate::build::BuildMode::Production)
+        else {
+            panic!("the module manifest should fail before compilation");
+        };
+        let error = anyhow::Error::new(failure);
+        let [diagnostic] = tola_diagnostic::attached(&error).unwrap() else {
+            panic!("expected a single manifest diagnostic");
+        };
+        assert_eq!(diagnostic.code, tola_diagnostic::codes::module::MANIFEST);
+        assert!(diagnostic.message.contains("`buid`"));
+        assert!(
+            diagnostic
+                .help
+                .iter()
+                .any(|help| help.message.contains("`build`"))
+        );
+        let location = diagnostic.location.as_ref().unwrap();
+        assert_eq!(
+            location.file.as_deref(),
+            Some(manifest.canonicalize().unwrap().as_path())
+        );
+        assert_eq!(location.range.unwrap().start.line, 1);
     }
 
     /// A build reads no vendored input while a stopped replacement waits for `tola vendor`.

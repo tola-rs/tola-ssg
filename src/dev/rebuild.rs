@@ -14,13 +14,15 @@ use crate::dev::watch::{
     FileChangeBatch, FileChangeSource, ProducerKind, RebuildScope, WatchError, WatchRequirements,
     append_observed_paths, append_typst_inputs, watch_requirements_from_observation,
 };
-use tola_build::build::{BuildTrigger, InputObservation, RevisionCheck};
+use tola_build::build::{BuildSession, BuildTrigger, InputObservation, RevisionCheck};
+use tola_build::cancellation::BuildCanceller;
 use tola_build::config::ResolvedSiteConfig;
 use tola_diagnostic::{Diagnostic, DiagnosticCode, Severity};
 
 #[derive(Default)]
 struct DevFailureWatches {
     latest_failed_paths: BTreeSet<PathBuf>,
+    config_failed_paths: BTreeSet<PathBuf>,
     latest_failed_packages: Vec<tola_typst::PackageCheck>,
     latest_failed_observed_paths: Vec<tola_build::build::ObservedInputPath>,
     typst_recovery_roots: Vec<PathBuf>,
@@ -109,6 +111,12 @@ impl DevFailureWatches {
         let mut requirements = watch_requirements_from_observation(published);
         append_typst_inputs(&mut requirements, paths, package_checks);
         append_observed_paths(&mut requirements, &self.latest_failed_observed_paths);
+        requirements.observe_paths(
+            ProducerKind::Modules,
+            tola_build::build::InputPathScope::Exact,
+            false,
+            self.config_failed_paths.iter().cloned(),
+        );
         if let Some(inputs) = &self.module_hook_inputs {
             requirements.add_module_hook_inputs(inputs);
         }
@@ -211,8 +219,7 @@ pub(super) struct RebuildLoop {
     changes: FileChangeSource,
     reload: Option<ReloadTransport>,
     shutdown: Cancellation,
-    build_session: tola_build::build::BuildSession,
-    input_mode: tola_input::InputMode,
+    build_session: BuildSession,
     failure_watches: DevFailureWatches,
     /// The diagnostics the installed revision has, plus any an unpublished attempt added.
     ///
@@ -237,7 +244,7 @@ pub(super) struct RebuildStartup {
     pub(super) dev: DevConfig,
     pub(super) disable_hook_reuse: bool,
     pub(super) config_loader: ConfigLoader,
-    pub(super) resources: tola_build::BuildResources,
+    pub(super) build_session: BuildSession,
     pub(super) sites: CurrentSite,
     pub(super) reload: Option<ReloadTransport>,
     pub(super) shutdown: Cancellation,
@@ -255,8 +262,6 @@ impl RebuildLoop {
             input.output.log().map(crate::cli::log::LogFile::path),
         )
         .await?;
-        let input_mode = input.resources.input_mode();
-        let build_session = tola_build::build::BuildSession::with_resources(input.resources);
         let (publication_sender, publication_requests) = tokio::sync::mpsc::channel(8);
         Ok(Self {
             initial_config: input.initial_config,
@@ -268,8 +273,7 @@ impl RebuildLoop {
             changes,
             reload: input.reload,
             shutdown: input.shutdown,
-            build_session,
-            input_mode,
+            build_session: input.build_session,
             failure_watches: DevFailureWatches::default(),
             reported_diagnostics: Vec::new(),
             round: 0,
@@ -409,7 +413,10 @@ impl RebuildLoop {
                     revision
                         .as_ref()
                         .map(|site| site.manifest().revision().as_str()),
-                    &self.attempt_diagnostics,
+                    &retained_with_previous_warnings(
+                        &self.reported_diagnostics,
+                        std::mem::take(&mut self.attempt_diagnostics),
+                    ),
                 )?;
             }
             // Release deferred hook events even if failure preceded worker startup; paths
@@ -443,31 +450,38 @@ impl RebuildLoop {
     async fn await_task<T>(
         &mut self,
         mut build: tokio::task::JoinHandle<T>,
-        canceller: &tola_build::cancellation::BuildCanceller,
+        (canceller, hook_epoch): (&BuildCanceller, Option<u64>),
         config: &ResolvedSiteConfig,
         changed_paths: &[PathBuf],
         rebuild_scope: RebuildScope,
     ) -> Result<RoundAwait<T>> {
         let mut superseding: Option<RebuildRequest> = None;
         let mut cancellation_started = None;
+        let cancel = || {
+            if let Some(epoch) = hook_epoch {
+                self.build_session.hook_executor().invalidate(epoch);
+            }
+            canceller.cancel();
+        };
         let completion = loop {
             tokio::select! {
                 biased;
                 _ = self.shutdown.cancelled() => {
-                    canceller.cancel();
+                    cancel();
                     break build.await;
                 }
                 batch = self.changes.next(config) => {
                     let batch = match batch {
                         Ok(batch) => batch,
                         Err(error) => {
-                            canceller.cancel();
+                            cancel();
                             let _ = build.await;
                             return Err(error.into());
                         }
                     };
                     if superseding.is_none() {
                         cancellation_started = Some(std::time::Instant::now());
+                        cancel();
                         superseding = Some(RebuildRequest {
                             paths: changed_paths.to_vec(),
                             rebuild_scope,
@@ -475,7 +489,6 @@ impl RebuildLoop {
                     }
                     let superseding = superseding.as_mut().expect("initialized above");
                     superseding.merge_batch(batch);
-                    canceller.cancel();
                 }
                 completion = &mut build => break completion,
             }
@@ -510,7 +523,7 @@ impl RebuildLoop {
 
     /// Resolve the configuration this round builds with: the reloaded candidate when it is valid
     /// and changes nothing the running server owns, otherwise the current revision's.
-    fn resolve_round_config(
+    async fn resolve_round_config(
         &mut self,
         current_config: &Arc<ResolvedSiteConfig>,
     ) -> Result<Option<RoundConfiguration>> {
@@ -518,6 +531,13 @@ impl RebuildLoop {
         let candidate = match self.config_loader.load_candidate() {
             Ok(candidate) => candidate,
             Err(error) => {
+                self.failure_watches.config_failed_paths = error
+                    .chain()
+                    .find_map(|cause| cause.downcast_ref::<tola_build::config::ConfigSourceError>())
+                    .map(|error| error.paths().iter().cloned().collect())
+                    .unwrap_or_default();
+                self.reconfigure_failure_watches(current_config, current_config)
+                    .await?;
                 let diagnostics = tola_diagnostic::attached(&error)
                     .map(|diagnostics| diagnostics.to_vec())
                     .unwrap_or_else(|| {
@@ -533,6 +553,7 @@ impl RebuildLoop {
                 return Ok(None);
             }
         };
+        self.failure_watches.config_failed_paths.clear();
         if let Some(candidate) = candidate.as_ref()
             && let Some(change) = invocation_config_change(
                 InvocationSettings {
@@ -597,9 +618,9 @@ impl RebuildLoop {
         // A closure cannot return from `rebuild`, so this is the one place an awaited task's
         // outcome becomes the round's own outcome.
         macro_rules! round_await {
-            ($task:expr, $canceller:expr, $config:expr, $paths:expr, $scope:expr) => {
+            ($task:expr, $cancellation:expr, $config:expr, $paths:expr, $scope:expr) => {
                 match self
-                    .await_task($task, $canceller, $config, $paths, $scope)
+                    .await_task($task, $cancellation, $config, $paths, $scope)
                     .await?
                 {
                     RoundAwait::Finished(value) => value,
@@ -637,7 +658,7 @@ impl RebuildLoop {
             sample_paths = ?sample,
             "starting site build"
         );
-        let Some(round_config) = self.resolve_round_config(&current_config)? else {
+        let Some(round_config) = self.resolve_round_config(&current_config).await? else {
             return Ok(None);
         };
         let RoundConfiguration { config, candidate } = round_config;
@@ -649,21 +670,34 @@ impl RebuildLoop {
 
         // Prepare one hook watch before staging any potential module-hook path.
         // The attempt below consumes the same watch instead of preparing it again.
+        let canceller = BuildCanceller::new();
         let hook_watch = if config.modules().is_empty() {
             None
         } else {
-            match tola_build::modules::prepare_hook_watch(
+            let watch_config = Arc::clone(&config);
+            let mode = self.build_session.input_mode();
+            let cancellation = canceller.token();
+            let preparation = tokio::task::spawn_blocking(move || {
+                tola_build::modules::prepare_hook_watch(&watch_config, mode, &cancellation)
+            });
+            match round_await!(
+                preparation,
+                (&canceller, None),
                 &config,
-                self.input_mode,
-                &Default::default(),
+                &changed_paths,
+                rebuild_scope
             ) {
-                Ok(watch) => Some(watch),
-                Err(error) => {
+                Ok(Ok(watch)) => Some(watch),
+                Ok(Err(error)) => {
                     self.failure_watches.build_task_failed(&config);
                     self.reconfigure_failure_watches(&current_config, &config)
                         .await?;
                     self.report_build_failure(&error);
                     return Ok(None);
+                }
+                Err(error) => {
+                    return Err(anyhow::Error::new(error)
+                        .context("Tola could not finish preparing module hook watches"));
                 }
             }
         };
@@ -686,7 +720,6 @@ impl RebuildLoop {
 
         let reuse_capabilities =
             producer_reuse_capabilities(rebuild_scope, ProducerReuseCoverage::of(&self.changes));
-        let canceller = tola_build::cancellation::BuildCanceller::new();
         let request = tola_build::build::BuildRequest {
             mode: tola_build::build::BuildMode::Development,
             trigger: match trigger {
@@ -714,6 +747,7 @@ impl RebuildLoop {
         } else {
             self.build_session.prepare(Arc::clone(&config), request)
         };
+        let attempt_cancellation = (&canceller, Some(attempt.hook_epoch()));
         let prepare_elapsed = rebuild_started.elapsed();
         let build_started = std::time::Instant::now();
         let lock_config = Arc::clone(&config);
@@ -725,7 +759,13 @@ impl RebuildLoop {
             })
         });
         let build_lock =
-            match round_await!(locking, &canceller, &config, &changed_paths, rebuild_scope) {
+            match round_await!(
+                locking,
+                attempt_cancellation,
+                &config,
+                &changed_paths,
+                rebuild_scope
+            ) {
                 Ok(Ok(lock)) => lock,
                 Ok(Err(error)) => {
                     self.report_build_failure(&anyhow::Error::new(error));
@@ -733,16 +773,14 @@ impl RebuildLoop {
                 }
                 Err(error) => {
                     self.output.record_failure(&anyhow::Error::new(error));
-                    self.report_diagnostics(vec![
-                    Diagnostic::new(
-                        crate::codes::build::TASK,
-                        Severity::Error,
-                        "Tola could not wait for another build of this site",
-                    )
-                    .with_help(
-                        "Wait for the other `tola` command to finish, then save a file to rebuild",
-                    ),
-                ]);
+                    self.report_diagnostics(vec![Diagnostic::new(
+                    crate::codes::build::TASK,
+                    Severity::Error,
+                    "Tola could not wait for another build of this site",
+                )
+                .with_help(
+                    "Wait for the other `tola` command to finish, then save a file to rebuild",
+                )]);
                     return Ok(None);
                 }
             };
@@ -752,7 +790,7 @@ impl RebuildLoop {
         let build = tokio::task::spawn_blocking(move || build_round.in_scope(|| attempt.run()));
         let built = match round_await!(
             build,
-            &canceller,
+            attempt_cancellation,
             &watch_config,
             &changed_paths,
             rebuild_scope
@@ -856,7 +894,7 @@ impl RebuildLoop {
         });
         let (checked, revision_elapsed, freshness_elapsed, diagnostics) = round_await!(
             preparing,
-            &canceller,
+            attempt_cancellation,
             &effective_config,
             &changed_paths,
             rebuild_scope
@@ -1237,7 +1275,8 @@ impl ProducerReuseCoverage {
 }
 
 /// Inputs whose stale evidence requires a fresh observation of the whole site.
-const STALE_INVENTORY_INPUTS: [tola_build::build::InputKind; 4] = [
+const STALE_INVENTORY_INPUTS: [tola_build::build::InputKind; 5] = [
+    tola_build::build::InputKind::Configuration,
     tola_build::build::InputKind::ModuleManifests,
     tola_build::build::InputKind::ContentInventory,
     tola_build::build::InputKind::ConfiguredAssets,
@@ -1342,11 +1381,15 @@ mod tests {
                 crate::terminal::Terminal::new(clap::ColorChoice::Never, false, None),
                 None,
             );
+            let build_session = super::BuildSession::with_resources(
+                tola_build::BuildResources::new().with_input_scope(tola_input::InputScope::Pure),
+            );
             let hooks = crate::dev::hooks::HookQueue::start(
                 output.clone(),
                 None,
                 cancellation.clone(),
                 crate::dev::events::Events(false),
+                build_session.hook_executor().clone(),
             )
             .unwrap();
             let mut rebuilding = super::RebuildLoop::start(super::RebuildStartup {
@@ -1355,8 +1398,7 @@ mod tests {
                 dev,
                 disable_hook_reuse: false,
                 config_loader,
-                resources: tola_build::BuildResources::new()
-                    .with_input_scope(tola_input::InputScope::Pure),
+                build_session,
                 sites: crate::dev::site::CurrentSite::new(),
                 reload: None,
                 shutdown: cancellation,

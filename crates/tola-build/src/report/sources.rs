@@ -59,7 +59,7 @@ impl ReportSource {
                 "an editor path must be absolute".into(),
             ));
         }
-        self.evidence = self.evidence.with_editor_path(path);
+        self.evidence = self.evidence.with_editor_path(path).with_sha256(&self.text);
         Ok(self)
     }
 
@@ -165,6 +165,7 @@ impl ReportSources {
         let column = source.text()[line_start..start].chars().count() + 1;
         Ok((
             Some(Location {
+                file: None,
                 path: path.to_owned(),
                 line: Some(location.range.start.line + 1),
                 column: Some(column),

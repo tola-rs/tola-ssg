@@ -190,18 +190,22 @@ impl HooksConfig {
     pub(crate) fn apply_site_options(&mut self, options: &toml::Table) -> anyhow::Result<()> {
         fn select(
             enable: &mut bool,
+            option_disabled: &mut bool,
             key: Option<&OptionPath>,
             options: &toml::Table,
             stage: HookStage,
             name: &str,
         ) -> anyhow::Result<()> {
-            *enable = tola_module::options::enabled_by(*enable, key, options)
+            let enabled = tola_module::options::enabled_by(*enable, key, options)
                 .map_err(|message| anyhow::anyhow!("{}: {message}", hook_identity(stage, name)))?;
+            *option_disabled |= *enable && !enabled;
+            *enable = enabled;
             Ok(())
         }
         for hook in &mut self.before_build {
             select(
                 &mut hook.enable,
+                &mut hook.option_disabled,
                 hook.enabled_by.as_ref(),
                 options,
                 HookStage::BeforeBuild,
@@ -211,6 +215,7 @@ impl HooksConfig {
         for hook in &mut self.generate_outputs {
             select(
                 &mut hook.enable,
+                &mut hook.option_disabled,
                 hook.enabled_by.as_ref(),
                 options,
                 HookStage::GenerateOutputs,
@@ -220,6 +225,7 @@ impl HooksConfig {
         for hook in &mut self.after_publish {
             select(
                 &mut hook.enable,
+                &mut hook.option_disabled,
                 hook.enabled_by.as_ref(),
                 options,
                 HookStage::AfterPublish,
@@ -372,11 +378,22 @@ pub struct BeforeBuildHookConfig {
     #[serde(skip)]
     #[config(skip)]
     pub origin: Option<ModuleHookOrigin>,
+    /// The module-local name, when this hook belongs to a module.
+    #[serde(skip)]
+    #[config(skip)]
+    pub declared_name: Option<String>,
+    /// Whether the hook was disabled by its option.
+    #[serde(skip)]
+    #[config(skip)]
+    pub option_disabled: bool,
     /// Set `false` to turn off this hook. If omitted, the hook is enabled.
     pub enable: bool,
     /// Name shown in progress and diagnostics. Choose a nonempty name with no whitespace,
     /// unique within this site or module instance and stage.
     pub name: String,
+    /// Execution batch within this site or module instance and stage. Defaults to 0.
+    /// Lower values finish first; equal values may run together and must be independent.
+    pub order: u64,
     /// Command and arguments to run from the site root. Use `argv` or `nu`. To run a shell
     /// script, name the shell explicitly. Write files where the site will read them.
     #[config(collection = inline)]
@@ -392,13 +409,16 @@ pub struct BeforeBuildHookConfig {
     /// Run only when this `[options]` key is `true`, for example `images.enable`.
     /// Omit this setting to run without checking an option.
     #[serde(rename = "enabled-by", skip_serializing_if = "Option::is_none")]
+    #[config(fragment_with = crate::config::fragment::option_path)]
     pub enabled_by: Option<OptionPath>,
     /// If omitted or set to `"run"`, `tola dev` runs the hook on each build. Use `"skip"`
     /// to skip it during development.
     #[config(values = DevParticipation::VALUES)]
+    #[config(fragment_with = tola_config::validate_value::<DevParticipation>)]
     pub dev: DevParticipation,
     /// Extra site-relative inputs selected by `include` and `exclude` patterns.
     #[serde(rename = "rerun-on")]
+    #[config(fragment_with = crate::config::fragment::rerun_on)]
     pub rerun_on: RerunOn,
     /// Files or directories the hook's command generates, relative to the site root; they must not
     /// be inside `build.publish-dir` or `.tola`. After the hook's command, Tola checks that each
@@ -514,11 +534,22 @@ pub struct OutputCommandConfig {
     #[serde(skip)]
     #[config(skip)]
     pub origin: Option<ModuleHookOrigin>,
+    /// The module-local name, when this hook belongs to a module.
+    #[serde(skip)]
+    #[config(skip)]
+    pub declared_name: Option<String>,
+    /// Whether the hook was disabled by its option.
+    #[serde(skip)]
+    #[config(skip)]
+    pub option_disabled: bool,
     /// Set `false` to turn off this hook. If omitted, the hook is enabled.
     pub enable: bool,
     /// Name shown in progress and diagnostics. Choose a nonempty name with no whitespace,
     /// unique within this site or module instance and stage.
     pub name: String,
+    /// Execution batch within this site or module instance and stage. Defaults to 0.
+    /// Lower values finish first; equal values may run together and must be independent.
+    pub order: u64,
     /// Command and arguments to run from the site root. Use `argv` or `nu`. Read compiled pages
     /// and assets from `hook.inputDir`. Write files to `hook.outputDir` using
     /// paths relative to the publish directory.
@@ -535,20 +566,23 @@ pub struct OutputCommandConfig {
     /// Run only when this `[options]` key is `true`, for example `images.enable`.
     /// Omit this setting to run without checking an option.
     #[serde(rename = "enabled-by", skip_serializing_if = "Option::is_none")]
+    #[config(fragment_with = crate::config::fragment::option_path)]
     pub enabled_by: Option<OptionPath>,
     /// If omitted or set to `"run"`, `tola dev` runs the hook on each build. Use `"reuse"`
     /// to use the last successful outputs when the inputs are unchanged, or `"skip"`
     /// to skip the hook during development.
     #[config(values = DevParticipation::REUSE_VALUES)]
+    #[config(fragment_with = tola_config::validate_value::<DevParticipation>)]
     pub dev: DevParticipation,
     /// Extra site-relative inputs selected by `include` and `exclude` patterns. For
     /// `dev = "reuse"`, the selected inputs are also part of the hook's fingerprint.
     #[serde(rename = "rerun-on")]
+    #[config(fragment_with = crate::config::fragment::rerun_on)]
     pub rerun_on: RerunOn,
     /// Required output paths relative to `build.publish-dir`, for example
     /// `{ file = "build.txt" }` or `{ tree = "assets/search" }`. Written files must match
     /// these declarations. Keep them outside `_tola` and use unique output paths.
-    #[config(collection = inline)]
+    #[config(collection = inline, fragment_with = crate::config::fragment::command_outputs)]
     pub outputs: Vec<CommandOutput>,
 }
 
@@ -667,11 +701,22 @@ pub struct AfterPublishHookConfig {
     #[serde(skip)]
     #[config(skip)]
     pub origin: Option<ModuleHookOrigin>,
+    /// The module-local name, when this hook belongs to a module.
+    #[serde(skip)]
+    #[config(skip)]
+    pub declared_name: Option<String>,
+    /// Whether the hook was disabled by its option.
+    #[serde(skip)]
+    #[config(skip)]
+    pub option_disabled: bool,
     /// Set `false` to turn off this hook. If omitted, the hook is enabled.
     pub enable: bool,
     /// Name shown in progress and diagnostics. Choose a nonempty name with no whitespace,
     /// unique within this site or module instance and stage.
     pub name: String,
+    /// Execution batch within this site or module instance and stage. Defaults to 0.
+    /// Lower values finish first; equal values may run together and must be independent.
+    pub order: u64,
     /// Command and arguments to run from the site root. Use `argv` or `nu`.
     /// Read the published files from `hook.inputDir`. If the command fails, the site is
     /// already published.
@@ -688,13 +733,16 @@ pub struct AfterPublishHookConfig {
     /// Run only when this `[options]` key is `true`, for example `images.enable`.
     /// Omit this setting to run without checking an option.
     #[serde(rename = "enabled-by", skip_serializing_if = "Option::is_none")]
+    #[config(fragment_with = crate::config::fragment::option_path)]
     pub enabled_by: Option<OptionPath>,
     /// If omitted or set to `"skip"`, `tola dev` skips the hook. Use `"run"` to run it
     /// after a successful development build.
     #[config(values = DevParticipation::VALUES)]
+    #[config(fragment_with = tola_config::validate_value::<DevParticipation>)]
     pub dev: DevParticipation,
     /// Extra site-relative inputs selected by `include` and `exclude` patterns.
     #[serde(rename = "rerun-on")]
+    #[config(fragment_with = crate::config::fragment::rerun_on)]
     pub rerun_on: RerunOn,
 }
 
@@ -781,8 +829,11 @@ impl Default for BeforeBuildHookConfig {
     fn default() -> Self {
         Self {
             origin: None,
+            declared_name: None,
+            option_disabled: false,
             enable: true,
             name: String::new(),
+            order: 0,
             argv: None,
             nu: None,
             args: None,
@@ -798,8 +849,11 @@ impl Default for OutputCommandConfig {
     fn default() -> Self {
         Self {
             origin: None,
+            declared_name: None,
+            option_disabled: false,
             enable: true,
             name: String::new(),
+            order: 0,
             argv: None,
             nu: None,
             args: None,
@@ -815,8 +869,11 @@ impl Default for AfterPublishHookConfig {
     fn default() -> Self {
         Self {
             origin: None,
+            declared_name: None,
+            option_disabled: false,
             enable: true,
             name: String::new(),
+            order: 0,
             argv: None,
             nu: None,
             args: None,
@@ -980,6 +1037,24 @@ fn validate_site_relative(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hook_order_is_nonnegative_in_every_stage() {
+        for stage in ["before-build", "generate-outputs", "after-publish"] {
+            let source = format!("[[{stage}]]\nname = 'one'\norder = 7\n");
+            let hooks: HooksConfig = toml::from_str(&source).unwrap();
+            let order = match stage {
+                "before-build" => hooks.before_build[0].order,
+                "generate-outputs" => hooks.generate_outputs[0].order,
+                _ => hooks.after_publish[0].order,
+            };
+            assert_eq!(order, 7);
+            for value in ["-1", "1.5", "true", "'1'"] {
+                let source = format!("[[{stage}]]\nname = 'one'\norder = {value}\n");
+                assert!(toml::from_str::<HooksConfig>(&source).is_err());
+            }
+        }
+    }
     use crate::config::tests::diagnostic_mentioning;
 
     #[test]
@@ -1117,7 +1192,7 @@ rerun-on = { include = ["../committed"] }
         crate::config::loading::validate_hook_output_boundaries(
             &config,
             Path::new("/site"),
-            Path::new("/site/tola.toml"),
+            [Path::new("/site/tola.toml")],
             Path::new("/site/public"),
             None,
             None,
@@ -1324,7 +1399,7 @@ rerun-on = { include = ["/src"], exclude = [{ project = "../templates" }] }
         crate::config::loading::validate_hook_output_boundaries(
             &hooks,
             root,
-            &root.join("tola.toml"),
+            [root.join("tola.toml").as_path()],
             &root.join("public"),
             None,
             None,

@@ -60,11 +60,18 @@ fn warn_undefined_name(
     if could_supply_unknown(names, occurrence.scope, range.start) {
         return;
     }
+    let in_library = library.global.scope().get(name).is_some();
+    let replacement = (!in_library && !matches!(name, "none" | "auto" | "false" | "true"))
+        .then(|| super::names::replacement(names, occurrence, library))
+        .flatten();
     hints.push(Hint {
         code: codes::editor::UNKNOWN_MATH_VARIABLE,
         message: format!("the math name `{name}` is not defined"),
         note: None,
-        help: Some(help(name, library.global.scope().get(name).is_some())),
+        help: Some(replacement.map_or_else(
+            || help(name, in_library),
+            |name| format!("Check whether you meant `{name}`"),
+        )),
         span: range,
         cause: Some(DiagnosticCause::UnknownVariable {
             name: name.to_owned(),
@@ -156,6 +163,7 @@ mod tests {
                 Some("alhpa".to_owned())
             )]
         );
+        assert!(source_messages("$alhpa$")[0].1.contains("`alpha`"));
         assert_eq!(
             pass_findings("$none$"),
             [(

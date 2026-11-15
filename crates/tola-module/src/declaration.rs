@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::action::Action;
+use crate::fragment::{FragmentError, FragmentStep, optional_table, read_fields, read_fragment};
 
 /// A module selected by the site.
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -16,6 +17,8 @@ pub struct ModuleDeclaration {
     pub options: toml::Table,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assets: Option<ModuleAssetPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icons: Option<crate::icons::Icons>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -36,32 +39,32 @@ pub struct TarballSource {
 }
 
 impl<'de> Deserialize<'de> for TarballSource {
-    fn deserialize<D: serde::Deserializer<'de>>(
-        deserializer: D,
-    ) -> std::result::Result<Self, D::Error> {
-        #[derive(Deserialize)]
-        #[serde(
-            deny_unknown_fields,
-            expecting = "a tarball table with `url` or `path`, and optional `sha256`"
-        )]
-        struct Fields {
-            url: Option<String>,
-            path: Option<PathBuf>,
-            sha256: Option<tola_input::Sha256Digest>,
-        }
-        let fields = Fields::deserialize(deserializer)?;
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Self::try_from(read_fields::<TarballSourceFields, _>(deserializer)?)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(expecting = "a tarball table with `url` or `path`, and optional `sha256`")]
+struct TarballSourceFields {
+    url: Option<String>,
+    path: Option<PathBuf>,
+    sha256: Option<tola_input::Sha256Digest>,
+}
+
+impl TryFrom<TarballSourceFields> for TarballSource {
+    type Error = &'static str;
+
+    fn try_from(fields: TarballSourceFields) -> Result<Self, Self::Error> {
         let location = match (fields.url, fields.path) {
             (Some(url), None) => tola_input::TarballLocation::Url { url },
             (None, Some(path)) if !path.as_os_str().is_empty() => {
                 tola_input::TarballLocation::File { path }
             }
-            _ => {
-                return Err(serde::de::Error::custom(
-                    "choose exactly one nonempty `tarball.url` or `tarball.path`",
-                ));
-            }
+            _ => return Err("choose exactly one nonempty `tarball.url` or `tarball.path`"),
         };
-        location.validate().map_err(serde::de::Error::custom)?;
+        location.validate()?;
         Ok(Self {
             location,
             sha256: fields.sha256,
@@ -98,67 +101,103 @@ impl Default for ModuleDeclaration {
             },
             options: toml::Table::new(),
             assets: None,
+            icons: None,
         }
     }
 }
 
 impl<'de> Deserialize<'de> for ModuleDeclaration {
-    fn deserialize<D: serde::Deserializer<'de>>(
-        deserializer: D,
-    ) -> std::result::Result<Self, D::Error> {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Fields {
-            path: Option<PathBuf>,
-            git: Option<GitSource>,
-            tarball: Option<TarballSource>,
-            #[serde(default, deserialize_with = "crate::options::deserialize_options")]
-            options: toml::Table,
-            assets: Option<ModuleAssetPolicy>,
-        }
-        let fields = Fields::deserialize(deserializer)?;
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Self::try_from(read_fields::<ModuleDeclarationFields, _>(deserializer)?)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Deserialize)]
+struct ModuleDeclarationFields {
+    path: Option<PathBuf>,
+    #[serde(default, deserialize_with = "optional_table")]
+    git: Option<GitSourceFields>,
+    #[serde(default, deserialize_with = "optional_table")]
+    tarball: Option<TarballSourceFields>,
+    options: Option<toml::Table>,
+    #[serde(default, deserialize_with = "optional_table")]
+    assets: Option<ModuleAssetFields>,
+    icons: Option<toml::Value>,
+}
+
+impl TryFrom<ModuleDeclarationFields> for ModuleDeclaration {
+    type Error = String;
+
+    fn try_from(fields: ModuleDeclarationFields) -> Result<Self, Self::Error> {
+        let mut options = fields.options.unwrap_or_default();
+        crate::options::normalize_options(&mut options).map_err(|error| error.to_string())?;
         let source = match (fields.path, fields.git, fields.tarball) {
-            (Some(path), None, None) => {
-                if path.as_os_str().is_empty() {
-                    return Err(serde::de::Error::custom("`path` must not be empty"));
-                }
+            (Some(path), None, None) if !path.as_os_str().is_empty() => {
                 ModuleSource::Local { path }
             }
-            (None, Some(git), None) => ModuleSource::Git { git },
-            (None, None, Some(tarball)) => ModuleSource::Tarball { tarball },
-            _ => {
-                return Err(serde::de::Error::custom(
-                    "choose exactly one of `path`, `git`, or `tarball`",
-                ));
-            }
+            (Some(_), None, None) => return Err("`path` must not be empty".into()),
+            (None, Some(git), None) => ModuleSource::Git {
+                git: git.try_into()?,
+            },
+            (None, None, Some(tarball)) => ModuleSource::Tarball {
+                tarball: tarball.try_into()?,
+            },
+            _ => return Err("choose exactly one of `path`, `git`, or `tarball`".into()),
         };
         Ok(Self {
             source,
-            options: fields.options,
-            assets: fields.assets,
+            options,
+            assets: fields.assets.map(Into::into),
+            icons: fields
+                .icons
+                .map(toml::Value::try_into)
+                .transpose()
+                .map_err(|error: toml::de::Error| error.to_string())?,
         })
     }
 }
 
-impl<'de> Deserialize<'de> for GitSource {
-    fn deserialize<D: serde::Deserializer<'de>>(
-        deserializer: D,
-    ) -> std::result::Result<Self, D::Error> {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Fields {
-            url: String,
-            tag: Option<String>,
-            branch: Option<String>,
-            rev: Option<String>,
-            subdir: Option<PathBuf>,
+impl ModuleDeclaration {
+    /// Check authored fields before other configuration fragments fill in missing fields.
+    pub fn validate_fragment(value: &toml::Value) -> Result<(), FragmentError> {
+        let fields = read_fragment::<ModuleDeclarationFields>(value)?;
+        if let Some(icons) = fields.icons {
+            crate::icons::Icons::validate_fragment(&icons)
+                .map_err(|error| error.at(FragmentStep::Key("icons".into())))?;
         }
-        let fields = Fields::deserialize(deserializer)?;
+        if let Some(mut options) = fields.options {
+            crate::options::normalize_options(&mut options)
+                .map_err(|error| error.at(FragmentStep::Key("options".into())))?;
+        }
+        Ok(())
+    }
+}
+
+impl<'de> Deserialize<'de> for GitSource {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Self::try_from(read_fields::<GitSourceFields, _>(deserializer)?)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Deserialize)]
+struct GitSourceFields {
+    url: Option<String>,
+    tag: Option<String>,
+    branch: Option<String>,
+    rev: Option<String>,
+    subdir: Option<PathBuf>,
+}
+
+impl TryFrom<GitSourceFields> for GitSource {
+    type Error = &'static str;
+
+    fn try_from(fields: GitSourceFields) -> Result<Self, Self::Error> {
         Ok(Self {
-            url: validate_git(fields.url).map_err(serde::de::Error::custom)?,
-            revision: select_revision(fields.tag, fields.branch, fields.rev)
-                .map_err(serde::de::Error::custom)?,
-            subdir: select_subdir(fields.subdir).map_err(serde::de::Error::custom)?,
+            url: validate_git(fields.url.ok_or("declare `git.url`")?)?,
+            revision: select_revision(fields.tag, fields.branch, fields.rev)?,
+            subdir: select_subdir(fields.subdir)?,
         })
     }
 }
@@ -207,11 +246,31 @@ fn select_subdir(subdir: Option<PathBuf>) -> std::result::Result<PathBuf, &'stat
 }
 
 /// Project selection and replacement of one module's published assets.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ModuleAssetPolicy {
     pub enable: bool,
     pub replace: BTreeMap<String, PathBuf>,
+}
+
+#[derive(Deserialize)]
+struct ModuleAssetFields {
+    enable: Option<bool>,
+    replace: Option<BTreeMap<String, PathBuf>>,
+}
+
+impl From<ModuleAssetFields> for ModuleAssetPolicy {
+    fn from(fields: ModuleAssetFields) -> Self {
+        Self {
+            enable: fields.enable.unwrap_or(true),
+            replace: fields.replace.unwrap_or_default(),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ModuleAssetPolicy {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        read_fields::<ModuleAssetFields, _>(deserializer).map(Into::into)
+    }
 }
 
 impl Default for ModuleAssetPolicy {
@@ -366,6 +425,7 @@ pub fn is_relative_path(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fragment::FragmentErrorKind;
 
     #[test]
     fn git_declaration_round_trips_its_nested_source() {
@@ -399,6 +459,50 @@ options = { enabled = true }"#,
             assert!(
                 toml::from_str::<ModuleDeclaration>(source).is_err(),
                 "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn module_fragments_defer_required_fields_and_reject_unknown_nested_keys() {
+        for source in [
+            "git = { tag = 'v1' }",
+            "tarball = { sha256 = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef' }",
+            "[options]\n'posted.on' = 2026-11-15",
+        ] {
+            let value: toml::Value = toml::from_str(source).unwrap();
+            ModuleDeclaration::validate_fragment(&value).unwrap();
+            assert!(toml::from_str::<ModuleDeclaration>(source).is_err());
+        }
+
+        let source = "git = { url = 'https://example.org/theme', 'wrong.key' = true }";
+        let value = toml::from_str(source).unwrap();
+        let error = ModuleDeclaration::validate_fragment(&value).unwrap_err();
+        assert!(matches!(error.kind, FragmentErrorKind::UnknownKey));
+        assert_eq!(
+            error.path,
+            [
+                FragmentStep::Key("git".into()),
+                FragmentStep::Key("wrong.key".into()),
+            ]
+        );
+        assert!(toml::from_str::<ModuleDeclaration>(source).is_err());
+    }
+
+    #[test]
+    fn module_fragment_keeps_written_types() {
+        for (source, path) in [
+            ("git = { tag = 2026-11-15 }", vec!["git", "tag"]),
+            ("git = ['https://example.org/theme']", vec!["git"]),
+        ] {
+            let value = toml::from_str(source).unwrap();
+            let error = ModuleDeclaration::validate_fragment(&value).unwrap_err();
+            assert!(matches!(error.kind, FragmentErrorKind::InvalidValue(_)));
+            assert_eq!(
+                error.path,
+                path.into_iter()
+                    .map(|key| FragmentStep::Key(key.into()))
+                    .collect::<Vec<_>>()
             );
         }
     }

@@ -342,7 +342,7 @@ mod tests {
         let (resume, resumption) = crossbeam_channel::bounded(1);
         let pause = CompilerPause(resume);
         let mut is_first_load = true;
-        let mut client = EditorSession::start_with_loader(&site, move |root, _| {
+        let mut client = EditorSession::start_with_loader(&site, move |root, _, _| {
             if std::mem::take(&mut is_first_load) {
                 notify_pause.send(())?;
                 resumption.recv()?;
@@ -379,7 +379,7 @@ mod tests {
     fn panic_leaves_lane_running() {
         let site = site_with_document();
         let (panicked, panic_seen) = crossbeam_channel::bounded(1);
-        let mut client = EditorSession::start_with_loader(&site, move |root, sources| {
+        let mut client = EditorSession::start_with_loader(&site, move |root, sources, _| {
             // The lane loads every revision through this callback, so the revision the test marks
             // panics here; the signal tells the test the panicking check ran before it asks for the
             // next revision, which keeps the sequence deterministic.

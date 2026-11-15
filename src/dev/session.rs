@@ -46,6 +46,19 @@ impl ServerPurpose {
             Self::Preview => "tola preview",
         }
     }
+
+    fn build_request(&self, cancellation: BuildCancellation) -> BuildRequest {
+        let mut request = BuildRequest::new(self.build_mode());
+        request.cancellation = cancellation;
+        request.disable_hook_reuse = matches!(
+            self,
+            Self::Development {
+                disable_hook_reuse: true,
+                ..
+            }
+        );
+        request
+    }
 }
 
 /// Start development with observation active before its first watched build.
@@ -128,21 +141,29 @@ fn run_server(launch: ServerLaunch, purpose: ServerPurpose) -> Result<()> {
         let reload_fallback = reload
             .as_ref()
             .and_then(|reload| reload_port_fallback_diagnostic(reload.endpoint().port()));
-        // One batch, so the view keeps the startup's diagnostics in one round.
-        let startup_diagnostics: Vec<_> = [port_fallback, network_exposure, reload_fallback]
+        let mut startup_diagnostics: Vec<_> = [port_fallback, reload_fallback]
             .into_iter()
             .flatten()
             .collect();
+        // The development header shows the active URL. Successful port changes
+        // are useful in the log without adding a round to the terminal.
+        if matches!(&purpose, ServerPurpose::Development { .. }) {
+            output.record_diagnostics(None, &startup_diagnostics);
+            startup_diagnostics.clear();
+        }
+        startup_diagnostics.extend(network_exposure);
         if !startup_diagnostics.is_empty() {
             output.diagnostics(&startup_diagnostics)?;
         }
         let browser_diagnostics = reload.as_ref().map(ReloadTransport::diagnostics_sender);
+        let mut build_session = BuildSession::with_resources(resources);
         let hooks = match &purpose {
             ServerPurpose::Development { .. } => Some(HookQueue::start(
                 output.clone(),
                 browser_diagnostics,
                 shutdown.clone(),
                 events,
+                build_session.hook_executor().clone(),
             )?),
             ServerPurpose::Preview => None,
         };
@@ -159,7 +180,7 @@ fn run_server(launch: ServerLaunch, purpose: ServerPurpose) -> Result<()> {
                         dev,
                         disable_hook_reuse,
                         config_loader,
-                        resources,
+                        build_session,
                         sites: sites.clone(),
                         reload,
                         shutdown: shutdown.clone(),
@@ -186,7 +207,12 @@ fn run_server(launch: ServerLaunch, purpose: ServerPurpose) -> Result<()> {
                     let build_sites = sites.clone();
                     let build_output = output.clone();
                     let build_cancellation = canceller.token();
-                    let build_resources = resources.clone();
+                    let attempt = build_session.prepare(
+                        Arc::clone(&config),
+                        purpose.build_request(build_cancellation.clone()),
+                    );
+                    let hook_epoch = attempt.hook_epoch();
+                    let executor = build_session.hook_executor().clone();
                     let hooks = hooks.as_ref().map(HookQueue::sender);
                     let mut building = tokio::task::spawn_blocking(move || {
                         build_site_once(BuildAttempt {
@@ -196,13 +222,15 @@ fn run_server(launch: ServerLaunch, purpose: ServerPurpose) -> Result<()> {
                             purpose,
                             cancellation: build_cancellation,
                             hooks,
-                            resources: build_resources,
+                            build_session,
+                            attempt,
                             events,
                         })
                     });
                     tokio::select! {
                         biased;
                         _ = shutdown.cancelled() => {
+                            executor.invalidate(hook_epoch);
                             canceller.cancel();
                             // Blocking work must finish before the hook queue and
                             // runtime are dropped; cancellation is cooperative.
@@ -314,7 +342,8 @@ struct BuildAttempt<'a> {
     purpose: ServerPurpose,
     cancellation: BuildCancellation,
     hooks: Option<HookSender>,
-    resources: tola_build::BuildResources,
+    build_session: BuildSession,
+    attempt: tola_build::build::BuildAttempt,
     events: super::events::Events,
 }
 
@@ -326,7 +355,8 @@ fn build_site_once(attempt: BuildAttempt<'_>) -> Result<()> {
         purpose,
         cancellation,
         hooks,
-        resources,
+        build_session,
+        attempt,
         events,
     } = attempt;
     events.build_started(1)?;
@@ -340,7 +370,8 @@ fn build_site_once(attempt: BuildAttempt<'_>) -> Result<()> {
         purpose,
         cancellation,
         hooks,
-        resources,
+        build_session,
+        attempt,
         attempt_diagnostics: &mut diagnostics,
         published: &mut published,
         events,
@@ -374,7 +405,8 @@ struct BuildAttemptInner<'a> {
     purpose: ServerPurpose,
     cancellation: BuildCancellation,
     hooks: Option<HookSender>,
-    resources: tola_build::BuildResources,
+    build_session: BuildSession,
+    attempt: tola_build::build::BuildAttempt,
     attempt_diagnostics: &'a mut Vec<tola_diagnostic::Diagnostic>,
     published: &'a mut bool,
     events: super::events::Events,
@@ -388,21 +420,18 @@ fn build_site_once_inner(attempt: BuildAttemptInner<'_>) -> Result<()> {
         purpose,
         cancellation,
         hooks,
-        resources,
+        build_session: mut session,
+        attempt,
         attempt_diagnostics,
         published,
         events,
     } = attempt;
     cancellation.ensure_active()?;
     let started = std::time::Instant::now();
-    let mut session = BuildSession::with_resources(resources);
-    let mut request = BuildRequest::new(purpose.build_mode());
-    request.cancellation = cancellation.clone();
     let build_lock = tola_build::build::SiteBuildLock::acquire(&config, &cancellation, || {
         let _ = output.waiting_for_build();
     })?;
-    let candidate = session
-        .prepare(Arc::clone(&config), request)
+    let candidate = attempt
         .run()
         .map_err(anyhow::Error::from)
         .and_then(|build| {
@@ -506,6 +535,7 @@ mod tests {
         output: &CommandOutput,
         purpose: ServerPurpose,
     ) -> Result<()> {
+        let mut build_session = BuildSession::new();
         let hooks = matches!(&purpose, ServerPurpose::Development { .. })
             .then(|| {
                 HookQueue::start(
@@ -513,18 +543,25 @@ mod tests {
                     None,
                     Cancellation::default(),
                     super::super::events::Events(false),
+                    build_session.hook_executor().clone(),
                 )
             })
             .transpose()
             .expect("start test hook consumer");
+        let cancellation = BuildCancellation::default();
+        let attempt = build_session.prepare(
+            Arc::clone(&config),
+            purpose.build_request(cancellation.clone()),
+        );
         let built = build_site_once(BuildAttempt {
             config,
             sites,
             output,
             purpose,
-            cancellation: BuildCancellation::default(),
+            cancellation,
             hooks: hooks.as_ref().map(HookQueue::sender),
-            resources: tola_build::BuildResources::default(),
+            build_session,
+            attempt,
             events: super::super::events::Events(false),
         });
         if let Some(hooks) = hooks {

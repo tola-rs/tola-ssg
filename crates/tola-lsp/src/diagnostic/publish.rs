@@ -27,7 +27,6 @@ const MAX_DOCUMENT_DIAGNOSTICS: usize = 100;
 pub(crate) struct PublishInputs<'a, W: Write> {
     pub(crate) output: &'a mut W,
     pub(crate) root: &'a Path,
-    pub(crate) entry: &'a Path,
     pub(crate) open: &'a OpenSources,
     pub(crate) features: &'a crate::capabilities::ClientFeatures,
     pub(crate) selected: &'a names::SelectedInterfaces,
@@ -46,7 +45,6 @@ impl ClientDiagnostics {
         let PublishInputs {
             output,
             root,
-            entry,
             open,
             features,
             selected,
@@ -61,21 +59,16 @@ impl ClientDiagnostics {
         for diagnostic in diagnostics.into_iter().chain(unread) {
             // A diagnostic no site document reaches is logged instead, and the log line is built
             // before the projection consumes the diagnostic.
-            let log_line = diagnostic
-                .producer
-                .is_some()
-                .then(|| log_message(&diagnostic));
-            let projected = editor_diagnostic(
-                diagnostic,
-                root,
-                entry,
-                &self.root,
-                fold_related,
-                &mut texts,
-            )?;
+            let log_line = log_message(&diagnostic);
+            let projected =
+                editor_diagnostic(diagnostic, root, &self.root, fold_related, &mut texts)?;
             if let Some((path, diagnostic)) = projected {
-                documents.entry(path).or_default().push(diagnostic);
-            } else if let Some((message, typ)) = log_line {
+                let reports = documents.entry(path).or_default();
+                if !reports.contains(&diagnostic) {
+                    reports.push(diagnostic);
+                }
+            } else {
+                let (message, typ) = log_line;
                 let notification: Message = Notification::new(
                     <lsp_types::notification::LogMessage as LspNotification>::METHOD.into(),
                     lsp_types::LogMessageParams { typ, message },
@@ -200,6 +193,7 @@ fn bounded(mut diagnostics: Vec<EditorDiagnostic>) -> Vec<EditorDiagnostic> {
     if diagnostics.len() <= MAX_DOCUMENT_DIAGNOSTICS {
         return diagnostics;
     }
+    diagnostics.sort_by_key(|diagnostic| diagnostic.severity.unwrap_or(DiagnosticSeverity::HINT));
     let hidden = diagnostics.len() - MAX_DOCUMENT_DIAGNOSTICS;
     diagnostics.truncate(MAX_DOCUMENT_DIAGNOSTICS);
     diagnostics.push(summary(hidden));
@@ -239,6 +233,9 @@ fn log_message(diagnostic: &Diagnostic) -> (String, lsp_types::MessageType) {
         diagnostic.code_label(),
         diagnostic.message
     );
+    for note in diagnostic.distinct_notes() {
+        message.push_str(&format!("\nnote: {note}"));
+    }
     for help in diagnostic.distinct_help() {
         message.push_str(&format!("\nhelp: {}", help.message));
     }
@@ -256,6 +253,9 @@ fn log_message(diagnostic: &Diagnostic) -> (String, lsp_types::MessageType) {
             })
             .unwrap_or_default();
         message.push_str(&format!("\nrelated: {location}{}", related.message));
+    }
+    for frame in &diagnostic.trace {
+        message.push_str(&format!("\n{}", frame.message));
     }
     (message, typ)
 }
@@ -280,7 +280,6 @@ mod tests {
                 .publish(PublishInputs {
                     output: &mut bytes,
                     root: &root,
-                    entry: &root.join("site.typ"),
                     open: &open,
                     features: &features(),
                     selected: &selected,
@@ -347,7 +346,6 @@ mod tests {
             .publish(PublishInputs {
                 output: &mut bytes,
                 root: &resolved,
-                entry: &resolved.join("index.typ"),
                 open: &open,
                 features: &features(),
                 selected: &selected,

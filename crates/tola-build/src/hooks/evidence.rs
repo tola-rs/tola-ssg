@@ -123,7 +123,7 @@ pub(super) fn validate_declared_output_boundaries(
     let root = config.get_root();
     let boundaries = crate::filesystem::DeclaredOutputBoundaries::for_site(
         root,
-        &config.config_path,
+        config.config_paths(),
         published_root,
         config.vendor.path.as_deref(),
         config.vendor_workspace.as_deref(),

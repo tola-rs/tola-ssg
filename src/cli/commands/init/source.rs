@@ -212,7 +212,9 @@ pub(super) fn generate(
     let text = std::str::from_utf8(config)
         .context("the initializer wrote a `tola.toml` that is not UTF-8")?;
     let text = register_source(text, alias, &input.declaration)?;
-    let schema = crate::config::validate_settings(&target.join("tola.toml"), &text, scope)?;
+    let overlays = super::configuration_overlays(&writes);
+    let (schema, _) =
+        crate::config::validate_settings(&target.join("tola.toml"), &text, scope, &overlays)?;
     crate::cli::commands::extensions::check_namespaces(&schema.modules)?;
     ensure!(
         !writes

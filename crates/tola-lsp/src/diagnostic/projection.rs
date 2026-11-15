@@ -48,17 +48,9 @@ pub(crate) fn compiler_source_range(range: Utf16Range) -> SourceRange {
 
 /// The site path one diagnostic location names, absent when it names a package file.
 pub(super) fn location_path(root: &Path, location: &Location) -> Option<PathBuf> {
-    if location.path.starts_with('@') {
-        return None;
-    }
-    let path = Path::new(&location.path);
-    Some(tola_input::normalize_existing_prefix(
-        &if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            root.join(path)
-        },
-    ))
+    location
+        .editor_file(root)
+        .map(|path| tola_input::normalize_existing_prefix(&path))
 }
 
 /// A validated report maps only to the exact text its host evidence describes.
@@ -120,7 +112,6 @@ impl<'a, 'b> Advice<'a, 'b> {
 pub(super) fn editor_diagnostic<'a>(
     mut diagnostic: Diagnostic,
     root: &'a Path,
-    entry: &Path,
     client_root: &'a crate::uri::ClientRoot,
     fold_related: bool,
     texts: &mut DiagnosticTexts<'a>,
@@ -136,7 +127,11 @@ pub(super) fn editor_diagnostic<'a>(
     let primary = diagnostic
         .location
         .as_ref()
-        .filter(|location| diagnostic.source.is_some() || !location.path.starts_with('@'))
+        .filter(|location| {
+            diagnostic.source.is_some()
+                || location.file.is_some()
+                || !location.path.starts_with('@')
+        })
         .or_else(|| {
             if public_report {
                 return None;
@@ -147,15 +142,16 @@ pub(super) fn editor_diagnostic<'a>(
                 .filter_map(|frame| frame.location.as_ref())
                 .find(|location| !location.path.starts_with('@'))
         });
-    let located = primary
-        .and_then(|location| evidence_path(root, location, diagnostic.source.as_ref(), texts));
-    if public_report
-        && (located.is_none() || primary.is_none_or(|location| location.range.is_none()))
-    {
+    let Some(primary) = primary else {
+        return Ok(None);
+    };
+    let Some(path) = evidence_path(root, primary, diagnostic.source.as_ref(), texts) else {
+        return Ok(None);
+    };
+    if public_report && primary.range.is_none() {
         return Ok(None);
     }
-    let range = diagnostic_range(primary, located.as_deref(), texts);
-    let path = located.unwrap_or_else(|| entry.to_path_buf());
+    let range = diagnostic_range(Some(primary), Some(&path), texts);
     let mut projected = EditorDiagnostic::new(
         range,
         Some(match diagnostic.severity {
@@ -477,6 +473,7 @@ mod tests {
     /// One location a producer named without its text.
     fn located_at(path: &str, line: usize, column: usize) -> Location {
         Location {
+            file: None,
             path: path.into(),
             line: Some(line),
             column: Some(column),
@@ -491,7 +488,6 @@ mod tests {
         editor_diagnostic(
             diagnostic,
             &site.physical,
-            &site.physical.join("site.typ"),
             &crate::uri::ClientRoot::new(&site.physical),
             false,
             &mut texts,

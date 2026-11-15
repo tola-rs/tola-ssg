@@ -27,11 +27,15 @@ struct FailedAttemptInputs {
 
 impl BuildFailure {
     /// A coordinated build that stopped before any attempt ran.
-    pub(super) fn before_attempt(error: anyhow::Error) -> Self {
-        Self::new(error, BuildAttemptInputs::default())
+    pub(super) fn before_attempt(error: anyhow::Error, root: &std::path::Path) -> Self {
+        Self::new(error, BuildAttemptInputs::default(), root)
     }
 
-    pub(super) fn new(error: anyhow::Error, inputs: BuildAttemptInputs) -> Self {
+    pub(super) fn new(
+        error: anyhow::Error,
+        inputs: BuildAttemptInputs,
+        root: &std::path::Path,
+    ) -> Self {
         let source_hooks = inputs.source_hooks;
         let (physical_reads, package_checks) = inputs.compiler.into_parts();
         let mut observation = input_observation(
@@ -55,7 +59,7 @@ impl BuildFailure {
             source_hooks_failed: error
                 .chain()
                 .any(|cause| cause.is::<crate::hooks::SourceHookFailure>()),
-            error,
+            error: super::diagnostic::with_site(error, root),
             inputs: Box::new(FailedAttemptInputs {
                 observation,
                 source_hooks,
@@ -312,7 +316,12 @@ pub(super) fn input_freshness(
         fonts_freshness_ms = (total_elapsed - assets_elapsed).as_secs_f64() * 1000.0,
         freshness_ms = total_elapsed.as_secs_f64() * 1000.0,
         "verified complete candidate inputs");
+    let config_fresh = match config.source() {
+        Some(source) => source.is_current(Some(cancellation))?,
+        None => true,
+    };
     let freshness = InputFreshness::from_checks([
+        (InputKind::Configuration, config_fresh),
         (InputKind::TypstPhysicalReads, physical_reads_fresh),
         (InputKind::ModuleManifests, manifests_fresh),
         (InputKind::TypstPackageSelection, package_checks_fresh),

@@ -2,6 +2,8 @@
 
 use typst::foundations::{Array, Dict, IntoValue, Value};
 
+use crate::fragment::{FragmentError, FragmentStep};
+
 /// A nonempty TOML key path within the declaration owner's options.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(try_from = "String", into = "String")]
@@ -70,24 +72,37 @@ pub fn deserialize_options<'de, D: serde::Deserializer<'de>>(
     use serde::Deserialize;
 
     let mut options = toml::Table::deserialize(deserializer)?;
-    for (_, value) in options.iter_mut() {
-        normalize(value).map_err(serde::de::Error::custom)?;
-    }
+    normalize_options(&mut options).map_err(serde::de::Error::custom)?;
     Ok(options)
 }
 
-fn normalize(value: &mut toml::Value) -> Result<(), &'static str> {
+/// Check the option protocol while preserving the authored values for merging.
+pub fn validate_fragment(value: &toml::Value) -> Result<(), FragmentError> {
+    let Some(options) = value.as_table() else {
+        return Err(FragmentError::invalid("options must be a table"));
+    };
+    normalize_options(&mut options.clone())
+}
+
+pub(crate) fn normalize_options(options: &mut toml::Table) -> Result<(), FragmentError> {
+    for (key, value) in options.iter_mut() {
+        normalize(value).map_err(|error| error.at(FragmentStep::Key(key.clone())))?;
+    }
+    Ok(())
+}
+
+fn normalize(value: &mut toml::Value) -> Result<(), FragmentError> {
     match value {
         toml::Value::Datetime(datetime) => *value = toml::Value::String(datetime.to_string()),
         toml::Value::Float(number) if !number.is_finite() => {
-            return Err("options require finite numbers");
+            return Err(FragmentError::invalid("options require finite numbers"));
         }
-        toml::Value::Array(values) => values.iter_mut().try_for_each(normalize)?,
-        toml::Value::Table(values) => {
-            values
-                .iter_mut()
-                .try_for_each(|(_, value)| normalize(value))?;
+        toml::Value::Array(values) => {
+            for (index, value) in values.iter_mut().enumerate() {
+                normalize(value).map_err(|error| error.at(FragmentStep::Index(index)))?;
+            }
         }
+        toml::Value::Table(values) => normalize_options(values)?,
         _ => {}
     }
     Ok(())

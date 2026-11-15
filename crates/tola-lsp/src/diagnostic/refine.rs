@@ -119,7 +119,7 @@ pub(super) fn refine_unresolved_import(diagnostic: &mut Diagnostic) {
         diagnostic.location = Some(site);
     }
     diagnostic.trace.clear();
-    diagnostic.message = match name {
+    diagnostic.message = match &name {
         Some(name) => {
             format!("Tola could not resolve the name `{name}` this import reads from `{package}`")
         }
@@ -128,7 +128,12 @@ pub(super) fn refine_unresolved_import(diagnostic: &mut Diagnostic) {
     };
     diagnostic.code = crate::codes::editor::UNRESOLVED_PACKAGE_IMPORT;
     diagnostic.help.push(tola_diagnostic::Help {
-        message: UNRESOLVED_IMPORT_HELP.to_owned(),
+        message: if name.is_some() {
+            "Check the imported name and use a version of the package that exports it"
+        } else {
+            UNRESOLVED_IMPORT_HELP
+        }
+        .to_owned(),
         location: None,
     });
 }
@@ -203,6 +208,7 @@ mod tests {
     /// A location a producer named without its text.
     fn located_at(path: &str, line: usize, column: usize) -> Location {
         Location {
+            file: None,
             path: path.into(),
             line: Some(line),
             column: Some(column),

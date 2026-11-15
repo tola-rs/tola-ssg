@@ -44,7 +44,11 @@ fn default_session_log_path(config: &super::ConfigFileArgs) -> Option<std::path:
 fn hook_nested_build(parsed: &ParsedCommand) -> anyhow::Result<Option<String>> {
     let blocked = match &parsed.command {
         Command::Builtin(
-            Commands::Build { .. } | Commands::Dev { .. } | Commands::Preview { .. },
+            Commands::Build { .. }
+            | Commands::Dev { .. }
+            | Commands::Preview { .. }
+            | Commands::Update { .. }
+            | Commands::Vendor { .. },
         ) => true,
         Command::Builtin(Commands::Check { no_build, .. }) => !no_build,
         _ => false,
@@ -74,10 +78,10 @@ pub(crate) fn run(arguments: &[std::ffi::OsString]) -> ExitCode {
         let diagnostic = Diagnostic::new(
             crate::codes::hook::NESTED_BUILD,
             Severity::Error,
-            format!("the `{stage}` hook cannot start another Tola build"),
+            format!("the `{stage}` hook cannot start a Tola command that writes a site"),
         )
         .with_help(
-            "Run the build outside the hook; a nested build waits on the same site lock and can re-run this hook.",
+            "Run this command outside the hook; nested site writes can wait on an existing site lock. Read-only queries remain available.",
         );
         let terminal = Terminal::new(parsed.process.color, parsed.process.quiet, None);
         let _ = terminal.diagnostic(&diagnostic);
@@ -217,12 +221,12 @@ pub(crate) fn run(arguments: &[std::ffi::OsString]) -> ExitCode {
 
 fn is_command_cancellation(error: &anyhow::Error) -> bool {
     error.is::<InputCancelled>()
+        || tola_build::cancellation::is_cancelled(error)
         || error.chain().any(|cause| {
-            cause.is::<tola_build::cancellation::BuildCancelled>()
-                || cause
-                    .downcast_ref::<std::io::Error>()
-                    .and_then(std::io::Error::get_ref)
-                    .is_some_and(|inner| inner.is::<tola_build::cancellation::BuildCancelled>())
+            cause
+                .downcast_ref::<std::io::Error>()
+                .and_then(std::io::Error::get_ref)
+                .is_some_and(|inner| inner.is::<tola_build::cancellation::BuildCancelled>())
         })
 }
 
@@ -308,7 +312,6 @@ fn prepare_log(
 /// backtrace stay in the log.
 fn install_panic_report(log: Option<LogFile>, terminal: Terminal) {
     std::panic::set_hook(Box::new(move |panic| {
-        crate::terminal::restore();
         // Only a log that really holds the record may be named: a log that never started, or one
         // whose writes stopped, has no panic to attach.
         let mut stored = None;
@@ -317,6 +320,10 @@ fn install_panic_report(log: Option<LogFile>, terminal: Terminal) {
         {
             stored = Some(log.path());
         }
+        if tola_build::hooks::current_hook_stage().is_some() {
+            return;
+        }
+        crate::terminal::restore();
         let diagnostic = explained_panic_diagnostic(panic.payload())
             .unwrap_or_else(|| internal_error_diagnostic(stored));
         let mut rendered =

@@ -98,8 +98,8 @@ struct AnalyzedSource {
     sources_input: Option<SourcesInput>,
     source_reads: Vec<(typst::syntax::RootedPath, Option<Arc<SourceFileInput>>)>,
     declaration: Option<crate::content::SourceMetadataDeclaration>,
-    /// Whether this source's own markup still calls the retired label spelling.
-    declares_with_label: bool,
+    /// Where this source still calls the retired label spelling.
+    legacy_label: Option<tola_diagnostic::Location>,
 }
 
 const ANALYSIS_INPUT_IDENTITY: &str = "source-analysis";
@@ -602,7 +602,7 @@ fn scan(
         };
         SourceAnalysisFailure { world, error }
     })?;
-    let declaration_warnings = declaration_warnings(&settlement.entries, config.get_root());
+    let declaration_warnings = declaration_warnings(&settlement.entries);
     let retained = entry_reuse.map(|cache| &cache.entries);
     let reused_sources = settlement.entries.reused_from(retained);
     Ok(SourceScan {
@@ -671,33 +671,24 @@ fn changed_metadata_listing(previous: &SourceSet, next: &SourceSet, root: &Path)
         .join(", ")
 }
 
-/// The one warning naming every source that still declares metadata through the label.
-fn declaration_warnings(
-    entries: &SourceEntryIndex,
-    root: &Path,
-) -> Arc<[tola_diagnostic::Diagnostic]> {
-    let sources = entries
+/// Warn about the retired label at the declaration that wrote it.
+fn declaration_warnings(entries: &SourceEntryIndex) -> Arc<[tola_diagnostic::Diagnostic]> {
+    entries
         .entries()
-        .filter(|entry| entry.declaration.is_none() && entry.declares_with_label)
-        .map(|entry| tola_diagnostic::display_path(&entry.source, root))
-        .collect::<Vec<_>>();
-    if sources.is_empty() {
-        return Arc::default();
-    }
-    let warning = tola_diagnostic::Diagnostic::new(
-        tola_diagnostic::codes::source::DECLARATION_DEPRECATED,
-        tola_diagnostic::Severity::Warning,
-        "the `<tola-meta>` label does not declare source metadata",
-    )
-    .with_help(
-        "Import `tola-meta` from `@tola/source:0.0.0` and replace \
-         `metadata(...) <tola-meta>` with `tola-meta(...)`",
-    )
-    .with_note(tola_diagnostic::bounded_listing(
-        &sources,
-        ("file", "files"),
-    ));
-    Arc::from([warning])
+        .filter_map(|entry| entry.legacy_label.clone())
+        .map(|location| {
+            tola_diagnostic::Diagnostic::at_location(
+                tola_diagnostic::codes::source::DECLARATION_DEPRECATED,
+                tola_diagnostic::Severity::Warning,
+                location,
+                "the `<tola-meta>` label does not declare source metadata",
+            )
+            .with_help(
+                "Import `tola-meta` from `@tola/source:0.0.0` and replace \
+                 `metadata(...) <tola-meta>` with `tola-meta(...)`",
+            )
+        })
+        .collect()
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -979,7 +970,11 @@ impl AnalysisRound<'_> {
                         });
                     }
                 };
-                let declares_with_label = declaration.is_none() && has_label_declaration(&scan);
+                let legacy_label = declaration
+                    .is_none()
+                    .then(|| label_declaration(&scan))
+                    .flatten()
+                    .and_then(|span| super::diagnostic::source_location(&world, span));
                 if self.cancellation.is_cancelled() {
                     return Ok(SourceRoundOutcome::Cancelled { accessed });
                 }
@@ -998,7 +993,7 @@ impl AnalysisRound<'_> {
                         sources_input: uses_sources.then(|| sources_input.clone()),
                         source_reads,
                         declaration,
-                        declares_with_label,
+                        legacy_label,
                     }),
                 })
             }
@@ -1020,8 +1015,8 @@ impl AnalysisRound<'_> {
     }
 }
 
-/// Whether the source's own markup calls the retired label at top level.
-fn has_label_declaration(scan: &tola_typst::ScanResult) -> bool {
+/// The source's own call of the retired label at top level.
+fn label_declaration(scan: &tola_typst::ScanResult) -> Option<typst::syntax::Span> {
     use typst::syntax::ast::{self, AstNode};
 
     let markup = scan
@@ -1029,7 +1024,7 @@ fn has_label_declaration(scan: &tola_typst::ScanResult) -> bool {
         .root()
         .cast::<ast::Markup>()
         .expect("an evaluated Typst source has a markup root");
-    let mut label_calls = markup
+    let label_calls = markup
         .exprs()
         .filter_map(|mut expression| {
             while let ast::Expr::Parenthesized(group) = expression {
@@ -1042,10 +1037,10 @@ fn has_label_declaration(scan: &tola_typst::ScanResult) -> bool {
         })
         .collect::<HashSet<_>>();
 
-    // Consume each AST span once, so one call cannot report twice.
     scan.metadata_declarations(crate::metadata::SOURCE_METADATA_LABEL)
         .into_iter()
-        .any(|declaration| label_calls.remove(&declaration.span()))
+        .map(|declaration| declaration.span())
+        .find(|span| label_calls.contains(span))
 }
 
 fn declaration_record(
@@ -1821,39 +1816,22 @@ mod tests {
         assert_eq!(diagnostics[0].location.as_ref().unwrap().line, Some(3));
     }
 
-    /// A source that declares with the retired label spelling is warned about once, and the note
-    /// names at most three sources.
     #[test]
-    fn label_warning_identifies_sources() {
-        for names in [&["alpha", "beta"][..], &["a", "b", "c", "d", "e"][..]] {
-            let sources = names
-                .iter()
-                .map(|name| {
-                    (
-                        format!("{name}.typ"),
-                        format!("#metadata((title: \"{name}\")) <tola-meta>"),
-                    )
-                })
-                .collect::<Vec<_>>();
-            let sources = sources
-                .iter()
-                .map(|(name, source)| (name.as_str(), source.as_str()))
-                .collect::<Vec<_>>();
-            let (_directory, scan) = scan_content(&sources);
-
-            assert_eq!(scan.declaration_warnings.len(), 1);
-            let warning = &scan.declaration_warnings[0];
-            assert_eq!(
-                warning.code,
-                tola_diagnostic::codes::source::DECLARATION_DEPRECATED
-            );
-            for (index, name) in names.iter().enumerate() {
-                assert_eq!(
-                    warning.notes[0].contains(&format!("content/{name}.typ")),
-                    index < 3,
-                );
-            }
-        }
+    fn label_warning_identifies_each_declaration() {
+        let (_directory, scan) = scan_content(&[
+            ("alpha.typ", "#metadata((title: \"Alpha\")) <tola-meta>"),
+            ("beta.typ", "#metadata((title: \"Beta\")) <tola-meta>"),
+        ]);
+        let locations = scan
+            .declaration_warnings
+            .iter()
+            .map(|warning| {
+                let location = warning.location.as_ref().unwrap();
+                assert!(location.range.is_some());
+                location.path.as_str()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(locations, ["content/alpha.typ", "content/beta.typ"]);
     }
 
     #[test]

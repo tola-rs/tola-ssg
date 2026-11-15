@@ -25,6 +25,7 @@ mod discard;
 mod fonts;
 mod imports;
 mod math;
+pub(crate) mod names;
 
 /// The hints one open document's index justifies, minus the ones the compiler already advised on.
 pub(super) fn document_diagnostics(

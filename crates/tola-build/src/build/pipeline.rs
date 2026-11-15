@@ -82,7 +82,11 @@ fn attach_attempt_diagnostics(
     if crate::cancellation::is_cancelled(&error) || attempt_diagnostics.is_empty() {
         return error;
     }
-    attempt_diagnostics.extend(diagnostic::for_error(&error, root));
+    for diagnostic in diagnostic::for_error(&error, root) {
+        if !attempt_diagnostics.contains(&diagnostic) {
+            attempt_diagnostics.push(diagnostic);
+        }
+    }
     tola_diagnostic::DiagnosticError::attach(error, attempt_diagnostics).into()
 }
 
@@ -90,6 +94,7 @@ pub(super) fn build_site_inner(
     site: &crate::modules::PreparedSite,
     request: &BuildRequest,
     producers: &mut BuildAttemptProducers,
+    executor: &hooks::HookExecutor,
     prepare_compiler: impl FnOnce(&mut BuildAttemptProducers, bool) -> Result<crate::compiler::SiteHost>,
 ) -> Result<SiteBuild> {
     let config = site.config();
@@ -104,6 +109,7 @@ pub(super) fn build_site_inner(
             request.hook_execution.clone(),
             Some(&producers.cancellation),
             &mut hook_diagnostics,
+            executor,
         )
         .map_err(|failure| {
             producers.source_hooks = failure.completed().clone();
@@ -121,9 +127,12 @@ pub(super) fn build_site_inner(
             &typst_host,
             request,
             producers,
-            build_started,
-            before_build_elapsed,
+            BeforeBuildTiming {
+                started: build_started,
+                elapsed: before_build_elapsed,
+            },
             std::mem::take(&mut hook_diagnostics),
+            executor,
         );
         producers.font_read_paths = typst_host.font_read_paths();
         typst_host.evict_stale_file_cache_entries(SiteHost::RETAINED_FILE_CACHE_EPOCHS);
@@ -136,14 +145,19 @@ pub(super) fn build_site_inner(
     })
 }
 
+struct BeforeBuildTiming {
+    started: std::time::Instant,
+    elapsed: std::time::Duration,
+}
+
 fn build_site_candidate(
     site: &crate::modules::PreparedSite,
     typst_host: &crate::compiler::SiteHost,
     request: &BuildRequest,
     producers: &mut BuildAttemptProducers,
-    build_started: std::time::Instant,
-    before_build_elapsed: std::time::Duration,
+    before_build: BeforeBuildTiming,
     mut build_diagnostics: Vec<tola_diagnostic::Diagnostic>,
+    executor: &hooks::HookExecutor,
 ) -> Result<SiteBuild> {
     let config = site.config();
     let mut warnings = tola_typst::Diagnostics::new();
@@ -151,7 +165,7 @@ fn build_site_candidate(
     // Capture discovery identity before later hooks can change inputs.
     let content_root = tola_input::normalize_existing_prefix(&config.build.content_dir);
     let sealed = (|| -> Result<_> {
-        let producers_started = build_started.elapsed();
+        let producers_started = before_build.started.elapsed();
         let mut compiled_outputs = compile_site_program(
             site,
             typst_host,
@@ -175,16 +189,15 @@ fn build_site_candidate(
             hook_config.hook_runner = Some(runner.with_assets(assets));
         }
         let hook_config = std::sync::Arc::new(hook_config);
-        let previous_hook_reuse = producers.previous_hook_reuse.take();
         let compiled_outputs = compiled_outputs.generate_outputs(
             &hook_config,
             request,
             site.scope(),
-            previous_hook_reuse.as_ref(),
-            &producers.cancellation,
+            producers,
             &mut build_diagnostics,
+            executor,
         )?;
-        let compile_elapsed = build_started.elapsed();
+        let compile_elapsed = before_build.started.elapsed();
         producers.cancellation.ensure_active()?;
         let candidate = compiled_outputs.seal(
             &hook_config,
@@ -194,11 +207,11 @@ fn build_site_candidate(
             producers.report.as_mut(),
         )?;
         producers.cancellation.ensure_active()?;
-        let total_elapsed = build_started.elapsed();
+        let total_elapsed = before_build.started.elapsed();
         tracing::debug!(
             target: "tola::compile",
-            before_build_ms = before_build_elapsed.as_secs_f64() * 1000.0,
-            resources_ms = (producers_started - before_build_elapsed).as_secs_f64() * 1000.0,
+            before_build_ms = before_build.elapsed.as_secs_f64() * 1000.0,
+            resources_ms = (producers_started - before_build.elapsed).as_secs_f64() * 1000.0,
             producers_ms = (compile_elapsed - producers_started).as_secs_f64() * 1000.0,
             seal_ms = (total_elapsed - compile_elapsed).as_secs_f64() * 1000.0,
             total_ms = total_elapsed.as_secs_f64() * 1000.0,
@@ -222,6 +235,7 @@ fn build_site_candidate(
         config: hook_config,
         mode: request.mode,
         cancellation: producers.cancellation.clone(),
+        hook_executor: executor.clone(),
         index: candidate.index,
         graph: candidate.graph,
         cache_update: BuildCacheUpdate::new(
@@ -267,10 +281,11 @@ impl CompiledSiteOutputs {
         config: &ResolvedSiteConfig,
         request: &BuildRequest,
         scope: tola_input::InputScope,
-        previous: Option<&crate::hooks::ReusableHookOutputs>,
-        cancellation: &crate::cancellation::BuildCancellation,
+        producers: &mut BuildAttemptProducers,
         diagnostics: &mut Vec<tola_diagnostic::Diagnostic>,
+        executor: &hooks::HookExecutor,
     ) -> Result<Self> {
+        let previous = producers.previous_hook_reuse.take();
         if !request.hook_execution.runs() {
             return Ok(self);
         }
@@ -279,9 +294,10 @@ impl CompiledSiteOutputs {
             self.outputs.outputs(),
             request.mode,
             scope,
-            previous,
-            cancellation,
+            previous.as_ref(),
+            &producers.cancellation,
             diagnostics,
+            executor,
         )?;
         for ownership in generated.root_ownerships {
             self.outputs.own_root(ownership)?;

@@ -4,6 +4,7 @@
 
 mod boundaries;
 pub mod diagnostic;
+mod fragment;
 pub mod loading;
 mod resolved;
 pub(crate) use resolved::ModuleFontDirectory;
@@ -14,7 +15,10 @@ mod source;
 pub(crate) use resolved::GeneratedExclusion;
 pub use resolved::{ResolvedSiteConfig, VendorRootError};
 pub use schema::{SiteConfigSchema, field_documentation, field_paths, field_values, section_help};
-pub use source::{ConfigSource, ConfigSourceError, ParsedConfig};
+pub use source::{
+    ConfigApplication, ConfigFieldOrigins, ConfigFile, ConfigFileState, ConfigInclude,
+    ConfigOrigin, ConfigSource, ConfigSourceError, ParsedConfig,
+};
 
 pub use section::build::{BuildEntry, BuildSectionConfig, ReferenceLevel, ResolvedBuildConfig};
 pub use section::{AssetsConfig, FontsConfig, IconCollectionSource, IconsConfig, Sha256Digest};

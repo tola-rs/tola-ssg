@@ -1,6 +1,7 @@
 //! The replies one checked revision produces for the read-back jobs.
 
 use std::path::Path;
+use tola_build::cancellation::BuildCancellation;
 
 use anyhow::Result;
 use lsp_types::{SymbolKind, WorkspaceSymbol, WorkspaceSymbolResponse};
@@ -16,7 +17,7 @@ use crate::server::ServedWorkspace;
 
 impl<F> SourceCompiler<F>
 where
-    F: FnMut(&Path, &[UnsavedSource]) -> Result<ServedWorkspace>,
+    F: FnMut(&Path, &[UnsavedSource], &BuildCancellation) -> Result<ServedWorkspace>,
 {
     pub(super) fn workspace_symbols(
         &mut self,

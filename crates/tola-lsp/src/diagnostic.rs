@@ -148,7 +148,6 @@ pub(crate) mod tests {
                 .publish(crate::diagnostic::PublishInputs {
                     output: &mut self.bytes,
                     root: &self.physical,
-                    entry: &self.physical.join("index.typ"),
                     open: &self.open,
                     features,
                     selected: &selected,

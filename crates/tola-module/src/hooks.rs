@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use tola_input::{FilePatterns, FileSelection};
 
 use crate::module_set::LoadedModule;
-use crate::prepared::{HookEntry, HooksContribution};
+use crate::prepared::{HookEntry, HookParticipation, HooksContribution};
 use crate::watch::HookWatchInputs;
 
 /// Hooks grouped by the event that runs them.
@@ -28,6 +28,8 @@ macro_rules! build_hook {
         #[serde(deny_unknown_fields, rename_all = "kebab-case")]
         struct $type {
             name: String,
+            #[serde(default)]
+            order: u64,
             #[serde(default = "enabled")]
             enable: bool,
             nu: Option<PathBuf>,
@@ -45,6 +47,7 @@ macro_rules! build_hook {
                 Hook {
                     stage: HookStage::$stage,
                     name: &self.name,
+                    order: self.order,
                     enable: self.enable,
                     nu: &self.nu,
                     argv: &self.argv,
@@ -94,6 +97,7 @@ fn enabled() -> bool {
 struct Hook<'a> {
     stage: HookStage,
     name: &'a str,
+    order: u64,
     enable: bool,
     nu: &'a Option<PathBuf>,
     argv: &'a Option<Vec<String>>,
@@ -531,21 +535,25 @@ pub(crate) fn watch_inputs(
     Ok(())
 }
 
-/// Evaluate module hook conditions and prepare active entries in module alias order.
+/// Evaluate module hook conditions and prepare declarations in module alias order.
 pub fn hook_stages(
     project_root: &Path,
     modules: &BTreeMap<String, LoadedModule>,
 ) -> Result<HooksContribution> {
     let mut result = HooksContribution::default();
     for (alias, module) in modules {
-        for hook in module.hooks.build_hooks().filter(|hook| hook.enable) {
+        for hook in module.hooks.build_hooks() {
             let name = format!("@module/{alias}/{}", hook.name);
-            if !crate::options::enabled_by(hook.enable, hook.enabled_by, &module.options)
+            let participation = if !hook.enable {
+                HookParticipation::Disabled
+            } else if !crate::options::enabled_by(hook.enable, hook.enabled_by, &module.options)
                 .map_err(anyhow::Error::msg)
                 .with_context(|| format!("module `{alias}` hook `{}`", hook.name))?
             {
-                continue;
-            }
+                HookParticipation::OptionDisabled
+            } else {
+                HookParticipation::Enabled
+            };
             let origin = ModuleHookOrigin {
                 name: alias.clone(),
                 root: module.root.clone(),
@@ -553,7 +561,10 @@ pub fn hook_stages(
                 options_json: serde_json::to_vec(&module.options)?,
             };
             let rerun_on = hook.rerun_on.expand(alias);
-            if !hook.dev.participates_in_development() && !rerun_on.include.is_empty() {
+            if participation == HookParticipation::Enabled
+                && !hook.dev.participates_in_development()
+                && !rerun_on.include.is_empty()
+            {
                 rerun_on
                     .compile(project_root, Some(&origin))
                     .with_context(|| format!("the `{name}` hook"))?;
@@ -570,6 +581,9 @@ pub fn hook_stages(
             result.push(HookEntry {
                 stage: hook.stage,
                 name,
+                declared_name: hook.name.to_owned(),
+                order: hook.order,
+                participation,
                 origin,
                 action: hook.action().map_err(anyhow::Error::msg)?,
                 dev: hook.dev,
@@ -659,5 +673,30 @@ impl DevParticipation {
     /// Whether this entry may reuse a previous development revision's outputs.
     pub const fn reuses_outputs(self) -> bool {
         matches!(self, Self::Reuse)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ModuleHooks;
+
+    #[test]
+    fn order_belongs_to_build_hooks_only() {
+        let hooks: ModuleHooks =
+            toml::from_str("[[before-build]]\nname = 'prepare'\norder = 4\nargv = ['tool']\n")
+                .unwrap();
+        assert_eq!(hooks.build_hooks().next().unwrap().order, 4);
+        assert!(
+            toml::from_str::<ModuleHooks>(
+                "[[before-build]]\nname = 'prepare'\norder = -1\nargv = ['tool']\n"
+            )
+            .is_err()
+        );
+        assert!(
+            toml::from_str::<ModuleHooks>(
+                "[[before-pack]]\nname = 'prepare'\norder = 1\nargv = ['tool']\n"
+            )
+            .is_err()
+        );
     }
 }

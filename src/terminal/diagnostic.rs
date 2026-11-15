@@ -255,6 +255,7 @@ mod tests {
     /// One location whose line the renderer can show without reading a file.
     pub(super) fn snippet(line: usize, text: &str) -> Location {
         Location {
+            file: None,
             path: "site.typ".to_owned(),
             line: Some(line),
             column: Some(1),
@@ -304,6 +305,7 @@ mod tests {
         diagnostic.help.push(Help {
             message: "path is already in use here".into(),
             location: Some(Location {
+                file: None,
                 path: "other.typ".to_owned(),
                 line: Some(1),
                 column: Some(1),

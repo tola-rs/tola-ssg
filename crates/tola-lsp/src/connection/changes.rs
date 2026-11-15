@@ -330,7 +330,7 @@ fn source_glob(root: &Path) -> String {
 
 /// Every module root a resolved configuration declares: the spelling the declaration uses, and the
 /// physical target it resolves to, which differ when the declaration goes through a link.
-fn module_roots(
+pub(super) fn module_roots(
     configuration: &ResolvedSiteConfig,
 ) -> impl Iterator<Item = (PathBuf, PathBuf)> + '_ {
     configuration

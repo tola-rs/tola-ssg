@@ -14,11 +14,12 @@ mod positions;
 mod repeat;
 mod report;
 mod source;
+pub mod toml;
 
 pub use code::DiagnosticCode;
 pub use error::{DiagnosticError, attached, collapse_whitespace, fallback};
 pub use path::{display_path, render_relative};
-pub use positions::{SourcePositions, key_at_span};
+pub use positions::{SourcePositions, WrittenPosition, key_at_span, push_pointer};
 pub use repeat::{LISTED_NAMES, ReferenceIdentity, bounded_listing, collapse_repeated};
 pub use report::{coalesce_reports, ensure_reports_succeed};
 pub use source::{
@@ -117,6 +118,7 @@ pub struct DiagnosticSource {
     locator: tola_typst::ReadLocator,
     digest: tola_typst::ContentDigest,
     editor_path: Option<std::path::PathBuf>,
+    sha256: Option<tola_input::Sha256Digest>,
 }
 
 impl DiagnosticSource {
@@ -125,6 +127,7 @@ impl DiagnosticSource {
             locator,
             digest,
             editor_path: None,
+            sha256: None,
         }
     }
 
@@ -144,6 +147,16 @@ impl DiagnosticSource {
 
     pub fn editor_path(&self) -> Option<&std::path::Path> {
         self.editor_path.as_deref()
+    }
+
+    /// A digest that the editor can check against the document it displays.
+    pub fn with_sha256(mut self, text: &str) -> Self {
+        self.sha256 = Some(tola_input::Sha256Digest::of_bytes(text.as_bytes()));
+        self
+    }
+
+    pub fn sha256(&self) -> Option<tola_input::Sha256Digest> {
+        self.sha256
     }
 }
 
@@ -277,6 +290,15 @@ impl Diagnostic {
         self
     }
 
+    /// Address a file whose displayed name may not be relative to the site.
+    pub fn with_file(mut self, file: std::path::PathBuf) -> Self {
+        self.location
+            .as_mut()
+            .expect("an editor file requires a display path")
+            .file = Some(file);
+        self
+    }
+
     pub fn with_help(mut self, help: impl Into<String>) -> Self {
         self.help.push(Help {
             message: help.into(),
@@ -306,6 +328,20 @@ impl Diagnostic {
             .expect("a diagnostic range requires a diagnostic path");
         location.range = Some(range);
         self
+    }
+
+    /// Retain the exact range and a terminal excerpt from the text the producer read.
+    pub fn with_source_span(self, text: &str, span: std::ops::Range<usize>) -> Self {
+        let Some(excerpt) = SourceExcerpt::of(text, span.clone()) else {
+            return self;
+        };
+        self.with_source_excerpt(
+            excerpt.line,
+            excerpt.column,
+            excerpt.text,
+            Some(excerpt.highlight),
+        )
+        .with_source_range(source::source_range(text, span))
     }
 
     pub fn with_source_excerpt(

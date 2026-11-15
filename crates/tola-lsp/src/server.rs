@@ -33,7 +33,7 @@ pub(crate) mod tests {
         TextDocumentPositionParams, VersionedTextDocumentIdentifier, request as lsp_request,
     };
     use tola_build::BuildResources;
-    use tola_build::cancellation::BuildCanceller;
+    use tola_build::cancellation::{BuildCancellation, BuildCanceller};
     use tola_diagnostic::Diagnostic;
 
     use crate::server::ServedWorkspace;
@@ -223,12 +223,14 @@ pub(crate) mod tests {
 
     impl EditorSession {
         pub(super) fn start(site: &SiteDirectory) -> Self {
-            Self::start_with_loader(site, |root, _| load_configuration(root))
+            Self::start_with_loader(site, |root, _, _| load_configuration(root))
         }
 
         pub(super) fn start_with_loader<F>(site: &SiteDirectory, load: F) -> Self
         where
-            F: FnMut(&Path, &[(PathBuf, Arc<str>)]) -> Result<ServedWorkspace> + Send + 'static,
+            F: FnMut(&Path, &[(PathBuf, Arc<str>)], &BuildCancellation) -> Result<ServedWorkspace>
+                + Send
+                + 'static,
         {
             let (server_input, to_server) = std::io::pipe().expect("an in-process pipe");
             let (from_server, server_output) = std::io::pipe().expect("an in-process pipe");

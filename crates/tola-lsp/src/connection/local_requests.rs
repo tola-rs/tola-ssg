@@ -784,7 +784,9 @@ mod tests {
             panic!("the incoming-calls request reaches the compiler lane");
         };
         let mut compiler = crate::compiler::SourceCompiler::new(
-            |root: &Path, _: &[(PathBuf, Arc<str>)]| load_configuration(root),
+            |root: &Path,
+             _: &[(PathBuf, Arc<str>)],
+             _: &tola_build::cancellation::BuildCancellation| load_configuration(root),
             tola_build::BuildResources::default(),
         );
         let SourceCompilation::Answered { response, .. } = compiler.compile(job) else {

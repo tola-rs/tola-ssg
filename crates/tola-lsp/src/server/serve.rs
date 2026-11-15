@@ -62,7 +62,9 @@ pub struct ServeRequest<R, W, F, D>
 where
     R: Read + Send + 'static,
     W: Write,
-    F: FnMut(&Path, &[(PathBuf, Arc<str>)]) -> Result<ServedWorkspace> + Send + 'static,
+    F: FnMut(&Path, &[(PathBuf, Arc<str>)], &BuildCancellation) -> Result<ServedWorkspace>
+        + Send
+        + 'static,
     D: Fn(&[Diagnostic]),
 {
     /// The client's input stream; reading runs on a detached thread.
@@ -73,7 +75,7 @@ where
     pub resources: BuildResources,
     /// Ends the connection's work when cancelled.
     pub cancellation: BuildCancellation,
-    /// Loads the workspace's configuration from the editor root and its unsaved sources.
+    /// Loads configuration from the editor root and unsaved sources for the current job.
     pub load_configuration: F,
     /// Receives complete current diagnostics before their LSP projection.
     pub record_diagnostics: D,
@@ -85,7 +87,7 @@ where
 
 /// Serve one independent Tola language-server connection.
 ///
-/// `load_configuration` receives the editor root and exact unsaved sources for
+/// `load_configuration` receives the editor root, exact unsaved sources, and cancellation for
 /// each operation, and reports the workspace as the site it holds, or as the
 /// documents it holds when no site configuration exists. Keep the configuration's
 /// `Arc` identity stable while build settings are unchanged to reuse compiler
@@ -111,7 +113,9 @@ pub fn serve<R, W, F, D>(inputs: ServeRequest<R, W, F, D>) -> Result<()>
 where
     R: Read + Send + 'static,
     W: Write,
-    F: FnMut(&Path, &[(PathBuf, Arc<str>)]) -> Result<ServedWorkspace> + Send + 'static,
+    F: FnMut(&Path, &[(PathBuf, Arc<str>)], &BuildCancellation) -> Result<ServedWorkspace>
+        + Send
+        + 'static,
     D: Fn(&[Diagnostic]),
 {
     let ServeRequest {

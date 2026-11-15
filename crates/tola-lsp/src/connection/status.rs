@@ -107,6 +107,11 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
                 .filter_map(|location| readable(location.root()))
                 .collect(),
         );
+        let module_roots = sorted_unique(
+            super::changes::module_roots(configuration)
+                .filter_map(|(_, path)| readable(&path))
+                .collect(),
+        );
         let assets = configuration.assets();
         let asset_files = sorted_unique(
             assets
@@ -147,6 +152,7 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
             "entry": entry,
             "configVersions": config_versions,
             "packageRoots": package_roots,
+            "moduleRoots": module_roots,
             "assetSources": { "files": asset_files, "trees": asset_trees },
             "generatedRoots": generated_roots,
         }))

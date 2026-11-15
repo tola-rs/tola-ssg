@@ -45,6 +45,10 @@ pub trait Observer {
     /// Each chunk exactly as it was read, before any capture bound applies.
     fn output(&mut self, stream: Stream, bytes: &[u8]);
 
+    /// Report the observed child stop before waiting for captured streams to finish.
+    /// Called even if live output callbacks are disabled.
+    fn stopped(&mut self, _stop: &Stop) {}
+
     /// Called once per stream, after its last output callback, on EOF or drain stop.
     ///
     /// Completion is guaranteed when a started run returns `Ok`, including
@@ -249,6 +253,7 @@ fn capture_until_exit(
     let stop = child.wait_for_stop(cancellation, || {
         relay.receive(CHILD_POLL_INTERVAL, observer)
     })?;
+    observer.stopped(&stop);
     let [stdout, stderr] = relay.finish(observer)?;
     Ok(Exit {
         stop,

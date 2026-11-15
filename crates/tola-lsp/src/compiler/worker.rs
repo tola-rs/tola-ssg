@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use tola_build::BuildResources;
-use tola_build::cancellation::BuildCancelled;
+use tola_build::cancellation::{BuildCancellation, BuildCancelled, is_cancelled};
 use tola_build::check::SourceDiagnosticSession;
 use tola_typst_syntax::names::SelectedInterfaces;
 
@@ -26,7 +26,7 @@ pub(crate) enum SourceFailure {
 
 impl SourceFailure {
     pub(crate) fn of(error: anyhow::Error) -> Self {
-        if error.chain().any(|cause| cause.is::<BuildCancelled>()) {
+        if is_cancelled(&error) {
             Self::Cancelled
         } else if let Some(error) = error
             .chain()
@@ -129,7 +129,7 @@ pub(crate) struct SourceCompiler<F> {
 
 impl<F> SourceCompiler<F>
 where
-    F: FnMut(&Path, &[UnsavedSource]) -> Result<ServedWorkspace>,
+    F: FnMut(&Path, &[UnsavedSource], &BuildCancellation) -> Result<ServedWorkspace>,
 {
     pub(crate) fn new(load: F, resources: BuildResources) -> Self {
         Self {
@@ -230,7 +230,7 @@ where
     /// Resolve the workspace one job runs against, replacing the session when it changed.
     pub(super) fn prepare(&mut self, sources: &SourceInputs) -> Result<()> {
         sources.cancellation.ensure_active()?;
-        let served = (self.load)(&sources.root, &sources.overrides);
+        let served = (self.load)(&sources.root, &sources.overrides, &sources.cancellation);
         sources.cancellation.ensure_active()?;
         let served = served?;
         if self.session.as_ref().is_none_or(|(active, _)| {
@@ -336,7 +336,6 @@ mod tests {
     use crate::compiler::{CheckRequest, SourceJob};
     use crate::sources::SourceView;
     use tola_build::BuildResources;
-    use tola_build::cancellation::BuildCancellation;
     use tola_diagnostic::{Diagnostic, DiagnosticError, Severity};
 
     fn package_hover(sources: SourceInputs) -> SourceJob {
@@ -371,12 +370,13 @@ mod tests {
                     canceller.cancel();
                 }
                 let mut compiler = SourceCompiler::new(
-                    |_, _| {
+                    |_, _, cancellation| {
                         assert!(
                             !cancel_before_load,
                             "cancelled jobs must not load configuration"
                         );
                         canceller.cancel();
+                        assert!(cancellation.is_cancelled());
                         anyhow::bail!("configuration failed while cancellation arrived")
                     },
                     BuildResources::default(),
@@ -422,7 +422,7 @@ mod tests {
         ];
         let mut first = true;
         let mut compiler = SourceCompiler::new(
-            |_, _| {
+            |_, _, _| {
                 if std::mem::take(&mut first) {
                     Ok(ServedWorkspace::Site(Arc::clone(&configuration)))
                 } else {

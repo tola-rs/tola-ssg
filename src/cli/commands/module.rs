@@ -36,7 +36,7 @@ pub(in crate::cli) fn run(
                 &cancelled,
                 |name, action, source, temp| match action {
                     Action::Nu { path, args } => {
-                        run_nu(name, source, temp, path, args, &cancelled, output)
+                        run_nu(name, source, temp, path, args, &token, output)
                     }
                     Action::Argv(argv) => {
                         let diagnostics =
@@ -58,7 +58,7 @@ fn run_nu(
     temp: &Path,
     path: &Path,
     args: &[String],
-    cancelled: &BundleCancellation,
+    cancelled: &tola_build::cancellation::BuildCancellation,
     output: &CommandOutput,
 ) -> Result<()> {
     let call = tola_build::hooks::before_pack_context(

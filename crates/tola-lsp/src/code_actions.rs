@@ -73,6 +73,7 @@ pub(super) fn diagnostic_actions(
     let mut parsed_names = None;
     let mut fixes: Vec<Vec<Fix>> = Vec::new();
     let mut organized = Vec::new();
+    let mut configuration = false;
     for diagnostic in &params.context.diagnostics {
         let Some(cause) = &diagnostic.data else {
             continue;
@@ -82,7 +83,8 @@ pub(super) fn diagnostic_actions(
         };
         match cause {
             DiagnosticCause::UnknownConfigurationFields { fields } if fixable => {
-                fixes.extend(configuration_fixes(source, host, &fields));
+                configuration = true;
+                fixes.extend(configuration_fixes(source, host, &fields, !fix_all));
             }
             DiagnosticCause::UnknownVariable { name } if fixable => {
                 fixes.push(unknown_variable_fixes(
@@ -91,6 +93,7 @@ pub(super) fn diagnostic_actions(
                     &mut parsed_names,
                     diagnostic.range,
                     &name,
+                    !fix_all,
                 ));
             }
             DiagnosticCause::UnreadImport { names, removal } => {
@@ -144,6 +147,7 @@ pub(super) fn diagnostic_actions(
     }
     if let Some(edits) = fix_all_edits
         && !edits.is_empty()
+        && (!configuration || crate::query::config::valid_edits(source.lines(), &edits))
     {
         actions.push(edit_action(
             uri,
@@ -500,5 +504,26 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[test]
+    fn fix_all_preserves_unknown_keys_without_a_safe_replacement() {
+        let text = "[site]\ntitle = \"Keep\"\ntitel = \"Possibly intended\"\n";
+        let actions = actions_for(
+            text,
+            vec![serde_json::json!({
+                "kind": "unknown-configuration-fields",
+                "fields": [{
+                    "name": "site.titel",
+                    "line": 3,
+                    "written": {
+                        "start": {"line": 2, "character": 0},
+                        "end": {"line": 2, "character": 5},
+                    },
+                }],
+            })],
+            vec![CodeActionKind::SOURCE_FIX_ALL],
+        );
+        assert!(actions.is_empty());
     }
 }

@@ -1385,11 +1385,10 @@ fn collect_roots(
 
     roots.extend(dynamic.iter().cloned());
 
-    if !config.config_path().as_os_str().is_empty() {
-        roots.push(WatchRequirement::exact_for(
-            lexical_path_identity(config.config_path()),
-            ProducerSet::ALL,
-        ));
+    for path in config.config_paths() {
+        roots.push(
+            WatchRequirement::exact_for(lexical_path_identity(path), ProducerSet::ALL).optional(),
+        );
     }
 
     dedupe_requirements(&mut roots);

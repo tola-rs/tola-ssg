@@ -15,7 +15,7 @@
 //! ```
 
 use serde::{Deserialize, Serialize};
-use tola_config::Config;
+use tola_config::{Config, Fragment};
 
 mod language;
 mod resolved;
@@ -23,7 +23,7 @@ pub use language::{LanguageDeclaration, LanguageSubtag, SiteLanguage, UnusableLa
 pub use resolved::ResolvedSiteSection;
 
 /// A configured site author exposed to Typst templates.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default, Serialize, Deserialize, Fragment)]
 #[serde(deny_unknown_fields)]
 pub struct SiteAuthor {
     pub name: String,

@@ -51,8 +51,7 @@ impl ClientDiagnostics {
         let mut answered = Vec::new();
         for diagnostic in unread_import_diagnostics(unread.documents, selected) {
             // Nothing this call builds has a located help or trace, so nothing folds.
-            let projected =
-                editor_diagnostic(diagnostic, root, &requested, &self.root, false, &mut texts)?;
+            let projected = editor_diagnostic(diagnostic, root, &self.root, false, &mut texts)?;
             let Some((path, diagnostic)) = projected else {
                 continue;
             };

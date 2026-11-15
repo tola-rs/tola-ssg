@@ -1,24 +1,35 @@
 //! Trusted build scripts and their process lifecycle.
 
+pub(crate) mod active;
 mod command;
 mod evidence;
+mod executor;
 mod generate;
 mod pack;
 mod report;
 mod reuse;
 mod runner;
+mod schedule;
 
 pub(crate) use crate::config::section::build::hooks::hook_identity;
 pub use command::{HookRunner, NuHook};
 pub use evidence::{FailedHookOutputs, HookOutputEvidence, SourceHookOutputs};
+pub use executor::HookExecutor;
 pub(crate) use generate::generate_outputs;
 pub use pack::{before_pack_context, run_before_pack};
 pub use reuse::AfterPublishDependencies;
 pub(crate) use reuse::{ReusableHookOutputs, observe_after_publish};
 pub use runner::*;
+pub use schedule::{hook_batches, hook_limit};
 
 use crate::config::section::build::{DevParticipation, HooksConfig, hooks::HookStage};
 use crate::mode::BuildMode;
+
+/// The hook whose invocation catches failures on the calling thread.
+/// Hosts use this to keep panic details in their log without printing a second diagnostic.
+pub fn current_hook_stage() -> Option<HookStage> {
+    active::stage()
+}
 
 /// An enabled hook command announced by the host.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

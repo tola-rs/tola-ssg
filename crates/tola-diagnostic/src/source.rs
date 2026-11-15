@@ -28,6 +28,10 @@ pub struct SourceRange {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Location {
     pub path: String,
+    /// The file this location addresses, independent of its display spelling.
+    #[serde(skip)]
+    #[cfg_attr(feature = "json-schema", schemars(skip))]
+    pub file: Option<std::path::PathBuf>,
     pub line: Option<usize>,
     pub column: Option<usize>,
     /// Exact UTF-16 range, when the producer retained a complete source span.
@@ -37,11 +41,20 @@ pub struct Location {
 }
 
 impl Location {
+    /// Resolve a host file or a project-relative location. A package label is display-only.
+    pub fn editor_file(&self, root: &std::path::Path) -> Option<std::path::PathBuf> {
+        if let Some(file) = &self.file {
+            return Some(root.join(file));
+        }
+        (!self.path.starts_with('@')).then(|| root.join(&self.path))
+    }
+
     pub(super) fn at_path(path: impl Into<String>) -> Self {
         let path = path.into();
         assert!(!path.is_empty(), "a diagnostic path must not be empty");
         Self {
             path,
+            file: None,
             line: None,
             column: None,
             range: None,
@@ -101,15 +114,18 @@ impl SourceExcerpt {
             return None;
         }
 
+        let lines = Lines::new(source);
         let mut start = source.floor_char_boundary(span.start);
-        if start == source.len() && source.ends_with('\n') {
-            start -= 1;
+        let mut line = lines.byte_to_line(start)?;
+        if start == source.len() && line > 0 && lines.line_to_byte(line)? == start {
+            line -= 1;
+            start = source.floor_char_boundary(start - 1);
         }
-        let line_start = source[..start].rfind('\n').map_or(0, |offset| offset + 1);
-        let line_end = source[start..]
-            .find('\n')
-            .map_or(source.len(), |offset| start + offset);
-        let text = &source[line_start..line_end];
+        let range = lines.line_to_range(line)?;
+        let line_start = range.start;
+        let text = source[range].trim_end_matches(typst::syntax::is_newline);
+        let line_end = line_start + text.len();
+        let start = start.min(line_end);
         let column = start - line_start;
         let end = source.ceil_char_boundary(span.end).min(line_end) - line_start;
         let highlight = if end > column {
@@ -120,11 +136,7 @@ impl SourceExcerpt {
             (0, text.chars().next().map_or(0, char::len_utf8))
         };
         Some(Self {
-            line: source[..line_start]
-                .bytes()
-                .filter(|byte| *byte == b'\n')
-                .count()
-                + 1,
+            line: line + 1,
             column: text[..column].chars().count() + 1,
             text: text.to_owned(),
             highlight,
@@ -134,23 +146,23 @@ impl SourceExcerpt {
 
 /// The exact UTF-16 range one byte span covers, clamped to the text the document holds.
 pub(super) fn source_range(source: &str, span: Range<usize>) -> SourceRange {
+    let lines = Lines::new(source);
     SourceRange {
-        start: source_position(source, span.start),
-        end: source_position(source, span.end),
+        start: source_position(&lines, span.start),
+        end: source_position(&lines, span.end),
     }
 }
 
 /// The zero-based UTF-16 position one byte offset names.
-fn source_position(source: &str, offset: usize) -> SourcePosition {
+fn source_position(lines: &Lines<&str>, offset: usize) -> SourcePosition {
+    let source = lines.text();
     let offset = source.floor_char_boundary(offset);
-    let line_start = source[..offset]
-        .rfind('\n')
-        .map_or(0, |newline| newline + 1);
+    let line = lines
+        .byte_to_line(offset)
+        .expect("the offset is in the source");
+    let line_start = lines.line_to_byte(line).expect("the offset's line exists");
     SourcePosition {
-        line: source[..line_start]
-            .bytes()
-            .filter(|byte| *byte == b'\n')
-            .count(),
+        line,
         character: source[line_start..offset]
             .chars()
             .map(char::len_utf16)

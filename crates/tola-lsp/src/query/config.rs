@@ -6,6 +6,7 @@ use lsp_types::{
     CompletionItem, CompletionItemKind, CompletionTextEdit, Hover, Position, TextEdit,
 };
 use tola_build::config::{field_documentation, field_paths, field_values};
+use tola_diagnostic::toml::{field_replacement, immediate_key};
 use tola_typst::typst::syntax::Lines;
 
 use crate::position;
@@ -232,25 +233,40 @@ pub(crate) fn replacement(text: &str, position: Position, host: HostSections) ->
     let (lines, offset) = at_offset(text, position)?;
     let (range, path) = key_path(&lines, offset)?;
     let closest = corrected(host, &path)?;
-    Some(TextEdit {
-        range: position::utf16_range(&lines, range)?,
+    let leaf = text[range.clone()].rsplit('.').next()?;
+    let edit = TextEdit {
+        range: position::utf16_range(&lines, range.end - leaf.len()..range.end)?,
         new_text: closest,
-    })
+    };
+    valid_edits(&lines, std::slice::from_ref(&edit)).then_some(edit)
 }
 
 /// The declared key a written path nearly spells; only the key, since its tables stand.
 pub(crate) fn corrected(host: HostSections, path: &str) -> Option<String> {
-    if declares(host, path) {
-        return None;
+    field_replacement(path, declared_paths(host).map(|(field, _)| field)).map(str::to_owned)
+}
+
+/// Check the edited TOML, including collisions that are only visible after applying the edits.
+pub(crate) fn valid_edits<T: AsRef<str>>(lines: &Lines<T>, edits: &[TextEdit]) -> bool {
+    let mut patches = Vec::with_capacity(edits.len());
+    for edit in edits {
+        let Some(range) = position::byte_range(lines, edit.range) else {
+            return false;
+        };
+        patches.push((range, &edit.new_text));
     }
-    let (table, written) = match path.rsplit_once('.') {
-        Some((table, key)) => (table, key),
-        None => ("", path),
-    };
-    let declared: Vec<String> = declared_paths(host)
-        .filter_map(|(field, _)| immediate_key(field, table).map(str::to_owned))
-        .collect();
-    tola_typst::spelling::closest(written, declared.iter().map(String::as_str)).map(str::to_owned)
+    patches.sort_by_key(|(range, _)| range.start);
+    if patches
+        .windows(2)
+        .any(|pair| pair[0].0.end > pair[1].0.start)
+    {
+        return false;
+    }
+    let mut text = lines.text().to_owned();
+    for (range, value) in patches.into_iter().rev() {
+        text.replace_range(range, value);
+    }
+    toml_edit::Document::parse(text).is_ok()
 }
 
 /// The dotted path of the key the cursor names, and the range it occupies.
@@ -462,16 +478,6 @@ fn enclosing_table(root: &toml_edit::Table, offset: usize) -> Option<(&toml_edit
     Some((owner.table, owner.path))
 }
 
-/// The key `path` writes directly inside `table_path`, if it writes one at all.
-fn immediate_key<'a>(path: &'a str, table_path: &str) -> Option<&'a str> {
-    let remainder = if table_path.is_empty() {
-        (!path.contains('.')).then_some(path)?
-    } else {
-        path.strip_prefix(table_path)?.strip_prefix('.')?
-    };
-    (!remainder.contains('.')).then_some(remainder)
-}
-
 /// Run `visit` with `key` appended to the dotted path, then restore the path.
 fn with_key<R>(path: &mut String, key: &str, visit: impl FnOnce(&mut String) -> R) -> R {
     let parent = path.len();
@@ -655,6 +661,14 @@ mod tests {
             (1, 0, 4),
             "the fix replaces the key the author wrote"
         );
+    }
+
+    #[test]
+    fn spelling_edits_keep_the_parent_and_refuse_collisions() {
+        let edit = fix("site.tite|l = \"Site\"\n").expect("a dotted key has a fix");
+        assert_eq!(edit.new_text, "title");
+        assert_eq!(edit.range.start.character, 5);
+        assert!(fix("[site]\ntitle = \"Keep\"\ntite|l = \"Typo\"\n").is_none());
     }
 
     #[test]

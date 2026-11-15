@@ -62,10 +62,10 @@ pub(super) fn validate_asset_source_boundaries(
     }
 }
 
-pub(crate) fn validate_hook_output_boundaries(
+pub(crate) fn validate_hook_output_boundaries<'a>(
     hooks: &HooksConfig,
     root: &Path,
-    configuration: &Path,
+    configurations: impl IntoIterator<Item = &'a Path>,
     build_output: &Path,
     vendor: Option<&Path>,
     vendor_workspace: Option<&Path>,
@@ -73,7 +73,7 @@ pub(crate) fn validate_hook_output_boundaries(
 ) {
     let boundaries = crate::filesystem::DeclaredOutputBoundaries::for_site(
         root,
-        configuration,
+        configurations,
         build_output,
         vendor,
         vendor_workspace,
@@ -217,9 +217,10 @@ pub(crate) fn overlapping_module_root<'a>(
 }
 
 /// The output root and the protected inputs it must not contain.
-pub(super) fn check_publish_dir(
+pub(super) fn check_publish_dir<'a>(
     schema: &SiteConfigSchema,
     config_path: &Path,
+    config_paths: impl Iterator<Item = &'a Path>,
     root: &Path,
     package_locations: &tola_typst::PackageLocations,
     module_roots: &[PathBuf],
@@ -244,6 +245,7 @@ pub(super) fn check_publish_dir(
             package_locations,
         )
         .into_iter()
+        .chain(config_paths.map(|path| ("config", path)))
         .chain(
             module_roots
                 .iter()
@@ -257,6 +259,7 @@ pub(super) fn validate_site_paths(
     config: &SiteConfigSchema,
     root: &Path,
     config_path: &Path,
+    config_paths: &[&Path],
     vendor_workspace: Option<&Path>,
     module_roots: &[PathBuf],
     diagnostics: &mut ConfigDiagnostics,
@@ -293,7 +296,7 @@ pub(super) fn validate_site_paths(
     validate_hook_output_boundaries(
         &config.hooks,
         root,
-        config_path,
+        std::iter::once(config_path).chain(config_paths.iter().copied()),
         &config.build.publish_dir,
         config.vendor.path.as_deref(),
         vendor_workspace,

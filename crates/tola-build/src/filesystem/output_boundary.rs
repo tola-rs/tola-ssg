@@ -210,7 +210,7 @@ fn protected_location(site_root: &Path, protected: &Path) -> String {
 pub(crate) struct DeclaredOutputBoundaries {
     site_root: PathBuf,
     site_identity: tola_input::FilesystemSourceIdentity,
-    reserved: [Option<ReservedPath>; 6],
+    reserved: Vec<ReservedPath>,
     published: tola_input::FilesystemSourceIdentity,
 }
 
@@ -239,9 +239,9 @@ impl DeclaredOutputBoundaries {
     ///
     /// Protect the site's configuration and vendor directory, including the vendor recovery
     /// workspace when one is declared.
-    pub(crate) fn for_site(
+    pub(crate) fn for_site<'a>(
         site_root: &Path,
-        configuration: &Path,
+        configurations: impl IntoIterator<Item = &'a Path>,
         published_root: &Path,
         vendor: Option<&Path>,
         vendor_workspace: Option<&Path>,
@@ -249,22 +249,26 @@ impl DeclaredOutputBoundaries {
         // A hook may not rewrite the document that declares it: the run reads that exact
         // configuration, so a write would leave the file and the build disagreeing. The empty
         // spelling names no document, and would otherwise intersect every declaration.
-        let configuration = (!configuration.as_os_str().is_empty())
-            .then(|| ("the site configuration", configuration.to_path_buf()));
-        let reserved = [
-            configuration,
-            Some(("the `.tola` directory", site_root.join(INTERNAL_DIR))),
-            Some(("the site build lock", site_root.join(SITE_BUILD_LOCK_FILE))),
-            swap_workspace(published_root).map(|path| ("the publication workspace", path)),
-            vendor.map(|path| ("the vendor directory", path.to_path_buf())),
-            vendor_workspace.map(|path| ("the vendor workspace", path.to_path_buf())),
-        ]
-        .map(|entry| {
-            entry.map(|(kind, path)| ReservedPath {
+        let reserved = configurations
+            .into_iter()
+            .filter(|path| !path.as_os_str().is_empty())
+            .map(|path| ("the site configuration", path.to_path_buf()))
+            .chain(
+                [
+                    Some(("the `.tola` directory", site_root.join(INTERNAL_DIR))),
+                    Some(("the site build lock", site_root.join(SITE_BUILD_LOCK_FILE))),
+                    swap_workspace(published_root).map(|path| ("the publication workspace", path)),
+                    vendor.map(|path| ("the vendor directory", path.to_path_buf())),
+                    vendor_workspace.map(|path| ("the vendor workspace", path.to_path_buf())),
+                ]
+                .into_iter()
+                .flatten(),
+            )
+            .map(|(kind, path)| ReservedPath {
                 kind,
                 identity: tola_input::FilesystemSourceIdentity::from_path(&path),
             })
-        });
+            .collect();
         Self {
             site_root: site_root.to_path_buf(),
             site_identity: tola_input::FilesystemSourceIdentity::from_path(site_root),
@@ -288,7 +292,6 @@ impl DeclaredOutputBoundaries {
         if let Some(reserved) = self
             .reserved
             .iter()
-            .flatten()
             .find(|reserved| declared.intersects(&reserved.identity))
         {
             return Some(DeclaredOutputViolation::InsideReserved {

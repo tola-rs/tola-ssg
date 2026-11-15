@@ -9,6 +9,7 @@ repository = "https://github.com/tola-rs/tola-ssg"
 
 [dependencies]
 tola-fs.workspace = true
+tola-icons.workspace = true
 anyhow = "1.0.104"
 blake3 = "1.8.7"
 flate2 = "1.1.10"
@@ -16,12 +17,14 @@ gix = { version = "=0.90.0", default-features = false, features = ["blocking-htt
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "system-proxy"] }
 ruzstd = "0.9.1"
 serde = { version = "1.0.229", default-features = false, features = ["derive"] }
+serde_ignored = "0.1.14"
 serde_json = { version = "1.0.151", features = ["preserve_order"] }
+serde_path_to_error = "0.1.20"
 thiserror = "2.0.20"
 tempfile = "3.27.0"
 tar = "0.4.46"
 toml = "1.1.4"
-toml_edit = "0.25.13"
+toml_edit = { version = "0.25.13", features = ["serde"] }
 tola-address.workspace = true
 tola-diagnostic.workspace = true
 tola-input = { workspace = true, features = ["http"] }

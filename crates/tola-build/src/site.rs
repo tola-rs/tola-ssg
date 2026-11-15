@@ -77,11 +77,13 @@ impl SiteRevision {
     /// What an after-publish run of this revision consumes.
     pub fn after_publish_dependencies(
         &self,
+        cancellation: &crate::cancellation::BuildCancellation,
     ) -> anyhow::Result<crate::hooks::AfterPublishDependencies> {
         crate::hooks::observe_after_publish(
             &self.config,
             self.mode,
             self.outputs.manifest().revision(),
+            cancellation,
         )
     }
 
@@ -182,8 +184,12 @@ rerun-on = { include = [\"consume.mjs\"] }
         let second = site_revision(config, empty_revision());
 
         assert_eq!(
-            first.after_publish_dependencies().unwrap(),
-            second.after_publish_dependencies().unwrap()
+            first
+                .after_publish_dependencies(&Default::default())
+                .unwrap(),
+            second
+                .after_publish_dependencies(&Default::default())
+                .unwrap()
         );
     }
 
@@ -193,10 +199,17 @@ rerun-on = { include = [\"consume.mjs\"] }
         let script = site_config.config.get_root().join("consume.mjs");
         std::fs::write(&script, "first").unwrap();
         let revision = site_revision(Arc::new(site_config.config.clone()), empty_revision());
-        let before = revision.after_publish_dependencies().unwrap();
+        let before = revision
+            .after_publish_dependencies(&Default::default())
+            .unwrap();
 
         std::fs::write(&script, "second").unwrap();
 
-        assert_ne!(revision.after_publish_dependencies().unwrap(), before);
+        assert_ne!(
+            revision
+                .after_publish_dependencies(&Default::default())
+                .unwrap(),
+            before
+        );
     }
 }

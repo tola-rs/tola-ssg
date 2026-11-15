@@ -1,13 +1,14 @@
 //! What a hook's output means to its author: status lines, live output, failure text.
 
 use anyhow::Result;
-use tola_subprocess::{Captured, Observer, Stream, terminating_signal};
+use tola_subprocess::{Captured, Observer, Stop, Stream, terminating_signal};
 
-use crate::cancellation::is_cancelled;
+use crate::cancellation::{BuildCancellation, is_cancelled};
 use crate::config::section::build::hooks::HookStage;
 use tola_diagnostic::{Diagnostic, DiagnosticError, Severity};
 
 use std::io;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::process::{ExitStatus, Output};
 use std::time::Instant;
 
@@ -29,16 +30,20 @@ pub(super) fn omitted_notice(omitted: u64) -> String {
 }
 
 /// Report what a hook prints while it runs, tagged with the command and stream.
-pub(super) struct HookObserver {
+pub(super) struct HookObserver<'a> {
     stdout: Option<HookOutputEmitter>,
     stderr: Option<HookOutputEmitter>,
+    observe_failure: Option<&'a dyn Fn()>,
+    pub(super) stop: Option<Stop>,
 }
 
-impl HookObserver {
-    pub(super) fn new(hook: &str) -> Self {
+impl<'a> HookObserver<'a> {
+    pub(super) fn new(hook: &str, observe_failure: Option<&'a dyn Fn()>) -> Self {
         Self {
             stdout: HookOutputEmitter::new(hook, Stream::Stdout),
             stderr: HookOutputEmitter::new(hook, Stream::Stderr),
+            observe_failure,
+            stop: None,
         }
     }
 
@@ -50,7 +55,7 @@ impl HookObserver {
     }
 }
 
-impl Observer for HookObserver {
+impl Observer for HookObserver<'_> {
     fn observes_output(&self) -> bool {
         self.stdout.is_some() || self.stderr.is_some()
     }
@@ -59,6 +64,21 @@ impl Observer for HookObserver {
         if let Some(emitter) = self.emitter(stream) {
             emitter.write(bytes);
         }
+    }
+
+    fn stopped(&mut self, stop: &Stop) {
+        self.stop = match *stop {
+            Stop::Exited(status) => {
+                if !status.success()
+                    && let Some(observe_failure) = self.observe_failure
+                {
+                    observe_failure();
+                }
+                Some(Stop::Exited(status))
+            }
+            Stop::Cancelled(status) => Some(Stop::Cancelled(status)),
+            _ => None,
+        };
     }
 
     fn finished(&mut self, stream: Stream) {
@@ -210,12 +230,81 @@ pub(super) fn report_reused(stage: HookStage, hook: &str) {
 pub(super) fn run_hook_entry<T>(
     stage: HookStage,
     hook: &str,
+    cancellation: &BuildCancellation,
     run: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
+    let _active = super::active::enter(stage);
     let report = HookEntryReport::started(stage, hook);
-    let outcome = run();
+    let outcome = catch_unwind(AssertUnwindSafe(run)).unwrap_or_else(|_| {
+        let identity = super::hook_identity(stage, hook);
+        Err(hook_command_error(
+            stage,
+            &identity,
+            CommandFailure::Interrupted {
+                step: InterruptionStep::Run,
+            }
+            .into(),
+        ))
+    });
     report.finished(HookOutcome::classify(&outcome));
-    outcome
+    outcome.map_err(|error| {
+        if is_cancelled(&error) && cancellation.was_cancelled_directly() {
+            error.context(BatchStopped)
+        } else {
+            error
+        }
+    })
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("another hook in the batch failed")]
+struct BatchStopped;
+
+/// Select the first failure in declaration order, keeping other hook diagnostics.
+#[derive(Default)]
+pub(super) struct BatchFailure {
+    error: Option<anyhow::Error>,
+    stopped: Option<anyhow::Error>,
+}
+
+impl BatchFailure {
+    pub(super) fn record(&mut self, error: anyhow::Error, diagnostics: &mut Vec<Diagnostic>) {
+        if is_cancelled(&error) {
+            diagnostics.extend_from_slice(tola_diagnostic::attached(&error).unwrap_or_default());
+            if !error.is::<BatchStopped>() {
+                self.stopped.get_or_insert(error);
+            }
+        } else if self.error.is_some() {
+            match tola_diagnostic::attached(&error) {
+                Some(reported) => diagnostics.extend_from_slice(reported),
+                None => diagnostics.push(tola_diagnostic::fallback(
+                    tola_diagnostic::codes::build::HOOKS,
+                    &error,
+                )),
+            }
+        } else {
+            self.error = Some(error);
+        }
+    }
+
+    pub(super) fn error(self) -> Option<anyhow::Error> {
+        self.error.or(self.stopped)
+    }
+}
+
+pub(super) fn genuinely_failed<T>(outcome: &Result<T>) -> bool {
+    outcome.as_ref().is_err_and(|error| !is_cancelled(error))
+}
+
+/// A granted hook still has one terminal record when its worker could not start.
+pub(super) fn failed_to_start(
+    stage: HookStage,
+    name: &str,
+    error: std::io::Error,
+) -> anyhow::Error {
+    let report = HookEntryReport::started(stage, name);
+    report.finished(HookOutcome::Failed);
+    hook_command_error(stage, &super::hook_identity(stage, name), error.into())
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -470,7 +559,7 @@ mod tests {
     fn failed_command(arguments: &[&str]) -> Diagnostic {
         let directory = tempfile::tempdir().unwrap();
         let invocation = hook_invocation(arguments, directory.path());
-        let error = invocation.run(None).unwrap_err();
+        let error = invocation.run(None, &|| {}).unwrap_err();
         let stage = HookStage::BeforeBuild;
         let error = hook_command_error(stage, &crate::hooks::hook_identity(stage, "styles"), error);
         tola_diagnostic::attached(&error)

@@ -24,7 +24,7 @@ pub fn collection_of_icon_file(path: &std::path::Path) -> Option<&str> {
         .strip_prefix(ICON_OBSERVATION_DIRECTORY)
         .ok()?
         .to_str()?;
-    let (collection, name) = relative.split_once('/')?;
+    let (collection, name) = relative.rsplit_once('/')?;
     (!collection.is_empty() && (name.ends_with(".svg") || name == ".names")).then_some(collection)
 }
 
@@ -63,7 +63,7 @@ fn observation_parts<'a>(
     path.strip_prefix(ICON_OBSERVATION_DIRECTORY)
         .ok()?
         .to_str()?
-        .split_once('/')
+        .rsplit_once('/')
 }
 
 /// Tracked names for suggestions within one mounted collection; aliases are included.
@@ -137,7 +137,7 @@ impl PublishedIcon {
         let relative = path.to_str()?;
         let relative = relative.strip_prefix('/').unwrap_or(relative);
         let relative = relative.strip_prefix(ICON_REQUEST_OBSERVATION_DIRECTORY)?;
-        let (namespace, name) = relative.split_once('/')?;
+        let (namespace, name) = relative.rsplit_once('/')?;
         tola_icons::IconId::new(namespace, name).ok().map(Self::new)
     }
 }
@@ -185,16 +185,39 @@ fn icon_file(identity: &str) -> Result<(tola_icons::IconId, FileId), tola_icons:
     Ok((identity, file))
 }
 
-fn read_icon(engine: &mut Engine, identity: &str, span: Span) -> SourceResult<ResolvedIcon> {
-    let (identity, file) = icon_file(identity).map_err(|error| {
+fn read_icon(
+    engine: &mut Engine,
+    identity: &str,
+    module: Option<&str>,
+    span: Span,
+) -> SourceResult<ResolvedIcon> {
+    let requested = identity;
+    if let Some(module) = module
+        && !super::library::module_records(engine).is_some_and(|modules| modules.contains(module))
+    {
+        typst::diag::bail!(span, "module `{module}` is not configured for this site");
+    }
+    let parsed = (|| {
+        let (collection, name) = requested
+            .split_once(':')
+            .ok_or(tola_icons::InvalidIconName)?;
+        let collection = tola_icons::IconCollectionKey::new(module, collection)?;
+        let (identity, file) = icon_file(&format!("{collection}:{name}"))?;
+        Ok::<_, tola_icons::InvalidIconName>((collection, identity, file))
+    })();
+    let (collection, identity, file) = parsed.map_err(|error| {
         let mut error = crate::diagnostic::package_error(
             span,
             TolaPackage::Icon,
-            format!("`{identity}` is not a valid icon id: {error}"),
+            format!("`{requested}` is not a valid icon id: {error}"),
         );
         error.hint("Write `collection:name` using a configured collection");
         eco_vec![error]
     })?;
+    let owner = module.map_or_else(
+        || "the site".to_owned(),
+        |alias| format!("module `{alias}`"),
+    );
     let bytes = match engine.world.file(file) {
         Ok(bytes) => bytes,
         Err(FileError::NotFound(_)) => {
@@ -212,8 +235,8 @@ fn read_icon(engine: &mut Engine, identity: &str, span: Span) -> SourceResult<Re
                         span,
                         TolaPackage::Icon,
                         format!(
-                            "the icon `{identity}` is not in collection `{}`",
-                            identity.collection()
+                            "the icon `{requested}` is not in collection `{}` of {owner}",
+                            collection.name()
                         ),
                     );
                     let names = std::str::from_utf8(names.as_slice())
@@ -221,11 +244,13 @@ fn read_icon(engine: &mut Engine, identity: &str, span: Span) -> SourceResult<Re
                     if let Some(name) =
                         tola_typst::spelling::closest(identity.name(), names.lines())
                     {
-                        error.hint(format!("Did you mean `{}:{name}`?", identity.collection()));
+                        error.hint(format!("Did you mean `{}:{name}`?", collection.name()));
                     }
+                    let selector =
+                        module.map_or_else(String::new, |alias| format!(" --module {alias}"));
                     error.hint(format!(
-                        "Run `tola inspect icons {}` to list names in this collection",
-                        identity.collection()
+                        "Run `tola inspect icons {}{selector}` to list names in this collection",
+                        collection.name()
                     ));
                     error
                 }
@@ -234,11 +259,16 @@ fn read_icon(engine: &mut Engine, identity: &str, span: Span) -> SourceResult<Re
                         span,
                         TolaPackage::Icon,
                         format!(
-                            "icon collection `{}` is not declared in `icons.collections`",
-                            identity.collection()
+                            "icon collection `{}` is not declared in `icons.collections` of {owner}",
+                            collection.name()
                         ),
                     );
-                    error.hint(format!("Declare `[icons.collections.{}]` in the site configuration, or use a configured collection", identity.collection()));
+                    let file = if module.is_some() {
+                        "the module's tola-module.toml"
+                    } else {
+                        "tola.toml"
+                    };
+                    error.hint(format!("Declare `[icons.collections.{}]` in {file}, or use a configured collection", collection.name()));
                     error
                 }
                 Err(error) => return Err::<ResolvedIcon, String>(error.to_string()).at(span),
@@ -261,8 +291,12 @@ pub(super) fn tola_icon_bytes(
     span: Span,
     /// The configured icon's identity, such as `"brand:mark"`.
     id: Str,
+    /// Module alias owning this collection. Omit to use the site's collections.
+    #[named]
+    #[default]
+    module: Option<Str>,
 ) -> SourceResult<Bytes> {
-    Ok(read_icon(engine, id.as_str(), span)?.bytes)
+    Ok(read_icon(engine, id.as_str(), module.as_deref(), span)?.bytes)
 }
 
 #[func]
@@ -271,8 +305,12 @@ pub(super) fn tola_icon_url(
     span: Span,
     /// The configured icon's identity, such as `"brand:mark"`.
     id: Str,
+    /// Module alias owning this collection. Omit to use the site's collections.
+    #[named]
+    #[default]
+    module: Option<Str>,
 ) -> SourceResult<Str> {
-    let icon = read_icon(engine, id.as_str(), span)?;
+    let icon = read_icon(engine, id.as_str(), module.as_deref(), span)?;
     let published = PublishedIcon::new(icon.identity);
     let url = super::library::browser_output_url(engine, span, &published_icon_path(&icon.bytes))?;
     // This is ordinary tracked World input, not an imperative output queue, so a complete build

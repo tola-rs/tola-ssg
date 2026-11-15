@@ -1,6 +1,9 @@
 //! The configured site language: one language tag, written whole or as its parts.
 
 use serde::{Deserialize, Serialize};
+use tola_config::{Fragment, FragmentContext, ValidateFragment};
+
+use crate::config::fragment;
 
 /// A configured site language, written as one tag or as its parts.
 ///
@@ -21,27 +24,31 @@ pub enum LanguageDeclaration {
     },
 }
 
+/// The subtags of one language, named after the parameters that take them.
+#[derive(Deserialize, Fragment)]
+#[serde(deny_unknown_fields)]
+struct LanguageParts {
+    lang: String,
+    script: Option<String>,
+    region: Option<String>,
+}
+
+impl ValidateFragment for LanguageDeclaration {
+    fn validate_fragment(value: &toml::Value, context: &mut FragmentContext<'_>) {
+        fragment::string_or_table::<LanguageParts>(value, context);
+    }
+}
+
 impl<'de> Deserialize<'de> for LanguageDeclaration {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
-        /// The subtags of one language, named after the parameters that take them.
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Parts {
-            lang: String,
-            #[serde(default)]
-            script: Option<String>,
-            #[serde(default)]
-            region: Option<String>,
-        }
-
         #[derive(Deserialize)]
         #[serde(untagged)]
         enum Declared {
             Tag(String),
-            Parts(Parts),
+            Parts(LanguageParts),
         }
 
         match Declared::deserialize(deserializer) {

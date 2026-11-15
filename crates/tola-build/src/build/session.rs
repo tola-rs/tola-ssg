@@ -4,6 +4,7 @@ use crate::compiler::{
     CompilationDependencies, CompilationReuse, RebuildDecision, SiteHost, SiteProgramCache,
     analysis,
 };
+use crate::hooks::HookExecutor;
 use crate::mode::BuildMode;
 
 /// Why an attempt refused before it could compile the site.
@@ -26,6 +27,7 @@ enum AttemptRefusal {
 /// Shared resources and accepted caches for repeated builds of one site.
 pub struct BuildSession {
     resources: crate::resources::BuildResources,
+    hook_executor: HookExecutor,
     // Attempts share immutable loaded resources even after failure. This lock is
     // held only while taking or replacing a handle, never during filesystem work.
     host_cache: std::sync::Arc<std::sync::Mutex<Option<SiteHost>>>,
@@ -90,8 +92,7 @@ impl BuildCacheUpdate {
         });
     }
 
-    /// A cancelled attempt recorded partial evidence, so its cancellation is checked
-    /// around the caller's own freshness walk.
+    /// Both the build attempt and the caller can stop the freshness walk.
     pub(super) fn freshness(
         &self,
         config: &crate::config::ResolvedSiteConfig,
@@ -100,17 +101,15 @@ impl BuildCacheUpdate {
         attempt_cancellation: &crate::cancellation::BuildCancellation,
         caller_cancellation: &crate::cancellation::BuildCancellation,
     ) -> anyhow::Result<super::InputFreshness> {
-        attempt_cancellation.ensure_active()?;
-        let freshness = super::input::input_freshness(
+        let cancellation = attempt_cancellation.either(caller_cancellation);
+        super::input::input_freshness(
             config,
             modules,
             &self.caches,
             &self.content_inventory,
             hook_outputs,
-            caller_cancellation,
-        )?;
-        attempt_cancellation.ensure_active()?;
-        Ok(freshness)
+            &cancellation,
+        )
     }
 }
 
@@ -190,14 +189,21 @@ pub struct BuildAttempt {
     /// Set when the attempt starts from an already prepared hook watch.
     prepared: Option<crate::modules::PreparedSite>,
     baseline: BuildSession,
+    hook_epoch: u64,
     request: BuildRequest,
 }
 
 impl BuildAttempt {
+    /// The executor epoch the caller invalidates before cancelling this attempt.
+    pub fn hook_epoch(&self) -> u64 {
+        self.hook_epoch
+    }
+
     /// Prepare resources and run the build pipeline.
     pub fn run(mut self) -> Result<super::SiteBuild, super::BuildFailure> {
-        super::diagnostic::refuse_incomplete_vendor(&self.config)
-            .map_err(super::BuildFailure::before_attempt)?;
+        let before_attempt =
+            |error| super::BuildFailure::before_attempt(error, self.config.get_root());
+        super::diagnostic::refuse_incomplete_vendor(&self.config).map_err(before_attempt)?;
         let mut site = match self.prepared.take() {
             Some(site) => site,
             None => {
@@ -206,16 +212,17 @@ impl BuildAttempt {
                     &self.config,
                     self.baseline.resources.input_mode(),
                     &bundle,
+                    &[],
                 )
-                .map_err(super::BuildFailure::before_attempt)?
+                .map_err(before_attempt)?
             }
         };
         if !site
             .prepared()
             .manifests_are_fresh(&self.request.cancellation.bundle_cancellation())
-            .map_err(super::BuildFailure::before_attempt)?
+            .map_err(before_attempt)?
         {
-            return Err(super::BuildFailure::before_attempt(anyhow::Error::new(
+            return Err(before_attempt(anyhow::Error::new(
                 AttemptRefusal::ManifestsChangedBeforeBuild,
             )));
         }
@@ -237,7 +244,7 @@ impl BuildAttempt {
             ..super::pipeline::BuildAttemptProducers::default()
         };
         let built = (|| -> anyhow::Result<super::SiteBuild> {
-            super::bootstrap::install(&mut site, &producers.resources)?;
+            super::install_hooks(&mut site, &producers.resources)?;
             if !site
                 .prepared()
                 .manifests_are_fresh(&producers.cancellation.bundle_cancellation())?
@@ -246,10 +253,18 @@ impl BuildAttempt {
                     AttemptRefusal::ManifestsChangedBeforeHooks,
                 ));
             }
+            let executor = self.baseline.hook_executor();
+            executor.configure(
+                self.hook_epoch,
+                site.config().build.par_hooks,
+                site.config().build.hook_jobs,
+                &producers.cancellation,
+            )?;
             super::pipeline::build_site_inner(
                 &site,
                 &self.request,
                 &mut producers,
+                executor,
                 |producers, hooks_executed| self.prepare_compiler(producers, hooks_executed, &site),
             )
         })();
@@ -265,11 +280,16 @@ impl BuildAttempt {
                     return Err(super::BuildFailure::new(
                         error.into(),
                         producers.into_inputs(),
+                        self.config.get_root(),
                     ));
                 }
                 Ok(built)
             }
-            Err(error) => Err(super::BuildFailure::new(error, producers.into_inputs())),
+            Err(error) => Err(super::BuildFailure::new(
+                error,
+                producers.into_inputs(),
+                self.config.get_root(),
+            )),
         }
     }
 
@@ -364,9 +384,20 @@ impl BuildSession {
     pub fn with_resources(resources: crate::resources::BuildResources) -> Self {
         Self {
             resources,
+            hook_executor: HookExecutor::new(),
             host_cache: std::sync::Arc::new(std::sync::Mutex::new(None)),
             accepted: None,
         }
+    }
+
+    /// The executor shared by this site's builds and publication consumers.
+    pub fn hook_executor(&self) -> &HookExecutor {
+        &self.hook_executor
+    }
+
+    /// The rules for acquiring and reading this site's inputs.
+    pub fn input_mode(&self) -> tola_input::InputMode {
+        self.resources.input_mode()
     }
 
     /// Build and commit the output tree, then accept its caches.
@@ -401,9 +432,11 @@ impl BuildSession {
             prepared: None,
             baseline: Self {
                 resources: self.resources.clone(),
+                hook_executor: self.hook_executor.clone(),
                 host_cache: std::sync::Arc::clone(&self.host_cache),
                 accepted: self.accepted.clone(),
             },
+            hook_epoch: self.hook_executor.begin_attempt(),
             request,
         }
     }

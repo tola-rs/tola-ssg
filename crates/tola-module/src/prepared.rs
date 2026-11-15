@@ -48,14 +48,30 @@ pub struct AssetContribution {
     pub replace: BTreeMap<String, PathBuf>,
 }
 
-/// One module hook, validated and filtered by its `enabled-by` option.
+/// Why a module hook participates in a build.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookParticipation {
+    Enabled,
+    Disabled,
+    OptionDisabled,
+}
+
+/// One module hook, validated against its instance options.
 ///
+/// Disabled declarations remain present for identity checks and source locations; consumers
+/// use `participation` to select execution rather than dropping entries during collection.
 /// Neutral to `HooksConfig`: the build maps each entry to its stage's configuration type.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HookEntry {
     pub stage: HookStage,
     /// Execution name, `@module/{alias}/{hook.name}`.
     pub name: String,
+    /// Name written in the module manifest.
+    pub declared_name: String,
+    /// Batch number local to this module instance and stage, not a cross-module priority.
+    pub order: u64,
+    /// Whether the declaration is enabled by its own fields and instance options.
+    pub participation: HookParticipation,
     pub origin: ModuleHookOrigin,
     pub action: crate::Action,
     pub dev: DevParticipation,
@@ -67,7 +83,8 @@ pub struct HookEntry {
     pub outputs: Vec<CommandOutput>,
 }
 
-/// Module hooks in lifecycle order: stage, then module alias, then declaration order.
+/// Module declarations collected by alias, then stage and source declaration order.
+/// The build separates stages and applies each instance's order batches afterward.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HooksContribution {
     entries: Vec<HookEntry>,
@@ -144,6 +161,7 @@ pub struct Context<'a> {
     pub mode: InputMode,
     pub vendor: Option<&'a Path>,
     pub cancellation: &'a BundleCancellation,
+    pub sources: &'a [(PathBuf, std::sync::Arc<str>)],
 }
 
 /// One declared module whose root is read and whose manifest is loaded.
@@ -173,7 +191,8 @@ pub fn acquire(
         declarations,
         ctx.cancellation,
     )?;
-    let loaded = load_modules_with_roots(ctx.site_root, declarations, &roots, ctx.mode)?;
+    let loaded =
+        load_modules_with_roots(ctx.site_root, declarations, &roots, ctx.mode, ctx.sources)?;
     let mut modules = BTreeMap::new();
     for (alias, module) in loaded {
         let declaration = declarations

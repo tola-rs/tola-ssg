@@ -151,6 +151,7 @@ impl InputObservation {
 /// One source of evidence that can invalidate a complete site candidate.
 #[derive(Debug, Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
 pub enum InputKind {
+    Configuration,
     TypstPhysicalReads,
     ModuleManifests,
     TypstPackageSelection,
@@ -165,6 +166,7 @@ impl InputKind {
     /// Author-facing label naming the configuration key that owns these inputs.
     pub(crate) const fn display_name(self) -> &'static str {
         match self {
+            Self::Configuration => "configuration files",
             Self::TypstPhysicalReads => "files read by the Bundle",
             Self::ModuleManifests => "module manifests",
             Self::TypstPackageSelection => "Typst packages",

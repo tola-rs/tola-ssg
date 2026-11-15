@@ -6,7 +6,9 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use tola_address::{OutputPath, OutputPathError, UrlPath, UrlPathError};
-use tola_input::{FilePatterns, FileSelection, PatternError};
+use tola_input::{FilePatterns, FileSelection};
+
+use crate::fragment::{FragmentError, read_fields, read_fragment};
 
 /// A configured asset URL could not establish a portable output identity.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -192,13 +194,8 @@ pub fn is_enabled(
         .map_err(|error| anyhow::anyhow!("{owner} asset `{}`: {error}", source.display()))
 }
 
-fn enabled() -> bool {
-    true
-}
-
 /// Selected members of one directory published below a URL prefix within its owner.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(try_from = "AssetTreeFields")]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct AssetTreeDeclaration {
     /// Logical source directory. TOML supplies a site-relative path; runtime
     /// configuration holds its logical absolute path without following symlinks.
@@ -221,28 +218,19 @@ pub struct AssetTreeDeclaration {
     selection: Arc<FileSelection>,
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Default, Deserialize)]
 struct AssetTreeFields {
-    source: PathBuf,
+    source: Option<PathBuf>,
     #[serde(rename = "url-prefix")]
-    url_prefix: AssetUrlPrefix,
-    #[serde(default, rename = "follow-file-symlinks")]
-    follow_file_symlinks: bool,
-    #[serde(default = "enabled")]
-    enable: bool,
-    #[serde(default, rename = "enabled-by")]
+    url_prefix: Option<AssetUrlPrefix>,
+    #[serde(rename = "follow-file-symlinks")]
+    follow_file_symlinks: Option<bool>,
+    enable: Option<bool>,
+    #[serde(rename = "enabled-by")]
     enabled_by: Option<OptionPath>,
-    #[serde(default = "enabled")]
-    minify: bool,
-    #[serde(default = "whole_tree_include")]
-    include: Vec<String>,
-    #[serde(default)]
-    exclude: Vec<String>,
-}
-
-fn whole_tree_include() -> Vec<String> {
-    vec![".".to_owned()]
+    minify: Option<bool>,
+    include: Option<Vec<String>>,
+    exclude: Option<Vec<String>>,
 }
 
 fn serialize_tree_patterns<S: serde::Serializer>(
@@ -253,38 +241,49 @@ fn serialize_tree_patterns<S: serde::Serializer>(
 }
 
 impl TryFrom<AssetTreeFields> for AssetTreeDeclaration {
-    type Error = PatternError;
+    type Error = String;
 
     fn try_from(fields: AssetTreeFields) -> Result<Self, Self::Error> {
+        let source = fields.source.ok_or("declare `source` for the asset tree")?;
+        let url_prefix = fields
+            .url_prefix
+            .ok_or("declare `url-prefix` for the asset tree")?;
         let selection = FileSelection::new(&FilePatterns {
-            include: fields.include,
-            exclude: fields.exclude,
+            include: fields.include.unwrap_or_else(|| vec![".".to_owned()]),
+            exclude: fields.exclude.unwrap_or_default(),
         })
-        .map_err(|error| error.at("assets.trees"))?;
+        .map_err(|error| error.at("assets.trees").to_string())?;
         Ok(Self {
-            source: fields.source,
-            url_prefix: fields.url_prefix,
-            follow_file_symlinks: fields.follow_file_symlinks,
-            enable: fields.enable,
+            source,
+            url_prefix,
+            follow_file_symlinks: fields.follow_file_symlinks.unwrap_or_default(),
+            enable: fields.enable.unwrap_or(true),
             enabled_by: fields.enabled_by,
-            minify: fields.minify,
+            minify: fields.minify.unwrap_or(true),
             selection: Arc::new(selection),
         })
     }
 }
 
+impl<'de> Deserialize<'de> for AssetTreeDeclaration {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Self::try_from(read_fields::<AssetTreeFields, _>(deserializer)?)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
 impl AssetTreeDeclaration {
+    /// Check the fields written in one asset tree declaration.
+    pub fn validate_fragment(value: &toml::Value) -> Result<(), FragmentError> {
+        read_fragment::<AssetTreeFields>(value).map(|_| ())
+    }
+
     /// Declare a source tree with an already validated URL prefix.
     pub fn new(source: impl Into<PathBuf>, url_prefix: AssetUrlPrefix) -> Self {
         AssetTreeFields {
-            source: source.into(),
-            url_prefix,
-            follow_file_symlinks: false,
-            enable: true,
-            enabled_by: None,
-            minify: true,
-            include: whole_tree_include(),
-            exclude: Vec::new(),
+            source: Some(source.into()),
+            url_prefix: Some(url_prefix),
+            ..AssetTreeFields::default()
         }
         .try_into()
         .expect("the entire asset tree is a valid selection")
@@ -309,8 +308,7 @@ impl AssetTreeDeclaration {
 }
 
 /// One file published at an exact URL within its owner.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct AssetFileDeclaration {
     /// Logical source file. TOML supplies a site-relative path; runtime configuration
     /// holds its logical absolute path without following symlinks.
@@ -320,21 +318,51 @@ pub struct AssetFileDeclaration {
     /// does not transcode the source bytes.
     pub url: AssetUrl,
     /// Whether this declaration may publish.
-    #[serde(default = "enabled")]
     pub enable: bool,
     /// TOML key path to a boolean in the owner's options.
-    #[serde(
-        default,
-        rename = "enabled-by",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(rename = "enabled-by", skip_serializing_if = "Option::is_none")]
     pub enabled_by: Option<OptionPath>,
     /// Whether the site may minify the published bytes.
-    #[serde(default = "enabled")]
     pub minify: bool,
 }
 
+#[derive(Deserialize)]
+struct AssetFileFields {
+    source: Option<PathBuf>,
+    url: Option<AssetUrl>,
+    enable: Option<bool>,
+    #[serde(rename = "enabled-by")]
+    enabled_by: Option<OptionPath>,
+    minify: Option<bool>,
+}
+
+impl TryFrom<AssetFileFields> for AssetFileDeclaration {
+    type Error = &'static str;
+
+    fn try_from(fields: AssetFileFields) -> Result<Self, Self::Error> {
+        Ok(Self {
+            source: fields.source.ok_or("declare `source` for the asset file")?,
+            url: fields.url.ok_or("declare `url` for the asset file")?,
+            enable: fields.enable.unwrap_or(true),
+            enabled_by: fields.enabled_by,
+            minify: fields.minify.unwrap_or(true),
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for AssetFileDeclaration {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Self::try_from(read_fields::<AssetFileFields, _>(deserializer)?)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
 impl AssetFileDeclaration {
+    /// Check the fields written in one asset file declaration.
+    pub fn validate_fragment(value: &toml::Value) -> Result<(), FragmentError> {
+        read_fragment::<AssetFileFields>(value).map(|_| ())
+    }
+
     /// Declare a source file with an already validated URL and output identity.
     pub fn new(source: impl Into<PathBuf>, url: AssetUrl) -> Self {
         Self {

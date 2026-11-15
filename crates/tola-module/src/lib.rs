@@ -10,7 +10,9 @@ pub mod checkout;
 pub mod declaration;
 mod diagnostic;
 pub mod entities;
+pub mod fragment;
 pub mod hooks;
+pub mod icons;
 pub mod inputs;
 pub mod manifest;
 pub mod module_set;
@@ -25,7 +27,7 @@ pub use action::Action;
 pub use arguments::expand_argument;
 pub use checkout::CheckoutError;
 pub use declaration::*;
-pub use diagnostic::source_diagnostic;
+pub use diagnostic::error_diagnostic;
 pub use hooks::{
     BeforePackHook, CommandOutput, DevParticipation, HookDeclarationError, HookStage,
     ModuleHookOrigin, ModuleHooks,

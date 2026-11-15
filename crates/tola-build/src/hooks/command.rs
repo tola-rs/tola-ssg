@@ -16,8 +16,11 @@ use crate::config::section::build::hooks::{HookStage, ModuleHookOrigin};
 use crate::mode::BuildMode;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::{ffi::OsStr, process::Output};
 use tola_input::layout;
+
+pub(super) type ObserveFailure = Arc<dyn Fn() + Send + Sync>;
 
 /// The directories one hook stage provides its command; a stage that provides none supplies none.
 pub(super) enum HookDirectories<'a> {
@@ -131,16 +134,32 @@ pub struct NuHook<'a> {
     pub temp_dir: &'a Path,
     pub cancellation: Option<&'a BuildCancellation>,
     label: &'a str,
+    observe_failure: &'a ObserveFailure,
 }
 
 impl NuHook<'_> {
     /// Run the Nu executor with the same capture and cancellation as an argv hook.
     pub fn run_command(&self, command: &Command) -> Result<()> {
-        run_observed(command, self.label, &|| {
-            self.cancellation
-                .is_some_and(BuildCancellation::is_cancelled)
-        })?;
+        run_observed_with(
+            command,
+            self.label,
+            &|| {
+                self.cancellation
+                    .is_some_and(BuildCancellation::is_cancelled)
+            },
+            Some(self.observe_failure.as_ref()),
+        )?;
         Ok(())
+    }
+
+    /// Stop dispatching this batch after observing a failure in the hook.
+    pub fn observe_failure(&self) {
+        (self.observe_failure)();
+    }
+
+    /// Notify the batch of a failure from this hook's report handler.
+    pub fn failure_notifier(&self) -> Arc<dyn Fn() + Send + Sync> {
+        Arc::clone(self.observe_failure)
     }
 }
 
@@ -194,6 +213,10 @@ impl HookRunner {
     pub(super) fn assets(&self) -> Option<std::sync::Arc<crate::asset::AssetUrls>> {
         self.assets.clone()
     }
+
+    pub(super) fn resources(&self) -> Option<&crate::BuildResources> {
+        self.resources.as_ref()
+    }
 }
 
 impl std::fmt::Debug for HookRunner {
@@ -208,15 +231,23 @@ pub(super) fn run_action(
     call: HookCall<'_>,
     cancellation: Option<&BuildCancellation>,
     diagnostics: &mut Vec<tola_diagnostic::Diagnostic>,
+    observe_failure: &ObserveFailure,
 ) -> Result<()> {
     if let Some(cancellation) = cancellation {
         cancellation.ensure_active()?;
     }
     match action.map_err(anyhow::Error::msg)? {
         Action::Argv(argv) => {
+            let hook = hook_identity(call.directories.stage(), call.name);
             let invocation = HookInvocation::new(&argv, call)?;
-            let completion = invocation.run(cancellation);
-            invocation.finish(completion, cancellation, diagnostics)
+            let completion = invocation.run(cancellation, observe_failure.as_ref());
+            finish_report_with(
+                &hook,
+                invocation.reports,
+                completion,
+                diagnostics,
+                observe_failure.as_ref(),
+            )
         }
         Action::Nu { path, args } => {
             let stage = call.directories.stage();
@@ -238,7 +269,7 @@ pub(super) fn run_action(
             let result = (runner.run)(NuHook {
                 modules: runner.modules.as_deref(),
                 assets: runner.assets.as_deref(),
-                resources: runner.resources.clone().unwrap_or_else(|| {
+                resources: runner.resources().cloned().unwrap_or_else(|| {
                     crate::BuildResources::new().with_input_scope(call.site.scope)
                 }),
                 config,
@@ -249,12 +280,15 @@ pub(super) fn run_action(
                 temp_dir: temporary.path(),
                 cancellation,
                 label: call.name,
+                observe_failure,
             });
-            if let Some(cancellation) = cancellation {
-                cancellation.ensure_active()?;
-            }
-            let reported = result?;
-            tola_diagnostic::ensure_reports_succeed(&reported)?;
+            let reported = result.inspect_err(|error| {
+                if !crate::cancellation::is_cancelled(error) {
+                    observe_failure();
+                }
+            })?;
+            tola_diagnostic::ensure_reports_succeed(&reported)
+                .inspect_err(|_| observe_failure())?;
             diagnostics.extend(reported);
             Ok(())
         }
@@ -346,46 +380,79 @@ impl<'a> HookInvocation<'a> {
         })
     }
 
-    pub(super) fn finish(
-        self,
-        completion: Result<Output>,
+    pub(super) fn run(
+        &self,
         cancellation: Option<&BuildCancellation>,
-        diagnostics: &mut Vec<tola_diagnostic::Diagnostic>,
-    ) -> Result<()> {
-        finish_report(self.reports, completion, cancellation, diagnostics)
-    }
-
-    pub(super) fn run(&self, cancellation: Option<&BuildCancellation>) -> Result<Output> {
-        run_observed(&self.command, self.name, &|| {
-            cancellation.is_some_and(BuildCancellation::is_cancelled)
-        })
+        observe_failure: &dyn Fn(),
+    ) -> Result<Output> {
+        run_observed_with(
+            &self.command,
+            self.name,
+            &|| cancellation.is_some_and(BuildCancellation::is_cancelled),
+            Some(observe_failure),
+        )
     }
 }
 
 pub(super) fn finish_report(
+    hook: &str,
     reports: crate::report::ReportChannel,
     completion: Result<Output>,
     cancellation: Option<&BuildCancellation>,
     diagnostics: &mut Vec<tola_diagnostic::Diagnostic>,
 ) -> Result<()> {
-    use tola_diagnostic::{Diagnostic, DiagnosticError, Severity};
+    finish_report_with(hook, reports, completion, diagnostics, &|| {})?;
     if let Some(cancellation) = cancellation {
         cancellation.ensure_active()?;
     }
+    Ok(())
+}
+
+fn finish_report_with(
+    hook: &str,
+    reports: crate::report::ReportChannel,
+    completion: Result<Output>,
+    diagnostics: &mut Vec<tola_diagnostic::Diagnostic>,
+    observe_failure: &dyn Fn(),
+) -> Result<()> {
+    use crate::report::ReportError;
+    use tola_diagnostic::{Diagnostic, DiagnosticError, Severity};
+    let cancelled = completion
+        .as_ref()
+        .is_err_and(crate::cancellation::is_cancelled);
     let report = reports.read().map_err(|error| {
-        let message = "invalid hook diagnostic report";
+        let message = format!("{hook} wrote a diagnostic report Tola could not read");
+        let help = match &error {
+            ReportError::Json(_) => {
+                "Write a complete JSON report with `schemaVersion` and `diagnostics`"
+            }
+            ReportError::UnsupportedVersion(_) => "Set `schemaVersion` to `1`",
+            ReportError::TooLarge { .. } => "Report fewer issues or shorten their messages",
+            ReportError::UnknownSource(_) | ReportError::InvalidLocation { .. } => {
+                "Use the source IDs and ranges supplied to this hook"
+            }
+            ReportError::InvalidDiagnostic { .. } => {
+                "Correct the indicated item in the `diagnostics` array"
+            }
+            _ => "Check that the hook writes the report to the path Tola supplied",
+        };
         let diagnostic = Diagnostic::new(
             tola_diagnostic::codes::build::HOOKS,
             Severity::Error,
-            message,
+            &message,
         )
-        .with_help("Check the report format and use only source locations supplied by Tola");
+        .with_note(error.to_string())
+        .with_help(help);
         let error = anyhow::Error::new(error).context(message);
         anyhow::Error::new(DiagnosticError::attach(error, vec![diagnostic]))
     });
     let report = match report {
         Ok(report) => report,
+        // A stopped command may leave only part of its report. Preserve a complete
+        // report when there is one, but do not diagnose an interrupted write.
+        Err(_) if cancelled => return completion.map(|_| ()),
         Err(error) => {
+            observe_failure();
             return match completion {
                 Ok(_) => Err(error),
                 Err(process_error) => {
@@ -403,7 +470,7 @@ pub(super) fn finish_report(
             Err(DiagnosticError::attach(error, reported).into())
         };
     }
-    tola_diagnostic::ensure_reports_succeed(&reported)?;
+    tola_diagnostic::ensure_reports_succeed(&reported).inspect_err(|_| observe_failure())?;
     diagnostics.extend(reported);
     Ok(())
 }
@@ -428,10 +495,41 @@ pub(super) fn run_observed(
     hook: &str,
     cancelled: &impl Fn() -> bool,
 ) -> Result<Output> {
-    let mut observer = HookObserver::new(hook);
-    let exit = command
-        .run(cancelled, &mut observer)
-        .map_err(|error| uncompleted(command, error))?;
+    run_observed_with(command, hook, cancelled, None)
+}
+
+fn run_observed_with(
+    command: &Command,
+    hook: &str,
+    cancelled: &impl Fn() -> bool,
+    observe_failure: Option<&dyn Fn()>,
+) -> Result<Output> {
+    let mut observer = HookObserver::new(hook, observe_failure);
+    let exit = match command.run(cancelled, &mut observer) {
+        Ok(exit) => exit,
+        Err(error) => {
+            let error = uncompleted(command, error);
+            return match observer.stop {
+                Some(Stop::Exited(status)) if !status.success() => {
+                    Err(anyhow::Error::new(CommandFailure::Exited {
+                        status,
+                        stdout: Vec::new(),
+                        stderr: Vec::new(),
+                    })
+                    .context(error))
+                }
+                Some(Stop::Cancelled(_)) => {
+                    Err(anyhow::Error::new(crate::cancellation::BuildCancelled).context(error))
+                }
+                _ => {
+                    if let Some(observe_failure) = observe_failure {
+                        observe_failure();
+                    }
+                    Err(error)
+                }
+            };
+        }
+    };
     let stdout = render_capture(&exit.stdout);
     let stderr = render_capture(&exit.stderr);
     match exit.stop {
@@ -499,7 +597,9 @@ mod tests {
             },
         )
         .unwrap();
-        let error = invocation.run(Some(&canceller.token())).unwrap_err();
+        let error = invocation
+            .run(Some(&canceller.token()), &|| {})
+            .unwrap_err();
 
         assert!(error.is::<crate::cancellation::BuildCancelled>());
     }
@@ -601,7 +701,7 @@ mod tests {
         )
         .unwrap();
 
-        invocation.run(None).unwrap();
+        invocation.run(None, &|| {}).unwrap();
     }
 
     /// Asserts the environment Tola built for it, against the expectations the scene

@@ -56,7 +56,14 @@ pub fn run_before_pack(
     )?;
     let completion = run_observed(&command, name, &|| cancellation.is_cancelled());
     let mut diagnostics = Vec::new();
-    finish_report(reports, completion, Some(cancellation), &mut diagnostics)?;
+    let hook = format!("the `{name}` hook in `hooks.before-pack`");
+    finish_report(
+        &hook,
+        reports,
+        completion,
+        Some(cancellation),
+        &mut diagnostics,
+    )?;
     Ok(diagnostics)
 }
 

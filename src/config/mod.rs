@@ -4,7 +4,7 @@ mod dev;
 mod diagnostics;
 mod server;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -225,10 +225,13 @@ pub(crate) fn validate_settings(
     path: &Path,
     text: &str,
     scope: InputScope,
-) -> Result<SiteConfigSchema> {
-    let (parsed, _) = ConfigSource::parse(path, text, scope)?.decode_with_host::<ConfigSchema>()?;
+    overlays: &[(PathBuf, Arc<str>)],
+) -> Result<(SiteConfigSchema, Vec<PathBuf>)> {
+    let source = ConfigSource::parse_with_sources(path, text, scope, overlays, None)?;
+    let paths = source.paths().map(Path::to_path_buf).collect();
+    let (parsed, _) = source.decode_with_host::<ConfigSchema>()?;
     parsed.validate_settings()?;
-    Ok(parsed.into_schema())
+    Ok((parsed.into_schema(), paths))
 }
 
 /// A reloaded configuration awaiting acceptance by the running session.
@@ -263,6 +266,7 @@ impl ConfigCandidate {
     /// A `false` answer is a configuration the caller must accept: the prepared session, and the
     /// answers a request reads, would otherwise keep the previous values. `server`, `dev`, and
     /// `diagnostics` are host settings, applied separately from this comparison.
+    #[cfg(test)]
     pub(crate) fn has_same_effective_settings(&self, config: &ResolvedSiteConfig) -> Result<bool> {
         Ok(self.config.get_root() == config.get_root()
             && self.config.package_locations() == config.package_locations()
@@ -294,6 +298,7 @@ impl ConfigCandidate {
 }
 
 /// Whether two configuration sections hold the same values.
+#[cfg(test)]
 fn same_section(left: &impl Serialize, right: &impl Serialize) -> Result<bool> {
     Ok(toml::Value::try_from(left)? == toml::Value::try_from(right)?)
 }
@@ -313,8 +318,17 @@ impl ConfigLoader {
         self.resolve_changed(self.source.read_changed()?)
     }
 
-    pub(crate) fn load_text_candidate(&self, text: &str) -> Result<Option<ConfigCandidate>> {
-        self.resolve_changed(self.source.changed_text(text)?)
+    #[cfg(test)]
+    fn load_text_candidate(&self, text: &str) -> Result<Option<ConfigCandidate>> {
+        self.load_sources_candidate(&[(self.path().to_path_buf(), Arc::from(text))], None)
+    }
+
+    pub(crate) fn load_sources_candidate(
+        &self,
+        overlays: &[(PathBuf, Arc<str>)],
+        cancellation: Option<&tola_build::cancellation::BuildCancellation>,
+    ) -> Result<Option<ConfigCandidate>> {
+        self.resolve_changed(self.source.changed_sources(overlays, cancellation)?)
     }
 
     fn resolve_changed(&self, source: Option<ConfigSource>) -> Result<Option<ConfigCandidate>> {
@@ -382,7 +396,10 @@ mod tests {
         assert_eq!(loaded.diagnostics().max_errors, Some(7));
         assert_eq!(loaded.diagnostics().max_warnings, Some(1));
         assert!(!loaded.config().build().minify.html);
-        assert_eq!(loaded.core.source_hash(), blake3::hash(source.as_bytes()));
+        assert_eq!(
+            loaded.config().source().unwrap().sources()[0].hash(),
+            blake3::hash(source.as_bytes())
+        );
         assert!(loaded.config().warnings().is_empty());
         assert!(!path.exists());
     }
@@ -467,7 +484,7 @@ mod tests {
         assert_eq!(candidate.server().port, 8000);
         assert!(!candidate.dev().watch);
         assert_eq!(
-            candidate.source.source_hash(),
+            candidate.source.sources()[0].hash(),
             blake3::hash(changed.as_bytes())
         );
         assert_eq!(
@@ -628,6 +645,24 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(candidate.has_same_effective_settings(&config).unwrap());
+    }
+
+    #[test]
+    fn fragment_comment_updates_source_snapshot() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let path = root.join("tola.toml");
+        let fragment = root.join("site.toml");
+        std::fs::write(&path, "include = ['site.toml']\n").unwrap();
+        std::fs::write(&fragment, text("Same")).unwrap();
+        let (config, _, _, mut loader) = load_at(&path).into_parts();
+        let previous = loader.source.source_hash();
+        std::fs::write(&fragment, format!("{}# note\n", text("Same"))).unwrap();
+        let candidate = loader.load_candidate().unwrap().unwrap();
+        assert!(candidate.has_same_effective_settings(&config).unwrap());
+        assert_ne!(candidate.source.source_hash(), previous);
+        loader.acknowledge(&candidate);
+        assert!(loader.load_candidate().unwrap().is_none());
     }
 
     #[test]

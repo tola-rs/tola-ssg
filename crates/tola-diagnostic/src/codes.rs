@@ -90,6 +90,8 @@ pub mod module {
 
     /// A declared module could not be acquired.
     pub const SOURCE: DiagnosticCode = DiagnosticCode::new("module.source");
+    /// A module manifest could not be read or its declarations were rejected.
+    pub const MANIFEST: DiagnosticCode = DiagnosticCode::new("module.manifest");
 }
 
 /// Private model query results.

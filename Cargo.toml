@@ -114,6 +114,7 @@ tola-address.workspace = true
 tola-diagnostic.workspace = true
 tola-highlight.workspace = true
 tola-input.workspace = true
+tola-icons.workspace = true
 tola-fs.workspace = true
 tola-module.workspace = true
 tola-packages.workspace = true

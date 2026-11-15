@@ -17,7 +17,7 @@ use crate::terminal::display_path_toward_home;
 use crate::writes::FileWrites;
 use anyhow::{Result, ensure};
 pub(in crate::cli) use input::Source;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tola_build::config::SiteConfigSchema;
 
 pub(in crate::cli) fn run(
@@ -67,7 +67,7 @@ pub(in crate::cli) fn run_with_source(
             &builtin
         }
     };
-    let schema = validate_configuration(writes, scope)?;
+    let (schema, config_paths) = validate_configuration(writes, scope)?;
     validate::checks([
         validate::scaffold(writes, args.force),
         destination::check_writes(output.log().map(LogFile::path), writes, args.dry_run),
@@ -80,7 +80,7 @@ pub(in crate::cli) fn run_with_source(
         output.block("Nothing written")?;
         return Ok(());
     }
-    start_log(output, &root, &schema, cancellation)?;
+    start_log(output, &root, &schema, &config_paths, cancellation)?;
     writes.apply(&cancellation.token())?;
     if let Some(generated) = &generated {
         generated.install_cache(&root, output, cancellation)?;
@@ -126,19 +126,36 @@ fn show_dry_run(root: &Path, writes: &FileWrites, output: &CommandOutput) -> Res
 fn validate_configuration(
     writes: &FileWrites,
     scope: tola_input::InputScope,
-) -> Result<SiteConfigSchema> {
+) -> Result<(SiteConfigSchema, Vec<PathBuf>)> {
     let source = config::config_source(writes);
     let path = writes.root().join(config::CONFIG_PATH);
-    let schema = crate::config::validate_settings(&path, source, scope)?;
-    Ok(schema)
+    let overlays = configuration_overlays(writes);
+    crate::config::validate_settings(&path, source, scope, &overlays)
+}
+
+fn configuration_overlays(writes: &FileWrites) -> Vec<(PathBuf, std::sync::Arc<str>)> {
+    writes
+        .file_paths()
+        .filter_map(|path| {
+            let contents = writes.file_contents(writes.relative_path(path))?;
+            let text = std::str::from_utf8(contents).ok()?;
+            Some((path.to_path_buf(), std::sync::Arc::from(text)))
+        })
+        .collect()
 }
 
 fn start_log(
     output: &CommandOutput,
     root: &Path,
     schema: &SiteConfigSchema,
+    config_paths: &[PathBuf],
     cancellation: &Cancellation,
 ) -> Result<()> {
+    destination::check_config_paths(
+        output.log().map(LogFile::path),
+        root,
+        config_paths.iter().map(PathBuf::as_path),
+    )?;
     destination::check_site(
         output.log().map(LogFile::path),
         root,

@@ -18,9 +18,13 @@ use crate::output::semantics::OutputDeclaration;
 use tola_address::OutputPath;
 use tola_input::layout;
 
-use super::command::{HookCall, HookDirectories, run_action};
-use super::report::{hook_command_error, report_reused, run_hook_entry};
-use super::reuse::{ReusableHookOutput, ReusableHookOutputs, observe};
+use super::command::{HookCall, HookDirectories, ObserveFailure, run_action};
+use super::report::{
+    BatchFailure, failed_to_start, genuinely_failed, hook_command_error, report_reused,
+    run_hook_entry,
+};
+use super::reuse::{HookId, ReusableHookOutput, ReusableHookOutputs, observe};
+use super::{HookExecutor, hook_batches, hook_participates};
 
 /// Files and exclusive directory ownerships produced by this candidate's commands.
 #[derive(Debug, Default)]
@@ -31,6 +35,7 @@ pub(crate) struct GeneratedOutputs {
 }
 
 /// Run each participating producer against the same immutable upstream files.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn generate_outputs(
     config: &ResolvedSiteConfig,
     upstream: &[OutputFile],
@@ -39,93 +44,139 @@ pub(crate) fn generate_outputs(
     previous: Option<&ReusableHookOutputs>,
     cancellation: &BuildCancellation,
     diagnostics: &mut Vec<tola_diagnostic::Diagnostic>,
+    executor: &HookExecutor,
 ) -> Result<GeneratedOutputs> {
     cancellation.ensure_active()?;
-    let mut participating = config
-        .hooks
-        .generate_outputs
-        .iter()
-        .enumerate()
-        .filter(|(_, command)| super::hook_participates(command.enable, command.dev, mode))
-        .peekable();
-    if participating.peek().is_none() {
-        return Ok(GeneratedOutputs::default());
-    }
+    let stage = HookStage::GenerateOutputs;
+    let hooks = &config.hooks.generate_outputs;
     // Materialize the input view only when a command actually runs.
     let mut candidate = None;
     let mut generated_outputs = GeneratedOutputs::default();
-    for (index, command) in participating {
+    for mut batch in hook_batches(
+        hooks,
+        false,
+        |hook| hook.origin.as_ref().map(|origin| origin.name.as_str()),
+        |hook| hook.order,
+    ) {
         cancellation.ensure_active()?;
-        let reuses_outputs = mode == BuildMode::Development && command.dev.reuses_outputs();
-        let inputs = if reuses_outputs {
-            Some(observe(config, command, upstream)?)
+        batch.retain(|&index| hook_participates(hooks[index].enable, hooks[index].dev, mode));
+        let mut entries = Vec::with_capacity(batch.len());
+        let mut ready = Vec::new();
+        for (member, &index) in batch.iter().enumerate() {
+            cancellation.ensure_active()?;
+            let hook = &hooks[index];
+            let id = HookId::new(
+                hook.origin.as_ref(),
+                &hook.name,
+                hook.declared_name.as_deref(),
+            );
+            let inputs = (mode == BuildMode::Development && hook.dev.reuses_outputs())
+                .then(|| observe(config, hook, upstream, cancellation))
+                .transpose()?;
+            let cached = inputs
+                .as_ref()
+                .zip(previous)
+                .and_then(|(inputs, previous)| previous.matching(&id, inputs));
+            if cached.is_none() {
+                ready.push(member);
+            }
+            entries.push((id, inputs, cached));
+        }
+        let mut results = if ready.is_empty() {
+            Vec::new()
         } else {
-            None
-        };
-        if let (Some(inputs), Some(previous)) = (inputs.as_ref(), previous)
-            && let Some(previous) = previous.matching(&command.name, inputs)
-        {
-            let owner = OutputOwner::command(index, command.name.as_str());
-            for output in &previous.outputs {
-                generated_outputs
-                    .outputs
-                    .push(output.with_owner(owner.clone()));
+            if candidate.is_none() {
+                candidate = Some(HookOutputFiles::materialize_outputs(
+                    config.get_root(),
+                    upstream,
+                    Some(cancellation),
+                    crate::compiler::minified_languages(config),
+                )?);
             }
-            for root in &previous.roots {
-                generated_outputs
-                    .root_ownerships
-                    .push(OutputRootOwnership::new(root.root().clone(), owner.clone()));
-            }
-            diagnostics.extend(previous.report.iter().cloned());
-            generated_outputs.reuse.insert(
-                &command.name,
-                ReusableHookOutput {
-                    inputs: inputs.clone(),
-                    outputs: previous.outputs.clone(),
-                    roots: previous.roots.clone(),
-                    report: previous.report.clone(),
-                },
-            );
-            report_reused(HookStage::GenerateOutputs, &command.name);
-            continue;
-        }
-        if candidate.is_none() {
-            candidate = Some(HookOutputFiles::materialize_outputs(
-                config.get_root(),
-                upstream,
+            let candidate = candidate.as_ref().expect("materialized above");
+            executor.run_batch(
+                ready.len(),
                 Some(cancellation),
-                crate::compiler::minified_languages(config),
-            )?);
-        }
-        let candidate = candidate.as_ref().expect("materialized above");
-        let mut report = Vec::new();
-        let files = run_hook_entry(HookStage::GenerateOutputs, &command.name, || {
-            generate_entry(GenerateEntry {
-                command,
-                index,
-                candidate,
-                config,
-                mode,
-                scope,
-                cancellation,
-                diagnostics: &mut report,
-            })
-        });
-        diagnostics.extend(report.iter().cloned());
-        let (outputs, roots) = files?;
-        if let Some(inputs) = inputs {
-            generated_outputs.reuse.insert(
-                &command.name,
-                ReusableHookOutput {
-                    inputs,
-                    outputs: outputs.clone(),
-                    roots: roots.clone(),
-                    report,
+                |slot, stop, observe_failure| {
+                    let index = batch[ready[slot]];
+                    let hook = &hooks[index];
+                    let mut report = Vec::new();
+                    let result = run_hook_entry(stage, &hook.name, stop, || {
+                        stop.ensure_active()?;
+                        let result = generate_entry(GenerateEntry {
+                            command: hook,
+                            index,
+                            candidate,
+                            config,
+                            mode,
+                            scope,
+                            cancellation: stop,
+                            diagnostics: &mut report,
+                            observe_failure,
+                        });
+                        if genuinely_failed(&result) {
+                            observe_failure();
+                        }
+                        result
+                    });
+                    (result, report)
                 },
-            );
+                |(result, _)| genuinely_failed(result),
+            )
         }
-        generated_outputs.outputs.extend(outputs);
-        generated_outputs.root_ownerships.extend(roots);
+        .into_iter();
+        let mut failure = BatchFailure::default();
+        for (member, (id, inputs, cached)) in entries.into_iter().enumerate() {
+            let index = batch[member];
+            let name = hooks[index].name.as_str();
+            let (outputs, roots, report) = if let Some(cached) = cached {
+                let owner = OutputOwner::command(index, name);
+                let outputs = cached
+                    .outputs
+                    .iter()
+                    .map(|output| output.with_owner(owner.clone()))
+                    .collect();
+                let roots = cached
+                    .roots
+                    .iter()
+                    .map(|root| OutputRootOwnership::new(root.root().clone(), owner.clone()))
+                    .collect();
+                report_reused(stage, name);
+                (outputs, roots, cached.report.clone())
+            } else {
+                let result = results.next().expect("each uncached hook is in the batch");
+                match result {
+                    Some(Ok((Ok((outputs, roots)), report))) => (outputs, roots, report),
+                    Some(Ok((Err(error), report))) => {
+                        diagnostics.extend(report);
+                        failure.record(error, diagnostics);
+                        continue;
+                    }
+                    Some(Err(error)) => {
+                        failure.record(failed_to_start(stage, name, error), diagnostics);
+                        continue;
+                    }
+                    None => continue,
+                }
+            };
+            diagnostics.extend(report.iter().cloned());
+            if let Some(inputs) = inputs {
+                generated_outputs.reuse.insert(
+                    id,
+                    ReusableHookOutput {
+                        inputs,
+                        outputs: outputs.clone(),
+                        roots: roots.clone(),
+                        report,
+                    },
+                );
+            }
+            generated_outputs.outputs.extend(outputs);
+            generated_outputs.root_ownerships.extend(roots);
+        }
+        if let Some(error) = failure.error() {
+            return Err(error);
+        }
     }
     cancellation.ensure_active()?;
     Ok(generated_outputs)
@@ -141,6 +192,7 @@ struct GenerateEntry<'a> {
     scope: tola_input::InputScope,
     cancellation: &'a BuildCancellation,
     diagnostics: &'a mut Vec<tola_diagnostic::Diagnostic>,
+    observe_failure: &'a ObserveFailure,
 }
 
 /// The declaration is a contract: no unowned file and no missing declared file.
@@ -154,6 +206,7 @@ fn generate_entry(entry: GenerateEntry<'_>) -> Result<(Vec<OutputFile>, Vec<Outp
         scope,
         cancellation,
         diagnostics,
+        observe_failure,
     } = entry;
     if command.outputs.is_empty() {
         return Err(super::hook_contract_error(
@@ -179,9 +232,24 @@ fn generate_entry(entry: GenerateEntry<'_>) -> Result<(Vec<OutputFile>, Vec<Outp
         },
         Some(cancellation),
         diagnostics,
+        observe_failure,
     )
     .map_err(|error| hook_command_error(HookStage::GenerateOutputs, &identity, error))?;
-    let files = read_generated_files(generated.path(), &identity, cancellation)
+    let result = collect_entry_outputs(command, index, generated.path(), &identity, cancellation);
+    if genuinely_failed(&result) {
+        observe_failure();
+    }
+    result
+}
+
+fn collect_entry_outputs(
+    command: &OutputCommandConfig,
+    index: usize,
+    generated: &Path,
+    identity: &str,
+    cancellation: &BuildCancellation,
+) -> Result<(Vec<OutputFile>, Vec<OutputRootOwnership>)> {
+    let files = read_generated_files(generated, identity, cancellation)
         .with_context(|| format!("Tola could not read the files written by {identity}"))?;
     let declarations = DeclaredOutputs::new(&command.outputs, cancellation)?;
     for path in files.regular.keys() {
@@ -581,6 +649,7 @@ mod tests {
             None,
             &BuildCancellation::new(),
             &mut Vec::new(),
+            &HookExecutor::new(),
         )
         .unwrap();
         assert_eq!(outputs.outputs.len(), 1);
@@ -623,6 +692,7 @@ mod tests {
                 None,
                 &BuildCancellation::new(),
                 &mut Vec::new(),
+                &HookExecutor::new(),
             )
             .unwrap_err();
             assert!(tola_diagnostic::attached(&error).is_some());
@@ -647,6 +717,7 @@ mod tests {
                 None,
                 &BuildCancellation::new(),
                 &mut Vec::new(),
+                &HookExecutor::new(),
             )
             .unwrap_err();
             assert_eq!(
@@ -687,6 +758,7 @@ mod tests {
                 None,
                 &worker_cancellation,
                 &mut Vec::new(),
+                &HookExecutor::new(),
             )
         });
         let ready = ready_receiver.recv_timeout(std::time::Duration::from_secs(5));
@@ -720,6 +792,7 @@ mod tests {
                 None,
                 &BuildCancellation::new(),
                 &mut Vec::new(),
+                &HookExecutor::new(),
             )
             .unwrap();
             assert_eq!(generated.root_ownerships[0].root().as_str(), "search");
@@ -783,6 +856,7 @@ mod tests {
                 None,
                 &cancellation,
                 &mut Vec::new(),
+                &HookExecutor::new(),
             )
             .unwrap();
             assert_eq!(run_count(&directory), 1);
@@ -817,6 +891,7 @@ mod tests {
                 Some(&first.reuse),
                 &cancellation,
                 &mut Vec::new(),
+                &HookExecutor::new(),
             )
             .unwrap();
 

@@ -23,6 +23,7 @@ pub(crate) fn append_observed_paths<'a>(
 ) {
     for path in paths {
         let producer = match path.input() {
+            InputKind::Configuration => ProducerKind::Modules,
             InputKind::TypstPhysicalReads => ProducerKind::TypstReads,
             InputKind::ModuleManifests => ProducerKind::Modules,
             InputKind::TypstPackageSelection => ProducerKind::PackageResolution,

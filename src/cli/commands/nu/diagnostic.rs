@@ -247,6 +247,7 @@ fn into_location(
             field: field(),
         })?;
     Ok(Location {
+        file: None,
         path,
         line: location.line,
         column: location.column,
@@ -317,6 +318,7 @@ mod tests {
         issue.help.push(Help {
             message: "Add a title here".into(),
             location: Some(Location {
+                file: None,
                 path: "content/index.typ".into(),
                 line: Some(2),
                 column: None,

@@ -105,6 +105,7 @@ pub fn inspect_sources(
         config,
         resources.input_mode(),
         &bundle,
+        &[],
     )?;
     let config = site.config();
     cancellation.ensure_active()?;

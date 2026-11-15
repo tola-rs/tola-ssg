@@ -80,7 +80,7 @@ pub(in crate::cli) fn run(
         if vendor.refresh {
             reject_previous_inputs(&selection.site, &replacement)?;
         }
-        let icons = selected_icon_collections(&selection_config, &resources, &cancellation)?;
+        let icons = selected_icon_collections(selection.site.config(), &resources, &cancellation)?;
         replacement.open()?;
         let candidate = replacement.candidate_root();
         let mut copy = VendorCopy {
@@ -498,6 +498,7 @@ impl VendorCopy<'_> {
                 .candidate_root()
                 .join("icons")
                 .join(format!("{}.json", collection.namespace));
+            fs::create_dir_all(destination.parent().expect("vendored icon has a parent"))?;
             fs::write(&destination, &collection.bytes)
                 .with_context(|| {
                     format!(
