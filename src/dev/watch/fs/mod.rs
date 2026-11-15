@@ -72,6 +72,7 @@ impl FileChangeBatch {
 #[derive(Default)]
 struct EventEpochState {
     boundary: EventBoundary,
+    internal_paths: RebuildPathFilter,
     revision: u64,
     pending: BTreeMap<PathBuf, PendingEvent>,
     /// File content each committed claim consumed, until a newer claim replaces it.
@@ -358,6 +359,12 @@ impl EventEpochState {
 struct EventEpoch(Arc<Mutex<EventEpochState>>);
 
 impl EventEpoch {
+    fn for_root(root: &Path) -> Self {
+        let epoch = Self::default();
+        epoch.lock().internal_paths = RebuildPathFilter::internal(root);
+        epoch
+    }
+
     /// Poisoned state is recovered rather than propagated, matching the hook mailbox: a session
     /// keeps serving its last consistent state.
     fn lock(&self) -> MutexGuard<'_, EventEpochState> {
@@ -842,7 +849,7 @@ impl FileChangeSource {
         log_file: Option<&Path>,
     ) -> Result<Self, WatchError> {
         let (event_tx, events) = WatchEventQueue::channel();
-        let event_epoch = EventEpoch::default();
+        let event_epoch = EventEpoch::for_root(config.get_root());
         let roots = RootSet::from_config(config, dynamic).map_err(WatchError::RerunOn)?;
         let callback_epoch = event_epoch.clone();
         let callback_events = event_tx.clone();
@@ -1523,7 +1530,7 @@ fn forward_watch_result<S: WatchMessageSink>(
     if producers.is_empty() {
         return;
     }
-    let event = match event {
+    let mut event = match event {
         Ok(event) => event,
         Err(error) => {
             dispatch_watch_message(
@@ -1537,6 +1544,14 @@ fn forward_watch_result<S: WatchMessageSink>(
             return;
         }
     };
+    if !event.paths.is_empty() {
+        event
+            .paths
+            .retain(|path| epoch.internal_paths.accepts(path));
+        if event.paths.is_empty() {
+            return;
+        }
+    }
     let boundary = epoch.boundary.clone();
     let rescan = event.need_rescan();
     let hook_rescan = rescan
@@ -1705,30 +1720,42 @@ fn take_rebuild_batch(
 
 /// Roots excluded from development rebuilds for one resolved configuration; one filter per
 /// configuration attempt resolves the excluded roots once instead of once per candidate path.
+#[derive(Default)]
 struct RebuildPathFilter {
-    excluded: [Option<tola_input::FilesystemSourceIdentity>; 5],
+    excluded: Vec<tola_input::FilesystemSourceIdentity>,
 }
 
 impl RebuildPathFilter {
-    fn for_config(config: &ResolvedSiteConfig) -> Self {
-        use tola_build::filesystem::{SITE_BUILD_LOCK_FILE, swap_workspace};
+    fn internal(root: &Path) -> Self {
+        use tola_build::filesystem::SITE_BUILD_LOCK_FILE;
         use tola_input::{FilesystemSourceIdentity, INTERNAL_DIR};
-        let root = config.get_root();
         Self {
-            excluded: [
+            excluded: [root.join(INTERNAL_DIR), root.join(SITE_BUILD_LOCK_FILE)]
+                .iter()
+                .map(|path| FilesystemSourceIdentity::from_path(path))
+                .collect(),
+        }
+    }
+
+    fn for_config(config: &ResolvedSiteConfig) -> Self {
+        use tola_build::filesystem::swap_workspace;
+        let mut filter = Self::internal(config.get_root());
+        filter.excluded.extend(
+            [
                 Some(config.build().publish_dir.clone()),
-                Some(root.join(INTERNAL_DIR)),
-                Some(root.join(SITE_BUILD_LOCK_FILE)),
                 swap_workspace(&config.build().publish_dir),
                 config.vendor().path.as_deref().and_then(swap_workspace),
             ]
-            .map(|path| path.map(|path| FilesystemSourceIdentity::from_path(&path))),
-        }
+            .into_iter()
+            .flatten()
+            .map(|path| tola_input::FilesystemSourceIdentity::from_path(&path)),
+        );
+        filter
     }
 
     fn accepts(&self, path: &Path) -> bool {
         let path = tola_input::FilesystemSourceIdentity::from_path(path);
-        !self.excluded.iter().flatten().any(|boundary| {
+        !self.excluded.iter().any(|boundary| {
             [path.logical_path(), path.physical_path()]
                 .into_iter()
                 .any(|path| {
@@ -1827,7 +1854,7 @@ mod tests {
         let mut changes = FileChangeSource {
             event_tx,
             events,
-            event_epoch: EventEpoch::default(),
+            event_epoch: EventEpoch::for_root(config.get_root()),
             claimed_revision: 0,
             observer: Some(observer),
             roots,
@@ -2036,7 +2063,7 @@ mod tests {
     }
 
     fn watching_epoch(config: &ResolvedSiteConfig, required: &WatchRequirements) -> EventEpoch {
-        let epoch = EventEpoch::default();
+        let epoch = EventEpoch::for_root(config.get_root());
         epoch.lock().boundary = RootSet::from_config(config, required)
             .unwrap()
             .initial_selection()
@@ -2180,6 +2207,48 @@ generates = ["generated/{name}.txt"]
             rebuild_scope,
             now + std::time::Duration::from_millis(debouncer::QUIET_PERIOD_MS),
         )
+    }
+
+    #[test]
+    fn internal_events_leave_the_candidate_current() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let config = resolve_schema(
+            directory.path(),
+            toml::from_str(
+                r#"
+[[hooks.before-build]]
+name = "inputs"
+argv = ["unused"]
+rerun-on = { include = ["**"] }
+"#,
+            )
+            .unwrap(),
+            local_packages(),
+        );
+        let root = config.get_root();
+        let epoch = watching_epoch(&config, &WatchRequirements::default());
+        let revision = epoch.revision();
+        let (events, mut received) = mpsc::unbounded_channel();
+        for event in [
+            modified_event(root.join(".tola-build.lock")),
+            notify::Event::new(notify::EventKind::Modify(notify::event::ModifyKind::Name(
+                notify::event::RenameMode::From,
+            )))
+            .add_path(root.join(".tola/cache")),
+        ] {
+            forward_watch_result(Ok(event), &epoch, &events, None);
+        }
+        assert!(received.try_recv().is_err());
+        assert!(epoch.guard_relevant(revision, |_| true).unwrap().is_some());
+
+        forward_watch_result(
+            Ok(modified_event(root.join("input.typ"))),
+            &epoch,
+            &events,
+            None,
+        );
+        assert!(received.try_recv().is_ok());
+        assert!(epoch.guard_relevant(revision, |_| true).unwrap().is_none());
     }
 
     #[test]
