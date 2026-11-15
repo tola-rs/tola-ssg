@@ -60,6 +60,10 @@ pub(crate) struct FileChangeBatch {
 }
 
 impl FileChangeBatch {
+    pub(crate) fn paths(&self) -> &[PathBuf] {
+        &self.paths
+    }
+
     pub(crate) fn into_parts(self) -> (Vec<PathBuf>, RebuildScope) {
         (self.paths, self.rebuild_scope)
     }
@@ -1011,6 +1015,19 @@ impl FileChangeSource {
 
     pub(crate) fn event_epoch(&self) -> u64 {
         self.event_epoch.revision()
+    }
+
+    pub(crate) fn hook_watches(&self, paths: &[PathBuf]) -> Vec<roots::HookWatch> {
+        let epoch = self.event_epoch.lock();
+        let mut watches = std::collections::BTreeSet::new();
+        for path in paths {
+            let structural = epoch
+                .pending
+                .get(path)
+                .is_some_and(|event| event.structural);
+            watches.extend(epoch.boundary.hook_watches(path, structural));
+        }
+        watches.into_iter().collect()
     }
 
     pub(crate) fn accepts_events_for(
@@ -2193,6 +2210,126 @@ generates = ["generated/{name}.txt"]
         )
         .unwrap();
         assert_eq!(batch.paths, vec![root.join("content/index.typ")]);
+    }
+
+    #[tokio::test]
+    async fn directory_renames_keep_exclusions_and_hook_claims() {
+        use notify::event::{ModifyKind, RenameMode};
+
+        let directory = tempfile::TempDir::new().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("generated/brand")).unwrap();
+        std::fs::create_dir(root.join("scratch")).unwrap();
+        let config = resolve_schema(
+            &root,
+            toml::from_str(
+                r#"
+[[hooks.before-build]]
+name = "styles"
+argv = ["unused"]
+rerun-on = { include = ["**/*.typ"], exclude = ["scratch/**"] }
+generates = ["generated/brand"]
+"#,
+            )
+            .unwrap(),
+            local_packages(),
+        );
+        let mut changes = manual_watch_source(&config, &Default::default()).await;
+        changes.begin_candidate(&config);
+        let rename = |from: &str, to: &str| {
+            notify::Event::new(notify::EventKind::Modify(ModifyKind::Name(
+                RenameMode::Both,
+            )))
+            .add_path(root.join(from))
+            .add_path(root.join(to))
+        };
+        for event in [
+            rename("scratch/previous", "scratch/older"),
+            rename("generated/brand", "scratch/previous"),
+        ] {
+            forward_watch_result(Ok(event), &changes.event_epoch, &changes.event_tx, None);
+        }
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(debouncer::MAX_BATCH_WAIT_MS + 1),
+                changes.next(&config),
+            )
+            .await
+            .is_err(),
+            "hook writes and excluded directories must not interrupt the candidate"
+        );
+
+        forward_watch_result(
+            Ok(rename("chapters/old", "chapters/new")),
+            &changes.event_epoch,
+            &changes.event_tx,
+            None,
+        );
+        let batch = tokio::time::timeout(std::time::Duration::from_secs(2), changes.next(&config))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(batch.paths.contains(&root.join("chapters/new")));
+        changes.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn restart_names_the_retained_hook_before_config_is_ready() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let module = root.join("theme");
+        std::fs::create_dir(&module).unwrap();
+        let manifest = module.join("tola-module.toml");
+        std::fs::write(
+            &manifest,
+            r#"
+[[hooks.before-build]]
+name = "styles"
+argv = ["unused"]
+rerun-on = { include = [{ project = "**/*.typ" }] }
+"#,
+        )
+        .unwrap();
+        let config = resolve_schema(
+            &root,
+            toml::from_str(
+                r#"[modules.theme]
+path = "theme"
+"#,
+            )
+            .unwrap(),
+            local_packages(),
+        );
+        let prepared = tola_build::modules::prepare_hook_watch(
+            &config,
+            tola_input::InputMode::new(tola_input::InputScope::Pure, false),
+            &Default::default(),
+        )
+        .unwrap();
+        assert!(prepared.config().hooks().before_build.is_empty());
+        let mut dynamic = WatchRequirements::default();
+        dynamic.add_module_hook_inputs(prepared.inputs());
+        let mut changes = manual_watch_source(&config, &Default::default()).await;
+        changes
+            .stage_config(prepared.config(), &dynamic)
+            .await
+            .unwrap();
+        changes
+            .stage_config(&config, &Default::default())
+            .await
+            .unwrap();
+        let path = root.join("generated/previous");
+        let event = notify::Event::new(notify::EventKind::Modify(notify::event::ModifyKind::Name(
+            notify::event::RenameMode::From,
+        )))
+        .add_path(path.clone());
+        forward_watch_result(Ok(event), &changes.event_epoch, &changes.event_tx, None);
+
+        let watches = changes.hook_watches(&[path]);
+        assert_eq!(watches.len(), 1);
+        assert_eq!(watches[0].name, "styles");
+        assert_eq!(watches[0].file, manifest);
+        changes.shutdown().await.unwrap();
     }
 
     #[cfg(unix)]

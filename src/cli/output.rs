@@ -138,6 +138,21 @@ impl CommandOutput {
         self.activity("Waiting for another build of this site")
     }
 
+    pub(crate) fn build_progress(
+        &self,
+        progress: Option<&crate::dev::round::BuildProgress>,
+        print: bool,
+    ) -> io::Result<()> {
+        if print && let Some(progress) = progress {
+            self.record_text(
+                STATUS_KIND,
+                &format!("{}\n{}", progress.title, progress.detail),
+                None,
+            );
+        }
+        self.terminal.build_progress(progress, print)
+    }
+
     pub(crate) fn summary(&self, text: impl AsRef<str>) -> io::Result<()> {
         self.record_text(SUMMARY_KIND, text.as_ref(), None);
         self.terminal.summary(text)

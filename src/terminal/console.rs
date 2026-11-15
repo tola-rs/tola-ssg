@@ -151,6 +151,17 @@ impl Terminal {
         self.sink.activity(&text)
     }
 
+    pub(crate) fn build_progress(
+        &self,
+        progress: Option<&crate::dev::round::BuildProgress>,
+        print: bool,
+    ) -> io::Result<()> {
+        if self.quiet {
+            return Ok(());
+        }
+        self.sink.build_progress(progress, print, self.palette)
+    }
+
     pub(crate) fn hook_output(
         &self,
         run: &crate::dev::round::HookRun,

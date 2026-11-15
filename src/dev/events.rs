@@ -22,6 +22,11 @@ enum DevEvent<'a> {
         format_version: u8,
         build: u64,
     },
+    BuildProgress {
+        #[serde(rename = "formatVersion")]
+        format_version: u8,
+        progress: Option<&'a super::round::BuildProgress>,
+    },
     BuildFinished {
         #[serde(rename = "formatVersion")]
         format_version: u8,
@@ -74,6 +79,16 @@ impl Events {
         self.send(DevEvent::BuildStarted {
             format_version: 1,
             build,
+        })
+    }
+
+    pub(crate) fn build_progress(
+        self,
+        progress: Option<&super::round::BuildProgress>,
+    ) -> Result<()> {
+        self.send(DevEvent::BuildProgress {
+            format_version: 1,
+            progress,
         })
     }
 

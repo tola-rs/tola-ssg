@@ -446,6 +446,15 @@ impl ClassifiedPath {
 }
 
 impl EventBoundary {
+    pub(super) fn hook_watches(&self, path: &Path, structural: bool) -> Vec<HookWatch> {
+        let path = lexical_path_identity(path);
+        self.intersecting_requirements(&path)
+            .filter(|requirement| requirement.admits_event(&path, structural))
+            .flat_map(|requirement| &requirement.hook_watches)
+            .cloned()
+            .collect()
+    }
+
     pub(super) fn hook_outputs(&self) -> Arc<[tola_input::FilesystemSourceIdentity]> {
         Arc::clone(&self.hook_outputs)
     }

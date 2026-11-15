@@ -3,6 +3,14 @@
 use chrono::{DateTime, Local};
 use tola_diagnostic::Diagnostic;
 
+/// The current attempt's status, shared by the terminal and JSON event stream.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct BuildProgress {
+    pub(crate) title: String,
+    pub(crate) detail: String,
+    pub(crate) warning: bool,
+}
+
 /// One build attempt's number and the revision it published, when it did.
 #[derive(Clone, Copy)]
 pub(crate) struct RoundIdentity<'a> {

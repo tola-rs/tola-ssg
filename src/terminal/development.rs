@@ -389,6 +389,7 @@ pub(crate) struct DevScreen {
     rounds: Rounds,
     jobs: Vec<Job>,
     message: Option<String>,
+    build_progress: Option<crate::dev::round::BuildProgress>,
     notice: Option<Notice>,
     dirty: bool,
 }
@@ -419,6 +420,7 @@ impl DevScreen {
             rounds: Rounds::default(),
             jobs: Vec::new(),
             message: None,
+            build_progress: None,
             notice: None,
             dirty: true,
         })
@@ -426,6 +428,7 @@ impl DevScreen {
 
     pub(crate) fn round(&mut self, round: Round) {
         self.rounds.push(round);
+        self.build_progress = None;
         self.message = None;
         self.notice = None;
         self.dirty = true;
@@ -433,6 +436,22 @@ impl DevScreen {
 
     pub(crate) fn activity(&mut self, text: &str) {
         self.message = Some(text.trim_end_matches('\n').to_owned());
+        self.dirty = true;
+    }
+
+    pub(crate) fn build_progress(&mut self, progress: Option<crate::dev::round::BuildProgress>) {
+        if progress.is_some() {
+            self.message = None;
+        }
+        if progress.as_ref().is_some_and(|next| next.warning)
+            && self
+                .build_progress
+                .as_ref()
+                .is_none_or(|previous| !previous.warning)
+        {
+            self.rounds.top = 0;
+        }
+        self.build_progress = progress;
         self.dirty = true;
     }
 
@@ -611,22 +630,35 @@ impl DevScreen {
             job_lines,
             self.notice.is_some(),
         );
-        let counter = match self.rounds.current() {
-            Some(round) => {
-                let time = round_stamp(round.observed_at, Local::now().date_naive());
-                match self.rounds.index() {
-                    Some(index) => {
-                        format!("round {}/{} {time}", index + 1, self.rounds.positions())
-                    }
-                    None => format!("Ready {time}"),
-                }
+        let counter = if let Some(progress) = &self.build_progress {
+            if progress.warning {
+                self.palette.notice(&progress.title)
+            } else {
+                progress.title.clone()
             }
-            None => "Building site…".to_owned(),
+        } else {
+            match self.rounds.current() {
+                Some(round) => {
+                    let time = round_stamp(round.observed_at, Local::now().date_naive());
+                    match self.rounds.index() {
+                        Some(index) => {
+                            format!("round {}/{} {time}", index + 1, self.rounds.positions())
+                        }
+                        None => format!("Ready {time}"),
+                    }
+                }
+                None => "Waiting for changes".to_owned(),
+            }
         };
         let mut body = self
             .message
             .as_ref()
             .map_or_else(String::new, |message| format!("{message}\n"));
+        if let Some(progress) = &self.build_progress
+            && !progress.detail.is_empty()
+        {
+            body.insert_str(0, &format!("{}\n\n", progress.detail));
+        }
         if let Some(round) = self.rounds.current() {
             body.push_str(round.transcript.trim_end_matches('\n'));
         }
@@ -639,11 +671,15 @@ impl DevScreen {
         self.rounds.top = self.rounds.top.min(self.rounds.last_top());
         let body = body.scroll((u16::try_from(self.rounds.top).unwrap_or(u16::MAX), 0));
         let palette = self.palette;
-        let counter = Line::from(Span::styled(counter, palette.dim_style()));
+        let counter = if self.build_progress.is_some() {
+            styled_paragraph(&counter)
+        } else {
+            Paragraph::new(Line::from(Span::styled(counter, palette.dim_style())))
+        };
         execute!(self.writer, BeginSynchronizedUpdate)?;
         let drawn = self.screen.draw_frame(self.size, |frame| {
             frame.render_widget(header, header_area);
-            frame.render_widget(Paragraph::new(counter), counter_area);
+            frame.render_widget(counter, counter_area);
             frame.render_widget(body, body_area);
             draw_jobs(frame, jobs_area, jobs, styled);
             draw_footer(

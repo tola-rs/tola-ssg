@@ -211,6 +211,40 @@ impl OutputSink {
         self.present(text, |screen, text| screen.activity(text))
     }
 
+    pub(crate) fn build_progress(
+        &self,
+        progress: Option<&crate::dev::round::BuildProgress>,
+        print: bool,
+        palette: Palette,
+    ) -> io::Result<()> {
+        let progress = progress.map(|progress| crate::dev::round::BuildProgress {
+            title: super::text::single_line(&progress.title),
+            detail: super::text::multiline(&progress.detail),
+            warning: progress.warning,
+        });
+        let mut presentation = self.lock()?;
+        if let Some(screen) = &mut presentation.development {
+            screen.build_progress(progress.clone());
+        } else if print && let Some(progress) = &progress {
+            self.finish_hook_line(&mut presentation)?;
+            let title = if progress.warning {
+                palette.notice(&progress.title)
+            } else {
+                progress.title.clone()
+            };
+            let text = if progress.detail.is_empty() {
+                format!("{title}\n")
+            } else {
+                format!(
+                    "{title}\n{}\n",
+                    super::text::indent_continuation_lines(&format!("  {}", progress.detail))
+                )
+            };
+            self.inner.stderr.write(text.as_bytes())?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn hooks(&self, text: &str) -> io::Result<()> {
         self.present(text, |screen, text| screen.hooks(text))
     }

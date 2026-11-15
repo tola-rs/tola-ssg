@@ -234,6 +234,7 @@ pub(super) struct RebuildLoop {
     build: u64,
     attempt_diagnostics: Vec<Diagnostic>,
     attempt_published: bool,
+    restarts: super::restart::Restarts,
     publication_sender: tokio::sync::mpsc::Sender<super::http::PublicationRequest>,
     publication_requests: tokio::sync::mpsc::Receiver<super::http::PublicationRequest>,
 }
@@ -283,6 +284,7 @@ impl RebuildLoop {
             build: 0,
             attempt_diagnostics: Vec::new(),
             attempt_published: false,
+            restarts: super::restart::Restarts::default(),
             publication_sender,
             publication_requests,
         })
@@ -378,6 +380,15 @@ impl RebuildLoop {
         let round = tracing::info_span!(target: "tola::dev", "round", round = self.round);
         // This loop holds one guard at a time, so the newest guard is the browser's rebuild state.
         let _rebuild_status = self.reload.as_ref().map(ReloadTransport::begin_rebuild);
+        self.restarts = super::restart::Restarts::default();
+        self.report_progress(
+            Some(super::round::BuildProgress {
+                title: "Building site…".to_owned(),
+                detail: String::new(),
+                warning: false,
+            }),
+            true,
+        )?;
         let mut failure_retry = FailureRetry::default();
         loop {
             self.build += 1;
@@ -443,7 +454,49 @@ impl RebuildLoop {
             }
             request = superseding;
         }
+        self.report_progress(None, false)?;
         Ok(())
+    }
+
+    fn report_progress(
+        &self,
+        progress: Option<super::round::BuildProgress>,
+        print: bool,
+    ) -> Result<()> {
+        self.events.build_progress(progress.as_ref())?;
+        self.output.build_progress(progress.as_ref(), print)?;
+        Ok(())
+    }
+
+    fn report_restart(
+        &mut self,
+        reason: &str,
+        paths: &[PathBuf],
+        config: &ResolvedSiteConfig,
+    ) -> Result<()> {
+        let Some(print) = self.restarts.record(std::time::Instant::now()) else {
+            return Ok(());
+        };
+        let watches = self
+            .changes
+            .hook_watches(paths)
+            .into_iter()
+            .map(|watch| {
+                let file = crate::terminal::display_path_within(&watch.file, config.get_root());
+                format!(
+                    "`{}` in `{file}` (`hooks.{}.rerun-on`)",
+                    watch.name, watch.stage
+                )
+            })
+            .collect::<Vec<_>>();
+        let paths = paths
+            .iter()
+            .map(|path| crate::terminal::display_path_within(path, config.get_root()))
+            .collect::<Vec<_>>();
+        let progress =
+            self.restarts
+                .progress(reason, &paths, &watches, self.sites.revision().is_some());
+        self.report_progress(Some(progress), print)
     }
 
     /// Await one task while edits are watched; a change cancels it and becomes the next request.
@@ -457,9 +510,9 @@ impl RebuildLoop {
     ) -> Result<RoundAwait<T>> {
         let mut superseding: Option<RebuildRequest> = None;
         let mut cancellation_started = None;
-        let cancel = || {
+        let cancel = |session: &BuildSession| {
             if let Some(epoch) = hook_epoch {
-                self.build_session.hook_executor().invalidate(epoch);
+                session.hook_executor().invalidate(epoch);
             }
             canceller.cancel();
         };
@@ -467,21 +520,30 @@ impl RebuildLoop {
             tokio::select! {
                 biased;
                 _ = self.shutdown.cancelled() => {
-                    cancel();
+                    cancel(&self.build_session);
                     break build.await;
                 }
                 batch = self.changes.next(config) => {
                     let batch = match batch {
                         Ok(batch) => batch,
                         Err(error) => {
-                            cancel();
+                            cancel(&self.build_session);
                             let _ = build.await;
                             return Err(error.into());
                         }
                     };
                     if superseding.is_none() {
                         cancellation_started = Some(std::time::Instant::now());
-                        cancel();
+                        cancel(&self.build_session);
+                        let reason = if batch.paths().is_empty() {
+                            "The watched inputs need to be checked again"
+                        } else {
+                            "Files changed during the build"
+                        };
+                        if let Err(error) = self.report_restart(reason, batch.paths(), config) {
+                            let _ = build.await;
+                            return Err(error);
+                        }
                         superseding = Some(RebuildRequest {
                             paths: changed_paths.to_vec(),
                             rebuild_scope,
@@ -798,6 +860,7 @@ impl RebuildLoop {
             Ok(Ok(built)) => built,
             Ok(Err(failure)) => {
                 if failure.is_cancelled() {
+                    self.report_restart("The build was cancelled", &[], &watch_config)?;
                     let mut retry = RebuildRequest {
                         paths: changed_paths,
                         rebuild_scope,
@@ -903,6 +966,11 @@ impl RebuildLoop {
         let checked = match checked? {
             RevisionCheck::Fresh(checked) => checked,
             RevisionCheck::Stale(freshness) => {
+                self.report_restart(
+                    "Inputs changed before the build could be published",
+                    &[],
+                    &effective_config,
+                )?;
                 return Ok(Some(self.retry_for_stale_candidate(
                     freshness,
                     &candidate_observation,
@@ -918,7 +986,7 @@ impl RebuildLoop {
             .rebuild_changes_after(build_event_epoch, &effective_config);
         let (previous, current) = {
             let shutdown = self.shutdown.token();
-            let event_epoch_guard = match tokio::select! {
+            let guarded = tokio::select! {
                 _ = self.shutdown.cancelled() => return Ok(None),
                 guarded = self.changes.guard_epoch(
                     build_event_epoch,
@@ -926,30 +994,35 @@ impl RebuildLoop {
                     hook_outputs,
                     &shutdown,
                 ) => guarded?,
-            } {
-                Some(guard) => guard,
-                None => {
-                    let (newer_paths, _) = guarded_changes.into_parts();
-                    merge_paths(&mut changed_paths, newer_paths);
-                    rebuild_scope = RebuildScope::FullSite;
-                    merge_paths(
-                        &mut changed_paths,
-                        std::iter::once(effective_config.get_root().to_path_buf()),
-                    );
-                    tracing::debug!(
-                        target: "tola::compile",
-                        build_event_epoch,
-                        guarded_event_epoch,
-                        changes = changed_paths.len(),
-                        rebuild_scope = ?rebuild_scope,
-                        "discarded candidate after a newer filesystem event was accepted"
-                    );
-                    return Ok(Some(RebuildRequest {
-                        paths: changed_paths,
-                        rebuild_scope,
-                    }));
-                }
             };
+            if guarded.is_none() {
+                drop(guarded);
+                let (newer_paths, _) = guarded_changes.into_parts();
+                self.report_restart(
+                    "Inputs changed before the build could be published",
+                    &newer_paths,
+                    &effective_config,
+                )?;
+                merge_paths(&mut changed_paths, newer_paths);
+                rebuild_scope = RebuildScope::FullSite;
+                merge_paths(
+                    &mut changed_paths,
+                    std::iter::once(effective_config.get_root().to_path_buf()),
+                );
+                tracing::debug!(
+                    target: "tola::compile",
+                    build_event_epoch,
+                    guarded_event_epoch,
+                    changes = changed_paths.len(),
+                    rebuild_scope = ?rebuild_scope,
+                    "discarded candidate after a newer filesystem event was accepted"
+                );
+                return Ok(Some(RebuildRequest {
+                    paths: changed_paths,
+                    rebuild_scope,
+                }));
+            }
+            let event_epoch_guard = guarded.expect("the missing guard returned a restart");
             if self.shutdown.is_requested() {
                 drop(event_epoch_guard);
                 self.changes.reject_hook_candidate();
