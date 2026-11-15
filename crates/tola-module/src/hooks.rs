@@ -524,7 +524,12 @@ pub(crate) fn watch_inputs(
                 .expand(&module.name)
                 .compile_at(project_root, Some((&module.name, &module.root)))
                 .with_context(|| format!("the `{}` hook in module `{}`", hook.name, module.name))?;
-            inputs.rerun_selections.push(selection);
+            inputs.rerun_watches.push(crate::watch::RerunWatch {
+                name: hook.name.to_owned(),
+                manifest: module.manifest.clone(),
+                stage: hook.stage,
+                selection,
+            });
         }
         for path in hook.generates {
             let path = expand_path(path, &module.name);

@@ -93,9 +93,9 @@ rerun-on = { include = [{project = "not-watched"}] }
         .unwrap();
         let rerun_roots: Vec<_> = prepared
             .inputs()
-            .rerun_selections()
+            .rerun_watches()
             .iter()
-            .flat_map(tola_module::hooks::RerunSelection::roots)
+            .flat_map(|watch| watch.selection.roots())
             .collect();
         assert!(
             rerun_roots
@@ -103,7 +103,13 @@ rerun-on = { include = [{project = "not-watched"}] }
                 .any(|path| path.ends_with("module/tool.txt"))
         );
         assert!(rerun_roots.iter().any(|path| path.ends_with("input/notes")));
-        let selection = &prepared.inputs().rerun_selections()[0];
+        let watch = &prepared.inputs().rerun_watches()[0];
+        assert_eq!(watch.name, "conditional");
+        assert_eq!(
+            watch.manifest,
+            prepared.config().get_root().join("module/tola-module.toml")
+        );
+        let selection = &watch.selection;
         let module = prepared.config().get_root().join("module");
         assert!(selection.matches(&module.join("data/entry.json")));
         assert!(!selection.matches(&module.join("data/vendor/entry.json")));

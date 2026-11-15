@@ -122,12 +122,18 @@ impl WatchRequirements {
     /// Conservatively observe paths of hooks whose conditions are not evaluated yet.
     pub(crate) fn add_module_hook_inputs(&mut self, inputs: &tola_module::HookWatchInputs) {
         let start = self.requirements.len();
-        self.requirements.extend(
-            inputs
-                .rerun_selections()
-                .iter()
-                .flat_map(hook_rerun_requirements),
-        );
+        self.requirements
+            .extend(inputs.rerun_watches().iter().flat_map(|watch| {
+                let source = HookWatch {
+                    name: watch.name.clone(),
+                    file: watch.manifest.clone(),
+                    stage: watch.stage.as_str(),
+                };
+                hook_rerun_requirements(&watch.selection).map(move |mut requirement| {
+                    requirement.hook_watches.push(source.clone());
+                    requirement
+                })
+            }));
         self.observe_paths(
             ProducerKind::Hooks,
             InputPathScope::Exact,
@@ -878,6 +884,13 @@ enum ChangeAdmission {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct HookWatch {
+    pub(crate) name: String,
+    pub(crate) file: PathBuf,
+    pub(crate) stage: &'static str,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WatchRequirement {
     path: PathBuf,
@@ -886,6 +899,7 @@ pub(crate) struct WatchRequirement {
     existence: ExistencePolicy,
     admission: ChangeAdmission,
     rebuild_scope: RebuildScope,
+    hook_watches: Vec<HookWatch>,
 }
 
 impl WatchRequirement {
@@ -906,6 +920,7 @@ impl WatchRequirement {
             existence: ExistencePolicy::Required,
             admission,
             rebuild_scope: RebuildScope::Paths,
+            hook_watches: Vec::new(),
         }
     }
 
@@ -1080,11 +1095,12 @@ fn selection_for_observed(
         }
         for (entry, parent) in &resolved.entries {
             symlink_entries.push(entry.clone());
-            matched.push(
+            let mut entry_requirement =
                 WatchRequirement::exact_for(entry.clone(), requirement.producers)
                     .with_rebuild_scope(requirement.rebuild_scope)
-                    .optional(),
-            );
+                    .optional();
+            entry_requirement.hook_watches = requirement.hook_watches.clone();
+            matched.push(entry_requirement);
             match parent {
                 Some(parent) => add_parent(&mut directories, &mut directory_producers, parent),
                 None => uncertain(&mut uncertainties, CoverageUncertainty::CoverageGap),
@@ -1480,10 +1496,36 @@ fn collect_hook_requirements(
             roots.extend(requirement);
         }
     }
-    let selections = config
-        .hooks()
-        .development_rerun_selections(config.get_root())?;
-    roots.extend(selections.iter().flat_map(hook_rerun_requirements));
+    macro_rules! stage {
+        ($field:ident, $name:literal) => {
+            for hook in &config.hooks().$field {
+                if !hook.enable
+                    || !hook.dev.participates_in_development()
+                    || hook.rerun_on.include.is_empty()
+                {
+                    continue;
+                }
+                let selection = hook
+                    .rerun_on
+                    .compile(config.get_root(), hook.origin.as_ref())?;
+                let watch = HookWatch {
+                    name: hook.declared_name.as_ref().unwrap_or(&hook.name).clone(),
+                    file: hook.origin.as_ref().map_or_else(
+                        || config.config_path().to_owned(),
+                        |origin| origin.manifest.clone(),
+                    ),
+                    stage: $name,
+                };
+                roots.extend(hook_rerun_requirements(&selection).map(|mut requirement| {
+                    requirement.hook_watches.push(watch.clone());
+                    requirement
+                }));
+            }
+        };
+    }
+    stage!(before_build, "before-build");
+    stage!(generate_outputs, "generate-outputs");
+    stage!(after_publish, "after-publish");
     roots.extend(
         config
             .hooks()
@@ -1534,6 +1576,9 @@ fn dedupe_requirements(requirements: &mut Vec<WatchRequirement>) {
         if let Some(existing) = existing {
             existing.producers.insert(requirement.producers);
             existing.rebuild_scope = existing.rebuild_scope.max(requirement.rebuild_scope);
+            existing.hook_watches.extend(requirement.hook_watches);
+            existing.hook_watches.sort();
+            existing.hook_watches.dedup();
         } else {
             kept.push(requirement);
         }
