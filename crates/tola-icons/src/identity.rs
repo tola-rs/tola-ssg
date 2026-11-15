@@ -75,12 +75,72 @@ macro_rules! icon_name {
 icon_name!(IconCollectionName);
 icon_name!(IconName);
 
+/// A site collection or a collection belonging to a configured module instance.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct IconCollectionKey(String);
+
+impl IconCollectionKey {
+    /// Bind a collection name to an optional module alias.
+    pub fn new(module: Option<&str>, collection: &str) -> Result<Self, InvalidIconName> {
+        validate_name(collection)?;
+        match module {
+            Some(module) => {
+                validate_name(module)?;
+                Ok(Self(format!("modules/{module}/{collection}")))
+            }
+            None => Ok(Self(collection.to_owned())),
+        }
+    }
+
+    /// Unambiguous spelling used in virtual reads, lock entries, and vendored paths.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// The collection's module alias, or none for a site collection.
+    pub fn module(&self) -> Option<&str> {
+        self.0
+            .strip_prefix("modules/")
+            .and_then(|path| path.split_once('/'))
+            .map(|(module, _)| module)
+    }
+
+    /// The collection name within its owner.
+    pub fn name(&self) -> &str {
+        self.0.rsplit('/').next().expect("a collection has a name")
+    }
+}
+
+impl FromStr for IconCollectionKey {
+    type Err = InvalidIconName;
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if let Some(path) = value.strip_prefix("modules/") {
+            let (module, collection) = path.split_once('/').ok_or(InvalidIconName)?;
+            Self::new(Some(module), collection)
+        } else {
+            Self::new(None, value)
+        }
+    }
+}
+
+impl fmt::Display for IconCollectionKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl Borrow<str> for IconCollectionKey {
+    fn borrow(&self) -> &str {
+        &self.0
+    }
+}
+
 /// An unambiguous collection and icon identity, written as `collection:name`.
 ///
 /// Consumers that map this pair into another spelling must detect collisions in that mapping.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct IconId {
-    collection: IconCollectionName,
+    collection: IconCollectionKey,
     name: IconName,
 }
 

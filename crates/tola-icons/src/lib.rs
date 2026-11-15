@@ -28,5 +28,5 @@ mod svg;
 
 pub use collection::{IconCollection, IconLicense, InvalidCollection};
 pub use collections::{IconCollections, InvalidIconNamespace};
-pub use identity::{IconCollectionName, IconId, IconName, InvalidIconName};
+pub use identity::{IconCollectionKey, IconCollectionName, IconId, IconName, InvalidIconName};
 pub use svg::{IconPaint, InvalidSvg, SvgIcon, ViewBox};

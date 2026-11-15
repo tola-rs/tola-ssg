@@ -5,7 +5,7 @@ use std::{
     sync::Arc,
 };
 
-use crate::{IconCollection, IconCollectionName, IconId, InvalidIconName, SvgIcon};
+use crate::{IconCollection, IconCollectionKey, IconId, InvalidIconName, SvgIcon};
 
 /// A collection namespace is invalid or already mounted.
 #[derive(Debug, thiserror::Error)]
@@ -24,7 +24,7 @@ pub enum InvalidIconNamespace {
 /// Named, shared icon collections with no implicit default collection.
 #[derive(Clone, Debug, Default)]
 pub struct IconCollections {
-    collections: BTreeMap<IconCollectionName, Arc<IconCollection>>,
+    collections: BTreeMap<IconCollectionKey, Arc<IconCollection>>,
 }
 
 impl IconCollections {
@@ -39,7 +39,7 @@ impl IconCollections {
         namespace: impl AsRef<str>,
         collection: impl Into<Arc<IconCollection>>,
     ) -> Result<(), InvalidIconNamespace> {
-        let namespace: IconCollectionName = namespace.as_ref().parse()?;
+        let namespace: IconCollectionKey = namespace.as_ref().parse()?;
         match self.collections.entry(namespace) {
             Entry::Occupied(entry) => {
                 return Err(InvalidIconNamespace::DuplicateNamespace {
