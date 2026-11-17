@@ -15,6 +15,7 @@ use typst_syntax::{LinkedNode, SyntaxKind};
 
 /// The extra syntax files also available to Typst's `raw.syntaxes`, keyed by language.
 pub const CODE_SYNTAXES: &[(&str, &str)] = &[
+    ("cuda", include_str!("syntaxes/cuda.sublime-syntax")),
     ("fennel", include_str!("syntaxes/fennel.sublime-syntax")),
     ("just", include_str!("syntaxes/just.sublime-syntax")),
     ("lean4", include_str!("syntaxes/lean4.sublime-syntax")),
@@ -575,6 +576,7 @@ mod tests {
             ("r7rs", "(define-library (demo))"),
             ("fnl", "(fn twice [x] (+ x x))"),
             ("nu", "let x = 2"),
+            ("cu", "kernel<<<grid, block>>>(data);"),
         ];
         for (tag, source) in cases {
             assert!(
