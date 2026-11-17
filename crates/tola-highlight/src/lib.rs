@@ -592,6 +592,96 @@ mod tests {
     }
 
     #[test]
+    fn nushell_keeps_command_names_and_flags_whole() {
+        let source = "use tola [get-context get-site]\n(get-context | save --raw)\n1 - 2\n";
+        let code = highlight(source, "nu", ThemeChoice::Dark);
+        let style = |start, len| {
+            code.runs
+                .iter()
+                .find(|(range, _)| range.start <= start && start + len <= range.end)
+                .map(|(_, style)| *style)
+                .expect("token has a single style")
+        };
+        let minus = style(source.find(" - ").unwrap() + 1, 1);
+        assert_ne!(style(source.find("get-context").unwrap(), 11), minus);
+        assert_ne!(style(source.rfind("get-context").unwrap(), 11), minus);
+        assert_ne!(style(source.find("--raw").unwrap(), 5), minus);
+    }
+
+    #[test]
+    fn nushell_uses_the_surrounding_syntax_to_classify_tokens() {
+        use syntect::parsing::{ParseState, ScopeStack};
+
+        let (syntaxes, syntax) = EXTRA_SYNTAXES
+            .iter()
+            .find_map(|set| set.find_syntax_by_token("nu").map(|syntax| (set, syntax)))
+            .unwrap();
+        let mut parser = ParseState::new(syntax);
+        let mut scopes = ScopeStack::new();
+        let lines: &[(&str, &[(&str, &str)])] = &[
+            (
+                "def inspect [--output(-l): string = short, rows: list<record<name: string>>]: nothing -> any {",
+                &[
+                    ("--output", "constant.other.option.nu"),
+                    ("-l", "constant.other.option.nu"),
+                    ("short", "source.nu"),
+                    ("list", "storage.type.nu"),
+                    ("name", "variable.other.member.nu"),
+                    ("->", "keyword.operator.type.nu"),
+                    ("any", "storage.type.nu"),
+                ],
+            ),
+            (
+                "  let data = {sample: 1..=3}",
+                &[
+                    ("sample", "variable.other.member.nu"),
+                    ("..=", "keyword.operator.range.nu"),
+                ],
+            ),
+            (
+                "  match $data.sample!? { 1 | 2 => true, _ => false }",
+                &[
+                    ("!?", "keyword.operator.member.nu"),
+                    ("|", "keyword.operator.pattern.nu"),
+                    ("=>", "keyword.operator.match.nu"),
+                    ("_", "constant.language.wildcard.nu"),
+                ],
+            ),
+            ("}", &[]),
+            (
+                r#"LABEL="test" %echo and -- --raw e>| save --raw"#,
+                &[
+                    ("LABEL", "variable.other.environment.nu"),
+                    ("%", "keyword.operator.command.nu"),
+                    ("echo", "variable.function.nu"),
+                    ("and", "source.nu"),
+                    ("--raw", "source.nu"),
+                    ("e>|", "keyword.operator.pipe.nu"),
+                    ("save", "variable.function.nu"),
+                ],
+            ),
+        ];
+        for &(line, expected) in lines {
+            let operations = parser.parse_line(line, syntaxes).unwrap();
+            for &(token, name) in expected {
+                let start = line.find(token).unwrap();
+                let end = start + token.len() - 1;
+                let scope = Scope::new(name).unwrap();
+                for offset in [start, end] {
+                    let mut stack = scopes.clone();
+                    for (_, operation) in operations.iter().take_while(|(at, _)| *at <= offset) {
+                        stack.apply(operation).unwrap();
+                    }
+                    assert_eq!(stack.as_slice().last(), Some(&scope), "{line}: {token}");
+                }
+            }
+            for (_, operation) in operations {
+                scopes.apply(&operation).unwrap();
+            }
+        }
+    }
+
+    #[test]
     fn builtin_aliases_keep_the_builtin_syntax() {
         let cases = [
             ("SBCL", "lisp", "(defun twice (x) (+ x x))"),

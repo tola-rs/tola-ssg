@@ -11,4 +11,4 @@ let ansi = render("fn main() {}", "rust", ThemeChoice::Dark);
 ```
 
 The extra syntax files are also exposed as `code-syntaxes` in `@tola/code`.
-Their sources and licenses are recorded in [THIRD-PARTY-GRAMMARS.txt](THIRD-PARTY-GRAMMARS.txt).
+Third-party syntax sources and licenses are recorded in [THIRD-PARTY-GRAMMARS.txt](THIRD-PARTY-GRAMMARS.txt).
