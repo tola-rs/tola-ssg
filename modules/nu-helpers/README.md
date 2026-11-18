@@ -1,12 +1,14 @@
 # Nu Helpers
 
-`pick` returns the original values selected from a searchable table, or `[]` on cancel. Use `--multi` to mark several rows with Space.
+Select values from a searchable terminal table with `nu-helpers pick`.
 
 ```nu
 use tola nu-helpers
-[{name: Guide} {name: Notes}] | nu-helpers pick --columns [name]
+
+[{id: 1, name: Guide} {id: 2, name: Notes}]
+| nu-helpers pick --columns [name] --multi
 ```
 
-In standalone Nushell 0.117+, import `use ./modules/nu-helpers` from the repository root.
+Press `/` to filter, Enter to confirm, or `q` to cancel. With `--multi`, Space toggles marks that survive filtering.
 
-`pick` 从可搜索的列表返回选中的原始值，取消返回 `[]`。`--multi` 模式下按空格标记多项。普通 Nushell 0.117+ 可从仓库根目录执行 `use ./modules/nu-helpers`。
+`pick` returns the original values in input order, including fields hidden by `--columns`. Canceling or passing an empty list returns `[]`.
