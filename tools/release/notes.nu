@@ -1,7 +1,7 @@
 #!/usr/bin/env nu
 # Render release notes for one tag from the commits after the previous tag.
 
-use ../lib/semver.nu [version-precedence, tag-version]
+use ../lib/semver.nu [is-prerelease, version-precedence, tag-version]
 use ../lib/repo.nu [git-output, check-tag]
 
 const CATEGORIES = [
@@ -13,16 +13,24 @@ const CATEGORIES = [
 const SKIPPED = ['release' 'ci' 'chore' 'docs' 'build' 'style' 'test' 'fmt']
 const SUBJECT = '^(?<prefix>[A-Za-z]+)(?:\([^)]*\))?!?: *(?<body>.+)$'
 
-# The greatest tag below this version, or null for the first release.
+# Stable releases compare against the previous stable tag. Prereleases compare
+# against the previous tag, including prereleases.
 def previous-tag [root: string, tag: string] {
-    let current = (version-precedence (tag-version $tag))
+    let current_version = (tag-version $tag)
+    let current = (version-precedence $current_version)
+    let include_prereleases = (is-prerelease $current_version)
     let below = (
         git-output $root ['tag' '--list' 'v[0-9]*']
         | lines
         | each {|candidate|
-            try { {tag: $candidate, version: (version-precedence (tag-version $candidate))} } catch { null }
+            try {
+                let version = (tag-version $candidate)
+                {tag: $candidate, version: (version-precedence $version), prerelease: (is-prerelease $version)}
+            } catch { null }
         }
-        | where {|candidate| $candidate.version < $current }
+        | where {|candidate|
+            $candidate.version < $current and ($include_prereleases or (not $candidate.prerelease))
+        }
     )
     let best = ($below | reduce --fold null {|candidate, best|
         if $best == null or $candidate.version >= $best.version { $candidate } else { $best }
