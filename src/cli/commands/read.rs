@@ -59,7 +59,7 @@ pub(super) fn select(
 }
 
 pub(super) fn write_json(
-    value: &Value,
+    value: &impl Serialize,
     args: &OutputArgs,
     output: &CommandOutput,
     cancellation: &Cancellation,

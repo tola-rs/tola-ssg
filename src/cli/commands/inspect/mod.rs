@@ -9,15 +9,24 @@ use std::io::{self, BufRead};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
+use serde::Serialize;
 use serde_json::{Value, json};
-use tola_input::{InputMode, InputScope};
+use tola_diagnostic::Diagnostic;
+use tola_input::InputMode;
 
-use crate::cli::output::CommandOutput;
+use crate::cli::output::{CommandOutput, attached_or_fallback};
 use crate::cli::{
     BuildArgs, ConfigFileArgs, IconInspectArgs, InspectCommand, SiteArgs, SourceInspectArgs,
 };
 
 const SOURCE_LIST_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
+
+#[derive(Serialize)]
+struct InspectionFailure {
+    success: bool,
+    #[serde(serialize_with = "crate::editor::diagnostics::serialize")]
+    diagnostics: Vec<Diagnostic>,
+}
 
 pub(in crate::cli) fn run(
     config: ConfigFileArgs,
@@ -26,13 +35,48 @@ pub(in crate::cli) fn run(
     output: &CommandOutput,
     cancellation: &Cancellation,
 ) -> Result<()> {
-    let scope = mode.scope();
+    let (title, display) = match &command {
+        InspectCommand::Fonts { display, .. } => ("fonts", display),
+        InspectCommand::Config(args) => ("config", &args.display),
+        InspectCommand::Sources(args) => ("sources", &args.display),
+        InspectCommand::Icons(args) => ("icons", &args.display),
+    };
+    let display = display.clone();
+    match value(config, command, mode, output, cancellation) {
+        Ok(value) => {
+            super::read::write(&value, title, &display, mode.scope(), output, cancellation)
+        }
+        Err(error) => {
+            // Output files store successful inspections.
+            if display.json
+                && display.output.is_none()
+                && !tola_build::cancellation::is_cancelled(&error)
+            {
+                let failure = InspectionFailure {
+                    success: false,
+                    diagnostics: attached_or_fallback(&error, crate::codes::command::FAILED),
+                };
+                if let Err(write_error) =
+                    super::read::write_json(&failure, &display, output, cancellation)
+                {
+                    return Err(error.context(write_error));
+                }
+            }
+            Err(error)
+        }
+    }
+}
+
+fn value(
+    config: ConfigFileArgs,
+    command: InspectCommand,
+    mode: InputMode,
+    output: &CommandOutput,
+    cancellation: &Cancellation,
+) -> Result<Value> {
     match command {
         InspectCommand::Fonts {
-            packages,
-            fonts,
-            display,
-            ..
+            packages, fonts, ..
         } => {
             let request = super::SiteRequest::new(
                 SiteArgs { config, packages },
@@ -41,8 +85,7 @@ pub(in crate::cli) fn run(
                 output,
                 cancellation,
             )?;
-            let value = super::fonts::value(&request)?;
-            super::read::write(&value, "fonts", &display, scope, output, cancellation)
+            super::fonts::value(&request)
         }
         InspectCommand::Config(args) => {
             let request = super::SiteRequest::new(
@@ -55,8 +98,7 @@ pub(in crate::cli) fn run(
                 output,
                 cancellation,
             )?;
-            let value = super::config::value(&request, &args.build, args.mode)?;
-            super::read::write(&value, "config", &args.display, scope, output, cancellation)
+            super::config::value(&request, &args.build, args.mode)
         }
         command => {
             let request = super::SiteRequest::new(
@@ -72,22 +114,12 @@ pub(in crate::cli) fn run(
             let loaded = request.load_config(&crate::config::ConfigOverrides::default())?;
             let config = loaded.config();
             match command {
-                InspectCommand::Sources(args) => sources(
-                    args,
-                    config,
-                    &request.resources,
-                    scope,
-                    output,
-                    cancellation,
-                ),
-                InspectCommand::Icons(args) => icons(
-                    args,
-                    config,
-                    &request.resources,
-                    scope,
-                    output,
-                    cancellation,
-                ),
+                InspectCommand::Sources(args) => {
+                    sources(args, config, &request.resources, cancellation)
+                }
+                InspectCommand::Icons(args) => {
+                    icons(args, config, &request.resources, output, cancellation)
+                }
                 _ => unreachable!("font and config inspection return above"),
             }
         }
@@ -98,10 +130,9 @@ fn icons(
     args: IconInspectArgs,
     config: &tola_build::config::ResolvedSiteConfig,
     resources: &tola_build::BuildResources,
-    scope: InputScope,
     output: &CommandOutput,
     cancellation: &Cancellation,
-) -> Result<()> {
+) -> Result<Value> {
     let prepared =
         tola_build::modules::prepare_site(config, resources.input_mode(), &cancellation.token())?;
     let config = prepared.config();
@@ -136,7 +167,7 @@ fn icons(
     {
         rows.retain(|row| row["module"].as_str() == Some(module.as_str()));
     }
-    super::read::write(&value, "icons", &args.display, scope, output, cancellation)
+    Ok(value)
 }
 
 fn unknown_icon_namespace(
@@ -166,10 +197,8 @@ fn sources(
     args: SourceInspectArgs,
     config: &tola_build::config::ResolvedSiteConfig,
     resources: &tola_build::BuildResources,
-    scope: InputScope,
-    output: &CommandOutput,
     cancellation: &Cancellation,
-) -> Result<()> {
+) -> Result<Value> {
     let paths = source_paths(args.paths, cancellation)?;
     let sources =
         tola_build::inspect::content_sources(&paths, config, resources, &cancellation.token())?;
@@ -182,14 +211,7 @@ fn sources(
             })
         })
         .collect::<Vec<_>>();
-    super::read::write(
-        &Value::Array(rows),
-        "sources",
-        &args.display,
-        scope,
-        output,
-        cancellation,
-    )
+    Ok(Value::Array(rows))
 }
 
 fn source_paths(paths: Vec<PathBuf>, cancellation: &Cancellation) -> Result<Vec<PathBuf>> {
@@ -229,5 +251,41 @@ fn collect_source_paths(
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Ok(paths),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::args::{InspectConfigArgs, OutputArgs};
+    use crate::cli::commands::testing::site;
+    use crate::terminal::{OutputSink, Terminal};
+
+    #[test]
+    fn invalid_config_reports_json_and_returns_an_error() {
+        let (_directory, config) = site(&[("tola.toml", "[build]\nentry = @\n")]);
+        let (sink, captured) = OutputSink::buffered();
+        let output = CommandOutput::new(Terminal::with_sink(sink, false, false), None);
+        let command = InspectCommand::Config(InspectConfigArgs {
+            display: OutputArgs {
+                json: true,
+                pretty: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+
+        let result = run(
+            config,
+            command,
+            InputMode::new(tola_input::InputScope::Pure, false),
+            &output,
+            &Cancellation::default(),
+        );
+        assert!(result.is_err());
+        let report: Value = serde_json::from_slice(&captured.bytes()).unwrap();
+        assert_eq!(report["success"], false);
+        assert_eq!(report["diagnostics"][0]["code"], "config.toml");
+        assert_eq!(report["diagnostics"][0]["location"]["line"], 2);
     }
 }

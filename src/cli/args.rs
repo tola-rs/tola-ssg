@@ -363,7 +363,7 @@ pub enum Commands {
 
     /// Inspect site inputs and the settings Tola uses.
     #[command(
-        after_long_help = "From the site root, run tola inspect config to read the settings Tola will use,\nor tola inspect sources to list the content files it finds."
+        after_long_help = "From the site root, run tola inspect config to read the settings Tola will use,\nor tola inspect sources to list the content files it finds.\nWith --json on stdout, a failed inspection prints a diagnostics object and exits nonzero."
     )]
     Inspect {
         #[command(flatten)]
