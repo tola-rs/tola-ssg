@@ -1,16 +1,23 @@
 //! Convert Bundle exports into producer-owned output files.
 
+use std::path::Path;
+
+use crate::cancellation::BuildCancellation;
 use crate::output::graph::{OutputFile, OutputGraphBuilder, OutputGraphError};
 use crate::output::owner::OutputOwner;
 use crate::output::semantics::OutputDeclaration;
 use tola_address::OutputPath;
+use tola_minify::{MinifiedLanguages, MinifyRequest};
 
 pub(crate) fn insert_bundle(
     outputs: &mut OutputGraphBuilder,
     entries: impl IntoIterator<Item = tola_typst::BundleEntry>,
-) -> Result<(), OutputGraphError> {
+    languages: MinifiedLanguages,
+    cancellation: &BuildCancellation,
+) -> anyhow::Result<()> {
     let owner = OutputOwner::bundle("site-program");
     for entry in entries {
+        cancellation.ensure_active()?;
         let (raw_path, entry_kind, bytes, digest) = entry.into_parts();
         let path = OutputPath::parse(raw_path.get_without_slash()).map_err(|source| {
             OutputGraphError::InvalidPath {
@@ -20,15 +27,35 @@ pub(crate) fn insert_bundle(
             }
         })?;
         let declaration = declaration_for_entry(entry_kind, &path);
-        outputs.insert(OutputFile::from_byte_owner_with_digest(
-            path,
-            declaration,
-            owner.clone(),
-            bytes,
-            digest,
-        ))?;
+        let minified = if entry_kind.is_asset() {
+            minify_asset(&path, &bytes, languages)
+        } else {
+            None
+        };
+        let output = match minified {
+            Some(bytes) => OutputFile::from_byte_owner(path, declaration, owner.clone(), bytes),
+            None => OutputFile::from_byte_owner_with_digest(
+                path,
+                declaration,
+                owner.clone(),
+                bytes,
+                digest,
+            ),
+        };
+        outputs.insert(output)?;
     }
     Ok(())
+}
+
+/// Keep the exported bytes if minification is disabled or cannot rewrite the asset.
+fn minify_asset(
+    path: &OutputPath,
+    bytes: &tola_typst::BundleBytes,
+    languages: MinifiedLanguages,
+) -> Option<Vec<u8>> {
+    let request = MinifyRequest::for_source(Path::new(path.as_str()), languages)?;
+    let source = std::str::from_utf8(bytes.as_slice()).ok()?;
+    Some(request.minify(source).ok()?.into_bytes())
 }
 
 fn declaration_for_entry(
@@ -51,7 +78,13 @@ mod tests {
 
     fn bundle_graph(entries: impl IntoIterator<Item = tola_typst::BundleEntry>) -> OutputGraph {
         let mut graph = OutputGraphBuilder::new();
-        insert_bundle(&mut graph, entries).unwrap();
+        insert_bundle(
+            &mut graph,
+            entries,
+            MinifiedLanguages::new(true, true),
+            &BuildCancellation::default(),
+        )
+        .unwrap();
         graph.finish()
     }
 
@@ -78,11 +111,12 @@ mod tests {
 
     #[test]
     fn entry_kind_outranks_the_filename() {
+        let document = b".a { color: red; }";
         let entries = vec![
             tola_typst::BundleEntry::new(
-                typst::syntax::VirtualPath::new("page.bin").unwrap(),
+                typst::syntax::VirtualPath::new("page.css").unwrap(),
                 tola_typst::BundleEntryKind::HtmlDocument,
-                Vec::new(),
+                document.to_vec(),
             ),
             tola_typst::BundleEntry::new(
                 typst::syntax::VirtualPath::new("tags/index.html").unwrap(),
@@ -92,7 +126,8 @@ mod tests {
         ];
         let graph = bundle_graph(entries);
         assert_eq!(graph.outputs()[0].kind(), OutputKind::HtmlDocument);
-        assert_eq!(graph.outputs()[0].path().as_str(), "page.bin");
+        assert_eq!(graph.outputs()[0].path().as_str(), "page.css");
+        assert_eq!(graph.outputs()[0].bytes(), document);
         assert_eq!(graph.outputs()[1].kind(), OutputKind::Asset);
         assert_eq!(graph.outputs()[1].path().as_str(), "tags/index.html");
     }

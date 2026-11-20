@@ -180,7 +180,13 @@ mod tests {
         entries: impl IntoIterator<Item = tola_typst::BundleEntry>,
     ) -> crate::output::graph::OutputGraphBuilder {
         let mut outputs = crate::output::graph::OutputGraphBuilder::new();
-        crate::compiler::outputs::insert_bundle(&mut outputs, entries).unwrap();
+        crate::compiler::outputs::insert_bundle(
+            &mut outputs,
+            entries,
+            tola_minify::MinifiedLanguages::default(),
+            &crate::cancellation::BuildCancellation::default(),
+        )
+        .unwrap();
         outputs
     }
 

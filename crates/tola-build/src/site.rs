@@ -70,7 +70,6 @@ impl SiteRevision {
             self.config.get_root(),
             &self.outputs,
             cancellation,
-            crate::compiler::minified_languages(&self.config),
         )
     }
 

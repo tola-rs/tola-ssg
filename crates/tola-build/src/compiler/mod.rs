@@ -60,7 +60,7 @@ impl SiteProgramCache {
     }
 }
 
-/// The languages one configuration minifies in configured assets and generated HTML.
+/// The CSS and JavaScript languages one configuration minifies.
 pub(crate) fn minified_languages(
     config: &crate::config::ResolvedSiteConfig,
 ) -> tola_minify::MinifiedLanguages {

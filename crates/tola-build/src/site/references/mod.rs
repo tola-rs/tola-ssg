@@ -356,8 +356,12 @@ mod tests {
         let documents = crate::compiler::documents::from_compilation(&compilation, &cancellation)?;
         let export = compilation.export_default(&cancellation, None).unwrap();
         let mut graph = crate::output::graph::OutputGraphBuilder::new();
-        crate::compiler::outputs::insert_bundle(&mut graph, export.entries().iter().cloned())
-            .unwrap();
+        crate::compiler::outputs::insert_bundle(
+            &mut graph,
+            export.entries().iter().cloned(),
+            tola_minify::MinifiedLanguages::default(),
+            &BuildCancellation::default(),
+        )?;
         let graph = graph.finish();
         let site_index = SiteIndex::from_output_graph(&graph, documents)?;
         Ok((directory, site_index, graph, world))

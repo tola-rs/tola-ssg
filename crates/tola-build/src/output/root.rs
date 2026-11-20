@@ -33,7 +33,6 @@ pub(crate) struct OutputWrite<'a> {
     output: &'a OwnedOutputRoot,
     _site_lock: &'a crate::build::SiteBuildLock,
     cancellation: BuildCancellation,
-    pub(crate) minify: tola_minify::MinifiedLanguages,
 }
 
 #[derive(Debug, Error)]
@@ -128,7 +127,6 @@ impl OwnedOutputRoot {
             output: self,
             _site_lock: site_lock,
             cancellation: cancellation.clone(),
-            minify: tola_minify::MinifiedLanguages::default(),
         })
     }
 

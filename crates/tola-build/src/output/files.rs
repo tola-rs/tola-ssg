@@ -1,6 +1,5 @@
 //! Materialization of validated output revisions.
 
-use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::fs;
 use std::io::Write;
@@ -68,12 +67,7 @@ impl StagedBuildFiles {
     ) -> Result<Self> {
         cancellation.ensure_active()?;
         let staged = destination.stage()?;
-        write_outputs(
-            graph.outputs(),
-            &staged,
-            Some(cancellation),
-            destination.minify,
-        )?;
+        write_outputs(graph.outputs(), &staged, Some(cancellation))?;
         Ok(Self {
             destination: destination.path().to_path_buf(),
         })
@@ -94,9 +88,8 @@ impl HookOutputFiles {
         site_root: &Path,
         graph: &OutputGraph,
         cancellation: Option<&BuildCancellation>,
-        languages: tola_minify::MinifiedLanguages,
     ) -> Result<Self> {
-        Self::materialize_outputs(site_root, graph.outputs(), cancellation, languages)
+        Self::materialize_outputs(site_root, graph.outputs(), cancellation)
     }
 
     /// Materialize a committed revision for a filesystem-based consumer.
@@ -104,21 +97,19 @@ impl HookOutputFiles {
         site_root: &Path,
         revision: &OutputRevision,
         cancellation: &BuildCancellation,
-        languages: tola_minify::MinifiedLanguages,
     ) -> Result<Self> {
-        Self::materialize_outputs(site_root, revision.outputs(), Some(cancellation), languages)
+        Self::materialize_outputs(site_root, revision.outputs(), Some(cancellation))
     }
 
     pub(crate) fn materialize_outputs(
         site_root: &Path,
         outputs: &[OutputFile],
         cancellation: Option<&BuildCancellation>,
-        languages: tola_minify::MinifiedLanguages,
     ) -> Result<Self> {
         cancellation.ensure_active_if_present()?;
         let directory =
             TemporaryDirectory::create(&layout::hook_candidates(site_root), "candidate")?;
-        write_outputs(outputs, directory.path(), cancellation, languages)?;
+        write_outputs(outputs, directory.path(), cancellation)?;
         directory.make_read_only(cancellation)?;
         cancellation.ensure_active_if_present()?;
         Ok(Self {
@@ -136,7 +127,6 @@ fn write_outputs(
     outputs: &[OutputFile],
     root: &Path,
     cancellation: Option<&BuildCancellation>,
-    languages: tola_minify::MinifiedLanguages,
 ) -> Result<()> {
     cancellation.ensure_active_if_present()?;
     write_output_directories(outputs, root, cancellation)?;
@@ -146,7 +136,7 @@ fn write_outputs(
     // failing output in output order decides the reported error, whatever order they finish in.
     let written = outputs
         .par_iter()
-        .map(|output| write_output(output, root, cancellation, languages))
+        .map(|output| write_output(output, root, cancellation))
         .collect::<Vec<_>>();
     for result in written {
         result?;
@@ -183,16 +173,14 @@ fn write_output(
     output: &OutputFile,
     root: &Path,
     cancellation: Option<&BuildCancellation>,
-    languages: tola_minify::MinifiedLanguages,
 ) -> Result<()> {
     cancellation.ensure_active_if_present()?;
-    let bytes = minified_output_bytes(output, languages);
     let path = root.join(output.path().as_str());
     let mut file = fs::File::create(&path).map_err(|source| StagedOutputError::Create {
         path: output.path().to_string(),
         source,
     })?;
-    for bytes in bytes.chunks(OUTPUT_IO_CHUNK_SIZE) {
+    for bytes in output.bytes().chunks(OUTPUT_IO_CHUNK_SIZE) {
         cancellation.ensure_active_if_present()?;
         file.write_all(bytes)
             .map_err(|source| StagedOutputError::Write {
@@ -201,30 +189,6 @@ fn write_output(
             })?;
     }
     Ok(())
-}
-
-/// The bytes one output publishes: Bundle CSS/JavaScript is minified, everything else is
-/// published as produced. A source that cannot be read as UTF-8 or rewritten keeps its bytes.
-fn minified_output_bytes(
-    output: &OutputFile,
-    languages: tola_minify::MinifiedLanguages,
-) -> Cow<'_, [u8]> {
-    let bytes = output.bytes();
-    if !matches!(output.owner(), super::owner::OutputOwner::Bundle { .. }) {
-        return Cow::Borrowed(bytes);
-    }
-    let Some(request) =
-        tola_minify::MinifyRequest::for_source(Path::new(output.path().as_str()), languages)
-    else {
-        return Cow::Borrowed(bytes);
-    };
-    let Ok(source) = std::str::from_utf8(bytes) else {
-        return Cow::Borrowed(bytes);
-    };
-    match request.minify(source) {
-        Ok(minified) => Cow::Owned(minified.into_bytes()),
-        Err(_) => Cow::Borrowed(bytes),
-    }
 }
 
 #[cfg(test)]
@@ -247,27 +211,17 @@ mod tests {
         root.write(lock, &BuildCancellation::default()).unwrap()
     }
 
-    fn staged_stylesheet(owner: OutputOwner, source: &str) -> Vec<u8> {
+    fn published_stylesheet(graph: &OutputGraph) -> Vec<u8> {
         let site = tempfile::TempDir::new().unwrap();
         let output = site.path().join("public");
         let destination = output_root(site.path(), &output);
         let lock = site_lock(site.path());
-        let mut writer = output_write(&destination, &lock);
-        writer.minify = tola_minify::MinifiedLanguages::new(true, false);
-        let stage = writer.stage().unwrap();
-        let stylesheet = output_file(
-            "assets/app.css",
-            OutputDeclaration::from_filesystem_source(Path::new("assets/app.css")),
-            source.as_bytes(),
-        )
-        .with_owner(owner);
-        StagedBuildFiles::materialize(
-            &output_graph([stylesheet]),
-            &writer,
-            &BuildCancellation::default(),
-        )
-        .unwrap();
-        fs::read(stage.join("assets/app.css")).unwrap()
+        let writer = output_write(&destination, &lock);
+        StagedBuildFiles::materialize(graph, &writer, &BuildCancellation::default())
+            .unwrap()
+            .commit(writer)
+            .unwrap();
+        fs::read(output.join("assets/app.css")).unwrap()
     }
 
     fn graph() -> OutputGraph {
@@ -281,13 +235,7 @@ mod tests {
     #[test]
     fn output_read_only_until_dropped() {
         let site = tempfile::tempdir().unwrap();
-        let view = HookOutputFiles::materialize_candidate(
-            site.path(),
-            &graph(),
-            None,
-            tola_minify::MinifiedLanguages::default(),
-        )
-        .unwrap();
+        let view = HookOutputFiles::materialize_candidate(site.path(), &graph(), None).unwrap();
         let root = view.root().to_path_buf();
         assert_eq!(
             fs::read(root.join("posts/rust/index.html")).unwrap(),
@@ -318,7 +266,6 @@ mod tests {
             site.path(),
             &OutputRevision::from_graph(&graph()),
             &canceller.token(),
-            tola_minify::MinifiedLanguages::default(),
         )
         .unwrap_err();
         assert!(
@@ -390,14 +337,47 @@ mod tests {
     }
 
     #[test]
-    fn bundle_stylesheet_is_minified() {
-        let staged = staged_stylesheet(
-            OutputOwner::bundle("site.typ"),
-            "/*! License */\n.a { color: red; }",
+    fn bundle_stylesheet_bytes_match_its_digest_and_filesystem_views() {
+        let site = tempfile::TempDir::new().unwrap();
+        let path = "assets/app.css";
+        let source = b"/*! License */\n.a { color: red; }";
+        let entry = tola_typst::BundleEntry::new(
+            typst::syntax::VirtualPath::new(path).unwrap(),
+            tola_typst::BundleEntryKind::Asset,
+            source.to_vec(),
         );
-        let staged = std::str::from_utf8(&staged).unwrap();
-        assert!(staged.starts_with("/*! License */"), "{staged:?}");
-        assert!(staged.contains(".a{color:red}"), "{staged:?}");
+        let cancellation = BuildCancellation::default();
+        let make_graph = |languages| {
+            let mut graph = crate::output::graph::OutputGraphBuilder::new();
+            crate::compiler::outputs::insert_bundle(
+                &mut graph,
+                [entry.clone()],
+                languages,
+                &cancellation,
+            )
+            .unwrap();
+            graph.finish()
+        };
+        let unminified = make_graph(tola_minify::MinifiedLanguages::default());
+        assert_eq!(unminified.outputs()[0].bytes(), source);
+        let graph = make_graph(tola_minify::MinifiedLanguages::new(true, false));
+        let output = &graph.outputs()[0];
+        let bytes = std::str::from_utf8(output.bytes()).unwrap();
+        assert!(bytes.starts_with("/*! License */"));
+        assert!(bytes.contains(".a{color:red}"));
+        assert_eq!(
+            output.digest(),
+            tola_typst::ContentDigest::of(output.bytes())
+        );
+        assert_ne!(output.digest(), unminified.outputs()[0].digest());
+        assert_eq!(published_stylesheet(&graph), output.bytes());
+        let view = HookOutputFiles::materialize_revision(
+            site.path(),
+            &OutputRevision::from_graph(&graph),
+            &cancellation,
+        )
+        .unwrap();
+        assert_eq!(fs::read(view.root().join(path)).unwrap(), output.bytes());
     }
 
     #[test]
@@ -407,7 +387,16 @@ mod tests {
             OutputOwner::command(0, "stylesheets"),
             OutputOwner::configured_asset("assets/app.css"),
         ] {
-            assert_eq!(staged_stylesheet(owner, source), source.as_bytes());
+            let stylesheet = output_file(
+                "assets/app.css",
+                OutputDeclaration::from_filesystem_source(Path::new("assets/app.css")),
+                source.as_bytes(),
+            )
+            .with_owner(owner);
+            assert_eq!(
+                published_stylesheet(&output_graph([stylesheet])),
+                source.as_bytes()
+            );
         }
     }
 }

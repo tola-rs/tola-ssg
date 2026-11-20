@@ -135,7 +135,12 @@ mod tests {
             .expect("the asset appears among the output changes");
         assert_eq!(added["operation"], "added");
         assert_eq!(added["output"]["kind"], "asset");
-        assert_eq!(added["output"]["size"], asset.len());
+        let published = after
+            .outputs()
+            .iter()
+            .find(|entry| entry.path().as_str() == "styles/site.css")
+            .expect("the published manifest contains the stylesheet");
+        assert_eq!(added["output"]["size"], published.size());
     }
 
     #[test]

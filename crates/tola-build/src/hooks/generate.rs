@@ -90,7 +90,6 @@ pub(crate) fn generate_outputs(
                     config.get_root(),
                     upstream,
                     Some(cancellation),
-                    crate::compiler::minified_languages(config),
                 )?);
             }
             let candidate = candidate.as_ref().expect("materialized above");

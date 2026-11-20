@@ -402,7 +402,12 @@ fn reexport_cached_site_program(
         Some(&cached.bundle_entries),
     )?;
     let mut outputs = crate::output::graph::OutputGraphBuilder::new();
-    crate::compiler::outputs::insert_bundle(&mut outputs, exported.bundle_entries.iter().cloned())?;
+    crate::compiler::outputs::insert_bundle(
+        &mut outputs,
+        exported.bundle_entries.iter().cloned(),
+        cached.minified_languages,
+        cancellation,
+    )?;
     Ok(crate::compiler::SiteProgramCache {
         root: cached.root.clone(),
         documents: exported.documents,
@@ -699,10 +704,11 @@ fn compile_root_bundle(
     .map_err(crate::compiler::bundle::RealizeFailure::into_error)?;
     warnings.extend_distinct(realized_bundle.compilation.diagnostics());
     let mut payload_diagnostics = Vec::new();
+    let minified_languages = crate::compiler::minified_languages(config);
     crate::compiler::minify_generated_payloads(
         &mut realized_bundle.compilation,
         &realized_bundle.world,
-        crate::compiler::minified_languages(config),
+        minified_languages,
         &mut payload_diagnostics,
         &cancellation,
     )
@@ -719,6 +725,8 @@ fn compile_root_bundle(
     crate::compiler::outputs::insert_bundle(
         &mut bundle_outputs,
         compiled_program.bundle_entries.iter().cloned(),
+        minified_languages,
+        &producers.cancellation,
     )?;
 
     tracing::debug!(
@@ -750,7 +758,7 @@ fn compile_root_bundle(
         diagnostics: compiled_program.diagnostics,
         payload_diagnostics,
         pretty_html: !config.build.minify.html,
-        minified_languages: crate::compiler::minified_languages(config),
+        minified_languages,
         entry: config.build.entry.clone(),
         bundle_entries: compiled_program.bundle_entries,
         compilation: compiled_program.compilation,
