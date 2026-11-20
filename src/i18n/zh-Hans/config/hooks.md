@@ -41,7 +41,7 @@ hook 默认开启。设 `enable = false` 可直接关闭。用 `enabled-by = "im
 | `tola inspect` | — | 跳过 | 跳过 | 跳过 |
 | `tola vendor` | `prod` | 跳过 | 跳过 | 跳过 |
 
-`tola check --no-hooks` 跳过两个构建阶段的 hook。`tola dev` 默认运行前两个阶段，跳过 `after-publish`。见 `[[hooks.generate-outputs]]` 的 `dev = "reuse"`。
+`tola check --no-hooks` 跳过两个构建阶段的 hook。`tola dev` 默认运行前两个阶段，跳过 `after-publish`。可以在 [`before-build`](tola-help://config/hooks/before-build) 或 [`generate-outputs`](tola-help://config/hooks/generate-outputs) 中设 `dev = "reuse"` 来复用生成的文件。
 
 发布前失败时保留上次发布的文件。`after-publish` 报错时，新文件已经写入发布目录。
 
@@ -49,7 +49,7 @@ hook 默认开启。设 `enable = false` 可直接关闭。用 `enabled-by = "im
 
 在 Nu 中导入 `use tola diagnostic`，再用 `$issues | diagnostic submit` 一次提交所有问题，没有问题可传 `[]`。普通 hook 的报告省略 `location`。警告会显示在终端，错误会使 hook 失败。外部程序可把报告写到 `reportPath`。示例见 [`@tola-scripts/diagnostic`](tola-help://scripts/diagnostic)。
 
-`tola dev` 复用 `generate-outputs` 写出的文件时，也会复用上次的诊断。
+`tola dev` 复用 hook 写出的文件时，也会沿用上次的诊断。
 
 在 Nu 脚本中用 `use tola get-context` 导入，再调用 `get-context | get hook.stage` 读取当前阶段。外部命令可以运行 `"$TOLA_EXECUTABLE" nu @tola-scripts/context --json`。字段和示例见 [`@tola-scripts/context`](tola-help://scripts/context)。
 
@@ -62,6 +62,8 @@ hook 默认开启。设 `enable = false` 可直接关闭。用 `enabled-by = "im
 写了 `rerun-on` 就要提供 `include`，`exclude` 可省略。站点 hook 的模式从站点根目录匹配。模块 hook 中的字符串从模块根目录匹配，要监听使用该模块的站点文件时，写 `{ project = "content/**/*.typ" }`。
 
 匹配到目录时，包含其下所有文件。`*` 只匹配一层，`**` 可以跨目录。排除规则优先。匹配不到文件也可以启动，文件创建后照样会触发构建。
+
+要监听文件符号链接所指向的内容，在 `rerun-on` 中直接写出链接路径。目标须是声明根目录内的普通文件。要监听目录链接中的文件，列出目标目录。选中的链接内容无法跟踪时，准备和输出 hook 会重新运行。
 
 hook 以你的权限运行。`--offline` 和 `--pure` 限制 Tola 自己读哪些文件和下载哪些依赖，脚本仍可访问文件和网络。取消开发构建时，发布前的脚本也会停止。脚本已经写出的文件或做出的其他修改会保留。
 

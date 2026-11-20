@@ -17,7 +17,10 @@ use crate::mode::BuildMode;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::{ffi::OsStr, process::Output};
+use std::{
+    ffi::{OsStr, OsString},
+    process::Output,
+};
 use tola_input::layout;
 
 pub(super) type ObserveFailure = Arc<dyn Fn() + Send + Sync>;
@@ -311,6 +314,33 @@ pub(super) fn nu_script(
     Ok(path)
 }
 
+/// Expand the placeholders supplied to a site or module build hook's `argv`.
+pub fn expand_hook_argument(
+    argument: &str,
+    root: &Path,
+    origin: Option<&ModuleHookOrigin>,
+    executable: &Path,
+) -> Result<OsString> {
+    let mut bindings = vec![
+        ("{tola}", executable.as_os_str()),
+        ("{project}", root.as_os_str()),
+    ];
+    if let Some(origin) = origin {
+        bindings.extend([
+            ("{module}", origin.root.as_os_str()),
+            ("{name}", OsStr::new(&origin.name)),
+        ]);
+    } else {
+        for marker in ["{module}", "{name}"] {
+            anyhow::ensure!(
+                !argument.contains(marker),
+                "this hook has no module context for `{marker}`"
+            );
+        }
+    }
+    Ok(tola_module::expand_argument(argument, &bindings))
+}
+
 pub(super) struct HookInvocation<'a> {
     command: Command,
     name: &'a str,
@@ -334,34 +364,32 @@ impl<'a> HookInvocation<'a> {
         let cache = prepare_cache(&call)?;
         let mut context = call.context(&cache, temporary.path())?;
         context.report_path = Some(reports.path().to_owned());
-        let executable = &context.executable;
-        let mut bindings = vec![
-            ("{tola}", executable.as_os_str()),
-            ("{project}", call.site.root.as_os_str()),
-        ];
-        if let Some(origin) = call.origin {
-            bindings.extend([
-                ("{module}", origin.root.as_os_str()),
-                ("{name}", OsStr::new(&origin.name)),
-            ]);
-        }
         let arguments = arguments
             .iter()
-            .map(|argument| {
+            .enumerate()
+            .map(|(index, argument)| {
                 let argument = argument.as_ref();
-                match argument.to_str() {
-                    Some(argument) => {
-                        for marker in ["{module}", "{name}"] {
-                            anyhow::ensure!(
-                                call.origin.is_some() || !argument.contains(marker),
-                                "hook `{}` has no module context for `{marker}`",
-                                call.name
-                            );
-                        }
-                        Ok(tola_module::expand_argument(argument, &bindings))
-                    }
+                let expanded = match argument.to_str() {
+                    Some(argument) => expand_hook_argument(
+                        argument,
+                        call.site.root,
+                        call.origin,
+                        &context.executable,
+                    )
+                    .with_context(|| format!("hook `{}` could not expand `argv`", call.name)),
                     None => Ok(argument.to_os_string()),
+                }?;
+                // Windows resolves explicit program paths before applying the child's cwd.
+                if cfg!(windows)
+                    && index == 0
+                    && expanded
+                        .as_encoded_bytes()
+                        .iter()
+                        .any(|byte| *byte == b'/' || *byte == b'\\')
+                {
+                    return Ok(call.site.root.join(expanded).into_os_string());
                 }
+                Ok(expanded)
             })
             .collect::<Result<Vec<_>>>()?;
         let command = context.command(

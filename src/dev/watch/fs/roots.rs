@@ -1289,6 +1289,7 @@ fn resolve_symlinks(path: &Path, tree_prefix_depth: usize) -> ResolvedWatchPath 
             }
             match std::fs::symlink_metadata(&prefix) {
                 Ok(metadata) if metadata.file_type().is_symlink() => {
+                    let prefix = lexical_path_identity(&prefix);
                     // A tree can have a symlinked root, but its walk skips symlinked members.
                     if index >= components.len() - tree_prefix_depth {
                         entries.insert(prefix);
@@ -1323,7 +1324,8 @@ fn resolve_symlinks(path: &Path, tree_prefix_depth: usize) -> ResolvedWatchPath 
                     for suffix in &components[index + 1..] {
                         rewritten.push(suffix.as_os_str());
                     }
-                    replacement = Some(lexical_path_identity(&rewritten));
+                    // A later `..` traverses from the physical directory after any link.
+                    replacement = Some(rewritten);
                     break;
                 }
                 Ok(_) => {}
@@ -1843,6 +1845,81 @@ mod tests {
         install(&mut roots, selected, 2);
         assert!(accepts(&roots.boundary(), &second.join("lib.typ")));
         assert!(!accepts(&roots.boundary(), &first.join("lib.typ")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hook_rerun_watches_an_explicit_links_physical_file() {
+        use notify::event::{CreateKind, DataChange, ModifyKind, RemoveKind};
+        use std::os::unix::fs::symlink;
+
+        let (_directory, root) = canonical_directory();
+        let config = configured_site(
+            &root,
+            "[[hooks.before-build]]\nname = \"prepare\"\nargv = [\"unused\"]\n\
+             rerun-on = { include = [\"input-link\"] }\n",
+        );
+        for name in ["first", "second"] {
+            std::fs::create_dir_all(root.join(name).join("nested")).unwrap();
+            std::fs::write(root.join(name).join("input.txt"), name).unwrap();
+        }
+        let redirect = root.join("redirect");
+        let first = root.join("first/input.txt");
+        let second = root.join("second/input.txt");
+        symlink("first/nested", &redirect).unwrap();
+        symlink("redirect/../input.txt", root.join("input-link")).unwrap();
+        let roots = RootSet::from_config(&config, &WatchRequirements::default()).unwrap();
+        let hooks = ProducerSet::one(ProducerKind::Hooks);
+        let write = notify::EventKind::Modify(ModifyKind::Data(DataChange::Any));
+        let assert_watched =
+            |selection: &WatchSelection, target: &Path, kinds: &[notify::EventKind]| {
+                assert!(watches(
+                    selection,
+                    target.parent().unwrap(),
+                    RecursiveMode::NonRecursive
+                ));
+                let boundary = selection.boundary();
+                for &kind in kinds {
+                    assert_eq!(boundary.classify_change(target, kind).producers(), hooks);
+                }
+            };
+        let selected = roots.initial_selection();
+        assert_watched(&selected, &first, &[write]);
+        assert!(
+            selected
+                .boundary()
+                .classify_change(&root.join("input.txt"), write)
+                .is_empty()
+        );
+
+        std::fs::remove_file(&first).unwrap();
+        let selected = roots.current_selection();
+        assert_watched(
+            &selected,
+            &first,
+            &[
+                notify::EventKind::Remove(RemoveKind::File),
+                notify::EventKind::Create(CreateKind::File),
+            ],
+        );
+        std::fs::write(&first, "recreated").unwrap();
+
+        std::fs::remove_file(&redirect).unwrap();
+        symlink("second/nested", &redirect).unwrap();
+        let retarget =
+            notify::Event::new(notify::EventKind::Create(CreateKind::Any)).add_path(redirect);
+        assert_eq!(
+            selected.boundary().invalidated_by(&retarget),
+            ProducerSet::ALL
+        );
+        let selected = roots.current_selection();
+        assert_watched(&selected, &second, &[write]);
+        assert!(
+            selected
+                .boundary()
+                .classify_change(&first, write)
+                .is_empty()
+        );
     }
 
     #[test]

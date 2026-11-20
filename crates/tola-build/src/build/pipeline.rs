@@ -41,6 +41,7 @@ pub(crate) struct BuildAttemptProducers {
     pub(crate) failed_hook_outputs: Option<crate::hooks::FailedHookOutputs>,
     /// Reusable `generate-outputs` products from the accepted development revision.
     pub(crate) previous_hook_reuse: Option<crate::hooks::ReusableHookOutputs>,
+    pub(crate) prepared_hooks: crate::hooks::PreparedHooks,
     pub(crate) report: Option<super::BuildReport>,
 }
 
@@ -102,20 +103,25 @@ pub(super) fn build_site_inner(
     let mut hook_diagnostics = Vec::new();
     let built = (|| {
         producers.cancellation.ensure_active()?;
-        let before_build = hooks::run_before_build_hooks_with_cancellation(
-            config,
-            request.mode,
-            producers.resources.input_scope(),
-            request.hook_execution.clone(),
-            Some(&producers.cancellation),
-            &mut hook_diagnostics,
-            executor,
-        )
-        .map_err(|failure| {
-            producers.source_hooks = failure.completed().clone();
-            producers.failed_hook_outputs = failure.partial_outputs().cloned();
-            anyhow::Error::new(failure)
-        })?;
+        let before_build = if request.hook_execution.runs() {
+            hooks::run_before_build_hooks_with_cancellation(
+                config,
+                request.mode,
+                producers.resources.input_scope(),
+                &mut producers.prepared_hooks,
+                Some(&producers.cancellation),
+                &mut hook_diagnostics,
+                executor,
+            )
+            .map_err(|failure| {
+                producers.source_hooks = failure.completed().clone();
+                producers.failed_hook_outputs = failure.partial_outputs().cloned();
+                anyhow::Error::new(failure)
+            })?
+        } else {
+            producers.prepared_hooks = hooks::PreparedHooks::default();
+            hooks::BeforeBuildExecution::empty()
+        };
         let hooks_executed = before_build.hooks_executed();
         producers.source_hooks = before_build.into_source_hooks();
         let before_build_elapsed = build_started.elapsed();
@@ -512,6 +518,7 @@ pub(super) fn compile_site_program(
             images,
             seo,
             hook_outputs: producers.source_hooks.clone(),
+            prepared_hooks: std::mem::take(&mut producers.prepared_hooks),
             hook_reuse: crate::hooks::ReusableHookOutputs::default(),
         },
         content,

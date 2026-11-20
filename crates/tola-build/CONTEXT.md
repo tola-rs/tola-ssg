@@ -25,7 +25,7 @@
 - Within a stage, each site or module instance owns its order batches. Modules follow alias order; same-order hooks may run together under the site's shared session limit.
 - One sealed, complete graph. Never publish partially converged output; never mutate the graph after sealing.
 - Exact asset declarations own their sources before option gates. Tree patterns match from the declaring root within the `source` subtree. Module replacements substitute selected assets.
-- Hook input selection supplies dependency evidence for development reuse. Nu entry scripts are observed separately. Output reuse also compares the upstream site, effective options, action, and declared outputs.
+- Hook input selection supplies dependency evidence for development reuse. Nu entry scripts are observed separately. Before-build reuse requires opt-in, a nonempty `generates` list, and unchanged declared inputs and generated paths in the current session. Generate-outputs reuse also compares the upstream site, effective options, action, and declared outputs.
 - Cache reuse preserves the same diagnostics, dependency evidence, and observable bytes as the authoritative build.
 - Remote icon bytes are parsed before their lock entries are committed through `tola-input`. Reuse compares the recorded collection entry as well as local file evidence. Explicit updates accept declaration changes.
 - Vendor copies use the module roots selected by the completed build. An unfinished vendor replacement is refused before module preparation.

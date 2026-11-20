@@ -3,8 +3,11 @@
 use crate::cancellation::Cancellation;
 use crate::cli::log::destination;
 use crate::editor::{GeneratedDirectory, HeldFile};
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
+use tola_build::config::ResolvedSiteConfig;
+use tola_build::hooks::{configured_hooks, expand_hook_argument, generated_input_producer};
 use tola_diagnostic::{Diagnostic, Severity};
 
 pub(super) fn diagnose(
@@ -37,13 +40,24 @@ pub(super) fn diagnose(
     match loaded {
         Ok(loaded) => {
             output.apply_diagnostic_limits(loaded.diagnostics());
-            let config = tola_build::modules::prepare_site(
+            let mut config = tola_build::modules::prepare_site(
                 loaded.config(),
                 tola_input::InputMode::new(scope, true),
                 &cancellation.token(),
             )?;
             destination::start_site(output, &config, &cancellation.token())?;
             let mut diagnostics = tola_build::config::diagnostic::warning_diagnostics(&config);
+            if let Err(error) = tola_build::build::install_hooks(
+                &mut config,
+                &tola_build::BuildResources::new()
+                    .with_input_scope(scope)
+                    .with_locked(true),
+            ) {
+                diagnostics.extend(crate::cli::output::attached_or_fallback(
+                    &error,
+                    crate::codes::doctor::CHECKS,
+                ));
+            }
             diagnostics.extend(diagnose_loaded(&config));
             Ok(diagnostics)
         }
@@ -57,56 +71,100 @@ pub(super) fn diagnose(
     }
 }
 
-fn diagnose_loaded(config: &tola_build::config::ResolvedSiteConfig) -> Vec<Diagnostic> {
+fn diagnose_loaded(config: &ResolvedSiteConfig) -> Vec<Diagnostic> {
     let root = config.get_root();
     let mut diagnostics = Vec::new();
-    if !config.build().entry.is_file() {
-        diagnostics.push(
-            path_diagnostic(
-                crate::codes::doctor::ENTRY_MISSING,
-                Severity::Error,
-                root,
-                &config.build().entry,
-                "`build.entry` is not a file",
-            )
-            .with_help("Create the entry file, or correct `build.entry`"),
-        );
-    }
-    if !config.build().content_dir.is_dir() {
-        diagnostics.push(
-            path_diagnostic(
-                crate::codes::doctor::CONTENT_ROOT_MISSING,
-                Severity::Error,
-                root,
-                &config.build().content_dir,
-                "`build.content-dir` is not a directory",
-            )
-            .with_help("Create the content directory, or correct `build.content-dir`"),
-        );
-    }
+    diagnostics.extend(build_input_diagnostic(
+        config,
+        &config.build().entry,
+        std::fs::Metadata::is_file,
+        crate::codes::doctor::ENTRY_MISSING,
+        "`build.entry` is not a file",
+        "Create the entry file, or correct `build.entry`",
+    ));
+    diagnostics.extend(build_input_diagnostic(
+        config,
+        &config.build().content_dir,
+        std::fs::Metadata::is_dir,
+        crate::codes::doctor::CONTENT_ROOT_MISSING,
+        "`build.content-dir` is not a directory",
+        "Create the content directory, or correct `build.content-dir`",
+    ));
 
     diagnostics.extend(editor_package_diagnostics(root));
 
-    for arguments in config.hooks().enabled_commands() {
-        if let Some(command) = arguments.first()
-            && !command_exists(command, config.get_root())
-        {
-            diagnostics.push(
-                Diagnostic::new(
-                    crate::codes::doctor::HOOK_COMMAND_MISSING,
-                    Severity::Error,
-                    format!("hook command `{command}` was not found"),
-                )
-                .with_help("Install the command on `PATH`, or correct its path in `hooks`"),
-            );
-        }
-    }
+    diagnostics.extend(hook_command_diagnostics(config));
 
     diagnostics.extend(environment_diagnostics(config.get_root()));
 
     diagnostics.extend(vendor_diagnostics(config));
     diagnostics.extend(font_diagnostics(config));
     diagnostics
+}
+
+fn build_input_diagnostic(
+    config: &ResolvedSiteConfig,
+    path: &Path,
+    is_expected: fn(&std::fs::Metadata) -> bool,
+    code: tola_diagnostic::DiagnosticCode,
+    message: &str,
+    help: &str,
+) -> Option<Diagnostic> {
+    let root = config.get_root();
+    let metadata = path.metadata();
+    if metadata.as_ref().is_ok_and(is_expected) {
+        return None;
+    }
+    if metadata.is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+        && let Some(producer) = generated_input_producer(config.hooks(), root, path)
+    {
+        return Some(
+            path_diagnostic(
+                code,
+                Severity::Warning,
+                root,
+                path,
+                &format!("the missing input is declared by the before-build hook `{producer}`"),
+            )
+            .with_help("Run `tola check` to execute the before-build hook"),
+        );
+    }
+    Some(path_diagnostic(code, Severity::Error, root, path, message).with_help(help))
+}
+
+fn hook_command_diagnostics(config: &ResolvedSiteConfig) -> Vec<Diagnostic> {
+    let root = config.get_root();
+    let executable = std::env::current_exe();
+    configured_hooks(config.hooks())
+        .filter_map(|hook| {
+            let program = hook.program()?;
+            let expanded = executable
+                .as_ref()
+                .map_err(|_| "Tola could not locate its executable".to_owned())
+                .and_then(|executable| {
+                    expand_hook_argument(program, root, hook.origin, executable)
+                        .map_err(|error| error.to_string())
+                });
+            let shown = tola_diagnostic::display_path(Path::new(program), root);
+            let reason = match expanded {
+                Ok(program) if command_exists(&program, root) => return None,
+                Ok(_) => format!("command `{shown}` does not name an executable"),
+                Err(reason) => reason,
+            };
+            Some(
+                Diagnostic::new(
+                    crate::codes::doctor::HOOK_COMMAND_MISSING,
+                    Severity::Error,
+                    format!(
+                        "{} hook `{}` cannot run because {reason}",
+                        hook.stage.as_str(),
+                        hook.label
+                    ),
+                )
+                .with_help("Make the command executable, install it on `PATH`, or correct `argv`"),
+            )
+        })
+        .collect()
 }
 
 /// What `tola doctor` reports about the generated package directory: the paths a writing command
@@ -292,12 +350,52 @@ fn environment_diagnostics(root: &Path) -> Vec<Diagnostic> {
     diagnostics
 }
 
-fn command_exists(command: &str, root: &Path) -> bool {
-    let path = Path::new(command);
-    if path.components().count() > 1 {
-        return root.join(path).is_file();
+#[cfg(not(windows))]
+fn command_exists(command: &OsStr, root: &Path) -> bool {
+    if command.as_encoded_bytes().contains(&b'/') {
+        return which::which(root.join(command)).is_ok();
     }
-    which::which(command).is_ok()
+    which::which_in(command, std::env::var_os("PATH"), root).is_ok()
+}
+
+#[cfg(windows)]
+fn command_exists(command: &OsStr, root: &Path) -> bool {
+    let path = Path::new(command);
+    let exe = |path: &Path| {
+        let mut name = path.as_os_str().to_os_string();
+        name.push(".exe");
+        PathBuf::from(name)
+    };
+    let bytes = command.as_encoded_bytes();
+    if bytes.is_empty() || bytes.ends_with(b"/") || bytes.ends_with(b"\\") {
+        return false;
+    }
+    if bytes.contains(&b'/') || bytes.contains(&b'\\') {
+        let path = root.join(path);
+        return path.is_file()
+            || (!bytes
+                .get(bytes.len().saturating_sub(4)..)
+                .is_some_and(|suffix| suffix.eq_ignore_ascii_case(b".exe"))
+                && exe(&path).is_file());
+    }
+    let program = if bytes.contains(&b'.') {
+        path.to_owned()
+    } else {
+        exe(path)
+    };
+    let application = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(Path::to_owned));
+    let windows = std::env::var_os("SystemRoot").map(PathBuf::from);
+    let path = std::env::var_os("PATH");
+    let search = application
+        .into_iter()
+        .chain(windows.as_ref().map(|path| path.join("System32")))
+        .chain(windows)
+        .chain(path.iter().flat_map(std::env::split_paths));
+    search
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .any(|dir| dir.join(&program).is_file())
 }
 
 /// A vendored copy is portable only while it holds real files.
@@ -533,6 +631,108 @@ mod tests {
 
     fn diagnose_at(path: &Path) -> Vec<Diagnostic> {
         diagnose_config(path, &Default::default(), tola_input::InputScope::Online)
+    }
+
+    #[test]
+    fn missing_build_inputs_use_enabled_generators() {
+        let directory = tempdir().unwrap();
+        let root = directory.path();
+        let path = root.join("tola.toml");
+        std::fs::create_dir(root.join("theme")).unwrap();
+        std::fs::write(
+            root.join("theme/tola-module.toml"),
+            r#"
+[[hooks.before-build]]
+name = "pages"
+argv = ["{tola}"]
+enabled-by = "generate-pages"
+generates = ["./generated/pages"]
+"#,
+        )
+        .unwrap();
+        let config = r#"
+[build]
+entry = "generated/pages/site.typ"
+content-dir = "generated/content"
+[modules.theme]
+path = "theme"
+[[hooks.before-build]]
+name = "content"
+argv = ["{tola}"]
+generates = ["generated/content"]
+"#;
+        for (enabled, severity) in [(true, Severity::Warning), (false, Severity::Error)] {
+            std::fs::write(
+                &path,
+                format!("{config}\n[modules.theme.options]\ngenerate-pages = {enabled}\n"),
+            )
+            .unwrap();
+            let reported = diagnose_at(&path);
+            let entry = reported
+                .iter()
+                .find(|d| d.code == crate::codes::doctor::ENTRY_MISSING)
+                .unwrap();
+            assert_eq!(entry.severity, severity);
+            assert_eq!(entry.message.contains("@module/theme/pages"), enabled);
+            let content = reported
+                .iter()
+                .find(|d| d.code == crate::codes::doctor::CONTENT_ROOT_MISSING)
+                .unwrap();
+            assert_eq!(content.severity, Severity::Warning);
+            assert!(content.message.contains("`content`"));
+            assert!(!root.join("generated").exists());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hook_executables_use_the_site_directory_and_module_placeholders() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempdir().unwrap();
+        let root = directory.path();
+        let path = root.join("tola.toml");
+        std::fs::create_dir(root.join("theme")).unwrap();
+        std::fs::write(
+            &path,
+            r#"
+[modules.theme]
+path = "theme"
+[[hooks.before-build]]
+name = "site-tool"
+argv = ["./site-tool"]
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("theme/tola-module.toml"),
+            r#"
+[[hooks.before-build]]
+name = "module-tool"
+argv = ["{module}/tool"]
+"#,
+        )
+        .unwrap();
+        let script = root.join("site-tool");
+        let module_script = root.join("theme/tool");
+        for file in [&script, &module_script] {
+            std::fs::write(file, "#!/bin/sh\nexit 1\n").unwrap();
+        }
+        for (site_mode, module_mode, expected) in [
+            (0o644, 0o755, "site-tool"),
+            (0o755, 0o644, "@module/theme/module-tool"),
+        ] {
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(site_mode)).unwrap();
+            std::fs::set_permissions(&module_script, std::fs::Permissions::from_mode(module_mode))
+                .unwrap();
+            let reported = diagnose_at(&path);
+            let errors: Vec<_> = reported
+                .iter()
+                .filter(|d| d.code == crate::codes::doctor::HOOK_COMMAND_MISSING)
+                .collect();
+            assert_eq!(errors.len(), 1, "{errors:?}");
+            assert!(errors[0].message.contains(&format!("`{expected}`")));
+        }
     }
 
     #[test]

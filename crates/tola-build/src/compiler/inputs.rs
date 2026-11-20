@@ -8,6 +8,7 @@ use tola_typst::sort_package_checks;
 #[derive(Default)]
 pub(crate) struct BuildInputs {
     disk_reads: BTreeSet<PathBuf>,
+    missing_disk_reads: BTreeSet<PathBuf>,
     package_checks: HashSet<tola_typst::PackageCheck>,
     package_reads: Vec<tola_typst::PackageRead>,
     successful_reads: HashSet<tola_typst::FileRead>,
@@ -23,6 +24,13 @@ impl BuildInputs {
                 .cloned()
                 .map(tola_typst::DiskReadPath::into_path),
         );
+        self.missing_disk_reads.extend(
+            accessed
+                .disk_reads
+                .iter()
+                .filter(|read| read.is_missing())
+                .map(|read| read.as_path().to_path_buf()),
+        );
         self.record_package_checks(accessed.package_checks.iter().cloned());
         self.package_reads.extend(accessed.package_reads());
     }
@@ -34,6 +42,12 @@ impl BuildInputs {
 
     pub(crate) fn successful_reads(&self) -> impl Iterator<Item = &tola_typst::FileRead> {
         self.successful_reads.iter()
+    }
+
+    pub(crate) fn take_missing_disk_reads(&mut self) -> Vec<PathBuf> {
+        std::mem::take(&mut self.missing_disk_reads)
+            .into_iter()
+            .collect()
     }
 
     pub(super) fn record_disk_reads(&mut self, reads: impl IntoIterator<Item = PathBuf>) {

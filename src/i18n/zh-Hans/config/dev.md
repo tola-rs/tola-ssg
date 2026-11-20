@@ -23,4 +23,4 @@ watch = false
 
 ### 调试开发中的 hook
 
-如果改数据文件也应重建，就把路径加到 hook 的 `rerun-on`。Tola 会自动监听 `nu` 指定的脚本。要让配置了 `dev = "reuse"` 的 `generate-outputs` hook 每次重建都运行，可以用 `tola dev --no-reuse`。各阶段的选项见 [`[hooks]`](tola-help://config/hooks)。
+如果改数据文件也应重建，就把路径加到 hook 的 `rerun-on`。Tola 会自动监听 `nu` 指定的脚本。用 `tola dev --no-reuse`，可以让配置了 `dev = "reuse"` 的 `before-build` 和 `generate-outputs` hook 每次构建都运行。各阶段的选项见 [`[hooks]`](tola-help://config/hooks)。

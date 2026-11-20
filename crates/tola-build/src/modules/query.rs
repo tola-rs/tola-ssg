@@ -11,6 +11,7 @@ use crate::BuildResources;
 use crate::cancellation::BuildCancellation;
 use crate::check::{SourceDiagnosticSession, SourceRevision};
 use crate::config::ResolvedSiteConfig;
+use crate::hooks::{generated_input_producer, generated_inputs};
 use tola_diagnostic::display_path;
 use tola_diagnostic::{Diagnostic, Severity};
 use tola_module::declaration::Query;
@@ -134,16 +135,6 @@ pub struct QueryEvaluation {
     pub revision: Option<Arc<SourceRevision>>,
     pub source_reads: Vec<typst::syntax::Source>,
     pub source_accessed: tola_typst::AccessedDeps,
-}
-
-impl QueryResult {
-    fn failure(&mut self, message: String) {
-        self.diagnostics.push(Diagnostic::new(
-            tola_diagnostic::codes::query::RESULT,
-            Severity::Error,
-            message,
-        ));
-    }
 }
 
 /// Why one module query could not evaluate.
@@ -297,6 +288,7 @@ fn prepare(
     cancellation.ensure_active()?;
     let mut configured =
         crate::modules::prepared::prepare_site(&config, resources.input_mode(), cancellation)?;
+    crate::build::install_hooks(&mut configured, &resources)?;
     let (name, label, entities, module_manifest, query_config) = match query {
         ModelQuery::Module {
             module,
@@ -331,20 +323,18 @@ fn prepare(
                 selected_module == module && selected_query == declaration,
                 "the declaration of query `{name}` changed while Tola was resolving the module; run the query again"
             );
-            let entry = selected_module
-                .root
-                .join(&selected_query.entry)
-                .canonicalize()
+            let path = selected_module.root.join(&selected_query.entry);
+            let entry = query_entry_path(&configured, &path)
                 .with_context(|| format!("Tola could not read the `entry` of query `{name}`"))?;
             ensure!(
-                entry.starts_with(&selected_module.root),
+                entry.path.starts_with(&selected_module.root),
                 "the `entry` of query `{name}` points outside its module"
             );
             ensure!(
-                entry.is_file(),
+                entry.can_compile(),
                 "the `entry` of query `{name}` is not a file"
             );
-            resources.source_boundary(&config).check(&entry)?;
+            resources.source_boundary(&config).check(&entry.path)?;
             (
                 name.to_owned(),
                 selected_query.label.clone(),
@@ -361,7 +351,7 @@ fn prepare(
             };
             let root = config.get_root();
             let shown = display_path(&entry, root);
-            let entry = entry.canonicalize().map_err(|error| {
+            let entry = query_entry_path(&configured, &entry).map_err(|error| {
                 let reason = if error.kind() == std::io::ErrorKind::NotFound {
                     "it does not exist"
                 } else {
@@ -371,17 +361,17 @@ fn prepare(
                     .context(format!("could not read query file `{shown}`: {reason}"))
             })?;
             ensure!(
-                entry.starts_with(root),
+                entry.path.starts_with(root),
                 "query file `{shown}` points outside the site"
             );
-            ensure!(entry.is_file(), "query path `{shown}` must name a file");
-            resources.source_boundary(&config).check(&entry)?;
+            ensure!(entry.can_compile(), "query path `{shown}` must name a file");
+            resources.source_boundary(&config).check(&entry.path)?;
             (
-                format!("{}#{label}", display_path(&entry, config.get_root())),
+                format!("{}#{label}", display_path(&entry.path, config.get_root())),
                 label.to_owned(),
                 false,
                 None,
-                tola_module::prepared::select_query_file(&entry),
+                tola_module::prepared::select_query_file(&entry.path),
             )
         }
     };
@@ -392,26 +382,21 @@ fn prepare(
             .manifests_are_fresh(&cancellation.bundle_cancellation())?,
         "the module changed while Tola was preparing the query `{name}`; run the query again"
     );
-    let mut generated = config
-        .hooks()
-        .before_build
-        .iter()
-        .filter(|hook| hook.enable)
-        .flat_map(|hook| {
-            hook.generates.iter().map(|path| GeneratedInput {
-                producer: hook.name.clone(),
-                path: display_path(path, config.get_root()),
-            })
+    let generated = generated_inputs(site.hooks())
+        .filter(|(producer, _)| !producer.starts_with("@module/"))
+        .map(|(producer, path)| GeneratedInput {
+            producer: producer.to_owned(),
+            path: display_path(path, config.get_root()),
         })
-        .collect::<Vec<_>>();
-    for module in site.prepared().modules.values() {
-        generated.extend(tola_module::hooks::declared_generated_inputs(module).map(
-            |(producer, path)| GeneratedInput {
-                producer,
-                path: display_path(&path, config.get_root()),
-            },
-        ));
-    }
+        .chain(site.prepared().modules.values().flat_map(|module| {
+            tola_module::hooks::declared_generated_inputs(module).map(|(producer, path)| {
+                GeneratedInput {
+                    producer,
+                    path: display_path(&path, config.get_root()),
+                }
+            })
+        }))
+        .collect();
     let session = SourceDiagnosticSession::with_prepared_modules(Arc::clone(&site), resources);
     Ok((
         QuerySession {
@@ -426,6 +411,39 @@ fn prepare(
             module_manifest,
         },
     ))
+}
+
+struct QueryEntryPath {
+    path: PathBuf,
+    generated: bool,
+}
+
+impl QueryEntryPath {
+    fn can_compile(&self) -> bool {
+        self.generated || self.path.is_file()
+    }
+}
+
+fn query_entry_path(config: &ResolvedSiteConfig, path: &Path) -> std::io::Result<QueryEntryPath> {
+    match path.canonicalize() {
+        Ok(path) => Ok(QueryEntryPath {
+            path,
+            generated: false,
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            // A known generated entry can reach the same read-only compiler as its imports.
+            let path = tola_input::normalize_existing_prefix(path);
+            if generated_input_producer(config.hooks(), config.get_root(), &path).is_some() {
+                Ok(QueryEntryPath {
+                    path,
+                    generated: true,
+                })
+            } else {
+                Err(error)
+            }
+        }
+        Err(error) => Err(error),
+    }
 }
 
 impl QuerySession {
@@ -495,6 +513,39 @@ impl QuerySession {
 }
 
 impl QueryCompilation {
+    fn failure<'a>(
+        &self,
+        result: &mut QueryResult,
+        message: String,
+        missing: impl IntoIterator<Item = &'a Path>,
+    ) {
+        let root = self.site.get_root();
+        let hooks = self.site.hooks();
+        let mut diagnostic = Diagnostic::new(
+            tola_diagnostic::codes::query::RESULT,
+            Severity::Error,
+            message,
+        );
+        for (path, producer) in missing
+            .into_iter()
+            .filter_map(|path| {
+                generated_input_producer(hooks, root, path)
+                    .map(|producer| (display_path(path, root), producer))
+            })
+            .collect::<std::collections::BTreeSet<_>>()
+        {
+            diagnostic = diagnostic.with_note(format!(
+                "`{path}` is declared by the before-build hook `{producer}`"
+            ));
+        }
+        if !diagnostic.notes.is_empty() {
+            diagnostic = diagnostic.with_help(
+                "Run `tola check` to execute the before-build hooks, then retry the query",
+            );
+        }
+        result.diagnostics.push(diagnostic);
+    }
+
     /// Read a declared entity query from this entry's compiled metadata.
     pub fn read_entities(
         &self,
@@ -576,19 +627,22 @@ impl QueryCompilation {
             data: None,
             diagnostics: revision.diagnostics().to_vec(),
         };
-        if result
-            .diagnostics
-            .iter()
-            .any(|d| d.severity == Severity::Error)
-        {
-            result.failure("The model entry did not compile".into());
-            return Ok(no_entities(result, revision));
-        }
-        let Some(bundle) = revision.checked().and_then(|checked| checked.bundle()) else {
-            result.failure("The model entry did not compile".into());
+        let checked = revision.checked().filter(|_| {
+            !result
+                .diagnostics
+                .iter()
+                .any(|d| d.severity == Severity::Error)
+        });
+        let Some((world, bundle)) =
+            checked.and_then(|checked| checked.bundle().map(|bundle| (checked.world(), bundle)))
+        else {
+            self.failure(
+                &mut result,
+                "The model entry did not compile".into(),
+                revision.missing_disk_reads().iter().map(PathBuf::as_path),
+            );
             return Ok(no_entities(result, revision));
         };
-        let world = revision.checked().expect("a bundle has a world").world();
         let outcome = tola_module::query::run_query(tola_module::query::QueryRequest {
             name: &name,
             label: &label,
@@ -607,8 +661,20 @@ impl QueryCompilation {
                 .map(|read| read.as_path().to_path_buf()),
         );
         if let Some(failure) = outcome.failure {
-            result.failure(failure);
-            return Ok(no_entities(result, revision));
+            self.failure(
+                &mut result,
+                failure,
+                outcome
+                    .accessed
+                    .disk_reads
+                    .iter()
+                    .filter(|read| read.is_missing())
+                    .map(|read| read.as_path()),
+            );
+            return Ok(QueryEvaluation {
+                source_accessed: outcome.accessed,
+                ..no_entities(result, revision)
+            });
         }
         if materialize {
             let data = outcome
@@ -798,6 +864,107 @@ mod tests {
         assert!(!result.input.reads.iter().any(|read| {
             matches!(&read.source, InputSource::File { path, .. } if path.ends_with("missing.json"))
         }));
+    }
+
+    #[test]
+    fn failed_query_names_only_the_missing_generated_input() {
+        let model = |path: &str| {
+            format!(
+                "#import \"@tola/site:0.0.0\": project-path\n#metadata(json(project-path(\"{path}\")))<nodes>"
+            )
+        };
+        let mut site = Site::new(&model("generated/missing.json"));
+        let root = site.directory.path();
+        let manifest = root.join("theme/tola-module.toml");
+        let initial = fs::read_to_string(&manifest).unwrap();
+        fs::write(
+            &manifest,
+            format!(
+                "{initial}\n{}",
+                r#"
+[options]
+disabled = false
+[[hooks.before-build]]
+name = "prepare"
+argv = ["{tola}"]
+generates = ["generated"]
+[[hooks.before-build]]
+name = "disabled-generator"
+argv = ["{tola}"]
+enabled-by = "disabled"
+generates = ["disabled.json"]
+[[hooks.before-build]]
+name = "unrelated-generator"
+argv = ["{tola}"]
+generates = ["unrelated.json"]
+"#
+            ),
+        )
+        .unwrap();
+        site.module = loaded_modules(
+            root,
+            site.config.modules(),
+            tola_input::InputMode::new(InputScope::Offline, false),
+        )
+        .unwrap()
+        .remove("forest")
+        .unwrap();
+
+        let failed = site.run(Vec::new());
+        assert!(!failed.success);
+        assert!(
+            failed
+                .diagnostics
+                .iter()
+                .any(|d| d.code != tola_diagnostic::codes::query::RESULT
+                    && d.severity == Severity::Error)
+        );
+        let summary = failed
+            .diagnostics
+            .iter()
+            .find(|d| d.code == tola_diagnostic::codes::query::RESULT)
+            .unwrap();
+        assert_eq!(summary.notes.len(), 1);
+        assert!(summary.notes[0].contains("generated/missing.json"));
+        assert!(summary.notes[0].contains("@module/forest/prepare"));
+        assert!(
+            summary
+                .help
+                .iter()
+                .any(|help| help.message.contains("tola check"))
+        );
+        assert!(!root.join("generated").exists());
+
+        let entry = run_file(
+            Arc::clone(&site.config),
+            Path::new("generated/model.typ"),
+            "nodes",
+            BuildResources::new().with_input_scope(InputScope::Offline),
+            Vec::new(),
+            &BuildCancellation::default(),
+        )
+        .unwrap();
+        assert!(!entry.success);
+        assert!(
+            entry
+                .diagnostics
+                .iter()
+                .flat_map(|d| &d.notes)
+                .any(|note| note.contains("@module/forest/prepare"))
+        );
+
+        fs::create_dir_all(root.join("generated/a-directory")).unwrap();
+        for path in ["ordinary.json", "disabled.json", "generated/a-directory"] {
+            let failed = site.run(vec![(root.join("theme/model.typ"), Arc::from(model(path)))]);
+            assert!(!failed.success);
+            assert!(
+                !failed
+                    .diagnostics
+                    .iter()
+                    .flat_map(|d| &d.help)
+                    .any(|help| help.message.contains("tola check"))
+            );
+        }
     }
 
     #[test]

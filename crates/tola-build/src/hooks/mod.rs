@@ -12,18 +12,22 @@ mod runner;
 mod schedule;
 
 pub(crate) use crate::config::section::build::hooks::hook_identity;
-pub use command::{HookRunner, NuHook};
+pub use command::{HookRunner, NuHook, expand_hook_argument};
 pub use evidence::{FailedHookOutputs, HookOutputEvidence, SourceHookOutputs};
 pub use executor::HookExecutor;
 pub(crate) use generate::generate_outputs;
 pub use pack::{before_pack_context, run_before_pack};
 pub use reuse::AfterPublishDependencies;
-pub(crate) use reuse::{ReusableHookOutputs, observe_after_publish};
+pub(crate) use reuse::{PreparedHooks, ReusableHookOutputs, observe_after_publish};
 pub use runner::*;
 pub use schedule::{hook_batches, hook_limit};
 
-use crate::config::section::build::{DevParticipation, HooksConfig, hooks::HookStage};
+use crate::config::section::build::{
+    DevParticipation, HooksConfig,
+    hooks::{HookStage, ModuleHookOrigin},
+};
 use crate::mode::BuildMode;
+use std::path::Path;
 
 /// The hook whose invocation catches failures on the calling thread.
 /// Hosts use this to keep panic details in their log without printing a second diagnostic.
@@ -38,12 +42,20 @@ pub struct ConfiguredHook<'a> {
     /// Required name from the hook declaration.
     pub label: &'a str,
     dev: DevParticipation,
+    argv: Option<&'a [String]>,
+    /// The module that declares the hook, if any.
+    pub origin: Option<&'a ModuleHookOrigin>,
 }
 
 impl ConfiguredHook<'_> {
     /// Whether this announced hook runs in `mode`; announcements hold enabled hooks only.
     pub fn participates(&self, mode: BuildMode) -> bool {
         hook_participates(true, self.dev, mode)
+    }
+
+    /// The executable as written in `argv`, before expanding placeholders.
+    pub fn program(&self) -> Option<&str> {
+        self.argv?.first().map(String::as_str)
     }
 }
 
@@ -53,23 +65,62 @@ pub fn configured_hooks(hooks: &HooksConfig) -> impl Iterator<Item = ConfiguredH
         .before_build
         .iter()
         .filter(|hook| hook.enable)
-        .map(|hook| announcement(HookStage::BeforeBuild, &hook.name, hook.dev));
+        .map(|hook| ConfiguredHook {
+            stage: HookStage::BeforeBuild,
+            label: &hook.name,
+            dev: hook.dev,
+            argv: hook.argv.as_deref(),
+            origin: hook.origin.as_ref(),
+        });
     let generate_outputs = hooks
         .generate_outputs
         .iter()
         .filter(|command| command.enable)
-        .map(|command| announcement(HookStage::GenerateOutputs, &command.name, command.dev));
+        .map(|hook| ConfiguredHook {
+            stage: HookStage::GenerateOutputs,
+            label: &hook.name,
+            dev: hook.dev,
+            argv: hook.argv.as_deref(),
+            origin: hook.origin.as_ref(),
+        });
     let after_publish = hooks
         .after_publish
         .iter()
         .filter(|hook| hook.enable)
-        .map(|hook| announcement(HookStage::AfterPublish, &hook.name, hook.dev));
+        .map(|hook| ConfiguredHook {
+            stage: HookStage::AfterPublish,
+            label: &hook.name,
+            dev: hook.dev,
+            argv: hook.argv.as_deref(),
+            origin: hook.origin.as_ref(),
+        });
     before_build.chain(generate_outputs).chain(after_publish)
 }
 
-/// One enabled hook of any stage, as the host announces it.
-fn announcement<'a>(stage: HookStage, label: &'a str, dev: DevParticipation) -> ConfiguredHook<'a> {
-    ConfiguredHook { stage, label, dev }
+/// Site-relative inputs declared by enabled before-build hooks, after module hooks are installed.
+pub fn generated_inputs(hooks: &HooksConfig) -> impl Iterator<Item = (&str, &Path)> {
+    hooks
+        .before_build
+        .iter()
+        .filter(|hook| hook.enable)
+        .flat_map(|hook| {
+            hook.generates
+                .iter()
+                .map(|path| (hook.name.as_str(), path.as_path()))
+        })
+}
+
+/// The enabled hook declaring this missing site input, directly or through its directory.
+pub fn generated_input_producer<'a>(
+    hooks: &'a HooksConfig,
+    root: &Path,
+    path: &Path,
+) -> Option<&'a str> {
+    let relative = path.strip_prefix(root).ok()?;
+    generated_inputs(hooks).find_map(|(name, generated)| {
+        let generated = generated.strip_prefix(".").unwrap_or(generated);
+        relative.starts_with(generated).then_some(name)
+    })
 }
 
 /// Whether one declared hook contributes to this mode.

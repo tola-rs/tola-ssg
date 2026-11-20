@@ -52,6 +52,7 @@ pub struct SourceRevision {
 #[derive(Default)]
 struct CheckReads {
     disk_reads: Vec<PathBuf>,
+    missing_disk_reads: Vec<PathBuf>,
     package_checks: Vec<tola_typst::PackageCheck>,
     file_reads: Vec<tola_typst::FileRead>,
 }
@@ -63,6 +64,13 @@ impl CheckReads {
             accessed
                 .disk_reads
                 .iter()
+                .map(|read| read.as_path().to_path_buf()),
+        );
+        self.missing_disk_reads.extend(
+            accessed
+                .disk_reads
+                .iter()
+                .filter(|read| read.is_missing())
                 .map(|read| read.as_path().to_path_buf()),
         );
         self.package_checks
@@ -94,6 +102,11 @@ impl SourceRevision {
     /// Physical read attempts made by this check, including failed input reads.
     pub fn disk_reads(&self) -> &[PathBuf] {
         &self.accessed.disk_reads
+    }
+
+    /// Physical paths reported missing at read time.
+    pub(crate) fn missing_disk_reads(&self) -> &[PathBuf] {
+        &self.accessed.missing_disk_reads
     }
 
     /// Every package candidate checked before this revision completed or failed.
@@ -873,9 +886,11 @@ impl SourceDiagnosticSession {
         file_reads.extend(evaluation.reads.successful_reads().cloned());
         let mut seen = std::collections::HashSet::new();
         file_reads.retain(|read| seen.insert(read.clone()));
+        let missing_disk_reads = evaluation.reads.take_missing_disk_reads();
         let (disk_reads, package_checks) = evaluation.reads.into_parts();
         let accessed = CheckReads {
             disk_reads,
+            missing_disk_reads,
             package_checks,
             file_reads,
         };

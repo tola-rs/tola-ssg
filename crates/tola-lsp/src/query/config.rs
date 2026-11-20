@@ -871,7 +871,7 @@ na|
     #[test]
     fn hook_dev_completes_finite_values() {
         for (stage, expected) in [
-            ("before-build", vec!["\"run\"", "\"skip\""]),
+            ("before-build", vec!["\"run\"", "\"skip\"", "\"reuse\""]),
             ("generate-outputs", vec!["\"run\"", "\"skip\"", "\"reuse\""]),
             ("after-publish", vec!["\"run\"", "\"skip\""]),
         ] {

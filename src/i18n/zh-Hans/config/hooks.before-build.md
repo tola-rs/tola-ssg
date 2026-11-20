@@ -34,7 +34,7 @@
 
 ### `dev`
 
-省略或设为 `"run"` 时，`tola dev` 每次构建都运行。设为 `"skip"` 时，开发构建会跳过。
+省略或设为 `"run"` 时，`tola dev` 每次构建都运行。设为 `"reuse"` 时，可以沿用 `generates` 中未变化的文件。设为 `"skip"` 时，开发构建会跳过。
 
 ### `rerun-on`
 
@@ -50,7 +50,15 @@
 
 把模板、数据或静态文件写到它们的源路径。例如，生成 `static/site.css` 后用 `[assets]` 发布。用 `generates` 列出生成的文件或目录。Tola 在命令结束后检查这些路径，开发时也会监听它们。
 
-每次构建都会运行 hook。把下次还能用的文件放进 `hook.cacheDir`，只用一次的文件放进 `hook.tempDir`。需要参与构建的文件直接写到站点读取它们的位置。
+把下次还能用的文件放进 `hook.cacheDir`，只用一次的文件放进 `hook.tempDir`。需要参与构建的文件直接写到站点读取它们的位置。
+
+### 在开发时复用生成的输入
+
+在站点或模块的 hook 中设 `dev = "reuse"`，并在 `generates` 中列出每个生成的文件或目录。在同一次 `tola dev` 会话中，如果命令、配置、监听的输入和生成的文件都与某次成功运行一致，Tola 可以跳过该命令并沿用上次的诊断。声明的输入出现、消失或发生变化，或生成的文件缺失或发生变化时，Tola 会重跑命令。
+
+把命令额外读取的文件都列入 `rerun-on`，包括导入的脚本、工具文件及其配置、较早执行的 hook 生成的文件。Tola 会自动追踪 Nu 入口脚本。如果命令不读其他文件，可以省略 `rerun-on`。如果结果依赖时间、网络、环境变量、系统工具等无法追踪的状态，或命令每次构建都需要产生副作用，使用 `dev = "run"`。
+
+用 `tola dev --no-reuse` 可以在开发时强制运行这些命令。生产构建每次都会运行已启用的 hook。
 
 示例：生成 `content/releases.typ`：
 
@@ -69,6 +77,7 @@ let content = get-context | get site.contentRoot
 [[hooks.before-build]]
 name = "release-notes"
 nu = "write-release-notes.nu"
+dev = "reuse"
 generates = ["content/releases.typ"]
 ```
 

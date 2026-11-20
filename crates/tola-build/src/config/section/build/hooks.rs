@@ -83,7 +83,9 @@ or non-boolean value is an error. With `enable = false`, Tola skips the lookup.
 | `tola vendor` | `prod` | skip | skip | skip |
 
 Use `tola check --no-hooks` to skip both build stages. By default, `tola dev` runs the first
-two stages and skips `after-publish`. See `[[hooks.generate-outputs]]` for `dev = "reuse"`.
+two stages and skips `after-publish`. Set `dev = "reuse"` to opt into reuse for
+[`before-build`](tola-help://config/hooks/before-build) or
+[`generate-outputs`](tola-help://config/hooks/generate-outputs).
 
 An error before publication leaves the previous site in place. An `after-publish` failure
 is reported after the new files are already on disk.
@@ -94,8 +96,7 @@ In a Nu hook, import `use tola diagnostic` and pass the issues to `diagnostic su
 Submit one list per run. Pass `[]` when there are no issues. Omit `location` in a regular
 hook report. Warnings appear in the terminal and errors fail the hook. An external
 command can write its report to `reportPath`. See [`@tola-scripts/diagnostic`](tola-help://scripts/diagnostic)
-for a complete example. If `tola dev` reuses files from a `generate-outputs` hook, it also
-reuses that hook's report.
+for a complete example. If `tola dev` reuses a hook's files, it also reuses that hook's report.
 
 In a Nu script, import `use tola get-context` and run `get-context | get hook.stage` to
 read the stage. From an external command, run `"$TOLA_EXECUTABLE" nu @tola-scripts/context --json`.
@@ -111,6 +112,9 @@ configuration files in `rerun-on`. Patterns start at the site root, and matching
 directory also matches its contents. `*` matches within one directory and `**` can
 cross directories. Exclusions take priority. A pattern may start with no matches.
 A file created later can still trigger a rebuild.
+Name a file symlink explicitly to track edits to its regular target within the declaring
+root. For a directory symlink, list the target directory. A selected link whose contents
+cannot be tracked prevents a before-build or generate-outputs cache hit.
 `include` is required when you write `rerun-on`; `exclude` defaults to an empty list.
 In a module hook, string paths start at the module root. For files in the consuming
 site, use entries such as `{ project = "content/**/*.typ" }`.
@@ -248,16 +252,20 @@ impl HooksConfig {
                     fields,
                     diag,
                 );
-                validate_dev(hook.dev, false, index, fields.dev, diag);
                 validate_name_is_unique(&mut named, &hook.name, index, fields.name, diag);
-                for (entry_index, generated) in hook.generates.iter().enumerate() {
-                    validate_site_relative(
-                        generated,
-                        index,
-                        entry_index,
-                        BeforeBuildHookConfig::FIELDS.generates,
-                        diag,
+                let generates = BeforeBuildHookConfig::FIELDS.generates;
+                if hook.dev.reuses_outputs() && hook.generates.is_empty() {
+                    diag.error_with_help(
+                        generates,
+                        format!(
+                            "`{}` is required with `dev = \"reuse\"`",
+                            message_key(generates, index)
+                        ),
+                        "declare the files or directories this hook generates",
                     );
+                }
+                for (entry_index, generated) in hook.generates.iter().enumerate() {
+                    validate_site_relative(generated, index, entry_index, generates, diag);
                 }
             });
         }
@@ -316,7 +324,14 @@ impl HooksConfig {
                     fields,
                     diag,
                 );
-                validate_dev(hook.dev, false, index, fields.dev, diag);
+                if hook.dev.reuses_outputs() {
+                    let dev = AfterPublishHookConfig::FIELDS.dev;
+                    diag.error_with_help(
+                        dev,
+                        format!("`{}` does not accept `\"reuse\"`", message_key(dev, index)),
+                        "use `\"run\"` or `\"skip\"`",
+                    );
+                }
                 validate_name_is_unique(&mut named, &hook.name, index, fields.name, diag);
             });
         }
@@ -331,7 +346,6 @@ impl HooksConfig {
 struct HookEntryFields {
     name: FieldPath,
     argv: FieldPath,
-    dev: FieldPath,
     rerun_on: FieldPath,
 }
 
@@ -339,21 +353,18 @@ impl HookEntryFields {
     const BEFORE_BUILD: Self = Self {
         name: BeforeBuildHookConfig::FIELDS.name,
         argv: BeforeBuildHookConfig::FIELDS.argv,
-        dev: BeforeBuildHookConfig::FIELDS.dev,
         rerun_on: BeforeBuildHookConfig::FIELDS.rerun_on,
     };
 
     const GENERATE_OUTPUTS: Self = Self {
         name: OutputCommandConfig::FIELDS.name,
         argv: OutputCommandConfig::FIELDS.argv,
-        dev: OutputCommandConfig::FIELDS.dev,
         rerun_on: OutputCommandConfig::FIELDS.rerun_on,
     };
 
     const AFTER_PUBLISH: Self = Self {
         name: AfterPublishHookConfig::FIELDS.name,
         argv: AfterPublishHookConfig::FIELDS.argv,
-        dev: AfterPublishHookConfig::FIELDS.dev,
         rerun_on: AfterPublishHookConfig::FIELDS.rerun_on,
     };
 }
@@ -411,9 +422,9 @@ pub struct BeforeBuildHookConfig {
     #[serde(rename = "enabled-by", skip_serializing_if = "Option::is_none")]
     #[config(fragment_with = crate::config::fragment::option_path)]
     pub enabled_by: Option<OptionPath>,
-    /// If omitted or set to `"run"`, `tola dev` runs the hook on each build. Use `"skip"`
-    /// to skip it during development.
-    #[config(values = DevParticipation::VALUES)]
+    /// If omitted or set to `"run"`, `tola dev` runs the hook on each build. With `"reuse"`,
+    /// it can keep unchanged files listed in `generates`. Use `"skip"` to skip it.
+    #[config(values = DevParticipation::REUSE_VALUES)]
     #[config(fragment_with = tola_config::validate_value::<DevParticipation>)]
     pub dev: DevParticipation,
     /// Extra site-relative inputs selected by `include` and `exclude` patterns.
@@ -439,9 +450,28 @@ Write templates, data files, or assets to their source paths. For example, gener
 in `generates`. Tola checks that they exist after the command runs and watches them in dev mode.
 Keep generated inputs outside `build.publish-dir` and `.tola`.
 
-The command runs once per build. Use `hook.cacheDir` for files needed across runs and
-`hook.tempDir` for this run's temporary files. This stage runs before there is a built
-site to read, so write input files directly in the site.
+Use `hook.cacheDir` for files needed across runs and `hook.tempDir` for this run's
+temporary files. This stage runs before there is a built site to read, so write
+input files directly in the site.
+
+### Reuse generated inputs during development
+
+Set `dev = "reuse"` and list every generated file or directory in `generates`.
+This works in site and module hooks. Within one `tola dev` session, Tola can skip
+the command and keep its previous diagnostics when the command, settings, watched
+inputs, and generated files still match a successful run. If a declared input
+appears, disappears, or changes, or if a generated file is missing or changed,
+Tola runs the command again.
+
+Declare every additional file the command reads in `rerun-on`, including imported
+scripts, tool files and configuration, and files generated by earlier hooks.
+Tola already tracks the Nu entry script. Omit `rerun-on` if the command reads no
+additional files. Use `dev = "run"` if the result depends on time, the network,
+environment variables, system tools or other state that Tola cannot track, or if
+the command has side effects needed on every build.
+
+Use `tola dev --no-reuse` to force these commands to run during development.
+Production builds always run enabled hooks.
 
 Example: Generate a Typst page:
 
@@ -461,6 +491,7 @@ Add the hook to `tola.toml`.
 [[hooks.before-build]]
 name = "release-notes"
 nu = "write-release-notes.nu"
+dev = "reuse"
 generates = ["content/releases.typ"]
 ```
 
@@ -949,23 +980,6 @@ pub(crate) fn hook_identity(stage: HookStage, name: &str) -> String {
     format!("the `{name}` hook in `hooks.{}`", stage.as_str())
 }
 
-fn validate_dev(
-    dev: DevParticipation,
-    reuse_allowed: bool,
-    index: usize,
-    field: FieldPath,
-    diag: &mut ConfigDiagnostics,
-) {
-    if dev == DevParticipation::Reuse && !reuse_allowed {
-        let key = message_key(field, index);
-        diag.error_with_help(
-            field,
-            format!("`{key}` is `\"reuse\"`, which only `generate-outputs` accepts"),
-            "Use `\"run\"` or `\"skip\"` for this stage",
-        );
-    }
-}
-
 fn validate_name(name: &str, index: usize, field: FieldPath, diag: &mut ConfigDiagnostics) {
     let key = message_key(field, index);
     if name.trim().is_empty() {
@@ -1058,9 +1072,15 @@ mod tests {
     use crate::config::tests::diagnostic_mentioning;
 
     #[test]
-    fn reuse_is_only_for_generate_outputs() {
+    fn reuse_requires_declared_outputs_in_a_build_stage() {
         let config: HooksConfig = toml::from_str(
             r#"
+[[before-build]]
+name = "prepare"
+nu = "prepare.nu"
+dev = "reuse"
+generates = ["generated/data.json"]
+
 [[generate-outputs]]
 name = "search"
 argv = ["search"]
@@ -1069,35 +1089,37 @@ outputs = [{ file = "search.json" }]
 "#,
         )
         .unwrap();
+        assert_eq!(config.before_build[0].dev, DevParticipation::Reuse);
         assert_eq!(config.generate_outputs[0].dev, DevParticipation::Reuse);
         let mut diagnostics = ConfigDiagnostics::new();
         config.validate(&mut diagnostics);
         assert!(diagnostics.into_result().is_ok());
 
-        for source in [
-            r#"
+        for (source, field) in [
+            (
+                r#"
 [[before-build]]
 name = "prepare"
 argv = ["prepare"]
 dev = "reuse"
 "#,
-            r#"
+                BeforeBuildHookConfig::FIELDS.generates,
+            ),
+            (
+                r#"
 [[after-publish]]
 name = "deploy"
 argv = ["deploy"]
 dev = "reuse"
 "#,
+                AfterPublishHookConfig::FIELDS.dev,
+            ),
         ] {
             let config: HooksConfig = toml::from_str(source).unwrap();
             let mut diagnostics = ConfigDiagnostics::new();
             config.validate(&mut diagnostics);
             let diagnostics = diagnostics.into_result().unwrap_err();
-            assert!(
-                diagnostics.errors().iter().any(|diagnostic| diagnostic
-                    .message
-                    .contains("only `generate-outputs` accepts")),
-                "{diagnostics}"
-            );
+            assert_eq!(diagnostics.errors()[0].field, field);
         }
     }
 

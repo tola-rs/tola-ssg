@@ -355,6 +355,19 @@ impl RerunSelection {
                 .map(move |path| root.join(path))
         })
     }
+
+    /// Whether a literal input's physical target stays within its declared scope.
+    pub fn admits_literal_target(&self, literal: &Path, target: &Path) -> bool {
+        !self.excludes(target)
+            && self.scopes.iter().any(|(root, selection)| {
+                literal.strip_prefix(root).is_ok_and(|literal| {
+                    selection.literal_includes().any(|path| path == literal)
+                        && target
+                            .strip_prefix(root)
+                            .is_ok_and(|target| admits_vcs_path(target, selection))
+                })
+            })
+    }
 }
 
 /// Metadata is an input only when this include names its `.git` or `.jj` component.
@@ -380,8 +393,12 @@ pub enum HookDeclarationError {
     DuplicateName { name: String },
     #[error("hook `{hook}`: {reason}")]
     Action { hook: String, reason: String },
-    #[error("hook `{hook}` can reuse its previous run only in `generate-outputs`")]
-    ReuseNeedsGenerateOutputs { hook: String },
+    #[error("hook `{hook}` in `after-publish` does not accept `dev = \"reuse\"`")]
+    AfterPublishReuse { hook: String },
+    #[error(
+        "hook `{hook}` must declare files or directories in `generates` to use `dev = \"reuse\"`"
+    )]
+    ReuseNeedsGenerates { hook: String },
     #[error("`{label}` only accepts the `{{name}}` substitution")]
     Substitution { label: &'static str },
     #[error("`{label}` must be a relative path inside its module or the site")]
@@ -472,10 +489,20 @@ pub fn validate_declarations(hooks: &ModuleHooks) -> std::result::Result<(), Hoo
                 hook: hook.name.into(),
                 reason,
             })?;
-        if hook.dev == DevParticipation::Reuse && hook.stage != HookStage::GenerateOutputs {
-            return Err(HookDeclarationError::ReuseNeedsGenerateOutputs {
-                hook: hook.name.into(),
-            });
+        if hook.dev.reuses_outputs() {
+            match hook.stage {
+                HookStage::AfterPublish => {
+                    return Err(HookDeclarationError::AfterPublishReuse {
+                        hook: hook.name.into(),
+                    });
+                }
+                HookStage::BeforeBuild if hook.generates.is_empty() => {
+                    return Err(HookDeclarationError::ReuseNeedsGenerates {
+                        hook: hook.name.into(),
+                    });
+                }
+                _ => {}
+            }
         }
         if let Some((key, _, error)) = hook.rerun_on.validate(true).next() {
             return Err(HookDeclarationError::RerunPattern {
@@ -685,11 +712,11 @@ pub enum DevParticipation {
     ///
     /// Production builds still run it.
     Skip,
-    /// Reuse the previous development revision's outputs when the hook's inputs are unchanged.
+    /// Reuse a successful run's outputs in the same development session if its inputs are unchanged.
     ///
-    /// Only `generate-outputs` accepts this value. The command must be a pure function of
-    /// its built-site input, its `rerun-on` paths, its command, and its declared outputs;
-    /// a command that reads time, network, or other external state must use [`Self::Run`].
+    /// Use with `before-build` and a nonempty `generates` list, or with `generate-outputs`.
+    /// Declare the additional files the command reads in `rerun-on`. Use [`Self::Run`] for
+    /// commands that depend on time, the network, or other untracked state.
     Reuse,
 }
 
@@ -710,7 +737,28 @@ impl DevParticipation {
 
 #[cfg(test)]
 mod tests {
-    use super::ModuleHooks;
+    use super::{HookDeclarationError, ModuleHooks, validate_declarations};
+
+    #[test]
+    fn before_build_reuse_requires_generates() {
+        let source = "[[before-build]]\nname = 'prepare'\nnu = 'prepare.nu'\ndev = 'reuse'\n";
+        let hooks: ModuleHooks = toml::from_str(source).unwrap();
+        assert!(matches!(
+            validate_declarations(&hooks),
+            Err(HookDeclarationError::ReuseNeedsGenerates { .. })
+        ));
+
+        let hooks: ModuleHooks =
+            toml::from_str(&format!("{source}generates = ['content/generated.typ']\n")).unwrap();
+        assert!(validate_declarations(&hooks).is_ok());
+
+        let hooks: ModuleHooks =
+            toml::from_str(&source.replace("before-build", "after-publish")).unwrap();
+        assert!(matches!(
+            validate_declarations(&hooks),
+            Err(HookDeclarationError::AfterPublishReuse { .. })
+        ));
+    }
 
     #[test]
     fn rerun_patterns_require_named_vcs_inputs() {

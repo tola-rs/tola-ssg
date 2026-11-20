@@ -1,35 +1,140 @@
-//! Development reuse of hook work: one `generate-outputs` hook's previous outputs, and the
-//! outcome of the latest after-publish run.
+//! Development reuse of generated inputs, published outputs and after-publish outcomes.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 
+use super::HookOutputEvidence;
 use crate::cancellation::BuildCancellation;
 use crate::config::ResolvedSiteConfig;
-use crate::config::section::build::hooks::{CommandOutput, ModuleHookOrigin, OutputCommandConfig};
+use crate::config::section::build::hooks::{
+    BeforeBuildHookConfig, CommandOutput, ModuleHookOrigin, OutputCommandConfig,
+};
 use crate::mode::BuildMode;
 use crate::output::graph::{OutputFile, OutputKind};
 use crate::output::manifest::RevisionId;
 use crate::output::owner::OutputRootOwnership;
 use tola_address::OutputPath;
 use tola_diagnostic::display_path;
-use tola_module::hooks::RerunOn;
+use tola_module::hooks::{RerunOn, RerunSelection};
 use tola_typst::ContentDigest;
 
 /// Everything Tola can observe about one `generate-outputs` command's inputs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct HookInputs {
+    command: CommandInputs,
+    outputs: Vec<CommandOutput>,
+    upstream: Vec<UpstreamOutput>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CommandInputs {
+    site: crate::context::Site,
+    scope: tola_input::InputScope,
     action: tola_module::Action,
     nu: Option<NuInputs>,
     origin: Option<ModuleHookOrigin>,
-    outputs: Vec<CommandOutput>,
-    upstream: Vec<UpstreamOutput>,
     rerun_on: RerunOn,
     paths: BTreeMap<PathBuf, ObservedPath>,
+}
+
+impl CommandInputs {
+    fn observe(
+        config: &ResolvedSiteConfig,
+        scope: tola_input::InputScope,
+        action: tola_module::Action,
+        origin: Option<&ModuleHookOrigin>,
+        rerun_on: &RerunOn,
+        cancellation: &BuildCancellation,
+    ) -> Result<Self> {
+        let script = match &action {
+            tola_module::Action::Nu { path, .. } => Some(path.as_path()),
+            tola_module::Action::Argv(_) => None,
+        };
+        Ok(Self {
+            site: config.into(),
+            scope,
+            paths: observe_paths(config.get_root(), origin, rerun_on, script, cancellation)?,
+            nu: script.map(|_| NuInputs::observe(config)).transpose()?,
+            action,
+            origin: origin.cloned(),
+            rerun_on: rerun_on.clone(),
+        })
+    }
+}
+
+/// What one opt-in before-build command reads and which paths it promises to prepare.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct BeforeBuildInputs {
+    command: CommandInputs,
+    generates: Vec<PathBuf>,
+}
+
+impl BeforeBuildInputs {
+    pub(super) fn observe(
+        config: &ResolvedSiteConfig,
+        hook: &BeforeBuildHookConfig,
+        scope: tola_input::InputScope,
+        cancellation: &BuildCancellation,
+    ) -> Result<Option<Self>> {
+        let observed = CommandInputs::observe(
+            config,
+            scope,
+            hook.action().map_err(anyhow::Error::msg)?,
+            hook.origin.as_ref(),
+            &hook.rerun_on,
+            cancellation,
+        );
+        cancellation.ensure_active()?;
+        let command = match observed {
+            Ok(inputs) if paths_are_reusable(&inputs.paths) => inputs,
+            Ok(_) => return Ok(None),
+            Err(error) => {
+                tracing::debug!(hook = %hook.name, %error, "could not observe all hook inputs");
+                return Ok(None);
+            }
+        };
+        Ok(Some(Self {
+            command,
+            generates: hook.generates.clone(),
+        }))
+    }
+}
+
+#[derive(Debug)]
+pub(super) struct PreparedHook {
+    pub(super) inputs: BeforeBuildInputs,
+    pub(super) outputs: Vec<HookOutputEvidence>,
+    pub(super) diagnostics: Vec<tola_diagnostic::Diagnostic>,
+}
+
+/// The accepted revision's successful input generators, indexed within their module.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct PreparedHooks {
+    pub(super) entries: BTreeMap<HookId, Arc<PreparedHook>>,
+}
+
+impl PreparedHooks {
+    pub(super) fn matching(
+        &self,
+        id: &HookId,
+        inputs: &BeforeBuildInputs,
+        cancellation: &BuildCancellation,
+    ) -> Result<Option<Arc<PreparedHook>>> {
+        let Some(entry) = self.entries.get(id).filter(|entry| entry.inputs == *inputs) else {
+            return Ok(None);
+        };
+        for output in &entry.outputs {
+            if !output.is_current_with_cancellation(cancellation)? {
+                return Ok(None);
+            }
+        }
+        Ok(Some(Arc::clone(entry)))
+    }
 }
 
 /// Values an embedded Nu hook can read without touching the filesystem.
@@ -86,7 +191,22 @@ enum ObservedPath {
     File(blake3::Hash),
     Directory,
     Symlink(PathBuf),
+    SymlinkFile {
+        link: PathBuf,
+        target: PathBuf,
+        digest: blake3::Hash,
+    },
+    UntrackedSymlink(PathBuf),
     Other,
+}
+
+fn paths_are_reusable(paths: &BTreeMap<PathBuf, ObservedPath>) -> bool {
+    paths.values().all(|path| {
+        !matches!(
+            path,
+            ObservedPath::UntrackedSymlink(_) | ObservedPath::Other
+        )
+    })
 }
 
 /// The outputs one hook produced, valid while its observed inputs match.
@@ -127,7 +247,9 @@ pub(crate) struct ReusableHookOutputs {
 impl ReusableHookOutputs {
     /// The previous outputs for a hook when their observed inputs still match.
     pub(super) fn matching(&self, id: &HookId, inputs: &HookInputs) -> Option<&ReusableHookOutput> {
-        self.entries.get(id).filter(|entry| entry.inputs == *inputs)
+        self.entries
+            .get(id)
+            .filter(|entry| entry.inputs == *inputs && paths_are_reusable(&inputs.command.paths))
     }
 
     pub(super) fn insert(&mut self, id: HookId, output: ReusableHookOutput) {
@@ -140,6 +262,7 @@ pub(crate) fn observe(
     config: &ResolvedSiteConfig,
     command: &OutputCommandConfig,
     upstream: &[OutputFile],
+    scope: tola_input::InputScope,
     cancellation: &BuildCancellation,
 ) -> Result<HookInputs> {
     cancellation.ensure_active()?;
@@ -156,27 +279,17 @@ pub(crate) fn observe(
     let mut outputs = command.outputs.clone();
     outputs.sort_unstable_by(|left, right| left.path().cmp(right.path()));
 
-    let action = command.action().map_err(anyhow::Error::msg)?;
-    let paths = observe_paths(
-        config.get_root(),
-        command.origin.as_ref(),
-        &command.rerun_on,
-        command.nu.as_deref(),
-        cancellation,
-    )?;
-
     Ok(HookInputs {
-        nu: command
-            .nu
-            .as_ref()
-            .map(|_| NuInputs::observe(config))
-            .transpose()?,
-        action,
-        origin: command.origin.clone(),
+        command: CommandInputs::observe(
+            config,
+            scope,
+            command.action().map_err(anyhow::Error::msg)?,
+            command.origin.as_ref(),
+            &command.rerun_on,
+            cancellation,
+        )?,
         outputs,
         upstream,
-        rerun_on: command.rerun_on.clone(),
-        paths,
     })
 }
 
@@ -305,7 +418,13 @@ fn observe_paths(
         }
         if script || selected {
             let state = if metadata.file_type().is_symlink() {
-                ObservedPath::Symlink(fs::read_link(&path).with_context(unreadable)?)
+                let link = fs::read_link(&path).with_context(unreadable)?;
+                if selected && literals.contains(&path) {
+                    observe_literal_link(&selection, &path, link, cancellation)
+                        .with_context(unreadable)?
+                } else {
+                    ObservedPath::UntrackedSymlink(link)
+                }
             } else if metadata.is_dir() {
                 ObservedPath::Directory
             } else if metadata.is_file() {
@@ -322,6 +441,33 @@ fn observe_paths(
     Ok(observed)
 }
 
+fn observe_literal_link(
+    selection: &RerunSelection,
+    path: &Path,
+    link: PathBuf,
+    cancellation: &BuildCancellation,
+) -> Result<ObservedPath> {
+    let target = match path.canonicalize() {
+        Ok(target) => target,
+        Err(error) if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => {
+            return Ok(ObservedPath::Symlink(link));
+        }
+        Err(_) => return Ok(ObservedPath::UntrackedSymlink(link)),
+    };
+    if !selection.admits_literal_target(path, &target) {
+        return Ok(ObservedPath::UntrackedSymlink(link));
+    }
+    if !fs::metadata(&target)?.is_file() {
+        return Ok(ObservedPath::UntrackedSymlink(link));
+    }
+    let digest = crate::filesystem::digest_file(&target, Some(cancellation))?;
+    Ok(ObservedPath::SymlinkFile {
+        link,
+        target,
+        digest,
+    })
+}
+
 // A glob can start below its scope without walking its fixed prefix. Check that
 // prefix for links so the shortcut cannot enter a directory the walk would skip.
 fn prefix_crosses_link(scope: &Path, prefix: &Path) -> bool {
@@ -335,6 +481,77 @@ fn prefix_crosses_link(scope: &Path, prefix: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn literal_rerun_link_observes_the_regular_file_through_it() {
+        use std::os::unix::fs::symlink;
+        use tola_module::hooks::RerunPath;
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let link = root.join("input.txt");
+        let target = root.join("target.data");
+        fs::write(&target, "first").unwrap();
+        symlink("target.data", &link).unwrap();
+        let literal = RerunOn {
+            include: vec![RerunPath::Relative("input.txt".into())],
+            ..Default::default()
+        };
+        let glob = RerunOn {
+            include: vec![RerunPath::Relative("*.txt".into())],
+            ..Default::default()
+        };
+        let observe = |rerun_on| {
+            observe_paths(&root, None, rerun_on, None, &BuildCancellation::default()).unwrap()
+        };
+        let before = observe(&literal);
+        let before_glob = observe(&glob);
+        assert!(!paths_are_reusable(&before_glob));
+        fs::write(&target, "second").unwrap();
+        let changed = observe(&literal);
+        assert_ne!(changed, before);
+        assert_eq!(observe(&glob), before_glob);
+
+        fs::remove_file(&target).unwrap();
+        assert_ne!(observe(&literal), changed);
+        fs::write(&target, "second").unwrap();
+        assert_eq!(observe(&literal), changed);
+
+        fs::remove_file(&target).unwrap();
+        fs::create_dir(&target).unwrap();
+        let directory_link = observe(&literal);
+        assert!(!paths_are_reusable(&directory_link));
+        fs::write(target.join("inside"), "ignored").unwrap();
+        assert_eq!(observe(&literal), directory_link);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn literal_rerun_link_cannot_read_a_target_outside_its_selection() {
+        use std::os::unix::fs::symlink;
+        use tola_module::hooks::RerunPath;
+
+        let directory = tempfile::tempdir().unwrap();
+        let parent = directory.path().canonicalize().unwrap();
+        let root = parent.join("site");
+        fs::create_dir_all(root.join(".git")).unwrap();
+        fs::write(root.join(".git/HEAD"), "git state").unwrap();
+        fs::write(root.join("excluded.txt"), "excluded input").unwrap();
+        fs::write(parent.join("outside.txt"), "outside input").unwrap();
+        let link = root.join("input.txt");
+        let rerun_on = RerunOn {
+            include: vec![RerunPath::Relative("input.txt".into())],
+            exclude: vec![RerunPath::Relative("excluded.txt".into())],
+        };
+        for target in [".git/HEAD", "excluded.txt", "../outside.txt"] {
+            symlink(target, &link).unwrap();
+            let paths =
+                observe_paths(&root, None, &rerun_on, None, &BuildCancellation::default()).unwrap();
+            assert!(!paths_are_reusable(&paths));
+            fs::remove_file(&link).unwrap();
+        }
+    }
 
     #[test]
     fn after_publish_reuse_depends_on_batches_not_order_numbers() {
@@ -402,9 +619,10 @@ mod tests {
             ..Default::default()
         };
         let config = crate::config::tests::load_test_config(root.path(), "");
-        let before = observe(&config, &hook, &[], &BuildCancellation::default()).unwrap();
+        let scope = tola_input::InputScope::Offline;
+        let before = observe(&config, &hook, &[], scope, &BuildCancellation::default()).unwrap();
         hook.origin.as_mut().unwrap().options_json = br#"{"search":false}"#.to_vec();
-        let after = observe(&config, &hook, &[], &BuildCancellation::default()).unwrap();
+        let after = observe(&config, &hook, &[], scope, &BuildCancellation::default()).unwrap();
         assert_ne!(before, after);
     }
 }

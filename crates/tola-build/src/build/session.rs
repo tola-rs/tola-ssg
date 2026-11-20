@@ -45,6 +45,7 @@ pub(crate) struct RetainedProducerCaches {
     pub(crate) seo: std::sync::Arc<crate::seo::SeoCompilation>,
     /// Fingerprints of what the before-build hooks wrote for this revision.
     pub(crate) hook_outputs: crate::hooks::SourceHookOutputs,
+    pub(crate) prepared_hooks: crate::hooks::PreparedHooks,
     /// The previous successful development revision's reusable `generate-outputs` products.
     pub(crate) hook_reuse: crate::hooks::ReusableHookOutputs,
 }
@@ -226,6 +227,10 @@ impl BuildAttempt {
                 AttemptRefusal::ManifestsChangedBeforeBuild,
             )));
         }
+        let reusable = self
+            .baseline
+            .accepted_caches()
+            .filter(|_| !self.request.disable_hook_reuse);
         let mut producers = super::pipeline::BuildAttemptProducers {
             resources: self.baseline.resources.clone(),
             cancellation: self.request.cancellation.clone(),
@@ -234,13 +239,10 @@ impl BuildAttempt {
                 .capture_report
                 .then(super::BuildReport::default),
             generated_files: std::mem::take(&mut self.request.generated_files),
-            previous_hook_reuse: if self.request.disable_hook_reuse {
-                None
-            } else {
-                self.baseline
-                    .accepted_caches()
-                    .map(|caches| caches.hook_reuse.clone())
-            },
+            previous_hook_reuse: reusable.map(|caches| caches.hook_reuse.clone()),
+            prepared_hooks: reusable
+                .map(|caches| caches.prepared_hooks.clone())
+                .unwrap_or_default(),
             ..super::pipeline::BuildAttemptProducers::default()
         };
         let built = (|| -> anyhow::Result<super::SiteBuild> {

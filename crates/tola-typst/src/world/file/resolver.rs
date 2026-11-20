@@ -453,9 +453,9 @@ impl FileResolver {
                 }
             }
             Err(error) => ReadAttempt {
+                disk_reads: vec![disk_read.with_error(&error)],
                 result: Err(error),
                 reads: None,
-                disk_reads: vec![disk_read],
                 package_checks,
             },
         }

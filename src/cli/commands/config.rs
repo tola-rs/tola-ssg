@@ -612,12 +612,7 @@ impl<'a> HookStageDocument<'a> {
                     source,
                     participates,
                     skip_reason,
-                    reuse: HookReuse::new(
-                        development
-                            && stage == HookStage::GenerateOutputs
-                            && participates
-                            && hook.dev.reuses_outputs(),
-                    ),
+                    reuse: HookReuse::new(development && participates && hook.dev.reuses_outputs()),
                 }
             })
             .collect();
@@ -760,6 +755,11 @@ path = "../theme"
 entry = { module = "notes" }
 par-hooks = false
 hook-jobs = 2
+[[hooks.before-build]]
+name = "prepare"
+nu = "prepare.nu"
+dev = "reuse"
+generates = ["content/generated.typ"]
 [[hooks.generate-outputs]]
 name = "search"
 argv = ["must-not-run"]
@@ -833,6 +833,10 @@ shared = "site"
         assert_eq!(minify["overridden"][0]["kind"], "default");
         let hooks = &shown["hooks"];
         assert_eq!(hooks["hook_jobs"]["effective"], 1);
+        assert_eq!(
+            hooks["stages"]["before-build"]["declarations"][0]["reuse"],
+            serde_json::json!({"eligible": true, "hit": null})
+        );
         let generators = &hooks["stages"]["generate-outputs"];
         let module_hook = &generators["declarations"][0];
         assert_eq!(module_hook["name"], "catalog");

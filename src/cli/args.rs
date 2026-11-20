@@ -747,7 +747,7 @@ pub struct DevelopmentArgs {
     #[arg(short, long, value_name = "BOOL", num_args = 0..=1, default_missing_value = "true", help_heading = "Server and rebuilds")]
     pub watch: Option<bool>,
 
-    /// Run `generate-outputs` hooks on every rebuild even if they use `dev = "reuse"`.
+    /// Run `before-build` and `generate-outputs` hooks with `dev = "reuse"` on every build.
     #[arg(long, help_heading = "Server and rebuilds")]
     pub no_reuse: bool,
 }

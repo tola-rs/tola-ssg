@@ -53,10 +53,12 @@ pub fn run_query(request: QueryRequest<'_>) -> Result<QueryOutcome> {
     };
     let query_value = if request.entities {
         super::entities::parse(declarations[0].value()).and_then(|parsed| {
-            let (source_reads, accessed) =
-                read_entity_sources(&parsed, request.world, request.cancellation)?;
-            outcome.source_reads = source_reads;
-            outcome.accessed = accessed;
+            outcome.source_reads = read_entity_sources(
+                &parsed,
+                request.world,
+                request.cancellation,
+                &mut outcome.accessed,
+            )?;
             let entities_json = if request.materialize {
                 super::entities::json(&parsed)
             } else {
@@ -85,9 +87,9 @@ fn read_entity_sources(
     entities: &[super::entities::Entity],
     world: &tola_typst::TypstWorld,
     cancellation: &tola_typst::BundleCancellation,
-) -> Result<(Vec<typst::syntax::Source>, tola_typst::AccessedDeps)> {
+    accessed: &mut tola_typst::AccessedDeps,
+) -> Result<Vec<typst::syntax::Source>> {
     let mut reads = Vec::new();
-    let mut accessed = tola_typst::AccessedDeps::default();
     for entity in entities {
         cancellation.ensure_active()?;
         let Some(source) = entity.source else {
@@ -111,7 +113,7 @@ fn read_entity_sources(
         );
         reads.push(read);
     }
-    Ok((reads, accessed))
+    Ok(reads)
 }
 
 pub fn json_value(value: &Value, at: &str) -> Result<Json> {

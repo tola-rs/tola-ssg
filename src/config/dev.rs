@@ -32,8 +32,8 @@ production build, use `tola preview`. Both commands use `[server]`.
 ### Check a hook while editing
 
 When changes to a data file should trigger a rebuild, add its path to the hook's `rerun-on`.
-Tola already watches the script named by `nu`. To rerun a `generate-outputs` hook configured
-with `dev = "reuse"` on every rebuild, start `tola dev --no-reuse`.
+Tola already watches the script named by `nu`. Start `tola dev --no-reuse` to run
+`before-build` and `generate-outputs` hooks configured with `dev = "reuse"` on every build.
 See [`[hooks]`](tola-help://config/hooks) for the stages and their options."#;
 }
 

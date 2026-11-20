@@ -150,7 +150,14 @@ pub(super) fn respond(mut request: EntityQuery<'_>) -> Result<Option<SourceReply
                     .find(|diagnostic| diagnostic.severity == tola_diagnostic::Severity::Error)
                     .map(|diagnostic| diagnostic.message.as_str())
                     .unwrap_or("the query produced no usable result");
-                anyhow::bail!("query `{alias}.{name}` failed: {message}");
+                let mut details = vec![message];
+                for diagnostic in &model.result.diagnostics {
+                    if diagnostic.code == tola_diagnostic::codes::query::RESULT {
+                        details.extend(diagnostic.notes.iter().map(String::as_str));
+                        details.extend(diagnostic.help.iter().map(|help| help.message.as_str()));
+                    }
+                }
+                anyhow::bail!("query `{alias}.{name}` failed: {}", details.join("\n"));
             }
             let scope = EntityScope {
                 module,

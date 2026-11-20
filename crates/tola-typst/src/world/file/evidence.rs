@@ -118,24 +118,40 @@ pub struct ReadEvidence {
 /// The path need not exist or be canonical. The resolver records it immediately
 /// before the filesystem attempt; it does not guarantee watcher coverage.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct DiskReadPath(PathBuf);
+pub struct DiskReadPath {
+    path: PathBuf,
+    missing: bool,
+}
 
 impl DiskReadPath {
     pub(super) fn new(path: PathBuf) -> FileResult<Self> {
         if !path.is_absolute() {
             return Err(FileError::AccessDenied);
         }
-        Ok(Self(path))
+        Ok(Self {
+            path,
+            missing: false,
+        })
+    }
+
+    pub(super) fn with_error(mut self, error: &FileError) -> Self {
+        self.missing = matches!(error, FileError::NotFound(_));
+        self
+    }
+
+    /// Whether the filesystem reported that the attempted input was missing.
+    pub fn is_missing(&self) -> bool {
+        self.missing
     }
 
     /// Return the exact path used for the filesystem attempt.
     pub fn as_path(&self) -> &Path {
-        &self.0
+        &self.path
     }
 
     /// Consume the identity and return its path.
     pub fn into_path(self) -> PathBuf {
-        self.0
+        self.path
     }
 }
 

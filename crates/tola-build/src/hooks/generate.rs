@@ -71,7 +71,7 @@ pub(crate) fn generate_outputs(
                 hook.declared_name.as_deref(),
             );
             let inputs = (mode == BuildMode::Development && hook.dev.reuses_outputs())
-                .then(|| observe(config, hook, upstream, cancellation))
+                .then(|| observe(config, hook, upstream, scope, cancellation))
                 .transpose()?;
             let cached = inputs
                 .as_ref()

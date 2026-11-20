@@ -6,8 +6,10 @@ use super::evidence::{
     validate_declared_output_boundaries,
 };
 use super::report::{
-    BatchFailure, failed_to_start, genuinely_failed, hook_command_error, run_hook_entry,
+    BatchFailure, failed_to_start, genuinely_failed, hook_command_error, report_reused,
+    run_hook_entry,
 };
+use super::reuse::{BeforeBuildInputs, HookId, PreparedHook, PreparedHooks};
 use super::{HookExecutor, hook_batches, hook_participates};
 
 use crate::cancellation::{BuildCancellation, OptionalCancellation};
@@ -18,6 +20,7 @@ use crate::mode::BuildMode;
 use anyhow::Result;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// Successful source generation completed before discovery.
 #[derive(Debug)]
@@ -135,18 +138,101 @@ fn run_before_build_hook(
         .collect()
 }
 
+struct Preparation {
+    outputs: Vec<HookOutputEvidence>,
+    cache: Option<Arc<PreparedHook>>,
+    executed: bool,
+}
+
+/// Site and cache shared by preparations in this build. Each ordered batch reads
+/// its inputs after the preceding batch has finished writing its generated files.
+struct BeforeBuildHooks<'a> {
+    config: &'a ResolvedSiteConfig,
+    mode: BuildMode,
+    scope: tola_input::InputScope,
+    previous: &'a PreparedHooks,
+}
+
+impl BeforeBuildHooks<'_> {
+    fn prepare(
+        &self,
+        hook: &BeforeBuildHookConfig,
+        id: &HookId,
+        stop: &BuildCancellation,
+        started_outputs: &mut BTreeSet<PathBuf>,
+        reported: &mut Vec<tola_diagnostic::Diagnostic>,
+        observe_failure: &ObserveFailure,
+    ) -> Result<Preparation> {
+        let inputs = if self.mode == BuildMode::Development
+            && hook.dev.reuses_outputs()
+            && !hook.generates.is_empty()
+        {
+            BeforeBuildInputs::observe(self.config, hook, self.scope, stop)?
+        } else {
+            None
+        };
+        if let Some(inputs) = &inputs
+            && let Some(saved) = self.previous.matching(id, inputs, stop)?
+        {
+            validate_declared_output_boundaries(hook, self.config, &self.config.build.publish_dir)?;
+            report_reused(HookStage::BeforeBuild, &hook.name);
+            reported.extend_from_slice(&saved.diagnostics);
+            return Ok(Preparation {
+                outputs: saved.outputs.clone(),
+                cache: Some(saved),
+                executed: false,
+            });
+        }
+        let outputs = run_hook_entry(HookStage::BeforeBuild, &hook.name, stop, || {
+            run_before_build_hook(
+                hook,
+                self.config,
+                self.mode,
+                self.scope,
+                Some(stop),
+                started_outputs,
+                reported,
+                observe_failure,
+            )
+        })?;
+        // A generator can run while its inputs change. Do not retain its
+        // outputs under an observation that no longer describes those inputs.
+        let cache = if let Some(before) = inputs
+            && BeforeBuildInputs::observe(self.config, hook, self.scope, stop)?.as_ref()
+                == Some(&before)
+        {
+            Some(Arc::new(PreparedHook {
+                inputs: before,
+                outputs: outputs.clone(),
+                diagnostics: reported.clone(),
+            }))
+        } else {
+            None
+        };
+        Ok(Preparation {
+            outputs,
+            cache,
+            executed: true,
+        })
+    }
+}
+
 pub(crate) fn run_before_build_hooks_with_cancellation(
     config: &ResolvedSiteConfig,
     mode: BuildMode,
     scope: tola_input::InputScope,
-    hook_execution: crate::hooks::HookExecution,
+    cache: &mut PreparedHooks,
     cancellation: Option<&BuildCancellation>,
     diagnostics: &mut Vec<tola_diagnostic::Diagnostic>,
     executor: &HookExecutor,
 ) -> Result<BeforeBuildExecution, SourceHookFailure> {
-    if !hook_execution.runs() {
-        return Ok(BeforeBuildExecution::empty());
-    }
+    let previous = std::mem::take(cache);
+    let commands = BeforeBuildHooks {
+        config,
+        mode,
+        scope,
+        previous: &previous,
+    };
     let mut completed = SourceHookOutputs::default();
     let mut hooks_executed = false;
     if let Err(error) = cancellation.ensure_active_if_present() {
@@ -173,36 +259,39 @@ pub(crate) fn run_before_build_hooks_with_cancellation(
                 let hook = &hooks[batch[member]];
                 let mut started_outputs = BTreeSet::new();
                 let mut reported = Vec::new();
-                let outputs = run_hook_entry(stage, &hook.name, stop, || {
-                    let result = run_before_build_hook(
-                        hook,
-                        config,
-                        mode,
-                        scope,
-                        Some(stop),
-                        &mut started_outputs,
-                        &mut reported,
-                        observe_failure,
-                    );
-                    if genuinely_failed(&result) {
-                        observe_failure();
-                    }
-                    result
-                });
-                (outputs, started_outputs, reported)
+                let id = HookId::new(
+                    hook.origin.as_ref(),
+                    &hook.name,
+                    hook.declared_name.as_deref(),
+                );
+                let outputs = commands.prepare(
+                    hook,
+                    &id,
+                    stop,
+                    &mut started_outputs,
+                    &mut reported,
+                    observe_failure,
+                );
+                if genuinely_failed(&outputs) {
+                    observe_failure();
+                }
+                (outputs, id, started_outputs, reported)
             },
-            |(outputs, _, _)| genuinely_failed(outputs),
+            |(outputs, _, _, _)| genuinely_failed(outputs),
         );
         let mut failure = BatchFailure::default();
         let mut partial_paths = BTreeSet::new();
         for (member, result) in results.into_iter().enumerate() {
             match result {
-                Some(Ok((outputs, started_outputs, reported))) => {
+                Some(Ok((outputs, id, started_outputs, reported))) => {
                     diagnostics.extend(reported);
                     match outputs {
-                        Ok(outputs) => {
-                            completed.outputs.extend(outputs);
-                            hooks_executed = true;
+                        Ok(prepared) => {
+                            if let Some(entry) = prepared.cache {
+                                cache.entries.insert(id, entry);
+                            }
+                            completed.outputs.extend(prepared.outputs);
+                            hooks_executed |= prepared.executed;
                         }
                         Err(error) => {
                             partial_paths.extend(started_outputs);
@@ -426,6 +515,59 @@ mod tests {
     }
 
     #[test]
+    fn prepare_reuse_checks_inputs_and_the_files_left_on_disk() {
+        use crate::config::section::build::DevParticipation;
+        let directory = TempDir::new().unwrap();
+        let mut config = config(&directory);
+        let mut prepare = hook("child_counts_successful_runs");
+        prepare.dev = DevParticipation::Reuse;
+        prepare.generates = vec!["generated/count.txt".into()];
+        prepare
+            .rerun_on
+            .include
+            .push(tola_module::hooks::RerunPath::Relative(
+                "inputs/*.txt".into(),
+            ));
+        config.hooks.before_build.push(prepare);
+        let mut cache = PreparedHooks::default();
+        let executor = HookExecutor::new();
+        let mut run = |mode| {
+            run_before_build_hooks_with_cancellation(
+                &config,
+                mode,
+                tola_input::InputScope::Online,
+                &mut cache,
+                None,
+                &mut Vec::new(),
+                &executor,
+            )
+            .unwrap()
+            .hooks_executed()
+        };
+        let dev = BuildMode::Development;
+        let root = config.get_root();
+        let generated = root.join("generated/count.txt");
+        assert!(run(dev));
+        assert!(!run(dev));
+        fs::create_dir(root.join("inputs")).unwrap();
+        let input = root.join("inputs/new.txt");
+        fs::write(&input, "new").unwrap();
+        assert!(run(dev));
+        fs::write(&input, "edited").unwrap();
+        assert!(run(dev));
+        fs::remove_file(input).unwrap();
+        assert!(run(dev));
+        fs::write(&generated, "20").unwrap();
+        assert!(run(dev));
+        assert_eq!(fs::read_to_string(&generated).unwrap(), "21");
+        fs::remove_file(&generated).unwrap();
+        assert!(run(dev));
+        assert_eq!(fs::read_to_string(&generated).unwrap(), "1");
+        assert!(!run(dev));
+        assert!(run(BuildMode::Production));
+    }
+
+    #[test]
     fn child_writes_middle_chain_output() {
         if !is_hook_child_for("before-build") {
             return;
@@ -514,7 +656,7 @@ mod tests {
                 &config,
                 BuildMode::Production,
                 tola_input::InputScope::Online,
-                HookExecution::Run,
+                &mut PreparedHooks::default(),
                 None,
                 &mut Vec::new(),
                 &HookExecutor::new(),
@@ -606,7 +748,7 @@ mod tests {
                 &config,
                 BuildMode::Development,
                 tola_input::InputScope::Online,
-                HookExecution::Run,
+                &mut PreparedHooks::default(),
                 None,
                 &mut Vec::new(),
                 &HookExecutor::new(),
@@ -624,7 +766,7 @@ mod tests {
             &config,
             BuildMode::Production,
             tola_input::InputScope::Online,
-            HookExecution::Run,
+            &mut PreparedHooks::default(),
             None,
             &mut Vec::new(),
             &HookExecutor::new(),
@@ -659,7 +801,7 @@ mod tests {
             &config,
             BuildMode::Development,
             tola_input::InputScope::Online,
-            HookExecution::Run,
+            &mut PreparedHooks::default(),
             None,
             &mut Vec::new(),
             &HookExecutor::new(),
@@ -674,7 +816,7 @@ mod tests {
             &config,
             BuildMode::Development,
             tola_input::InputScope::Online,
-            HookExecution::Run,
+            &mut PreparedHooks::default(),
             None,
             &mut Vec::new(),
             &HookExecutor::new(),
@@ -707,7 +849,7 @@ mod tests {
             &config,
             BuildMode::Development,
             tola_input::InputScope::Online,
-            HookExecution::Run,
+            &mut PreparedHooks::default(),
             None,
             &mut Vec::new(),
             &HookExecutor::new(),
@@ -803,7 +945,7 @@ mod tests {
             &config,
             BuildMode::Development,
             tola_input::InputScope::Online,
-            HookExecution::Run,
+            &mut PreparedHooks::default(),
             Some(&cancellation),
             &mut diagnostics,
             &executor,
@@ -874,7 +1016,7 @@ mod tests {
                 &config,
                 mode,
                 tola_input::InputScope::Online,
-                HookExecution::Run,
+                &mut PreparedHooks::default(),
                 None,
                 &mut Vec::new(),
                 &HookExecutor::new(),
@@ -923,7 +1065,7 @@ mod tests {
                 &config,
                 BuildMode::Production,
                 tola_input::InputScope::Online,
-                HookExecution::Run,
+                &mut PreparedHooks::default(),
                 None,
                 &mut Vec::new(),
                 &HookExecutor::new(),
@@ -943,7 +1085,7 @@ mod tests {
                         &config,
                         BuildMode::Production,
                         tola_input::InputScope::Online,
-                        HookExecution::Run,
+                        &mut PreparedHooks::default(),
                         None,
                         &mut Vec::new(),
                         &HookExecutor::new(),
@@ -967,7 +1109,7 @@ mod tests {
                                 &config,
                                 BuildMode::Development,
                                 tola_input::InputScope::Online,
-                                HookExecution::Run,
+                                &mut PreparedHooks::default(),
                                 Some(&cancellation),
                                 &mut Vec::new(),
                                 &HookExecutor::new(),
