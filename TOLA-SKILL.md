@@ -1718,7 +1718,7 @@ still belong to the same site.
 Run `tola inspect config --mode dev --json --pretty` to see which hooks run and in what
 order. Each declaration's `reuse.eligible` indicates whether it can reuse files in that
 mode. For two hooks that run in sequence, see
-`tola help "[hooks.before-build]"`.
+`tola help "[[hooks.before-build]]"`.
 
 ### Before build
 

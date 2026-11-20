@@ -87,12 +87,27 @@ const TABLES: &[ConfigTable] = &[
     ConfigTable::new(DiagnosticsConfig::TEMPLATE_SECTION),
 ];
 
+fn config_table(section: &str) -> Option<&'static ConfigTable> {
+    TABLES.iter().find(|table| table.section == section)
+}
+
+pub(super) fn config_section(selector: &str) -> Option<&'static str> {
+    let table = config_table(selector.trim_matches(['[', ']']))?;
+    (selector == table.header()).then_some(table.section)
+}
+
 pub(crate) fn request(targets: &[String]) -> Result<LinkTarget> {
     super::target::request(targets).ok_or_else(|| {
-        target_error(
-            &targets.join(" "),
-            "Use `tola help config`, `tola help package`, or `tola help scripts`",
-        )
+        let help = if let [selector] = targets
+            && selector.starts_with('[')
+        {
+            config_table(selector.trim_matches(['[', ']'])).map_or_else(table_choices, |table| {
+                format!("Use `tola help {}`", quoted(&table.header()))
+            })
+        } else {
+            "Use `tola help config`, `tola help package`, or `tola help scripts`".to_owned()
+        };
+        target_error(&targets.join(" "), &help)
     })
 }
 
@@ -251,14 +266,11 @@ fn index_page(category: HelpCategory, language: HelpLanguage) -> HelpPage {
 
 /// The table page one section names, when the index names a real table.
 fn table_target(section: &str) -> Option<LinkTarget> {
-    TABLES
-        .iter()
-        .find(|table| table.section == section)
-        .map(|table| {
-            LinkTarget::Page(PageId::Config {
-                section: table.section.to_owned(),
-            })
+    config_table(section).map(|table| {
+        LinkTarget::Page(PageId::Config {
+            section: table.section.to_owned(),
         })
+    })
 }
 
 /// The package page one bundled package names, when every named export belongs to it.
@@ -281,10 +293,7 @@ fn package_target(name: &str, exports: &[&str]) -> Option<LinkTarget> {
 }
 
 fn table_page(target: &str, language: HelpLanguage) -> Result<HelpPage> {
-    let table = TABLES
-        .iter()
-        .find(|table| table.section == target)
-        .ok_or_else(|| target_error(target, &table_choices()))?;
+    let table = config_table(target).ok_or_else(|| target_error(target, &table_choices()))?;
     // A container whose only content is its one child shows that child's page instead, so
     // the reader lands on the table that names real settings.
     if let Some(child) = sole_child_table(table.section) {
@@ -884,10 +893,8 @@ fn package_config_table(name: &str) -> Option<&'static str> {
 }
 
 /// The header one configuration table renders under.
-fn table_header(section: &str) -> String {
-    TABLES
-        .iter()
-        .find(|table| table.section == section)
+pub(crate) fn table_header(section: &str) -> String {
+    config_table(section)
         .map(ConfigTable::header)
         .unwrap_or_else(|| format!("[{section}]"))
 }
@@ -960,7 +967,7 @@ fn quoted(selector: &str) -> String {
 
 /// Every configuration-table selector, shared by the no-argument index and the error help.
 fn config_sections() -> impl Iterator<Item = String> {
-    TABLES.iter().map(|table| table.section.to_owned())
+    TABLES.iter().map(ConfigTable::header)
 }
 
 /// Every bundled-package selector, shared by the no-argument index and the error help.
@@ -1017,13 +1024,7 @@ mod tests {
             targets(&["package"]),
             targets(&["scripts"]),
         ];
-        requests.extend(TABLES.iter().map(|table| {
-            vec![if table.key {
-                table.section.to_owned()
-            } else {
-                format!("[{}]", table.section)
-            }]
-        }));
+        requests.extend(TABLES.iter().map(|table| vec![table.header()]));
         for package in tola_packages::builtin_packages() {
             let name = package.spec().name.to_string();
             requests.push(vec![format!("@tola/{name}")]);
@@ -1043,6 +1044,25 @@ mod tests {
             assert!(include.starts_with("# include\n"));
             assert!(include.contains("include = ["));
             assert!(!include.contains("[include]"));
+        }
+    }
+
+    #[test]
+    fn wrong_table_brackets_suggest_the_documented_selector() {
+        for (wrong, header) in [
+            ("[hooks.before-build]", "[[hooks.before-build]]"),
+            ("[[build]]", "[build]"),
+            ("[include]", "include"),
+        ] {
+            let error = request(&targets(&[wrong])).unwrap_err();
+            let diagnostic = &tola_diagnostic::attached(&error).unwrap()[0];
+            assert_eq!(diagnostic.code, crate::codes::help::TARGET);
+            assert!(
+                diagnostic
+                    .help
+                    .iter()
+                    .any(|help| help.message.contains(&quoted(header)))
+            );
         }
     }
 

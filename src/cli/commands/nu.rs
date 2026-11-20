@@ -20,7 +20,7 @@ use tola_nu::Host;
 use anyhow::{Context, Result, bail, ensure};
 use tola_build::config::ConfigSource;
 use tola_build::modules::{nu_font_options, read_nu_modules};
-use tola_input::{InputMode, InputScope};
+use tola_input::{FilePatterns, InputMode, InputScope};
 use tola_module::manifest::NuModule;
 use tola_nu::{
     BuiltinModule, ConfiguredModule, InvocationContext, Runtime, SourceOverlay, serve_lsp,
@@ -690,7 +690,8 @@ pub(crate) fn hook_runner() -> tola_build::hooks::HookRunner {
             })),
             get_assets: hook.asset_reader().map(|read| {
                 Arc::new(move |module, include, exclude| {
-                    read(module, include, exclude).map_err(|error| error.to_string())
+                    read(module, FilePatterns { include, exclude })
+                        .map_err(|error| error.to_string())
                 }) as tola_nu::GetAssets
             }),
             ..call_host(Some(call))?

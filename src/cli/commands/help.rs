@@ -210,7 +210,7 @@ fn overview_name(language: HelpLanguage) -> &'static str {
 fn page_title(id: &PageId, language: HelpLanguage) -> String {
     match id {
         PageId::Overview => overview_name(language).into(),
-        PageId::Config { section } => format!("[{section}]"),
+        PageId::Config { section } => pages::table_header(section),
         PageId::Package { name } | PageId::PackageSelection { name, .. } => {
             format!("@tola/{name}")
         }

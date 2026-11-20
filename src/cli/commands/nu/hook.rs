@@ -104,9 +104,9 @@ pub(super) fn run(
         } => query(&directory, &target, config.as_deref(), label.as_deref()),
         Request::Submit(issues) => submit(issues).map(|()| Value::Null),
         Request::RerunOnDigest => {
-            let digest = rerun_on_digest.as_ref().ok_or_else(|| {
-                "get-hook --rerun-on-digest needs a Nu build hook".to_owned()
-            })?;
+            let digest = rerun_on_digest
+                .as_ref()
+                .ok_or_else(|| "get-hook --rerun-on-digest needs a Nu build hook".to_owned())?;
             digest().map(|digest| digest.map_or(Value::Null, Value::String))
         }
         Request::Assets {

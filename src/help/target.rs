@@ -202,29 +202,14 @@ pub(crate) fn request(targets: &[String]) -> Option<LinkTarget> {
                 return None;
             }
         }
-        [target] => {
-            if let Some(section) = target
-                .strip_prefix('[')
-                .and_then(|section| section.strip_suffix(']'))
-            {
-                if !section.split('.').all(identifier) {
-                    return None;
-                }
-                PageId::Config {
-                    section: section.to_owned(),
-                }
-            } else {
-                match target.as_str() {
-                    "config" => PageId::Index(HelpCategory::Config),
-                    "include" => PageId::Config {
-                        section: "include".into(),
-                    },
-                    "package" => PageId::Index(HelpCategory::Packages),
-                    "scripts" => PageId::Index(HelpCategory::Scripts),
-                    _ => return None,
-                }
-            }
-        }
+        [target] => match target.as_str() {
+            "config" => PageId::Index(HelpCategory::Config),
+            "package" => PageId::Index(HelpCategory::Packages),
+            "scripts" => PageId::Index(HelpCategory::Scripts),
+            selector => PageId::Config {
+                section: super::pages::config_section(selector)?.to_owned(),
+            },
+        },
         _ => return None,
     };
     Some(LinkTarget::Page(page))
@@ -287,6 +272,25 @@ mod tests {
         ] {
             let arguments = arguments.into_iter().map(str::to_owned).collect::<Vec<_>>();
             assert_eq!(request(&arguments), Some(LinkTarget::Page(page)));
+        }
+    }
+
+    #[test]
+    fn array_table_requests_require_double_brackets() {
+        let section = PageId::Config {
+            section: "hooks.before-build".into(),
+        };
+        assert_eq!(
+            request(&["[[hooks.before-build]]".into()]),
+            Some(LinkTarget::Page(section))
+        );
+        for target in [
+            "[hooks.before-build]",
+            "[[build]]",
+            "[[hooks.before-build]",
+            "[[[hooks.before-build]]]",
+        ] {
+            assert_eq!(request(&[target.into()]), None);
         }
     }
 

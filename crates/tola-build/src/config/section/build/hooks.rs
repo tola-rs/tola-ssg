@@ -441,7 +441,7 @@ pub struct BeforeBuildHookConfig {
 }
 
 impl BeforeBuildHookConfig {
-    /// What `tola help "[hooks.before-build]"` adds under its table.
+    /// What `tola help "[[hooks.before-build]]"` adds under its table.
     pub const HELP: &'static str = r#"
 ### Generate other inputs
 
@@ -618,7 +618,7 @@ pub struct OutputCommandConfig {
 }
 
 impl OutputCommandConfig {
-    /// What `tola help "[hooks.generate-outputs]"` adds under its table.
+    /// What `tola help "[[hooks.generate-outputs]]"` adds under its table.
     pub const HELP: &'static str = r#"
 ### Read pages and write files
 
@@ -779,7 +779,7 @@ pub struct AfterPublishHookConfig {
 }
 
 impl AfterPublishHookConfig {
-    /// What `tola help "[hooks.after-publish]"` adds under its table.
+    /// What `tola help "[[hooks.after-publish]]"` adds under its table.
     pub const HELP: &'static str = r#"
 ### Read the published files
 

@@ -22,7 +22,7 @@ use std::{
     ffi::{OsStr, OsString},
     process::Output,
 };
-use tola_input::layout;
+use tola_input::{FilePatterns, FileSelection, layout};
 
 pub(super) type ObserveFailure = Arc<dyn Fn() + Send + Sync>;
 
@@ -169,23 +169,19 @@ impl NuHook<'_> {
     pub fn asset_reader(
         &self,
     ) -> Option<
-        impl Fn(Option<String>, Vec<String>, Vec<String>) -> Result<serde_json::Value>
-        + Send
-        + Sync
-        + use<>,
+        impl Fn(Option<String>, FilePatterns) -> Result<serde_json::Value> + Send + Sync + use<>,
     > {
         let assets = self.configured_assets?.clone();
         let config = self.config.clone();
         let cancellation = self.cancellation.cloned().unwrap_or_default();
-        Some(move |module: Option<String>, include, exclude| {
+        Some(move |module: Option<String>, patterns| {
             if let Some(alias) = &module {
                 anyhow::ensure!(
                     config.modules().contains_key(alias),
                     "no configured module is named `{alias}`"
                 );
             }
-            let selection =
-                tola_input::FileSelection::new(&tola_input::FilePatterns { include, exclude })?;
+            let selection = FileSelection::new(&patterns)?;
             assets.select(
                 config.get_root(),
                 module.as_deref(),

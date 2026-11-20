@@ -725,10 +725,9 @@ dev = { option = "nested.dev" }
 outputs = [{ file = "result.txt" }]
 "#;
         let (site, mut declarations) = theme_site(manifest);
-        declarations.get_mut("forest").unwrap().options = toml::from_str(
-            "show = false\nitems = []\nnested = { count = 3, dev = 'reuse' }",
-        )
-        .unwrap();
+        declarations.get_mut("forest").unwrap().options =
+            toml::from_str("show = false\nitems = []\nnested = { count = 3, dev = 'reuse' }")
+                .unwrap();
         let modules = loaded_modules(
             site.path(),
             &declarations,
