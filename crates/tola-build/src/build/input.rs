@@ -159,7 +159,8 @@ pub fn configured_input_observation(config: &ResolvedSiteConfig) -> InputObserva
         let root = match &declaration.source {
             tola_module::declaration::ModuleSource::Local { path } => config.get_root().join(path),
             tola_module::declaration::ModuleSource::Git { .. }
-            | tola_module::declaration::ModuleSource::Tarball { .. } => {
+            | tola_module::declaration::ModuleSource::Tarball { .. }
+            | tola_module::declaration::ModuleSource::Builtin { .. } => {
                 match crate::inputs::declaration_root(
                     config.get_root(),
                     config.vendor().path.as_deref(),

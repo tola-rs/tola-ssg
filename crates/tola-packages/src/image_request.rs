@@ -112,13 +112,18 @@ impl ImageRequest {
     }
 
     pub fn key(&self) -> ContentDigest {
+        Self::variant_key(self.source_digest, &self.recipe)
+    }
+
+    /// The encoded image's identity, shared by different sources of a resize request.
+    pub fn variant_key(source_digest: ContentDigest, recipe: &ImageRecipe) -> ContentDigest {
         let mut hash = blake3::Hasher::new();
         hash.update(KEY_DOMAIN);
         hash.update(&IMAGE_PIPELINE_REVISION.to_le_bytes());
-        hash.update(self.source_digest.as_bytes());
+        hash.update(source_digest.as_bytes());
         // Recipes carry only validated scalar fields; streaming their canonical serialization
         // avoids allocating a second descriptor.
-        serde_json::to_writer(&mut hash, &self.recipe)
+        serde_json::to_writer(&mut hash, recipe)
             .expect("image recipe serialization into a digest is infallible");
         ContentDigest::from_bytes(*hash.finalize().as_bytes())
     }

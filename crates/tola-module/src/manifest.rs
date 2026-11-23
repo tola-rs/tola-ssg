@@ -98,8 +98,7 @@ pub fn read_selected(
                 ModuleSource::Local { .. } => sources,
                 _ => &[],
             };
-            let mut loaded = read_one(&site, name, root, mode, sources)?;
-            crate::options::merge(&mut loaded.options, &declaration.options);
+            let loaded = read_with_options(&site, name, root, mode, sources, &declaration.options)?;
             Ok((name.clone(), loaded))
         })
         .collect()
@@ -254,6 +253,29 @@ pub fn read_one(
     mode: InputMode,
     sources: &[(PathBuf, Arc<str>)],
 ) -> std::result::Result<ReadManifest, ManifestError> {
+    read_manifest(site, name, declared_root, mode, sources, None)
+}
+
+/// Read a configured module using its instance options before checking referenced fields.
+pub fn read_with_options(
+    site: &Path,
+    name: &str,
+    declared_root: PathBuf,
+    mode: InputMode,
+    sources: &[(PathBuf, Arc<str>)],
+    options: &toml::Table,
+) -> std::result::Result<ReadManifest, ManifestError> {
+    read_manifest(site, name, declared_root, mode, sources, Some(options))
+}
+
+fn read_manifest(
+    site: &Path,
+    name: &str,
+    declared_root: PathBuf,
+    mode: InputMode,
+    sources: &[(PathBuf, Arc<str>)],
+    overrides: Option<&toml::Table>,
+) -> std::result::Result<ReadManifest, ManifestError> {
     if !valid_name(name) {
         return Err(ManifestError::Namespace {
             name: name.to_owned(),
@@ -359,33 +381,107 @@ pub fn read_one(
             source,
         })?,
     };
+    let content: Arc<str> = Arc::from(content);
     let digest = blake3::hash(content.as_bytes());
-    let manifest: Manifest = toml::from_str(content).map_err(|source: toml::de::Error| {
+    let mut table: toml::Table = toml::from_str(&content).map_err(|source: toml::de::Error| {
         let tola_diagnostic::toml::TomlMessage { message, help } =
             tola_diagnostic::toml::TomlMessage::from_error(source.message());
-        let span = source.span();
-        let key = span
-            .as_ref()
-            .filter(|_| message.starts_with("expected "))
-            .and_then(|span| {
-                let document = toml_edit::Document::parse(Arc::<str>::from(content)).ok()?;
-                tola_diagnostic::key_at_span(&document, span)
-            });
-        let mut diagnostic = diagnostic(match key {
-            Some(key) => format!("`{key}` {message}"),
-            None => message.into_owned(),
-        });
+        let mut diagnostic = diagnostic(message.into_owned());
         if let Some(help) = help {
             diagnostic = diagnostic.with_help(help);
         }
-        if let Some(span) = span {
-            diagnostic = diagnostic.with_source_span(content, span);
+        if let Some(span) = source.span() {
+            diagnostic = diagnostic.with_source_span(&content, span);
         }
         ManifestError::Rejected {
             diagnostic: Box::new(diagnostic),
             source: source.into(),
         }
     })?;
+    let mut options = table
+        .get("options")
+        .and_then(toml::Value::as_table)
+        .cloned()
+        .unwrap_or_default();
+    let option_root = if let Some(overrides) = overrides {
+        crate::options::merge(&mut options, overrides);
+        format!("modules.{name}.options")
+    } else {
+        "options".to_owned()
+    };
+    let reject_field = |message: String, pointer: &str, source: anyhow::Error| {
+        let diagnostic = locate_field(diagnostic(message), &content, pointer);
+        ManifestError::Rejected {
+            diagnostic: Box::new(diagnostic),
+            source,
+        }
+    };
+    crate::options::normalize_options(&mut options).map_err(|error| {
+        let mut pointer = "/options".to_owned();
+        for step in &error.path {
+            match step {
+                crate::fragment::FragmentStep::Key(key) => {
+                    tola_diagnostic::push_pointer(&mut pointer, key);
+                }
+                crate::fragment::FragmentStep::Index(index) => {
+                    tola_diagnostic::push_pointer(&mut pointer, &index.to_string());
+                }
+            }
+        }
+        reject_field(
+            error.to_string(),
+            &pointer,
+            anyhow::anyhow!(error.to_string()),
+        )
+    })?;
+    let bindings =
+        crate::option_refs::bind(&mut table, &options, &option_root).map_err(|invalid| {
+            let source = anyhow::anyhow!(invalid.reason.clone());
+            reject_field(invalid.reason, &invalid.field_pointer, source)
+        })?;
+    let manifest: Manifest =
+        serde_path_to_error::deserialize(toml::Value::Table(table)).map_err(|error| {
+            let mut pointer = String::new();
+            for segment in error.path() {
+                use serde_path_to_error::Segment;
+                match segment {
+                    Segment::Map { key } => tola_diagnostic::push_pointer(&mut pointer, key),
+                    Segment::Seq { index } => {
+                        tola_diagnostic::push_pointer(&mut pointer, &index.to_string());
+                    }
+                    Segment::Enum { .. } | Segment::Unknown => {}
+                }
+            }
+            let reason = error.inner().message();
+            if let Some(field) = reason
+                .strip_prefix("unknown field `")
+                .and_then(|reason| reason.split('`').next())
+                && pointer.rsplit('/').next() != Some(field)
+            {
+                tola_diagnostic::push_pointer(&mut pointer, field);
+            }
+            let tola_diagnostic::toml::TomlMessage { message, help } =
+                tola_diagnostic::toml::TomlMessage::from_error(reason);
+            let message = if let Some((_, option)) = bindings.iter().find(|(field, _)| {
+                pointer
+                    .strip_prefix(field.as_str())
+                    .is_some_and(|suffix| suffix.is_empty() || suffix.starts_with('/'))
+            }) {
+                format!("`{option}`: {message}")
+            } else if message.starts_with("expected ") && !pointer.is_empty() {
+                format!("`{}` {message}", error.path())
+            } else {
+                message.into_owned()
+            };
+            let mut diagnostic = locate_field(diagnostic(message), &content, &pointer);
+            if let Some(help) = help {
+                diagnostic = diagnostic.with_help(help);
+            }
+            ManifestError::Rejected {
+                diagnostic: Box::new(diagnostic),
+                source: error.into(),
+            }
+        })?;
     validate_manifest(name, &manifest).map_err(|source| {
         let mut diagnostic = diagnostic(source.to_string());
         if let ManifestError::CommandUnknownQuery { replacement, .. } = &source {
@@ -406,11 +502,37 @@ pub fn read_one(
             root: root_identity,
             manifest: manifest_identity,
             digest,
-            source: std::sync::Arc::from(content),
+            source: content,
         },
-        options: manifest.options.clone(),
+        options,
         manifest,
     })
+}
+
+fn locate_field(
+    mut diagnostic: tola_diagnostic::Diagnostic,
+    content: &Arc<str>,
+    mut pointer: &str,
+) -> tola_diagnostic::Diagnostic {
+    if let Ok(document) = toml_edit::Document::parse(Arc::clone(content)) {
+        let positions = tola_diagnostic::SourcePositions::of(&document, Arc::clone(content));
+        while !pointer.is_empty() {
+            if let Some(position) = positions.at_pointer(pointer) {
+                diagnostic = diagnostic.with_source_range(position.range());
+                if let Some(excerpt) = position.excerpt() {
+                    diagnostic = diagnostic.with_source_excerpt(
+                        excerpt.line,
+                        excerpt.column,
+                        excerpt.text,
+                        Some(excerpt.highlight),
+                    );
+                }
+                break;
+            }
+            pointer = pointer.rsplit_once('/').map_or("", |(parent, _)| parent);
+        }
+    }
+    diagnostic
 }
 
 fn validate_manifest(name: &str, manifest: &Manifest) -> Result<(), ManifestError> {

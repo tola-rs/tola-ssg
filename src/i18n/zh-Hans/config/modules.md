@@ -8,7 +8,9 @@
 
 用 `path` 指定本地模块。相对路径从站点根目录算起，也可以填绝对路径。用 `--pure` 时，本地模块必须在站点内。模块目录与发布目录要分开。站点的 `before-build` hook 可以为站点内的本地模块生成输入文件。
 
-每个模块从 `path`、`git`、`tarball` 中选一种。`tarball` 可以填 HTTPS 下载地址 `url`，也可以填本地归档 `path`，相对路径从站点根目录算起。需要校验归档时，加上 64 位十六进制 `sha256`。
+每个模块从 `path`、`git`、`tarball`、`builtin` 中选一种。Tola 自带 `resize-images` 和 `tailwind`，版本随 Tola 更新。
+
+`tarball` 可以填 HTTPS 下载地址 `url`，也可以填本地归档 `path`，相对路径从站点根目录算起。需要校验归档时，加上 64 位十六进制 `sha256`。
 
 支持 tar.gz、tar.zst 和使用 stored 或 deflate 压缩方式的 ZIP。归档须有一个外层目录，`tola-module.toml` 直接放在里面。下载和解包时 Tola 不会运行模块脚本。要使用私有 Release 附件，先把归档下载到站点里，再填 `tarball.path`。
 
@@ -28,6 +30,10 @@
 
 清单里的路径相对于模块根目录。站点可用 `[modules.notes.options]` 覆盖默认值。两边都是表时逐键合并，数组和其他值直接替换。
 
+在 `tola-module.toml` 里写 `dev = { option = "preview" }`，可以用实例的 `preview` 选项决定 hook 的开发行为。引用替换整个字段，取到的值仍按字段规则校验。`tola module check` 使用清单里的 `[options]` 默认值。
+
+引用也适用于构建 hook 的 `order`、`args`、`rerun-on`、`generates`、`outputs`，模块命令的 `args`、`projection`，以及静态资源的 `minify` 和资源树的 `include`、`exclude`。
+
 站点里的模块来源和选项可以用 [`include`](tola-help://config/include) 拆开写。
 
 例如，`notes` 的静态资源发布到 `/_tola-modules/notes/` 下，链接还会带上站点的部署前缀。用 `enabled-by = "images.enable"` 可以按模块的布尔选项决定是否发布。用 `[modules.notes.assets]` 下的 `enable = false` 可关闭该实例的全部静态资源。替换资源时，保留已启用资源的发布名，替换文件从站点根目录找。被目录筛选规则排除的资源不能替换。
@@ -43,6 +49,44 @@
 命令参数还可以写 `{module}`、`{project}` 或 `{tola}`，分别传入模块根目录、站点根目录和 Tola 的可执行文件路径。
 
 运行顺序与并行设置见 [`[hooks]`](tola-help://config/hooks)。
+
+### 给一批照片生成小图
+
+假设原图放在项目的 `photos/`，发布在 `/gallery/` 下。用源文件路径选择要转换的图片。
+
+```toml
+[assets]
+trees = [{ source = "photos", url-prefix = "/gallery" }]
+
+[modules.resize-images]
+builtin = "resize-images"
+
+[modules.resize-images.options]
+include = ["photos/**"]
+widths = [480, 960]
+format = "webp"
+jobs = 2
+
+[modules.resize-images.options.overrides."photos/cover.jpg"]
+widths = [1200]
+```
+
+普通照片生成宽 480 和 960 像素的 WebP，封面只生成宽 1200 像素的一份。默认跳过需要放大的尺寸。用 `exclude` 跳过部分图片，用 `upscale = true` 允许放大。`jobs` 控制这个模块最多同时处理几张原图。
+
+封面宽度足够时，用 `output-url("images/resize-images/photos/cover.jpg/w1200.webp")` 引用小图。构建会为选中的图片生成文件，即使页面还没引用它们。开发时，源图和尺寸设置相同的成品可以直接复用。
+
+### 生成 Tailwind CSS
+
+```toml
+[modules.tailwind]
+builtin = "tailwind"
+
+[modules.tailwind.options]
+minify = true
+# runner = ["deno", "task", "tailwind"]
+```
+
+模块默认从站点的 `node_modules/.bin` 或 `PATH` 找到已安装的 Tailwind CSS v4。可以用 `runner` 指定项目任务或自己的命令，接收模块传入的参数，编译一次后退出。模块扫描渲染后的 HTML，发布 `_tola-modules/tailwind/tailwind.css`，用 `output-url` 引用。需要自定义样式时，写到 `styles/tailwind.css`，再用 `watch.include` 登记额外的输入文件。
 
 ### 声明和运行查询
 

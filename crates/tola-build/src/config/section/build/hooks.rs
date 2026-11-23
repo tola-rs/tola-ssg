@@ -625,6 +625,7 @@ impl OutputCommandConfig {
 - `hook.inputDir`: Read compiled pages and `[assets]` files here.
 - `hook.outputDir`: Write every path listed in `outputs`. This directory starts empty.
   Tola publishes the files at the same relative paths.
+- `hook.outputs`: Read this hook's publish-relative `file` and `tree` declarations.
 - `hook.cacheDir`: Keep files for later runs. Copy the finished files to `hook.outputDir`
   even if you reuse the cache.
 - `hook.tempDir`: Store scratch files for this run. Tola removes it when the command exits.

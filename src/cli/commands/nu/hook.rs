@@ -44,6 +44,12 @@ enum Request {
         label: Option<String>,
     },
     Submit(Value),
+    RerunOnDigest,
+    Assets {
+        module: Option<String>,
+        include: Vec<String>,
+        exclude: Vec<String>,
+    },
 }
 
 pub(super) fn run(
@@ -87,6 +93,33 @@ pub(super) fn run(
     let submit = host
         .submit_diagnostics
         .context("Nu hook requires a report handler")?;
+    let assets = host.get_assets;
+    let rerun_on_digest = host.rerun_on_digest;
+    let handle = move |request| match request {
+        Request::Query {
+            directory,
+            target,
+            config,
+            label,
+        } => query(&directory, &target, config.as_deref(), label.as_deref()),
+        Request::Submit(issues) => submit(issues).map(|()| Value::Null),
+        Request::RerunOnDigest => {
+            let digest = rerun_on_digest.as_ref().ok_or_else(|| {
+                "get-hook --rerun-on-digest needs a Nu build hook".to_owned()
+            })?;
+            digest().map(|digest| digest.map_or(Value::Null, Value::String))
+        }
+        Request::Assets {
+            module,
+            include,
+            exclude,
+        } => {
+            let assets = assets.as_ref().ok_or_else(|| {
+                "get-assets needs a hook that runs after asset discovery".to_owned()
+            })?;
+            assets(module, include, exclude)
+        }
+    };
     let stopped = Arc::new(AtomicBool::new(false));
     let stop = stopped.clone();
     let connection = Arc::new(Mutex::new(None::<TcpStream>));
@@ -97,7 +130,7 @@ pub(super) fn run(
         .name("tola-nu-hook".into())
         .spawn(move || {
             tracing::dispatcher::with_default(&dispatch, || {
-                span.in_scope(|| serve(listener, key, &stop, &active, query, submit))
+                span.in_scope(|| serve(listener, key, &stop, &active, handle))
             })
         })
         .context("start the Nu hook request handler")?;
@@ -119,8 +152,7 @@ fn serve(
     key: [u8; 32],
     stopped: &AtomicBool,
     connection: &Mutex<Option<TcpStream>>,
-    query: tola_nu::Query,
-    submit: tola_nu::SubmitDiagnostics,
+    handle: impl Fn(Request) -> Result<Value, String>,
 ) -> std::io::Result<()> {
     while !stopped.load(Ordering::Relaxed) {
         let mut stream = match listener.accept() {
@@ -145,16 +177,9 @@ fn serve(
         let mut received = [0; 32];
         if stream.read_exact(&mut received).is_ok() && received == key {
             stream.set_read_timeout(None)?;
-            let response = match serde_json::from_reader(BufReader::new(&stream)) {
-                Ok(Request::Query {
-                    directory,
-                    target,
-                    config,
-                    label,
-                }) => query(&directory, &target, config.as_deref(), label.as_deref()),
-                Ok(Request::Submit(issues)) => submit(issues).map(|()| Value::Null),
-                Err(error) => Err(error.to_string()),
-            };
+            let response = serde_json::from_reader(BufReader::new(&stream))
+                .map_err(|error| error.to_string())
+                .and_then(&handle);
             let mut writer = BufWriter::new(&mut stream);
             if serde_json::to_writer(&mut writer, &response).is_ok() {
                 // A cancelled hook can close its socket before the query returns.
@@ -207,6 +232,24 @@ pub(super) fn run_worker(path: &Path) -> Result<i32> {
         })),
         submit_diagnostics: Some(Arc::new(move |issues| {
             request(address, &key, Request::Submit(issues)).map(|_| ())
+        })),
+        rerun_on_digest: Some(Arc::new(move || {
+            match request(address, &key, Request::RerunOnDigest)? {
+                Value::Null => Ok(None),
+                Value::String(digest) => Ok(Some(digest)),
+                _ => Err("could not read the hook rerun-on digest".into()),
+            }
+        })),
+        get_assets: Some(Arc::new(move |module, include, exclude| {
+            request(
+                address,
+                &key,
+                Request::Assets {
+                    module,
+                    include,
+                    exclude,
+                },
+            )
         })),
         ..super::host()
     })?;

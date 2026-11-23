@@ -29,7 +29,10 @@ Use `path` for a local module. Relative paths start at the site root. With `--pu
 the module must be inside the site. A site `before-build` hook can generate inputs in
 such a module. Keep the module directory separate from the publish directory.
 
-`path`, `git`, and `tarball` are mutually exclusive. A `tarball` table has exactly one
+Choose one of `path`, `git`, `tarball`, or `builtin`. This executable supplies
+`builtin = "resize-images"` and `builtin = "tailwind"`.
+
+A `tarball` table has exactly one
 HTTPS `url` or local file `path`, plus optional `sha256` as 64 hexadecimal digits. Relative
 archive paths start at the site root. Tola accepts tar.gz, tar.zst, and ZIP (stored/deflate).
 Put `tola-module.toml` directly inside the archive's one outer directory. For a private
@@ -61,6 +64,15 @@ Manifest paths are relative to the module. Project `[modules.notes.options]` val
 replace the defaults, with recursive merging when both values are tables.
 Use [`include`](tola-help://config/include) to keep a site's module source and overrides in separate files.
 
+In `tola-module.toml`, write `dev = { option = "preview" }` to read a hook's `dev`
+setting from the instance's `preview` option. The referenced value replaces the
+whole field and must pass the same validation as a literal value. The module's
+`[options]` supplies the defaults for `tola module check`.
+
+References also work in build hooks' `order`, `args`, `rerun-on`, `generates`, and
+`outputs`, module commands' `args` and `projection`, and static assets' `minify`,
+tree `include`, and tree `exclude`.
+
 Module assets publish under `/_tola-modules/notes/`, with the site's deployment prefix.
 `enable = false` under `[modules.notes.assets]` disables the instance's static assets.
 A replacement keeps the public resource name and reads from a project-relative file.
@@ -80,6 +92,48 @@ and `rerun-on`.
 Modules run in alias order. Within a stage, `order` sorts hooks from the same module.
 The site's `par-hooks` and `hook-jobs` apply to all modules. See [`[hooks]`](tola-help://config/hooks)
 for defaults and an ordered example.
+
+### Resize a directory of photos
+
+Publish `photos/` at `/gallery/` and choose which images to resize by their source paths.
+
+```toml
+[assets]
+trees = [{ source = "photos", url-prefix = "/gallery" }]
+
+[modules.resize-images]
+builtin = "resize-images"
+
+[modules.resize-images.options]
+include = ["photos/**"]
+widths = [480, 960]
+format = "webp"
+
+[modules.resize-images.options.overrides."photos/cover.jpg"]
+widths = [1200]
+```
+
+The module skips widths larger than the original. Use `output-url` to link to the
+result, for example `images/resize-images/photos/cover.jpg/w1200.webp` for a cover
+at least 1200 pixels wide.
+
+### Generate Tailwind CSS
+
+```toml
+[modules.tailwind]
+builtin = "tailwind"
+
+[modules.tailwind.options]
+minify = true
+# runner = ["deno", "task", "tailwind"]
+```
+
+The module finds an installed Tailwind CSS v4 CLI in the site's `node_modules/.bin`
+or on `PATH`. Set `runner` to run a project task or wrapper. It receives the module's
+Tailwind arguments and exits after one compilation. The module scans rendered HTML
+and publishes `_tola-modules/tailwind/tailwind.css`. Link it with `output-url`.
+Add `styles/tailwind.css` to set Tailwind options or scan additional sources. List
+the extra inputs in `watch.include` so editing them triggers a rebuild.
 
 ### Declare and run queries
 
@@ -660,11 +714,21 @@ argv = ["editor", "--wait"]
 [options]
 show = true
 items = ["default"]
-nested = { count = 2, date = 2026-01-01 }
+nested = { count = 2, date = 2026-01-01, dev = "run" }
+
+[[hooks.generate-outputs]]
+name = "render"
+nu = "render.nu"
+args = { option = "items" }
+order = { option = "nested.count" }
+dev = { option = "nested.dev" }
+outputs = [{ file = "result.txt" }]
 "#;
         let (site, mut declarations) = theme_site(manifest);
-        declarations.get_mut("forest").unwrap().options =
-            toml::from_str("show = false\nitems = []\nnested = { count = 3 }").unwrap();
+        declarations.get_mut("forest").unwrap().options = toml::from_str(
+            "show = false\nitems = []\nnested = { count = 3, dev = 'reuse' }",
+        )
+        .unwrap();
         let modules = loaded_modules(
             site.path(),
             &declarations,
@@ -676,6 +740,11 @@ nested = { count = 2, date = 2026-01-01 }
         assert!(options["items"].as_array().unwrap().is_empty());
         assert_eq!(options["nested"]["count"].as_integer(), Some(3));
         assert_eq!(options["nested"]["date"].as_str(), Some("2026-01-01"));
+        let hooks = tola_module::hooks::hook_stages(site.path(), &modules).unwrap();
+        let hook = &hooks.entries()[0];
+        assert_eq!(hook.dev, tola_module::DevParticipation::Reuse);
+        assert_eq!(hook.order, 3);
+        assert!(matches!(&hook.action, tola_module::Action::Nu { args, .. } if args.is_empty()));
     }
 
     #[test]

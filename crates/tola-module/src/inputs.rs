@@ -11,7 +11,7 @@ use tola_input::{
 use tola_typst::BundleCancellation;
 
 use crate::declaration::{ModuleDeclaration, ModuleSource, RemoteRevision, TarballSource};
-use crate::{checkout, remote};
+use crate::{BuiltinModule, checkout, remote};
 
 /// The directory every declared module reads, under the cancellation shared with its host.
 pub fn module_roots_with_bundle(
@@ -111,6 +111,7 @@ pub fn declaration_root(
 ) -> Result<PathBuf, ModuleRootError> {
     match source {
         ModuleSource::Local { path } => Ok(site_root.join(path)),
+        ModuleSource::Builtin { builtin } => Ok(builtin_module(alias, builtin)?.root(site_root)),
         ModuleSource::Tarball { tarball } => {
             let lock = InputLock::read(site_root)?.unwrap_or_default();
             match lock.modules.get(alias) {
@@ -205,6 +206,12 @@ impl ModuleAcquisition<'_> {
                 self.remote(alias, &git.url, git.revision.as_ref(), &git.subdir)
             }
             ModuleSource::Tarball { tarball } => self.tarball(alias, tarball),
+            ModuleSource::Builtin { builtin } => {
+                let module = builtin_module(alias, builtin)?;
+                let root = materialize_builtin(self.site_root, alias, module, self.cancellation)?;
+                self.lock.modules.remove(alias);
+                Ok(root)
+            }
         }
     }
 
@@ -534,6 +541,45 @@ impl ModuleAcquisition<'_> {
     }
 }
 
+fn builtin_module(alias: &str, name: &str) -> Result<&'static BuiltinModule, ModuleRootError> {
+    BuiltinModule::named(name).ok_or_else(|| ModuleRootError::UnknownBuiltin {
+        alias: alias.to_owned(),
+        name: name.to_owned(),
+    })
+}
+
+fn materialize_builtin(
+    site: &Path,
+    alias: &str,
+    builtin: &BuiltinModule,
+    cancellation: &BundleCancellation,
+) -> Result<PathBuf, ModuleRootError> {
+    let result = (|| -> Result<PathBuf> {
+        let destination = builtin.root(site);
+        let canonical_site = tola_input::normalize_existing_prefix(site);
+        anyhow::ensure!(
+            tola_input::normalize_existing_prefix(&destination).starts_with(&canonical_site),
+            "the module directory points outside the site"
+        );
+        let staging = stage(site)?;
+        let source = staging.source();
+        for (file, bytes) in builtin.files {
+            let path = source.join(file);
+            std::fs::create_dir_all(path.parent().expect("embedded file has a parent"))?;
+            std::fs::write(path, bytes)?;
+        }
+        ensure_active(cancellation)?;
+        let expected = tree_digest(alias, &source)?;
+        store_checkout(alias, &source, &destination, expected)?;
+        Ok(destination)
+    })();
+    result.map_err(|source| ModuleRootError::Builtin {
+        alias: alias.to_owned(),
+        name: builtin.name,
+        source,
+    })
+}
+
 /// One fetch attempt's staging area, removed unless its source tree moves into the cache.
 struct Staging {
     /// The temporary directory below `.tola` that holds the repository and its checkout.
@@ -782,6 +828,19 @@ pub enum ArchiveStage {
 /// Why one declared module has no readable directory.
 #[derive(Debug, thiserror::Error)]
 pub enum ModuleRootError {
+    #[error(
+        "`modules.{alias}.builtin` names `{name}`, which is not shipped with this Tola executable"
+    )]
+    UnknownBuiltin { alias: String, name: String },
+    #[error(
+        "Tola could not prepare built-in module `{name}` for `{alias}`; check the site's `.tola/modules/builtin` directory"
+    )]
+    Builtin {
+        alias: String,
+        name: &'static str,
+        #[source]
+        source: anyhow::Error,
+    },
     #[error(
         "module `{alias}` cannot read its archive from `.tola` under `--pure`; keep the archive in the site's source tree"
     )]

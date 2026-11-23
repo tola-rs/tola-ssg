@@ -146,6 +146,48 @@ impl ConfiguredAssets {
             .flat_map(|asset| asset.outputs.iter())
     }
 
+    /// Configured assets whose effective source paths match one hook's selection.
+    pub(crate) fn select(
+        &self,
+        site: &std::path::Path,
+        module: Option<&str>,
+        selection: &tola_input::FileSelection,
+        cancellation: &crate::cancellation::BuildCancellation,
+    ) -> Result<serde_json::Value> {
+        use super::ModuleAssetInput;
+
+        let mut rows = Vec::new();
+        for (asset, _) in self.entries() {
+            cancellation.ensure_active()?;
+            let source = match (&asset.module, module) {
+                (None, None) => asset.logical_source.strip_prefix(site).ok(),
+                (Some(asset), None) => match &asset.input {
+                    ModuleAssetInput::Project(path) => Some(path.as_path()),
+                    ModuleAssetInput::Module(_) => None,
+                },
+                (Some(asset), Some(alias)) if asset.alias == alias => match &asset.input {
+                    ModuleAssetInput::Module(path) => Some(path.as_path()),
+                    ModuleAssetInput::Project(_) => None,
+                },
+                _ => None,
+            };
+            let Some(source) = source.filter(|path| selection.matches(path)) else {
+                continue;
+            };
+            anyhow::ensure!(
+                source.to_str().is_some(),
+                "the asset published at `{}` must have a UTF-8 source name",
+                asset.output
+            );
+            rows.push(serde_json::json!({
+                "source": tola_diagnostic::render_relative(source),
+                "output": asset.output.as_str(),
+                "media-type": asset.declaration().media_type().as_str(),
+            }));
+        }
+        Ok(serde_json::Value::Array(rows))
+    }
+
     /// URL values come from this generation's declarations and output bytes.
     pub(crate) fn asset_urls(&self, config: &ResolvedSiteConfig) -> Result<super::AssetUrls> {
         let published = self.generation.assets.iter().flat_map(|asset| {

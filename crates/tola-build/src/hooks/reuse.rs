@@ -21,7 +21,7 @@ use crate::output::owner::OutputRootOwnership;
 use tola_address::OutputPath;
 use tola_diagnostic::display_path;
 use tola_module::hooks::{RerunOn, RerunSelection};
-use tola_typst::ContentDigest;
+use tola_typst::{ContentDigest, hash_length_prefixed};
 
 /// Everything Tola can observe about one `generate-outputs` command's inputs.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -357,6 +357,47 @@ pub(crate) fn observe_after_publish(
         nu: uses_nu.then(|| NuInputs::observe(config)).transpose()?,
         batches,
     })
+}
+
+pub(super) fn rerun_on_digest(
+    root: &Path,
+    origin: Option<&ModuleHookOrigin>,
+    rerun_on: &RerunOn,
+    cancellation: &BuildCancellation,
+) -> Result<Option<String>> {
+    let paths = observe_paths(root, origin, rerun_on, None, cancellation)?;
+    let mut digest = blake3::Hasher::new();
+    digest.update(b"tola-hook-rerun-on-v1\0");
+    for (path, state) in paths {
+        hash_length_prefixed(&mut digest, path.as_os_str().as_encoded_bytes());
+        match state {
+            ObservedPath::Missing => {
+                digest.update(&[0]);
+            }
+            ObservedPath::Directory => {
+                digest.update(&[1]);
+            }
+            ObservedPath::File(file_digest) => {
+                digest.update(&[2]).update(file_digest.as_bytes());
+            }
+            ObservedPath::Symlink(link) => {
+                digest.update(&[3]);
+                hash_length_prefixed(&mut digest, link.as_os_str().as_encoded_bytes());
+            }
+            ObservedPath::SymlinkFile {
+                link,
+                target,
+                digest: file_digest,
+            } => {
+                digest.update(&[4]);
+                hash_length_prefixed(&mut digest, link.as_os_str().as_encoded_bytes());
+                hash_length_prefixed(&mut digest, target.as_os_str().as_encoded_bytes());
+                digest.update(file_digest.as_bytes());
+            }
+            ObservedPath::UntrackedSymlink(_) | ObservedPath::Other => return Ok(None),
+        }
+    }
+    Ok(Some(digest.finalize().to_string()))
 }
 
 /// Record selected paths in path order, including missing literals and the Nu entry.

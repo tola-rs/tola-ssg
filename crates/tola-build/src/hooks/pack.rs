@@ -81,6 +81,7 @@ pub fn before_pack_context(
         mode: None,
         input_dir: Some(source.to_owned()),
         output_dir: None,
+        outputs: Vec::new(),
         cache_dir: None,
         temp_dir: temp.to_owned(),
     });

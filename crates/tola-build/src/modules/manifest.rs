@@ -7,6 +7,7 @@ use tola_input::{InputMode, InputScope};
 use tola_module::declaration::{ModuleDeclaration, ModuleSource};
 use tola_module::manifest::{
     InitializerSource, ManifestError, ModuleDeclarations, NuModule, read_one, read_selected,
+    read_with_options,
 };
 
 /// Read the Nu entry of every declared module.
@@ -118,14 +119,18 @@ pub fn read_available_declarations(
             continue;
         };
         if scope == InputScope::Pure
-            && !matches!(&declaration.source, ModuleSource::Local { .. })
+            && !matches!(
+                &declaration.source,
+                ModuleSource::Local { .. } | ModuleSource::Builtin { .. }
+            )
             && !vendor_modules
                 .as_ref()
                 .is_some_and(|dir| root.starts_with(dir))
         {
             continue;
         }
-        let Ok(loaded) = read_one(&site, name, root, mode, &[]) else {
+        let Ok(loaded) = read_with_options(&site, name, root, mode, &[], &declaration.options)
+        else {
             continue;
         };
         let manifest = loaded.manifest;

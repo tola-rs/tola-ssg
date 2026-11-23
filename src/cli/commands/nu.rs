@@ -557,6 +557,7 @@ pub(super) fn call_host(call: Option<&CallContext>) -> Result<Host> {
         json!({
             "name": hook.name, "stage": hook.stage, "mode": hook.mode,
             "input-dir": hook.input_dir, "output-dir": hook.output_dir,
+            "outputs": hook.outputs,
             "cache-dir": hook.cache_dir, "temp-dir": hook.temp_dir,
         })
     });
@@ -678,11 +679,20 @@ pub(crate) fn hook_runner() -> tola_build::hooks::HookRunner {
             }
             Ok(())
         });
+        let rerun_on_digest = hook.rerun_on_digest();
         let host = Host {
             site: Some(site_record(&config)),
             modules: module_records(&modules, directory, hook.assets)?,
             query: Some(query_operation(config.clone(), resources, token.clone())),
             submit_diagnostics: Some(submit),
+            rerun_on_digest: Some(Arc::new(move || {
+                rerun_on_digest().map_err(|error| error.to_string())
+            })),
+            get_assets: hook.asset_reader().map(|read| {
+                Arc::new(move |module, include, exclude| {
+                    read(module, include, exclude).map_err(|error| error.to_string())
+                }) as tola_nu::GetAssets
+            }),
             ..call_host(Some(call))?
         };
         let (libraries, dependencies) = runtime_inputs(&config, &modules);

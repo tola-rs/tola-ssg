@@ -43,7 +43,7 @@ impl From<OptionPath> for String {
 }
 
 impl OptionPath {
-    fn boolean(&self, options: &toml::Table) -> Result<bool, String> {
+    pub(crate) fn read<'a>(&self, options: &'a toml::Table) -> Result<&'a toml::Value, String> {
         let (leaf, parents) = self
             .0
             .split_last()
@@ -59,9 +59,7 @@ impl OptionPath {
         }
         table
             .get(leaf)
-            .ok_or_else(|| format!("option `{self}` is missing"))?
-            .as_bool()
-            .ok_or_else(|| format!("option `{self}` must be a boolean"))
+            .ok_or_else(|| format!("option `{self}` is missing"))
     }
 }
 
@@ -132,7 +130,9 @@ pub fn enabled_by(
     let Some(path) = path else {
         return Ok(true);
     };
-    path.boolean(options)
+    path.read(options)?
+        .as_bool()
+        .ok_or_else(|| format!("option `{path}` must be a boolean"))
 }
 
 /// Bind normalized TOML options as a Typst dictionary.

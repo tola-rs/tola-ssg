@@ -1,0 +1,28 @@
+[options]
+runner = "auto"
+minify = false
+dev = "run"
+cache = true
+toolchain = ""
+
+[options.watch]
+include = [
+  "cache.nu",
+  { project = "styles" },
+  { project = "tools" },
+  { project = "package.json" },
+  { project = "package-lock.json" },
+  { project = "pnpm-lock.yaml" },
+  { project = "yarn.lock" },
+  { project = "bun.lock" },
+  { project = "deno.json" },
+  { project = "deno.jsonc" },
+  { project = "deno.lock" },
+]
+
+[[hooks.generate-outputs]]
+name = "compile"
+nu = "compile.nu"
+dev = { option = "dev" }
+rerun-on = { option = "watch" }
+outputs = [{ file = "_tola-modules/{name}/tailwind.css" }]

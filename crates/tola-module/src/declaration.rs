@@ -27,6 +27,7 @@ pub enum ModuleSource {
     Local { path: PathBuf },
     Git { git: GitSource },
     Tarball { tarball: TarballSource },
+    Builtin { builtin: String },
 }
 
 /// One prepared module obtained from a tar.gz, tar.zst, or ZIP file.
@@ -120,6 +121,7 @@ struct ModuleDeclarationFields {
     git: Option<GitSourceFields>,
     #[serde(default, deserialize_with = "optional_table")]
     tarball: Option<TarballSourceFields>,
+    builtin: Option<String>,
     options: Option<toml::Table>,
     #[serde(default, deserialize_with = "optional_table")]
     assets: Option<ModuleAssetFields>,
@@ -132,18 +134,22 @@ impl TryFrom<ModuleDeclarationFields> for ModuleDeclaration {
     fn try_from(fields: ModuleDeclarationFields) -> Result<Self, Self::Error> {
         let mut options = fields.options.unwrap_or_default();
         crate::options::normalize_options(&mut options).map_err(|error| error.to_string())?;
-        let source = match (fields.path, fields.git, fields.tarball) {
-            (Some(path), None, None) if !path.as_os_str().is_empty() => {
+        let source = match (fields.path, fields.git, fields.tarball, fields.builtin) {
+            (Some(path), None, None, None) if !path.as_os_str().is_empty() => {
                 ModuleSource::Local { path }
             }
-            (Some(_), None, None) => return Err("`path` must not be empty".into()),
-            (None, Some(git), None) => ModuleSource::Git {
+            (Some(_), None, None, None) => return Err("`path` must not be empty".into()),
+            (None, Some(git), None, None) => ModuleSource::Git {
                 git: git.try_into()?,
             },
-            (None, None, Some(tarball)) => ModuleSource::Tarball {
+            (None, None, Some(tarball), None) => ModuleSource::Tarball {
                 tarball: tarball.try_into()?,
             },
-            _ => return Err("choose exactly one of `path`, `git`, or `tarball`".into()),
+            (None, None, None, Some(builtin)) if !builtin.is_empty() => {
+                ModuleSource::Builtin { builtin }
+            }
+            (None, None, None, Some(_)) => return Err("`builtin` must not be empty".into()),
+            _ => return Err("choose exactly one of `path`, `git`, `tarball`, or `builtin`".into()),
         };
         Ok(Self {
             source,

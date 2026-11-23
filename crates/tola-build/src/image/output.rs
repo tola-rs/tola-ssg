@@ -126,7 +126,7 @@ struct PendingRender {
     output: OutputPath,
     claim: usize,
     source: usize,
-    source_id: FileId,
+    file: String,
     /// The identity the stored bytes of this variant are kept under.
     key: ContentDigest,
 }
@@ -444,8 +444,8 @@ impl ImageCause {
 }
 
 /// One image failure: what Tola could not do, and the failure behind it.
-fn image_failure(file: FileId, operation: ImageOperation, cause: ImageCause) -> anyhow::Error {
-    let message = operation.message(file.vpath().get_without_slash());
+fn image_failure(file: &str, operation: ImageOperation, cause: ImageCause) -> anyhow::Error {
+    let message = operation.message(file);
     let mut diagnostic = Diagnostic::new(
         tola_diagnostic::codes::build::SITE,
         Severity::Error,
@@ -471,6 +471,7 @@ fn render_pending_variants(
     claims: &[VariantClaim],
     sources: &[SourceImage],
     pixel_cache: &PixelCache,
+    jobs: usize,
     cancellation: &BuildCancellation,
 ) -> Result<Vec<Arc<[u8]>>> {
     // Pending indices survive regrouping so a later encoding cannot hide an earlier failure
@@ -512,7 +513,7 @@ fn render_pending_variants(
         let cpu_threads = std::thread::available_parallelism()
             .map_or(1, |threads| threads.get())
             .min(rayon::current_num_threads());
-        let source_workers = cpu_threads.min(MAX_SOURCE_WORKERS);
+        let source_workers = cpu_threads.min(jobs);
         let workers = image_workers(source_workers, cancellation)?;
         workers.install(|| -> Result<()> {
             let mut sizes = groups
@@ -621,12 +622,135 @@ fn render_pending_variants(
         } else {
             ImageOperation::Resize
         };
-        return Err(image_failure(job.source_id, operation, error));
+        return Err(image_failure(&job.file, operation, error));
     }
     Ok(rendered_bytes
         .into_iter()
         .map(|bytes| bytes.expect("every claimed render has its encoded bytes"))
         .collect())
+}
+
+/// Sources, output claims, and encoded variants for one image producer.
+#[derive(Default)]
+struct ImageBatch {
+    sources: Vec<SourceImage>,
+    claims: Vec<VariantClaim>,
+    claimed: BTreeMap<OutputPath, usize>,
+    pending: Vec<PendingRender>,
+    variants: BTreeMap<OutputPath, EncodedVariant>,
+}
+
+impl ImageBatch {
+    fn claim(
+        &mut self,
+        output: OutputPath,
+        source: usize,
+        file: &str,
+        recipe: ImageRecipe,
+        previous: Option<&ImageOutputs>,
+    ) -> Result<()> {
+        let source_digest = self.sources[source].digest;
+        if let Some(&index) = self.claimed.get(&output) {
+            let existing = &self.claims[index];
+            ensure!(
+                existing.source_digest == source_digest && existing.recipe == recipe,
+                "two image variants publish the same output `{output}`; change one recipe or output",
+            );
+            return Ok(());
+        }
+        let claim = VariantClaim {
+            source_digest,
+            recipe,
+        };
+        let retained = previous
+            .and_then(|previous| previous.variants.get(&output))
+            .filter(|cached| {
+                cached.source_digest == source_digest && cached.recipe == claim.recipe
+            });
+        if let Some(cached) = retained {
+            self.variants.insert(
+                output.clone(),
+                claim.encoded(Arc::clone(&cached.bytes), cached.digest),
+            );
+        } else {
+            self.pending.push(PendingRender {
+                output: output.clone(),
+                claim: self.claims.len(),
+                source,
+                file: file.to_owned(),
+                key: ImageRequest::variant_key(source_digest, &claim.recipe),
+            });
+        }
+        self.claimed.insert(output, self.claims.len());
+        self.claims.push(claim);
+        Ok(())
+    }
+
+    fn render(
+        mut self,
+        site_root: &Path,
+        resources: &BuildResources,
+        jobs: usize,
+        cancellation: &BuildCancellation,
+        started: std::time::Instant,
+    ) -> Result<ImageOutputs> {
+        let reused = self.variants.len();
+        let mut restored = 0usize;
+        let mut unwritable = 0usize;
+        let variant_cache = VariantCache::new(layout::image_cache(site_root));
+
+        // Lookups do not depend on one another. Keep misses in claim order for render diagnostics.
+        let cached = self
+            .pending
+            .par_iter()
+            .map(|job| {
+                cancellation.ensure_active()?;
+                Ok(variant_cache.read(job.key))
+            })
+            .collect::<Result<Vec<_>, BuildCancelled>>()?;
+        let pending: Vec<_> = self
+            .pending
+            .into_iter()
+            .zip(cached)
+            .filter_map(|(job, cached)| match cached {
+                Some((bytes, digest)) => {
+                    restored += 1;
+                    self.variants
+                        .insert(job.output, self.claims[job.claim].encoded(bytes, digest));
+                    None
+                }
+                None => Some(job),
+            })
+            .collect();
+
+        let encoded = render_pending_variants(
+            &pending,
+            &self.claims,
+            &self.sources,
+            &resources.pixel_cache(),
+            jobs,
+            cancellation,
+        )?;
+        for (job, bytes) in pending.iter().zip(encoded) {
+            cancellation.ensure_active()?;
+            let claim = &self.claims[job.claim];
+            let digest = ContentDigest::of(&bytes);
+            if let Err(error) = variant_cache.store(job.key, &bytes, digest) {
+                unwritable += 1;
+                tracing::debug!(target: "tola::compile", %error, "image variant not stored");
+            }
+            self.variants
+                .insert(job.output.clone(), claim.encoded(bytes, digest));
+        }
+        cancellation.ensure_active()?;
+        tracing::debug!(target: "tola::compile",
+            images_ms = started.elapsed().as_secs_f64() * 1000.0,
+            sources = self.sources.len(), variants = self.variants.len(), rendered = pending.len(), reused, restored, unwritable,
+            "prepared image outputs");
+        Ok(ImageOutputs {
+            variants: self.variants,
+        })
+    }
 }
 
 impl ImageOutputs {
@@ -641,19 +765,10 @@ impl ImageOutputs {
     ) -> Result<(Arc<Self>, AccessedDeps)> {
         cancellation.ensure_active()?;
         let started = std::time::Instant::now();
-        let mut variants = BTreeMap::<OutputPath, EncodedVariant>::new();
-        let mut claims = Vec::<VariantClaim>::new();
-        let mut claims_by_output = BTreeMap::<OutputPath, usize>::new();
-        let mut pending = Vec::<PendingRender>::new();
-        let mut sources = Vec::<SourceImage>::new();
+        let mut batch = ImageBatch::default();
         let mut source_indexes = HashMap::<FileId, usize>::new();
         let mut content_indexes = HashMap::<ContentDigest, usize>::new();
         let mut accessed = AccessedDeps::default();
-        let mut reused = 0usize;
-        let mut restored = 0usize;
-        let mut unwritable = 0usize;
-        let variant_cache = VariantCache::new(layout::image_cache(site_root));
-        let pixel_cache = resources.pixel_cache();
 
         // Content aliases share pixels, but every requested path must retain its own read evidence.
         for read in evidence {
@@ -662,6 +777,7 @@ impl ImageOutputs {
                 continue;
             };
             let source_id = FileId::new(request.origin().clone());
+            let file = source_id.vpath().get_without_slash();
             let source_index = match source_indexes.get(&source_id).copied() {
                 Some(index) => index,
                 None => {
@@ -675,11 +791,7 @@ impl ImageOutputs {
                             accessed.package_checks.extend(observed.package_checks);
                             cancellation.ensure_active()?;
                             bytes.map_err(|error| {
-                                image_failure(
-                                    source_id,
-                                    ImageOperation::Read,
-                                    ImageCause::File(error),
-                                )
+                                image_failure(file, ImageOperation::Read, ImageCause::File(error))
                             })?
                         }
                         DataSource::Bytes(bytes) => bytes.clone(),
@@ -697,7 +809,7 @@ impl ImageOutputs {
                                     )
                                     .map_err(|error| {
                                         image_failure(
-                                            source_id,
+                                            file,
                                             ImageOperation::RasterizeSvg,
                                             ImageCause::Svg(error),
                                         )
@@ -719,14 +831,14 @@ impl ImageOutputs {
                                 }
                                 None => inspect(bytes.as_slice()).map_err(|error| {
                                     image_failure(
-                                        source_id,
+                                        file,
                                         ImageOperation::Read,
                                         ImageCause::Image(error),
                                     )
                                 })?,
                             };
-                            let index = sources.len();
-                            sources.push(SourceImage {
+                            let index = batch.sources.len();
+                            batch.sources.push(SourceImage {
                                 bytes,
                                 digest,
                                 metadata,
@@ -739,7 +851,7 @@ impl ImageOutputs {
                     index
                 }
             };
-            let source = &sources[source_index];
+            let source = &batch.sources[source_index];
             ensure!(
                 source.digest == request.source_digest(),
                 "the image `{}` changed since Tola prepared its variants; run the build again",
@@ -753,79 +865,23 @@ impl ImageOutputs {
                 }
                 None => request.recipe().validate(&source.metadata)?,
             }
-            let output = request.output_path();
-            if let Some(&index) = claims_by_output.get(&output) {
-                let existing = &claims[index];
-                ensure!(
-                    existing.source_digest == source.digest && existing.recipe == *request.recipe(),
-                    "two image variants publish the same output `{output}`; change one recipe or output",
-                );
-                continue;
-            }
-            let claim = VariantClaim {
-                source_digest: source.digest,
-                recipe: request.recipe().clone(),
-            };
-            let retained = previous
-                .and_then(|previous| previous.variants.get(&output))
-                .filter(|cached| {
-                    cached.source_digest == source.digest && cached.recipe == *request.recipe()
-                })
-                .map(|cached| (Arc::clone(&cached.bytes), cached.digest));
-            if let Some((bytes, digest)) = retained {
-                reused += 1;
-                variants.insert(output.clone(), claim.encoded(bytes, digest));
-            } else {
-                pending.push(PendingRender {
-                    output: output.clone(),
-                    claim: claims.len(),
-                    source: source_index,
-                    source_id,
-                    key: request.key(),
-                });
-            }
-            claims_by_output.insert(output, claims.len());
-            claims.push(claim);
+            batch.claim(
+                request.output_path(),
+                source_index,
+                file,
+                request.recipe().clone(),
+                previous,
+            )?;
         }
 
-        // Lookups do not depend on one another. Keep misses in claim order for render diagnostics.
-        let cached = pending
-            .par_iter()
-            .map(|job| {
-                cancellation.ensure_active()?;
-                Ok(variant_cache.read(job.key))
-            })
-            .collect::<Result<Vec<_>, BuildCancelled>>()?;
-        let pending: Vec<_> = pending
-            .into_iter()
-            .zip(cached)
-            .filter_map(|(job, cached)| match cached {
-                Some((bytes, digest)) => {
-                    restored += 1;
-                    variants.insert(job.output, claims[job.claim].encoded(bytes, digest));
-                    None
-                }
-                None => Some(job),
-            })
-            .collect();
-
-        let encoded =
-            render_pending_variants(&pending, &claims, &sources, &pixel_cache, cancellation)?;
-        for (job, bytes) in pending.iter().zip(encoded) {
-            let claim = &claims[job.claim];
-            let digest = ContentDigest::of(&bytes);
-            if let Err(error) = variant_cache.store(job.key, &bytes, digest) {
-                unwritable += 1;
-                tracing::debug!(target: "tola::compile", %error, "image variant not stored");
-            }
-            variants.insert(job.output.clone(), claim.encoded(bytes, digest));
-        }
-        cancellation.ensure_active()?;
-        tracing::debug!(target: "tola::compile",
-            images_ms = started.elapsed().as_secs_f64() * 1000.0,
-            sources = source_indexes.len(), variants = variants.len(), rendered = pending.len(), reused, restored, unwritable,
-            "prepared image outputs");
-        Ok((Arc::new(Self { variants }), accessed))
+        let images = batch.render(
+            site_root,
+            resources,
+            MAX_SOURCE_WORKERS,
+            cancellation,
+            started,
+        )?;
+        Ok((Arc::new(images), accessed))
     }
 
     pub(crate) fn insert_into(

@@ -68,6 +68,9 @@ pub struct Hook {
     pub input_dir: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_dir: Option<PathBuf>,
+    /// Publish-relative files and trees declared for this generate-outputs hook.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outputs: Vec<tola_module::CommandOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_dir: Option<PathBuf>,
     pub temp_dir: PathBuf,

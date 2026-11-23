@@ -25,7 +25,7 @@ mod resources;
 mod signatures;
 
 pub use error::NuError;
-pub use host::{Host, Query, SubmitDiagnostics};
+pub use host::{GetAssets, Host, Query, SubmitDiagnostics};
 pub use lsp::serve_lsp;
 pub use modules::{ConfiguredModule, Dependency, ModuleEntry, Origin, SourceOrigin, SourceOverlay};
 pub use nu_protocol::{Flag, PositionalArg, Signature};

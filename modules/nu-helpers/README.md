@@ -1,6 +1,6 @@
 # Nu Helpers
 
-Select values from a searchable terminal table with `nu-helpers pick`.
+Pick values from a searchable terminal table.
 
 ```nu
 use tola nu-helpers
@@ -9,6 +9,8 @@ use tola nu-helpers
 | nu-helpers pick --columns [name] --multi
 ```
 
-Press `/` to filter, Enter to confirm, or `q` to cancel. With `--multi`, Space toggles marks that survive filtering.
+Use `/` to filter, Enter to pick, and `q` to cancel. With `--multi`, Space toggles
+marks that survive filtering.
 
-`pick` returns the original values in input order, including fields hidden by `--columns`. Canceling or passing an empty list returns `[]`.
+`pick` returns the original values in input order. Empty input or cancellation
+returns `[]`.

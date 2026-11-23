@@ -188,11 +188,8 @@ fn build_site_candidate(
         )?;
         let mut hook_config = config.clone();
         if let Some(runner) = hook_config.hook_runner.take() {
-            let assets = compiled_outputs
-                .producer_caches
-                .configured_assets
-                .asset_urls(config)?;
-            hook_config.hook_runner = Some(runner.with_assets(assets));
+            let assets = compiled_outputs.producer_caches.configured_assets.clone();
+            hook_config.hook_runner = Some(runner.with_assets(assets, config)?);
         }
         let hook_config = std::sync::Arc::new(hook_config);
         let compiled_outputs = compiled_outputs.generate_outputs(

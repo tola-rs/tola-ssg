@@ -1,7 +1,8 @@
 //! Hook command policy: what a configured command receives, and how it is run.
 
 use anyhow::{Context, Result};
-use tola_module::Action;
+use tola_module::hooks::RerunOn;
+use tola_module::{Action, CommandOutput};
 use tola_subprocess::{Command, Stop};
 
 use super::hook_identity;
@@ -28,8 +29,14 @@ pub(super) type ObserveFailure = Arc<dyn Fn() + Send + Sync>;
 /// The directories one hook stage provides its command; a stage that provides none supplies none.
 pub(super) enum HookDirectories<'a> {
     BeforeBuild,
-    GenerateOutputs { input: &'a Path, output: &'a Path },
-    AfterPublish { input: &'a Path },
+    GenerateOutputs {
+        input: &'a Path,
+        output: &'a Path,
+        outputs: &'a [CommandOutput],
+    },
+    AfterPublish {
+        input: &'a Path,
+    },
 }
 
 impl<'a> HookDirectories<'a> {
@@ -88,6 +95,10 @@ impl HookCall<'_> {
     fn context(&self, cache: &Path, temp: &Path) -> Result<crate::context::Context> {
         use crate::context::{Context, Hook, Module, Site};
 
+        let outputs = match self.directories {
+            HookDirectories::GenerateOutputs { outputs, .. } => outputs.to_vec(),
+            _ => Vec::new(),
+        };
         let mut context = Context::new(
             std::env::current_exe().context("locate the running Tola executable")?,
             Some(self.site.scope),
@@ -111,6 +122,7 @@ impl HookCall<'_> {
             mode: Some(self.mode.as_str().to_owned()),
             input_dir: self.directories.input().map(Path::to_owned),
             output_dir: self.directories.output().map(Path::to_owned),
+            outputs,
             cache_dir: Some(cache.to_owned()),
             temp_dir: temp.to_owned(),
         });
@@ -136,11 +148,53 @@ pub struct NuHook<'a> {
     pub context: crate::context::Context,
     pub temp_dir: &'a Path,
     pub cancellation: Option<&'a BuildCancellation>,
+    origin: Option<&'a ModuleHookOrigin>,
+    rerun_on: &'a RerunOn,
+    configured_assets: Option<&'a crate::asset::ConfiguredAssets>,
     label: &'a str,
     observe_failure: &'a ObserveFailure,
 }
 
 impl NuHook<'_> {
+    /// Read a digest of the hook's declared rerun-on files on demand.
+    pub fn rerun_on_digest(&self) -> impl Fn() -> Result<Option<String>> + Send + Sync + use<> {
+        let root = self.config.get_root().to_owned();
+        let origin = self.origin.cloned();
+        let rerun_on = self.rerun_on.clone();
+        let cancellation = self.cancellation.cloned().unwrap_or_default();
+        move || super::reuse::rerun_on_digest(&root, origin.as_ref(), &rerun_on, &cancellation)
+    }
+
+    /// Select configured assets by their source paths after asset discovery.
+    pub fn asset_reader(
+        &self,
+    ) -> Option<
+        impl Fn(Option<String>, Vec<String>, Vec<String>) -> Result<serde_json::Value>
+        + Send
+        + Sync
+        + use<>,
+    > {
+        let assets = self.configured_assets?.clone();
+        let config = self.config.clone();
+        let cancellation = self.cancellation.cloned().unwrap_or_default();
+        Some(move |module: Option<String>, include, exclude| {
+            if let Some(alias) = &module {
+                anyhow::ensure!(
+                    config.modules().contains_key(alias),
+                    "no configured module is named `{alias}`"
+                );
+            }
+            let selection =
+                tola_input::FileSelection::new(&tola_input::FilePatterns { include, exclude })?;
+            assets.select(
+                config.get_root(),
+                module.as_deref(),
+                &selection,
+                &cancellation,
+            )
+        })
+    }
+
     /// Run the Nu executor with the same capture and cancellation as an argv hook.
     pub fn run_command(&self, command: &Command) -> Result<()> {
         run_observed_with(
@@ -175,6 +229,7 @@ pub struct HookRunner {
     run: std::sync::Arc<RunNuHook>,
     modules: Option<std::sync::Arc<tola_module::prepared::PreparedModules>>,
     assets: Option<std::sync::Arc<crate::asset::AssetUrls>>,
+    configured_assets: Option<crate::asset::ConfiguredAssets>,
     resources: Option<crate::BuildResources>,
 }
 
@@ -189,6 +244,7 @@ impl HookRunner {
             run: std::sync::Arc::new(run),
             modules: None,
             assets: None,
+            configured_assets: None,
             resources: None,
         }
     }
@@ -196,12 +252,18 @@ impl HookRunner {
     pub(crate) fn with_modules(mut self, modules: tola_module::prepared::PreparedModules) -> Self {
         self.modules = Some(std::sync::Arc::new(modules));
         self.assets = None;
+        self.configured_assets = None;
         self
     }
 
-    pub(crate) fn with_assets(mut self, assets: crate::asset::AssetUrls) -> Self {
-        self.assets = Some(std::sync::Arc::new(assets));
-        self
+    pub(crate) fn with_assets(
+        mut self,
+        assets: crate::asset::ConfiguredAssets,
+        config: &ResolvedSiteConfig,
+    ) -> Result<Self> {
+        self.assets = Some(Arc::new(assets.asset_urls(config)?));
+        self.configured_assets = Some(assets);
+        Ok(self)
     }
 
     pub(crate) fn with_resources(mut self, resources: crate::BuildResources) -> Self {
@@ -232,6 +294,7 @@ pub(super) fn run_action(
     config: &ResolvedSiteConfig,
     action: std::result::Result<Action, String>,
     call: HookCall<'_>,
+    rerun_on: &RerunOn,
     cancellation: Option<&BuildCancellation>,
     diagnostics: &mut Vec<tola_diagnostic::Diagnostic>,
     observe_failure: &ObserveFailure,
@@ -282,6 +345,9 @@ pub(super) fn run_action(
                 context: call.context(&cache, temporary.path())?,
                 temp_dir: temporary.path(),
                 cancellation,
+                origin: call.origin,
+                rerun_on,
+                configured_assets: runner.configured_assets.as_ref(),
                 label: call.name,
                 observe_failure,
             });
@@ -701,6 +767,7 @@ mod tests {
             "generate-outputs" => HookDirectories::GenerateOutputs {
                 input: &input,
                 output: &output,
+                outputs: &[],
             },
             "after-publish" => HookDirectories::AfterPublish { input: &input },
             other => panic!("unknown hook stage `{other}`"),

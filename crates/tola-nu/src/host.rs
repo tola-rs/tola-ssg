@@ -15,6 +15,11 @@ pub type Query =
     Arc<dyn Fn(&Path, &str, Option<&Path>, Option<&str>) -> Result<Json, String> + Send + Sync>;
 pub type SubmitDiagnostics = Arc<dyn Fn(Json) -> Result<(), String> + Send + Sync>;
 pub type RenderDiagnostics = Arc<dyn Fn(&Path, Json, bool) -> Result<String, String> + Send + Sync>;
+/// Read the configured assets matching source paths in the current build.
+pub type GetAssets =
+    Arc<dyn Fn(Option<String>, Vec<String>, Vec<String>) -> Result<Json, String> + Send + Sync>;
+/// Read the digest of the paths selected by the hook's rerun-on declaration.
+pub type RerunOnDigest = Arc<dyn Fn() -> Result<Option<String>, String> + Send + Sync>;
 
 #[derive(Default, Clone)]
 pub struct Host {
@@ -27,6 +32,8 @@ pub struct Host {
     pub query: Option<Query>,
     pub submit_diagnostics: Option<SubmitDiagnostics>,
     pub render_diagnostics: Option<RenderDiagnostics>,
+    pub get_assets: Option<GetAssets>,
+    pub rerun_on_digest: Option<RerunOnDigest>,
     /// The invocation's SVG fonts, or a configuration error reported when an SVG needs them.
     pub svg_fonts: Option<Result<Arc<tola_typst::FontStore>, String>>,
 }
@@ -37,6 +44,7 @@ pub(super) enum Operation {
     Site,
     Module,
     Hook,
+    Assets,
     Init,
     Query,
     Submit,
@@ -60,6 +68,7 @@ impl Command for HostCommand {
             Operation::Site => "get-site",
             Operation::Module => "get-module",
             Operation::Hook => "get-hook",
+            Operation::Assets => "get-assets",
             Operation::Init => "get-init",
             Operation::Query => "query",
             Operation::Submit => "submit",
@@ -73,6 +82,7 @@ impl Command for HostCommand {
             Operation::Site => "Read the current site's settings and paths.",
             Operation::Module => "Read the current or named module instance.",
             Operation::Hook => "Read the current hook's stage and directories.",
+            Operation::Assets => "Read configured assets in this hook's input snapshot.",
             Operation::Init => "Read the current initializer's source and directories.",
             Operation::Query => "Evaluate a site query.",
             Operation::Submit => "Submit one complete batch from a Tola hook or module command.",
@@ -85,6 +95,9 @@ impl Command for HostCommand {
             Operation::Submit => {
                 "A second submission is rejected, even if the first batch was empty. An error fails the host operation after the script finishes."
             }
+            Operation::Assets => {
+                "Each row has a source path, an output path relative to the hook input directory, and a media type. Patterns are relative to the site root or the selected module root."
+            }
             _ => "",
         }
     }
@@ -94,6 +107,31 @@ impl Command for HostCommand {
         match self.0 {
             Operation::Context => signature.switch("json", "Return the context as JSON.", None),
             Operation::Module => signature.optional("name", SyntaxShape::String, "Module alias."),
+            Operation::Hook => signature.switch(
+                "rerun-on-digest",
+                "Hash the declared rerun-on files instead of returning the hook record.",
+                None,
+            ),
+            Operation::Assets => signature
+                .input_output_types(vec![(Type::Nothing, Type::list(Type::record()))])
+                .named(
+                    "module",
+                    SyntaxShape::String,
+                    "Read sources inside this module.",
+                    None,
+                )
+                .named(
+                    "include",
+                    SyntaxShape::List(Box::new(SyntaxShape::String)),
+                    "Include source paths or globs. Defaults to all.",
+                    None,
+                )
+                .named(
+                    "exclude",
+                    SyntaxShape::List(Box::new(SyntaxShape::String)),
+                    "Exclude source paths or globs.",
+                    None,
+                ),
             Operation::Query => signature
                 .required("target", SyntaxShape::String, "Query name or Typst file.")
                 .named(
@@ -165,10 +203,29 @@ impl Command for HostCommand {
                     .cloned()
                     .ok_or_else(|| error(format!("no configured module is named `{name}`")))?
             }
-            Operation::Hook => host
-                .hook
-                .clone()
-                .ok_or_else(|| error("get-hook can only be called in a hook".into()))?,
+            Operation::Hook => {
+                if call.has_flag(engine, stack, "rerun-on-digest")? {
+                    let digest = host.rerun_on_digest.as_ref().ok_or_else(|| {
+                        error("get-hook --rerun-on-digest needs a Nu build hook".into())
+                    })?;
+                    digest().map_err(error)?.map_or(Json::Null, Json::String)
+                } else {
+                    host.hook
+                        .clone()
+                        .ok_or_else(|| error("get-hook can only be called in a hook".into()))?
+                }
+            }
+            Operation::Assets => {
+                let assets = host.get_assets.as_ref().ok_or_else(|| {
+                    error("get-assets needs a hook that runs after asset discovery".into())
+                })?;
+                let module = call.get_flag(engine, stack, "module")?;
+                let include = call
+                    .get_flag(engine, stack, "include")?
+                    .unwrap_or_else(|| vec!["**".into()]);
+                let exclude = call.get_flag(engine, stack, "exclude")?.unwrap_or_default();
+                assets(module, include, exclude).map_err(error)?
+            }
             Operation::Init => host
                 .init
                 .clone()

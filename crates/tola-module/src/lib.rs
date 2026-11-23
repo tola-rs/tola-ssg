@@ -5,6 +5,7 @@ mod archive;
 pub mod arguments;
 
 pub mod assets;
+mod builtin;
 pub mod check;
 pub mod checkout;
 pub mod declaration;
@@ -16,6 +17,7 @@ pub mod icons;
 pub mod inputs;
 pub mod manifest;
 pub mod module_set;
+mod option_refs;
 pub mod options;
 pub mod pack;
 pub mod prepared;
@@ -25,6 +27,7 @@ pub mod watch;
 
 pub use action::Action;
 pub use arguments::expand_argument;
+pub use builtin::{BuiltinModule, install_builtin_modules};
 pub use checkout::CheckoutError;
 pub use declaration::*;
 pub use diagnostic::error_diagnostic;

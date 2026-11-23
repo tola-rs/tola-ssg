@@ -263,7 +263,10 @@ fn select_inputs(
     let mut modules = Vec::new();
     for (alias, source) in site.module_roots() {
         let declaration = &config.modules()[alias];
-        if matches!(declaration.source, tola_module::ModuleSource::Local { .. }) {
+        if matches!(
+            declaration.source,
+            tola_module::ModuleSource::Local { .. } | tola_module::ModuleSource::Builtin { .. }
+        ) {
             continue;
         }
         modules.push(SelectedModule {

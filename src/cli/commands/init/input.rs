@@ -108,9 +108,12 @@ impl Source {
                     *path = site.join(&*path);
                 }
             }
-            ModuleSource::Git { .. } => {}
+            ModuleSource::Git { .. } | ModuleSource::Builtin { .. } => {}
         }
-        let cached = if matches!(declaration, ModuleSource::Local { .. }) {
+        let cached = if matches!(
+            declaration,
+            ModuleSource::Local { .. } | ModuleSource::Builtin { .. }
+        ) {
             None
         } else {
             locked.map(|locked| (directory.to_owned(), locked))

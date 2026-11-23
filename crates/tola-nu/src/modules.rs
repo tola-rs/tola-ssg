@@ -193,6 +193,7 @@ pub(super) fn register<'a>(
         Operation::Site,
         Operation::Module,
         Operation::Hook,
+        Operation::Assets,
         Operation::Init,
         Operation::Query,
     ] {

@@ -227,8 +227,10 @@ fn generate_entry(entry: GenerateEntry<'_>) -> Result<(Vec<OutputFile>, Vec<Outp
             directories: HookDirectories::GenerateOutputs {
                 input: candidate.root(),
                 output: generated.path(),
+                outputs: &command.outputs,
             },
         },
+        &command.rerun_on,
         Some(cancellation),
         diagnostics,
         observe_failure,

@@ -52,7 +52,8 @@ Typst 编译后运行。适合生成搜索索引、文件清单等要一并发�
 - `hook.outputDir`：把 `outputs` 声明的文件写到这里。目录每次从空开始，文件按同样的相对路径发布。
 - `hook.cacheDir`：保存下次还能用的数据。即使用了缓存，仍要把成品写入 `hook.outputDir`。
 - `hook.tempDir`：放本次的临时文件，命令结束后删除。
-- `hook.outputDir`：每次都是空目录。把 `outputs` 声明的文件写到这里，Tola 按同样的相对路径发布。
+- `hook.outputs`：本 hook 声明的 `file` 和 `tree`，路径相对于发布目录。模块别名已展开。
+
 同一阶段的 hook 读取相同的输入，各自生成自己的文件。一个步骤需要读取另一个步骤生成的文件时，把两步写在同一个脚本里。
 
 在 Typst 页面中，从 `@tola/address:0.0.0` 导入 `output-url`，再写 `#link(output-url("build.txt"))[构建信息]`。Tola 会在 hook 运行后检查链接。输出文件如需压缩或 cache-busting，由脚本处理。
