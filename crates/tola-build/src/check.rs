@@ -508,6 +508,7 @@ impl SourceDiagnosticSession {
                 &boundary,
                 cancellation,
             )?,
+            None,
         )
         .prepare_modules(site.prepared())?;
         Ok((host, content, bindings))

@@ -27,7 +27,7 @@ impl QuerySite {
             root,
             &format!("[site]\norigin = \"https://example.test\"\nbase-path = \"{base_path}\"\n"),
         );
-        crate::package::SiteBindings::from_config(&config, Default::default())
+        crate::package::SiteBindings::from_config(&config, Default::default(), None)
             .library(Default::default())
     }
 

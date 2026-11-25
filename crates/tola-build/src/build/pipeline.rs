@@ -175,6 +175,7 @@ fn build_site_candidate(
         let mut compiled_outputs = compile_site_program(
             site,
             typst_host,
+            request.mode,
             &mut warnings,
             &mut build_diagnostics,
             producers,
@@ -432,6 +433,7 @@ fn reexport_cached_site_program(
 pub(super) fn compile_site_program(
     site: &crate::modules::PreparedSite,
     typst_host: &SiteHost,
+    mode: BuildMode,
     warnings: &mut tola_typst::Diagnostics,
     diagnostics: &mut Vec<tola_diagnostic::Diagnostic>,
     producers: &mut BuildAttemptProducers,
@@ -446,6 +448,11 @@ pub(super) fn compile_site_program(
             typst_host,
         },
     ) = prepare_beside_configured_assets(site, typst_host, producers, &cancellation)?;
+    let bindings = crate::package::SiteBindings::from_config(
+        config,
+        configured_assets.asset_urls(config)?,
+        Some(mode),
+    );
     let CompiledRootBundle {
         site_program,
         dependencies,
@@ -454,7 +461,7 @@ pub(super) fn compile_site_program(
         site,
         &typst_host,
         &content,
-        &configured_assets,
+        bindings,
         producers,
         warnings,
         diagnostics,
@@ -621,7 +628,7 @@ fn compile_root_bundle(
     site: &crate::modules::PreparedSite,
     typst_host: &SiteHost,
     content: &[crate::content::ContentUnit],
-    configured_assets: &crate::asset::ConfiguredAssets,
+    bindings: crate::package::SiteBindings,
     producers: &mut BuildAttemptProducers,
     warnings: &mut tola_typst::Diagnostics,
     // Every later step of this attempt may fail, and a failed root Bundle reports no other
@@ -630,8 +637,6 @@ fn compile_root_bundle(
 ) -> Result<CompiledRootBundle> {
     let config = site.config();
     let cancellation = producers.cancellation.bundle_cancellation();
-    let bindings =
-        crate::package::SiteBindings::from_config(config, configured_assets.asset_urls(config)?);
     let package_bindings = bindings.prepare_modules(site.prepared())?;
     let reuse = producers.reuse.take();
     let reuse = reuse.as_ref();

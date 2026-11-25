@@ -39,7 +39,7 @@ fn source_world_with_files(
         .with_metadata(&declarations)
         .inputs()
         .to_source_records();
-    let bindings = SiteBindings::from_config(&config, Default::default());
+    let bindings = SiteBindings::from_config(&config, Default::default(), None);
     let library = bindings.library(records);
     let main = root.join("site.typ");
     fs::write(&main, program).unwrap();

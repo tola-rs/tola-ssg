@@ -8,6 +8,7 @@ use typst::utils::LazyHash;
 use crate::config::ResolvedSiteConfig;
 use crate::config::section::site::SiteLanguage;
 use crate::content::SourceRecords;
+use crate::mode::BuildMode;
 use tola_packages::library::{HostInputs, SiteLibrary};
 
 /// Immutable site values shared by source evaluation and Bundle compilation.
@@ -20,12 +21,15 @@ pub(crate) struct SiteBindings {
 }
 
 impl SiteBindings {
+    /// `mode` is the build's mode, or `None` for a compilation outside a build, such as editor
+    /// diagnostics or `tola inspect`.
     pub(crate) fn from_config(
         config: &ResolvedSiteConfig,
         asset_urls: crate::asset::AssetUrls,
+        mode: Option<BuildMode>,
     ) -> Self {
         Self {
-            site: Arc::new(LazyHash::new(site_values(config))),
+            site: Arc::new(LazyHash::new(site_values(config, mode))),
             asset_origins: asset_origins(config, &asset_urls),
             asset_urls,
             modules: Dict::new(),
@@ -78,7 +82,7 @@ fn asset_origins(config: &ResolvedSiteConfig, assets: &crate::asset::AssetUrls) 
         .collect()
 }
 
-fn site_values(config: &ResolvedSiteConfig) -> Dict {
+fn site_values(config: &ResolvedSiteConfig, mode: Option<BuildMode>) -> Dict {
     let site_config = &config.site;
     let mut site = Dict::new();
     site.insert("origin".into(), site_config.origin.as_deref().into_value());
@@ -118,6 +122,10 @@ fn site_values(config: &ResolvedSiteConfig) -> Dict {
             .map(|language| language_fields(&language).into_value())
             .collect::<Array>()
             .into_value(),
+    );
+    site.insert(
+        "build-mode".into(),
+        mode.map(BuildMode::as_str).into_value(),
     );
     site.insert(
         "options".into(),

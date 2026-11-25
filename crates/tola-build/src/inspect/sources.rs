@@ -39,6 +39,7 @@ pub(super) fn inspect(
             &resources.source_boundary(config),
             cancellation,
         )?,
+        None,
     )
     .prepare_modules(prepared)?;
     let scan = crate::compiler::analysis::analyze(
