@@ -5,7 +5,7 @@
 //! copies from the same facts. A key is `@namespace/name`; the value records the version the
 //! compiler selected and the digest of that package directory.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use tola_typst::{
@@ -149,19 +149,31 @@ pub enum PackageLockError {
 /// A lock key names one package, so reading two versions of the same package is an error rather
 /// than a silent choice, and two different trees at one version are an error rather than a coin
 /// flip.
+///
+/// Every compilation reports the roots it read, so one root usually appears once per page. Each
+/// distinct root is hashed once.
 pub fn record_package_reads(
     reads: &[PackageRead],
 ) -> Result<BTreeMap<String, LockedPackage>, PackageLockError> {
     let mut packages = BTreeMap::new();
+    let mut digests: HashMap<&Path, Sha256Digest> = HashMap::new();
     for read in reads {
         let name = package_key(read.package());
         let version = read.version().to_string();
         let path = describe_root(read.root(), Some(read.tier()), None);
-        let digest = tree_sha256(read.root()).map_err(|source| PackageLockError::TreeHash {
-            name: name.clone(),
-            path: path.clone(),
-            source,
-        })?;
+        let digest = match digests.get(read.root()) {
+            Some(digest) => *digest,
+            None => {
+                let digest =
+                    tree_sha256(read.root()).map_err(|source| PackageLockError::TreeHash {
+                        name: name.clone(),
+                        path: path.clone(),
+                        source,
+                    })?;
+                digests.insert(read.root(), digest);
+                digest
+            }
+        };
         match packages.get(&name) {
             None => {
                 packages.insert(
