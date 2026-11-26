@@ -304,7 +304,7 @@ mod tests {
             &config,
             &host,
             &content,
-            crate::package::SiteBindings::from_config(&config, Default::default()),
+            crate::package::SiteBindings::from_config(&config, Default::default(), None),
             &cancellation,
             crate::compiler::analysis::SourceAnalysisReuse::None,
             &mut inputs,

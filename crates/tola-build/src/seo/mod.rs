@@ -168,7 +168,7 @@ mod tests {
         )
         .unwrap();
         let config = crate::config::tests::load_test_config(directory.path(), settings);
-        let bindings = crate::package::SiteBindings::from_config(&config, Default::default());
+        let bindings = crate::package::SiteBindings::from_config(&config, Default::default(), None);
         let library = bindings.library(Default::default());
         let files = tola_typst::FileResolver::new().with_provider(PackageFiles);
         let world = tola_typst::TypstWorld::builder(&main, directory.path())

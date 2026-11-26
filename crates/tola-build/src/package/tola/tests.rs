@@ -75,7 +75,7 @@ fn world_with_icons(
 /// The library of a default site configuration holding `sources`.
 fn default_library(sources: SourceRecords) -> tola_packages::library::SiteLibrary {
     let site_config = crate::config::tests::OwnedSiteConfig::new("");
-    let identity = SiteBindings::from_config(&site_config.config, Default::default());
+    let identity = SiteBindings::from_config(&site_config.config, Default::default(), None);
     identity.library(sources)
 }
 
@@ -298,7 +298,7 @@ fn world_from_example_site(source: &str, files: &[(String, String)]) -> (TempDir
         .with_metadata(&declarations)
         .inputs()
         .to_source_records();
-    let library = SiteBindings::from_config(&config, asset_urls).library(records);
+    let library = SiteBindings::from_config(&config, asset_urls, None).library(records);
 
     let main = root.join("main.typ");
     fs::write(&main, source).unwrap();

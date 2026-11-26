@@ -20,6 +20,11 @@
 /// nonempty array must contain `language`. Both are template inputs: the site itself decides how to
 /// route, pair, and switch between languages.
 ///
+/// `site.build-mode` is the command's build mode, the same value hooks read as `hook.mode`: `"dev"`
+/// under `tola dev`, and `"prod"` under `tola build`, `tola check`, and `tola preview`. It is `none`
+/// in the editor, `tola query`, and `tola inspect`, which compile outside a build. A site can do less
+/// while you write, for example publish only its newest posts when `site.build-mode == "dev"`.
+///
 /// Example: Read default settings:
 ///
 /// With the default `tola.toml` settings, these are the values available in `site.typ`.

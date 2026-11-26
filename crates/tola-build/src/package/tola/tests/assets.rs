@@ -68,7 +68,7 @@ fn configured_inventory(
 /// rendered inventory, so the addresses are the ones this build publishes.
 fn library_for(config: &crate::config::ResolvedSiteConfig) -> tola_packages::library::SiteLibrary {
     let urls = configured_inventory(config).asset_urls(config).unwrap();
-    let bindings = SiteBindings::from_config(config, urls);
+    let bindings = SiteBindings::from_config(config, urls, None);
     bindings.library(Default::default())
 }
 
