@@ -87,7 +87,7 @@ impl FileReadErrorExt for tola_input::FileReadError {
 }
 
 pub use dev_server::DevServerAddress;
-pub(crate) use identity::{FilesystemSourceKind, FilesystemWatchEvidence};
+pub(crate) use identity::{FilesystemSourceKind, WatchPaths};
 pub(crate) use lock::{FileLock, FileLockError};
 pub(crate) use observation::{
     FilesystemSourceObservation, TreeMemberWalk, TreeObservation, observe_file_source,

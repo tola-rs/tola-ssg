@@ -177,9 +177,9 @@ fn at_config_path(diagnostics: Vec<Diagnostic>, display: Option<&str>) -> Vec<Di
 }
 
 /// Convert retained configuration warnings into the shared diagnostic protocol.
-pub fn warning_diagnostics(config: &crate::config::ResolvedSiteConfig) -> Vec<Diagnostic> {
-    let root = Some(config.get_root());
-    let display = display_path(config.config_path(), config.get_root());
+pub fn warning_diagnostics(config: &crate::config::SiteConfig) -> Vec<Diagnostic> {
+    let root = Some(config.root());
+    let display = display_path(config.config_path(), config.root());
     let positions = config.positions();
     let (experimental, other): (Vec<_>, Vec<_>) = config
         .warnings()
@@ -495,42 +495,41 @@ mod tests {
     use tola_config::FieldPath;
 
     #[test]
-    fn warning_points_at_the_writing_line() {
-        let directory = tempfile::TempDir::new().unwrap();
-        let mut config =
-            crate::config::tests::load_test_config(directory.path(), "[site]\ntitle = \"Site\"\n");
-        config.warnings.push(ConfigDiagnostic::warning(
+    fn warning_cites_written_line() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut cfg =
+            crate::config::tests::load_test_config(dir.path(), "[site]\ntitle = \"Site\"\n");
+        cfg.warnings.push(ConfigDiagnostic::warning(
             FieldPath::new("site.title"),
             "check this",
         ));
 
-        let diagnostics = warning_diagnostics(&config);
-
-        let location = diagnostics[0].location.as_ref().unwrap();
-        assert_eq!(location.path, "tola.toml");
-        assert_eq!((location.line, location.column), (Some(2), Some(1)));
+        let diag = warning_diagnostics(&cfg);
+        let loc = diag[0].location.as_ref().unwrap();
+        assert_eq!(loc.path, "tola.toml");
+        assert_eq!((loc.line, loc.column), (Some(2), Some(1)));
     }
 
     #[test]
-    fn syntax_error_points_at_supplied_text() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("tola.toml");
-        let error = crate::config::ConfigSource::parse(
+    fn syntax_error_cites_supplied_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tola.toml");
+        let err = crate::config::ConfigSource::parse(
             &path,
             "[build]\nentry = @\n",
             tola_input::InputScope::Online,
         )
         .unwrap_err();
 
-        let diagnostic = &error.diagnostics()[0];
-        assert_eq!(diagnostic.code, tola_diagnostic::codes::config::TOML);
-        let location = diagnostic.location.as_ref().unwrap();
-        assert_eq!(location.path, "tola.toml");
-        assert_eq!(location.line, Some(2));
+        let diag = &err.diagnostics()[0];
+        assert_eq!(diag.code, tola_diagnostic::codes::config::TOML);
+        let loc = diag.location.as_ref().unwrap();
+        assert_eq!(loc.path, "tola.toml");
+        assert_eq!(loc.line, Some(2));
     }
 
     #[test]
-    fn unknown_field_corrections_stay_inside_their_file() {
+    fn unknown_field_corrections_scoped_to_file() {
         let root = Path::new("site");
         let entry = root.join("tola.toml");
         let mut positions = SourcePositions::in_root(root.to_owned());
@@ -543,23 +542,22 @@ mod tests {
             (&root.join("config/common.toml"), "\nlimit = 3\n"),
         ] {
             let text = Arc::<str>::from(text);
-            let document = toml_edit::Document::parse(Arc::clone(&text)).unwrap();
-            positions.copy_subtree(&SourcePositions::of(&document, text), "", "", file);
+            let doc = toml_edit::Document::parse(Arc::clone(&text)).unwrap();
+            positions.copy_subtree(&SourcePositions::of(&doc, text), "", "", file);
         }
 
-        let diagnostics = unknown_fields(&entry, Some(&positions), &fields);
-        assert_eq!(diagnostics.len(), 2);
+        let diag = unknown_fields(&entry, Some(&positions), &fields);
+        assert_eq!(diag.len(), 2);
         for (file, name, line) in [
             ("config/common.toml", "limit", 2),
             ("tola.toml", "enabled", 1),
         ] {
-            let diagnostic = diagnostics
+            let d = diag
                 .iter()
-                .find(|diagnostic| diagnostic.location.as_ref().unwrap().path == file)
+                .find(|d| d.location.as_ref().unwrap().path == file)
                 .unwrap();
-            assert_eq!(diagnostic.location.as_ref().unwrap().line, Some(line));
-            let Some(DiagnosticCause::UnknownConfigurationFields { fields }) = &diagnostic.cause
-            else {
+            assert_eq!(d.location.as_ref().unwrap().line, Some(line));
+            let Some(DiagnosticCause::UnknownConfigurationFields { fields }) = &d.cause else {
                 panic!("expected unknown field corrections for {file}");
             };
             assert_eq!(fields.len(), 1);

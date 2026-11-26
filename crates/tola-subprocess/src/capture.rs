@@ -42,9 +42,9 @@ impl Captured {
     pub(crate) fn extend(&mut self, mut bytes: &[u8]) {
         self.total_bytes = self.total_bytes.saturating_add(bytes.len() as u64);
         if self.head.len() < HEAD_TAIL_BYTES {
-            let retained = (HEAD_TAIL_BYTES - self.head.len()).min(bytes.len());
-            self.head.extend_from_slice(&bytes[..retained]);
-            bytes = &bytes[retained..];
+            let n = (HEAD_TAIL_BYTES - self.head.len()).min(bytes.len());
+            self.head.extend_from_slice(&bytes[..n]);
+            bytes = &bytes[n..];
         }
         if bytes.is_empty() {
             return;
@@ -68,30 +68,27 @@ impl Captured {
         self.stopped_early = true;
     }
 
-    /// Bytes dropped between the retained head and tail.
     pub fn omitted(&self) -> u64 {
         self.total_bytes
             .saturating_sub((self.head.len() + self.tail.len()) as u64)
     }
 
-    /// Whether reading ended because it was stopped, not because the stream closed.
     pub fn stopped_early(&self) -> bool {
         self.stopped_early
     }
 
-    /// Every retained byte, with the caller's notice inserted where bytes were
-    /// dropped. The notice is rendered only when something was omitted.
+    /// Render retained bytes with `notice` inserted where bytes were dropped.
     pub fn render(&self, notice: impl FnOnce(u64) -> String) -> Vec<u8> {
         let omitted = self.omitted();
-        let mut bytes = Vec::with_capacity(self.head.len() + self.tail.len() + 96);
-        bytes.extend_from_slice(&self.head);
+        let mut buf = Vec::with_capacity(self.head.len() + self.tail.len() + 96);
+        buf.extend_from_slice(&self.head);
         if omitted > 0 {
-            bytes.push(b'\n');
-            bytes.extend_from_slice(notice(omitted).as_bytes());
-            bytes.push(b'\n');
+            buf.push(b'\n');
+            buf.extend_from_slice(notice(omitted).as_bytes());
+            buf.push(b'\n');
         }
-        bytes.extend(&self.tail);
-        bytes
+        buf.extend(&self.tail);
+        buf
     }
 }
 
@@ -104,8 +101,8 @@ mod tests {
     }
 
     #[test]
-    fn head_and_tail_survive_the_bound() {
-        for length in [
+    fn bounded_head_and_tail() {
+        for len in [
             0,
             1,
             HEAD_TAIL_BYTES - 1,
@@ -116,43 +113,43 @@ mod tests {
             2 * HEAD_TAIL_BYTES + 1,
             3 * HEAD_TAIL_BYTES + 1,
         ] {
-            let bytes: Vec<_> = (0..length).map(|offset| offset as u8).collect();
-            let omitted = length.saturating_sub(2 * HEAD_TAIL_BYTES) as u64;
+            let bytes: Vec<_> = (0..len).map(|off| off as u8).collect();
+            let omitted = len.saturating_sub(2 * HEAD_TAIL_BYTES) as u64;
             let expected = if omitted == 0 {
                 bytes.clone()
             } else {
                 [
                     &bytes[..HEAD_TAIL_BYTES],
                     format!("\n{}\n", notice(omitted)).as_bytes(),
-                    &bytes[length - HEAD_TAIL_BYTES..],
+                    &bytes[len - HEAD_TAIL_BYTES..],
                 ]
                 .concat()
             };
-            for chunk_length in [1, 997, HEAD_TAIL_BYTES, HEAD_TAIL_BYTES + 1, length.max(1)] {
-                let mut captured = Captured::default();
-                captured.extend(&[]);
-                for chunk in bytes.chunks(chunk_length) {
-                    captured.extend(chunk);
+            for chunk_len in [1, 997, HEAD_TAIL_BYTES, HEAD_TAIL_BYTES + 1, len.max(1)] {
+                let mut cap = Captured::default();
+                cap.extend(&[]);
+                for chunk in bytes.chunks(chunk_len) {
+                    cap.extend(chunk);
                 }
-                let mut noticed_omitted = None;
-                let rendered = captured.render(|count| {
-                    noticed_omitted = Some(count);
-                    notice(count)
+                let mut seen = None;
+                let rendered = cap.render(|n| {
+                    seen = Some(n);
+                    notice(n)
                 });
                 assert_eq!(rendered, expected);
-                assert_eq!(captured.omitted(), omitted);
-                assert_eq!(noticed_omitted, (omitted > 0).then_some(omitted));
-                assert!(!captured.stopped_early());
+                assert_eq!(cap.omitted(), omitted);
+                assert_eq!(seen, (omitted > 0).then_some(omitted));
+                assert!(!cap.stopped_early());
             }
         }
     }
 
     #[test]
-    fn stopped_read_marks_the_capture() {
-        let mut captured = Captured::default();
-        captured.extend(b"partial");
-        captured.mark_stopped_early();
-        assert!(captured.stopped_early());
-        assert_eq!(captured.render(notice), b"partial");
+    fn stopped_early_flag() {
+        let mut cap = Captured::default();
+        cap.extend(b"partial");
+        cap.mark_stopped_early();
+        assert!(cap.stopped_early());
+        assert_eq!(cap.render(notice), b"partial");
     }
 }

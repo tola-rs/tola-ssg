@@ -34,11 +34,11 @@ impl FilesystemWatchBoundary {
 
 /// Exact file and recursive tree watch requirements from frozen observations.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct FilesystemWatchEvidence {
+pub(crate) struct WatchPaths {
     boundaries: Vec<FilesystemWatchBoundary>,
 }
 
-impl FilesystemWatchEvidence {
+impl WatchPaths {
     pub(crate) fn from_sources(
         sources: impl IntoIterator<Item = (FilesystemSourceKind, FilesystemSourceIdentity)>,
     ) -> Self {

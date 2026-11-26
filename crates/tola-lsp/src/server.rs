@@ -51,7 +51,7 @@ pub(crate) mod tests {
 
         use anyhow::Result;
         use lsp_types::{Position, Uri};
-        use tola_build::config::ResolvedSiteConfig;
+        use tola_build::config::SiteConfig;
         use tola_build::config::loading::{BuildOverrides, load_site_config};
         use tola_typst::typst::syntax::Source;
 
@@ -118,7 +118,7 @@ pub(crate) mod tests {
         }
 
         /// The site configuration an empty `tola.toml` below `root` resolves.
-        pub(crate) fn site_configuration(root: &Path) -> Result<Arc<ResolvedSiteConfig>> {
+        pub(crate) fn site_configuration(root: &Path) -> Result<Arc<SiteConfig>> {
             Ok(Arc::new(
                 load_site_config(
                     Some(&root.join("tola.toml")),
@@ -176,7 +176,7 @@ pub(crate) mod tests {
 
         pub(crate) fn rendering_site(
             files: &[(&str, &str)],
-        ) -> (tempfile::TempDir, Arc<ResolvedSiteConfig>) {
+        ) -> (tempfile::TempDir, Arc<SiteConfig>) {
             let directory = tempfile::tempdir().expect("a temporary site directory");
             let root = directory.path();
             std::fs::write(

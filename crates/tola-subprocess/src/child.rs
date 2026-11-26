@@ -139,14 +139,14 @@ mod tests {
     use std::process::{Command, Stdio};
 
     #[test]
-    fn terminated_child_keeps_observed_status() {
-        let command = Command::new(std::env::current_exe().unwrap())
+    fn terminated_status_cached() {
+        let cmd = Command::new(std::env::current_exe().unwrap())
             .arg("--list")
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
             .unwrap();
-        let mut child = Child::new(Box::new(command));
+        let mut child = Child::new(Box::new(cmd));
 
         let status = child.terminate().expect("the terminated child was reaped");
 

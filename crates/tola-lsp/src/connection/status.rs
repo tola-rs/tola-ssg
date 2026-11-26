@@ -5,7 +5,7 @@ use std::io::Write;
 use std::path::Path;
 
 use anyhow::Result;
-use tola_build::config::ResolvedSiteConfig;
+use tola_build::config::SiteConfig;
 use tola_diagnostic::Diagnostic;
 use tola_input::normalize_existing_prefix;
 
@@ -38,7 +38,7 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
     pub(super) fn report_prepared_site(
         &mut self,
         progress: CheckProgress,
-        configuration: &ResolvedSiteConfig,
+        configuration: &SiteConfig,
     ) -> Result<()> {
         self.report_check(progress, Some(configuration))
     }
@@ -46,7 +46,7 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
     fn report_check(
         &mut self,
         progress: CheckProgress,
-        configuration: Option<&ResolvedSiteConfig>,
+        configuration: Option<&SiteConfig>,
     ) -> Result<()> {
         if !matches!(&self.phase, Phase::Ready(workspace) if workspace.source_check_status) {
             return Ok(());
@@ -65,8 +65,8 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
     /// generated roots are named as they are: the client is told to ignore changes below them.
     /// Absent when the site root or its entry document has no URI, which leaves the status without
     /// a site rather than with a half-spelled one.
-    fn site_status(&self, configuration: &ResolvedSiteConfig) -> Option<serde_json::Value> {
-        let root = crate::uri::from_file_path(configuration.get_root()).ok()?;
+    fn site_status(&self, configuration: &SiteConfig) -> Option<serde_json::Value> {
+        let root = crate::uri::from_file_path(configuration.root()).ok()?;
         let entry = normalize_existing_prefix(&configuration.build().entry);
         let entry = self
             .open
@@ -133,9 +133,9 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
                 .into_iter()
                 .map(|exclusion| exclusion.directory)
                 .chain([
-                    configuration.get_root().join(tola_input::INTERNAL_DIR),
+                    configuration.root().join(tola_input::INTERNAL_DIR),
                     configuration
-                        .get_root()
+                        .root()
                         .join(tola_build::filesystem::SITE_BUILD_LOCK_FILE),
                 ])
                 .filter_map(|path| client_uri(&normalize_existing_prefix(&path)))

@@ -1,36 +1,36 @@
-# Workspace crates
+# Crates
 
-Every crate owns one responsibility and its public contract. Read the crate-specific context when one exists; otherwise this table and the crate's module docs orient you.
+Each crate owns one domain and its public API. Read a crate's `CONTEXT.md` when present; otherwise use the list below and its module docs.
 
 ## Large subsystems
 
-- [`tola-build/CONTEXT.md`](tola-build/CONTEXT.md) — independently consumable site construction engine.
-- [`tola-module/CONTEXT.md`](tola-module/CONTEXT.md) — site modules: declarations, acquisition, preparation, queries, hooks.
-- [`tola-typst/CONTEXT.md`](tola-typst/CONTEXT.md) — reusable Typst world and official compiler/exporter.
-- [`tola-lsp/CONTEXT.md`](tola-lsp/CONTEXT.md) — Tola language service.
+- [`tola-build/CONTEXT.md`](tola-build/CONTEXT.md) — site builds, validation, and publication.
+- [`tola-module/CONTEXT.md`](tola-module/CONTEXT.md) — site module manifests, fetching, preparation, queries, hooks, and packing.
+- [`tola-typst/CONTEXT.md`](tola-typst/CONTEXT.md) — Typst worlds, compilation, export, and diagnostics transport.
+- [`tola-lsp/CONTEXT.md`](tola-lsp/CONTEXT.md) — Tola language server.
 - [`tola-nu/CONTEXT.md`](tola-nu/CONTEXT.md) — embedded Nushell runtime.
 
 ## Ownership
 
-- `tola-address` — slugs, routes, logical output paths, site URLs, deployment mounts, browser reference rules.
-- `tola-fs` — native filesystem operations; see [`tola-fs/CONTEXT.md`](tola-fs/CONTEXT.md).
-- `tola-input` — input identity, lock entries, and the access limits one build attempt runs under.
-- `tola-slugify` — turning text into a slug: naming rules, character policy, script-specific romanization.
-- `tola-pronunciations` — pronunciation tables Tola carries, one feature per source, with provenance and licence.
-- `tola-config`, `tola-config-macros` — reusable configuration protocol and derive macros.
-- `tola-diagnostic` — the diagnostic record every producer emits and the declared code identifiers.
-- `tola-subprocess` — trusted external command execution with process-tree containment and cancellation.
-- `tola-icons` — validated SVG values and immutable icon collections.
-- `tola-image` — deterministic image decoding, colour management, resampling, encoding.
-- `tola-webp` — pure-Rust VP8 still-image encoder used by `tola-image`.
-- `tola-packages` — bundled `@tola/*` packages, their natives, documentation, and signatures.
-- `tola-minify` — deterministic CSS and JavaScript minification.
-- `tola-highlight` — shared syntax highlighting.
-- `tola-datalog` — immutable relation snapshots, stratification, tabled evaluation.
-- `tola-typst-syntax` — immutable Typst source indexes and cross-source name graphs; no host I/O or evaluation.
+- `tola-address` — routes, output paths, browser URLs, deployment mounts, and link references.
+- `tola-fs` — Unix and Windows filesystem operations; see [`tola-fs/CONTEXT.md`](tola-fs/CONTEXT.md).
+- `tola-input` — file/tree digests, `tola.lock`, `.tola` paths, glob selection, and input access scopes.
+- `tola-slugify` — URL slug generation and CJK romanization.
+- `tola-pronunciations` — Chinese and Japanese pronunciation tables (feature-gated per source).
+- `tola-config`, `tola-config-macros` — TOML key paths, config derive macro, presence tracking, and field validation.
+- `tola-diagnostic` — structured diagnostics and declared error codes.
+- `tola-subprocess` — external command execution with process-tree cleanup, output caps, and cancellation.
+- `tola-icons` — static SVG validation and IconifyJSON import.
+- `tola-image` — image decoding, color handling, resizing, and encoding.
+- `tola-webp` — pure-Rust lossy WebP encoder used by `tola-image`.
+- `tola-packages` — built-in `@tola/*` Typst packages, natives, and docs.
+- `tola-minify` — CSS and JavaScript minification.
+- `tola-highlight` — terminal syntax highlighting.
+- `tola-datalog` — in-memory stratified Datalog engine.
+- `tola-typst-syntax` — I/O-free Typst source analysis and formatting.
 
 ## Rules
 
-- Public crates keep documented APIs, feature boundaries, and `forbid(unsafe_code)`.
-- A crate that renders nothing returns structured values and diagnostics; terminal output belongs to `src/terminal`.
-- Dependencies point inward: domain and construction crates never depend on the application or presentation.
+- Keep public APIs documented, feature boundaries valid, and `forbid(unsafe_code)`.
+- Library crates return structured values and diagnostics; terminal rendering belongs to `src/terminal`.
+- Domain crates never depend on the `tola` binary or CLI presentation.

@@ -3,7 +3,7 @@ name = "tola-address"
 version.workspace = true
 edition = "2024"
 rust-version.workspace = true
-description = "Slugs, routes, output paths, browser URLs, and references, with conversions between them"
+description = "Site routes, output paths, and browser URLs"
 license = "MIT"
 repository = "https://github.com/tola-rs/tola-ssg"
 

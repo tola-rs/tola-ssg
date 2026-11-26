@@ -1,11 +1,4 @@
-//! A pure-Rust, deterministic still-image WebP encoder for `tola-image`.
-//!
-//! The encoder writes lossy VP8 still images with intra mode search, trellis quantization,
-//! integer SIMD transforms, and VP8L-compressed alpha. Within one encoder revision, the same
-//! pixels and quality produce the same bytes with scalar or SIMD code, including wasm.
-//!
-//! The public API is experimental. `tola-image` selects it by default and delegates whole-image
-//! lossless WebP to `image-webp`.
+//! Pure-Rust deterministic lossy WebP encoder.
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
@@ -13,28 +6,22 @@ pub use encoder::Error;
 
 use std::io::{self, Write};
 
-/// Coefficient-trellis effort for [`encode_rgba_with_mode`].
+/// Coefficient trellis mode for [`encode_rgba_with_mode`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum TrellisMode {
-    /// Exhaustive trellis over the `0..=2047` magnitude domain (default).
+    /// Exhaustive trellis over the `0..=2047` magnitude range.
     #[default]
     Exact,
-    /// Two-candidate restricted trellis: faster, with measured rate-distortion differences.
+    /// Two-candidate restricted trellis.
     Restricted,
 }
 
-/// Encode straight-alpha RGBA8 pixels as one lossy WebP still image.
-///
-/// `quality` is `0..=100`; higher keeps more detail. The image must be at most 16,383 pixels on
-/// either side.
+/// Encode straight-alpha RGBA8 pixels as a lossy WebP image.
 pub fn encode_rgba(rgba: &[u8], width: u32, height: u32, quality: u8) -> Result<Vec<u8>, Error> {
     encode_rgba_with_mode(rgba, width, height, quality, TrellisMode::Restricted)
 }
 
-/// Encode straight-alpha RGBA8 pixels with an explicit trellis effort mode.
-///
-/// [`encode_rgba`] uses [`TrellisMode::Restricted`]; [`TrellisMode::Exact`] is the
-/// quality mode with the same API.
+/// Encode straight-alpha RGBA8 pixels using an explicit [`TrellisMode`].
 pub fn encode_rgba_with_mode(
     rgba: &[u8],
     width: u32,
@@ -42,34 +29,34 @@ pub fn encode_rgba_with_mode(
     quality: u8,
     mode: TrellisMode,
 ) -> Result<Vec<u8>, Error> {
-    let mut options = EncodeOptions::new(quality);
-    options.trellis = mode;
-    encoder::encode(rgba, width, height, options, &|| false).map(container::WebP::into_bytes)
+    let mut opts = EncodeOptions::new(quality);
+    opts.trellis = mode;
+    encoder::encode(rgba, width, height, opts, &|| false).map(container::WebP::into_bytes)
 }
 
-/// Settings for encoding straight-alpha RGBA8 as lossy WebP.
+/// Options for encoding straight-alpha RGBA8 pixels as lossy WebP.
 #[derive(Clone, Copy, Debug)]
 pub struct EncodeOptions {
-    /// Detail retained, from 0 to 100.
+    /// Target quality in `0..=100`.
     pub quality: u8,
-    /// Coefficient search used by the encoder.
+    /// Coefficient trellis mode.
     pub trellis: TrellisMode,
-    /// Maximum concurrent workers, including the calling thread. Zero is treated as one.
+    /// Maximum concurrent workers, clamped to at least one.
     pub workers: usize,
-    /// Whether any input pixel has alpha below 255. `None` asks the encoder to check.
+    /// Known alpha presence, or `None` to inspect the input.
     pub has_transparency: Option<bool>,
 }
 
 impl EncodeOptions {
-    /// Use restricted trellis and the host's available workers.
+    /// Create options with restricted trellis and host parallelism.
     pub fn new(quality: u8) -> Self {
         Self::with_workers(
             quality,
-            std::thread::available_parallelism().map_or(1, |count| count.get()),
+            std::thread::available_parallelism().map_or(1, |n| n.get()),
         )
     }
 
-    /// Use restricted trellis and an explicit worker limit.
+    /// Create options with restricted trellis and an explicit worker limit.
     pub fn with_workers(quality: u8, workers: usize) -> Self {
         Self {
             quality,
@@ -80,21 +67,18 @@ impl EncodeOptions {
     }
 }
 
-/// An encoding or destination write failure.
+/// Failure while encoding or writing a WebP image.
 #[derive(Debug, thiserror::Error)]
 pub enum WriteError {
-    /// The image could not be encoded.
+    /// Image encoding failed.
     #[error(transparent)]
     Encode(#[from] Error),
-    /// The encoded image could not be written.
+    /// Writing to the destination failed.
     #[error(transparent)]
     Write(#[from] io::Error),
 }
 
-/// Encode one lossy WebP still image and write it to `destination`.
-///
-/// The encoder polls `cancelled` while preparing the image. A write error can leave a partial
-/// image in the destination.
+/// Encode one lossy WebP image and write it to `destination`.
 pub fn encode_rgba_to(
     rgba: &[u8],
     width: u32,
@@ -103,14 +87,13 @@ pub fn encode_rgba_to(
     cancelled: &(dyn Fn() -> bool + Sync),
     mut destination: impl Write,
 ) -> Result<(), WriteError> {
-    let image = encoder::encode(rgba, width, height, options, cancelled)?;
+    let webp = encoder::encode(rgba, width, height, options, cancelled)?;
     encoder::check_cancelled(cancelled)?;
-    image.write_to(&mut destination)?;
+    webp.write_to(&mut destination)?;
     Ok(())
 }
 
-/// Estimated temporary bytes for restricted encoding of a valid frame, excluding its RGBA input.
-/// Encoded partition sizes depend on image content.
+/// Estimated scratch bytes for restricted encoding, excluding the RGBA input.
 pub fn estimated_scratch_bytes(
     width: u32,
     height: u32,
@@ -141,21 +124,20 @@ mod vp8;
 mod tests {
     use super::*;
 
-    /// The same image encodes to the same bytes, so a rebuild never churns an unchanged asset.
     #[test]
-    fn encoding_is_deterministic() {
-        let (width, height) = (257, 513);
+    fn deterministic_encode() {
+        let (w, h) = (257, 513);
         let mut rgba = Vec::new();
-        for y in 0..height {
-            for x in 0..width {
+        for y in 0..h {
+            for x in 0..w {
                 rgba.extend_from_slice(&[x as u8, y as u8, (x ^ y) as u8, (x + y) as u8]);
             }
         }
         let encode = |workers| {
-            let mut bytes = Vec::new();
-            let options = EncodeOptions::with_workers(75, workers);
-            encode_rgba_to(&rgba, width, height, options, &|| false, &mut bytes).unwrap();
-            bytes
+            let mut buf = Vec::new();
+            let opts = EncodeOptions::with_workers(75, workers);
+            encode_rgba_to(&rgba, w, h, opts, &|| false, &mut buf).unwrap();
+            buf
         };
         let serial = encode(1);
         assert_eq!(serial, encode(3));
@@ -163,44 +145,43 @@ mod tests {
     }
 
     #[test]
-    fn cancellation_stops_a_parallel_encode_before_writing() {
+    fn parallel_encode_cancel() {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
-        let (width, height) = (257, 257);
-        let rgba = [20, 80, 190, 255].repeat((width * height) as usize);
-        let mut options = EncodeOptions::with_workers(75, 2);
-        options.has_transparency = Some(false);
+        let (w, h) = (257, 257);
+        let rgba = [20, 80, 190, 255].repeat((w * h) as usize);
+        let mut opts = EncodeOptions::with_workers(75, 2);
+        opts.has_transparency = Some(false);
         let checks = AtomicUsize::new(0);
-        let cancelled = || checks.fetch_add(1, Ordering::Relaxed) >= 30;
-        let mut bytes = Vec::new();
-        let result = encode_rgba_to(&rgba, width, height, options, &cancelled, &mut bytes);
-        assert!(matches!(result, Err(WriteError::Encode(Error::Cancelled))));
-        assert!(bytes.is_empty());
+        let cancel = || checks.fetch_add(1, Ordering::Relaxed) >= 30;
+        let mut buf = Vec::new();
+        let res = encode_rgba_to(&rgba, w, h, opts, &cancel, &mut buf);
+        assert!(matches!(res, Err(WriteError::Encode(Error::Cancelled))));
+        assert!(buf.is_empty());
     }
 
     fn alpha_payload(webp: &[u8]) -> Option<&[u8]> {
-        let mut position = 12;
-        while position < webp.len() {
-            let length =
-                u32::from_le_bytes(webp[position + 4..position + 8].try_into().unwrap()) as usize;
-            let payload = &webp[position + 8..position + 8 + length];
-            if &webp[position..position + 4] == b"ALPH" {
+        let mut pos = 12;
+        while pos < webp.len() {
+            let len = u32::from_le_bytes(webp[pos + 4..pos + 8].try_into().unwrap()) as usize;
+            let payload = &webp[pos + 8..pos + 8 + len];
+            if &webp[pos..pos + 4] == b"ALPH" {
                 return Some(payload);
             }
-            position += 8 + length + (length & 1);
+            pos += 8 + len + (len & 1);
         }
         None
     }
 
     #[test]
-    fn opaque_images_omit_alpha() {
-        for (width, height) in [(1, 1), (1, 17), (17, 1), (17, 19)] {
-            let rgba = [37, 123, 211, 255].repeat((width * height) as usize);
-            let webp = encode_rgba(&rgba, width, height, 75).unwrap();
-            assert!(alpha_payload(&webp).is_none(), "{width}x{height}");
+    fn opaque_omits_alpha() {
+        for (w, h) in [(1, 1), (1, 17), (17, 1), (17, 19)] {
+            let rgba = [37, 123, 211, 255].repeat((w * h) as usize);
+            let webp = encode_rgba(&rgba, w, h, 75).unwrap();
+            assert!(alpha_payload(&webp).is_none(), "{w}x{h}");
             let decoded = image::load_from_memory(&webp).unwrap().to_rgba8();
-            assert_eq!(decoded.dimensions(), (width, height));
-            assert!(decoded.pixels().all(|pixel| pixel[3] == 255));
+            assert_eq!(decoded.dimensions(), (w, h));
+            assert!(decoded.pixels().all(|px| px[3] == 255));
         }
     }
 }

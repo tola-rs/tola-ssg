@@ -6,7 +6,7 @@ use anyhow::Result;
 use ignore::WalkBuilder;
 
 use crate::cancellation::BuildCancellation;
-use crate::config::ResolvedSiteConfig;
+use crate::config::SiteConfig;
 
 use super::path_failure_reason;
 use tola_diagnostic::display_path;
@@ -18,11 +18,8 @@ use tola_input::INTERNAL_DIR;
 /// symbolic link, and the state Tola or a tool beside the site keeps — [`INTERNAL_DIR`], the
 /// publish directory, a declared `[vendor] path`, `target`, `node_modules` — are not the site's
 /// own files.
-pub fn owned_files(
-    config: &ResolvedSiteConfig,
-    cancellation: &BuildCancellation,
-) -> Result<Vec<PathBuf>> {
-    let root = config.get_root();
+pub fn owned_files(config: &SiteConfig, cancellation: &BuildCancellation) -> Result<Vec<PathBuf>> {
+    let root = config.root();
     // The entry filter outlives this call, so the two declared directories travel as owned values.
     let publish_dir = config.build().publish_dir.clone();
     let vendor_path = config.vendor().path.clone();
@@ -105,7 +102,7 @@ mod tests {
         owned_files(&site.config, &BuildCancellation::new())
             .expect("the site's files are walkable")
             .iter()
-            .map(|path| display_path(path, site.config.get_root()))
+            .map(|path| display_path(path, site.config.root()))
             .collect()
     }
 
@@ -130,19 +127,19 @@ mod tests {
             ".cache/value.typ",
         ] {
             let site = OwnedSiteConfig::new("");
-            write_file(site.config.get_root(), excluded);
+            write_file(site.config.root(), excluded);
             assert_eq!(listed_files(&site), ["tola.toml"], "walked `{excluded}`");
         }
 
         let vendored = OwnedSiteConfig::new(VENDORED_SITE_SOURCE);
         write_file(
-            vendored.config.get_root(),
+            vendored.config.root(),
             "vendor/typst-packages/preview/demo/1.0.0/lib.typ",
         );
         assert_eq!(listed_files(&vendored), ["tola.toml"], "walked vendor tree");
 
         let ignored = OwnedSiteConfig::new("");
-        let root = ignored.config.get_root();
+        let root = ignored.config.root();
         write_file(root, "drafts/page.typ");
         write_file(root, "scratch.typ");
         std::fs::write(root.join(".gitignore"), "drafts/\n").unwrap();
@@ -154,7 +151,7 @@ mod tests {
     #[cfg(unix)]
     fn symbolic_links_are_not_owned_files() {
         let site = OwnedSiteConfig::new("");
-        let root = site.config.get_root();
+        let root = site.config.root();
         let outside = tempfile::tempdir().unwrap();
         write_file(outside.path(), "shared.typ");
         write_file(root, "content/index.typ");
@@ -171,7 +168,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let site = OwnedSiteConfig::new("");
-        let root = site.config.get_root();
+        let root = site.config.root();
         write_file(root, "content/closed/page.typ");
         let closed = root.join("content/closed");
         std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o000)).unwrap();

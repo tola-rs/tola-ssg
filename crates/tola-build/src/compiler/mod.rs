@@ -35,8 +35,8 @@ pub(crate) struct SiteProgramCache {
 }
 
 impl SiteProgramCache {
-    pub(crate) fn matches_site(&self, config: &crate::config::ResolvedSiteConfig) -> bool {
-        self.root == tola_input::normalize_path(config.get_root())
+    pub(crate) fn matches_site(&self, config: &crate::config::SiteConfig) -> bool {
+        self.root == tola_input::normalize_path(config.root())
             && tola_input::normalize_path(&self.entry)
                 == tola_input::normalize_path(&config.build.entry)
             && config
@@ -44,25 +44,25 @@ impl SiteProgramCache {
                 .or_else(|| {
                     tola_typst::file_id_from_path(
                         &tola_typst::normalize_path(&config.build.entry),
-                        &tola_typst::normalize_path(config.get_root()),
+                        &tola_typst::normalize_path(config.root()),
                     )
                 })
                 .is_some_and(|entry| typst::World::main(self.world.as_ref()) == entry)
     }
 
-    pub(crate) fn matches_export_config(&self, config: &crate::config::ResolvedSiteConfig) -> bool {
+    pub(crate) fn matches_export_config(&self, config: &crate::config::SiteConfig) -> bool {
         self.pretty_html == !config.build.minify.html
     }
 
     /// Whether this compilation already has the minification the configuration requests.
-    pub(crate) fn matches_minification(&self, config: &crate::config::ResolvedSiteConfig) -> bool {
+    pub(crate) fn matches_minification(&self, config: &crate::config::SiteConfig) -> bool {
         self.minified_languages == minified_languages(config)
     }
 }
 
 /// The CSS and JavaScript languages one configuration minifies.
 pub(crate) fn minified_languages(
-    config: &crate::config::ResolvedSiteConfig,
+    config: &crate::config::SiteConfig,
 ) -> tola_minify::MinifiedLanguages {
     tola_minify::MinifiedLanguages::new(config.build.minify.css, config.build.minify.javascript)
 }
@@ -102,14 +102,14 @@ pub(crate) mod tests {
 
     /// Typst host for `config` with default build resources and a fresh cancellation token.
     pub(crate) fn compiler_host(
-        config: &crate::config::ResolvedSiteConfig,
+        config: &crate::config::SiteConfig,
     ) -> std::result::Result<crate::compiler::SiteHost, tola_typst::FontLoadError> {
         compiler_host_with(config, &crate::resources::BuildResources::default())
     }
 
     /// Build a host from caller-owned resources, which the caller can compare it against.
     pub(crate) fn compiler_host_with(
-        config: &crate::config::ResolvedSiteConfig,
+        config: &crate::config::SiteConfig,
         resources: &crate::resources::BuildResources,
     ) -> std::result::Result<crate::compiler::SiteHost, tola_typst::FontLoadError> {
         crate::compiler::SiteHost::for_config(
@@ -121,7 +121,7 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn configure_site(
-        config: &mut crate::config::ResolvedSiteConfig,
+        config: &mut crate::config::SiteConfig,
         content: &Path,
         entry: &Path,
     ) {
@@ -287,13 +287,13 @@ system = false
             "first"
         );
         let second = configure("second");
-        let prepared_first = crate::modules::prepared::prepare_site(
+        let prepared_first = crate::modules::site::prepare_site(
             &first,
             tola_input::InputMode::new(InputScope::Offline, false),
             &Default::default(),
         )
         .unwrap();
-        let prepared_second = crate::modules::prepared::prepare_site(
+        let prepared_second = crate::modules::site::prepare_site(
             &second,
             tola_input::InputMode::new(InputScope::Offline, false),
             &Default::default(),

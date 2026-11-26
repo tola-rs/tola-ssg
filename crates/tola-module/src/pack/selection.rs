@@ -20,24 +20,24 @@ pub(super) fn compile(pack: &FilePatterns) -> Result<FileSelection, PatternError
 }
 
 pub(super) fn collect(
-    selection: &FileSelection,
+    sel: &FileSelection,
     root: &Path,
     staging: &Path,
-    cancellation: &BundleCancellation,
+    cancel: &BundleCancellation,
 ) -> anyhow::Result<BTreeMap<PathBuf, Member>> {
     let mut walk = Walk {
-        selection,
+        sel,
         root,
         staging: staging.strip_prefix(root).ok(),
-        cancellation,
+        cancel,
         members: BTreeMap::new(),
     };
     walk.visit(Path::new(""))?;
-    for path in selection.literal_includes() {
+    for path in sel.literal_includes() {
         ensure!(
             path.as_os_str().is_empty()
                 || path == Path::new(MANIFEST)
-                || selection.excludes(path)
+                || sel.excludes(path)
                 || walk.members.contains_key(path),
             "`pack.include` path `{}` was not found",
             path.display()
@@ -47,34 +47,31 @@ pub(super) fn collect(
 }
 
 struct Walk<'a> {
-    selection: &'a FileSelection,
+    sel: &'a FileSelection,
     root: &'a Path,
     staging: Option<&'a Path>,
-    cancellation: &'a BundleCancellation,
+    cancel: &'a BundleCancellation,
     members: BTreeMap<PathBuf, Member>,
 }
 
 impl Walk<'_> {
     fn visit(&mut self, path: &Path) -> anyhow::Result<bool> {
-        self.cancellation.ensure_active()?;
-        if self.staging == Some(path)
-            || path == Path::new(MANIFEST)
-            || self.selection.excludes(path)
-        {
+        self.cancel.ensure_active()?;
+        if self.staging == Some(path) || path == Path::new(MANIFEST) || self.sel.excludes(path) {
             return Ok(false);
         }
-        let selected = self.selection.includes(path);
-        if !selected && !self.selection.could_match_below(path) {
+        let selected = self.sel.includes(path);
+        if !selected && !self.sel.could_match_below(path) {
             return Ok(false);
         }
 
-        let absolute = self.root.join(path);
-        let metadata = fs::symlink_metadata(&absolute)
+        let abs = self.root.join(path);
+        let meta = fs::symlink_metadata(&abs)
             .with_context(|| format!("could not read module path `{}`", path.display()))?;
-        let link = is_link_like(&metadata);
-        let member = if metadata.is_dir() && !link {
+        let link = is_link_like(&meta);
+        let member = if meta.is_dir() && !link {
             let mut retained = selected;
-            for entry in fs::read_dir(&absolute)
+            for entry in fs::read_dir(&abs)
                 .with_context(|| format!("could not list module directory `{}`", path.display()))?
             {
                 let entry = entry.context("could not read a module directory entry")?;
@@ -83,11 +80,11 @@ impl Walk<'_> {
             retained.then_some(Member::Directory)
         } else if selected {
             ensure!(
-                metadata.is_file() && !link,
+                meta.is_file() && !link,
                 "selected member `{}` must be an ordinary file or directory without links",
                 path.display()
             );
-            Some(Member::File(file_mode(&metadata)))
+            Some(Member::File(file_mode(&meta)))
         } else {
             None
         };

@@ -83,141 +83,122 @@ pub enum FetchError {
     },
 }
 
-/// Fetch `request.revision` of `request.git` into `request.git_dir`.
+/// Fetch `req.revision` of `req.git` into `req.git_dir`.
 ///
-/// The caller creates the destination and inspects cancellation; this function only hands the
-/// interrupt flag to gix and reports failures.
+/// The caller creates the destination and inspects cancellation; this only hands the
+/// interrupt flag to gix and classifies failures.
 pub(crate) fn fetch(
-    request: FetchRequest<'_>,
-    cancellation: &BundleCancellation,
+    req: FetchRequest<'_>,
+    cancel: &BundleCancellation,
 ) -> Result<FetchedRepository, FetchError> {
-    let address = || FetchError::Address {
-        address: request.git.to_owned(),
+    let bad_addr = || FetchError::Address {
+        address: req.git.to_owned(),
     };
-    let url = gix::Url::try_from(request.git).map_err(|_| address())?;
+    let url = gix::Url::try_from(req.git).map_err(|_| bad_addr())?;
     if !matches!(url.scheme, gix::url::Scheme::Https | gix::url::Scheme::Ssh) {
-        return Err(address());
+        return Err(bad_addr());
     }
     let ssh = url.scheme == gix::url::Scheme::Ssh;
-    let classify = |error| classify(error, ssh, request.revision.is_some());
-    let revision = request.revision.map(|revision| match revision {
+    let map_err = |err| classify(err, ssh, req.revision.is_some());
+    let rev = req.revision.map(|rev| match rev {
         RemoteRevision::Tag(tag) => format!("refs/tags/{tag}"),
         RemoteRevision::Branch(branch) => format!("refs/heads/{branch}"),
         RemoteRevision::Rev(commit) => commit.clone(),
     });
-    let options = request.options;
+    let opts = req.options;
     let mut prepared = gix::clone::PrepareFetch::new(
         url,
-        request.git_dir,
+        req.git_dir,
         gix::create::Kind::Bare,
         gix::create::Options::default(),
         open_options(),
     )
-    .map_err(classify)?
-    .with_revision(revision)
-    .map_err(classify)?
+    .map_err(map_err)?
+    .with_revision(rev)
+    .map_err(map_err)?
     .with_shallow(gix::remote::fetch::Shallow::DepthAtRemote(NonZeroU32::MIN))
-    .configure_connection(move |connection| configure_connection(connection, options));
-    let (repository, _) = prepared
-        .fetch_only(gix::progress::Discard, cancellation.flag())
-        .map_err(classify)?;
+    .configure_connection(move |conn| configure_connection(conn, opts));
+    let (repo, _) = prepared
+        .fetch_only(gix::progress::Discard, cancel.flag())
+        .map_err(map_err)?;
     let (commit, tree) = {
-        let head = repository.head_commit().map_err(classify)?;
-        let tree = head.tree_id().map_err(classify)?.detach();
+        let head = repo.head_commit().map_err(map_err)?;
+        let tree = head.tree_id().map_err(map_err)?.detach();
         (head.id().to_string(), tree)
     };
     Ok(FetchedRepository {
-        repository,
+        repository: repo,
         commit,
         tree,
     })
 }
 
-/// Open repositories with the user's Git configuration, but with checkout bytes pinned.
-///
-/// User configuration supplies credential helpers, URL rewrites, proxies, and CAs; environment
-/// permissions allow HOME/XDG and the GIT_*/SSH_*/HTTP_* categories those need. Line endings stay
-/// fixed so one commit digests identically on every platform. Configured filter drivers are
-/// cleared at checkout, so a module's `.gitattributes` cannot run a local filter command.
+/// Open repositories with the user's Git config and pinned LF checkout bytes.
 fn open_options() -> gix::open::Options {
-    let mut options = gix::open::Options::isolated();
-    options.permissions.config = gix::open::permissions::Config::all();
-    // macOS Apple Git keeps `credential.helper = osxkeychain` only in its installation
-    // configuration; without this, a standard private HTTPS checkout cannot authenticate.
-    options.permissions.config.git_binary = true;
-    // The isolated environment permission also hides HOME, which would skip
-    // `~/.gitconfig` entirely. Allow the sources a Git user configures: HOME and
-    // XDG_CONFIG_HOME for user config, GIT_*/SSH_* for askpass and config overrides,
-    // and HTTP_* for proxies. Identity/object environment variables stay isolated.
+    let mut opts = gix::open::Options::isolated();
+    opts.permissions.config = gix::open::permissions::Config::all();
+    // macOS Apple Git keeps `credential.helper = osxkeychain` in its installation config.
+    opts.permissions.config.git_binary = true;
+    // Allow HOME/XDG/GIT_*/SSH_*/HTTP_* for user config, askpass, and proxies while keeping
+    // identity and object environment variables isolated.
     let mut env = gix::open::permissions::Environment::isolated();
     env.home = gix::sec::Permission::Allow;
     env.xdg_config_home = gix::sec::Permission::Allow;
     env.git_prefix = gix::sec::Permission::Allow;
     env.ssh_prefix = gix::sec::Permission::Allow;
     env.http_transport = gix::sec::Permission::Allow;
-    options.permissions.env = env;
-    // `tree_sha256` hashes the materialized bytes, not the Git tree. Pin EOL so the
-    // same commit yields the same digest on every host; this is unrelated to auth.
-    options.config_overrides(["core.autocrlf=false", "core.eol=lf"])
+    opts.permissions.env = env;
+    // `tree_sha256` hashes materialized bytes; pin EOL so commits digest identically across hosts.
+    opts.config_overrides(["core.autocrlf=false", "core.eol=lf"])
 }
 
-/// Configure the transport and use the user's Git credential helpers.
 fn configure_connection(
-    connection: &mut gix::remote::Connection<'_, '_, '_, Box<dyn Transport + Send>>,
-    options: FetchOptions,
+    conn: &mut gix::remote::Connection<'_, '_, '_, Box<dyn Transport + Send>>,
+    opts: FetchOptions,
 ) -> gix::Result<()> {
-    connection.set_transport_options(Box::new(http::Options {
+    conn.set_transport_options(Box::new(http::Options {
         backend: Some(Arc::new(Mutex::new(http::reqwest::Options {
             configure_client: Some(Box::new(move |client| {
                 Ok(client
-                    .connect_timeout(options.connect_timeout)
-                    .timeout(options.request_timeout))
+                    .connect_timeout(opts.connect_timeout)
+                    .timeout(opts.request_timeout))
             })),
             configure_request: None,
         }))),
         ..Default::default()
     }));
-    // Use gix's built-in cascade: it re-reads helpers per action URL (so redirects
-    // follow the user's Git config) and prompts only when no helper supplies credentials.
-    // Do not replace it with a prompt-disabled custom cascade.
-    let credentials = connection.configured_credentials_for_current_url();
-    connection.set_credentials(credentials);
+    // Use gix's built-in cascade so redirects re-read helpers per URL and prompt only as fallback.
+    let creds = conn.configured_credentials_for_current_url();
+    conn.set_credentials(creds);
     Ok(())
 }
 
-/// Turn one gix failure into the remedy its author can act on.
-fn classify(error: gix::Error, ssh: bool, explicit_revision: bool) -> FetchError {
-    if error.is_unauthenticated() || error.is_permission_denied() {
-        return FetchError::Authentication { source: error };
+fn classify(err: gix::Error, ssh: bool, explicit_rev: bool) -> FetchError {
+    if err.is_unauthenticated() || err.is_permission_denied() {
+        return FetchError::Authentication { source: err };
     }
     // gix 0.90 renders an unclassified HTTP client status as "Received HTTP status 404 ...".
-    // Its version is pinned, so the rendered text is the only stable 404 signal.
-    if error
+    if err
         .iter_errors()
         .any(|cause| cause.to_string().contains("Received HTTP status 404"))
     {
-        return FetchError::NotVisible { source: error };
+        return FetchError::NotVisible { source: err };
     }
-    if error.is_retryable() {
-        return FetchError::Network { source: error };
+    if err.is_retryable() || io_kinds(&err).any(is_network_kind) {
+        return FetchError::Network { source: err };
     }
-    if io_kinds(&error).any(is_network_kind) {
-        return FetchError::Network { source: error };
-    }
-    let missing_file = io_kinds(&error).any(|kind| kind == ErrorKind::NotFound);
+    let missing_file = io_kinds(&err).any(|kind| kind == ErrorKind::NotFound);
     if ssh && missing_file {
-        return FetchError::MissingSsh { source: error };
+        return FetchError::MissingSsh { source: err };
     }
-    if explicit_revision && error.is_not_found() && !missing_file {
-        return FetchError::RevisionUnavailable { source: error };
+    if explicit_rev && err.is_not_found() && !missing_file {
+        return FetchError::RevisionUnavailable { source: err };
     }
-    FetchError::Other { source: error }
+    FetchError::Other { source: err }
 }
 
-/// The I/O kinds carried anywhere in an error chain.
-fn io_kinds(error: &gix::Error) -> impl Iterator<Item = ErrorKind> + '_ {
-    error
-        .iter_errors()
+fn io_kinds(err: &gix::Error) -> impl Iterator<Item = ErrorKind> + '_ {
+    err.iter_errors()
         .filter_map(|cause| cause.downcast_ref::<std::io::Error>())
         .map(std::io::Error::kind)
 }

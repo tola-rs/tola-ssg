@@ -29,17 +29,15 @@ const STOP_POLL_TIMEOUT: Timespec = Timespec {
 };
 
 /// Place the child in its own process group so the whole tree can be signalled.
-pub(crate) fn wrap(mut command: CommandWrap) -> CommandWrap {
-    command.wrap(ProcessGroup::leader());
-    command
+pub(crate) fn wrap(mut cmd: CommandWrap) -> CommandWrap {
+    cmd.wrap(ProcessGroup::leader());
+    cmd
 }
 
-/// The signal that terminated the child, or `None` when it exited on its own.
 pub fn terminating_signal(status: &ExitStatus) -> Option<i32> {
     status.signal()
 }
 
-/// A pipe read end that observes a stop request while its read is pending.
 pub(crate) struct Reader<T: Pipe> {
     inner: T,
     stop: ReaderStop,
@@ -47,7 +45,6 @@ pub(crate) struct Reader<T: Pipe> {
 }
 
 impl<T: Pipe> Reader<T> {
-    /// Enable nonblocking reads, retaining the original flags for restoration.
     pub(crate) fn new(inner: T, stop: ReaderStop) -> io::Result<Self> {
         let flags = fcntl_getfl(&inner)?;
         fcntl_setfl(&inner, flags | OFlags::NONBLOCK)?;
@@ -57,18 +54,15 @@ impl<T: Pipe> Reader<T> {
     fn await_readable(&self) -> io::Result<()> {
         loop {
             self.abandon_if_stopped()?;
-            let mut descriptors = [PollFd::new(&self.inner, PollFlags::IN)];
-            match poll(&mut descriptors, Some(&STOP_POLL_TIMEOUT)) {
-                // A timeout and an interrupted poll both only re-run the checks.
+            let mut fds = [PollFd::new(&self.inner, PollFlags::IN)];
+            match poll(&mut fds, Some(&STOP_POLL_TIMEOUT)) {
                 Ok(0) | Err(rustix::io::Errno::INTR) => {}
                 Ok(_) => return Ok(()),
-                Err(error) => return Err(error.into()),
+                Err(err) => return Err(err.into()),
             }
         }
     }
 
-    /// Abandon a read that cannot proceed: a stop request ends it, so a reader never waits on a
-    /// stream whose writer is gone while one that can still reach its end keeps draining.
     fn abandon_if_stopped(&self) -> io::Result<()> {
         if self.stop.is_requested() {
             Err(io::Error::other(Stopped))
@@ -77,25 +71,25 @@ impl<T: Pipe> Reader<T> {
         }
     }
 
-    fn read_unless_stopped(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+    fn read_unless_stopped(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         loop {
-            match self.inner.read(bytes) {
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+            match self.inner.read(buf) {
+                Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
                     self.await_readable()?;
                 }
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+                Err(err) if err.kind() == io::ErrorKind::Interrupted => {
                     self.abandon_if_stopped()?;
                 }
                 Err(_) if self.stop.is_requested() => return Err(io::Error::other(Stopped)),
-                result => return result,
+                res => return res,
             }
         }
     }
 }
 
 impl<T: Pipe + Read> Read for Reader<T> {
-    fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
-        self.read_unless_stopped(bytes)
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.read_unless_stopped(buf)
     }
 }
 
@@ -111,11 +105,6 @@ mod tests {
     use std::os::fd::BorrowedFd;
     use std::os::unix::net::UnixStream;
 
-    // The `Read` contract both readers share — a completed read outranks a stop, a failed one
-    // reports it — is held here.
-
-    /// A stream owning its fd — so the flag test has a descriptor to inspect — whose
-    /// next read returns `outcome`, optionally requesting a stop first.
     struct ScriptedRead {
         stream: UnixStream,
         outcome: Result<usize, io::ErrorKind>,
@@ -129,14 +118,14 @@ mod tests {
     }
 
     impl Read for ScriptedRead {
-        fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
             if let Some(stop) = &self.stop {
                 stop.request();
             }
             match std::mem::replace(&mut self.outcome, Ok(0)) {
-                Ok(read) => {
-                    bytes[..read].fill(b'x');
-                    Ok(read)
+                Ok(n) => {
+                    buf[..n].fill(b'x');
+                    Ok(n)
                 }
                 Err(kind) => Err(kind.into()),
             }
@@ -161,37 +150,37 @@ mod tests {
     }
 
     #[test]
-    fn completed_read_beats_concurrent_stop() {
+    fn read_beats_concurrent_stop() {
         let stop = ReaderStop::default();
         let mut reader = reader(&stop, Ok(4), true);
-        let mut bytes = [0; 8];
+        let mut buf = [0; 8];
 
-        assert_eq!(reader.read(&mut bytes).unwrap(), 4);
-        assert_eq!(&bytes[..4], b"xxxx");
+        assert_eq!(reader.read(&mut buf).unwrap(), 4);
+        assert_eq!(&buf[..4], b"xxxx");
     }
 
     #[test]
-    fn failed_read_reports_the_stop_request() {
+    fn failed_read_reports_stop() {
         let stop = ReaderStop::default();
         let mut reader = reader(&stop, Err(io::ErrorKind::BrokenPipe), true);
 
-        let error = reader.read(&mut [0; 8]).unwrap_err();
+        let err = reader.read(&mut [0; 8]).unwrap_err();
 
-        assert!(error.get_ref().is_some_and(|inner| inner.is::<Stopped>()));
+        assert!(err.get_ref().is_some_and(|e| e.is::<Stopped>()));
     }
 
     #[test]
-    fn interrupted_read_observes_stop() {
+    fn interrupted_read_stop() {
         let stop = ReaderStop::default();
         let mut reader = reader(&stop, Err(io::ErrorKind::Interrupted), true);
 
-        let error = reader.read(&mut [0; 8]).unwrap_err();
+        let err = reader.read(&mut [0; 8]).unwrap_err();
 
-        assert!(error.get_ref().is_some_and(|inner| inner.is::<Stopped>()));
+        assert!(err.get_ref().is_some_and(|e| e.is::<Stopped>()));
     }
 
     #[test]
-    fn drop_restores_descriptor_flags() {
+    fn drop_restores_flags() {
         let (stream, _peer) = UnixStream::pair().unwrap();
         let alias = stream.try_clone().unwrap();
         let flags = fcntl_getfl(&alias).unwrap();

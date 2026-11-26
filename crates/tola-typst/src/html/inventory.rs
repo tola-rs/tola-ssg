@@ -416,7 +416,7 @@ mod tests {
     }
 
     #[test]
-    fn inventory_keeps_dom_order() {
+    fn inventory_dom_order() {
         let mut root = HtmlElement::new(tag::html).with_attr(attr::id, "root");
         root.children.push(HtmlNode::Element(
             HtmlElement::new(tag::base).with_attr(attr::href, "/docs/"),
@@ -463,7 +463,7 @@ mod tests {
     }
 
     #[test]
-    fn matching_anchor_is_one_target() {
+    fn inventory_dedups_anchor() {
         let root = HtmlElement::new(tag::a)
             .with_attr(attr::id, "same")
             .with_attr(typst_html::attr::name, "same");
@@ -475,7 +475,7 @@ mod tests {
     }
 
     #[test]
-    fn form_controls_decide_their_urls() {
+    fn inventory_form_controls() {
         let mut root = HtmlElement::new(tag::html);
         root.children.push(HtmlNode::Element(
             HtmlElement::new(tag::input)

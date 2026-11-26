@@ -3,7 +3,7 @@
 use tola_address::OutputPath;
 
 use crate::cancellation::{BuildCancellation, BuildCancelled};
-use crate::config::{ReferenceLevel, ResolvedSiteConfig};
+use crate::config::{ReferenceLevel, SiteConfig};
 use crate::site::references::{
     Reference, ReferenceCategory, ReferenceResolution, References, UnresolvedReferenceReason,
 };
@@ -13,7 +13,7 @@ use tola_diagnostic::{Diagnostic, DiagnosticCause, Severity};
 // build's configuration so cached failures cannot retain an obsolete severity.
 pub(crate) fn diagnostics(
     index: &References,
-    config: &ResolvedSiteConfig,
+    config: &SiteConfig,
     cancellation: &BuildCancellation,
 ) -> Result<Vec<Diagnostic>, BuildCancelled> {
     cancellation.ensure_active()?;
@@ -61,7 +61,7 @@ fn base_href_diagnostic(page: &OutputPath, base: &super::document::UncheckedBase
     .with_help("Remove the `<base href>` or write it as a relative address (`/`, `/docs/`)")
 }
 
-fn reference_diagnostic(config: &ResolvedSiteConfig, reference: &Reference) -> Option<Diagnostic> {
+fn reference_diagnostic(config: &SiteConfig, reference: &Reference) -> Option<Diagnostic> {
     let ReferenceResolution::Unresolved { reason } = reference.resolution() else {
         return None;
     };
@@ -232,38 +232,37 @@ mod tests {
     use crate::site::references::{Reference, UnresolvedReferenceReason};
 
     fn unresolved(
-        destination: &str,
-        category: ReferenceCategory,
+        dst: &str,
+        cat: ReferenceCategory,
         reason: UnresolvedReferenceReason,
     ) -> Reference {
         Reference {
             page: tola_address::OutputPath::parse("index.html").unwrap(),
-            destination: destination.to_owned(),
+            destination: dst.to_owned(),
             html_context: "a[href]".to_owned(),
-            category,
+            category: cat,
             resolution: ReferenceResolution::Unresolved { reason },
             origin: None,
         }
     }
 
-    fn cause(reference: &Reference) -> Option<DiagnosticCause> {
-        let directory = tempfile::TempDir::new().unwrap();
-        let config = crate::config::tests::load_test_config(directory.path(), "");
-        reference_diagnostic(&config, reference).and_then(|diagnostic| diagnostic.cause)
+    fn cause(ref_: &Reference) -> Option<DiagnosticCause> {
+        let dir = tempfile::TempDir::new().unwrap();
+        let cfg = crate::config::tests::load_test_config(dir.path(), "");
+        reference_diagnostic(&cfg, ref_).and_then(|d| d.cause)
     }
 
     #[test]
-    fn missing_directory_page_published_address() {
-        let reference = unresolved(
+    fn missing_directory_suggests_slash() {
+        let ref_ = unresolved(
             "/post",
             ReferenceCategory::Navigation,
             UnresolvedReferenceReason::TargetMissing {
                 suggestion: Some("/post/".to_owned()),
             },
         );
-
         assert_eq!(
-            cause(&reference),
+            cause(&ref_),
             Some(DiagnosticCause::UnresolvedReference {
                 destination: "/post".to_owned(),
                 replacements: vec!["/post/".to_owned()],
@@ -272,8 +271,8 @@ mod tests {
     }
 
     #[test]
-    fn missing_each_id_target_has() {
-        let reference = unresolved(
+    fn missing_fragment_lists_ids() {
+        let ref_ = unresolved(
             "/post/#missing",
             ReferenceCategory::Fragment,
             UnresolvedReferenceReason::FragmentMissing {
@@ -281,9 +280,8 @@ mod tests {
                 available: ["a".to_owned(), "z".to_owned()].into(),
             },
         );
-
         assert_eq!(
-            cause(&reference),
+            cause(&ref_),
             Some(DiagnosticCause::UnresolvedReference {
                 destination: "/post/#missing".to_owned(),
                 replacements: vec!["/post/#a".to_owned(), "/post/#z".to_owned()],

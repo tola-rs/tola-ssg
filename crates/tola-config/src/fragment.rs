@@ -78,29 +78,23 @@ impl<'a> FragmentContext<'a> {
     }
 }
 
-/// Validate only fields present in one input value.
 pub trait ValidateFragment {
-    fn validate_fragment(value: &toml::Value, context: &mut FragmentContext<'_>);
+    fn validate_fragment(val: &toml::Value, ctx: &mut FragmentContext<'_>);
 }
 
-/// Decode a complete atomic value, discarding the decoded result.
-pub fn validate_value<T: DeserializeOwned>(value: &toml::Value, context: &mut FragmentContext<'_>) {
-    // toml::Value's Serde input can present a date as a string. Retain the
-    // original TOML type, without creating synthetic source text or positions.
-    let decoded = value
+/// Decode a complete atomic value without converting TOML dates to strings.
+pub fn validate_value<T: DeserializeOwned>(val: &toml::Value, ctx: &mut FragmentContext<'_>) {
+    let decoded = val
         .serialize(toml_edit::ser::ValueSerializer::new())
-        .map_err(|error| error.to_string())
-        .and_then(|value| {
-            T::deserialize(value.into_deserializer()).map_err(|error| error.to_string())
-        });
-    if let Err(error) = decoded {
-        context.issue(FragmentIssueKind::InvalidValue { message: error });
+        .map_err(|err| err.to_string())
+        .and_then(|v| T::deserialize(v.into_deserializer()).map_err(|err| err.to_string()));
+    if let Err(message) = decoded {
+        ctx.issue(FragmentIssueKind::InvalidValue { message });
     }
 }
 
-/// Report a value whose TOML type does not match the expected shape.
-pub fn wrong_type(value: &toml::Value, expected: &'static str, context: &mut FragmentContext<'_>) {
-    let actual = match value {
+pub fn wrong_type(val: &toml::Value, expected: &'static str, ctx: &mut FragmentContext<'_>) {
+    let actual = match val {
         toml::Value::String(_) => "string",
         toml::Value::Integer(_) => "integer",
         toml::Value::Float(_) => "float",
@@ -109,17 +103,17 @@ pub fn wrong_type(value: &toml::Value, expected: &'static str, context: &mut Fra
         toml::Value::Array(_) => "array",
         toml::Value::Table(_) => "table",
     };
-    context.issue(FragmentIssueKind::WrongType { expected, actual });
+    ctx.issue(FragmentIssueKind::WrongType { expected, actual });
 }
 
 macro_rules! atomic {
     ($expected:literal, $pattern:pat => $($ty:ty),* $(,)?) => {$ (
         impl ValidateFragment for $ty {
-            fn validate_fragment(value: &toml::Value, context: &mut FragmentContext<'_>) {
-                if matches!(value, $pattern) {
-                    validate_value::<Self>(value, context);
+            fn validate_fragment(val: &toml::Value, ctx: &mut FragmentContext<'_>) {
+                if matches!(val, $pattern) {
+                    validate_value::<Self>(val, ctx);
                 } else {
-                    wrong_type(value, $expected, context);
+                    wrong_type(val, $expected, ctx);
                 }
             }
         }
@@ -131,31 +125,31 @@ atomic!("integer", toml::Value::Integer(_) => u8, u16, u32, u64, u128, usize, i8
 atomic!("number", toml::Value::Float(_) | toml::Value::Integer(_) => f32, f64);
 
 impl ValidateFragment for toml::Value {
-    fn validate_fragment(_value: &toml::Value, _context: &mut FragmentContext<'_>) {}
+    fn validate_fragment(_val: &toml::Value, _ctx: &mut FragmentContext<'_>) {}
 }
 
 impl ValidateFragment for toml::Table {
-    fn validate_fragment(value: &toml::Value, context: &mut FragmentContext<'_>) {
-        if !value.is_table() {
-            wrong_type(value, "table", context);
+    fn validate_fragment(val: &toml::Value, ctx: &mut FragmentContext<'_>) {
+        if !val.is_table() {
+            wrong_type(val, "table", ctx);
         }
     }
 }
 
 impl<T: ValidateFragment> ValidateFragment for Option<T> {
-    fn validate_fragment(value: &toml::Value, context: &mut FragmentContext<'_>) {
-        T::validate_fragment(value, context);
+    fn validate_fragment(val: &toml::Value, ctx: &mut FragmentContext<'_>) {
+        T::validate_fragment(val, ctx);
     }
 }
 
 impl<T: ValidateFragment> ValidateFragment for Vec<T> {
-    fn validate_fragment(value: &toml::Value, context: &mut FragmentContext<'_>) {
-        if let toml::Value::Array(values) = value {
-            for (index, value) in values.iter().enumerate() {
-                context.index(index, |context| T::validate_fragment(value, context));
+    fn validate_fragment(val: &toml::Value, ctx: &mut FragmentContext<'_>) {
+        if let toml::Value::Array(vals) = val {
+            for (idx, v) in vals.iter().enumerate() {
+                ctx.index(idx, |ctx| T::validate_fragment(v, ctx));
             }
         } else {
-            wrong_type(value, "array", context);
+            wrong_type(val, "array", ctx);
         }
     }
 }
@@ -163,13 +157,13 @@ impl<T: ValidateFragment> ValidateFragment for Vec<T> {
 macro_rules! map {
     ($map:ident $(, $extra:ident)?) => {
         impl<T: ValidateFragment $(, $extra: std::hash::BuildHasher + Default)?> ValidateFragment for $map<String, T $(, $extra)?> {
-            fn validate_fragment(value: &toml::Value, context: &mut FragmentContext<'_>) {
-                if let toml::Value::Table(values) = value {
-                    for (key, value) in values {
-                        context.key(key, |context| T::validate_fragment(value, context));
+            fn validate_fragment(val: &toml::Value, ctx: &mut FragmentContext<'_>) {
+                if let toml::Value::Table(vals) = val {
+                    for (k, v) in vals {
+                        ctx.key(k, |ctx| T::validate_fragment(v, ctx));
                     }
                 } else {
-                    wrong_type(value, "table", context);
+                    wrong_type(val, "table", ctx);
                 }
             }
         }
@@ -184,14 +178,13 @@ mod tests {
     use crate::Fragment;
 
     #[test]
-    fn atomic_validation_does_not_coerce_dates_to_strings() {
-        let value: toml::Table = toml::from_str("date = 2024-01-01").unwrap();
+    fn date_not_coerced_to_string() {
+        let val: toml::Table = toml::from_str("date = 2024-01-01").unwrap();
         let mut issues = Vec::new();
-        validate_value::<String>(&value["date"], &mut FragmentContext::new(&mut issues, None));
+        validate_value::<String>(&val["date"], &mut FragmentContext::new(&mut issues, None));
         assert!(!issues.is_empty());
     }
 
-    // These fixtures describe fields for static validation; they are never constructed.
     #[allow(dead_code)]
     #[derive(Fragment)]
     struct Child {
@@ -209,43 +202,43 @@ mod tests {
     }
 
     #[test]
-    fn validates_only_written_fields_with_structured_paths() {
-        let value: toml::Value = toml::from_str(
+    fn fragment_structured_paths() {
+        let val: toml::Value = toml::from_str(
             "children = [{ flag = 1 }, { unknown = true }]\n[values]\n'quoted.key' = 300\n",
         )
         .unwrap();
         let mut issues = Vec::new();
-        Root::validate_fragment(&value, &mut FragmentContext::new(&mut issues, None));
+        Root::validate_fragment(&val, &mut FragmentContext::new(&mut issues, None));
         assert_eq!(issues.len(), 3);
-        assert!(issues.iter().any(|issue| issue.path
+        assert!(issues.iter().any(|i| i.path
             == vec![
                 ValueStep::Key("children".into()),
                 ValueStep::Index(0),
                 ValueStep::Key("flag".into())
             ]
-            && matches!(issue.kind, FragmentIssueKind::WrongType { .. })));
-        assert!(issues.iter().any(|issue| issue.path
+            && matches!(i.kind, FragmentIssueKind::WrongType { .. })));
+        assert!(issues.iter().any(|i| i.path
             == vec![
                 ValueStep::Key("children".into()),
                 ValueStep::Index(1),
                 ValueStep::Key("unknown".into())
             ]
-            && matches!(issue.kind, FragmentIssueKind::UnknownKey)));
-        assert!(issues.iter().any(|issue| issue.path
+            && matches!(i.kind, FragmentIssueKind::UnknownKey)));
+        assert!(issues.iter().any(|i| i.path
             == vec![
                 ValueStep::Key("values".into()),
                 ValueStep::Key("quoted.key".into())
             ]
-            && matches!(issue.kind, FragmentIssueKind::InvalidValue { .. })));
+            && matches!(i.kind, FragmentIssueKind::InvalidValue { .. })));
     }
 
     #[test]
-    fn filters_only_unknown_root_keys() {
-        let value: toml::Value = toml::from_str("host = true\ninternal = true\n").unwrap();
+    fn root_unknown_filter() {
+        let val: toml::Value = toml::from_str("host = true\ninternal = true\n").unwrap();
         let mut issues = Vec::new();
         Root::validate_fragment(
-            &value,
-            &mut FragmentContext::new(&mut issues, Some(&|key| key != "host")),
+            &val,
+            &mut FragmentContext::new(&mut issues, Some(&|k| k != "host")),
         );
         assert_eq!(issues.len(), 1);
         assert_eq!(issues[0].path, vec![ValueStep::Key("internal".into())]);

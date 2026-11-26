@@ -5,7 +5,7 @@ use std::path::Path;
 use anyhow::{Context, Result, ensure};
 use tola_build::cancellation::BuildCancellation;
 use tola_build::config::{
-    AssetsConfig, FontsConfig, IconsConfig, ResolvedSiteConfig, SiteConfigSchema,
+    AssetsConfig, FontsConfig, IconsConfig, SiteConfig, SiteConfigSchema,
     section::{VendorConfig, build::HooksConfig},
 };
 use tola_input::{layout, normalize_existing_prefix};
@@ -77,7 +77,7 @@ fn conflicted_diagnostic(path: &Path) -> tola_diagnostic::Diagnostic {
 
 pub(crate) fn start_site(
     output: &CommandOutput,
-    config: &ResolvedSiteConfig,
+    config: &SiteConfig,
     cancellation: &BuildCancellation,
 ) -> Result<()> {
     let log = output.log();
@@ -88,14 +88,14 @@ pub(crate) fn start_site(
     }
     if let Err(error) = check_site(
         log.map(super::LogFile::path),
-        config.get_root(),
+        config.root(),
         config.config_path(),
         SiteInputSections::from_config(config),
     )
     .and_then(|()| {
         check_config_paths(
             log.map(super::LogFile::path),
-            config.get_root(),
+            config.root(),
             config.config_paths(),
         )
     }) {
@@ -239,7 +239,7 @@ pub(crate) struct SiteInputSections<'a> {
 
 impl<'a> SiteInputSections<'a> {
     /// The sections of a configuration that has been resolved into a site.
-    pub(crate) fn from_config(config: &'a ResolvedSiteConfig) -> Self {
+    pub(crate) fn from_config(config: &'a SiteConfig) -> Self {
         Self {
             entry: (!config.build().entry.as_os_str().is_empty())
                 .then_some(config.build().entry.as_path()),

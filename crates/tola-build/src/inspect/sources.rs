@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use crate::config::ResolvedSiteConfig;
+use crate::config::SiteConfig;
 use crate::filesystem::root_relative;
 use anyhow::Result;
 use tola_input::normalize_path;
@@ -13,8 +13,8 @@ use super::InspectedSource;
 pub(super) fn inspect(
     files: &[PathBuf],
     units: &[crate::content::ContentUnit],
-    config: &ResolvedSiteConfig,
-    prepared: &tola_module::prepared::PreparedModules,
+    config: &SiteConfig,
+    prepared: &tola_module::bundle::ModuleBundle,
     host: &crate::compiler::SiteHost,
     resources: &crate::resources::BuildResources,
     cancellation: &crate::cancellation::BuildCancellation,
@@ -33,7 +33,7 @@ pub(super) fn inspect(
         config,
         crate::asset::AssetUrls::for_check_with(
             config,
-            crate::modules::prepared::AppliedAssets {
+            crate::modules::site::AppliedAssets {
                 modules: &prepared.assets,
             },
             &resources.source_boundary(config),
@@ -60,7 +60,7 @@ pub(super) fn inspect(
         .iter()
         .map(|path| normalize_path(path))
         .collect::<HashSet<_>>();
-    let root = normalize_path(config.get_root());
+    let root = normalize_path(config.root());
 
     let mut sources = Vec::with_capacity(files.len());
     for source in scan.source_set.sources() {
@@ -84,7 +84,7 @@ pub(super) fn inspect(
 /// A later source failure must not discard the option schema's diagnostics.
 fn with_prior_diagnostics(
     error: anyhow::Error,
-    config: &ResolvedSiteConfig,
+    config: &SiteConfig,
     warnings: &mut tola_typst::Diagnostics,
 ) -> anyhow::Error {
     let prior = crate::compiler::warning_diagnostics(config, warnings);
@@ -93,7 +93,7 @@ fn with_prior_diagnostics(
     }
     let mut diagnostics = tola_diagnostic::attached(&error)
         .map(<[tola_diagnostic::Diagnostic]>::to_vec)
-        .or_else(|| crate::compiler::error_diagnostics(&error, config.get_root()))
+        .or_else(|| crate::compiler::error_diagnostics(&error, config.root()))
         .unwrap_or_else(|| {
             vec![tola_diagnostic::fallback(
                 tola_diagnostic::codes::typst::SOURCE_ANALYSIS,

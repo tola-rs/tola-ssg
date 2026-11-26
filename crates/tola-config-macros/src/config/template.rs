@@ -8,32 +8,24 @@ use quote::quote;
 
 use crate::config::attr::{CollectionShape, FieldStatus};
 use crate::config::field::ConfigField;
-use crate::config::field_type::{is_option_type, vec_element_type};
+use crate::config::ty::{is_option, vec_elem};
 use crate::config::value::{format_scalar_default_for_type, option_placeholder};
 
-/// Generate TOML template code for the fields.
-pub fn generate_template_code(
-    fields: &[ConfigField],
-    runtime_crate: &syn::Path,
-) -> syn::Result<TokenStream> {
+pub fn emit_template(fields: &[ConfigField], rt: &syn::Path) -> syn::Result<TokenStream> {
     let fields = fields
         .iter()
-        .filter(|field| !field.skip && field.status != FieldStatus::Hidden);
+        .filter(|f| !f.skip && f.status != FieldStatus::Hidden);
     fields
         .clone()
-        .filter(|field| !field.sub)
-        .chain(fields.filter(|field| field.sub))
-        .map(|field| generate_field_template_code(field, runtime_crate))
+        .filter(|f| !f.sub)
+        .chain(fields.filter(|f| f.sub))
+        .map(|f| emit_field_template(f, rt))
         .collect()
 }
 
-/// Generate TOML template code for one field.
-fn generate_field_template_code(
-    field: &ConfigField,
-    runtime_crate: &syn::Path,
-) -> syn::Result<TokenStream> {
-    let field_name = &field.rust_ident;
-    let (is_commented, status_comment) = match field.status {
+fn emit_field_template(field: &ConfigField, rt: &syn::Path) -> syn::Result<TokenStream> {
+    let ident = &field.rust_ident;
+    let (commented, status_msg) = match field.status {
         FieldStatus::Normal => (false, None),
         FieldStatus::Experimental => (
             true,
@@ -49,45 +41,44 @@ fn generate_field_template_code(
 
     if field.sub {
         if field.collection == Some(CollectionShape::ArrayTable) {
-            let element_ty = vec_element_type(&field.ty)
+            let elem_ty = vec_elem(&field.ty)
                 .expect("array-table element type was validated while parsing the field");
-            let nested_code = generate_nested_template_code(field, element_ty, quote! { value });
+            let nested = emit_nested_template(field, elem_ty, quote! { val });
             return Ok(quote! {
-                for (index, value) in config_value.#field_name.iter().enumerate() {
-                    #nested_code
+                for (index, val) in config_value.#ident.iter().enumerate() {
+                    #nested
                 }
             });
         }
-        return Ok(generate_nested_template_code(
+        return Ok(emit_nested_template(
             field,
             &field.ty,
-            quote! { &config_value.#field_name },
+            quote! { &config_value.#ident },
         ));
     }
 
-    let status_code = status_comment.map(|comment| quote! { out.push_str(#comment); });
-    let prefix = if is_commented { "# " } else { "" };
+    let status_code = status_msg.map(|msg| quote! { out.push_str(#msg); });
+    let prefix = if commented { "# " } else { "" };
 
-    if is_option_type(&field.ty) && field.default.is_none() {
+    if is_option(&field.ty) && field.default.is_none() {
         let line = format_template_assignment(field, option_placeholder(&field.ty), "# ");
-        if is_commented {
+        if commented {
             return Ok(quote! {
                 #status_code
                 out.push_str(#line);
             });
         }
-        let runtime_code = generate_runtime_value_code(field, runtime_crate);
+        let rt_code = emit_runtime_value(field, rt);
         return Ok(quote! {
             #status_code
-            if config_value.#field_name.is_some() {
-                #runtime_code
+            if config_value.#ident.is_some() {
+                #rt_code
             } else {
                 out.push_str(#line);
             }
         });
     }
 
-    // Explicit template defaults are scalar values known at expansion time.
     if let Some(default_val) = &field.default {
         let formatted = format_scalar_default_for_type(default_val, &field.ty)?;
         let line = format_template_assignment(field, &formatted, prefix);
@@ -97,30 +88,25 @@ fn generate_field_template_code(
         });
     }
 
-    let runtime_code = generate_runtime_value_code(field, runtime_crate);
+    let rt_code = emit_runtime_value(field, rt);
     Ok(quote! {
         #status_code
         out.push_str(#prefix);
-        #runtime_code
+        #rt_code
     })
 }
 
-/// Nested sections render the values their parent supplies.
-fn generate_nested_template_code(
-    field: &ConfigField,
-    field_ty: &syn::Type,
-    value: TokenStream,
-) -> TokenStream {
+fn emit_nested_template(field: &ConfigField, ty: &syn::Type, val: TokenStream) -> TokenStream {
     let propagate = if field.collection == Some(CollectionShape::ArrayTable) {
-        let field_name = &field.rust_ident;
+        let ident = &field.rust_ident;
         quote! {
-            .map_err(|error| error.with_array_element(Self::FIELDS.#field_name, index))
+            .map_err(|error| error.with_array_element(Self::FIELDS.#ident, index))
         }
     } else {
         quote! {}
     };
     quote! {
-        let nested = <#field_ty>::try_template_with_header_from(#value)#propagate?;
+        let nested = <#ty>::try_template_with_header_from(#val)#propagate?;
         if !nested.is_empty() {
             out.push('\n');
             out.push_str(&nested);
@@ -128,7 +114,7 @@ fn generate_nested_template_code(
     }
 }
 
-pub(super) fn generate_section_header_code(
+pub(super) fn emit_section_header(
     section: TokenStream,
     collection: Option<CollectionShape>,
 ) -> TokenStream {
@@ -146,22 +132,21 @@ pub(super) fn generate_section_header_code(
     }
 }
 
-fn format_template_assignment(field: &ConfigField, value: &str, prefix: &str) -> String {
-    let toml_name = &field.toml_name;
-    format!("{prefix}{toml_name} = {value}\n")
+fn format_template_assignment(field: &ConfigField, val: &str, prefix: &str) -> String {
+    format!("{prefix}{} = {val}\n", field.toml_name)
 }
 
-fn generate_runtime_value_code(field: &ConfigField, runtime_crate: &syn::Path) -> TokenStream {
-    let field_name = &field.rust_ident;
+fn emit_runtime_value(field: &ConfigField, rt: &syn::Path) -> TokenStream {
+    let ident = &field.rust_ident;
     let toml_name = &field.toml_name;
 
     quote! {
         out.push_str(#toml_name);
         out.push_str(" = ");
         out.push_str(
-            &#runtime_crate::serialize_toml_value(&config_value.#field_name)
+            &#rt::serialize_toml_value(&config_value.#ident)
                 .map_err(|error| {
-                    #runtime_crate::ConfigTemplateError::new(Self::FIELDS.#field_name, error)
+                    #rt::ConfigTemplateError::new(Self::FIELDS.#ident, error)
                 })?,
         );
         out.push('\n');

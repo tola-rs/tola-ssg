@@ -7,7 +7,7 @@ mod output;
 mod source;
 mod urls;
 
-pub(crate) use build::{ConfiguredAssets, build_configured_assets};
+pub(crate) use build::{SiteAssets, build_configured_assets};
 pub(crate) use minify::AssetMinifyWarning;
 pub use urls::{AssetOrigin, AssetUrls, ModuleAsset, ModuleAssetInput, PublishedAsset};
 

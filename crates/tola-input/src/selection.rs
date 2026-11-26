@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use globset::{GlobBuilder, GlobMatcher};
 use serde::{Deserialize, Serialize};
 
-/// Include and exclude patterns relative to a caller's input directory.
+/// Include and exclude patterns relative to an input directory.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FilePatterns {
@@ -17,9 +17,7 @@ pub struct FilePatterns {
     pub exclude: Vec<String>,
 }
 
-/// Compiled patterns for relative paths. The base directory is the empty path.
-/// Matching an ancestor includes or excludes its descendants.
-/// Equality, ordering, and hashing use only the declared patterns.
+/// Compiled patterns for relative paths (ancestor matches apply to descendants).
 #[derive(Clone, Debug)]
 pub struct FileSelection {
     patterns: FilePatterns,
@@ -30,9 +28,8 @@ pub struct FileSelection {
 impl FileSelection {
     /// Validate and compile include and exclude patterns.
     pub fn new(patterns: &FilePatterns) -> Result<Self, PatternError> {
-        let compile = |key, patterns: &[String]| {
-            patterns
-                .iter()
+        let compile = |key, list: &[String]| {
+            list.iter()
                 .map(|raw| Pattern::parse(key, raw))
                 .collect::<Result<Vec<_>, _>>()
         };
@@ -43,48 +40,44 @@ impl FileSelection {
         })
     }
 
-    /// The patterns as declared by the author.
+    /// Author-declared patterns.
     pub fn patterns(&self) -> &FilePatterns {
         &self.patterns
     }
 
-    /// Whether an include pattern matches this path or an ancestor.
+    /// Return whether an include pattern matches `path` or an ancestor.
     pub fn includes(&self, path: &Path) -> bool {
-        self.include.iter().any(|pattern| pattern.contains(path))
+        self.include.iter().any(|pat| pat.contains(path))
     }
 
-    /// Whether an exclude pattern matches this path or an ancestor.
+    /// Return whether an exclude pattern matches `path` or an ancestor.
     pub fn excludes(&self, path: &Path) -> bool {
-        self.exclude.iter().any(|pattern| pattern.contains(path))
+        self.exclude.iter().any(|pat| pat.contains(path))
     }
 
-    /// Whether this path is included and not excluded.
+    /// Return whether `path` is included and not excluded.
     pub fn matches(&self, path: &Path) -> bool {
         self.includes(path) && !self.excludes(path)
     }
 
-    /// Whether a strict descendant could match. An excluded path prunes its subtree.
+    /// Return whether a strict descendant could match (excluded paths prune their subtree).
     pub fn could_match_below(&self, path: &Path) -> bool {
-        !self.excludes(path)
-            && self
-                .include
-                .iter()
-                .any(|pattern| pattern.could_match_below(path))
+        !self.excludes(path) && self.include.iter().any(|pat| pat.could_match_below(path))
     }
 
     /// Include patterns with no glob syntax, in declaration order.
     pub fn literal_includes(&self) -> impl Iterator<Item = &Path> {
-        self.include.iter().filter_map(|pattern| match pattern {
+        self.include.iter().filter_map(|pat| match pat {
             Pattern::Literal(path) => Some(path.as_path()),
             Pattern::Glob { .. } => None,
         })
     }
 
-    /// Literal includes and the fixed directory prefixes of include globs.
+    /// Literal includes and fixed directory prefixes of include globs.
     pub fn roots(&self) -> Vec<PathBuf> {
         self.include
             .iter()
-            .map(|pattern| match pattern {
+            .map(|pat| match pat {
                 Pattern::Literal(path) | Pattern::Glob { prefix: path, .. } => path.clone(),
             })
             .collect()
@@ -117,7 +110,7 @@ impl Hash for FileSelection {
     }
 }
 
-/// A declared pattern that is invalid or can leave its input directory.
+/// Invalid or escaping file pattern.
 #[derive(Debug, thiserror::Error)]
 pub struct PatternError {
     key: String,
@@ -127,9 +120,9 @@ pub struct PatternError {
 }
 
 impl PatternError {
-    /// Qualify the include or exclude key with its configuration location.
-    pub fn at(mut self, prefix: &str) -> Self {
-        self.key = format!("{prefix}.{}", self.key);
+    /// Qualify the include or exclude key with its configuration prefix.
+    pub fn at(mut self, pfx: &str) -> Self {
+        self.key = format!("{pfx}.{}", self.key);
         self
     }
 }
@@ -138,7 +131,7 @@ impl fmt::Display for PatternError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let Self { key, pattern, glob } = self;
         match glob {
-            Some(error) => write!(f, "invalid `{key}` pattern `{pattern}`: {}", error.kind()),
+            Some(err) => write!(f, "invalid `{key}` pattern `{pattern}`: {}", err.kind()),
             None => write!(
                 f,
                 "`{key}` pattern `{pattern}` must stay relative to its input directory"
@@ -159,7 +152,7 @@ enum Pattern {
 
 impl Pattern {
     fn parse(key: &str, raw: &str) -> Result<Self, PatternError> {
-        let error = |glob| PatternError {
+        let err = |glob| PatternError {
             key: key.to_owned(),
             pattern: raw.to_owned(),
             glob,
@@ -169,7 +162,7 @@ impl Pattern {
             || raw.contains(['\\', ':', '\0'])
             || raw.split('/').any(|part| part == "..")
         {
-            return Err(error(None));
+            return Err(err(None));
         }
 
         let parts: Vec<_> = raw
@@ -185,18 +178,18 @@ impl Pattern {
             return Ok(Self::Literal(prefix));
         }
 
-        let pattern = parts.join("/");
-        let matcher = GlobBuilder::new(&pattern)
+        let pat = parts.join("/");
+        let matcher = GlobBuilder::new(&pat)
             .literal_separator(true)
             .backslash_escape(false)
             .build()
-            .map_err(|cause| error(Some(cause)))?
+            .map_err(|cause| err(Some(cause)))?
             .compile_matcher();
-        let depth = if pattern.contains("**") {
+        let depth = if pat.contains("**") {
             usize::MAX
         } else {
             // A character class can match a path separator.
-            parts.len() + pattern.matches('[').count()
+            parts.len() + pat.matches('[').count()
         };
         Ok(Self::Glob {
             matcher: Box::new(matcher),
@@ -207,14 +200,14 @@ impl Pattern {
 
     fn contains(&self, path: &Path) -> bool {
         match self {
-            Self::Literal(literal) => path.starts_with(literal),
-            Self::Glob { matcher, .. } => path.ancestors().any(|path| matcher.is_match(path)),
+            Self::Literal(lit) => path.starts_with(lit),
+            Self::Glob { matcher, .. } => path.ancestors().any(|p| matcher.is_match(p)),
         }
     }
 
     fn could_match_below(&self, path: &Path) -> bool {
         match self {
-            Self::Literal(literal) => literal.starts_with(path) || path.starts_with(literal),
+            Self::Literal(lit) => lit.starts_with(path) || path.starts_with(lit),
             Self::Glob { prefix, depth, .. } => {
                 let shares_prefix = prefix.starts_with(path) || path.starts_with(prefix);
                 (shares_prefix && path.components().count() < *depth) || self.contains(path)

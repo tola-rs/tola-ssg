@@ -22,15 +22,14 @@ enum PresenceNode {
 
 impl ConfigPresence {
     pub fn from_toml(content: &str) -> Result<Self, toml::de::Error> {
-        let value: toml::Value = toml::from_str(content)?;
-        Ok(Self::from_value(&value))
+        let val: toml::Value = toml::from_str(content)?;
+        Ok(Self::from_value(&val))
     }
 
-    /// Build presence from a parsed TOML value in linear time and space.
-    pub fn from_value(value: &toml::Value) -> Self {
+    pub fn from_value(val: &toml::Value) -> Self {
         Self {
-            root: match PresenceNode::from_value(value) {
-                PresenceNode::Table(table) if table.is_empty() => None,
+            root: match PresenceNode::from_value(val) {
+                PresenceNode::Table(tbl) if tbl.is_empty() => None,
                 PresenceNode::Array(items) if items.is_empty() => None,
                 PresenceNode::Scalar => None,
                 root => Some(Arc::new(root)),
@@ -38,21 +37,17 @@ impl ConfigPresence {
         }
     }
 
-    /// Check whether a field or section path was explicitly present.
     #[inline]
     pub fn contains(&self, path: &str) -> bool {
         self.contains_scoped(path, &[])
     }
 
-    /// Check a field in one array-table element. Unlike
-    /// `contains("site.seo.feeds.url")`, this cannot match another feed's URL.
     #[inline]
-    pub fn contains_indexed(&self, array_path: &str, index: usize, field: &str) -> bool {
+    pub fn contains_indexed(&self, array_path: &str, idx: usize, field: &str) -> bool {
         if array_path.is_empty() || field.is_empty() {
             return false;
         }
-        let path = format!("{array_path}.{index}.{field}");
-        self.contains(&path)
+        self.contains(&format!("{array_path}.{idx}.{field}"))
     }
 
     #[inline]
@@ -70,12 +65,11 @@ impl ConfigPresence {
 }
 
 impl PresenceNode {
-    fn from_value(value: &toml::Value) -> Self {
-        match value {
-            toml::Value::Table(table) => Self::Table(
-                table
-                    .iter()
-                    .map(|(key, value)| (key.clone(), Self::from_value(value)))
+    fn from_value(val: &toml::Value) -> Self {
+        match val {
+            toml::Value::Table(tbl) => Self::Table(
+                tbl.iter()
+                    .map(|(k, v)| (k.clone(), Self::from_value(v)))
                     .collect(),
             ),
             toml::Value::Array(items) => Self::Array(
@@ -83,73 +77,71 @@ impl PresenceNode {
                     .iter()
                     .enumerate()
                     .filter(|(_, item)| matches!(item, toml::Value::Table(_)))
-                    .map(|(index, item)| (index, Self::from_value(item)))
+                    .map(|(idx, item)| (idx, Self::from_value(item)))
                     .collect(),
             ),
             _ => Self::Scalar,
         }
     }
 
-    fn contains(&self, remaining: Option<&str>, full_path: &str, scopes: &[(&str, usize)]) -> bool {
+    fn contains(&self, rem: Option<&str>, full_path: &str, scopes: &[(&str, usize)]) -> bool {
         if let Self::Array(items) = self {
-            // Scope paths are canonical and unindexed. Select the scoped array element
-            // before checking its section or fields.
-            let array_path_end = remaining.map_or(full_path.len(), |remaining| {
-                (full_path.len() - remaining.len()).saturating_sub(1)
+            // Scope paths are unindexed; select the active element before descending.
+            let array_end = rem.map_or(full_path.len(), |r| {
+                (full_path.len() - r.len()).saturating_sub(1)
             });
-            if let Some((_, index)) = scopes
+            if let Some((_, idx)) = scopes
                 .iter()
-                .find(|(path, _)| *path == &full_path[..array_path_end])
+                .find(|(path, _)| *path == &full_path[..array_end])
             {
                 return items
-                    .get(index)
-                    .is_some_and(|item| item.contains(remaining, full_path, scopes));
+                    .get(idx)
+                    .is_some_and(|item| item.contains(rem, full_path, scopes));
             }
         }
-        let Some(remaining) = remaining else {
+        let Some(rem) = rem else {
             return true;
         };
         match self {
-            Self::Table(table) => table_key_candidates(remaining).any(|key| {
-                table.get(key).is_some_and(|child| {
-                    let rest = remaining.get(key.len() + 1..);
+            Self::Table(tbl) => table_key_candidates(rem).any(|k| {
+                tbl.get(k).is_some_and(|child| {
+                    let rest = rem.get(k.len() + 1..);
                     child.contains(rest, full_path, scopes)
                 })
             }),
             Self::Array(items) => {
-                split_array_index(remaining).is_some_and(|(index, rest)| {
+                split_array_index(rem).is_some_and(|(idx, rest)| {
                     items
-                        .get(&index)
+                        .get(&idx)
                         .is_some_and(|item| item.contains(rest, full_path, scopes))
                 }) || items
                     .values()
-                    .any(|item| item.contains(Some(remaining), full_path, scopes))
+                    .any(|item| item.contains(Some(rem), full_path, scopes))
             }
             Self::Scalar => false,
         }
     }
 }
 
-/// Try complete TOML keys, including keys containing literal dots.
 fn table_key_candidates(path: &str) -> impl Iterator<Item = &str> {
     path.match_indices('.')
-        .map(|(offset, _)| offset)
+        .map(|(off, _)| off)
         .chain(std::iter::once(path.len()))
         .map(move |end| &path[..end])
 }
 
 /// Only canonical decimal segments address an array element.
 fn split_array_index(path: &str) -> Option<(usize, Option<&str>)> {
-    let (segment, rest) = path
+    let (seg, rest) = path
         .split_once('.')
-        .map_or((path, None), |(segment, rest)| (segment, Some(rest)));
-    if segment.is_empty()
-        || (segment != "0" && segment.starts_with('0'))
-        || !segment.bytes().all(|byte| byte.is_ascii_digit())
+        .map_or((path, None), |(s, r)| (s, Some(r)));
+    if seg.is_empty()
+        || (seg != "0" && seg.starts_with('0'))
+        || !seg.bytes().all(|b| b.is_ascii_digit())
     {
         return None;
     }
-    segment.parse().ok().map(|index| (index, rest))
+    seg.parse().ok().map(|idx| (idx, rest))
 }
 
 #[cfg(test)]
@@ -157,7 +149,7 @@ mod tests {
     use super::ConfigPresence;
 
     #[test]
-    fn indexed_paths_select_one_array_element() {
+    fn indexed_array_paths() {
         let raw = r#"
 [[site.seo.feeds]]
 format = "rss"
@@ -167,53 +159,54 @@ format = "atom"
 url = "/atom.xml"
 "#;
 
-        let presence = ConfigPresence::from_toml(raw).unwrap();
+        let p = ConfigPresence::from_toml(raw).unwrap();
 
-        assert!(presence.contains("site.seo.feeds"));
-        assert!(presence.contains("site.seo.feeds.format"));
-        assert!(presence.contains("site.seo.feeds.url"));
-        assert!(presence.contains("site.seo.feeds.0.format"));
-        assert!(!presence.contains("site.seo.feeds.0.url"));
-        assert!(presence.contains("site.seo.feeds.1.format"));
-        assert!(presence.contains("site.seo.feeds.1.url"));
-        assert!(presence.contains_indexed("site.seo.feeds", 1, "url"));
-        assert!(!presence.contains_indexed("site.seo.feeds", 0, "url"));
+        assert!(p.contains("site.seo.feeds"));
+        assert!(p.contains("site.seo.feeds.format"));
+        assert!(p.contains("site.seo.feeds.url"));
+        assert!(p.contains("site.seo.feeds.0.format"));
+        assert!(!p.contains("site.seo.feeds.0.url"));
+        assert!(p.contains("site.seo.feeds.1.format"));
+        assert!(p.contains("site.seo.feeds.1.url"));
+        assert!(p.contains_indexed("site.seo.feeds", 1, "url"));
+        assert!(!p.contains_indexed("site.seo.feeds", 0, "url"));
     }
 
     #[test]
-    fn empty_roots_have_no_presence() {
-        for value in [
+    fn empty_roots() {
+        for val in [
             toml::Value::String(String::new()),
             toml::Value::Table(Default::default()),
             toml::Value::Array(Vec::new()),
             toml::Value::Array(vec![toml::Value::Integer(0)]),
         ] {
-            let presence = ConfigPresence::from_value(&value);
-            assert!(presence.is_empty());
-            assert!(!presence.contains("0"));
-            assert!(!presence.contains("field"));
+            let p = ConfigPresence::from_value(&val);
+            assert!(p.is_empty());
+            assert!(!p.contains("0"));
+            assert!(!p.contains("field"));
         }
 
-        let presence = ConfigPresence::from_value(&toml::Value::Array(vec![toml::Value::Table(
+        let p = ConfigPresence::from_value(&toml::Value::Array(vec![toml::Value::Table(
             Default::default(),
         )]));
-        assert!(!presence.is_empty());
-        assert!(presence.contains("0"));
-        assert!(!presence.contains("0.field"));
+        assert!(!p.is_empty());
+        assert!(p.contains("0"));
+        assert!(!p.contains("0.field"));
     }
+
     #[test]
-    fn literal_table_keys_stay_addressable() {
-        let presence = ConfigPresence::from_toml(
+    fn literal_table_keys() {
+        let p = ConfigPresence::from_toml(
             "\"literal.dot\" = { value = true }\nempty = []\nscalars = [1, 2]\nmixed = [0, { field = true }]\n",
         )
         .unwrap();
-        assert!(presence.contains("literal.dot.value"));
-        assert!(presence.contains("empty"));
-        assert!(!presence.contains("scalars.0"));
-        assert!(!presence.contains_indexed("mixed", 0, "field"));
-        assert!(presence.contains_indexed("mixed", 1, "field"));
-        assert!(!presence.contains("mixed.01.field"));
-        assert!(!presence.contains("mixed.1."));
-        assert!(!presence.contains("literal.dot.value."));
+        assert!(p.contains("literal.dot.value"));
+        assert!(p.contains("empty"));
+        assert!(!p.contains("scalars.0"));
+        assert!(!p.contains_indexed("mixed", 0, "field"));
+        assert!(p.contains_indexed("mixed", 1, "field"));
+        assert!(!p.contains("mixed.01.field"));
+        assert!(!p.contains("mixed.1."));
+        assert!(!p.contains("literal.dot.value."));
     }
 }

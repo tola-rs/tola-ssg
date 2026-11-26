@@ -37,7 +37,7 @@ pub(in crate::cli) fn run(
     let _guard = tola_build::build::SiteBuildLock::acquire(&config, &token, || {
         let _ = output.waiting_for_build();
     })?;
-    let site_root = config.get_root().to_path_buf();
+    let site_root = config.root().to_path_buf();
     let site_root = site_root.as_path();
     let vendor = config.vendor().path.clone();
     let vendor = vendor.as_deref();
@@ -389,17 +389,14 @@ fn module_change(before: Option<&LockedModule>, after: &LockedModule) -> String 
                 ));
             }
             if subdir != new_subdir {
-                let old = if subdir.as_os_str().is_empty() {
-                    ".".into()
-                } else {
-                    subdir.display().to_string()
+                let shown = |p: &std::path::Path| {
+                    if p.as_os_str().is_empty() {
+                        ".".into()
+                    } else {
+                        p.display().to_string()
+                    }
                 };
-                let new = if new_subdir.as_os_str().is_empty() {
-                    ".".into()
-                } else {
-                    new_subdir.display().to_string()
-                };
-                changes.push(format!("subdir: {old} → {new}"));
+                changes.push(format!("subdir: {} → {}", shown(subdir), shown(new_subdir)));
             }
             if changes.is_empty() && tree_sha256 != new_tree {
                 changes.push(format!(
@@ -475,7 +472,7 @@ mod tests {
     use tola_module::declaration::GitSource;
 
     #[test]
-    fn fixed_revision_updates_only_when_its_declaration_changes() {
+    fn pinned_git_updates_on_change() {
         let commit = "a".repeat(40);
         let mut git = GitSource {
             url: "https://example.com/theme.git".into(),

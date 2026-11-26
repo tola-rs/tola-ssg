@@ -13,7 +13,7 @@ use self::output::{
 use crate::cancellation::Cancellation;
 use crate::recipe::PixelRecipe;
 use crate::resample::plane::{
-    AlphaRepresentation, CoveredPlane, PreparedRows, SourcePlane, premultiply_row,
+    AlphaRepresentation, CoveredPlane, SampleRows, SourcePlane, premultiply_row,
 };
 use crate::resample::reduce::{ReducedBlock, box_averaged, covered_box_averaged};
 use crate::resample::weights::{AxisWeights, check_coverage_bounds};
@@ -26,126 +26,114 @@ mod output;
 
 pub(super) fn convolved_pixels(
     plane: &SourcePlane<'_>,
-    pixels: PixelRecipe,
-    cancellation: &dyn Cancellation,
+    px: PixelRecipe,
+    cancel: &dyn Cancellation,
 ) -> ImageResult<Vec<u8>> {
-    let block = ReducedBlock::of(
-        (plane.width(), plane.height()),
-        (pixels.width(), pixels.height()),
-    );
+    let block = ReducedBlock::of((plane.width(), plane.height()), (px.width(), px.height()));
     if let Some(block) = block {
         if plane.alpha() == AlphaRepresentation::Opaque {
-            let reduced = box_averaged(plane, block, cancellation)?;
-            convolve_opaque(&reduced, pixels, cancellation)
+            let reduced = box_averaged(plane, block, cancel)?;
+            convolve_opaque(&reduced, px, cancel)
         } else {
-            let reduced = covered_box_averaged(plane, block, cancellation)?;
-            convolve_covered(&reduced, pixels, cancellation)
+            let reduced = covered_box_averaged(plane, block, cancel)?;
+            convolve_covered(&reduced, px, cancel)
         }
     } else {
-        convolved_reduced(plane, pixels, cancellation)
+        convolved_reduced(plane, px, cancel)
     }
 }
 
 struct AxisPasses {
-    horizontal: AxisWeights,
-    vertical: AxisWeights,
-    horizontal_first: bool,
+    horiz: AxisWeights,
+    vert: AxisWeights,
+    horiz_first: bool,
 }
 
 impl AxisPasses {
-    fn new(
-        width: u32,
-        height: u32,
-        pixels: PixelRecipe,
-        cancellation: &dyn Cancellation,
-    ) -> ImageResult<Self> {
+    fn new(w: u32, h: u32, px: PixelRecipe, cancel: &dyn Cancellation) -> ImageResult<Self> {
         Ok(Self {
-            horizontal: AxisWeights::new(width, pixels.width(), pixels.filter, cancellation)?,
-            vertical: AxisWeights::new(height, pixels.height(), pixels.filter, cancellation)?,
-            horizontal_first: horizontal_first(width, height, pixels),
+            horiz: AxisWeights::new(w, px.width(), px.filter, cancel)?,
+            vert: AxisWeights::new(h, px.height(), px.filter, cancel)?,
+            horiz_first: horizontal_first(w, h, px),
         })
     }
 }
 
 pub(super) fn convolved_reduced(
     plane: &SourcePlane<'_>,
-    pixels: PixelRecipe,
-    cancellation: &dyn Cancellation,
+    px: PixelRecipe,
+    cancel: &dyn Cancellation,
 ) -> ImageResult<Vec<u8>> {
     if plane.alpha() == AlphaRepresentation::Opaque {
-        convolve_opaque(plane, pixels, cancellation)
+        convolve_opaque(plane, px, cancel)
     } else {
-        convolve_covered(&CoveredPlane::Straight(plane), pixels, cancellation)
+        convolve_covered(&CoveredPlane::Straight(plane), px, cancel)
     }
 }
 
-fn horizontal_first(width: u32, height: u32, pixels: PixelRecipe) -> bool {
-    u64::from(pixels.width()) * u64::from(height) <= u64::from(width) * u64::from(pixels.height())
+fn horizontal_first(w: u32, h: u32, px: PixelRecipe) -> bool {
+    u64::from(px.width()) * u64::from(h) <= u64::from(w) * u64::from(px.height())
 }
 
 /// Target size of a band before adding the tap halo. A band writes at least one output row.
 const BAND_SOURCE_ROWS: u32 = 64;
 const BAND_BYTES: usize = 2 * 1024 * 1024;
 
-fn band_height(width: u32, input_height: u32, output_height: u32, sample_bytes: usize) -> u32 {
-    let row_bytes = work_bytes(width, 1, sample_bytes);
-    let source_rows = (BAND_BYTES / row_bytes).min(BAND_SOURCE_ROWS as usize) as u32;
-    (source_rows / input_height.div_ceil(output_height)).clamp(1, output_height)
+fn band_height(w: u32, src_h: u32, dst_h: u32, sample_bytes: usize) -> u32 {
+    let row_bytes = work_bytes(w, 1, sample_bytes);
+    let src_rows = (BAND_BYTES / row_bytes).min(BAND_SOURCE_ROWS as usize) as u32;
+    (src_rows / src_h.div_ceil(dst_h)).clamp(1, dst_h)
 }
 
-fn work_bytes(width: u32, height: u32, sample_bytes: usize) -> usize {
-    (width as usize)
-        .saturating_mul(height as usize)
+fn work_bytes(w: u32, h: u32, sample_bytes: usize) -> usize {
+    (w as usize)
+        .saturating_mul(h as usize)
         .saturating_mul(sample_bytes)
 }
 
 /// Intermediate samples and prepared alpha rows kept by the active convolution workers.
-pub(super) fn scratch_bytes(width: u32, height: u32, pixels: PixelRecipe, alpha: bool) -> u64 {
+pub(super) fn scratch_bytes(w: u32, h: u32, px: PixelRecipe, alpha: bool) -> u64 {
     let sample_bytes = if alpha { 16 } else { 8 };
-    let output_work = work_bytes(pixels.width(), pixels.height(), 4);
-    let step = u64::from(height.div_ceil(pixels.height()));
-    let taps = u64::from(pixels.filter.tap_count_bound(height, pixels.height()));
-    let bytes = |width, rows, bytes| (u64::from(width) * u64::from(rows)).saturating_mul(bytes);
-    if horizontal_first(width, height, pixels) {
-        let band = band_height(pixels.width(), height, pixels.height(), sample_bytes);
-        let tasks = pixels.height().div_ceil(band) as usize;
-        let work = work_bytes(pixels.width(), height, sample_bytes);
-        let workers = row_workers(work.max(output_work)).min(tasks);
+    let out_work = work_bytes(px.width(), px.height(), 4);
+    let step = u64::from(h.div_ceil(px.height()));
+    let taps = u64::from(px.filter.tap_count_bound(h, px.height()));
+    let bytes = |w, rows, b| (u64::from(w) * u64::from(rows)).saturating_mul(b);
+    if horizontal_first(w, h, px) {
+        let band = band_height(px.width(), h, px.height(), sample_bytes);
+        let tasks = px.height().div_ceil(band) as usize;
+        let work = work_bytes(px.width(), h, sample_bytes);
+        let workers = row_workers(work.max(out_work)).min(tasks);
         let rows = ((u64::from(band) - 1) * step + taps + 2 * (WINDOW_ROWS as u64 - 1))
-            .min(u64::from(height)) as u32;
-        let prepared = if alpha {
-            bytes(width, WINDOW_ROWS as u32, 8)
+            .min(u64::from(h)) as u32;
+        let prep = if alpha {
+            bytes(w, WINDOW_ROWS as u32, 8)
         } else {
             0
         };
-        bytes(pixels.width(), rows, sample_bytes as u64)
-            .saturating_add(prepared)
+        bytes(px.width(), rows, sample_bytes as u64)
+            .saturating_add(prep)
             .saturating_mul(workers as u64)
     } else {
-        let work = work_bytes(width, pixels.height(), sample_bytes);
-        let workers = row_workers(work.max(output_work)).min(pixels.height() as usize);
-        let prepared = if alpha {
-            bytes(width, taps.min(u64::from(height)) as u32, 8)
+        let work = work_bytes(w, px.height(), sample_bytes);
+        let workers = row_workers(work.max(out_work)).min(px.height() as usize);
+        let prep = if alpha {
+            bytes(w, taps.min(u64::from(h)) as u32, 8)
         } else {
             0
         };
-        bytes(width, 1, sample_bytes as u64)
-            .saturating_add(prepared)
+        bytes(w, 1, sample_bytes as u64)
+            .saturating_add(prep)
             .saturating_mul(workers as u64)
     }
 }
 
-fn resize_samples<T: Copy + Default>(
-    samples: &mut Vec<T>,
-    width: u32,
-    height: u32,
-) -> ImageResult<()> {
+fn resize_samples<T: Copy + Default>(samples: &mut Vec<T>, w: u32, h: u32) -> ImageResult<()> {
     let bytes = size_of::<T>();
-    let len = pixel_bytes(width, height, bytes)? / bytes;
+    let len = pixel_bytes(w, h, bytes)? / bytes;
     if len > samples.len() {
         samples
             .try_reserve_exact(len - samples.len())
-            .map_err(|error| ImageError::codec(HOLD_IN_MEMORY, error))?;
+            .map_err(|err| ImageError::codec(HOLD_IN_MEMORY, err))?;
     }
     samples.resize(len, T::default());
     Ok(())
@@ -153,26 +141,26 @@ fn resize_samples<T: Copy + Default>(
 
 fn convolve_opaque(
     plane: &SourcePlane<'_>,
-    pixels: PixelRecipe,
-    cancellation: &dyn Cancellation,
+    px: PixelRecipe,
+    cancel: &dyn Cancellation,
 ) -> ImageResult<Vec<u8>> {
-    let passes = AxisPasses::new(plane.width(), plane.height(), pixels, cancellation)?;
+    let passes = AxisPasses::new(plane.width(), plane.height(), px, cancel)?;
     let level = Level::new();
-    let mut output = rgba_buffer(pixels.width(), pixels.height())?;
-    if passes.horizontal_first {
+    let mut out = rgba_buffer(px.width(), px.height())?;
+    if passes.horiz_first {
         horizontal_bands(
-            &mut output,
-            pixels,
+            &mut out,
+            px,
             plane.height(),
-            &passes.vertical,
-            cancellation,
+            &passes.vert,
+            cancel,
             |_: &mut (), first, rows| {
                 horizontal_opaque(
                     plane,
-                    &passes.horizontal,
+                    &passes.horiz,
                     first,
                     rows,
-                    pixels.width() as usize,
+                    px.width() as usize,
                     level,
                 );
                 Ok(())
@@ -180,164 +168,155 @@ fn convolve_opaque(
             |taps, weights, row| write_opaque_vertical(taps, weights, row, level),
         )?;
     } else {
-        let work = work_bytes(plane.width(), pixels.height(), size_of::<[i16; 4]>());
+        let work = work_bytes(plane.width(), px.height(), size_of::<[i16; 4]>());
         for_each_row_with_work(
-            &mut output,
-            pixels.width() as usize * 4,
+            &mut out,
+            px.width() as usize * 4,
             work,
             Vec::new,
             |samples, y, row| {
-                cancellation.ensure_active()?;
+                cancel.ensure_active()?;
                 if samples.is_empty() {
                     resize_samples(samples, plane.width(), 1)?;
                 }
-                let (first, weights) = passes.vertical.at(y as u32);
-                let tap = |offset| plane.row(first + offset as u32);
-                for (index, destination) in samples.chunks_mut(ACCUMULATE_PIXELS).enumerate() {
+                let (first, weights) = passes.vert.at(y as u32);
+                let tap = |off| plane.row(first + off as u32);
+                for (idx, dst) in samples.chunks_mut(ACCUMULATE_PIXELS).enumerate() {
                     let mut totals = [[0i32; 4]; ACCUMULATE_PIXELS];
                     accumulate_tile(
-                        &mut totals[..destination.len()],
+                        &mut totals[..dst.len()],
                         tap,
                         weights,
-                        index * ACCUMULATE_PIXELS,
+                        idx * ACCUMULATE_PIXELS,
                         level,
                     );
-                    for (destination, total) in destination.iter_mut().zip(totals) {
-                        *destination = finish_tile(total);
+                    for (dst, total) in dst.iter_mut().zip(totals) {
+                        *dst = finish_tile(total);
                     }
                 }
-                write_opaque_horizontal(samples, &passes.horizontal, row);
+                write_opaque_horizontal(samples, &passes.horiz, row);
                 Ok(())
             },
         )?;
     }
-    Ok(output)
+    Ok(out)
 }
 
 fn convolve_covered(
     plane: &CoveredPlane<'_>,
-    pixels: PixelRecipe,
-    cancellation: &dyn Cancellation,
+    px: PixelRecipe,
+    cancel: &dyn Cancellation,
 ) -> ImageResult<Vec<u8>> {
-    let passes = AxisPasses::new(plane.width(), plane.height(), pixels, cancellation)?;
+    let passes = AxisPasses::new(plane.width(), plane.height(), px, cancel)?;
     let level = Level::new();
-    let (first, second) = if passes.horizontal_first {
-        (&passes.horizontal, &passes.vertical)
+    let (first, second) = if passes.horiz_first {
+        (&passes.horiz, &passes.vert)
     } else {
-        (&passes.vertical, &passes.horizontal)
+        (&passes.vert, &passes.horiz)
     };
     check_coverage_bounds(first, second)?;
-    let mut output = rgba_buffer(pixels.width(), pixels.height())?;
-    if passes.horizontal_first {
+    let mut out = rgba_buffer(px.width(), px.height())?;
+    if passes.horiz_first {
         horizontal_bands(
-            &mut output,
-            pixels,
+            &mut out,
+            px,
             plane.height(),
-            &passes.vertical,
-            cancellation,
-            |prepared, first, rows| {
+            &passes.vert,
+            cancel,
+            |prep, first, rows| {
                 horizontal_covered(
                     plane,
-                    &passes.horizontal,
+                    &passes.horiz,
                     first,
                     rows,
-                    pixels.width() as usize,
-                    prepared,
+                    px.width() as usize,
+                    prep,
                     level,
                 )
             },
             |taps, weights, row| write_covered_vertical(taps, weights, row, level),
         )?;
     } else {
-        let work = work_bytes(plane.width(), pixels.height(), size_of::<[i32; 4]>());
+        let work = work_bytes(plane.width(), px.height(), size_of::<[i32; 4]>());
         for_each_row_with_work(
-            &mut output,
-            pixels.width() as usize * 4,
+            &mut out,
+            px.width() as usize * 4,
             work,
             || {
                 (
-                    PreparedRows::new(plane.width(), passes.vertical.max_taps()),
+                    SampleRows::new(plane.width(), passes.vert.max_taps()),
                     Vec::new(),
                 )
             },
-            |(prepared, samples), y, row| {
-                cancellation.ensure_active()?;
+            |(prep, samples), y, row| {
+                cancel.ensure_active()?;
                 if samples.is_empty() {
                     resize_samples(samples, plane.width(), 1)?;
                 }
-                let (first, weights) = passes.vertical.at(y as u32);
-                if let CoveredPlane::Straight(source) = plane {
-                    prepared.prepare(source, first as usize, weights.len(), cancellation)?;
+                let (first, weights) = passes.vert.at(y as u32);
+                if let CoveredPlane::Straight(src) = plane {
+                    prep.prepare(src, first as usize, weights.len(), cancel)?;
                 }
-                let tap = |offset| {
+                let tap = |off| {
                     plane
-                        .row(first + offset as u32)
-                        .unwrap_or_else(|| prepared.row(offset))
+                        .row(first + off as u32)
+                        .unwrap_or_else(|| prep.row(off))
                 };
                 write_covered_vertical_row(samples, tap, weights, level);
-                write_covered_horizontal(samples, &passes.horizontal, row, level);
+                write_covered_horizontal(samples, &passes.horiz, row, level);
                 Ok(())
             },
         )?;
     }
-    Ok(output)
+    Ok(out)
 }
 
-/// Each task walks consecutive output bands, reusing the horizontal samples that still lie in
-/// the next band's vertical tap window. Four-row alignment preserves the first pass's SIMD groups.
+/// Walk consecutive output bands, reusing horizontal samples still inside the next vertical window.
+/// Four-row alignment preserves the first pass's SIMD groups.
 fn horizontal_bands<T: Copy + Default + Send, S: Default + Send>(
-    output: &mut [u8],
-    pixels: PixelRecipe,
-    input_height: u32,
-    vertical: &AxisWeights,
-    cancellation: &dyn Cancellation,
+    out: &mut [u8],
+    px: PixelRecipe,
+    src_h: u32,
+    vert: &AxisWeights,
+    cancel: &dyn Cancellation,
     filter: impl Fn(&mut S, u32, &mut [T]) -> ImageResult<()> + Sync + Send,
     write: impl Fn(&[T], &[i16], &mut [u8]) + Sync + Send,
 ) -> ImageResult<()> {
-    let band = band_height(
-        pixels.width(),
-        input_height,
-        pixels.height(),
-        size_of::<T>(),
-    ) as usize;
-    let width = pixels.width() as usize;
-    let stride = width * 4;
-    let work = work_bytes(pixels.width(), input_height, size_of::<T>());
+    let band = band_height(px.width(), src_h, px.height(), size_of::<T>()) as usize;
+    let w = px.width() as usize;
+    let stride = w * 4;
+    let work = work_bytes(px.width(), src_h, size_of::<T>());
     for_each_row_with_work(
-        output,
+        out,
         band * stride,
         work,
         || (0usize, Vec::<T>::new(), S::default()),
-        |(previous, samples, state), index, rows| {
-            let y = index * band;
-            let (first, _) = vertical.at(y as u32);
-            let (last, weights) = vertical.at((y + rows.len() / stride - 1) as u32);
+        |(prev, samples, state), idx, rows| {
+            let y = idx * band;
+            let (first, _) = vert.at(y as u32);
+            let (last, weights) = vert.at((y + rows.len() / stride - 1) as u32);
             let first = first as usize / WINDOW_ROWS * WINDOW_ROWS;
             let end = (last as usize + weights.len())
                 .next_multiple_of(WINDOW_ROWS)
-                .min(input_height as usize);
+                .min(src_h as usize);
 
-            let offset = (first - *previous) * width;
-            // Both ends of the tap window advance with the output rows.
-            let overlap = samples.len().saturating_sub(offset);
-            if offset != 0 && overlap != 0 {
-                samples.copy_within(offset..offset + overlap, 0);
+            let off = (first - *prev) * w;
+            let overlap = samples.len().saturating_sub(off);
+            if off != 0 && overlap != 0 {
+                samples.copy_within(off..off + overlap, 0);
             }
             samples.truncate(overlap);
-            resize_samples(samples, pixels.width(), (end - first) as u32)?;
-            *previous = first;
-            for (group, destination) in samples[overlap..]
-                .chunks_mut(width * WINDOW_ROWS)
-                .enumerate()
-            {
-                cancellation.ensure_active()?;
-                let source = first + overlap / width + group * WINDOW_ROWS;
-                filter(state, source as u32, destination)?;
+            resize_samples(samples, px.width(), (end - first) as u32)?;
+            *prev = first;
+            for (group, dst) in samples[overlap..].chunks_mut(w * WINDOW_ROWS).enumerate() {
+                cancel.ensure_active()?;
+                let src_y = first + overlap / w + group * WINDOW_ROWS;
+                filter(state, src_y as u32, dst)?;
             }
-            for (offset, row) in rows.chunks_exact_mut(stride).enumerate() {
-                cancellation.ensure_active()?;
-                let (start, weights) = vertical.at((y + offset) as u32);
-                let taps = &samples[(start as usize - first) * width..][..weights.len() * width];
+            for (off, row) in rows.chunks_exact_mut(stride).enumerate() {
+                cancel.ensure_active()?;
+                let (start, weights) = vert.at((y + off) as u32);
+                let taps = &samples[(start as usize - first) * w..][..weights.len() * w];
                 write(taps, weights, row);
             }
             Ok(())
@@ -347,32 +326,31 @@ fn horizontal_bands<T: Copy + Default + Send, S: Default + Send>(
 
 fn horizontal_opaque(
     plane: &SourcePlane<'_>,
-    horizontal: &AxisWeights,
+    horiz: &AxisWeights,
     first: u32,
     rows: &mut [[i16; 4]],
-    width: usize,
+    w: usize,
     level: Level,
 ) {
-    if rows.len() == width * WINDOW_ROWS {
-        let sources: [&[u8]; WINDOW_ROWS] =
-            std::array::from_fn(|row| plane.row(first + row as u32));
-        for x in 0..width {
-            let (start, weights) = horizontal.at(x as u32);
-            let windows = sources.map(|source| &source[start as usize * 4..][..weights.len() * 4]);
-            for (row, sample) in dot_window_four(windows, weights, level)
+    if rows.len() == w * WINDOW_ROWS {
+        let srcs: [&[u8]; WINDOW_ROWS] = std::array::from_fn(|r| plane.row(first + r as u32));
+        for x in 0..w {
+            let (start, weights) = horiz.at(x as u32);
+            let windows = srcs.map(|src| &src[start as usize * 4..][..weights.len() * 4]);
+            for (r, sample) in dot_window_four(windows, weights, level)
                 .into_iter()
                 .enumerate()
             {
-                rows[row * width + x] = sample;
+                rows[r * w + x] = sample;
             }
         }
     } else {
-        for (offset, row) in rows.chunks_exact_mut(width).enumerate() {
-            let source = plane.row(first + offset as u32);
+        for (off, row) in rows.chunks_exact_mut(w).enumerate() {
+            let src = plane.row(first + off as u32);
             for (x, sample) in row.iter_mut().enumerate() {
-                let (start, weights) = horizontal.at(x as u32);
+                let (start, weights) = horiz.at(x as u32);
                 *sample = dot_window(
-                    &source[start as usize * 4..][..weights.len() * 4],
+                    &src[start as usize * 4..][..weights.len() * 4],
                     weights,
                     level,
                 );
@@ -383,30 +361,30 @@ fn horizontal_opaque(
 
 fn horizontal_covered(
     plane: &CoveredPlane<'_>,
-    horizontal: &AxisWeights,
+    horiz: &AxisWeights,
     first: u32,
     rows: &mut [[i32; 4]],
-    width: usize,
-    prepared: &mut Vec<[u16; 4]>,
+    w: usize,
+    prep: &mut Vec<[u16; 4]>,
     level: Level,
 ) -> ImageResult<()> {
-    let count = rows.len() / width;
-    let source_width = plane.width() as usize;
-    if let CoveredPlane::Straight(source) = plane {
-        resize_samples(prepared, plane.width(), count as u32)?;
-        for (offset, row) in prepared.chunks_exact_mut(source_width).enumerate() {
-            premultiply_row(source.row(first + offset as u32), row);
+    let count = rows.len() / w;
+    let src_w = plane.width() as usize;
+    if let CoveredPlane::Straight(src) = plane {
+        resize_samples(prep, plane.width(), count as u32)?;
+        for (off, row) in prep.chunks_exact_mut(src_w).enumerate() {
+            premultiply_row(src.row(first + off as u32), row);
         }
     }
-    let sources: [&[[u16; 4]]; WINDOW_ROWS] = std::array::from_fn(|offset| {
-        if offset >= count {
+    let srcs: [&[[u16; 4]]; WINDOW_ROWS] = std::array::from_fn(|off| {
+        if off >= count {
             &[]
         } else {
             plane
-                .row(first + offset as u32)
-                .unwrap_or_else(|| &prepared[offset * source_width..][..source_width])
+                .row(first + off as u32)
+                .unwrap_or_else(|| &prep[off * src_w..][..src_w])
         }
     });
-    write_covered_horizontal_rows(sources, horizontal, rows, width, level);
+    write_covered_horizontal_rows(srcs, horiz, rows, w, level);
     Ok(())
 }

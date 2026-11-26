@@ -3,18 +3,18 @@
 use std::collections::BTreeSet;
 
 use anyhow::{Result, ensure};
-use tola_module::prepared::HookParticipation;
+use tola_module::bundle::HookParticipation;
 
 use crate::config::ConfigDiagnostics;
 use crate::config::section::build::hooks::{
     AfterPublishHookConfig, BeforeBuildHookConfig, HookStage, OutputCommandConfig,
 };
-use crate::modules::prepared::PreparedSite;
+use crate::modules::site::LoadedSite;
 
 /// Install site and module hook declarations on a prepared configuration.
-pub fn install_hooks(site: &mut PreparedSite, resources: &crate::BuildResources) -> Result<()> {
+pub fn install_hooks(site: &mut LoadedSite, resources: &crate::BuildResources) -> Result<()> {
     let modules = site.prepared().clone();
-    let module_hooks = tola_module::hooks::hook_stages(site.get_root(), &modules.modules)?;
+    let module_hooks = tola_module::hooks::hook_stages(site.root(), &modules.modules)?;
     let config = site.config_mut();
     // A rebuild can start from the last published configuration, which includes module hooks.
     let mut project_hooks = config.hooks.clone();
@@ -102,7 +102,7 @@ pub fn install_hooks(site: &mut PreparedSite, resources: &crate::BuildResources)
     let mut diagnostics = ConfigDiagnostics::new();
     crate::config::loading::validate_hook_output_boundaries(
         &hooks,
-        config.get_root(),
+        config.root(),
         config.config_paths(),
         &config.build.publish_dir,
         config.vendor.path.as_deref(),
@@ -162,12 +162,8 @@ argv = ["prepare-project"]
         );
         let resources = crate::BuildResources::new();
         let prepare = |config| {
-            crate::modules::prepared::prepare_site(
-                config,
-                resources.input_mode(),
-                &Default::default(),
-            )
-            .unwrap()
+            crate::modules::site::prepare_site(config, resources.input_mode(), &Default::default())
+                .unwrap()
         };
         let mut first = prepare(&config);
         install_hooks(&mut first, &resources).unwrap();

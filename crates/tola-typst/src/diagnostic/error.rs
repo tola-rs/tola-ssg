@@ -136,7 +136,7 @@ impl CompileError {
     }
 
     /// Create a compilation error from diagnostics that are already resolved.
-    pub fn from_resolved(diagnostics: Diagnostics) -> Self {
+    pub fn from_diagnostics(diagnostics: Diagnostics) -> Self {
         Self::Compilation { diagnostics }
     }
 

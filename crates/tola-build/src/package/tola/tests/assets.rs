@@ -1,62 +1,50 @@
 use std::sync::Arc;
 
-use super::IconFiles;
 use tempfile::TempDir;
 
 use crate::package::SiteBindings;
 
+use super::IconFiles;
+
 struct Site {
-    directory: TempDir,
-    config: crate::config::ResolvedSiteConfig,
-    library: tola_packages::library::SiteLibrary,
+    dir: TempDir,
+    cfg: crate::config::SiteConfig,
+    lib: tola_packages::library::SiteLibrary,
 }
 
-/// One site with the given `assets` declarations on disk.
-///
-/// `files` are `(source, url)` declarations; `tree` is an optional
-/// `(source directory, url prefix)` declaration. `settings` is the whole
-/// site configuration, so a caller asks for cache busting with
-/// `[assets] cache-busting = true` there.
 fn site(files: &[(&str, &str)], tree: Option<(&str, &str)>, settings: &str) -> Site {
-    let directory = TempDir::new().unwrap();
-    let mut config = crate::config::tests::load_test_config(directory.path(), settings);
-    let mut declarations = Vec::new();
+    let dir = TempDir::new().unwrap();
+    let mut cfg = crate::config::tests::load_test_config(dir.path(), settings);
+    let mut decls = Vec::new();
     for (name, url) in files {
-        let source = directory.path().join(name);
-        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
-        std::fs::write(&source, format!("/* {name} */")).unwrap();
-        declarations.push(crate::config::section::AssetFileDeclaration::new(
-            &source,
+        let src = dir.path().join(name);
+        std::fs::create_dir_all(src.parent().unwrap()).unwrap();
+        std::fs::write(&src, format!("/* {name} */")).unwrap();
+        decls.push(crate::config::section::AssetFileDeclaration::new(
+            &src,
             crate::config::section::AssetUrl::parse(url).unwrap(),
         ));
     }
-    if let Some((source, prefix)) = tree {
-        let source = directory.path().join(source);
-        std::fs::create_dir_all(&source).unwrap();
-        std::fs::write(source.join("member.js"), "/* member */").unwrap();
-        config.assets.trees = vec![crate::config::section::AssetTreeDeclaration::new(
-            &source,
+    if let Some((src, prefix)) = tree {
+        let src = dir.path().join(src);
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("member.js"), "/* member */").unwrap();
+        cfg.assets.trees = vec![crate::config::section::AssetTreeDeclaration::new(
+            &src,
             crate::config::section::AssetUrlPrefix::parse(prefix).unwrap(),
         )];
     }
-    config.build.publish_dir = directory.path().join("public");
-    config.assets.files = declarations;
-    let library = library_for(&config);
-    Site {
-        directory,
-        config,
-        library,
-    }
+    cfg.build.publish_dir = dir.path().join("public");
+    cfg.assets.files = decls;
+    let lib = library_for(&cfg);
+    Site { dir, cfg, lib }
 }
 
-/// The inventory of one site's configured assets, rendered as a build renders it.
-fn configured_inventory(
-    config: &crate::config::ResolvedSiteConfig,
-) -> crate::asset::ConfiguredAssets {
+fn configured_inventory(cfg: &crate::config::SiteConfig) -> crate::asset::SiteAssets {
     crate::asset::build_configured_assets(
-        config,
-        crate::modules::prepared::AppliedAssets::project_only(config),
-        &crate::resources::source_boundary(config, tola_input::InputScope::Online),
+        cfg,
+        crate::modules::site::AppliedAssets::project_only(cfg),
+        &crate::resources::source_boundary(cfg, tola_input::InputScope::Online),
         &crate::cancellation::BuildCancellation::default(),
         None,
         &[],
@@ -64,150 +52,121 @@ fn configured_inventory(
     .unwrap()
 }
 
-/// Bind one site's configured asset URLs the way a build does: from the
-/// rendered inventory, so the addresses are the ones this build publishes.
-fn library_for(config: &crate::config::ResolvedSiteConfig) -> tola_packages::library::SiteLibrary {
-    let urls = configured_inventory(config).asset_urls(config).unwrap();
-    let bindings = SiteBindings::from_config(config, urls, None);
-    bindings.library(Default::default())
+fn library_for(cfg: &crate::config::SiteConfig) -> tola_packages::library::SiteLibrary {
+    let urls = configured_inventory(cfg).asset_urls(cfg).unwrap();
+    SiteBindings::from_config(cfg, urls, None).library(Default::default())
 }
 
-/// The identity of the published bytes of the one file at `name`.
-fn published_identity(config: &crate::config::ResolvedSiteConfig, name: &str) -> String {
-    let inventory = configured_inventory(config);
-    let (_, bytes) = inventory
+fn published_identity(cfg: &crate::config::SiteConfig, name: &str) -> String {
+    let inv = configured_inventory(cfg);
+    let (_, bytes) = inv
         .entries()
-        .find(|(output, _)| output.output.as_str() == name)
+        .find(|(out, _)| out.output.as_str() == name)
         .unwrap_or_else(|| panic!("{name} is published"));
     tola_typst::ContentDigest::of(bytes).to_hex()
 }
 
-/// Every output path this site's declarations published.
-fn published_names(config: &crate::config::ResolvedSiteConfig) -> Vec<String> {
-    let mut names = configured_inventory(config)
+fn published_names(cfg: &crate::config::SiteConfig) -> Vec<String> {
+    let mut names: Vec<_> = configured_inventory(cfg)
         .entries()
-        .map(|(output, _)| output.output.as_str().to_owned())
-        .collect::<Vec<_>>();
+        .map(|(out, _)| out.output.as_str().to_owned())
+        .collect();
     names.sort();
     names
 }
 
 impl Site {
     fn compile(&self, body: &str) -> Result<tola_typst::BundleCompilation, String> {
-        let main = self.directory.path().join("site.typ");
+        let main = self.dir.path().join("site.typ");
         std::fs::write(
             &main,
             format!("#import \"@tola/address:0.0.0\": asset-url\n{body}"),
         )
         .unwrap();
-        let files = tola_typst::FileResolver::new().with_provider(IconFiles::default());
-        let world = tola_typst::TypstWorld::builder(&main, self.directory.path())
+        let files = tola_typst::FileStore::new().with_provider(IconFiles::default());
+        let world = tola_typst::TypstWorld::builder(&main, self.dir.path())
             .with_files(Arc::new(files))
-            .with_shared_library(self.library.shared())
+            .with_shared_library(self.lib.shared())
             .with_local_cache()
             .no_fonts()
             .build(&tola_typst::BundleCancellation::default())
             .expect("valid test world");
-        tola_typst::compile_bundle_world(&world, &Default::default()).map_err(|error| {
-            error
-                .diagnostics()
+        tola_typst::compile_bundle_world(&world, &Default::default()).map_err(|err| {
+            err.diagnostics()
                 .expect("Typst failure has diagnostics")
                 .errors()
-                .map(|diagnostic| {
-                    // A diagnostic tells the author what failed and what to do about it,
-                    // so the rendered failure has its hints too.
-                    let hints = diagnostic
+                .map(|diag| {
+                    let hints: Vec<_> = diag
                         .hints
                         .iter()
-                        .map(|hint| format!("hint: {}", hint.message))
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    format!("{}\n{hints}", diagnostic.message)
+                        .map(|h| format!("hint: {}", h.message))
+                        .collect();
+                    format!("{}\n{}", diag.message, hints.join("\n"))
                 })
                 .collect::<Vec<_>>()
                 .join("\n")
         })
     }
 
-    /// The value `asset-url(declared)` produced in a real Bundle compilation.
     fn resolve(&self, declared: &str) -> Result<String, String> {
         let compilation = self.compile(&format!(
             "#document(\"index.html\")[#metadata(asset-url(\"{declared}\")) <resolved>]"
         ))?;
         let path = typst::syntax::VirtualPath::new("index.html").unwrap();
-        let value = compilation
+        let val = compilation
             .document(&path)
-            .expect("the test document was compiled")
+            .expect("test document compiled")
             .metadata_unique("resolved")
             .expect("one resolved URL")
-            .expect("the document declares the resolved URL");
-        Ok(value
-            .cast::<typst::foundations::Str>()
-            .expect("asset-url returns a string")
-            .to_string())
+            .expect("document declares resolved URL");
+        Ok(val.cast::<typst::foundations::Str>().unwrap().to_string())
     }
 }
 
 #[test]
 fn cache_busting_names_bytes() {
-    let mut site = site(
+    let mut s = site(
         &[("assets/app.js", "/app.js")],
         Some(("assets", "/assets")),
         "[assets]\ncache-busting = true\n[site]\nbase-path = \"/blog/\"",
     );
-    std::fs::write(
-        site.directory.path().join("assets/app.js"),
-        "window.answer = 42;",
-    )
-    .unwrap();
-    site.library = library_for(&site.config);
-    let first = site.resolve("/app.js").unwrap();
-    let first_identity = published_identity(&site.config, "app.js");
-    assert_eq!(first, format!("/blog/app.js?h={first_identity}"));
-    let member = published_identity(&site.config, "assets/member.js");
+    std::fs::write(s.dir.path().join("assets/app.js"), "window.answer = 42;").unwrap();
+    s.lib = library_for(&s.cfg);
+    let first = s.resolve("/app.js").unwrap();
+    let first_id = published_identity(&s.cfg, "app.js");
+    assert_eq!(first, format!("/blog/app.js?h={first_id}"));
+    let member = published_identity(&s.cfg, "assets/member.js");
     assert_eq!(
-        site.resolve("/assets/member.js").unwrap(),
+        s.resolve("/assets/member.js").unwrap(),
         format!("/blog/assets/member.js?h={member}")
     );
 
-    std::fs::write(
-        site.directory.path().join("assets/app.js"),
-        "window.answer = 43;",
-    )
-    .unwrap();
-    site.library = library_for(&site.config);
-    let changed_identity = published_identity(&site.config, "app.js");
-    assert_ne!(changed_identity, first_identity);
+    std::fs::write(s.dir.path().join("assets/app.js"), "window.answer = 43;").unwrap();
+    s.lib = library_for(&s.cfg);
+    let changed_id = published_identity(&s.cfg, "app.js");
+    assert_ne!(changed_id, first_id);
     assert_eq!(
-        site.resolve("/app.js").unwrap(),
-        format!("/blog/app.js?h={changed_identity}")
+        s.resolve("/app.js").unwrap(),
+        format!("/blog/app.js?h={changed_id}")
     );
     assert_eq!(
-        site.resolve("/assets/member.js").unwrap(),
+        s.resolve("/assets/member.js").unwrap(),
         format!("/blog/assets/member.js?h={member}")
     );
-    assert_eq!(
-        published_names(&site.config),
-        ["app.js", "assets/member.js"]
-    );
+    assert_eq!(published_names(&s.cfg), ["app.js", "assets/member.js"]);
 }
 
 #[test]
-fn undeclared_urls_are_errors() {
-    let site = site(
+fn undeclared_urls_rejected() {
+    let s = site(
         &[("assets/app.js", "/app.js")],
         None,
         "[assets]\ncache-busting = true",
     );
-
-    let error = site.resolve("/missing.js").unwrap_err();
-
-    assert!(error.contains("/missing.js"), "{error}");
-    assert!(error.contains("assets.files"), "{error}");
-    assert!(error.contains("site configuration"), "{error}");
-    assert!(!error.contains("tola.toml"), "{error}");
-    assert!(
-        !error.contains("/app.js"),
-        "an undefined URL must not resolve to another declaration: {error}"
-    );
+    let err = s.resolve("/missing.js").unwrap_err();
+    assert!(err.contains("/missing.js"), "{err}");
+    assert!(err.contains("assets.files"), "{err}");
+    assert!(err.contains("site configuration"), "{err}");
+    assert!(!err.contains("tola.toml"), "{err}");
+    assert!(!err.contains("/app.js"), "{err}");
 }

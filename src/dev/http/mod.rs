@@ -21,24 +21,20 @@ pub(super) use preview::PublicationRequest;
 const MAX_PORT_RETRIES: u16 = 10;
 const MAX_HTTP_CONNECTIONS: usize = 256;
 const HTTP_HEADER_TIMEOUT: Duration = Duration::from_secs(5);
-/// How long a connection with no response in flight is retained before it is recycled.
 const HTTP_IDLE_CONNECTION_LIFETIME: Duration = Duration::from_secs(60);
 
 /// Bind a nonblocking listener, trying consecutive ports when needed.
-///
-/// The warning naming a taken requested port comes back for the caller to report with the
-/// startup's other diagnostics.
 pub(super) fn bind_with_port_fallback(
     interface: std::net::IpAddr,
     base_port: u16,
 ) -> Result<(TcpListener, SocketAddr, Option<Diagnostic>)> {
     for offset in 0..MAX_PORT_RETRIES {
         let port = base_port.saturating_add(offset);
-        let address = SocketAddr::new(interface, port);
-        let Ok((listener, address)) = TcpListener::bind(address).and_then(|listener| {
+        let addr = SocketAddr::new(interface, port);
+        let Ok((listener, addr)) = TcpListener::bind(addr).and_then(|listener| {
             listener.set_nonblocking(true)?;
-            let address = listener.local_addr()?;
-            Ok((listener, address))
+            let addr = listener.local_addr()?;
+            Ok((listener, addr))
         }) else {
             continue;
         };
@@ -48,29 +44,24 @@ pub(super) fn bind_with_port_fallback(
                 Severity::Warning,
                 format!("port `{base_port}` is already in use"),
             )
-            .with_note(format!("serving http://{address} instead"))
+            .with_note(format!("serving http://{addr} instead"))
             .with_help(format!(
                 "Pass `--port {}` to use this port next time",
-                address.port()
+                addr.port()
             ))
         });
-        return Ok((listener, address, fallback));
+        return Ok((listener, addr, fallback));
     }
-    let message = format!("Tola could not start the development server on {interface}");
-    let diagnostic = Diagnostic::new(
-        crate::codes::command::FAILED,
-        Severity::Error,
-        message.clone(),
-    )
-    .with_help("Choose another address or port with `--interface`/`--port`");
-    Err(tola_diagnostic::DiagnosticError::new(message, vec![diagnostic]).into())
+    let msg = format!("Tola could not start the development server on {interface}");
+    let diag = Diagnostic::new(crate::codes::command::FAILED, Severity::Error, msg.clone())
+        .with_help("Choose another address or port with `--interface`/`--port`");
+    Err(tola_diagnostic::DiagnosticError::new(msg, vec![diag]).into())
 }
 
-/// The services the development server owns for its lifetime.
 pub(super) struct HttpServices {
     pub(super) listener: tokio::net::TcpListener,
     pub(super) sites: CurrentSite,
-    pub(super) initial_config: Arc<tola_build::config::ResolvedSiteConfig>,
+    pub(super) initial_config: Arc<tola_build::config::SiteConfig>,
     pub(super) reload_endpoint: Option<crate::dev::reload::transport::ReloadEndpoint>,
     pub(super) publications: Option<tokio::sync::mpsc::Sender<PublicationRequest>>,
     pub(super) shutdown: crate::cancellation::Cancellation,
@@ -92,32 +83,29 @@ pub(super) async fn serve_http(services: HttpServices) -> Result<()> {
     if shutdown.is_requested() {
         return Ok(());
     }
-    let revision = sites.revision();
+    let rev = sites.revision();
     events.server_ready(
         &url,
-        revision
-            .as_ref()
-            .map(|site| site.manifest().revision().as_str()),
+        rev.as_ref().map(|site| site.manifest().revision().as_str()),
     )?;
     let mut connections = tokio::task::JoinSet::new();
-    let connection_limit = Arc::new(tokio::sync::Semaphore::new(MAX_HTTP_CONNECTIONS));
+    let conn_limit = Arc::new(tokio::sync::Semaphore::new(MAX_HTTP_CONNECTIONS));
     let serving = async {
         loop {
             tokio::select! {
                 _ = shutdown.cancelled() => break,
-                connection = listener.accept() => {
-                    let (stream, address) = match connection {
-                        Ok(connection) => connection,
-                        Err(error) => {
-                            tracing::debug!(target: "tola::dev", %error, "accept failed");
+                conn = listener.accept() => {
+                    let (stream, addr) = match conn {
+                        Ok(conn) => conn,
+                        Err(err) => {
+                            tracing::debug!(target: "tola::dev", %err, "accept failed");
                             return Err(anyhow!(
                                 "Tola could not accept a development request; restart `tola dev`"
                             ));
                         }
                     };
-                    let Ok(connection_permit) = Arc::clone(&connection_limit).try_acquire_owned()
-                    else {
-                        tracing::debug!(target: "tola::dev", %address, limit = MAX_HTTP_CONNECTIONS, "HTTP connection limit reached");
+                    let Ok(permit) = Arc::clone(&conn_limit).try_acquire_owned() else {
+                        tracing::debug!(target: "tola::dev", %addr, limit = MAX_HTTP_CONNECTIONS, "HTTP connection limit reached");
                         continue;
                     };
                     let served = ServedSite {
@@ -128,10 +116,10 @@ pub(super) async fn serve_http(services: HttpServices) -> Result<()> {
                     };
                     let shutdown = shutdown.clone();
                     connections.spawn(async move {
-                        let _connection_permit = connection_permit;
-                        if let Err(error) = serve_connection(
+                        let _permit = permit;
+                        if let Err(err) = serve_connection(
                             stream,
-                            address,
+                            addr,
                             served,
                             HTTP_IDLE_CONNECTION_LIFETIME,
                             shutdown.clone(),
@@ -139,13 +127,13 @@ pub(super) async fn serve_http(services: HttpServices) -> Result<()> {
                         .await
                             && !shutdown.is_requested()
                         {
-                            tracing::debug!(target: "tola::dev", %error, "connection error");
+                            tracing::debug!(target: "tola::dev", %err, "connection error");
                         }
                     });
                 }
                 Some(completion) = connections.join_next(), if !connections.is_empty() => {
-                    if let Err(error) = completion {
-                        tracing::debug!(target: "tola::dev", %error, "connection task failed");
+                    if let Err(err) = completion {
+                        tracing::debug!(target: "tola::dev", %err, "connection task failed");
                         return Err(anyhow!(
                             "Tola could not serve a development request; restart `tola dev`"
                         ));
@@ -163,19 +151,13 @@ pub(super) async fn serve_http(services: HttpServices) -> Result<()> {
 
 const PREVIEW_ENDPOINT: &str = "preview";
 
-/// The one request path the development server answers under `RESERVED_ROOT`.
-///
-/// The address is a cross-language contract: the VS Code client and the preview end-to-end suite
-/// spell the same URL, so a change here needs those call sites in the same change. A site route
-/// cannot take the path over: the reserved namespace is refused for a site mount and for a
-/// published output.
+/// Cross-language URL shared with the VS Code extension and preview e2e suite.
 static PREVIEW_ENDPOINT_PATH: LazyLock<String> =
     LazyLock::new(|| format!("/{RESERVED_ROOT}/{PREVIEW_ENDPOINT}"));
 
-/// The current revision and endpoints one development connection answers its requests from.
 struct ServedSite {
     sites: CurrentSite,
-    initial_config: Arc<tola_build::config::ResolvedSiteConfig>,
+    initial_config: Arc<tola_build::config::SiteConfig>,
     reload_endpoint: Option<crate::dev::reload::transport::ReloadEndpoint>,
     publications: Option<tokio::sync::mpsc::Sender<PublicationRequest>>,
 }
@@ -194,45 +176,41 @@ async fn serve_connection(
         publications,
     } = served;
     let io = hyper_util::rt::TokioIo::new(stream);
-    let service = hyper::service::service_fn(move |request: Request<Incoming>| {
+    let service = hyper::service::service_fn(move |req: Request<Incoming>| {
         let sites = sites.clone();
         let initial_config = Arc::clone(&initial_config);
         let reload_endpoint = reload_endpoint.clone();
         let publications = publications.clone();
         async move {
-            let request = request.map(|_| ());
-            let reply = if request.uri().path() == PREVIEW_ENDPOINT_PATH.as_str() {
-                preview::respond(request, peer, sites, publications).await
+            let req = req.map(|_| ());
+            let resp = if req.uri().path() == PREVIEW_ENDPOINT_PATH.as_str() {
+                preview::respond(req, peer, sites, publications).await
             } else {
                 response::respond(
-                    request,
+                    req,
                     sites.installed(),
                     &initial_config,
                     reload_endpoint.as_ref(),
                     sites.unpublished_html(),
                 )
             };
-            Ok::<_, Infallible>(reply)
+            Ok::<_, Infallible>(resp)
         }
     });
     let mut builder = hyper::server::conn::http1::Builder::new();
     builder
         .timer(hyper_util::rt::TokioTimer::new())
         .header_read_timeout(HTTP_HEADER_TIMEOUT);
-    let connection = builder.serve_connection(io, service);
-    tokio::pin!(connection);
-    // The idle lifetime ends a connection that outlived it: hyper's graceful shutdown closes an
-    // idle keep-alive connection at once and, during an exchange, lets the response in flight
-    // finish before closing, so the deadline never truncates a response. Nothing bounds a
-    // response itself — any wall clock would cut off a client that is merely slow — and
-    // `MAX_HTTP_CONNECTIONS` caps how many connections such a client can hold.
+    let conn = builder.serve_connection(io, service);
+    tokio::pin!(conn);
+    // Graceful shutdown closes idle keep-alive connections while letting in-flight responses finish.
     tokio::select! {
-        completion = &mut connection => completion.map_err(anyhow::Error::from),
+        completion = &mut conn => completion.map_err(anyhow::Error::from),
         _ = shutdown.cancelled() => Ok(()),
         _ = tokio::time::sleep(idle_lifetime) => {
-            connection.as_mut().graceful_shutdown();
+            conn.as_mut().graceful_shutdown();
             tokio::select! {
-                completion = &mut connection => completion.map_err(anyhow::Error::from),
+                completion = &mut conn => completion.map_err(anyhow::Error::from),
                 _ = shutdown.cancelled() => Ok(()),
             }
         }
@@ -243,42 +221,39 @@ async fn serve_connection(
 mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream, duplex};
     use tola_build::build::{BuildMode, BuildSession};
-    use tola_build::config::ResolvedSiteConfig;
+    use tola_build::config::SiteConfig;
 
     use super::*;
 
-    /// Larger than the test connection's buffer so the response pauses when the client stops.
     const LARGE_ASSET_BYTES: usize = 256 * 1024;
     const SMALL_ASSET_BYTES: usize = 4 * 1024;
     const IDLE_LIFETIME: Duration = Duration::from_millis(250);
 
     pub(super) use crate::dev::tests::site_config;
 
-    /// One published revision with `large.bin` and `small.bin`.
-    fn served_site() -> (tempfile::TempDir, CurrentSite, Arc<ResolvedSiteConfig>) {
-        let root = tempfile::tempdir().unwrap();
-        std::fs::write(root.path().join("large.bin"), vec![0u8; LARGE_ASSET_BYTES]).unwrap();
-        std::fs::write(root.path().join("small.bin"), vec![0u8; SMALL_ASSET_BYTES]).unwrap();
-        let config = crate::dev::tests::write_site(
-            root.path(),
+    fn served_site() -> (tempfile::TempDir, CurrentSite, Arc<SiteConfig>) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("large.bin"), vec![0u8; LARGE_ASSET_BYTES]).unwrap();
+        std::fs::write(dir.path().join("small.bin"), vec![0u8; SMALL_ASSET_BYTES]).unwrap();
+        let cfg = crate::dev::tests::write_site(
+            dir.path(),
             "",
             "[assets]\nfiles = [{ source = \"large.bin\", url = \"/large.bin\" }, { source = \"small.bin\", url = \"/small.bin\" }]\n",
         );
         let mut session = BuildSession::new();
         let (checked, _) = crate::dev::tests::checked_candidate(
             &mut session,
-            Arc::clone(&config),
+            Arc::clone(&cfg),
             BuildMode::Production,
         );
         let sites = CurrentSite::new();
         sites.replace(&mut session, checked).unwrap();
-        (root, sites, config)
+        (dir, sites, cfg)
     }
 
-    /// Serve a connection with a fixed buffer, returning the client end and the serving task.
     fn serve_client(
         sites: CurrentSite,
-        config: Arc<ResolvedSiteConfig>,
+        cfg: Arc<SiteConfig>,
     ) -> (DuplexStream, tokio::task::JoinHandle<Result<()>>) {
         let (client, server) = duplex(16 * 1024);
         let serving = tokio::spawn(serve_connection(
@@ -286,7 +261,7 @@ mod tests {
             ([127, 0, 0, 1], 0).into(),
             ServedSite {
                 sites,
-                initial_config: config,
+                initial_config: cfg,
                 reload_endpoint: None,
                 publications: None,
             },
@@ -303,27 +278,22 @@ mod tests {
             .unwrap();
     }
 
-    /// The response head and the body bytes that arrived with it.
     async fn response_head(stream: &mut DuplexStream) -> (Vec<u8>, Vec<u8>) {
-        let mut received = Vec::new();
+        let mut buf = Vec::new();
         let mut unscanned = 0;
         loop {
-            if let Some(terminator) = received[unscanned..]
-                .windows(4)
-                .position(|window| window == b"\r\n\r\n")
-            {
-                let body = received.split_off(unscanned + terminator + 4);
-                return (received, body);
+            if let Some(end) = buf[unscanned..].windows(4).position(|w| w == b"\r\n\r\n") {
+                let body = buf.split_off(unscanned + end + 4);
+                return (buf, body);
             }
-            unscanned = received.len().saturating_sub(3);
+            unscanned = buf.len().saturating_sub(3);
             let mut chunk = [0u8; 16 * 1024];
             let read = stream.read(&mut chunk).await.unwrap();
-            assert!(read > 0, "the connection closed before the response head");
-            received.extend_from_slice(&chunk[..read]);
+            assert!(read > 0, "connection closed before response head");
+            buf.extend_from_slice(&chunk[..read]);
         }
     }
 
-    /// The bytes a client receives from `stream` until the server closes it.
     async fn drain(stream: &mut DuplexStream) -> Vec<u8> {
         let mut rest = Vec::new();
         stream.read_to_end(&mut rest).await.unwrap();
@@ -331,9 +301,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn response_outliving_connection_lifetime_arrives_complete() {
-        let (_root, sites, config) = served_site();
-        let (mut client, serving) = serve_client(sites, config);
+    async fn in_flight_response_completes() {
+        let (_dir, sites, cfg) = served_site();
+        let (mut client, serving) = serve_client(sites, cfg);
         request(&mut client, "/large.bin").await;
         let (head, body) = response_head(&mut client).await;
         let head = String::from_utf8(head).unwrap();
@@ -343,23 +313,19 @@ mod tests {
             "{head}"
         );
 
-        // Leave the body unread so the fixed buffer keeps the response in flight at the deadline.
         tokio::time::sleep(IDLE_LIFETIME * 3).await;
-        assert!(
-            !serving.is_finished(),
-            "the deadline must arrive while the response is in flight"
-        );
+        assert!(!serving.is_finished());
         let drained = tokio::time::timeout(Duration::from_secs(60), drain(&mut client))
             .await
-            .expect("the response completes after the deadline");
+            .unwrap();
         assert_eq!(body.len() + drained.len(), LARGE_ASSET_BYTES);
         serving.await.unwrap().unwrap();
     }
 
     #[tokio::test]
-    async fn idle_connection_closes_at_connection_lifetime() {
-        let (_root, sites, config) = served_site();
-        let (mut client, serving) = serve_client(sites, config);
+    async fn idle_connection_closes() {
+        let (_dir, sites, cfg) = served_site();
+        let (mut client, serving) = serve_client(sites, cfg);
         request(&mut client, "/small.bin").await;
         let (head, mut body) = response_head(&mut client).await;
         assert!(
@@ -370,33 +336,32 @@ mod tests {
         while body.len() < SMALL_ASSET_BYTES {
             let mut chunk = [0u8; 1024];
             let read = client.read(&mut chunk).await.unwrap();
-            assert!(read > 0, "the small asset arrived complete");
+            assert!(read > 0);
             body.extend_from_slice(&chunk[..read]);
         }
 
-        // The exchange is complete and the connection waits for another request.
         let mut byte = [0u8; 1];
         let closed = tokio::time::timeout(IDLE_LIFETIME * 3, client.read(&mut byte))
             .await
-            .expect("the idle connection ends at its lifetime")
+            .unwrap()
             .unwrap();
-        assert_eq!(closed, 0, "the server closed the idle connection");
+        assert_eq!(closed, 0);
         serving.await.unwrap().unwrap();
     }
 
     #[test]
-    fn taken_base_port_port_use() {
-        let interface = "127.0.0.1".parse().unwrap();
-        let held = TcpListener::bind((interface, 0)).unwrap();
+    fn taken_base_port_fallback() {
+        let iface = "127.0.0.1".parse().unwrap();
+        let held = TcpListener::bind((iface, 0)).unwrap();
         let taken = held.local_addr().unwrap().port();
 
-        let (_listener, address, fallback) = bind_with_port_fallback(interface, taken).unwrap();
-        let fallback = fallback.expect("a taken base port reports the fallback");
+        let (_listener, addr, fallback) = bind_with_port_fallback(iface, taken).unwrap();
+        let fallback = fallback.unwrap();
         assert_eq!(fallback.code, crate::codes::server::PORT_IN_USE);
         assert!(fallback.message.contains(&taken.to_string()));
-        assert_ne!(address.port(), taken);
+        assert_ne!(addr.port(), taken);
 
-        let (_listener, _address, fallback) = bind_with_port_fallback(interface, 0).unwrap();
-        assert!(fallback.is_none(), "a free base port reports nothing");
+        let (_listener, _addr, fallback) = bind_with_port_fallback(iface, 0).unwrap();
+        assert!(fallback.is_none());
     }
 }

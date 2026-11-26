@@ -30,6 +30,7 @@ mod error;
 mod recipe;
 mod resample;
 mod rows;
+mod vector;
 
 pub use cancellation::{
     Cancellation, ImageCancelled, NO_CANCELLATION, NoCancellation, ensure_active_if_present,
@@ -38,9 +39,10 @@ pub use codec::{DecodedSource, inspect, render};
 pub use error::{ImageError, ImageResult, ReexportProblem, SizeLimit};
 pub use recipe::{
     Background, CropAnchor, ImageRecipe, ImageRequestError, OutputFormat, PixelRecipe,
-    ResizeFilter, ResizeOperation, ResizeOptions, SvgRender, VectorGeometry,
+    ResizeFilter, ResizeOperation, ResizeOptions,
 };
 pub use resample::ResampledPixels;
+pub use vector::{SvgRender, VectorGeometry};
 
 /// Revision of the image pipeline: increment it whenever anything that changes the bytes this crate
 /// produces changes, whether that is a resampling, color, codec, or metadata policy of our own or
@@ -113,8 +115,8 @@ pub struct ImageMetadata {
     pub is_lossy: bool,
 }
 
-fn check_dimensions(width: u32, height: u32) -> Result<(), ImageRequestError> {
-    if width == 0 || height == 0 {
+fn check_dimensions(w: u32, h: u32) -> Result<(), ImageRequestError> {
+    if w == 0 || h == 0 {
         return Err(ImageRequestError::InvalidDimensions);
     }
     Ok(())
@@ -127,11 +129,11 @@ pub(crate) const HOLD_IN_MEMORY: &str =
 pub(crate) const RESIZE_TOO_LARGE: &str = "the image is too large to resize; use a smaller image";
 
 /// Byte length of one decoded plane, rejecting sizes that cannot be addressed.
-pub(crate) fn pixel_bytes(width: u32, height: u32, bytes_per_pixel: usize) -> ImageResult<usize> {
+pub(crate) fn pixel_bytes(w: u32, h: u32, bpp: usize) -> ImageResult<usize> {
     let allowed = isize::MAX as u64;
-    let actual = u64::from(width)
-        .saturating_mul(u64::from(height))
-        .saturating_mul(bytes_per_pixel as u64);
+    let actual = u64::from(w)
+        .saturating_mul(u64::from(h))
+        .saturating_mul(bpp as u64);
     if actual > allowed {
         return Err(ImageError::TooLarge {
             limit: SizeLimit::HoldInMemory,
@@ -142,8 +144,8 @@ pub(crate) fn pixel_bytes(width: u32, height: u32, bytes_per_pixel: usize) -> Im
     Ok(actual as usize)
 }
 
-pub(crate) fn rgba_buffer(width: u32, height: u32) -> ImageResult<Vec<u8>> {
-    zeroed_plane(pixel_bytes(width, height, 4)?)
+pub(crate) fn rgba_buffer(w: u32, h: u32) -> ImageResult<Vec<u8>> {
+    zeroed_plane(pixel_bytes(w, h, 4)?)
 }
 
 /// A zeroed buffer of `bytes` bytes.
@@ -151,7 +153,7 @@ pub(crate) fn zeroed_plane(bytes: usize) -> ImageResult<Vec<u8>> {
     let mut plane = Vec::new();
     plane
         .try_reserve_exact(bytes)
-        .map_err(|error| ImageError::codec(HOLD_IN_MEMORY, error))?;
+        .map_err(|err| ImageError::codec(HOLD_IN_MEMORY, err))?;
     plane.resize(bytes, 0);
     Ok(plane)
 }
@@ -160,12 +162,9 @@ pub(crate) fn zeroed_plane(bytes: usize) -> ImageResult<Vec<u8>> {
 mod tests {
     use super::*;
 
-    /// The extension names the published derivative and the media type is reported to the site
-    /// author, so both are part of what a site exposes. JPEG publishes as `jpg`: changing that
-    /// would rename every JPEG derivative, invalidating every reference to one.
     #[test]
-    fn formats_name_their_own_published_files() {
-        for (format, extension, mime) in [
+    fn format_extensions_and_mimes() {
+        for (fmt, ext, mime) in [
             (ImageFormat::Jpeg, "jpg", "image/jpeg"),
             (ImageFormat::Png, "png", "image/png"),
             (ImageFormat::WebP, "webp", "image/webp"),
@@ -173,8 +172,8 @@ mod tests {
             (ImageFormat::Bmp, "bmp", "image/bmp"),
             (ImageFormat::Svg, "svg", "image/svg+xml"),
         ] {
-            assert_eq!(format.extension(), extension, "{format:?}");
-            assert_eq!(format.mime(), mime, "{format:?}");
+            assert_eq!(fmt.extension(), ext, "{fmt:?}");
+            assert_eq!(fmt.mime(), mime, "{fmt:?}");
         }
     }
 }

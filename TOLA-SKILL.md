@@ -1,46 +1,37 @@
 # Tola authoring guide
 
-| You want to | Start with |
+| You want to | Read |
 | --- | --- |
-| Create a site, find its files, or set up an editor | `tola skill start` |
-| Write content with the site's existing theme | `tola skill writing` |
+| Create a site, locate files, or set up an editor | `tola skill start` |
+| Write content in Typst (headings, math, code, links) | `tola skill writing` |
+| Configure metadata, pages, HTML/CSS, navigation, assets, or SEO | `tola skill site` |
 | Install or update a theme or module | `tola skill modules use` |
+| Use built-in modules (`resize-images`, `tailwind`) | `tola skill modules built-in` |
 | Customize a theme | `tola skill modules theme customization` |
-| Choose pages, routes, layout, navigation, assets, or SEO | `tola skill site` |
-| Create a theme | `tola skill modules theme --all` |
-| Create a reusable library or author tool | `tola skill modules create` |
-| Write a Nu script using Tola's libraries | `tola skill scripts` |
-| Generate files during a build or act after publication | `tola skill hooks` |
-| Check, preview, or publish a site | `tola skill build` |
+| Create a theme, library, query, or author command | `tola skill modules create` |
+| Write a Nu script or interactive author tool | `tola skill scripts` |
+| Run build hooks or generate extra outputs | `tola skill hooks` |
+| Check, preview, publish, or vendor a site | `tola skill build` |
 
-Use `--list` to find a topic, or give its section names to read it directly:
+Browse sections on demand from any directory:
 
 ```sh
-tola skill writing math numbering
-tola skill site assets files
-tola skill hooks generate-outputs
 tola skill --list
+tola skill writing math
+tola skill site assets files
+tola skill modules theme --all -o theme-guide.md
 ```
 
-`--list` shows the section names. `--all` prints the text of every subsection.
-Without a selection, `--all` prints the complete guide. `--output FILE` writes the selected
-text without overwriting a file, for example
-`tola skill modules theme --all -o theme-guide.md`. Without the CLI, read the matching
-heading below.
+- `--list` prints available section paths.
+- `--all` includes every subsection (or the complete guide with no section name).
+- `-o FILE` writes the selected text without overwriting an existing file.
+- Use `tola <command> --help` for CLI flags and `tola help` for full configuration, package, and script references.
 
-Use `tola <command> --help` for command options and `tola help` for configuration and
-package references. Import built-in Typst packages with version `0.0.0`. To use the
-package alongside Typst's `document(...)` function, import the members you need from
-`@tola/document` or give the package another name.
-
-For an existing site, start with `tola.toml` and the theme's public guide. Read the selected
-`build.entry` when changing page selection or templates. For a module, start with
-`tola-module.toml`. Check site changes with `tola check`; use a browser to judge appearance.
+When working on an existing site, read `tola.toml` and its selected `build.entry` first (or the theme's guide via `tola ALIAS --help`). For a module, start with `tola-module.toml`. Verify changes with `tola check`, and inspect rendered layout in a browser.
 
 ## Start
 
-Read `tola.toml`, the selected site entry, and the files it imports before editing. Run
-`tola inspect config` to see the settings Tola uses. A theme can supply the entry instead of a project file.
+Read `tola.toml`, the selected site entry, and any files it imports before editing. Run `tola inspect config` to see the active configuration.
 
 ### Create
 
@@ -52,267 +43,130 @@ printf '%s\n' '= Hello' > content/index.typ
 tola dev
 ```
 
-`init` takes a missing or empty directory. `--force` permits other files but does not overwrite
-scaffold files. It writes `tola.toml`, `site.typ`, `.gitignore`, `.ignore`, and an empty
-`content/`; `site.typ` publishes every source at the route its file layout gives it and serves
-`404.html`. Open the URL from `tola dev` to see the new home page. Save an edit to `content/index.typ`
-to see it rebuild.
+`init` requires a missing or empty directory (`--force` allows other existing files without overwriting scaffold files). It creates `tola.toml`, `site.typ`, `.gitignore`, `.ignore`, and `content/`. Open the URL printed by `tola dev` and save edits to see live rebuilds.
 
-### Locate
+To scaffold from a theme or starter module, see `tola skill modules initializer`.
 
-Tola finds the nearest `tola.toml` in the current directory or its parents. A command's
-`-C path/to/tola.toml` selects another site. Paths in the configuration are relative to it.
+### Layout
 
-Read `[build] entry` to find the root program: a path selects a project file, while
-`{ module = "notes" }` selects that instance's `[build] entry` in `tola-module.toml`.
-The configured content directory holds inputs; shared helpers belong outside it.
-`content/` and `site.typ` are defaults, not reserved names.
+Tola searches upward from the current directory for `tola.toml`; pass `-C path/to/tola.toml` to target another site. Paths in configuration are relative to `tola.toml`.
+
+- `[build] entry` chooses the root site program: a project file path (default `site.typ`) or `{ module = "ALIAS" }` to use a module's entry.
+- The configured content directory (default `content/`) holds source pages; keep shared templates and helpers outside it. Neither `content/` nor `site.typ` is a reserved name.
+- To split large configurations across files, put a top-level `include = ["config/base.toml"]` before the first `[table]` header in `tola.toml`. Include paths resolve from the file that declares them, while site paths still resolve from the site root. Later values override earlier ones; asset and hook arrays append. See `tola help include`.
 
 ### Workflow
 
 | Task | Command |
 | --- | --- |
-| See the site's settings | `tola inspect config` |
-| Write and preview with live rebuilding | `tola dev` |
-| Validate the site without replacing published files | `tola check` |
+| Live preview with file watching | `tola dev` |
+| Build and validate without touching published files | `tola check` |
 | Preview production settings locally | `tola preview` |
-| Write the complete site to `build.publish-dir` | `tola build` |
+| Publish the site to `build.publish-dir` | `tola build` |
+| Inspect active settings, sources, fonts, or icons | `tola inspect <config\|sources\|fonts\|icons>` |
+| Check configuration and local tools | `tola doctor` |
 
-`check` and `preview` still run input and output generators; see `tola skill hooks`.
-Use `tola check --no-hooks` when checking with already generated inputs.
-For a theme's extra commands and guide, run `tola ALIAS --help` with its configured alias.
+`check` and `preview` run build hooks (`before-build` and `generate-outputs`) without replacing published files; add `--no-hooks` to `tola check` to reuse already generated inputs. Run `tola ALIAS --help` to see a configured module's commands and guide.
 
 ### Editors
 
-Use `tola editor setup --list`, then the setup command for your editor. After upgrading Tola,
-`tola editor packages` refreshes its editor package files. Read the site's `[formatter]`
-settings before formatting; the CLI and language service share them.
+Run `tola editor setup --list`, then run the setup command for your editor. After upgrading Tola, run `tola editor packages` to refresh editor package files. Both `tola fmt` and `tola lsp` share the site's `[formatter]` settings.
 
 ## Writing
 
-If the site uses a theme, follow its guide for metadata, imports, and options.
-Import its Typst functions from `@tola-modules/ALIAS:0.0.0`, using the alias in
-`tola.toml`. For metadata fields, see `tola skill site metadata`. For images and web
-fonts, see `tola skill site assets`.
+If the site uses a theme, follow its guide for metadata helpers, components, and options, importing from `@tola-modules/ALIAS:0.0.0`. Import Tola's built-in Typst packages with version `0.0.0` (for example `@tola/site:0.0.0`).
 
 ### Syntax
 
-Typst is not Markdown or LaTeX: `=` introduces headings, `$` introduces math, and `#`
-enters code from markup. Use native content for prose and HTML/CSS for browser layout.
+Typst is not Markdown or LaTeX: `=` starts headings, `$` enters math, and `#` enters code from markup. Write native Typst content for prose and `html.*` elements with CSS for web layout.
 
-#### Modes
-
-```typst
-#let name = "Tola"
-#let greeting = [Hello, *#name*!]
-#greeting
-```
-
-`[...]` is content; `{...}` is code. Inside code, omit `#`; inside nested content, use it
-again. `[A *rich* title]` carries markup; `"A *rich* title"` is a string. An HTML string is
-text, not an element. Render arrays with a loop or `.join()`.
-
-#### Functions
-
-```typst
-#let note(body, kind: "note") = html.aside(class: kind, body)
-#note(kind: "tip")[Keep the body as content.]
-```
-
-Named arguments use `name: value`; `..values` spreads arguments. Trailing content follows
-named arguments. Put a multiline expression or method chain inside parentheses or a code
-block: a new top-level `.map(...)` line is markup, not a continuation.
-
-#### Imports
-
-`import` reads definitions; `include` inserts a file's content. Imported files do not inherit
-the caller's locals: pass inputs to their functions. Import the members you use, or use
-`as` to choose the module name.
-
-Project `/...` paths start at the site root; inside a package they start at that package.
-Pass a discovered source's `file` directly to `include`. For project data read by a theme,
-see [Modules](#modules). Reading a file does not publish it.
-
-#### Context
-
-Use `context` for locations, counters, and document queries, inside the document body that
-owns the result. `all-sources()` and a source's `tola-meta(...)` declaration run in ordinary
-code. Deferring the declaration into `context` does not declare source metadata.
+- **Modes**: `[...]` is content; `{...}` is code. Inside code, omit `#`; inside nested content, use `#` again. `[A *rich* title]` is markup, whereas `"A *rich* title"` is a plain string. Strings containing HTML render as text, not elements. Render arrays of elements with a loop or `.join()`.
+- **Functions and chaining**: Named arguments use `name: value`, trailing `[...]` passes content, and `..values` spreads arguments. Wrap multiline expressions or method chains in parentheses or `{...}` — a top-level `.map(...)` on a new line is parsed as markup text.
+- **Imports vs includes**: `import` loads definitions without inheriting the caller's locals; `include` inserts a file's content. Project `/...` paths start at the site root; inside a module or package, `/...` starts at that package root. Reading or including a file does not publish it.
+- **Context**: Use `context` inside a document body for locations, counters, and document queries (`headings()`, `references()`, `current-document()`). Keep `all-sources()` and `tola-meta(...)` in ordinary code — placing `tola-meta(...)` inside `context` or a show rule will not declare source metadata.
 
 ### Headings
 
-Write native headings for document structure and queries. `#title()` is the document title;
-`= Section` starts its sections. Style their exported HTML with CSS instead of changing the
-logical hierarchy to get a font size.
-
-#### Levels
+Use `#title[...]` for the page title and `= Section` for sections; style sizes with CSS rather than skipping heading levels.
 
 ```typst
 #title[Guide]
 
-= Install
-== Requirements
-=== Platforms
-```
-
-With the default heading rules, title exports to `h1`, `=` to `h2`, `==` to `h3`,
-and `===` to `h4`. Typst level 1 is a section, not the page title. Keep nesting shallow
-enough for HTML's six heading levels and avoid skipped levels.
-
-For programmatic headings use `heading(depth: 2)[Requirements]`. `depth` is relative;
-`offset + depth` gives the resolved level unless `level` is explicitly set.
-
-#### Numbering
-
-```typst
 #set heading(numbering: "1.1")
-= Installation <guide-install>
-See @guide-install.
+= Install <guide-install>
+== Requirements
+
+See @guide-install or #link(<guide-install>)[Install].
 ```
 
-Numbering is separate from the outline. `link(<guide-install>)[Installation]` needs no
-numbering, while `@guide-install` does. Labels and stable fragments belong to
-`tola skill writing links fragments`.
+By default, `#title` exports to `<h1>`, `=` to `<h2>`, `==` to `<h3>`, and so on. `@guide-install` requires numbering, while `link(<guide-install>)[...]` does not.
 
-#### Contents
+To build an on-page table of contents inside a template's `document(...)` body, import `headings` from `@tola/document:0.0.0` (import specific members or alias the package so it does not shadow Typst's `document(...)`):
 
 ```typst
 #import "@tola/document:0.0.0": headings
 #context {
-  let sections = headings(depth: 2).filter(section => section.outlined)
+  let sections = headings(depth: 2).filter(h => h.outlined)
   html.nav(aria-label: "On this page")[
-    #for section in sections [#link(section.location, section.body) \
+    #for section in sections [
+      #link(section.location, section.body) \
     ]
   ]
 }
 ```
 
-Put this in the template's `document(...)` body. `headings()` lists headings in that
-document, and the `outlined` filter keeps the ones that appear in the outline. `level`
-includes any `heading` offset. `nesting` is the level in the outline. Pass `location`
-to `link` to link to the heading.
-
-#### Inclusion
-
-When nesting included content, adjust its headings locally:
-
-```typst
-#let subsection(body) = context {
-  set heading(offset: heading.offset + 1)
-  body
-}
-#subsection[= Included section]
-```
-
-Counters are shared across a Bundle. Put `#counter(heading).update(0)` at a document's
-start if its numbering must restart. Check the exported heading order and TOC links, not
-just their visual sizes. Exact query fields: `tola help "@tola/document" headings`.
+When nesting included content, shift its headings locally with `#set heading(offset: heading.offset + 1)`. Because counters are shared across a site, place `#counter(heading).update(0)` at the start of a document if numbering should restart per page. See `tola help "@tola/document" headings`.
 
 ### Math
 
-Use native Typst equations. `$x^2$` is inline; spaces at both ends, as in `$ x^2 $`,
-make a displayed equation. HTML uses MathML by default; keep that structure unless a
-specific formula needs a different rendering.
-
-#### Notation
-
-```typst
-Inline: $x_i^2 + alpha$.
-
-$ (a + b) / c = frac(a + b, c) $
-$ sum_(i=1)^n i = n(n+1) / 2 $
-$ mat(1, 0; 0, 1) $
-```
-
-Use `_` and `^` for attachments and parentheses to group their bodies. Functions such as
-`frac` and `mat` are Typst math, not LaTeX commands. Multi-letter identifiers name symbols,
-functions, or variables; quote ordinary words, for example `$ x "where" x > 0 $`.
-
-#### Numbering
+Write native Typst equations: `$x^2$` is inline, and spaces inside the delimiters (`$ x^2 $`) make a displayed equation. Quote ordinary prose words inside math (`$ x "where" x > 0 $`).
 
 ```typst
 #set math.equation(numbering: "(1)")
-$ E = m c^2 $ <energy-equation>
-See @energy-equation.
+$ E = m c^2 $ <energy-eq>
+See @energy-eq.
 ```
 
-Numbering applies to displayed equations. Keep labels unique across the site. For numbering
-that restarts per document, put `#counter(math.equation).update(0)` at that document's start.
-Use a native reference rather than manually repeating its number.
+Equation numbering applies to displayed equations; keep labels unique across the site, and reset per page with `#counter(math.equation).update(0)` if needed.
 
-#### Rendering
+HTML export uses MathML by default:
 
-Test in the browser at narrow widths. A successful compile does not prove that long
-formulas fit, that the intended math font loaded, or that light and dark themes are legible.
-Explain essential formulas in prose as well.
-
-##### Fonts
-
-MathML uses browser fonts. Publish the font file and load it with CSS; a Typst compiler
-font setting does not install it in the browser. SVG equations instead use the fonts
-available to the compiler. See `tola skill site assets fonts`.
-
-##### SVG
-
-For a formula that deliberately needs compiler-rendered artwork:
+- **MathML fonts**: Browsers render MathML with web fonts, not compiler fonts. Publish the math font file and load it via CSS `@font-face` (`tola skill site assets fonts`). Test long formulas at narrow widths and in both light and dark themes.
+- **SVG fallback**: When a specific formula needs compiler-rendered artwork instead of MathML, wrap it in `html.frame`:
 
 ```typst
-#let math-svg(equation) = if equation.at("block", default: false) {
-  block(html.frame(equation))
+#show math.equation: eq => if eq.at("block", default: false) {
+  block(html.frame(eq))
 } else {
-  box(html.frame(equation))
+  box(html.frame(eq))
 }
-#show math.equation: math-svg
 ```
 
-Use `box` for inline placement and `block` for display placement. SVG loses MathML's
-selectable mathematical structure; verify equation references and accessibility after
-applying a custom show rule.
+SVG equations use compiler fonts (`[typst.fonts]`) and give up selectable MathML structure, so re-check references and accessibility if you apply this rule.
 
 ### Code
 
-For highlighting, apply `render-code` as a show rule and load `code-stylesheet()` in the
-head. Calling the renderer directly skips Typst's preparation of a raw element.
-
-#### Highlighting
+Apply `render-code` as a `raw` show rule and include `code-stylesheet()` in the HTML `<head>` so token colors load in the browser:
 
 ```typst
-#import "@tola/code:0.0.0": render-code, code-themes
+#import "@tola/code:0.0.0": code-stylesheet, code-themes, render-code
+
 #set raw(theme: code-themes.github)
 #show raw: render-code.with(dark-theme: code-themes.github-dark)
-#raw("let answer = 42;", lang: "rust", block: true)
 ```
 
-Set `raw.theme` where the code is written. Inline backticks have no language;
-`raw(..., lang: "rust")` enables inline highlighting. Browser token styles also require
-`code-stylesheet` imported from `@tola/code:0.0.0` and called in the document head.
-
-#### Themes
-
-The dark appearance applies while the root element has `data-theme="dark"`. The site owns
-the toggle and system preference behavior. Style the wrapper with CSS; inspect both theme
-states. Exact options: `tola help "@tola/code" render-code code-stylesheet`.
+- Set `raw.theme` where code blocks are rendered. Inline backticks have no language; use `raw("x + 1", lang: "rust")` for highlighted inline code.
+- Dark token colors activate when the root element has `data-theme="dark"`. Your site owns the theme toggle and wrapper CSS. See `tola help "@tola/code" render-code code-stylesheet`.
 
 ### Links
 
-To link to a Typst label or location, pass it to `link`. To link to another published
-document by its output path, use `output-url(page.output)`.
+Keep output paths, routes, and browser URLs distinct:
 
-#### Routes
+- `guide/index.html` is an **output path**; its **route** is `/guide/`. The route `/guide` refers to a file named `guide`.
+- Pass a route to `output-of` (`@tola/address:0.0.0`) for `document(output, ...)`. Pass an output path to `output-url` (or a route to `route-url`) to produce a browser URL.
+- By default, `about.typ` and `about/index.typ` suggest the same route `/about/`. Use `slugify` for lowercase hyphenated segments. To preserve URLs when moving files, read a custom metadata field such as `permalink` and reuse the resulting output path across templates, navigation, and feeds.
 
-The file `guide/index.html` has route `/guide/`. The route `/guide` names a file called
-`guide`. Pass a route to `output-of` to get the file path for `document(...)`. Pass an
-output path to `output-url` to get a browser URL. Use `route-url` if you already have
-a decoded route.
-
-By default, `about.typ` and `about/index.typ` suggest the same route, `/about/`. Pass
-route segments through `slugify` if you want lowercase names with hyphens. To keep an
-article's URL when you move its source file, define a field such as `permalink` and
-use it to choose the output path. Reuse that path in templates, links, and feeds.
-
-#### Mount
-
-For a site served at `https://example.com/docs/`, configure:
+**Subpath deployment**: Configure `[site]` in `tola.toml`:
 
 ```toml
 [site]
@@ -320,212 +174,115 @@ origin = "https://example.com"
 base-path = "/docs/"
 ```
 
-Keep output paths such as `guide/index.html` relative to the publish directory.
-`output-url`, `route-url`, and `asset-url` add `/docs/` when generating links. Add that
-prefix yourself for handwritten links. Pass `origin: site.origin` to get an absolute URL.
+Keep output paths relative to the publish directory (`guide/index.html`). `output-url`, `route-url`, and `asset-url` prepend `base-path` automatically; pass `origin: site.origin` for an absolute URL. Handwritten HTML links must include the mount prefix themselves.
 
-#### Fragments
+**Fragments**: Linking a native heading with `link(<guide-install>)[...]` emits its label as the HTML ID (or a generated `loc-N` if unlabeled). A label alone does not emit an ID unless something links to it. Keep labels unique across the site. For a stable external anchor that never depends on internal links, emit an explicit HTML ID (for example `#html.h2(id: "install")[Install]`), noting that raw `html.h2` elements do not join native `headings()`.
 
-```typst
-= Installation <guide-install>
-#link(<guide-install>)[Jump to installation]
-```
-
-Linking a native heading creates an anchor: its label when present, otherwise a generated
-`loc-N`. A label alone does not guarantee an exported ID when nothing links to it. Keep
-labels unique across the Bundle; a native link cannot choose between duplicate targets.
-
-For a permanent, externally linked fragment independent of native links, write an explicit
-HTML ID, for example `#html.h2(id: "installation")[Installation]`. A raw HTML heading is not
-a native heading and does not join `headings()` or the outline. See [Headings](#headings)
-when both navigation and native heading semantics matter.
-
-#### Check
-
-Run `tola check` to find broken links. Add `--json` to read routes, output paths, and
-reference results from a script. The check treats absolute URLs as external, including
-URLs that use `site.origin`.
+Run `tola check` to catch broken internal links (`tola check --json` prints structured routes and references). Absolute URLs are treated as external, including those starting with `site.origin`.
 
 ## Site
 
-The site entry chooses what to publish, where to publish it, and which templates to use.
-Use the same list of documents when generating menus, feeds, and the sitemap.
+The site entry selects which sources to publish, maps each to an output path, and renders it through templates. Reuse the same validated list of page records for menus, feeds, and sitemaps so they never drift.
 
-With a module-selected entry, configure its options and public customization functions;
-see `tola skill modules use` and `tola skill modules theme customization`. With a project
-entry, read the topics below before changing its source selection or templates.
+If `[build] entry` points to a theme module, configure it through options or a wrapper entry instead (`tola skill modules theme customization`).
 
 ### Metadata
 
-Declare metadata with `tola-meta`; validate it in the root program with a schema your site
-declares. Tola does not assign built-in meaning to fields such as `draft` or `permalink`; your
-site's schema does.
-
-#### Declaration
+Declare per-page metadata once near the top of a source file with `tola-meta`, outside `context` and show rules:
 
 ```typst
 #import "@tola/source:0.0.0": tola-meta
-#tola-meta((title: "Hello", description: "A short introduction"))
+#tola-meta((title: "Hello", draft: false, published: "2026-09-01"))
 ```
 
-Call `tola-meta` once near the top of the article, directly or through an imported
-function. Keep the call outside `context` and selector show rules. Tola still reads
-drafts, so a Typst error in a draft can fail the build. Use `tola inspect sources` to
-list source files, or return the metadata you need from a query and read it with
-`tola query --json`.
-
-#### Fields
-
-Declare the metadata fields your site accepts. A schema rejects unknown fields unless declared
-with `unknown: "keep"`. Add the field there, then use the parsed value where you need the field.
+Tola assigns no built-in meaning to fields like `draft` or `permalink`; your site entry defines and validates them with `@tola/schema:0.0.0`:
 
 ```typst
-#import "@tola/schema:0.0.0": schema, optional, parse
-#let fields = schema((title: str, order: optional(int, default: 0)))
-#let meta = parse((title: "Guide"), fields)
-#assert.eq(meta.order, 0)
+#import "@tola/schema:0.0.0": date, optional, schema
+#import "@tola/source:0.0.0": all-sources, parse-sources
+
+#let page-schema = schema((
+  title: str,
+  draft: optional(bool, default: false),
+  published: optional(date),
+))
+#let sources = parse-sources(all-sources(), page-schema)
 ```
 
-`optional` accepts an absent key; `nullable` accepts explicit `none`. A supplied invalid
-value does not fall back to a default. For source records use `parse-sources` rather than
-parsing each dictionary by hand: it reports the source whose metadata failed.
-
-#### Dates
-
-Use `date` for a calendar day, `timestamp` for a date and time, or `partial-date` for
-a year or month on its own. To accept either a date or a timestamp, use
-`union(date, timestamp)`.
-
-```typst
-#import "@tola/schema:0.0.0" as s
-#let published = s.parse("2026-09-01T09:30:00+08:00", s.timestamp)
-#let period = s.parse("2026-09", s.partial-date)
-#assert.eq(period.precision, "month")
-```
-
-Pass the parsed timestamp's `.rfc3339` to `feed` or `sitemap`. For accepted formats,
-see `tola help "@tola/schema" date timestamp partial-date`.
+- Schemas reject unknown fields unless created with `unknown: "keep"`.
+- `optional` accepts a missing key; `nullable` accepts explicit `none`. An invalid supplied value fails instead of falling back to a default.
+- Prefer `parse-sources` over manual loops so errors report the offending source file.
+- Use `date` (calendar day), `timestamp` (date and time; pass `.rfc3339` to feeds/sitemaps), `partial-date` (year or month), or `union(date, timestamp)`. See `tola help "@tola/schema" date timestamp partial-date`.
+- Note that Tola still evaluates drafts during discovery, so syntax or runtime errors in drafts fail builds.
 
 ### Pages
 
-Choose which source files go into each document. One article can appear in several
-documents, or be skipped altogether.
+`all-sources()` discovers lowercase `.typ` files under the content directory (excluding hidden names, symlinks, and the site entry), ordered by source path. Validate, filter, and sort explicitly:
 
-#### Selection
+```typst
+#import "@tola/address:0.0.0": join-route, output-of
+#import "@tola/site:0.0.0": site
 
-To publish articles and skip drafts, parse each source with your schema, filter by the
-draft field, and return a `(source:, output:)` record for each document you want to publish.
+#let pages = sources
+  .filter(s => not s.meta.draft)
+  .map(s => (source: s, output: output-of(join-route(s.route-segments))))
 
-`all-sources()` discovers lowercase `.typ` files beneath the configured content directory,
-excluding hidden names, symlinks, and the site entry. Its order is by complete source path,
-not editorial order. Validate and sort explicitly before using the records in navigation.
+#for page in pages {
+  document(page.output, format: "html", title: page.source.meta.title)[
+    #include page.source.file
+  ]
+}
+```
 
-#### Rendering
-
-Pass `page.source.file` directly to `include`. It is a native input path, not a URL.
-`document(page.output, format: "html", ...)[...]` emits the page; choose a PDF output and
-format explicitly for PDF. A permalink changes an address, not its format.
-
-Call `current-source()` in the article to get its source path. If a helper needs that
-path, pass the result as an argument. Call `current-document()` inside `context` to
-get the document's output path or route.
-
-#### Data
-
-A site may generate documents from `json` or `csv` without a content source per page.
-Validate generated metadata with `parse` and the same schema used by other pages.
-Keep data reads, output selection, and rendering separate; reading a file does not publish it.
-Compare the paths from `tola inspect sources` with the pages in `tola check --json`
-when a source exists but a page is missing. `tola check --no-hooks --json` uses existing
-inputs without running generators; missing generated inputs remain errors.
+- Pass `page.source.file` directly to `include`. One source can feed multiple outputs (for example HTML and `format: "pdf"`), or be skipped.
+- Inside an article, `current-source()` (`@tola/source:0.0.0`) returns its source path; inside `context`, `current-document()` (`@tola/document:0.0.0`) returns the current output path and route.
+- **Build mode**: `site.build-mode` is `"dev"` under `tola dev`, `"prod"` under `tola build`/`check`/`preview`, and `none` in the editor, `tola query`, and `tola inspect`. Use it to trim work while writing (for example rendering only recent posts in `"dev"`) or toggle production-only scripts.
+- **Languages**: Configure `language` (and optional `languages`) under `[site]` in `tola.toml`. `site.language` provides `tag`, `lang`, `script`, and `region` for `#set text(...)`; your site entry decides how to route and link localized pages.
+- **Data-driven pages**: Read `json(...)` or `csv(...)` files and validate rows with `parse(...)` using the same schema. If a page is missing, compare `tola inspect sources` against `tola check --json`.
 
 ### HTML
 
-Use native Typst content for text, headings, equations, and links. Use typed `html.*`
-constructors for browser structure and CSS for layout. Typst page settings are not CSS.
-
-#### Elements
+Use typed `html.*` constructors for structure and CSS for layout (Typst page settings do not control CSS layout):
 
 ```typst
 #html.aside(class: "note")[A reusable note.]
-#html.elem("aside", attrs: ("data-kind": "tip"))[A note with a custom attribute.]
+#html.elem("aside", attrs: ("data-kind": "tip"))[Custom attributes.]
 ```
 
-Typed constructors accept their documented attributes and one content body; void elements
-have none. Use `html.elem` for a tag or attribute the typed constructor does not provide.
-Use native `link` for Typst targets; `html.a` is useful for raw attributes such as `target`
-and `rel`. Strings containing HTML stay text.
-
-#### Shell
-
-A custom `html.html` shell owns its head: document metadata does not fill it automatically.
-Use the site's `head-entries` helper or supply the title, viewport, description, and styles.
-`html.head` takes content; loop over entry arrays or `.join()` them.
-
-Keep an actual `html.head` so the exporter can add equation styles. With a custom shell,
-check footnotes explicitly: upstream's default placement is not available there; retain the
-default shell or supply a footnote show rule. Test citations and bibliography in the same shell.
-
-#### CSS
-
-Load declared stylesheets through `asset-url`; see `tola skill site assets files`. Use CSS for
-spacing, columns, responsive layout, and browser typography. `html.frame` makes SVG artwork,
-not an HTML layout container, and cannot contain `set page`.
-
-`html.script` and `html.style` take strings. An external script uses an empty body:
-`html.script("", src: url, defer: true)`. Inspect the actual DOM and narrow viewport before
-claiming the layout is correct.
+- Typed constructors take documented attributes and one content body (void elements take none). Use `html.elem` for custom tags or attributes. Use `html.a` when you need raw attributes like `target` or `rel`.
+- **Custom document shell**: Writing `#html.html[...]` gives you full control over `<head>` — document metadata is no longer inserted automatically. Always keep an explicit `html.head[...]` (so equation styles can attach) and supply title, viewport, stylesheets, and any SEO tags. Check footnotes, citations, and bibliographies in your custom shell, since a custom shell requires your own footnote placement rule.
+- **Scripts and styles**: `html.script` and `html.style` take strings; an external script uses an empty string body: `html.script("", src: url, defer: true)`.
+- `html.frame(...)` produces SVG artwork, not an HTML layout container, and cannot contain `set page`.
 
 ### Navigation
 
-Build menus from the selected page records, not a fresh interpretation of source paths.
-Choose a stable editorial order and use each record's output for its link.
+Build menus, prev/next links, and trees from your selected page records — never by re-scanning paths separately.
 
-#### Ordering
-
-Add an `order` field to the site's schema before sorting by it. Break ties by source identity,
-for example `(page.source.meta.order, page.source.id)`. Pass the ordered records to both the
-page template and navigation. A previous/next link is a neighbor in this order, not a filename
-guess. For paginated lists, find neighbors among the generated listing pages.
-
-#### Hierarchy
-
-Use `@tola/collection` for lineage and descendants once the site's parent rule is explicit.
-A permalink is an address, not necessarily a parent relationship. Keys must be unique and
-non-`none`; the parent rule must reach `none` and may traverse keys absent from the array.
-Exact examples: `tola help "@tola/collection" lineage descendants adjacent`.
-
-#### Backlinks
+- **Ordering**: Add an `order` (or date) field to your schema and sort with a deterministic tie-breaker such as `(p.source.meta.order, p.source.id)`. Compute prev/next neighbors from this same ordered array (or from generated pagination records).
+- **Hierarchy**: Use `@tola/collection:0.0.0` (`children`, `descendants`, `ancestors`, `lineage`, `adjacent`) when your site defines explicit parent keys. Keys must be unique and non-`none`, and the parent rule must terminate at `none`. See `tola help "@tola/collection" lineage descendants adjacent`.
+- **Backlinks**: Label the article body `<article-body>` and render backlinks outside it using `references()` from `@tola/document:0.0.0`:
 
 ```typst
 #import "@tola/document:0.0.0": references
 #context {
   let seen = ()
-  for reference in references(to: auto, from-within: <article-body>) {
-    let output = reference.document.output
-    if output in seen { continue }
-    seen.push(output)
-    link(reference.document.location)[#reference.document.route]
+  for r in references(to: auto, from-within: <article-body>) {
+    if r.document.output in seen { continue }
+    seen.push(r.document.output)
+    link(r.document.location)[#r.document.route]
   }
 }
 ```
 
-Label the containing article region `<article-body>` and put this list outside that region.
-A heading label selects the heading, not the text following it. The query returns reference
-occurrences; deduplicate by document output when the UI needs one row per linking page.
-For a page TOC use `tola skill writing headings contents`; recursive relations can use
-`tola help "@tola/datalog" database` for the database’s `.query(...)` method.
+For multi-step or recursive graph queries across site data, see `tola help "@tola/datalog" database`.
 
 ### Assets
 
-Distinguish a compiler input path from a browser URL. Reading a file does not publish its
-original. Declare browser-served files under `[assets]`; use image helpers when a generated
-derivative, rather than the original, should be published.
+Compiler input paths and browser URLs are separate: reading a file in Typst does not publish it. Declare browser-served files under `[assets]`, or generate derivatives with image helpers or hooks.
 
 #### Files
 
-Use `files` for one concrete source and `trees` for a directory. A tree can select members
-with `include` and `exclude` patterns relative to the declaring site or module root.
+Use `files` for single files and `trees` for directories in `tola.toml`:
 
 ```toml
 [assets]
@@ -533,229 +290,165 @@ trees = [{ source = "static", url-prefix = "/assets", include = ["static/**/*.cs
 files = [{ source = "static/robots.txt", url = "/robots.txt" }]
 ```
 
-Only matches inside `source` are eligible. A matched `static/css/site.css` is published at
-`/assets/css/site.css`, with the path within `source` appended to `url-prefix`. Omitting
-`include` uses `["."]`, which covers the whole source tree. `include = []` selects nothing,
-and `exclude` defaults to empty. An exact file declaration owns its source even when an
-option disables it. Tree filters apply only to tree members. An instance replacement can
-substitute the bytes of a selected asset.
-
-To publish a file through a symbolic link inside a tree, set `follow-file-symlinks = true`
-on that entry. Use the link's path in the published URL. The target must be a regular
-file. See `tola help "[assets]"` for setup and path restrictions.
-
-The stylesheet URL is the URL declared by the site's asset mapping, not its input filename:
+- `include` defaults to `["."]` (the whole `source` tree); `include = []` selects nothing; `exclude` defaults to empty. Patterns are relative to the site (or module) root and apply only within `source`.
+- A matched `static/css/site.css` publishes at `/assets/css/site.css`. Set `follow-file-symlinks = true` on a tree entry to publish regular-file symlinks at the link's path.
+- Reference declared assets with `asset-url` (`@tola/address:0.0.0`), passing the declared URL (not the input filename):
 
 ```typst
 #import "@tola/address:0.0.0": asset-url
 #html.link(rel: "stylesheet", href: asset-url("/assets/css/site.css"))
 ```
 
-Place this in the head after declaring that URL. `asset-url` validates the declaration and
-adds the deployment mount. CSS `url(...)` is relative to the published stylesheet; Tola does
-not bundle JavaScript or rewrite CSS resource references. See `tola help "[assets]"`.
+`asset-url` validates the declaration and prepends `site.base-path` (plus cache-busting if enabled). Tola does not bundle JavaScript or rewrite `url(...)` inside CSS; keep CSS resource paths relative to the published stylesheet. See `tola help "[assets]"`.
 
 #### Fonts
 
-Compiler fonts and browser fonts are separate inputs. `[typst.fonts]` supplies Typst;
-`tola inspect fonts` lists its fonts. Browsers need published font files loaded through CSS
-`@font-face`. A Typst font setting alone does not load a web font.
-For pure builds, keep compiler fonts in configured site paths or available module inputs.
-Host system fonts cannot be used with `--pure`.
+Compiler fonts and browser fonts are configured separately:
 
-Modules can declare compiler font directories with `fonts = ["typst-fonts"]` in the
-`[typst]` table of `tola-module.toml`. Select their aliases in `[typst.fonts].modules`.
-To use two versions of the same family, give one module's family a new compiler name.
-
-Run `tola help "[typst.fonts]"` for the complete example that renames a font family.
-
-All matching faces from `cjk` in this entry move to `CJK Plex Sans`. Use that name in
-Typst and check the registered names and module aliases with `tola inspect fonts --json`.
+- **Compiler fonts** (used for PDFs, `html.frame`, and SVG rasterization) come from `[typst.fonts]`; inspect them with `tola inspect fonts --json`. Pure builds (`--pure`) cannot use host system fonts, so keep required fonts inside the site or a module.
+- **Module compiler fonts**: A module can ship fonts via `[typst] fonts = ["typst-fonts"]` in `tola-module.toml`. Sites enable them in `[typst.fonts].modules` and can rename a module's font family if two modules ship conflicting versions. See `tola help "[typst.fonts]"`.
+- **Browser fonts** must be published as static assets (or hook outputs) and loaded with CSS `@font-face`.
 
 #### Images
 
-Use native `image` for compiler-rendered content, `html.img(src: asset-url(...))` for a
-published original, or `@tola/image` for resized derivatives and responsive sets.
+Choose the right path for each image:
 
-Pass an input path or raw bytes to image helpers, not an asset URL. Resolve a path with
-`path(...)` before passing it to another file's function. Returned URLs already include
-the mount. Supply `sizes` for responsive images that are not full-width.
+- **Compiler-rendered content** (PDF or inline Typst graphics): native `image("...")`.
+- **Published original**: declare under `[assets]` and render `html.img(src: asset-url(...))`.
+- **On-demand derivatives and responsive `<picture>`/`srcset`**: use `@tola/image:0.0.0`. Pass an input path or raw bytes (never an asset URL); resolve relative paths with `path(...)` before handing them to helpers in another file. Returned URLs already include `base-path`. Supply `sizes` for non-full-width responsive images. `resize-image` requires an explicit raster format for SVG inputs; responsive helpers refuse SVG. See `tola help "@tola/image"`.
+- **Batch resizing of `[assets]` images**: use the built-in `resize-images` module (`tola skill modules built-in`).
 
-`resize-image` needs an explicit raster format to rasterize SVG; responsive helpers refuse
-SVG. Keep vector artwork as vector when resizing is unnecessary. A declared original stays
-published even when a helper also creates derivatives. Put private originals outside asset
-trees. Inspect alternate text, dimensions, and narrow layouts. See `tola help "@tola/image"`.
+Keep private originals outside `[assets]` trees, since declared originals are always published even if you also create resized variants.
 
 #### Icons
 
-Use collections declared under `[icons.collections]` and their actual `namespace:name` IDs.
-An unlabeled icon is decorative; informative icons need a label and controls need accessible
-names. Inline `currentColor` artwork follows its surrounding color; an `icon-url` image
-does not. Exact helpers: `tola help "@tola/icon"`.
+Declare icon collections under `[icons.collections]` in `tola.toml` (or in a module's `tola-module.toml`), inspect available IDs with `tola inspect icons`, and render via `@tola/icon:0.0.0`:
+
+```typst
+#import "@tola/icon:0.0.0": icon, icon-url
+#icon("lucide:rocket")
+#icon("lucide:rocket", label: "Launch site")
+```
+
+- Omit `label` for decorative icons; supply `label` for informative icons (screen readers).
+- Inline SVG drawn with `currentColor` inherits surrounding CSS color; `icon-url(...)` images do not.
+- Inside a module that declares its own icon collections, bind `icon.with(module: get-module().name)` so lookups target that module instance. See `tola help "[icons]"` and `tola help "@tola/icon"`.
 
 ### SEO
 
-Reuse selected page outputs for canonical URLs, feeds, and sitemaps. Configure the real
-`site.origin` and deployment path before judging their addresses. Social image metadata
-does not publish the image: declare that resource too.
+Reuse your selected page list for canonical links, feeds, and sitemaps, and configure the real `site.origin` and `site.base-path` before verifying output URLs.
 
-#### Head
-
-Compose head entries in the page template. Canonical and social helpers return arrays; render
-them in the custom head. Build absolute URLs with `output-url(page.output, origin: site.origin)`.
-Use `plain-text` for rich titles.
-See `tola help "@tola/head" canonical open-graph twitter-card`.
-
-#### Feeds
-
-A feed needs an origin and a non-blank title. An entry without `content` publishes no full-text
-body, so a summary alone makes an excerpt-only entry. Pass a document selection as `content` to
-publish the whole page.
-
-A `(document: output, id: "article")` selection keeps one exported subtree, whose HTML ID
-must occur exactly once. Use it to exclude navigation. Keep entry IDs stable when routes
-move, and pass parsed timestamps as `.rfc3339`. Inspect the serialized feed's actual content
-and URLs. Exact inputs: `tola help "@tola/feed" feed`.
-
-#### Sitemap
-
-Sitemaps name whole documents, not fragments. They accept calendar dates as well as timestamps
-for updates, and every listed URL is absolute, so the site needs `site.origin`; skip the output
-when it is absent. Check the serialized entries and exclusions after `tola check` or a build.
-Exact inputs: `tola help "@tola/sitemap" sitemap`.
+- **Head tags**: `@tola/head:0.0.0` helpers (`head-metadata`, `canonical`, `open-graph`, `twitter-card`) return arrays of elements to render inside `html.head`. Pass `output-url(page.output, origin: site.origin)` for canonical URLs and `plain-text` for rich titles. Social preview images must also be published as assets or derivatives. See `tola help "@tola/head" canonical open-graph twitter-card`.
+- **Feeds**: `@tola/feed:0.0.0` requires `site.origin` and a non-blank title. Pass `content: (document: page.output, id: "article")` to embed one unique HTML subtree (excluding site chrome); omitting `content` creates an excerpt-only entry. Keep entry IDs stable across route moves and format dates with `.rfc3339`. See `tola help "@tola/feed" feed`.
+- **Sitemap**: `@tola/sitemap:0.0.0` lists whole documents with absolute URLs (skip generating it when `site.origin` is unset) and accepts calendar dates or timestamps. See `tola help "@tola/sitemap" sitemap`.
 
 ## Modules
 
-A module is a directory containing `tola-module.toml`. It can provide a Typst library,
-a Nu library, a site entry, assets, queries, commands, or an initializer. Declare only the
-capabilities it provides. A theme is a module that supplies a site entry and writing API.
+A module is a directory with `tola-module.toml`. It can supply any combination of a Typst library, a site entry (theme), a Nu library, static assets, icons, compiler fonts, queries, CLI commands, hooks, or an initializer.
 
-The site chooses the instance alias in `[modules.ALIAS]`. Keep it out of module code:
-several aliases can refer to the same source with different options. The manifest needs
-no package name, version, authors, or description; describe the project in its README.
+Each site assigns an instance alias under `[modules.ALIAS]`. Never hard-code an alias inside module code — one module can be mounted under multiple aliases with different options.
 
-Start with `tola skill modules use` to install a module, `tola skill modules create`
-to write a library, or `tola skill modules theme --all` to build a theme.
+Start with `tola skill modules use` to install a module, `tola skill modules built-in` for official built-in modules, `tola skill modules create` to write a library, or `tola skill modules theme --all` to build a theme.
 
 ### Use
 
-Choose an alias in the site's `tola.toml`; the examples use `notes`. For a local theme:
+Register each module under `[modules.ALIAS]` in `tola.toml` using exactly one source: `path`, `tarball`, `git`, or `builtin`.
 
 ```toml
 [build]
-entry = { module = "notes" }
+entry = { module = "notes" } # optional: only when the module supplies the site entry
+
 [modules.notes]
 path = "theme"
 ```
 
-Content imports `@tola-modules/notes:0.0.0`. Selecting the module as `build.entry` uses
-its site program; adding a library or tool does not require changing the entry.
-Read the module's guide for its public functions and `[modules.notes.options]` settings.
-For theme changes, see `tola skill modules theme customization`.
+Content and templates import its Typst library from `@tola-modules/notes:0.0.0`, and configure it under `[modules.notes.options]`.
 
-Choose exactly one source: `path`, `tarball`, or `git`. Local paths are relative to
-`tola.toml`. Keep `tola.lock` with the site so other builds use the same remote inputs.
+- **`path`**: Relative to `tola.toml` (or absolute; `--pure` requires paths inside the site).
+- **`tarball`**: `{ url = "https://..." }` or `{ path = "downloads/theme.zip" }`, with optional 64-hex `sha256`. Supports `.tar.gz`, `.tar.zst`, and `.zip` with one outer directory containing `tola-module.toml` directly inside. Downloading does not run module build scripts, so use prepared release archives.
+- **`git`**: `{ url = "...", tag | branch | rev, subdir = "..." }`. Pick at most one of `tag`, `branch`, or full-commit `rev` (omitting all selects the default branch). HTTPS uses your Git credential helper; SSH / `git@host:path` uses your SSH config and agent.
+- **`builtin`**: Official modules embedded in Tola (`"resize-images"`, `"tailwind"`). See `tola skill modules built-in`.
 
-#### Archives
+Keep `tola.lock` committed so builds use the same resolved inputs. Run `tola update ALIAS` after changing a source or to refresh a moving branch/archive (and `tola vendor --refresh` if vendoring).
 
-Published themes can be read from an HTTPS download or a local archive file.
-
-Run `tola help "[modules]"` for a complete release URL example.
-
-Use `tarball = { path = "downloads/theme.zip" }` for a local file. Choose one of `url`
-or `path`; optional `sha256` checks the archive's expected SHA-256 digest.
-Supported archives are tar.gz, tar.zst, and ZIP, with one outer directory containing
-`tola-module.toml` directly inside it. Use the author's prepared release, since downloading
-does not run author build tools. For a private release, download it separately or use Git.
-
-A GitHub branch archive also works when the repository root contains the complete module.
-
-```toml
-[modules.notes]
-tarball = { url = "https://github.com/example/notebook/archive/refs/heads/preview.tar.gz" }
-```
-
-This expects `notebook-preview/tola-module.toml` inside the archive. For a module under
-`theme/`, use `git.subdir` or publish a separate archive of the module directory.
-
-#### Git
-
-Use Git when the selected directory already contains the module's runtime files.
-
-Run `tola help "[modules]"` for a complete Git tag example.
-
-`subdir` selects the directory containing `tola-module.toml`; omit it for the repository
-root. Choose one of `tag`, `branch`, or a full-commit `rev`; omitting all three selects
-the default branch. HTTPS uses your Git credential helper. SSH URLs and `git@host:path`
-use your SSH configuration and agent.
-
-To follow `preview` when the module lives in `theme/`, use this declaration.
-
-```toml
-[modules.notes]
-git = { url = "https://github.com/example/notebook", branch = "preview", subdir = "theme" }
-```
-
-#### Updates
-
-Ordinary builds reuse the lock entry. Run `tola update notes` to refresh a branch or
-archive, even if its name or URL is unchanged. To switch to another version, edit the
-selector or URL first. If you follow a moving archive, omit `sha256` so the update can
-record the new digest in `tola.lock`. If you set `sha256`, update it to match the new archive.
-Check the site after updating. If it uses vendor copies, run `tola vendor --refresh`.
-
-| Build option | Use it when |
+| Flag | Effect |
 | --- | --- |
-| `--locked` | The build must keep `tola.lock` unchanged; locked inputs may still be fetched |
-| `--offline` | Tola must use inputs already available without network access |
-| `--pure` | Tola must use locked project inputs and vendor copies, without host caches |
+| `--locked` | Keep `tola.lock` unchanged; locked remote inputs may still be fetched |
+| `--offline` | Disallow network access; use already cached or local inputs |
+| `--pure` | Use only locked site-local inputs and vendored copies; no host caches or system fonts |
 
-Use `tola skill build vendor` to prepare an offline delivery. A lock records selected
-inputs; it does not contain their files. These flags govern Tola's input loading, not
-what a hook's external tools can access.
+See `tola help "[modules]"`.
+
+### Built-in
+
+Tola ships ready-to-use modules under `builtin = "..."` that stay in sync with your Tola version. To fork and customize one, copy its files into your site and switch `builtin` to `path`.
+
+#### Resize images
+
+Resizes JPEG, PNG, and WebP images declared in `[assets]` and caches each size separately:
+
+```toml
+[assets]
+trees = [{ source = "photos", url-prefix = "/gallery" }]
+
+[modules.resize-images]
+builtin = "resize-images"
+
+[modules.resize-images.options]
+include = ["photos/**"]
+exclude = ["photos/drafts/**"]
+widths = [480, 960] # format = "webp" (or "png", "jpg"), quality, upscale, jobs, dev
+
+[modules.resize-images.options.overrides."photos/cover.jpg"]
+widths = [1200]
+```
+
+Link generated variants with `output-url("images/<alias>/<source>/w<width>.<format>")` (for example `output-url("images/resize-images/photos/cover.jpg/w1200.webp")`). To resize a module's assets, set `source = { module = "notes" }`.
+
+#### Tailwind
+
+Compiles Tailwind CSS v4 from the HTML pages Tola renders:
+
+```toml
+[modules.tailwind]
+builtin = "tailwind"
+
+[modules.tailwind.options]
+runner = "auto" # or e.g. ["bunx", "--no-install", "@tailwindcss/cli"]
+minify = false
+dev = "run"     # "run", "reuse", or "skip"
+```
+
+Link the generated stylesheet in `<head>` with `output-url("_tola-modules/tailwind/tailwind.css")` (using your module alias). Add `styles/tailwind.css` starting with `@import "tailwindcss" source(none);` for custom CSS or `@source` directives. For a launcher or custom stylesheet, set `toolchain` to bust the cross-run disk cache when dependencies change.
 
 ### Create
 
-Create `theme/tola-module.toml` and `theme/lib.typ`. A Typst library needs just one
-manifest entry:
+A Typst library module needs only `tola-module.toml` and one file:
 
 ```toml
+# theme/tola-module.toml
 [typst]
 entry = "lib.typ"
 ```
 
-`theme/lib.typ`:
-
 ```typst
+// theme/lib.typ
 #let note(body) = html.aside(class: "note", body)
 ```
 
-Register the directory in the site's `tola.toml`.
+Register `[modules.notes] path = "theme"` in `tola.toml`, then import `#import "@tola-modules/notes:0.0.0": note`.
 
-```toml
-[modules.notes]
-path = "theme"
-```
-Content can then use `#import "@tola-modules/notes:0.0.0": note` and
-`#note[Remember this.]`. This library does not replace the site's entry.
-
-| Declaration | Purpose |
+| Manifest entry | Purpose |
 | --- | --- |
-| `[typst] entry` | Public Typst definitions imported through `@tola-modules/ALIAS:0.0.0` |
-| `[build] entry` | Site program selected by the site's `build.entry = { module = "ALIAS" }` |
-| `[nu] entry` | Public Nu exports imported with `use tola-modules ALIAS` |
+| `[typst] entry` | Public Typst library imported via `@tola-modules/ALIAS:0.0.0` |
+| `[build] entry` | Site program selected by `build.entry = { module = "ALIAS" }` |
+| `[nu] entry` | Public Nu library imported via `use tola-modules ALIAS` or run with `tola nu @tola-modules/ALIAS` |
 
-These entries are independent. A module can be only a library or only a tool. A project
-entry is an ordinary project file; it does not become an implicit module.
-`tola module check ./theme` checks the declaration and file, without compiling the library.
-Use it from a real site to validate its behavior.
+These entries are independent. Validate a manifest and its declared files with `tola module check ./theme`, then test behavior from a real site.
 
 ### Theme
 
-This example publishes non-draft sources, loads a module stylesheet, and exposes an article
-function for customization. Under a site directory, create `theme/` and `content/`.
-The four module files below form a complete theme. To extend the library in **Create**,
-replace its manifest and `lib.typ` with these versions.
+A complete minimal theme combines a manifest, a reusable Typst API (`lib.typ`), a thin site entry (`site.typ`), and a stylesheet:
 
 `theme/tola-module.toml`:
 
@@ -788,11 +481,8 @@ files = [{ source = "assets/theme.css", url = "/theme.css", minify = false }]
 
 #let pages() = {
   parse-sources(all-sources(), fields)
-    .filter(source => not source.meta.draft)
-    .map(source => (
-      source: source,
-      output: output-of(join-route(source.route-segments)),
-    ))
+    .filter(s => not s.meta.draft)
+    .map(s => (source: s, output: output-of(join-route(s.route-segments))))
 }
 
 #let article(source) = [
@@ -827,11 +517,7 @@ files = [{ source = "assets/theme.css", url = "/theme.css", minify = false }]
 }
 ```
 
-`pages()` validates before filtering, and retains the native `source.file` for inclusion.
-Its records can also feed navigation and model queries. Complete-set metadata validation
-belongs here, not in the `note` function that individual sources call.
-
-`theme/site.typ` delegates to that same public function:
+`theme/site.typ`:
 
 ```typst
 #import "lib.typ": render-site
@@ -845,52 +531,12 @@ body { margin: 0; font-family: system-ui, sans-serif; line-height: 1.6; }
 .page { max-width: 48rem; margin: auto; padding: 2rem 1rem; }
 ```
 
-This custom shell supplies its own head. Add the site's SEO, code stylesheet, and footnote
-handling when it needs them; see `tola skill site html shell` and `tola skill site seo`.
-
-#### Consumer
-
-Create `tola.toml` beside `theme/`:
-
-```toml
-[site]
-base-path = "/docs/"
-
-[build]
-entry = { module = "notes" }
-
-[modules.notes]
-path = "theme"
-
-[modules.notes.options]
-show-title = false
-```
-
-`content/index.typ`:
-
-```typst
-#import "@tola-modules/notes:0.0.0": note
-#note(title: "Welcome")
-
-= First section
-
-A page supplied by the theme.
-```
-
-Run `tola check`, then `tola build` or `tola dev` from this site. The output is
-`index.html`, served at `/docs/`. The stylesheet URL is
-`/docs/_tola-modules/notes/theme.css`, with any enabled cache-busting suffix.
-Renaming the alias requires changing the site's entry selection and content imports,
-not editing the theme's source.
+A consuming site points `[build] entry = { module = "notes" }` at `theme/`, optionally overrides `[modules.notes.options]`, and writes pages with `#import "@tola-modules/notes:0.0.0": note`. Note that a custom `html.html` shell needs explicit SEO, code stylesheet, and footnote handling (`tola skill site html`, `tola skill site seo`).
 
 #### Customization
 
-Keep simple choices in options. For added site CSS, declare the file in the site's
-`[assets]` and add its declared URL to `[modules.notes.options] extra-styles`.
-The example theme loads those styles after its own stylesheet.
-
-For structural changes, set the site's `[build] entry = "site.typ"` and create that
-project entry:
+- **Options and styles**: Expose everyday toggles in `[options]`. Sites can declare extra CSS in `[assets]` and pass its declared URL via `extra-styles`.
+- **Structural overrides**: Switch `tola.toml` to `[build] entry = "site.typ"` and wrap the theme's public functions:
 
 ```typst
 #import "@tola-modules/notes:0.0.0": article, render-site
@@ -903,124 +549,57 @@ project entry:
 #render-site(article: with-banner)
 ```
 
-The project calls the same function as the module's default entry. Expose ordinary
-functions and content parameters for the variations a theme supports; document which
-are public. Additional modules compose through their exported Typst or Nu APIs.
-A named `get-module` call reads instance settings; it does not import that instance's API.
+Expose layout hooks as Typst function parameters rather than putting code or markup callbacks in TOML options.
 
-### Options
+### Options and paths
 
-Set defaults in the module manifest's `[options]` table. The site's
-`[modules.notes.options]` overrides them. Tables merge recursively, and an explicit array
-or scalar replaces its default. A module's own public API can validate the fields it uses.
-Use the site's top-level `[options]` for site-owned data, read as `site.options` in Typst
-and `(get-site).options` in Nu.
-
-From module Typst source, import `get-module` from `@tola/module:0.0.0` and call
-`get-module()` to read the instance's `name`, `options`, and `assets`. Project code
-selects the instance with `get-module("notes")`. Use `assets.urls` directly because the
-URLs already contain the site mount. Pass layout customizations through the theme's
-public API.
-
-Typst chooses the current instance from the package containing the call. In Nu, the
-current instance belongs to the calling module command, hook, or public Nu entry:
-importing another Nu library does not change it. Pass options explicitly to shared Nu
-functions. Inside module code, use the current instance instead of hard-coding the example
-alias.
-
-Options are ordinary TOML data. Validate the fields your API consumes and treat paths or
-URLs according to that API's documented meaning. Layout callbacks belong in Typst
-function parameters, not in the options table.
-
-### Paths
-
-Package `/...` paths point to the package root. Preserve `source.file` when including project
-content. For a known project data path, use `project-path` from `@tola/site` before reading
-it. Creating a path does not run a generator. Tools and hooks depend on the module's actual
-manifest: use `tola help "[modules]"` for current declarations rather than guessing an
-external script's environment or assuming a query runs its hooks.
-
-### Assets
-
-Use the shared `files/source/url` and `trees/source/url-prefix` declarations; the full
-selection rules are in `tola skill site assets files`. In a module manifest, both
-`source` and tree `include/exclude` patterns are relative to the module root.
-
-For the theme's `source = "assets/theme.css"` and `url = "/theme.css"`:
-
-| Value | Meaning |
-| --- | --- |
-| `assets/theme.css` | File read inside the module |
-| `theme.css` | Resource key in `get-module().assets.files` and `.urls` |
-| `/docs/_tola-modules/notes/theme.css` | URL with the site's base path and module alias, before the cache-busting query |
-
-Use `assets.urls` to link to a selected static asset. Its URLs include the site's base path
-and the cache-busting query, if enabled. Use `assets.files` for Typst paths to the same files.
-To link to a file generated by a hook, use `output-url`.
-A normal Nu command or query does not prepare the build's final asset bytes.
-
-For a feature with optional CSS, add `search = true` to the existing `[options]`
-table. Add this entry to the module's existing `[assets] files` array:
+- **Merging**: `[options]` in `tola-module.toml` sets defaults; `[modules.ALIAS.options]` in `tola.toml` overrides them (tables merge recursively; arrays and scalars replace). Site-wide data belongs in top-level `[options]`, read as `site.options` (Typst) or `(get-site).options` (Nu).
+- **Reading in Typst**: `get-module()` (`@tola/module:0.0.0`) inside module code reads the calling instance's `name`, `options`, and `assets`; project code passes an explicit alias (`get-module("notes")`).
+- **Reading in Nu**: `get-module` returns the calling module instance in module commands, hooks, and public Nu entries (importing another Nu library does not change the calling instance; pass options explicitly to shared functions).
+- **Manifest option references**: Fields in `tola-module.toml` can bind directly to merged module options using `{ option = "key" }`:
 
 ```toml
-{ source = "assets/search.css", url = "/search.css", enabled-by = "search" },
+[options]
+dev = "reuse"
+watch = { include = ["styles/**"] }
+
+[[hooks.generate-outputs]]
+name = "build-css"
+nu = "compile.nu"
+dev = { option = "dev" }
+rerun-on = { option = "watch" }
+outputs = [{ file = "_tola-modules/{name}/site.css" }]
 ```
 
-Supply the file even when the default is false: it is part of the module's declared
-capabilities. Use the same boolean for the public UI and its runtime hook. Site overrides
-go in `[modules.notes.options]`. An exact file declaration owns its source before the
-option is checked, so disabling it cannot republish it through an overlapping tree.
+Option references work on hook `dev`, `order`, `rerun-on`, `args`, `generates`, `outputs`; asset `minify`, `include`, `exclude`; and command `args`, `projection`. The resolved value is still validated by the field's normal rules.
 
-A site can replace an already selected resource:
+- **Paths**: Inside a module, `/...` resolves from the module root. Preserve `source.file` when including site content. To read a known site file (such as JSON produced by a hook) from module Typst code, use `project-path("data/file.json")` from `@tola/site:0.0.0`.
+
+### Assets and icons
+
+Module `[assets]` use the same `files` and `trees` rules as sites (`tola skill site assets files`), with paths relative to the module root.
+
+For `source = "assets/theme.css"` and `url = "/theme.css"` under alias `notes` (with `base-path = "/docs/"`):
+
+- Key in `get-module().assets.files` and `.urls`: `"theme.css"`
+- Published URL: `/docs/_tola-modules/notes/theme.css` (with cache-busting query if enabled)
+
+Use `assets.urls` for browser links and `assets.files` for Typst reads. To link a file generated by a module hook instead of `[assets]`, use `output-url(...)`.
+
+- **Conditional assets**: Add `enabled-by = "search"` (referencing a boolean option) to an asset declaration. Ship the file even when the default is `false`; disabling an exact file entry never lets an overlapping tree republish it.
+- **Site overrides**: A site can replace any selected module asset with a site-relative file while keeping its module URL, or disable all module assets:
 
 ```toml
 [modules.notes.assets.replace]
 "theme.css" = "styles/alternate.css"
+# Or: enable = false
 ```
 
-The replacement path is site-relative and keeps the resource's module URL. It cannot add
-a tree member excluded by its patterns. `[modules.notes.assets] enable = false` disables
-the module's assets; a theme that unconditionally looks up its CSS needs a corresponding
-template customization.
-
-The site owns `[assets] cache-busting` and `[build.minify]`. A declaration's
-`minify = false` preserves its bytes. Keep CSS resource references relative to the
-published stylesheet; Tola does not rewrite those references or bundle JavaScript.
-
-### Nu libraries
-
-List built-in and configured Nu libraries with `tola nu --help`. A module can expose a library
-alongside its Typst entry and commands by adding this to `tola-module.toml`:
-
-```toml
-[nu]
-entry = "tools/mod.nu"
-```
-
-The library uses standard Nu exports. For example, `tools/mod.nu` can contain:
-
-```nu
-export def title [text: string] {
-  $text | str trim
-}
-export def main [text: string] { title $text }
-```
-
-With the module selected as `notes`, another script can use `use tola-modules notes` and
-call `notes title " A title "`. Run the public entry with
-`tola nu @tola-modules/notes " A title "`; append `--help` for its argument help. Libraries
-need no `main` unless directly executed. Use `path self` for resources belonging to the
-library, and pass site options explicitly when sharing a library across aliases.
-
-Unknown `@tola-modules/ALIAS` entries fail directly. `tola nu --lsp` supplies Nu
-libraries to editors; `tola lsp` supplies Typst and declared entity semantics.
-Built-in Nu libraries are described in `tola skill scripts libraries`.
+- **Module icons**: Declare `[icons.collections]` in `tola-module.toml` (local paths are module-relative) and bind `#let icon = icon.with(module: get-module().name)` in Typst so icon names stay scoped to that module instance.
 
 ### Queries
 
-A named query selects a module-relative Typst `entry` and a metadata `label`.
-The entry runs with the consuming site's content and modules. The label must select
-exactly one metadata value. Reuse the theme's page selection so queries agree with the site.
+A named query evaluates a module-relative Typst file against the consuming site and reads one unique `<label>` metadata value:
 
 ```toml
 [queries.pages]
@@ -1028,36 +607,23 @@ entry = "queries/pages.typ"
 label = "page-list"
 ```
 
-`theme/queries/pages.typ` can reuse the example theme's page selection:
-
 ```typst
+// theme/queries/pages.typ
 #import "../lib.typ": pages
 #import "@tola/address:0.0.0": output-url
 
-#metadata(pages().map(page => (
-  title: page.source.meta.title,
-  output: page.output,
-  url: output-url(page.output),
+#metadata(pages().map(p => (
+  title: p.source.meta.title,
+  output: p.output,
+  url: output-url(p.output),
 ))) <page-list>
 ```
 
-Run `tola query notes.pages --json` from the site that uses the module. Ordinary queries accept scalars,
-arrays, and dictionaries that can be converted to JSON. Native Typst paths are encoded as
-`{ root, path }`, preserving their project or package root. Project content and functions
-to explicit data fields before returning them.
+Run `tola query notes.pages` (human table), `--json` / `--json --pretty`, or `-i` (interactive picker). You can also query any standalone file with `tola query ./model.typ --label model`. From Nu, call `use tola [query get-module]; query $"((get-module).name).pages"`. Queries do not run build hooks; prepare generated inputs beforehand.
 
-Queries do not build the site or run its hooks. Prepare generated inputs before querying
-them. Keep query entries focused on the data the tool needs.
-
-#### References and definitions
-
-Declare editor support under the query that supplies the IDs. The following example assumes
-that `lib.typ` exports `page-link(id)`, `page-card(id: ...)`, and `page(..., id: ...)`:
+**Editor support (completion, hover, go-to-definition, rename)**: Attach `references` and `definitions` to a query whose metadata returns an array of records with only these fields: `id` (unique nonempty string), `name` (string), and optional `description`, `source` (native Typst path), `url`:
 
 ```toml
-[typst]
-entry = "lib.typ"
-
 [queries.index]
 entry = "queries/index.typ"
 label = "page-index"
@@ -1066,149 +632,45 @@ label = "page-index"
 export = "page-link"
 parameter = { positional = 0 }
 
-[[queries.index.references]]
-export = "page-card"
-parameter = { named = "id" }
-
 [[queries.index.definitions]]
 export = "page"
 parameter = { named = "id" }
-
-[commands.list-pages]
-query = "index"
 ```
 
-Each declaration selects a parameter of a public function exported by `[typst].entry`.
-`positional` is zero-based; `named` selects a named parameter, not a positional parameter
-with that name. Use a dot-separated export such as `content.page-link` for a nested member.
-
-A query with at least one reference or definition must return an array of records with
-these fields:
-
-| Field | Requirement | Meaning |
-| --- | --- | --- |
-| `id` | Nonempty string, unique within this query | The value the public API accepts as a reference |
-| `name` | String | The item's human-readable name |
-| `description` | Optional string or `none` | Explanatory text for completion and hover |
-| `source` | Optional native Typst path or `none` | The source file used for definition lookup |
-| `url` | Optional string or `none` | The item's web address |
-
-Editor queries accept only the fields above. For a tool that needs other fields,
-write a separate query.
-
-In `theme/queries/index.typ`, select those fields from the list of documents:
-
-```typst
-#import "../lib.typ": pages
-#import "@tola/address:0.0.0": output-url
-
-#metadata(pages().map(page => (
-  id: page.source.id,
-  name: page.source.meta.title,
-  source: page.source.file,
-  url: output-url(page.output),
-))) <page-index>
-```
-
-Use the ID the public function accepts. It is local to this module alias and query.
-The query's `label` selects metadata; a record's `name` is display text. Keep native
-`source` paths separate from web URLs; JSON represents a source as `{ root, path }`.
-
-Editors can use these declarations for completion, hover, go to definition, and find
-references. To rename an ID from the editor, its definition and references need to be
-editable literals. Try these commands in a site that imports the module.
-
-#### Calling
-
-For a module that declares `queries.index`, a registered Nu tool can use:
-
-```nu
-use tola [query get-module]
-query $"((get-module).name).index" | to json
-```
-
-`query` returns a Nu value directly; this example serializes it. It uses the calling site's
-configuration unless given `--config FILE`. Always include the instance alias in a named
-query; importing a library does not supply it. Check a renamed alias before shipping.
-
-`tola query --help` lists configured query names. `tola query notes.index` prints a
-human-readable table; `--json` returns the query value as compact JSON, and
-`--json --pretty` indents it. `tola query ./tools/model.typ --label model` reads one explicit
-Typst entry without requiring a module declaration.
-
-Use `tola query notes.index -i` to select a row. A declared query command's fixed
-`projection` applies after selection. Use ordinary Nu `where` and `select` for filtering
-or field selection. Nonterminal output and `--json --output FILE` return the ordinary
-result without opening the browser; leaving the browser writes nothing.
-
-#### Selection
-
-For the module's `index` query above, this `tools/find.nu` keeps each
-record through search and selection. Register it with
-`nu = "tools/find.nu"` under `[commands.find]` and run `tola notes find`:
-
-```nu
-use tola [query get-module nu-helpers]
-
-def main [] {
-  let entities = query $"((get-module).name).index"
-  let picked = (
-    $entities
-    | nu-helpers pick --columns [id name] --search-columns [name] --fuzzy
-  )
-  if ($picked | is-not-empty) {
-    $picked | first
-  }
-}
-```
-
-The selected record retains fields hidden from the table, including `source` if present.
-Keep the plain query available for use without a terminal.
+`export` names a function exported by `[typst] entry` (dot-separated for nested members); `positional` is zero-based and `named` matches a named parameter.
 
 ### Commands
 
-Register a Nu tool in `tola-module.toml`:
+Expose author tools under `[commands.NAME]` in `tola-module.toml`, invoked as `tola ALIAS NAME ...`. Each command declares exactly one of `nu`, `argv`, `query`, or `skill`:
 
 ```toml
 [commands.greet]
 nu = "tools/greet.nu"
-```
 
-Use the `greet.nu` example from `tola skill scripts` as `tools/greet.nu`.
-With the module configured as `notes`, run `tola notes greet Ada --upper`. The script
-path is module-relative and cwd is the project root. Optional `args` precede the user
-arguments. Nu binds the arguments using the script's typed `main` signature. Write the
-description above `main`. Command help reads the signature without running the script,
-and a manifest `help` field can override the description.
-
-Embedded Nu commands read the calling module instance with `get-module`, another instance
-with `get-module notes`, and site settings with `get-site`. Importing a Nu library does not
-change the calling instance. An external `argv` tool reads its invocation with
-`"$TOLA_EXECUTABLE" nu @tola-scripts/context --json`. The result includes
-the site's paths and the current module's effective options in `module.options`.
-Embedded Nu can read the same record with `use tola get-context`.
-Run `tola help @tola-scripts/context` for the fields each action receives.
-
-An action declares exactly one of `nu`, `argv`, `query`, or `skill`. A query action
-exposes a declared query without a wrapper script; `projection` selects its output fields:
-
-```toml
 [commands.pages]
 query = "pages"
 projection = ["title", "url"]
 
 [commands.guide]
 skill = "GUIDE.md"
+help = "Read the theme guide."
 ```
 
-Create `GUIDE.md` with the module's authoring instructions before declaring the skill
-action. Consumers read it with `tola notes guide` and its heading selectors. A command's
-description belongs in its Nu signature or `help` field; the manifest needs no general
-project-description fields.
+- `nu` / `argv` commands run at the site root; optional `args` prepend user arguments and support `{module}`, `{project}`, and `{tola}` placeholders. Nu command help comes from comments above `def main` (overridable via `help`).
+- `skill` serves a module Markdown guide using the same section navigation (`--list`, `--all`, `-o`) as `tola skill`.
+- External `argv` tools can read invocation paths and effective `module.options` via `"$TOLA_EXECUTABLE" nu @tola-scripts/context --json` (see `tola help @tola-scripts/context`).
 
-#### Reports
+**Diagnostics and reports**:
 
-A registered tool or hook can submit diagnostics separately from its ordinary output:
+- **From Typst** (`@tola/diagnostic:0.0.0`): Report non-fatal warnings or errors during compilation without aborting evaluation immediately:
+
+```typst
+#import "@tola/diagnostic:0.0.0": report
+#report("Missing summary.", severity: "warning", code: "missing-summary",
+  hints: ("Add a `summary` field to metadata.",))
+```
+
+- **From Nu hooks and commands** (`use tola diagnostic`): Submit one batch per invocation (`[]` counts as a submission; an `error` fails the Tola command after the script exits; omit `location` in build hooks and module commands):
 
 ```nu
 use tola diagnostic
@@ -1218,511 +680,165 @@ use tola diagnostic
 ] | diagnostic submit
 ```
 
-The default severity is `warning`. An `error` fails the operation after the script finishes.
-Each invocation accepts one valid batch. `[]` counts as a submission, and a second
-submission fails with the first batch intact. Embedded Nu submits directly to the host.
-External tools write a version 1 JSON report to the path in the invocation context’s `reportPath`.
-Omit locations in hook and module command reports because these invocations have no source snapshot.
-
-For an independent check, pipe the list to `diagnostic render`. Add a `location` record
-with a file `path` and optional one-based `line` and `column` to show source text.
-Paths are relative to the script's working directory. From another language, pass a JSON
-array or an object with a `diagnostics` array to `tola nu --stdin @tola-scripts/diagnostic render`.
-The calling script chooses its exit status after rendering.
+Standalone scripts can render diagnostics with `| diagnostic render` (with optional file `location`), or pipe JSON to `tola nu --stdin @tola-scripts/diagnostic render`. External hooks/commands write version 1 JSON to `reportPath` from context. See `tola help "@tola/diagnostic" report` and `tola help @tola-scripts/diagnostic`.
 
 ### Initializer
 
-An optional initializer generates the files for a new site. Add to the manifest:
-
-```toml
-[init]
-nu = "tools/init.nu"
-```
-
-`theme/tools/init.nu` creates a site using this theme's `note` API:
+Declare `[init] nu = "tools/init.nu"` (or `argv`) to let users scaffold sites with `tola init my-site --from <path|git-url|archive> --alias notes [-- --script-args]` (or `tola notes init new-site` from an existing site):
 
 ```nu
 use tola get-init
 
 def main [] {
   let init = get-init
-  let config = {
-    build: {
-      entry: {module: $init.module.name}
-    }
-    modules: {
-      ($init.module.name): {path: $init.module.root}
-    }
-  }
-  $config | to toml | save --raw ($init.output-dir | path join "tola.toml")
+  {
+    build: {entry: {module: $init.module.name}}
+    modules: {($init.module.name): {path: $init.module.root}}
+  } | to toml | save --raw ($init.output-dir | path join "tola.toml")
   mkdir ($init.output-dir | path join "content")
-  let source = [
+  [
     $'#import "@tola-modules/($init.module.name):0.0.0": note'
     '#note(title: "Welcome")'
-    ''
-    'Your first page.'
-  ] | str join (char nl)
-  $source | save --raw ($init.output-dir | path join "content" "index.typ")
+  ] | str join (char nl) | save --raw ($init.output-dir | path join "content" "index.typ")
 }
 ```
 
-Run `tola init my-site --from ./theme --alias notes --dry-run`, then the same command
-without `--dry-run`. Tola runs the generator in a disposable output directory even for
-dry-run, checks the generated files, and writes them to the target directory.
-Write only to `(get-init).output-dir`. `target-dir` is the final destination for calculating
-relative paths, not the directory to populate during generation.
-
-Tola registers the initializer's original source under the selected alias, preserving that
-module's generated options and other settings. A local initializer becomes a local `path`;
-a remote initializer retains its Git selector or archive location. Temporary download
-directories are used only while running and validating the initializer.
-
-Git initializers accept the same selectors as Git modules. For a module in `theme/` on
-the `preview` branch, initialize a site with:
-
-```sh
-tola init my-site --from https://github.com/example/notebook --branch preview --subdir theme --alias notes
-```
-
-Choose at most one of `--branch`, `--tag`, and `--rev`; `--rev` requires a full commit ID.
-Omitting all three selects the default branch. HTTPS and SSH use the same authentication
-as ordinary Git modules.
-
-An HTTPS URL or local file ending in `.tar.gz`, `.tar.zst`, or `.zip` selects a module
-archive. It must contain one outer directory with `tola-module.toml` directly inside.
-Git-specific flags, including `--subdir`, apply only to Git initializers.
-
-```sh
-tola init my-site --from https://example.com/theme-v1.tar.zst --alias notes
-tola init my-site --from ./theme-v1.zip --alias notes
-```
-
-The generated configuration can also declare other Git, tarball, or local modules.
-Initialization resolves and validates these inputs before writing the site, records them
-in `tola.lock`, and retains downloaded module snapshots in the new site's cache. The
-initializer's own lock entry identifies the exact snapshot that ran, even if its branch
-advances during initialization. `--dry-run` performs preparation in temporary storage and
-shows the proposed site without writing it. Input restrictions such as `--offline` and
-`--locked` also apply during preparation.
-
-From an existing site, `tola notes init new-site` uses the selected `notes` module and its
-locked snapshot. To change the new site's source later, edit its module declaration and
-run `tola update notes`.
-
-`get-site` and `get-module` are unavailable here; use `(get-init).module` for source details.
-An unattended initializer must not prompt; `(get-init).interactive` indicates explicit
-interactive use.
+- Write all generated files under `(get-init).output-dir` (a disposable staging directory, even for `--dry-run`); use `target-dir` only when computing relative paths.
+- Tola rewrites the initializer's own module declaration to preserve the original local path, Git selector, or archive URL and locks all generated remote dependencies into `tola.lock`.
+- `get-site` and `get-module` are unavailable during initialization; inspect `(get-init).interactive` before prompting. Remote `--from` flags (`--branch`, `--tag`, `--rev`, `--subdir`, `--offline`, `--locked`) follow the same rules as `tola skill modules use`.
 
 ### Releases
 
-Prepare a directory containing the files a site needs to use the module, then distribute it through
-an archive or Git. The examples package `theme/` into `dist/theme/`; the directory names
-and repository layout are your choice.
-
-Publish the files sites need, including entries, imported helpers, runtime scripts,
-query models, and declared assets. Author-only sources and build tools can stay outside
-the release. Add `[pack]` to the example theme:
+Prepare a clean release directory with `[pack]` and optional `[[hooks.before-pack]]` in `tola-module.toml`:
 
 ```toml
 [pack]
 include = ["lib.typ", "site.typ", "assets", "queries", "tools"]
 exclude = ["assets/**/*.map"]
-```
 
-This selection assumes the optional Queries and Initializer examples are present.
-For the four-file theme alone, use `include = ["lib.typ", "site.typ", "assets"]`.
-Include additional runtime files when adding other capabilities.
-
-Patterns are module-relative. A directory includes its descendants, exclusions win,
-and the manifest is always included. Keep entries, imported files, and declared assets
-in the release; author-only sources may be excluded.
-
-#### Preparation
-
-For generated CSS, put the author's source at `theme/styles/theme.css` and declare:
-
-```toml
 [[hooks.before-pack]]
 name = "compile-assets"
 nu = "author/assets.nu"
 ```
 
-This runnable `theme/author/assets.nu` copies the source CSS; replace its processing
-step with the compiler or data transformation the module needs:
-
-```nu
-use tola get-context
-
-def main [] {
-  let root = get-context | get hook.inputDir
-  mkdir ($root | path join "assets")
-  open --raw ($root | path join "styles" "theme.css")
-  | save --raw --force ($root | path join "assets" "theme.css")
-}
-```
-
-Use `argv = ["tool", "argument", ...]` instead when the whole action is an external
-compiler call. Supply real arguments for the chosen tool; no implicit shell or wildcard
-expansion occurs. Install author dependencies in the author environment. Consumers need
-only dependencies of the runtime hooks they execute.
-
-Run pack from beside `theme/`; the destination's parent must exist:
+In `before-pack`, read the module source directory via `get-context | get hook.inputDir` and write compiled assets into the module before packing. Then pack, check, test, and archive:
 
 ```sh
 mkdir -p dist
 tola module pack ./theme --output ./dist/theme
-```
-
-Pack runs before-pack hooks in the source module, then replaces the destination with
-the selected release files. A failed preparation leaves the previous release intact.
-The delivered manifest omits `pack` and `hooks.before-pack`, so author scripts may be
-excluded. Consumers receive the prepared files and never run before-pack themselves.
-Use `get-context | get hook.inputDir` to read the module's source directory during
-`before-pack`. This stage runs before a site loads the module.
-
-#### Verification
-
-`tola module check ./theme` validates the manifest and explicitly declared files without
-compiling programs or executing hooks. Run it after preparing generated files, or check
-the already prepared release:
-
-```sh
 tola module check ./dist/theme
-```
-
-Point a site at the prepared `dist/theme` directory, then run `tola check` and `tola build`
-from the site. Set `path` relative to the site's `tola.toml`.
-Exercise its declared queries and commands there. Verify an overridden option, a renamed
-alias, and a non-root `site.base-path` so accidental hard-coded assumptions are visible.
-For initializer modules, run `tola init` against the release and build the resulting site.
-
-After checking the release files, open the built site in a browser to check the layout
-and CSS URLs. If the theme ships compiled CSS, check that the site builds without
-the CSS compiler installed.
-
-#### Publication
-
-After checking the prepared directory, compress the directory itself so the archive has
-one outer directory with the manifest directly inside it. For example:
-
-```sh
 tar -czf dist/theme-v1.0.0.tar.gz -C dist theme
 ```
 
-A tar.zst or ZIP with the same layout also works. Pack does not invoke a compressor or
-upload files. The author or CI attaches the archive to a release; the Git tag can point
-to the source commit. GitHub's automatically generated source-code archives do not run
-pack and are not substitutes for a prepared module when generated files are needed.
-
-In the site's `tola.toml`, use the download URL of the attached archive:
-
-```toml
-[modules.notes]
-tarball = { url = "https://github.com/example/notebook/releases/download/v1.0.0/theme-v1.0.0.tar.gz" }
-
-[build]
-entry = { module = "notes" }
-```
-
-`tola build` downloads, checks, extracts, and caches the module. It records the file and
-module digests in `tola.lock`; subsequent reads must match. The site uses the packed files directly. Use versioned download addresses instead of a
-moving latest-release URL. Changing the URL and running `tola update notes` upgrades it.
-
-If you commit the packed files to Git, sites can select the prepared directory with
-`git.subdir`.
+- `tola module pack` runs `before-pack`, copies selected files (always including the manifest, stripping `[pack]` and `before-pack` so consumers never run author build tools), and replaces the output directory atomically on success.
+- Before publishing, test `dist/theme` from a real site with an overridden option, a renamed alias, and a non-root `site.base-path` (and without author-only tools installed).
+- Compress the directory itself so the archive has one outer directory containing `tola-module.toml` (`.tar.gz`, `.tar.zst`, or `.zip`), and attach it to a versioned release URL (or commit the packed directory and point consumers at `git.subdir`).
 
 ## Scripts
 
-Use `tola nu` for author tools, structured data processing, and build scripts.
-Tola includes Nushell. It can run the script without a separate Nu installation. Save this as
-`greet.nu` and run `tola nu greet.nu "Tola author" --upper`:
+Tola bundles Nushell so author tools, data scripts, and build hooks run identically without a separate Nu installation. Browser interactivity still uses JavaScript.
 
 ```nu
 # Greet someone by name.
 def main [name: string, --upper] {
-  let greeting = $"Hello, ($name)!"
-  if $upper {
-    $greeting | str upcase
-  } else {
-    $greeting
-  }
+  let msg = $"Hello, ($name)!"
+  if $upper { $msg | str upcase } else { $msg }
 }
 ```
 
-Use `tola skill modules commands` to expose it as a module command, or
-`tola skill hooks` to run it during a build. Browser code still needs JavaScript.
+Run it with `tola nu greet.nu "Tola author" --upper`, expose it as a module command (`tola skill modules commands`), or run it during a build (`tola skill hooks`).
 
 ### Runtime
 
-`tola nu` runs a script file or a public `@tola-scripts/NAME` or `@tola-modules/ALIAS`
-entry. Put Tola options before the entry and script arguments after it. It does not accept
-the standalone Nu CLI's `-c` flag. Use `tola nu --help` to list available libraries.
+`tola nu` runs a `.nu` file, a built-in `@tola-scripts/NAME` entry, or a module's `@tola-modules/ALIAS` entry (when `[nu] entry` is declared in `tola-module.toml`).
 
-The standard library is available, for example `use std/assert`. Personal Nu startup
-files and plugins are not loaded. Run `version` or `help COMMAND` inside a script to
-inspect the runtime you are using.
-
-Pass process input with `--stdin`. For `upper.nu`:
-
-```nu
-def main [] { $in | from json | get name | str upcase }
-```
-
-`printf '%s' '{"name":"Tola"}' | tola nu --stdin upper.nu` returns `TOLA`.
-Decode process input explicitly; Nu records are not passed between processes as records.
+- Place Tola flags (`--config FILE`, `--stdin`) **before** the entry, and script arguments **after** it. (`tola nu` does not support standalone Nu's `-c` flag.)
+- Personal Nu startup configs and external Nu plugins are not loaded; the Nu standard library (`use std/assert`) is available. Run `tola nu --help` to list available libraries.
+- Pass piped stdin with `--stdin` and decode explicitly (`$in | from json`).
+- Disk scripts keep the caller's working directory and discover nearby `tola.toml`; module commands and `@tola-modules/ALIAS` entries run at the site root. None of these run build hooks.
+- A module with `[nu] entry = "tools/mod.nu"` exports functions imported via `use tola-modules ALIAS` (add `export def main` only if it should also be directly runnable via `tola nu @tola-modules/ALIAS`).
 
 ### Libraries
 
-Import the Tola helpers you need:
-
-| Import | Use |
+| Import | Purpose |
 | --- | --- |
 | `use tola get-site` | Site settings, options, and paths |
-| `use tola get-module` | The calling module's alias and options, or a named instance |
-| `use tola query` | A declared module query or an explicit Typst query file |
-| `use tola get-context` | Paths and settings for this hook, module command, or initializer |
-| `use tola get-hook` | Directories and stage of the current hook |
-| `use tola get-init` | The current initializer's source and destination |
-| `use tola diagnostic` | Report warnings and errors; see `tola skill modules commands reports` |
-| `use tola nu-helpers` | Select original values from a searchable table |
-| `use tola syntax-highlight` | Highlight source text for a terminal preview |
-| `use tola image` | Read image metadata and produce resized images |
-| `use tola-modules notes` | Public Nu exports of the configured `notes` module |
+| `use tola get-module` | Current module instance (in module contexts) or `get-module ALIAS` |
+| `use tola query` | Evaluate a module query (`alias.name`) or standalone Typst query file |
+| `use tola get-context` | Full invocation record (paths, options, stage, `reportPath`) |
+| `use tola get-hook` | Current hook's stage/directories, or `get-hook --rerun-on-digest` |
+| `use tola get-assets` | Configured asset snapshot in post-discovery hooks (`--module`, `--include`, `--exclude`) |
+| `use tola get-init` | Initializer source and output/target directories |
+| `use tola diagnostic` | `make`, `submit`, and `render` diagnostics |
+| `use tola nu-helpers` | Interactive table picker (`pick`) |
+| `use tola syntax-highlight` | Terminal syntax highlighting for previews |
+| `use tola image` | Image `metadata` and `resize` (supports raster and SVG inputs) |
+| `use tola-modules ALIAS` | Public Nu exports of a configured module |
 
-`get-hook` and `get-init` require their respective invocation. `get-module notes` reads
-an explicit alias; calling it without an alias requires a module command, hook, or public
-entry. Pass settings to shared library functions explicitly. See
-`tola help @tola-scripts/context` for the fields each invocation makes available.
-
-For example, resize an image without installing an external image tool:
+For example, resize or rasterize an image without external tools (`tola help "@tola-scripts/image"`):
 
 ```nu
 use tola image
 image resize photo.png --output thumb.webp --width 640 --format webp
 ```
 
-One dimension preserves the aspect ratio; two fill the rectangle and may crop.
-The destination directory must exist, and an existing file is not overwritten.
-Creating the image does not publish it: declare it as an asset or hook output.
-Use `tola help "@tola-scripts/image"` for image operations and their options.
+One dimension preserves aspect ratio; two fill and crop (`--anchor` controls crop). The output directory must exist, existing files are not overwritten, and creating a file does not publish it unless declared as an asset or hook output.
 
-### Values
+### Conventions
 
-Nu pipes records, lists, and tables. Keep values structured until writing a file or
-calling another process:
+Keep Tola Nu scripts clean, portable, and side-effect-safe:
 
-```nu
-let pages = [
-  {title: "Guide", draft: false}
-  {title: "Notes", draft: true}
-]
-$pages | where draft == false | select title | to json
-```
-
-A table is a list of records. `get` extracts a field; `select` keeps columns;
-`update` and `upsert` return changed records. Use `describe` to inspect a value.
-`$row.description?` reads an optional field. Decode JSON with `from json` and serialize
-with `to json`; a rendered terminal table is not a data format.
-
-### Pipelines
-
-Pipeline input and positional parameters are separate:
-
-```nu
-def add [amount: int]: int -> int { $in + $amount }
-2 | add 3
-```
-
-This returns `5`. Use `$in` for pipeline input; piping into a closure does not fill its
-first parameter. Use `each` for transformed results and `for` for ordered side effects.
-Only the last expression is returned. Use `print --stderr` for progress beside structured
-stdout, rather than inserting messages into the returned data.
-
-### Commands
-
-Typed `def main` parameters provide argument parsing and `--help`. A switch such as
-`--upper` is boolean; a value flag has a type, such as `--limit: int = 10`.
-Nu invokes `main` after top-level code; do not call it again at the bottom.
-Keep top-level code free of writes so asking for script help has no side effects.
-
-Put reusable definitions in `lib.nu`:
-
-```nu
-export def greeting [name: string]: nothing -> string {
-  $"Hello, ($name)!"
-}
-```
-
-Import them from `hello.nu`:
-
-```nu
-use ./lib.nu greeting
-def main [name: string] { greeting $name }
-```
-
-Run `tola nu hello.nu Ada`. `use` imports exports; `source` executes in the current scope.
-Import paths must be literal or constant, not runtime `let` values. To publish a library
-through a module, see `tola skill modules nu-libraries`.
-
-### Arguments
-
-Pass one value per argument. Spread a list instead of joining it into a shell command:
-
-```nu
-def main [file: string, ...words: string] {
-  let program = $env.TOLA_EXECUTABLE
-  ^$program nu $file ...$words
-}
-```
-
-`^` selects an external executable and `...$words` preserves argument boundaries.
-Use `--` for a positional value that starts with a dash, for example
-`tola nu greet.nu -- -Ada`. Nu interpolation is `$"Hello, ($name)"`; single-quoted
-strings are literal. Serialize JSON instead of assembling it with string interpolation.
-
-### Paths
-
-Disk scripts keep the caller's working directory and use a nearby `tola.toml` when one
-exists. Select another site with `tola nu --config FILE ENTRY`. A public module entry
-and a registered module command run at the site root. These invocations do not build
-the site or run hooks; prepare any generated inputs before querying them.
-
-Use `path join` for filesystem paths. `$env.PWD` is the working directory;
-`$env.FILE_PWD` locates resources beside a script. A relative `open` uses the working
-directory, while relative `use` paths follow the importing file.
-
-```nu
-use tola get-site
-let data = (get-site).root | path join "data" "pages.json"
-open $data
-```
-
-This script needs a configured site. For reusable libraries, use `path self` for their
-own resources and pass site data as arguments.
-
-### Files
-
-`open` decodes known formats; `open --raw` preserves text or bytes. Use raw reads for
-Typst templates and text editing. To write selected records from JSON:
-
-```nu
-def main [source: string, destination: string] {
-  open $source | select title output | to json | save --raw $destination
-}
-```
-
-`to json` chooses the format; `save --raw` writes it without another conversion.
-Use `save --force` only for intentional replacement.
-
-### Errors
-
-Let unexpected errors fail the command. Use `try/catch` for a specific recovery.
-When capturing an external command, inspect its status before using its output:
-
-```nu
-def main [program: string, ...arguments: string] {
-  let child = (^$program ...$arguments | complete)
-  if $child.exit_code != 0 {
-    print --stderr $child.stderr
-    exit $child.exit_code
-  }
-  print --no-newline $child.stdout
-}
-```
-
-`complete` returns `stdout`, `stderr`, and `exit_code`. Use `$env.TOLA_EXECUTABLE` to call
-the current Tola executable. Pass `--config` when the child needs a specific configuration.
-If the command supports `--offline` or `--pure`, pass the matching flag when
-`$env.TOLA_INPUT_SCOPE` is `offline` or `pure`.
+- **Structured data & files**: Keep values as records/tables until serialization (`to json` / `to toml`). Use `open --raw` for Typst/text templates and `to json | save --raw $dest` to write exact bytes without double conversion; use `save --force` only for intentional overwrites.
+- **Arguments & `main`**: Typed `def main` parameters generate `--help` automatically. Keep top-level code free of writes so `--help` has no side effects, and never call `main` manually. Send progress messages with `print --stderr` so stdout stays clean data. Pass `--` before positional values starting with `-`.
+- **Subprocesses & errors**: Invoke external commands with `^$program ...$args` (never string-joined shell lines). Inspect exit status via `let r = (^$prog ...$args | complete)` before using `$r.stdout`. Call Tola recursively through `$env.TOLA_EXECUTABLE`, forwarding `--config` and matching `--offline`/`--pure` when `$env.TOLA_INPUT_SCOPE` is `offline` or `pure`.
+- **Paths & modules**: Build paths with `path join`. Relative `open` uses `$env.PWD`; relative `use` follows the importing file (import paths must be constant). Use `$env.FILE_PWD` or `path self` for resources bundled beside a script or library, and `(get-site).root` for site files.
+- **Testing**: Test reusable Nu helpers with `use std/assert` and `tola nu test.nu` against the same `tola` binary your users run. Use a temporary site directory when testing file-modifying scripts.
 
 ### TUI
 
-Use `nu-helpers pick` for an interactive author command:
+Use `nu-helpers pick` for interactive author commands (never inside unattended build hooks):
 
 ```nu
-use tola nu-helpers
-use tola syntax-highlight
+use tola [nu-helpers syntax-highlight]
+
 let rows = [
-  {name: Guide, file: "content/guide.typ"}
-  {name: Notes, file: "content/notes.typ"}
+  {name: "Guide", file: "content/guide.typ"}
+  {name: "Notes", file: "content/notes.typ"}
 ]
 
-let picked = ($rows | nu-helpers pick --columns [name]
-  --preview {|row| open --raw $row.file | syntax-highlight typst })
-if ($picked | is-not-empty) {
-  $picked | first
-}
+let picked = (
+  $rows
+  | nu-helpers pick --columns [name] --fuzzy
+      --preview {|row| open --raw $row.file | syntax-highlight typst }
+)
+if ($picked | is-not-empty) { $picked | first }
 ```
 
-`pick` returns a list of original values, including fields hidden from the table. Cancel or
-pass an empty list to get `[]`. With `--multi`, Space marks rows and the result follows input
-order. Marks survive filtering. Keep previews read-only and hooks unattended. For filtering
-query results, see `tola skill modules queries selection`.
-
-### Testing
-
-Run scripts with the same version of `tola nu` that your users will use. A small `test.nu` for
-`lib.nu` from Commands can use the standard library:
-
-```nu
-use std/assert
-use ./lib.nu greeting
-assert equal (greeting "世界") "Hello, 世界!"
-```
-
-Run `tola nu test.nu`. Use a temporary site for file-changing tools; check the result,
-error handling, and cancellation. A parse check with `nu-check --debug` helps find syntax
-errors, but does not exercise the tool's behavior.
+`pick` returns a list of the original records (preserving hidden fields like `source`), or `[]` when cancelled or empty. Pass `--multi` to select multiple rows with Space. Keep previews strictly read-only, and keep a non-interactive query command available for scripts.
 
 ## Hooks
 
-Choose a hook by what it produces. Hooks finish after one invocation; Tola handles watching.
+Hooks run external tools or Nu scripts at fixed stages of a build. Every hook runs once and exits; Tola owns file watching and rebuilds.
 
-| Work | Stage | Read |
-| --- | --- | --- |
-| Prepare files that Typst or asset declarations will read | `before-build` | `tola skill hooks before-build` |
-| Add final files, such as a search index, to the site | `generate-outputs` | `tola skill hooks generate-outputs` |
-| Upload or otherwise use the published site | `after-publish` | `tola skill hooks after-publish` |
-| Prepare the files to include in a module release | Module `before-pack` | `tola skill modules releases preparation` |
+### Overview
 
-`build` runs all three runtime stages. `check` and `preview` run the first two without
-replacing published files. `dev` follows each hook's development setting. Ordinary queries,
-Nu scripts, inspection, and vendoring do not run build hooks.
+| Stage | Purpose | Runs in `build` | Runs in `check`/`preview` | Default in `dev` |
+| --- | --- | --- | --- | --- |
+| `before-build` | Generate Typst sources, data, or asset inputs | Yes | Yes | `"run"` |
+| `generate-outputs` | Read compiled pages/assets and add final outputs | Yes | Yes | `"run"` |
+| `after-publish` | Act on the published directory (e.g. deploy) | Yes | No | `"skip"` |
 
-### Declaration
+Module release preparation uses `before-pack` (`tola skill modules releases`). Queries, `tola nu`, `tola inspect`, and `tola vendor` never run build hooks.
 
-Declare runtime hooks in `tola.toml` or `tola-module.toml`, under `[[hooks.STAGE]]`.
-Each has a name and exactly one action: `nu = "tools/task.nu"`, with optional `args`,
-or `argv = ["tool", "argument", ...]`. `argv` does not expand shell variables or globs.
-Nu script paths are relative to the declaring site or module; runtime hooks run at the
-site root.
+Declare hooks under `[[hooks.STAGE]]` in `tola.toml` or `tola-module.toml` with a `name` and exactly one action: `nu = "path/to/script.nu"` (plus optional `args`) or `argv = ["tool", "arg", ...]`. `argv` runs directly with no shell or glob expansion. Runtime hooks run with cwd at the site root; Nu script paths resolve from the declaring site or module.
 
-Use `enable = false` to disable a hook. `enabled-by = "search.enable"` reads a boolean through a TOML key path in the
-site's `[options]` or the calling module's effective options. A quoted segment names a
-literal key, for example `enabled-by = '"search.enable"'`. The path must end at a boolean;
-missing keys and non-table parents fail the build. `enable = false` skips the lookup. Module hooks can use `{name}`
-in generated paths and input patterns to distinguish multiple aliases of the same module.
-
-Nu hooks use `get-context` or the individual getters. External tools run
-`"$TOLA_EXECUTABLE" nu @tola-scripts/context --json`. See
-`tola help @tola-scripts/context` for the fields available in each stage.
-
-### Order
-
-Within each stage, the site and each module instance order their own hooks from the lowest
-`order` to the highest. The default is `0`. Hooks with equal order may run together.
-Give dependent steps different orders. Use `[build] par-hooks = false` to run one hook at a
-time or set `hook-jobs` to limit concurrency. Site hooks from separate configuration files
-still belong to the same site.
-
-Run `tola inspect config --mode dev --json --pretty` to see which hooks run and in what
-order. Each declaration's `reuse.eligible` indicates whether it can reuse files in that
-mode. For two hooks that run in sequence, see
-`tola help "[[hooks.before-build]]"`.
+- **Toggling**: Set `enable = false`, or `enabled-by = "search.enable"` to read a boolean from site `[options]` or effective module options (quote keys containing dots, e.g. `'"search.enable"'`). Module hooks also support `{ option = "key" }` field bindings (`tola skill modules options-and-paths`), `{name}` in generated/output/rerun paths, and `{module}`/`{project}`/`{tola}` in arguments.
+- **Ordering & concurrency**: Within each site or module instance, lower `order` runs first (default `0`); equal orders may run concurrently (limit with `[build] hook-jobs` or `par-hooks = false`). `before-build` runs site hooks before module hooks; `generate-outputs` and `after-publish` run module hooks before site hooks. Inspect effective order and reuse status with `tola inspect config --mode dev --json --pretty`.
+- **Context & diagnostics**: Nu hooks read invocation data with `use tola [get-context get-hook]` and report issues via `diagnostic submit`. External tools call `"$TOLA_EXECUTABLE" nu @tola-scripts/context --json`. See `tola help "[hooks]"` and `tola help @tola-scripts/context`.
 
 ### Before build
 
-For an existing `tools/data.nu` that writes `generated/data.json`, add to `tola.toml`:
+Generate files that Typst or `[assets]` will read (outside `build.publish-dir`), and list them in `generates`:
 
 ```toml
 [[hooks.before-build]]
@@ -1733,23 +849,14 @@ rerun-on = { include = ["data/**/*.json"] }
 generates = ["generated/data.json"]
 ```
 
-`generates` names files or directories relative to the site root. They must exist when
-the hook finishes. Read them from Typst, or declare them under `[assets]` if browsers
-need the files themselves. Generating an input does not publish it.
-
-Write generated files where Typst or `[assets]` will read them, outside `build.publish-dir`.
+Paths in `generates` are relative to the site root and must exist when the hook completes. Generating a file makes it available to Typst or `[assets]`; it does not publish it automatically. See `tola help "[[hooks.before-build]]"`.
 
 ### Generate outputs
 
-This stage reads compiled pages from `(get-hook).input-dir` and writes final files beneath
-`(get-hook).output-dir`. Declare each file with `{ file = "search.json" }`, or a whole
-directory with `{ tree = "search" }`. Paths are relative to the published site, without
-`site.base-path`. Files must match the declarations and cannot overwrite other site outputs.
-
-For a module with the `pages` query from `tola skill modules queries`, add this to
-`tola-module.toml` and create `runtime/search.nu`:
+Read compiled pages and assets from `hook.inputDir` (or `(get-hook).input-dir`) and write declared final files into the empty `hook.outputDir` (`(get-hook).output-dir`):
 
 ```toml
+# In a module's tola-module.toml
 [[hooks.generate-outputs]]
 name = "search"
 nu = "runtime/search.nu"
@@ -1760,109 +867,66 @@ outputs = [{ file = "_tola-modules/{name}/search.json" }]
 use tola [get-hook get-module query]
 
 def main [] {
-  let module = get-module
-  let destination = ((get-hook).output-dir
-    | path join "_tola-modules" $module.name "search.json")
-  mkdir ($destination | path dirname)
-  query $"($module.name).pages" | to json | save --raw $destination
+  let mod = get-module
+  let dest = (get-hook).output-dir | path join "_tola-modules" $mod.name "search.json"
+  mkdir ($dest | path dirname)
+  query $"($mod.name).pages" | to json | save --raw $dest
 }
 ```
 
-Link this file from the theme with `output-url("_tola-modules/" + get-module().name
-+ "/search.json")`, importing `output-url` from `@tola/address` and `get-module` from
-`@tola/module`. It applies the site's mount. Hook outputs need no `[assets]` entry and
-do not appear in `assets.urls`; the generator owns any minification or hashed filenames.
-
-Each output hook reads the same compiled site and writes into its own empty directory.
-If several steps depend on each other's results, put them in one script. Use
-`(get-hook).cache-dir` for reusable tool data and `temp-dir` for temporary work; a running
-hook must still write its declared output files.
+- Declare each output as `{ file = "path" }` or `{ tree = "dir" }` (relative to the publish root, without `base-path`). Every declared path must be written, undeclared files are rejected, and outputs cannot overwrite other site outputs.
+- Link hook outputs from Typst with `output-url(...)` (`@tola/address:0.0.0`); they do not need `[assets]` entries and are not minified or hashed automatically.
+- All `generate-outputs` hooks read the same compiled snapshot. If step B depends on step A's output, put both in one script.
+- Use `use tola get-assets` to inspect declared static assets (`source`, `output`, `media-type`, filterable by `--module`, `--include`, `--exclude`), `hook.cacheDir` for persistent caches, and `hook.tempDir` for disposable scratch files. See `tola help "[[hooks.generate-outputs]]"`.
 
 ### After publish
 
-Use `(get-hook).input-dir` to read the just-published files, for example from an upload
-script. This stage does not add files to the site. `tola build` waits for it to finish;
-a failure reports an error but leaves the publication in place.
+Read the freshly published site from `hook.inputDir` (`(get-hook).input-dir`), for example to sync or validate deployed files. This stage cannot add files to the site. `tola build` waits for it to finish; an error reports failure while leaving the published files intact.
 
-Development skips this stage by default. With `dev = "run"`, it follows the latest
-published development site without delaying browser updates; intermediate revisions may
-be skipped. Use it for work that only needs the latest site.
+With `dev = "run"`, `after-publish` runs asynchronously against the latest dev output without blocking browser reloads (intermediate edits may be coalesced). See `tola help "[[hooks.after-publish]]"`.
 
 ### Development
 
-`before-build` and `generate-outputs` default to `dev = "run"`; `after-publish` defaults
-to `"skip"`. Production builds always run enabled hooks.
+Production builds always run enabled hooks. In `tola dev`, each hook obeys its `dev` setting (`"run"`, `"reuse"`, or `"skip"`):
 
-Use `rerun-on = { include = [...], exclude = [...] }` for additional files a tool reads.
-Patterns are relative to the declaring site or module; `{ project = "content/**/*.typ" }`
-selects project inputs from a module. Tola tracks the Nu entry script automatically.
-Declare every other file the command reads, including imported helpers, tool files and
-configuration, and files generated by earlier hooks. You can omit `rerun-on` if the
-command reads no additional files.
-
-Site and module `before-build` hooks can opt in with `dev = "reuse"` and a nonempty
-`generates` list. Within one `tola dev` session, Tola can skip the command and keep
-its diagnostics when its inputs, settings, and generated files still match a successful
-run. It reruns if declared inputs appear, disappear, or change, or if generated files
-are missing or changed. `generate-outputs` also supports `dev = "reuse"` and tracks
-the compiled site it reads.
-
-For a symlink to a regular file within the declaring root, list the link explicitly
-to watch edits to its target. For a directory symlink, list the target directory.
-
-Use `dev = "run"` for hooks that depend on time, the network, environment variables,
-system tools, or other untracked state, or that must produce side effects each build.
-Use `tola dev --no-reuse` to force both build stages to run these hooks.
-
-For warnings or errors from a hook, use `tola skill modules commands reports`.
+- **`rerun-on`**: Tola tracks a hook's `nu` entry script automatically. Declare every other file it reads under `rerun-on = { include = [...], exclude = [...] }`. Patterns resolve from the declaring site or module; module hooks match site files with `{ project = "content/**/*.typ" }`. Broad patterns do not match VCS directories — list `.git` or `.jj` paths explicitly if needed. For a file symlink, name the link path directly; for a directory symlink, list the target directory.
+- **`dev = "reuse"`**: Supported on `before-build` (with nonempty `generates`) and `generate-outputs`. Within a `tola dev` session, Tola skips rerunning the hook and keeps its last diagnostics while tracked inputs, config, and outputs remain unchanged. Use `dev = "run"` if a hook depends on time, network, environment variables, or untracked external state. Pass `tola dev --no-reuse` to force reruns.
+- **Cross-run caching**: Nu hooks can call `get-hook --rerun-on-digest` to include a digest of declared `rerun-on` inputs in their own `hook.cacheDir` cache key (returns `null` if an untrackable path is matched).
 
 ## Build
 
-Use `tola check` to build and validate without replacing the published tree. Use `tola dev`
-for watching and `tola preview` for a production preview. `tola build` publishes to disk.
-Hook stages and examples are in `tola skill hooks`.
-
-### Split configuration
-
-Put a top-level `include = ["config/base.toml"]` above the first table header in `tola.toml`.
-Each include path starts in the file that declares it. Site-relative settings, such as a
-hook script path, still start at the site root. Later settings override earlier values.
-Asset and hook declarations append. See `tola help include` for an example with an optional
-local override.
-
-### Development events
-
-Use `tola dev --json` in a script that needs the preview URL or build status. Read one
-JSON event per line from stdout. `server-ready` gives the preview URL, `build-finished`
-gives the build result, and `hook-finished` gives the result of work that runs after
-publishing. A failed rebuild may leave the last successful version available. In Nu,
-read the events with `lines | each {|line| $line | from json }`.
+Use `tola check` to validate without overwriting published files, `tola dev` for live editing, `tola preview` for a local production preview, and `tola build` to publish.
 
 ### Checks
 
-- `tola inspect sources` lists the source files Tola found.
-- `tola inspect icons`, `tola inspect fonts`, and `tola inspect config` show available icons, fonts, and active settings.
-- `tola query alias.name` runs a module's query without running hooks or publishing.
-- `tola check` builds and validates; `--json` returns that operation's pages, routes, outputs and references.
-  Add `--no-hooks` to use existing inputs without running generators.
-- `tola check --no-build` parses owned source syntax only; it cannot validate imports or outputs.
-- `tola fmt --check` reports formatting without writing; `tola fmt` edits sources.
+- `tola check`: Full build and link/output validation. Add `--json` for structured pages, routes, outputs, and references; `--no-hooks` to reuse existing inputs; `--no-build` for fast syntax-only parsing of owned sources.
+- `tola inspect <config|sources|fonts|icons>`: Read-only inspection (supports `--json`).
+- `tola query alias.name`: Run a module query without running hooks or publishing.
+- `tola fmt --check` / `tola fmt`: Verify or apply formatting.
+- `tola doctor`: Verify configuration, hooks, and external tools. Add `-v` or `--log-file FILE` for detailed diagnostics.
 
-`tola doctor` checks the configuration and local tools. Use `-v` or `--log-file` if
-you need more detail. If a build reports that a file changed while it was running,
-retry after saving your edits.
+If a build reports that a file changed while running, finish saving edits and re-run.
+
+### Development events
+
+Run `tola dev --json` when automating against live builds. Stdout emits one JSON object per line:
+
+- `server-ready`: local preview URL
+- `build-finished`: build outcome (a failed rebuild may keep serving the previous successful site)
+- `hook-finished`: result of `after-publish` work
+
+In Nu, parse the stream with `lines | each {|line| $line | from json }`.
 
 ### Publish
 
-`tola build` replaces the publish directory and removes old output files. Keep files
-you maintain by hand elsewhere. Preview with the real domain and deployment path, then
-upload the contents of `build.publish-dir`. Configure the host to serve `index.html` for
-directories and `404.html` for missing pages.
+`tola build` atomically replaces `build.publish-dir`, removing stale outputs — keep hand-maintained files elsewhere. Verify with your real `site.origin` and `site.base-path` via `tola preview`, then deploy the contents of `build.publish-dir`. Configure your web host to serve `index.html` for directories and `404.html` for missing pages.
 
 ### Vendor
 
-Configure `[vendor] path`, inspect `tola vendor --dry-run`, then run `tola vendor` and
-`tola build --pure`. Vendoring freezes selected packages and remote icon collections, not
-compiler fonts. Keep fonts under configured site paths. `--offline` refuses network access;
-`--pure` also excludes host packages, caches, and outside-site source files. Exact behavior:
-`tola vendor --help` and `tola help "[vendor]"`.
+To make a site buildable with zero network access or host caches:
+
+1. Configure `[vendor] path` in `tola.toml`.
+2. Preview with `tola vendor --dry-run`, then run `tola vendor` (refresh later with `tola vendor --refresh`).
+3. Verify with `tola build --pure`.
+
+Vendoring freezes selected packages and remote icon collections, not compiler fonts — keep required fonts inside the site or a module. See `tola vendor --help` and `tola help "[vendor]"`.

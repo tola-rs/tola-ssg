@@ -11,7 +11,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use tola_build::BuildResources;
 use tola_build::cancellation::BuildCancellation;
-use tola_build::config::ResolvedSiteConfig;
+use tola_build::config::SiteConfig;
 use tola_build::context::{Context as CallContext, Module};
 use tola_build::report::ReportSources;
 use tola_diagnostic::{Diagnostic, DiagnosticError};
@@ -22,9 +22,7 @@ use tola_build::config::ConfigSource;
 use tola_build::modules::{nu_font_options, read_nu_modules};
 use tola_input::{FilePatterns, InputMode, InputScope};
 use tola_module::manifest::NuModule;
-use tola_nu::{
-    BuiltinModule, ConfiguredModule, InvocationContext, Runtime, SourceOverlay, serve_lsp,
-};
+use tola_nu::{BuiltinModule, InvocationContext, Runtime, ScriptModule, SourceOverlay, serve_lsp};
 
 use crate::cli::args::NuArgs;
 
@@ -46,7 +44,7 @@ pub(in crate::cli) const BUILTIN_MODULES: &[BuiltinModule] = &[BuiltinModule {
 }];
 
 pub(super) fn prepare_runtime(
-    modules: Vec<ConfiguredModule>,
+    modules: Vec<ScriptModule>,
     dependencies: Vec<PathBuf>,
     context: InvocationContext,
     overlays: Vec<SourceOverlay>,
@@ -238,7 +236,7 @@ fn effective_scope(explicit: Option<&str>) -> Result<InputScope> {
 }
 
 struct SiteModules {
-    config: Arc<ResolvedSiteConfig>,
+    config: Arc<SiteConfig>,
     modules: BTreeMap<String, NuModule>,
 }
 
@@ -275,7 +273,7 @@ fn site_modules(
         .into_config(),
     );
     let modules = read_nu_modules(
-        config.get_root(),
+        config.root(),
         config.vendor().path.as_deref(),
         config.modules(),
         InputMode::new(scope, true),
@@ -307,7 +305,7 @@ pub(super) fn call_environment(
     Ok(env)
 }
 
-pub(crate) fn site_record(config: &ResolvedSiteConfig) -> Value {
+pub(crate) fn site_record(config: &SiteConfig) -> Value {
     use tola_build::config::section::site::SiteLanguage;
 
     let site = config.site();
@@ -323,15 +321,15 @@ pub(crate) fn site_record(config: &ResolvedSiteConfig) -> Value {
         })).collect::<Vec<_>>(),
         "description": site.description, "language": language(&site.language),
         "languages": site.languages.iter().map(language).collect::<Vec<_>>(),
-        "options": config.options(), "root": config.get_root(), "config-path": config.config_path(),
+        "options": config.options(), "root": config.root(), "config-path": config.config_path(),
         "content-root": config.build().content_dir,
     })
 }
 
 fn runtime_inputs(
-    config: &ResolvedSiteConfig,
+    config: &SiteConfig,
     modules: &BTreeMap<String, NuModule>,
-) -> (Vec<ConfiguredModule>, Vec<PathBuf>) {
+) -> (Vec<ScriptModule>, Vec<PathBuf>) {
     let mut dependencies = config
         .source()
         .map(|source| {
@@ -346,7 +344,7 @@ fn runtime_inputs(
     for module in modules.values() {
         dependencies.push(module.manifest.clone());
         if let Some(entry) = &module.entry {
-            libraries.push(ConfiguredModule {
+            libraries.push(ScriptModule {
                 alias: module.name.clone(),
                 root: module.root.clone(),
                 entry: entry.clone(),
@@ -481,7 +479,7 @@ fn prepare_invocation(
         );
     }
     if alias.is_some() {
-        context.directory = site.config.get_root().to_owned();
+        context.directory = site.config.root().to_owned();
     }
     let (libraries, mut dependencies) = runtime_inputs(&site.config, &site.modules);
     let config_overlays = config_overlays(overlays);
@@ -515,7 +513,7 @@ fn prepare_invocation(
         );
     }
     inherited.site = Some(site_record(&site.config));
-    inherited.modules = module_records(&site.modules, site.config.get_root(), None)?;
+    inherited.modules = module_records(&site.modules, site.config.root(), None)?;
     if let Some(alias) = alias {
         inherited.module = Some(alias.to_owned());
     }
@@ -529,7 +527,7 @@ fn prepare_invocation(
 }
 
 fn svg_fonts(
-    config: &ResolvedSiteConfig,
+    config: &SiteConfig,
     resources: &BuildResources,
     modules: &BTreeMap<String, NuModule>,
 ) -> Result<Arc<tola_typst::FontStore>, String> {
@@ -577,7 +575,7 @@ pub(super) fn call_host(call: Option<&CallContext>) -> Result<Host> {
 }
 
 fn query_operation(
-    config: Arc<ResolvedSiteConfig>,
+    config: Arc<SiteConfig>,
     resources: BuildResources,
     cancellation: BuildCancellation,
 ) -> tola_nu::Query {
@@ -627,7 +625,7 @@ fn query_operation(
 pub(crate) fn hook_runner() -> tola_build::hooks::HookRunner {
     tola_build::hooks::HookRunner::new(|hook| {
         let config = Arc::new(hook.config.clone());
-        let directory = config.get_root();
+        let directory = config.root();
         let token = hook.cancellation.cloned().unwrap_or_default();
         let resources = hook.resources.clone();
         let mut modules = BTreeMap::new();
@@ -727,13 +725,13 @@ pub(super) fn run_action(
     arguments: &[String],
     alias: &str,
     command: &str,
-    config: Arc<ResolvedSiteConfig>,
+    config: Arc<SiteConfig>,
     resources: BuildResources,
     cancellation: &Cancellation,
 ) -> Result<Vec<Diagnostic>> {
     let scope = resources.input_scope();
     let token = cancellation.token();
-    let directory = config.get_root();
+    let directory = config.root();
     let modules = read_nu_modules(
         directory,
         config.vendor().path.as_deref(),
@@ -801,32 +799,32 @@ mod tests {
     const CONTEXT_HOOK: &str = "cli::commands::nu::tests::context_hook_child";
     const CONTEXT_ROLE: &str = "TOLA_CONTEXT_TEST_ROLE";
 
+    fn temp_root() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        (dir, root)
+    }
+
     #[test]
-    fn hook_can_read_context_without_tola_on_path() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().canonicalize().unwrap();
-        let executable = std::env::current_exe().unwrap();
+    fn hook_reads_context_without_path() {
+        let (_dir, root) = temp_root();
+        let exe = std::env::current_exe().unwrap();
         std::fs::create_dir(root.join("content")).unwrap();
         std::fs::create_dir(root.join("empty-path")).unwrap();
         std::fs::write(root.join("site.typ"), r#"#document("index.html")[Site]"#).unwrap();
-        let argv = std::iter::once(executable.to_str().unwrap())
+        let argv = std::iter::once(exe.to_str().unwrap())
             .chain(["--exact", CONTEXT_HOOK, "--nocapture"])
             .collect::<Vec<_>>();
+        let argv_line = format!("argv = {}", serde_json::to_string(&argv).unwrap());
         std::fs::write(
             root.join("tola.toml"),
             format!(
-                r#"
-[[hooks.generate-outputs]]
-name = "context"
-argv = {}
-outputs = [{{ file = "context.txt" }}]
-"#,
-                serde_json::to_string(&argv).unwrap()
+                "\n[[hooks.generate-outputs]]\nname = \"context\"\n{argv_line}\noutputs = [{{ file = \"context.txt\" }}]\n",
             ),
         )
         .unwrap();
 
-        let result = std::process::Command::new(&executable)
+        let out = std::process::Command::new(&exe)
             .args(["--exact", CONTEXT_CLI, "--nocapture"])
             .current_dir(&root)
             .env("PATH", root.join("empty-path"))
@@ -836,10 +834,10 @@ outputs = [{{ file = "context.txt" }}]
             .output()
             .unwrap();
         assert!(
-            result.status.success(),
+            out.status.success(),
             "{}{}",
-            String::from_utf8_lossy(&result.stderr),
-            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&out.stderr),
+            String::from_utf8_lossy(&out.stdout),
         );
         assert_eq!(
             std::fs::read_to_string(root.join("public/context.txt")).unwrap(),
@@ -849,17 +847,13 @@ outputs = [{{ file = "context.txt" }}]
 
     #[test]
     fn context_cli_child() {
-        let arguments: &[&str] = match std::env::var(CONTEXT_ROLE).as_deref() {
+        let args: &[&str] = match std::env::var(CONTEXT_ROLE).as_deref() {
             Ok("build") => &["tola", "build", "--offline"],
             Ok("context") => &["tola", "nu", "@tola-scripts/context", "--json"],
             _ => return,
         };
-        let arguments = arguments
-            .iter()
-            .copied()
-            .map(Into::into)
-            .collect::<Vec<_>>();
-        assert_eq!(crate::cli::run(&arguments), ExitCode::SUCCESS);
+        let args = args.iter().copied().map(Into::into).collect::<Vec<_>>();
+        assert_eq!(crate::cli::run(&args), ExitCode::SUCCESS);
     }
 
     #[test]
@@ -867,26 +861,26 @@ outputs = [{{ file = "context.txt" }}]
         if std::env::var(CONTEXT_ROLE).as_deref() != Ok("build") {
             return;
         }
-        let executable = PathBuf::from(std::env::var_os("TOLA_EXECUTABLE").unwrap());
-        assert!(executable.is_absolute());
-        let result = std::process::Command::new(executable)
+        let exe = PathBuf::from(std::env::var_os("TOLA_EXECUTABLE").unwrap());
+        assert!(exe.is_absolute());
+        let out = std::process::Command::new(exe)
             .args(["--exact", CONTEXT_CLI, "--nocapture"])
             .env(CONTEXT_ROLE, "context")
             .output()
             .unwrap();
         assert!(
-            result.status.success(),
+            out.status.success(),
             "{}",
-            String::from_utf8_lossy(&result.stderr)
+            String::from_utf8_lossy(&out.stderr)
         );
         // The test runner also writes its progress to stdout.
-        let stdout = String::from_utf8(result.stdout).unwrap();
-        let context: Value = stdout
+        let stdout = String::from_utf8(out.stdout).unwrap();
+        let ctx: Value = stdout
             .lines()
             .find_map(|line| serde_json::from_str(line).ok())
             .expect("context prints a JSON object");
-        assert_eq!(context["inputScope"], "offline");
-        let hook = &context["hook"];
+        assert_eq!(ctx["inputScope"], "offline");
+        let hook = &ctx["hook"];
         assert_eq!(hook["name"], "context");
         let input = Path::new(hook["inputDir"].as_str().unwrap());
         assert!(input.join("index.html").is_file());
@@ -894,11 +888,11 @@ outputs = [{{ file = "context.txt" }}]
         std::fs::write(output.join("context.txt"), hook["stage"].as_str().unwrap()).unwrap();
     }
 
-    fn module(root: &Path, directory: &str, nu: bool) {
-        let module = root.join(directory);
-        std::fs::create_dir_all(&module).unwrap();
+    fn module(root: &Path, dir: &str, nu: bool) {
+        let mod_dir = root.join(dir);
+        std::fs::create_dir_all(&mod_dir).unwrap();
         std::fs::write(
-            module.join("tola-module.toml"),
+            mod_dir.join("tola-module.toml"),
             if nu {
                 "\n[nu]\nentry = \"public tools.nu\"\n"
             } else {
@@ -908,67 +902,67 @@ outputs = [{{ file = "context.txt" }}]
         .unwrap();
         if nu {
             std::fs::write(
-                module.join("public tools.nu"),
+                mod_dir.join("public tools.nu"),
                 "export def message [] { 'saved' }\nexport def main [] { message }\n",
             )
             .unwrap();
         }
     }
 
-    fn selected_config(root: &Path, alias: &str, directory: &str) -> PathBuf {
-        let config = root.join("selected site.toml");
-        std::fs::write(&config, format!("[build]\ncontent-dir = \"article sources\"\n[modules.{alias}]\npath = {directory:?}\n")).unwrap();
-        config
+    fn selected_config(root: &Path, alias: &str, dir: &str) -> PathBuf {
+        let cfg = root.join("selected site.toml");
+        std::fs::write(
+            &cfg,
+            format!(
+                "[build]\ncontent-dir = \"article sources\"\n[modules.{alias}]\npath = {dir:?}\n"
+            ),
+        )
+        .unwrap();
+        cfg
     }
 
-    fn argument_values<'a>(runtime: &'a Runtime, name: &str) -> Option<&'a str> {
-        runtime
-            .invocation()
+    fn env_val<'a>(rt: &'a Runtime, name: &str) -> Option<&'a str> {
+        rt.invocation()
             .environment
             .get(name)
             .and_then(Option::as_deref)
     }
 
     #[test]
-    fn preparation_keeps_alias_and_config() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(directory.path()).unwrap();
+    fn prepare_keeps_alias_and_config() {
+        let (_dir, root) = temp_root();
         module(&root, "module tools", true);
-        let config = selected_config(&root, "catalog", "module tools");
+        let cfg = selected_config(&root, "catalog", "module tools");
         std::fs::write(root.join("tola.toml"), "invalid = [").unwrap();
-        let current_directory = std::env::current_dir().unwrap();
-        let current_config = std::env::var_os(tola_build::context::PATH_ENV);
-        let runtime = prepare(
+        let cwd = std::env::current_dir().unwrap();
+        let cur_ctx = std::env::var_os(tola_build::context::PATH_ENV);
+        let rt = prepare(
             &root,
-            Some(&config),
+            Some(&cfg),
             InputScope::Pure,
             Some("@tola-modules/catalog"),
             &[],
             true,
         )
         .unwrap();
-        let entry = runtime.resolve_locator("@tola-modules/catalog").unwrap();
+        let entry = rt.resolve_locator("@tola-modules/catalog").unwrap();
         assert_eq!(entry.path, root.join("module tools/public tools.nu"));
-        assert_eq!(argument_values(&runtime, "TOLA_INPUT_SCOPE"), Some("pure"));
-        assert_eq!(std::env::current_dir().unwrap(), current_directory);
-        assert_eq!(
-            std::env::var_os(tola_build::context::PATH_ENV),
-            current_config
-        );
+        assert_eq!(env_val(&rt, "TOLA_INPUT_SCOPE"), Some("pure"));
+        assert_eq!(std::env::current_dir().unwrap(), cwd);
+        assert_eq!(std::env::var_os(tola_build::context::PATH_ENV), cur_ctx);
     }
 
     #[test]
-    fn worker_reads_saved_snapshot() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(directory.path()).unwrap();
+    fn worker_reads_snapshot() {
+        let (_dir, root) = temp_root();
         module(&root, "module tools", true);
-        let config = selected_config(&root, "catalog", "module tools");
-        let source = root.join("module tools/public tools.nu");
-        let snapshot = root.join("buffer snapshot.json");
+        let cfg = selected_config(&root, "catalog", "module tools");
+        let src = root.join("module tools/public tools.nu");
+        let snap = root.join("buffer snapshot.json");
         std::fs::write(
-            &snapshot,
+            &snap,
             serde_json::to_vec(&vec![SourceOverlay {
-                path: source.clone(),
+                path: src.clone(),
                 text: "export def message [] { 'unsaved' }\nexport def main [] { message }\n"
                     .into(),
                 version: 7,
@@ -976,55 +970,41 @@ outputs = [{{ file = "context.txt" }}]
             .unwrap(),
         )
         .unwrap();
-        let overlays = read_snapshot(&snapshot).unwrap();
-        let runtime = prepare(
-            &root,
-            Some(&config),
-            InputScope::Pure,
-            None,
-            &overlays,
-            true,
-        )
-        .unwrap();
+        let overlays = read_snapshot(&snap).unwrap();
+        let rt = prepare(&root, Some(&cfg), InputScope::Pure, None, &overlays, true).unwrap();
         assert!(
-            runtime
-                .origins()
+            rt.origins()
                 .iter()
-                .any(|origin| origin.path == source && origin.version == Some(7))
+                .any(|o| o.path == src && o.version == Some(7))
         );
-        assert!(std::fs::read_to_string(source).unwrap().contains("'saved'"));
-        std::fs::write(&snapshot, "[broken").unwrap();
-        assert!(read_snapshot(&snapshot).is_err());
+        assert!(std::fs::read_to_string(src).unwrap().contains("'saved'"));
+        std::fs::write(&snap, "[broken").unwrap();
+        assert!(read_snapshot(&snap).is_err());
     }
 
     #[test]
-    fn reload_forwards_config_aliases() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(directory.path()).unwrap();
+    fn reload_forwards_aliases() {
+        let (_dir, root) = temp_root();
         module(&root, "module tools", true);
-        let config = selected_config(&root, "before", "module tools");
-        let previous = prepare(&root, Some(&config), InputScope::Offline, None, &[], true).unwrap();
-        assert!(previous.resolve_locator("@tola-modules/before").is_ok());
+        let cfg = selected_config(&root, "before", "module tools");
+        let prev = prepare(&root, Some(&cfg), InputScope::Offline, None, &[], true).unwrap();
+        assert!(prev.resolve_locator("@tola-modules/before").is_ok());
         selected_config(&root, "after", "module tools");
-        assert!(previous.ensure_fresh().is_err());
-        let current = prepare(&root, Some(&config), InputScope::Offline, None, &[], true).unwrap();
-        assert!(current.resolve_locator("@tola-modules/after").is_ok());
-        assert!(current.resolve_locator("@tola-modules/before").is_err());
-        assert_eq!(
-            argument_values(&current, "TOLA_INPUT_SCOPE"),
-            Some("offline")
-        );
+        assert!(prev.ensure_fresh().is_err());
+        let cur = prepare(&root, Some(&cfg), InputScope::Offline, None, &[], true).unwrap();
+        assert!(cur.resolve_locator("@tola-modules/after").is_ok());
+        assert!(cur.resolve_locator("@tola-modules/before").is_err());
+        assert_eq!(env_val(&cur, "TOLA_INPUT_SCOPE"), Some("offline"));
     }
 
     #[test]
-    fn missing_entries_never_fall_back() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(directory.path()).unwrap();
+    fn missing_entries_rejected() {
+        let (_dir, root) = temp_root();
         module(&root, "module tools", false);
-        let config = selected_config(&root, "catalog", "module tools");
-        let error = prepare(
+        let cfg = selected_config(&root, "catalog", "module tools");
+        let err = prepare(
             &root,
-            Some(&config),
+            Some(&cfg),
             InputScope::Pure,
             Some("@tola-modules/catalog"),
             &[],
@@ -1032,7 +1012,7 @@ outputs = [{{ file = "context.txt" }}]
         )
         .err()
         .unwrap();
-        assert!(format!("{error:#}").contains("declares no `[nu]` entry"));
+        assert!(format!("{err:#}").contains("declares no `[nu]` entry"));
         std::fs::create_dir_all(root.join("@tola-scripts")).unwrap();
         std::fs::write(
             root.join("@tola-scripts/missing"),
@@ -1054,30 +1034,29 @@ outputs = [{{ file = "context.txt" }}]
     }
 
     #[test]
-    fn internal_ignores_unusable_site_configuration() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(directory.path()).unwrap();
-        let config = root.join("tola.toml");
-        std::fs::write(&config, "invalid = [").unwrap();
+    fn internal_skips_broken_config() {
+        let (_dir, root) = temp_root();
+        let cfg = root.join("tola.toml");
+        std::fs::write(&cfg, "invalid = [").unwrap();
         assert!(prepare(&root, None, InputScope::Pure, Some("main.nu"), &[], true).is_err());
-        let runtime = prepare(
+        let rt = prepare(
             &root,
-            Some(&config),
+            Some(&cfg),
             InputScope::Pure,
             Some("main.nu"),
             &[],
             false,
         )
         .unwrap();
-        assert!(runtime.resolve_locator("@tola-scripts/image").is_ok());
-        assert!(runtime.resolve_locator("@tola-scripts/diagnostic").is_ok());
-        assert!(argument_values(&runtime, tola_build::context::PATH_ENV).is_none());
+        assert!(rt.resolve_locator("@tola-scripts/image").is_ok());
+        assert!(rt.resolve_locator("@tola-scripts/diagnostic").is_ok());
+        assert!(env_val(&rt, tola_build::context::PATH_ENV).is_none());
         let script = root.join("pick.nu");
         std::fs::write(
             &script,
             "use std/assert\nuse tola nu-helpers\nassert equal ([] | nu-helpers pick) []\n",
         )
         .unwrap();
-        assert_eq!(runtime.run_embedded(&script, &[]).unwrap(), 0);
+        assert_eq!(rt.run_embedded(&script, &[]).unwrap(), 0);
     }
 }

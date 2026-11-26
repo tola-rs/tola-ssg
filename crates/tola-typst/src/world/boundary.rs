@@ -105,31 +105,8 @@ impl SourceBoundary {
             return Ok(None);
         };
         let shown = self.display_path(path);
-        let physical =
-            physical_path(path, 128).map_err(|error| FileError::from_io(error, shown))?;
-        let forbidden = limits.excluded.iter().any(|excluded| {
-            let generated = physical_path(&excluded.directory, 128).ok();
-            let inside = path.starts_with(&excluded.directory)
-                || physical.starts_with(&excluded.directory)
-                || generated
-                    .as_ref()
-                    .is_some_and(|generated| physical.starts_with(generated));
-            if !inside {
-                return false;
-            }
-            let permitted = excluded.candidates.iter().any(|candidate| {
-                let Ok(source) = physical_path(candidate, 128) else {
-                    return false;
-                };
-                generated
-                    .as_ref()
-                    .is_some_and(|generated| source != *generated && source.starts_with(generated))
-                    && physical.starts_with(&source)
-                    && (path.starts_with(candidate) || path.starts_with(&source))
-            });
-            !permitted
-        });
-        if forbidden {
+        let physical = physical_path(path, 128).map_err(|err| FileError::from_io(err, shown))?;
+        if is_excluded(&limits.excluded, path, &physical) {
             return Ok(Some(SourceRefusal::GeneratedState));
         }
         if limits
@@ -164,6 +141,30 @@ impl SourceBoundary {
             .and_then(|root| path.strip_prefix(root).ok())
             .unwrap_or_else(|| Path::new(path.file_name().unwrap_or(path.as_os_str())))
     }
+}
+
+fn is_excluded(excluded: &[GeneratedSourceBoundary], path: &Path, physical: &Path) -> bool {
+    excluded.iter().any(|entry| {
+        let generated = physical_path(&entry.directory, 128).ok();
+        let inside = path.starts_with(&entry.directory)
+            || physical.starts_with(&entry.directory)
+            || generated
+                .as_ref()
+                .is_some_and(|dir| physical.starts_with(dir));
+        if !inside {
+            return false;
+        }
+        !entry.candidates.iter().any(|candidate| {
+            let Ok(src) = physical_path(candidate, 128) else {
+                return false;
+            };
+            generated
+                .as_ref()
+                .is_some_and(|dir| src != *dir && src.starts_with(dir))
+                && physical.starts_with(&src)
+                && (path.starts_with(candidate) || path.starts_with(&src))
+        })
+    })
 }
 
 impl SourceRefusal {
@@ -234,9 +235,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn candidate_grants_keep_other_limits() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().join("site");
+    fn candidate_grant_scoped() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("site");
         let generated = root.join("generated");
         let candidate = generated.join("candidate");
         let internal = root.join(".tola");
@@ -245,14 +246,14 @@ mod tests {
         std::fs::write(candidate.join("allowed.typ"), "candidate source").unwrap();
         std::fs::write(generated.join("previous.typ"), "old source").unwrap();
         std::fs::write(internal.join("cached.typ"), "cache source").unwrap();
-        let outside = directory.path().join("host.typ");
+        let outside = dir.path().join("host.typ");
         std::fs::write(&outside, "host source").unwrap();
         std::os::unix::fs::symlink(internal.join("cached.typ"), candidate.join("cache.typ"))
             .unwrap();
         std::os::unix::fs::symlink(&outside, candidate.join("host.typ")).unwrap();
         std::os::unix::fs::symlink(candidate.join("allowed.typ"), generated.join("alias.typ"))
             .unwrap();
-        let files = crate::FileResolver::new().with_source_boundary(
+        let files = crate::FileStore::new().with_source_boundary(
             SourceBoundary::new(&root, true)
                 .excluding(internal)
                 .excluding_except(generated, candidate),

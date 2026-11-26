@@ -1,95 +1,85 @@
-//! The VP8 boolean arithmetic encoder (RFC 6386 §7.3).
-//!
-//! One partition is written at a time: every call narrows the current interval, and shifting the
-//! range back to `[128, 255]` emits whole bytes. The trailing bytes carry the final interval in
-//! [`BoolWriter::finish`].
+//! VP8 boolean arithmetic encoder (RFC 6386 §7.3).
 
 /// Writes one bool-coded VP8 partition.
 pub(crate) struct BoolWriter {
-    output: Vec<u8>,
+    buf: Vec<u8>,
     range: u32,
     bottom: u32,
-    bit_count: i32,
+    bits: i32,
 }
 
 impl BoolWriter {
     pub(crate) fn new() -> Self {
         Self {
-            output: Vec::new(),
+            buf: Vec::new(),
             range: 255,
             bottom: 0,
-            bit_count: 24,
+            bits: 24,
         }
     }
 
-    /// Write `value`, whose probability of being false is `probability / 256`.
     #[inline(always)]
-    pub(crate) fn write_bool(&mut self, probability: u8, value: bool) {
-        debug_assert_ne!(probability, 0);
-        let split = 1 + (((self.range - 1) * u32::from(probability)) >> 8);
+    pub(crate) fn write_bool(&mut self, prob: u8, value: bool) {
+        debug_assert_ne!(prob, 0);
+        let split = 1 + (((self.range - 1) * u32::from(prob)) >> 8);
         if value {
             self.bottom = self.bottom.wrapping_add(split);
             self.range -= split;
         } else {
             self.range = split;
         }
-        if self.range >= 128 {
-            return;
+        if self.range < 128 {
+            self.normalize();
         }
-        self.normalize();
     }
 
     #[inline]
     fn normalize(&mut self) {
         let shift = self.range.leading_zeros() - (u32::BITS - u8::BITS);
         self.range <<= shift;
-        let before_byte = shift.min(self.bit_count as u32);
-        // Each bit shifted out before the next byte carries one into the emitted bytes.
-        let carries = self.bottom >> (u32::BITS - before_byte);
+        let pre = shift.min(self.bits as u32);
+        let carries = self.bottom >> (u32::BITS - pre);
         if carries != 0 {
             self.propagate_carry(carries.count_ones() as u8);
         }
-        self.bottom <<= before_byte;
-        self.bit_count -= shift as i32;
-        if self.bit_count <= 0 {
-            self.output.push((self.bottom >> 24) as u8);
+        self.bottom <<= pre;
+        self.bits -= shift as i32;
+        if self.bits <= 0 {
+            self.buf.push((self.bottom >> 24) as u8);
             // At most six shifts remain, so the retained 24 bits cannot carry again.
-            self.bottom = (self.bottom & 0x00ff_ffff) << (shift - before_byte);
-            self.bit_count += 8;
+            self.bottom = (self.bottom & 0x00ff_ffff) << (shift - pre);
+            self.bits += 8;
         }
     }
 
-    /// Write `value` as `bits` literal bits, most significant first.
-    pub(crate) fn write_literal(&mut self, value: u32, bits: u8) {
-        for shift in (0..bits).rev() {
+    pub(crate) fn write_literal(&mut self, value: u32, nbits: u8) {
+        for shift in (0..nbits).rev() {
             self.write_bool(128, value & (1 << shift) != 0);
         }
     }
 
-    /// Flush the final interval and return the partition bytes.
     pub(crate) fn finish(mut self) -> Vec<u8> {
-        let mut remaining = self.bit_count;
-        let mut value = self.bottom;
-        if remaining > 0 && value & (1_u32 << (32 - remaining)) != 0 {
+        let mut rem = self.bits;
+        let mut val = self.bottom;
+        if rem > 0 && val & (1_u32 << (32 - rem)) != 0 {
             self.propagate_carry(1);
         }
-        value <<= (remaining & 7) as u32;
-        remaining >>= 3;
-        while remaining > 0 {
-            value <<= 8;
-            remaining -= 1;
+        val <<= (rem & 7) as u32;
+        rem >>= 3;
+        while rem > 0 {
+            val <<= 8;
+            rem -= 1;
         }
         for _ in 0..4 {
-            self.output.push((value >> 24) as u8);
-            value <<= 8;
+            self.buf.push((val >> 24) as u8);
+            val <<= 8;
         }
-        self.output
+        self.buf
     }
 
-    /// Propagate a carry into the bytes already written.
     #[cold]
     fn propagate_carry(&mut self, mut carry: u8) {
-        for byte in self.output.iter_mut().rev() {
+        for byte in self.buf.iter_mut().rev() {
             let (next, overflow) = byte.overflowing_add(carry);
             *byte = next;
             if !overflow {
@@ -101,32 +91,27 @@ impl BoolWriter {
     }
 }
 
-/// Predicts one partition's byte length without materialising `bottom` or carry bytes.
-///
-/// Byte count depends only on how often renormalization drains `bit_count`: each drain appends
-/// one byte, and [`BoolWriter::finish`] always appends four. Carries rewrite earlier bytes but
-/// never add or remove one.
+/// Tracks partition byte length without buffering carries (each drain emits 1 byte, finish emits 4).
 #[derive(Clone)]
 pub(crate) struct LengthWriter {
     range: u32,
-    bit_count: i32,
-    written: usize,
+    bits: i32,
+    bytes: usize,
 }
 
 impl LengthWriter {
     pub(crate) fn new() -> Self {
         Self {
             range: 255,
-            bit_count: 24,
-            written: 0,
+            bits: 24,
+            bytes: 0,
         }
     }
 
-    /// Write `value`, whose probability of being false is `probability / 256`.
     #[inline(always)]
-    pub(crate) fn write_bool(&mut self, probability: u8, value: bool) {
-        debug_assert_ne!(probability, 0);
-        let split = 1 + (((self.range - 1) * u32::from(probability)) >> 8);
+    pub(crate) fn write_bool(&mut self, prob: u8, value: bool) {
+        debug_assert_ne!(prob, 0);
+        let split = 1 + (((self.range - 1) * u32::from(prob)) >> 8);
         if value {
             self.range -= split;
         } else {
@@ -135,21 +120,19 @@ impl LengthWriter {
         if self.range < 128 {
             let shift = self.range.leading_zeros() - (u32::BITS - u8::BITS);
             self.range <<= shift;
-            self.bit_count -= shift as i32;
-            if self.bit_count <= 0 {
-                self.written += 1;
-                self.bit_count += 8;
+            self.bits -= shift as i32;
+            if self.bits <= 0 {
+                self.bytes += 1;
+                self.bits += 8;
             }
         }
     }
 
-    /// The partition length in bytes, including [`BoolWriter::finish`]'s four-byte flush.
     pub(crate) fn finish(self) -> usize {
-        self.written + 4
+        self.bytes + 4
     }
 }
 
-/// Find the branches from `node` to the leaf carrying `value`.
 #[cfg(test)]
 pub(crate) fn tree_path(
     tree: &[i8],
@@ -160,7 +143,7 @@ pub(crate) fn tree_path(
     path_to(tree, node, value, path, 0)
 }
 
-/// Packed branches and lengths for each leaf; zero length means the leaf is unreachable.
+/// Packed `(bits, len)` branch paths per leaf; `len == 0` marks unreachable leaves.
 pub(crate) const fn tree_paths<const N: usize>(tree: &[i8], start: usize) -> [(u8, u8); N] {
     const fn fill<const N: usize>(
         tree: &[i8],
@@ -215,131 +198,103 @@ mod tests {
 
     fn splitmix(state: &mut u64) -> u64 {
         *state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
-        let mut value = *state;
-        value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-        value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-        value ^ (value >> 31)
+        let mut v = *state;
+        v = (v ^ (v >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        v = (v ^ (v >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        v ^ (v >> 31)
     }
 
-    /// The length model must predict the bytes the writer emits.
     #[test]
-    fn length_model_matches_written_bytes() {
+    fn length_tracks_writer() {
         assert_eq!(
             LengthWriter::new().finish(),
             BoolWriter::new().finish().len()
         );
 
-        // Every probability, so no branch's arithmetic is left unpriced.
-        for probability in 1..=u8::MAX {
+        for prob in 1..=u8::MAX {
             for seed in 0..4 {
-                let mut state = (u64::from(probability) << 32) | seed;
-                let mut writer = BoolWriter::new();
-                let mut reference = BoolWriter::new();
-                let mut length = LengthWriter::new();
+                let mut state = (u64::from(prob) << 32) | seed;
+                let mut w = BoolWriter::new();
+                let mut ref_w = BoolWriter::new();
+                let mut len = LengthWriter::new();
                 for step in 0..=512 {
-                    let value = splitmix(&mut state) & 1 != 0;
-                    write_one_shift_at_a_time(&mut reference, probability, value);
-                    assert_length_tracks(
-                        &mut writer,
-                        &mut length,
-                        probability,
-                        value,
-                        step,
-                        "random bits",
-                    );
+                    let bit = splitmix(&mut state) & 1 != 0;
+                    write_bit_by_bit(&mut ref_w, prob, bit);
+                    assert_length_tracks(&mut w, &mut len, prob, bit, step, "random");
                 }
-                let bytes = writer.finish();
-                assert_eq!(
-                    length.finish(),
-                    bytes.len(),
-                    "probability {probability}, seed {seed}"
-                );
-                assert_eq!(
-                    reference.finish(),
-                    bytes,
-                    "probability {probability}, seed {seed}"
-                );
+                let bytes = w.finish();
+                assert_eq!(len.finish(), bytes.len(), "prob {prob}, seed {seed}");
+                assert_eq!(ref_w.finish(), bytes, "prob {prob}, seed {seed}");
             }
         }
 
-        // A finished stream, across every byte boundary a partition is priced at.
         for count in [1, 7, 8, 9, 23, 24, 25, 100, 1_000] {
             let mut state = count as u64;
-            let mut writer = BoolWriter::new();
-            let mut reference = BoolWriter::new();
-            let mut length = LengthWriter::new();
+            let mut w = BoolWriter::new();
+            let mut ref_w = BoolWriter::new();
+            let mut len = LengthWriter::new();
             for step in 0..count {
                 let bits = splitmix(&mut state);
-                let probability = (bits as u8).max(1);
-                let value = bits & 256 != 0;
-                write_one_shift_at_a_time(&mut reference, probability, value);
-                assert_length_tracks(
-                    &mut writer,
-                    &mut length,
-                    probability,
-                    value,
-                    step,
-                    "finished stream",
-                );
+                let prob = (bits as u8).max(1);
+                let bit = bits & 256 != 0;
+                write_bit_by_bit(&mut ref_w, prob, bit);
+                assert_length_tracks(&mut w, &mut len, prob, bit, step, "stream");
             }
-            let bytes = writer.finish();
-            assert_eq!(length.finish(), bytes.len(), "count {count}");
-            assert_eq!(reference.finish(), bytes, "count {count}");
+            let bytes = w.finish();
+            assert_eq!(len.finish(), bytes.len(), "count {count}");
+            assert_eq!(ref_w.finish(), bytes, "count {count}");
         }
 
-        // A literal, written as eight equiprobable bits.
-        let mut writer = BoolWriter::new();
-        let mut length = LengthWriter::new();
-        for value in 0..=255 {
-            writer.write_literal(value, 8);
+        let mut w = BoolWriter::new();
+        let mut len = LengthWriter::new();
+        for val in 0..=255 {
+            w.write_literal(val, 8);
             for shift in (0..8).rev() {
-                let bit = value & (1 << shift) != 0;
-                length.write_bool(128, bit);
-                assert_eq!(length.clone().finish(), writer.output.len() + 4);
+                len.write_bool(128, val & (1 << shift) != 0);
+                assert_eq!(len.clone().finish(), w.buf.len() + 4);
             }
         }
-        assert_eq!(length.finish(), writer.finish().len());
+        assert_eq!(len.finish(), w.finish().len());
     }
 
-    fn write_one_shift_at_a_time(writer: &mut BoolWriter, probability: u8, value: bool) {
-        let split = 1 + (((writer.range - 1) * u32::from(probability)) >> 8);
+    fn write_bit_by_bit(w: &mut BoolWriter, prob: u8, value: bool) {
+        let split = 1 + (((w.range - 1) * u32::from(prob)) >> 8);
         if value {
-            writer.bottom = writer.bottom.wrapping_add(split);
-            writer.range -= split;
+            w.bottom = w.bottom.wrapping_add(split);
+            w.range -= split;
         } else {
-            writer.range = split;
+            w.range = split;
         }
-        while writer.range < 128 {
-            writer.range <<= 1;
-            if writer.bottom & (1 << 31) != 0 {
-                writer.propagate_carry(1);
+        while w.range < 128 {
+            w.range <<= 1;
+            if w.bottom & (1 << 31) != 0 {
+                w.propagate_carry(1);
             }
-            writer.bottom <<= 1;
-            writer.bit_count -= 1;
-            if writer.bit_count == 0 {
-                writer.output.push((writer.bottom >> 24) as u8);
-                writer.bottom &= 0x00ff_ffff;
-                writer.bit_count = 8;
+            w.bottom <<= 1;
+            w.bits -= 1;
+            if w.bits == 0 {
+                w.buf.push((w.bottom >> 24) as u8);
+                w.bottom &= 0x00ff_ffff;
+                w.bits = 8;
             }
         }
     }
 
-    /// A pending-byte write still costs the four bytes the writer holds.
     fn assert_length_tracks(
-        writer: &mut BoolWriter,
-        length: &mut LengthWriter,
-        probability: u8,
+        w: &mut BoolWriter,
+        len: &mut LengthWriter,
+        prob: u8,
         value: bool,
         step: usize,
         label: &str,
     ) {
-        writer.write_bool(probability, value);
-        length.write_bool(probability, value);
+        w.write_bool(prob, value);
+        len.write_bool(prob, value);
         if step.is_multiple_of(16) {
             assert_eq!(
-                length.clone().finish(),
-                writer.output.len() + 4,
-                "{label} probability {probability}, step {step}"
+                len.clone().finish(),
+                w.buf.len() + 4,
+                "{label} prob {prob}, step {step}"
             );
         }
     }

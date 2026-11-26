@@ -84,14 +84,14 @@ fn io_error(operation: &'static str, source: io::Error) -> OutputRootError {
 /// Producers supply dynamic Bundle reads and external CSS inputs that configuration
 /// alone cannot enumerate.
 pub(crate) fn resolve_site_output_root_with_inputs<'a>(
-    config: &'a crate::config::ResolvedSiteConfig,
+    config: &'a crate::config::SiteConfig,
     additional_inputs: impl IntoIterator<Item = (&'static str, &'a Path)>,
 ) -> anyhow::Result<OwnedOutputRoot> {
     let protected = config
         .protected_input_paths()
         .into_iter()
         .chain(additional_inputs);
-    OwnedOutputRoot::resolve(config.get_root(), &config.build.publish_dir, protected)
+    OwnedOutputRoot::resolve(config.root(), &config.build.publish_dir, protected)
         .map_err(Into::into)
 }
 
@@ -294,34 +294,34 @@ impl OutputWrite<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::ResolvedSiteConfig;
+    use crate::config::SiteConfig;
     use tempfile::TempDir;
 
     #[cfg(unix)]
     #[test]
-    fn root_alias_output_uses_canonical_path() {
+    fn root_alias_canonical_path() {
         use std::os::unix::fs::symlink;
 
-        let directory = TempDir::new().unwrap();
-        let root = directory.path().join("site");
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().join("site");
         fs::create_dir(&root).unwrap();
-        let canonical_root = fs::canonicalize(&root).unwrap();
-        let alias = directory.path().join("alias");
+        let canon = fs::canonicalize(&root).unwrap();
+        let alias = dir.path().join("alias");
         symlink(&root, &alias).unwrap();
 
-        for site_root in [&canonical_root, &alias] {
+        for site_root in [&canon, &alias] {
             let owned = OwnedOutputRoot::resolve(site_root, &alias.join("public"), []).unwrap();
-            assert_eq!(owned.path(), canonical_root.join("public"));
+            assert_eq!(owned.path(), canon.join("public"));
         }
     }
 
-    fn site_lock(output: &OwnedOutputRoot) -> crate::build::SiteBuildLock {
-        crate::output::tests::site_lock(&output.boundary.site_root)
+    fn site_lock(out: &OwnedOutputRoot) -> crate::build::SiteBuildLock {
+        crate::output::tests::site_lock(&out.boundary.site_root)
     }
 
-    fn publish(output: &OwnedOutputRoot, files: &[(&str, &str)]) -> Result<(), OutputRootError> {
-        let lock = site_lock(output);
-        let writer = output.write(&lock, &BuildCancellation::default())?;
+    fn publish(out: &OwnedOutputRoot, files: &[(&str, &str)]) -> Result<(), OutputRootError> {
+        let lock = site_lock(out);
+        let writer = out.write(&lock, &BuildCancellation::default())?;
         let staged = writer.stage()?;
         for (name, contents) in files {
             let path = staged.join(name);
@@ -332,44 +332,43 @@ mod tests {
     }
 
     fn published_output(site_root: &Path, files: &[(&str, &str)]) -> OwnedOutputRoot {
-        let output = OwnedOutputRoot::resolve(site_root, &site_root.join("public"), []).unwrap();
-        publish(&output, files).unwrap();
-        output
+        let out = OwnedOutputRoot::resolve(site_root, &site_root.join("public"), []).unwrap();
+        publish(&out, files).unwrap();
+        out
     }
 
-    fn resolve_configured_output(config: &ResolvedSiteConfig) -> anyhow::Result<OwnedOutputRoot> {
-        resolve_site_output_root_with_inputs(config, std::iter::empty())
+    fn resolve_configured_output(cfg: &SiteConfig) -> anyhow::Result<OwnedOutputRoot> {
+        resolve_site_output_root_with_inputs(cfg, std::iter::empty())
     }
 
-    fn output_test_config(root: &Path) -> ResolvedSiteConfig {
+    fn output_test_config(root: &Path) -> SiteConfig {
         let root = root.canonicalize().unwrap();
-        let mut config = crate::config::tests::load_test_config(&root, "");
-        config.config_path = root.join("tola.toml");
-        config.build.publish_dir = root.join("public");
-        config.build.entry = root.join("site.typ");
-        config.build.content_dir = root.join("content");
-        config
+        let mut cfg = crate::config::tests::load_test_config(&root, "");
+        cfg.config_path = root.join("tola.toml");
+        cfg.build.publish_dir = root.join("public");
+        cfg.build.entry = root.join("site.typ");
+        cfg.build.content_dir = root.join("content");
+        cfg
     }
 
-    fn assert_protected_input(label: &str, error: anyhow::Error, kind: &str) {
+    fn assert_protected_input(label: &str, err: anyhow::Error, kind: &str) {
         assert!(
             matches!(
-                error.downcast_ref::<OutputRootError>(),
+                err.downcast_ref::<OutputRootError>(),
                 Some(OutputRootError::Boundary(
                     crate::filesystem::OutputBoundaryError::ProtectedPath { kind: found, .. }
                 )) if *found == kind
             ),
-            "{label}: {error:#}"
+            "{label}: {err:#}"
         );
     }
 
-    /// Every input the output root refuses, each named by the kind its diagnostic reports.
     #[test]
     fn output_rejects_protected_inputs() {
         use crate::config::section::IconCollectionSource;
         let dir = TempDir::new().unwrap();
 
-        for source in [
+        for src in [
             IconCollectionSource::LocalJson {
                 path: dir.path().join("public/icons.json"),
             },
@@ -377,76 +376,79 @@ mod tests {
                 path: dir.path().join("public/icons"),
             },
         ] {
-            let mut config = output_test_config(dir.path());
-            config.icons.collections.insert("brand".into(), source);
-            let error = resolve_configured_output(&config).unwrap_err();
-            assert_protected_input("icon source", error, "icon source");
+            let mut cfg = output_test_config(dir.path());
+            cfg.icons.collections.insert("brand".into(), src);
+            let err = resolve_configured_output(&cfg).unwrap_err();
+            assert_protected_input("icon source", err, "icon source");
         }
 
-        let mut config = output_test_config(dir.path());
-        config.config_path = config.build.publish_dir.join("tola.toml");
-        let error = resolve_configured_output(&config).unwrap_err();
-        assert_protected_input("config", error, "config");
+        let mut cfg = output_test_config(dir.path());
+        cfg.config_path = cfg.build.publish_dir.join("tola.toml");
+        assert_protected_input(
+            "config",
+            resolve_configured_output(&cfg).unwrap_err(),
+            "config",
+        );
 
-        let mut config = output_test_config(dir.path());
-        config.build.entry = config.build.publish_dir.join("entry.typ");
-        let error = resolve_configured_output(&config).unwrap_err();
-        assert_protected_input("build entry", error, "build entry");
+        let mut cfg = output_test_config(dir.path());
+        cfg.build.entry = cfg.build.publish_dir.join("entry.typ");
+        assert_protected_input(
+            "build entry",
+            resolve_configured_output(&cfg).unwrap_err(),
+            "build entry",
+        );
 
-        let mut config = output_test_config(dir.path());
-        config.build.content_dir = config.build.publish_dir.join("content");
-        let error = resolve_configured_output(&config).unwrap_err();
-        assert_protected_input("content-dir", error, "content-dir");
+        let mut cfg = output_test_config(dir.path());
+        cfg.build.content_dir = cfg.build.publish_dir.join("content");
+        assert_protected_input(
+            "content-dir",
+            resolve_configured_output(&cfg).unwrap_err(),
+            "content-dir",
+        );
 
         for generated in ["public", ".public-swap"] {
-            let config = output_test_config(dir.path());
-            let dynamic_read = config
-                .get_root()
-                .join(generated)
-                .join("templates/document.typ");
-            let error = resolve_site_output_root_with_inputs(
-                &config,
-                [("Typst read", dynamic_read.as_path())],
-            )
-            .unwrap_err();
-            assert_protected_input("Typst read", error, "Typst read");
+            let cfg = output_test_config(dir.path());
+            let read = cfg.root().join(generated).join("templates/document.typ");
+            let err = resolve_site_output_root_with_inputs(&cfg, [("Typst read", read.as_path())])
+                .unwrap_err();
+            assert_protected_input("Typst read", err, "Typst read");
         }
 
-        for (relative, author_file) in [
+        for (rel, author_file) in [
             (Path::new(".tola"), None),
             (Path::new(".tola/nested"), None),
             (Path::new(".tola/public"), Some("author file")),
         ] {
-            let mut config = output_test_config(dir.path());
-            config.build.publish_dir = config.get_root().join(relative);
+            let mut cfg = output_test_config(dir.path());
+            cfg.build.publish_dir = cfg.root().join(rel);
             if let Some(author_file) = author_file {
-                let internal = config.get_root().join(tola_input::INTERNAL_DIR);
+                let internal = cfg.root().join(tola_input::INTERNAL_DIR);
                 fs::create_dir_all(&internal).unwrap();
-                fs::write(&config.build.publish_dir, author_file).unwrap();
+                fs::write(&cfg.build.publish_dir, author_file).unwrap();
             }
-            let error = resolve_configured_output(&config).unwrap_err();
-            assert_protected_input("`.tola` directory", error, "`.tola` directory");
+            let err = resolve_configured_output(&cfg).unwrap_err();
+            assert_protected_input("`.tola` directory", err, "`.tola` directory");
             if let Some(author_file) = author_file {
                 assert_eq!(
-                    fs::read_to_string(&config.build.publish_dir).unwrap(),
+                    fs::read_to_string(&cfg.build.publish_dir).unwrap(),
                     author_file
                 );
             }
         }
 
-        let output = dir.path().join("public");
-        for (package_path, package_cache_path, kind) in [
-            (Some(output.join("packages")), None, "Typst package"),
-            (None, Some(output.join("cache")), "Typst package cache"),
+        let out = dir.path().join("public");
+        for (pkg_path, pkg_cache, kind) in [
+            (Some(out.join("packages")), None, "Typst package"),
+            (None, Some(out.join("cache")), "Typst package cache"),
         ] {
-            let mut config = output_test_config(dir.path());
-            config.package_locations = tola_typst::PackageLocations::discover(
-                package_path.or_else(|| Some(dir.path().join("safe-data"))),
-                package_cache_path.or_else(|| Some(dir.path().join("safe-cache"))),
+            let mut cfg = output_test_config(dir.path());
+            cfg.package_locations = tola_typst::PackageLocations::discover(
+                pkg_path.or_else(|| Some(dir.path().join("safe-data"))),
+                pkg_cache.or_else(|| Some(dir.path().join("safe-cache"))),
             )
             .unwrap();
-            let error = resolve_configured_output(&config).unwrap_err();
-            assert_protected_input("package root", error, kind);
+            let err = resolve_configured_output(&cfg).unwrap_err();
+            assert_protected_input("package root", err, kind);
         }
     }
 
@@ -454,37 +456,36 @@ mod tests {
     #[test]
     fn output_rejects_case_aliased_internal() {
         let dir = TempDir::new().unwrap();
-        let mut config = output_test_config(dir.path());
-        fs::create_dir(config.get_root().join(tola_input::INTERNAL_DIR)).unwrap();
-        config.build.publish_dir = config.get_root().join(".TOLA/output");
-
-        let error = resolve_configured_output(&config).unwrap_err();
-
-        assert_protected_input("case-aliased `.tola`", error, "`.tola` directory");
+        let mut cfg = output_test_config(dir.path());
+        fs::create_dir(cfg.root().join(tola_input::INTERNAL_DIR)).unwrap();
+        cfg.build.publish_dir = cfg.root().join(".TOLA/output");
+        assert_protected_input(
+            "case-aliased `.tola`",
+            resolve_configured_output(&cfg).unwrap_err(),
+            "`.tola` directory",
+        );
     }
 
-    /// Real path components decide overlap: an ancestor, the site root itself, an equal path, and
-    /// a nested subtree are refused; paths sharing only text and disjoint siblings are accepted.
     #[test]
-    fn output_overlap_follows_real_components() {
+    fn output_overlap_real_components() {
         let dir = TempDir::new().unwrap();
         let root = dir.path().join("site");
         fs::create_dir(&root).unwrap();
 
-        for output in [
+        for out in [
             root.clone(),
             dir.path().to_path_buf(),
             dir.path().join("other"),
         ] {
             assert!(matches!(
-                OwnedOutputRoot::resolve(&root, &output, []),
+                OwnedOutputRoot::resolve(&root, &out, []),
                 Err(OutputRootError::Boundary(
                     crate::filesystem::OutputBoundaryError::OutsideSite
                 ))
             ));
         }
 
-        for (output, protected, kind) in [
+        for (out, protected, kind) in [
             (
                 dir.path().join("public"),
                 dir.path().join("public"),
@@ -497,14 +498,14 @@ mod tests {
             ),
         ] {
             assert!(matches!(
-                OwnedOutputRoot::resolve(dir.path(), &output, [(kind, protected.as_path())]),
+                OwnedOutputRoot::resolve(dir.path(), &out, [(kind, protected.as_path())]),
                 Err(OutputRootError::Boundary(
                     crate::filesystem::OutputBoundaryError::ProtectedPath { kind: found, .. }
                 )) if found == kind
             ));
         }
 
-        for (output, protected, expected) in [
+        for (out, protected, expected) in [
             ("public", "publicx", "public"),
             ("a", "ab", "a"),
             ("site", "site-assets", "site"),
@@ -513,10 +514,10 @@ mod tests {
         ] {
             let owned = OwnedOutputRoot::resolve(
                 dir.path(),
-                &dir.path().join(output),
+                &dir.path().join(out),
                 [("generated input", dir.path().join(protected).as_path())],
             )
-            .unwrap_or_else(|error| panic!("{output} overlaps {protected}: {error}"));
+            .unwrap_or_else(|err| panic!("{out} overlaps {protected}: {err}"));
             assert_eq!(
                 owned.path(),
                 dir.path().canonicalize().unwrap().join(expected)
@@ -524,21 +525,18 @@ mod tests {
         }
     }
 
-    /// An output whose real path is a symlink is refused: at resolution through a chain,
-    /// after resolution through one created later, and when a protected input aliases it.
     #[cfg(unix)]
     #[test]
-    fn output_symlinks_are_refused() {
+    fn output_symlinks_rejected() {
         use std::os::unix::fs::symlink;
 
-        // A symlinked component below the output makes the real path differ from the logical one.
         {
             let dir = TempDir::new().unwrap();
             let root = dir.path().join("site");
-            let external = dir.path().join("external");
+            let ext = dir.path().join("external");
             fs::create_dir(&root).unwrap();
-            fs::create_dir(&external).unwrap();
-            symlink(&external, root.join("public")).unwrap();
+            fs::create_dir(&ext).unwrap();
+            symlink(&ext, root.join("public")).unwrap();
             let expected = root.canonicalize().unwrap().join("public");
             assert!(matches!(
                 OwnedOutputRoot::resolve(&root, &root.join("public/site"), []),
@@ -546,36 +544,34 @@ mod tests {
             ));
         }
 
-        // A symlink created after the root was resolved is still seen before the write.
         {
             let dir = TempDir::new().unwrap();
-            let output = dir.path().join("public");
-            let external = dir.path().join("external");
-            fs::create_dir(&external).unwrap();
-            fs::write(external.join("keep.txt"), "external data").unwrap();
-            let owned = OwnedOutputRoot::resolve(dir.path(), &output, []).unwrap();
+            let out = dir.path().join("public");
+            let ext = dir.path().join("external");
+            fs::create_dir(&ext).unwrap();
+            fs::write(ext.join("keep.txt"), "external data").unwrap();
+            let owned = OwnedOutputRoot::resolve(dir.path(), &out, []).unwrap();
             let expected = owned.path().to_path_buf();
-            symlink(&external, &output).unwrap();
+            symlink(&ext, &out).unwrap();
             let lock = site_lock(&owned);
             assert!(matches!(
                 owned.write(&lock, &BuildCancellation::default()),
                 Err(OutputRootError::Boundary(crate::filesystem::OutputBoundaryError::Symlink { path, .. })) if path == expected
             ));
             assert_eq!(
-                fs::read_to_string(external.join("keep.txt")).unwrap(),
+                fs::read_to_string(ext.join("keep.txt")).unwrap(),
                 "external data"
             );
         }
 
-        // A protected input that aliases the output is refused at resolution.
         {
             let dir = TempDir::new().unwrap();
-            let output = dir.path().join("public");
+            let out = dir.path().join("public");
             let protected = dir.path().join("assets");
-            fs::create_dir(&output).unwrap();
-            symlink(&output, &protected).unwrap();
+            fs::create_dir(&out).unwrap();
+            symlink(&out, &protected).unwrap();
             assert!(matches!(
-                OwnedOutputRoot::resolve(dir.path(), &output, [("asset", protected.as_path())]),
+                OwnedOutputRoot::resolve(dir.path(), &out, [("asset", protected.as_path())]),
                 Err(OutputRootError::Boundary(
                     crate::filesystem::OutputBoundaryError::ProtectedPath { kind: "asset", .. }
                 ))
@@ -583,17 +579,14 @@ mod tests {
         }
     }
 
-    /// Tola publishes only into an output and workspace it can prove it owns: files it cannot
-    /// claim keep their contents and receive nothing.
     #[test]
-    fn foreign_ownership_is_refused() {
-        // Neither a missing publication marker nor a foreign one lets Tola write.
+    fn foreign_ownership_rejected() {
         for marker in [None, Some("not an owner marker")] {
             let dir = TempDir::new().unwrap();
-            let output = dir.path().join("public");
-            fs::create_dir(&output).unwrap();
-            fs::write(output.join("keep.txt"), "user data").unwrap();
-            let owned = OwnedOutputRoot::resolve(dir.path(), &output, []).unwrap();
+            let out = dir.path().join("public");
+            fs::create_dir(&out).unwrap();
+            fs::write(out.join("keep.txt"), "user data").unwrap();
+            let owned = OwnedOutputRoot::resolve(dir.path(), &out, []).unwrap();
             if let Some(marker) = marker {
                 let path = publication_marker_path(owned.path());
                 fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -601,22 +594,21 @@ mod tests {
             }
             assert!(publish(&owned, &[]).is_err(), "{marker:?}");
             assert_eq!(
-                fs::read_to_string(output.join("keep.txt")).unwrap(),
+                fs::read_to_string(out.join("keep.txt")).unwrap(),
                 "user data"
             );
         }
 
-        // A workspace another writer recorded keeps its trees and receives nothing.
         for marker in [None, Some("another owner")] {
-            let directory = TempDir::new().unwrap();
-            let output = directory.path().join("public");
-            let workspace = crate::filesystem::swap_workspace(&output).unwrap();
+            let dir = TempDir::new().unwrap();
+            let out = dir.path().join("public");
+            let workspace = crate::filesystem::swap_workspace(&out).unwrap();
             fs::create_dir_all(workspace.join("previous")).unwrap();
             fs::write(workspace.join("previous/keep.txt"), "author files").unwrap();
             if let Some(marker) = marker {
                 fs::write(workspace.join("owner"), marker).unwrap();
             }
-            let owned = OwnedOutputRoot::resolve(directory.path(), &output, []).unwrap();
+            let owned = OwnedOutputRoot::resolve(dir.path(), &out, []).unwrap();
             let lock = site_lock(&owned);
             assert!(matches!(
                 owned.write(&lock, &BuildCancellation::default()),
@@ -626,23 +618,22 @@ mod tests {
                 fs::read(workspace.join("previous/keep.txt")).unwrap(),
                 b"author files"
             );
-            assert!(!output.exists());
+            assert!(!out.exists());
         }
 
-        // A marker copied from another output does not transfer ownership.
         {
             let dir = TempDir::new().unwrap();
-            let output_a = dir.path().join("public-a");
-            let output_b = dir.path().join("public-b");
-            let owned_a = OwnedOutputRoot::resolve(dir.path(), &output_a, []).unwrap();
+            let out_a = dir.path().join("public-a");
+            let out_b = dir.path().join("public-b");
+            let owned_a = OwnedOutputRoot::resolve(dir.path(), &out_a, []).unwrap();
             publish(&owned_a, &[("index.html", "a")]).unwrap();
 
-            fs::create_dir(&output_b).unwrap();
-            fs::write(output_b.join("keep.txt"), "user data").unwrap();
-            let owned_b = OwnedOutputRoot::resolve(dir.path(), &output_b, []).unwrap();
-            let marker = publication_marker_path(&output_b);
+            fs::create_dir(&out_b).unwrap();
+            fs::write(out_b.join("keep.txt"), "user data").unwrap();
+            let owned_b = OwnedOutputRoot::resolve(dir.path(), &out_b, []).unwrap();
+            let marker = publication_marker_path(&out_b);
             fs::create_dir_all(marker.parent().unwrap()).unwrap();
-            fs::copy(publication_marker_path(&output_a), marker).unwrap();
+            fs::copy(publication_marker_path(&out_a), marker).unwrap();
 
             let lock = site_lock(&owned_b);
             let writer = owned_b.write(&lock, &BuildCancellation::default()).unwrap();
@@ -651,35 +642,30 @@ mod tests {
                 Err(OutputRootError::InvalidMarker { .. })
             ));
             assert_eq!(
-                fs::read_to_string(output_b.join("keep.txt")).unwrap(),
+                fs::read_to_string(out_b.join("keep.txt")).unwrap(),
                 "user data"
             );
         }
 
-        // A lock taken by another site's build refuses the write and creates nothing.
         {
-            let directory = TempDir::new().unwrap();
+            let dir = TempDir::new().unwrap();
             let other = TempDir::new().unwrap();
-            let output =
-                OwnedOutputRoot::resolve(directory.path(), &directory.path().join("public"), [])
-                    .unwrap();
+            let out = OwnedOutputRoot::resolve(dir.path(), &dir.path().join("public"), []).unwrap();
             let foreign =
                 OwnedOutputRoot::resolve(other.path(), &other.path().join("public"), []).unwrap();
             let lock = site_lock(&foreign);
             assert!(matches!(
-                output.write(&lock, &BuildCancellation::default()),
+                out.write(&lock, &BuildCancellation::default()),
                 Err(OutputRootError::WrongSiteLock)
             ));
-            assert!(!output.path().exists());
+            assert!(!out.path().exists());
         }
     }
 
-    /// A completed publication is the site's only tree: the replaced one and its workspace are gone.
     #[test]
-    fn publication_leaves_only_the_published_tree() {
+    fn publication_clean_tree() {
         let dir = TempDir::new().unwrap();
         let owned = published_output(dir.path(), &[("stale.html", "stale")]);
-
         publish(&owned, &[("index.html", "home")]).unwrap();
 
         assert!(!owned.path().join("stale.html").exists());
@@ -696,17 +682,17 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn workspace_rejects_source_aliases() {
-        let directory = TempDir::new().unwrap();
-        let output = directory.path().join("public");
-        let workspace = crate::filesystem::swap_workspace(&output).unwrap();
+    fn workspace_rejects_aliases() {
+        let dir = TempDir::new().unwrap();
+        let out = dir.path().join("public");
+        let workspace = crate::filesystem::swap_workspace(&out).unwrap();
         fs::create_dir(&workspace).unwrap();
         fs::write(workspace.join("page.typ"), "source").unwrap();
-        let alias = directory.path().join("page.typ");
+        let alias = dir.path().join("page.typ");
         std::os::unix::fs::symlink(workspace.join("page.typ"), &alias).unwrap();
 
         assert!(matches!(
-            OwnedOutputRoot::resolve(directory.path(), &output, [("Typst read", alias.as_path())]),
+            OwnedOutputRoot::resolve(dir.path(), &out, [("Typst read", alias.as_path())]),
             Err(OutputRootError::Boundary(
                 crate::filesystem::OutputBoundaryError::ProtectedPath {
                     kind: "Typst read",
@@ -717,10 +703,9 @@ mod tests {
         assert_eq!(fs::read(&alias).unwrap(), b"source");
     }
 
-    /// A committed publication is not undone by a cleanup failure after it.
     #[cfg(unix)]
     #[test]
-    fn published_bytes_survive_a_cleanup_failure() {
+    fn published_survives_cleanup_error() {
         use std::os::unix::fs::PermissionsExt;
 
         let dir = TempDir::new().unwrap();
@@ -736,17 +721,16 @@ mod tests {
             fs::read(owned.path().join("index.html")).unwrap(),
             b"committed"
         );
-        let previous = crate::filesystem::swap_workspace(owned.path())
+        let prev = crate::filesystem::swap_workspace(owned.path())
             .unwrap()
             .join("previous/0/locked");
-        if previous.exists() {
-            fs::set_permissions(previous, fs::Permissions::from_mode(0o755)).unwrap();
+        if prev.exists() {
+            fs::set_permissions(prev, fs::Permissions::from_mode(0o755)).unwrap();
         }
     }
 
-    /// Cancelling before the replacement starts leaves the published tree as it was.
     #[test]
-    fn cancelled_publication_keeps_previous_output() {
+    fn cancelled_publish_noop() {
         let dir = TempDir::new().unwrap();
         let owned = published_output(dir.path(), &[("index.html", "successful")]);
         let canceller = crate::cancellation::BuildCanceller::default();
@@ -756,9 +740,8 @@ mod tests {
         fs::write(staged.join("index.html"), "candidate").unwrap();
         canceller.cancel();
 
-        let error = writer.publish().unwrap_err();
-
-        assert!(crate::cancellation::is_cancelled(&error.into()));
+        let err = writer.publish().unwrap_err();
+        assert!(crate::cancellation::is_cancelled(&err.into()));
         assert_eq!(
             fs::read(owned.path().join("index.html")).unwrap(),
             b"successful"

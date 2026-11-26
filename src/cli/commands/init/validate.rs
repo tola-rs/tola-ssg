@@ -184,18 +184,25 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    fn preflight_diags(root: &Path, force: bool) -> Vec<Diagnostic> {
+        let err = preflight(root, force).unwrap_err();
+        tola_diagnostic::attached(&err)
+            .expect("the preflight has its diagnostics")
+            .to_vec()
+    }
+
     #[test]
-    fn init_target_refuses_occupied_paths() {
-        let temp = TempDir::new().unwrap();
+    fn target_rejects_occupied_paths() {
+        let dir = TempDir::new().unwrap();
         let empty = TempDir::new().unwrap();
-        let absent = temp.path().join("new_site");
-        let occupied = temp.path().join("occupied");
+        let absent = dir.path().join("new_site");
+        let occupied = dir.path().join("occupied");
         fs::create_dir(&occupied).unwrap();
         fs::write(occupied.join("file.txt"), "content").unwrap();
-        let file = temp.path().join("site");
+        let file = dir.path().join("site");
         fs::write(&file, "content").unwrap();
 
-        for (path, force, accepted) in [
+        for (path, force, ok) in [
             (empty.path().to_path_buf(), false, true),
             (empty.path().join("."), false, true),
             (absent, false, true),
@@ -206,7 +213,7 @@ mod tests {
         ] {
             assert_eq!(
                 target(&path, force).is_ok(),
-                accepted,
+                ok,
                 "{} force={force}",
                 path.display()
             );
@@ -214,83 +221,62 @@ mod tests {
     }
 
     #[test]
-    fn file_target_reports_its_directory_requirement() {
-        let temp = TempDir::new().unwrap();
-        let file = temp.path().join("site");
+    fn file_target_rejected() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("site");
         fs::write(&file, "content").unwrap();
 
-        let diagnostics = preflight_diagnostics(&file, false);
-        assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].code, crate::codes::init::CONFLICT);
+        let diags = preflight_diags(&file, false);
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, crate::codes::init::CONFLICT);
     }
 
     #[test]
-    fn preflight_reports_the_target_conflict() {
-        let temp = TempDir::new().unwrap();
+    fn preflight_reports_conflict() {
+        let dir = TempDir::new().unwrap();
 
-        let empty = temp.path().join("empty");
+        let empty = dir.path().join("empty");
         fs::create_dir(&empty).unwrap();
         assert!(preflight(&empty, false).is_ok());
 
-        let unrelated = temp.path().join("unrelated");
+        let unrelated = dir.path().join("unrelated");
         fs::create_dir(&unrelated).unwrap();
         fs::write(unrelated.join("notes.txt"), "notes").unwrap();
-        let diagnostics = preflight_diagnostics(&unrelated, false);
-        assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].code, crate::codes::init::CONFLICT);
-        assert!(diagnostics[0].notes.is_empty(), "{diagnostics:?}");
+        let diags = preflight_diags(&unrelated, false);
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, crate::codes::init::CONFLICT);
+        assert!(diags[0].notes.is_empty(), "{diags:?}");
         assert!(
-            diagnostics[0]
-                .help
-                .iter()
-                .any(|help| help.message.contains("--force")),
-            "{diagnostics:?}"
+            diags[0].help.iter().any(|h| h.message.contains("--force")),
+            "{diags:?}"
         );
 
-        let existing = temp.path().join("existing");
+        let existing = dir.path().join("existing");
         fs::create_dir(&existing).unwrap();
         fs::write(existing.join("site.typ"), "program").unwrap();
-        let diagnostics = preflight_diagnostics(&existing, false);
-        assert_eq!(diagnostics.len(), 1);
+        let diags = preflight_diags(&existing, false);
+        assert_eq!(diags.len(), 1);
         assert!(
-            diagnostics[0]
-                .notes
-                .iter()
-                .any(|note| note.contains("site.typ")),
-            "{diagnostics:?}"
+            diags[0].notes.iter().any(|n| n.contains("site.typ")),
+            "{diags:?}"
         );
 
-        let diagnostics = preflight_diagnostics(&existing, true);
-        assert_eq!(diagnostics.len(), 1);
+        let diags = preflight_diags(&existing, true);
+        assert_eq!(diags.len(), 1);
+        assert!(diags[0].message.contains("site.typ"), "{diags:?}");
+        assert!(diags[0].notes.is_empty(), "{diags:?}");
         assert!(
-            diagnostics[0].message.contains("site.typ"),
-            "{diagnostics:?}"
-        );
-        assert!(diagnostics[0].notes.is_empty(), "{diagnostics:?}");
-        assert!(
-            !diagnostics[0].message.contains("--force")
-                && diagnostics[0]
-                    .help
-                    .iter()
-                    .all(|help| !help.message.contains("--force")),
-            "{diagnostics:?}"
+            !diags[0].message.contains("--force")
+                && diags[0].help.iter().all(|h| !h.message.contains("--force")),
+            "{diags:?}"
         );
 
         assert!(preflight(&unrelated, true).is_ok());
     }
 
-    /// The diagnostics a refused preflight has.
-    fn preflight_diagnostics(root: &Path, force: bool) -> Vec<Diagnostic> {
-        let error = preflight(root, force).unwrap_err();
-        tola_diagnostic::attached(&error)
-            .expect("the preflight has its diagnostics")
-            .to_vec()
-    }
-
     #[test]
-    fn cancelled_validation_keeps_its_type() {
-        let error = checks([Err(tola_build::cancellation::BuildCancelled.into())]).unwrap_err();
-
-        assert!(error.is::<tola_build::cancellation::BuildCancelled>());
+    fn cancelled_validation_keeps_type() {
+        let err = checks([Err(tola_build::cancellation::BuildCancelled.into())]).unwrap_err();
+        assert!(err.is::<tola_build::cancellation::BuildCancelled>());
     }
 }

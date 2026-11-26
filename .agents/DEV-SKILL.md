@@ -737,12 +737,13 @@ This checkout is jj-colocated: `.jj/repo/store` points at `.git`, so jj and git 
 ### Naming
 
 - Name what a value owns or represents, not how it is built.
-- Rust: `snake_case` functions/modules, `CamelCase` types, `SCREAMING_SNAKE_CASE` constants; booleans read `is_` or `has_`.
-- No `data`, `info`, `obj`, `tmp`, `manager`, `handler`, `utils`, `common`; no type prefixes or numeric suffixes.
+- Rust: `snake_case` functions/modules, `CamelCase` types, `SCREAMING_SNAKE_CASE` constants; booleans read `is_` or `has_`; no `get_` accessor prefixes (`root()`, not `get_root()`).
+- No `data`, `info`, `obj`, `tmp`, `manager`, `handler`, `utils`, `common`; no type prefixes, numeric suffixes, or single-field pass-through wrapper types.
+- Use domain consensus shorthands (`cfg`, `doc`, `src`, `dst`, `pkg`, `dep`, `rev`, `diag`, `tok`, `pos`, `span`, `loc`, `attr`, `val`, `req`/`resp`, `hdr`, `dir`, `buf`, `idx`, `ch`, `sep`, `ext`, `err`, `ctx`) in locals, parameters, private helpers, and tests; keep public types and modules as crisp domain nouns or universal acronyms (`Url`, `Ast`, `Lsp`, `Svg`, `Css`).
 - Names are short, clear, and rigorous; a reader should know what the value is without opening its definition.
 - No arbitrary prefixes such as `a_foo_bar`, and no filler conjunctions (`and`, `or`, `with`, `for`) that name no real distinction.
 - One authoritative representation per concept; derived views name their owner.
-- Use the concrete noun the code holds or returns. Reject umbrella words when a narrower one exists: `policy` → `scope`/`access`/`limits`, `facts` → the field names, `plan` → `entries`/`hooks`/`steps`.
+- Use the concrete noun the code holds or returns. Reject umbrella words and stage prefixes when a narrower noun exists: `policy` → `scope`/`access`/`limits`, `facts` → the field names, `plan` → `entries`/`hooks`/`steps`, `artifact` → `output`/`file`, `evidence` → `reads`/`stamp`/`record`, `outcome` → `status`/`summary`, `payload` → `body`/`entry`/`block`, `resolved`/`prepared`/`configured` → the domain noun directly.
 - Verbs name the concrete action: `read`, `load`, `select`, `store`, `pass`, `move`, `record`; not `resolve`, `carry`, `thread`, or `surface`.
 - Cargo `description` and doc comments are declarative: what the crate holds and what it does. Drop filler such as "shared by" or "one build attempt runs under". A crate description is a short noun phrase naming the crate's subject.
 
@@ -783,6 +784,7 @@ This checkout is jj-colocated: `.jj/repo/store` points at `.git`, so jj and git 
 
 - Inline `#[cfg(test)] mod tests` in the module that owns the behaviour. No separate test files or integration targets.
 - Prove observable behaviour, not private call order. Keep inputs minimal and domain-named.
+- Name test functions concisely as `<subject>_<case>` in domain terms; never write full English sentences (`*_preserves_*_without_*`, `*_keeps_its_*`).
 
 ### Deleting
 

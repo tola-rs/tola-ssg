@@ -1,4 +1,4 @@
-//! Checked conversion between byte offsets and the positions an editor addresses text by.
+//! Checked conversion between byte offsets and UTF-16 editor positions.
 
 use typst_syntax::Lines;
 
@@ -48,36 +48,34 @@ impl Utf16Range {
     }
 }
 
-/// The byte offset one position addresses, or an error when the position is past the
-/// document's lines or past the end of its line.
+/// The byte offset one position addresses, or an error when out of range or splitting a surrogate pair.
 pub fn byte_offset<T: AsRef<str>>(
     lines: &Lines<T>,
-    position: Utf16Position,
+    pos: Utf16Position,
 ) -> Result<usize, PositionError> {
     let line = lines
-        .line_to_range(position.line as usize)
+        .line_to_range(pos.line as usize)
         .ok_or(PositionError::LineOutOfRange)?;
     let text = lines.text()[line.clone()].trim_end_matches(typst_syntax::is_newline);
-    let column = position.character as usize;
+    let col = pos.character as usize;
     let mut utf16 = 0;
-    for (offset, character) in text.char_indices() {
-        if utf16 == column {
+    for (offset, ch) in text.char_indices() {
+        if utf16 == col {
             return Ok(line.start + offset);
         }
-        utf16 += character.len_utf16();
-        if utf16 > column {
+        utf16 += ch.len_utf16();
+        if utf16 > col {
             return Err(PositionError::SplitsSurrogatePair);
         }
     }
-    if utf16 == column {
+    if utf16 == col {
         Ok(line.start + text.len())
     } else {
         Err(PositionError::PastLineEnd)
     }
 }
 
-/// The positions that bound one byte range, or `None` when the range is reversed or reaches
-/// past the source.
+/// The positions that bound one byte range, or `None` when reversed or past the source.
 pub fn utf16_range<T: AsRef<str>>(
     lines: &Lines<T>,
     bytes: std::ops::Range<usize>,
@@ -88,8 +86,8 @@ pub fn utf16_range<T: AsRef<str>>(
     let convert = |byte| {
         let line = lines.byte_to_line(byte)?;
         let start = lines.line_to_byte(line)?;
-        let character = utf16_len(lines.text().get(start..byte)?);
-        checked_position(line, character)
+        let col = utf16_len(lines.text().get(start..byte)?);
+        checked_position(line, col)
     };
     Some(Utf16Range::new(convert(bytes.start)?, convert(bytes.end)?))
 }
@@ -99,8 +97,7 @@ pub fn utf16_len(text: &str) -> usize {
     text.encode_utf16().count()
 }
 
-/// The position at `line` and `character`, or `None` when either is too large for the
-/// coordinates an editor carries.
+/// The position at `line` and `character`, or `None` on overflow.
 pub fn checked_position(line: usize, character: usize) -> Option<Utf16Position> {
     Some(Utf16Position::new(
         line.try_into().ok()?,
@@ -113,7 +110,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn utf16_columns_map_to_byte_offsets() {
+    fn position_utf16_to_byte() {
         let lines = Lines::new("a🦊b\r\n正文\n");
         assert_eq!(byte_offset(&lines, Utf16Position::new(0, 3)).unwrap(), 5);
         assert_eq!(byte_offset(&lines, Utf16Position::new(0, 4)).unwrap(), 6);

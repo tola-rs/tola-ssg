@@ -5,11 +5,11 @@ use typst::foundations::{Dict, IntoValue, Value};
 use typst::syntax::{RootedPath, VirtualRoot};
 
 use crate::asset::{AssetUrls, ModuleAssetInput};
-use tola_module::prepared::{PreparedModules, package_path, virtual_path};
+use tola_module::bundle::{ModuleBundle, package_path, virtual_path};
 
 /// Record every selected module's manifest root and file as an exact input.
 pub(crate) fn observe_manifests(
-    prepared: &PreparedModules,
+    prepared: &ModuleBundle,
     observation: &mut crate::observation::InputObservation,
 ) {
     use crate::observation::{InputKind, InputPathScope};
@@ -30,7 +30,7 @@ pub(crate) fn observe_manifests(
 }
 
 /// The `@tola/module` records this compilation binds.
-pub(crate) fn contexts(prepared: &PreparedModules, urls: &AssetUrls) -> Result<Dict> {
+pub(crate) fn contexts(prepared: &ModuleBundle, urls: &AssetUrls) -> Result<Dict> {
     let mut assets = std::collections::BTreeMap::<&str, (Dict, Dict)>::new();
     for (asset, address) in urls.module_assets() {
         let path = match &asset.input {

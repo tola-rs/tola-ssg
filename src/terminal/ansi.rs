@@ -410,84 +410,72 @@ fn push_color(escape: &mut String, color: Color, background: bool) {
 mod tests {
     use super::*;
 
-    fn style_of(source: &str, text: &str) -> Style {
-        segments(source)
+    fn style_of(src: &str, text: &str) -> Style {
+        segments(src)
             .into_iter()
-            .find(|segment| segment.text == text)
+            .find(|s| s.text == text)
             .unwrap_or_else(|| panic!("{text} is not drawn"))
             .style
     }
 
-    fn painted(segments: &[Segment], styled: bool) -> String {
-        let mut output = String::new();
+    fn painted(segs: &[Segment], styled: bool) -> String {
+        let mut out = String::new();
         let mut painter = Painter::new(styled);
-        for segment in segments {
-            painter.write(segment, &mut output);
+        for seg in segs {
+            painter.write(seg, &mut out);
         }
-        painter.reset(&mut output);
-        output
+        painter.reset(&mut out);
+        out
     }
 
     #[test]
     fn sgr_sets_colors_and_emphasis() {
-        let default = Style::default();
+        let def = Style::default();
         let cases = [
-            ("\x1b[31mred", "red", default.fg(Color::Red)),
-            ("\x1b[91mbright", "bright", default.fg(Color::LightRed)),
-            ("\x1b[42mback", "back", default.bg(Color::Green)),
-            (
-                "\x1b[38;5;196mindex",
-                "index",
-                default.fg(Color::Indexed(196)),
-            ),
-            (
-                "\x1b[48;2;1;2;3mrgb",
-                "rgb",
-                default.bg(Color::Rgb(1, 2, 3)),
-            ),
-            (
-                "\x1b[38:5:200mcolon",
-                "colon",
-                default.fg(Color::Indexed(200)),
-            ),
+            ("\x1b[31mred", "red", def.fg(Color::Red)),
+            ("\x1b[91mbright", "bright", def.fg(Color::LightRed)),
+            ("\x1b[42mback", "back", def.bg(Color::Green)),
+            ("\x1b[38;5;196mindex", "index", def.fg(Color::Indexed(196))),
+            ("\x1b[48;2;1;2;3mrgb", "rgb", def.bg(Color::Rgb(1, 2, 3))),
+            ("\x1b[38:5:200mcolon", "colon", def.fg(Color::Indexed(200))),
             (
                 "\x1b[38:2:9:8:7mplain",
                 "plain",
-                default.fg(Color::Rgb(9, 8, 7)),
+                def.fg(Color::Rgb(9, 8, 7)),
             ),
             (
                 "\x1b[38:2::9:8:7mspace",
                 "space",
-                default.fg(Color::Rgb(9, 8, 7)),
+                def.fg(Color::Rgb(9, 8, 7)),
             ),
             (
                 "\x1b[1;2;4mfancy",
                 "fancy",
-                default.add_modifier(Modifier::BOLD | Modifier::DIM | Modifier::UNDERLINED),
+                def.add_modifier(Modifier::BOLD | Modifier::DIM | Modifier::UNDERLINED),
             ),
-            ("\x1b[1;31m\x1b[22;39mclear", "clear", default),
-            ("\x1b[31;42m\x1b[49mhalf", "half", default.fg(Color::Red)),
-            ("\x1b[mreset", "reset", default),
+            ("\x1b[1;31m\x1b[22;39mclear", "clear", def),
+            ("\x1b[31;42m\x1b[49mhalf", "half", def.fg(Color::Red)),
+            ("\x1b[mreset", "reset", def),
         ];
-        for (source, text, expected) in cases {
-            assert_eq!(style_of(source, text), expected, "{source:?}");
+        for (src, text, expected) in cases {
+            assert_eq!(style_of(src, text), expected, "{src:?}");
         }
     }
 
     #[test]
-    fn unsupported_sgr_leaves_text_plain() {
-        for source in [
+    fn unsupported_sgr_plain() {
+        for src in [
             "\x1b[3;5;7;8;9mplain",
             "\x1b[58;2;9;8;7mplain",
             "\x1b[38;2;999;0;0mplain",
             "\x1b[38:2:1:9:8:7mplain",
         ] {
-            assert_eq!(style_of(source, "plain"), Style::default(), "{source:?}");
+            assert_eq!(style_of(src, "plain"), Style::default(), "{src:?}");
         }
     }
 
     #[test]
-    fn paint_emits_normalized_sgr() {
+    fn paint_normalizes_sgr() {
         assert_eq!(paint("\x1b[31mred\x1b[0m", true), "\x1b[0;31mred\x1b[0m");
         assert_eq!(paint("\x1b[31mred\x1b[0m", false), "red");
         assert_eq!(
@@ -497,18 +485,18 @@ mod tests {
     }
 
     #[test]
-    fn chunk_boundaries_do_not_change_text() {
-        let source = "a\x1b[31mred\x1b[0m\r\nb\x1b]8;;u\x1b\\link\x1b]8;;\x1b\\\tend";
-        let whole = segments(source);
-        for split in 0..=source.len() {
-            if !source.is_char_boundary(split) {
+    fn chunk_boundaries_invariant() {
+        let src = "a\x1b[31mred\x1b[0m\r\nb\x1b]8;;u\x1b\\link\x1b]8;;\x1b\\\tend";
+        let whole = segments(src);
+        for split in 0..=src.len() {
+            if !src.is_char_boundary(split) {
                 continue;
             }
             let mut parser = Parser::new();
-            let mut parts = parser.push(&source[..split]);
-            parts.extend(parser.push(&source[split..]));
-            if let Some(carriage_return) = parser.flush() {
-                parts.push(carriage_return);
+            let mut parts = parser.push(&src[..split]);
+            parts.extend(parser.push(&src[split..]));
+            if let Some(cr) = parser.flush() {
+                parts.push(cr);
             }
             for styled in [false, true] {
                 assert_eq!(
@@ -521,14 +509,14 @@ mod tests {
     }
 
     #[test]
-    fn control_sequences_never_reach_text() {
-        let source = "a\x1b[2Jb\x1b[1;2Hc\x1b]0;title\x07d\x1b]8;;http://x\x1b\\e\x1b]8;;\x1b\\f\x1bPq\x1b\\g";
-        assert_eq!(paint(source, false), "abcdefg");
-        assert_eq!(paint(source, true), "abcdefg");
+    fn control_sequences_stripped() {
+        let src = "a\x1b[2Jb\x1b[1;2Hc\x1b]0;title\x07d\x1b]8;;http://x\x1b\\e\x1b]8;;\x1b\\f\x1bPq\x1b\\g";
+        assert_eq!(paint(src, false), "abcdefg");
+        assert_eq!(paint(src, true), "abcdefg");
     }
 
     #[test]
-    fn carriage_returns_stay_visible() {
+    fn carriage_returns_visible() {
         assert_eq!(paint("a\r\nb", false), "a\nb");
         assert_eq!(paint("a\rb", false), "a\\rb");
         assert_eq!(paint("a\r", false), "a\\r");
@@ -537,22 +525,21 @@ mod tests {
 
     #[test]
     fn style_survives_newlines() {
-        let segments = segments("\x1b[31mfirst\nsecond");
+        let segs = segments("\x1b[31mfirst\nsecond");
         assert!(
-            segments
-                .iter()
-                .filter(|segment| segment.text != "\n")
-                .all(|segment| segment.style.fg == Some(Color::Red))
+            segs.iter()
+                .filter(|s| s.text != "\n")
+                .all(|s| s.style.fg == Some(Color::Red))
         );
     }
 
     #[test]
     fn newlines_stand_alone() {
-        for segment in segments("a\nb\n\nc\x1b[31m\n") {
+        for seg in segments("a\nb\n\nc\x1b[31m\n") {
             assert!(
-                segment.text == "\n" || !segment.text.contains('\n'),
+                seg.text == "\n" || !seg.text.contains('\n'),
                 "{:?}",
-                segment.text
+                seg.text
             );
         }
     }

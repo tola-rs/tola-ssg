@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tola_build::cancellation::{BuildCancellation, BuildCancelled};
 use tola_build::check::{SourceDiagnosticSession, SourceRevision};
-use tola_build::config::ResolvedSiteConfig;
+use tola_build::config::SiteConfig;
 use tola_typst::typst::World;
 
 use super::jobs::SourceInputs;
@@ -21,7 +21,7 @@ use super::worker::SourceFailure;
 /// outlives the request that produced it and answers the next one. A newer revision or a new
 /// configuration drops every compilation held.
 pub(crate) struct RevisionCompilations {
-    configuration: Option<Arc<ResolvedSiteConfig>>,
+    configuration: Option<Arc<SiteConfig>>,
     revision: u64,
     compilations: Vec<CompiledSources>,
 }
@@ -60,7 +60,7 @@ impl RevisionCompilations {
     pub(crate) fn inspect(
         &mut self,
         session: &mut SourceDiagnosticSession,
-        configuration: &Arc<ResolvedSiteConfig>,
+        configuration: &Arc<SiteConfig>,
         revision: u64,
         sources: Vec<(PathBuf, Arc<str>)>,
         cancellation: &BuildCancellation,
@@ -98,7 +98,7 @@ impl RevisionCompilations {
     pub(crate) fn inspect_job(
         &mut self,
         session: &mut SourceDiagnosticSession,
-        configuration: &Arc<ResolvedSiteConfig>,
+        configuration: &Arc<SiteConfig>,
         sources: &SourceInputs,
     ) -> Result<Arc<SourceRevision>, SourceFailure> {
         self.inspect(
@@ -118,7 +118,7 @@ impl RevisionCompilations {
     /// reads none of it and retains none of its own: a check or a repair superseded while it ran
     /// must not drop the compilations the newest revision is answering from, and the next read of
     /// that revision finds them where they were left.
-    fn adopt(&mut self, configuration: &Arc<ResolvedSiteConfig>, revision: u64) -> bool {
+    fn adopt(&mut self, configuration: &Arc<SiteConfig>, revision: u64) -> bool {
         let known = self
             .configuration
             .as_ref()
@@ -168,7 +168,7 @@ impl RevisionCompilations {
 /// reads what is held.
 fn resolves_the_same(
     compiled: &CompiledSources,
-    configuration: &Arc<ResolvedSiteConfig>,
+    configuration: &Arc<SiteConfig>,
     sources: &[(PathBuf, Arc<str>)],
 ) -> bool {
     let Some(checked) = compiled.compiled.checked() else {
@@ -193,7 +193,7 @@ fn resolves_the_same(
             let Some(requested_text) = requested.get(path) else {
                 return false;
             };
-            crate::identity::path_id(path, configuration.get_root())
+            crate::identity::path_id(path, configuration.root())
                 .and_then(|id| world.source(id).ok())
                 .is_some_and(|resolved| resolved.text() == *requested_text)
         })

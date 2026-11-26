@@ -1,16 +1,16 @@
 use super::{assert_package, reject_package};
 
-fn assert_collection(assertions: &str) {
+fn assert_col(assertions: &str) {
     assert_package("collection", assertions);
 }
 
-fn reject_collection(assertions: &str) {
+fn reject_col(assertions: &str) {
     reject_package("collection", assertions);
 }
 
 #[test]
-fn membership_shapes_are_not_coerced() {
-    for expression in [
+fn membership_shapes_rejected() {
+    for expr in [
         "group-by(((tags: (\"rust\",)),), key: member => member.tags)",
         "group-by-keys(((tag: \"rust\"),), keys: member => member.tag)",
         "group-by-keys((none,))",
@@ -18,13 +18,13 @@ fn membership_shapes_are_not_coerced() {
         "select-members(((\"rust\",),), \"rust\")",
         "pick((name: \"Author\"), (1,))",
     ] {
-        reject_collection(&format!("#let selected = {expression}"));
+        reject_col(&format!("#let selected = {expr}"));
     }
 }
 
 #[test]
-fn sparse_parents_remain_traversable() {
-    assert_collection(
+fn hierarchy_traversal() {
+    assert_col(
         r#"
 #let members = ("leaf", "root")
 #let parent(key) = (leaf: "missing", missing: "root", root: none).at(key)
@@ -32,14 +32,7 @@ fn sparse_parents_remain_traversable() {
 #assert.eq(descendants(members, "root", parent), ("leaf",))
 #assert.eq(children(members, "missing", parent), ("leaf",))
 #assert.eq(descendants(members, "missing", parent), ("leaf",))
-"#,
-    );
-}
 
-#[test]
-fn hierarchy_accepts_composite_identities() {
-    assert_collection(
-        r#"
 #let root = (id: ("root", 1))
 #let leaf = (id: ("leaf", 2))
 #let parent(key) = if key == leaf.id { root.id } else { none }
@@ -50,8 +43,8 @@ fn hierarchy_accepts_composite_identities() {
 }
 
 #[test]
-fn duplicate_navigation_keys_are_errors() {
-    for expression in [
+fn duplicate_keys_rejected() {
+    for expr in [
         "index-by(members)",
         "adjacent(members, \"anchor\")",
         "window(members, \"anchor\", before: 1)",
@@ -61,37 +54,33 @@ fn duplicate_navigation_keys_are_errors() {
         "lineage(members, \"anchor\", _ => none)",
         "siblings(members, \"anchor\", _ => none)",
     ] {
-        reject_collection(&format!(
+        reject_col(&format!(
             "#let members = (\"anchor\", \"duplicate\", \"duplicate\")\n\
-             #let selected = {expression}"
+             #let selected = {expr}"
         ));
     }
 }
 
 #[test]
-fn traversed_parent_cycles_are_errors() {
-    for operation in ["ancestors", "lineage", "descendants"] {
+fn parent_cycles_rejected() {
+    for op in ["ancestors", "lineage", "descendants"] {
         for parents in [
             r#"(leaf: "leaf")"#,
             r#"(leaf: "missing", missing: "leaf")"#,
             r#"(leaf: "root", root: "leaf")"#,
         ] {
-            let anchor = if operation == "descendants" {
-                "root"
-            } else {
-                "leaf"
-            };
-            reject_collection(&format!(
+            let anchor = if op == "descendants" { "root" } else { "leaf" };
+            reject_col(&format!(
                 "#let parent(key) = {parents}.at(key)\n\
-                 #let selected = {operation}((\"leaf\",), \"{anchor}\", parent)"
+                 #let selected = {op}((\"leaf\",), \"{anchor}\", parent)"
             ));
         }
     }
 }
 
 #[test]
-fn direct_relations_ignore_deeper_cycles() {
-    assert_collection(
+fn direct_relations_ignore_cycles() {
+    assert_col(
         r#"
 #let members = ("leaf-a", "leaf-b", "root")
 #let parent(key) = ("leaf-a": "root", "leaf-b": "root", root: "missing", missing: "root").at(key)

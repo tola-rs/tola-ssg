@@ -27,17 +27,17 @@ pub use crate::compile::scan::{
 
 pub use crate::diagnostic::{
     CompileError, Diagnostic, DiagnosticFilter, DiagnosticOrigin, DiagnosticSeverity,
-    DiagnosticSummary, Diagnostics, FilterType, Hint, LocationFailure, NativeDiagnostic,
-    PackageKind, ProducerDiagnosticOrigin, ResolvedPackageFailure, ResolvedPackageFailureReason,
-    ResolvedPackageSearch, ResolvedSource, SourceContextLimit, SourceDiagnostic, SourceLine,
-    SourceLocation, SourcePosition, SourceRange, SourceTruncation, Trace, TraceKind,
+    DiagnosticSummary, Diagnostics, FilterType, Hint, LocatedSource, LocationFailure,
+    NativeDiagnostic, PackageFailure, PackageFailureReason, PackageKind, PackageSearch,
+    ProducerDiagnosticOrigin, SourceContextLimit, SourceDiagnostic, SourceLine, SourceLocation,
+    SourcePosition, SourceRange, SourceTruncation, Trace, TraceKind,
 };
 
 pub use crate::introspection::{MetadataCardinalityError, MetadataDeclaration};
 
 pub use crate::world::file::{
-    ContentDigest, DiskReadPath, EmptyFiles, FileMap, FileProvider, FileRead, FileResolver,
-    FileTarget, FileView, LocalPackage, LocalPackages, ReadEvidence, ReadLocator, ReadOrigin,
+    ContentDigest, DiskReadPath, EmptyFiles, FileMap, FileProvider, FileRead, FileStore,
+    FileTarget, FileView, LocalPackage, LocalPackages, ReadLocator, ReadOrigin, ReadRecord,
     SharedFileCache, file_id, file_id_from_path, hash_length_prefixed, virtual_file_id,
 };
 
@@ -55,9 +55,9 @@ pub use crate::world::{
 
 pub use crate::world::package;
 pub use crate::world::package::{
-    PackageAvailability, PackageCheck, PackageFetchPolicy, PackageLocation, PackageLocationSource,
-    PackageLocations, PackagePreparationFailure, PackageRead, PackageSpec, PackageStore,
-    PackageTier, PackageVerificationError, PackageVerifier, PackageVersion, PreparedPackage,
+    PackageAvailability, PackageCheck, PackageDir, PackageFetchMode, PackageLocation,
+    PackageLocationSource, PackageLocations, PackagePreparationFailure, PackageRead, PackageSpec,
+    PackageStore, PackageTier, PackageVerificationError, PackageVerifier, PackageVersion,
     sort_package_checks, sort_package_reads,
 };
 

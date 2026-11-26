@@ -12,16 +12,16 @@ use typst::utils::LazyHash;
 
 use crate::bundle::BundleCancellation;
 use crate::world::file::{
-    FileMap, FileProvider, FileResolver, FileTarget, FileView, LocalPackages, SharedFileCache,
+    FileMap, FileProvider, FileStore, FileTarget, FileView, LocalPackages, SharedFileCache,
 };
 use crate::world::font::{FontLoadError, FontOptions, FontStore};
-use crate::world::package::{PackageFetchPolicy, PackageLocations, PackageSpec, PackageVerifier};
+use crate::world::package::{PackageFetchMode, PackageLocations, PackageSpec, PackageVerifier};
 use crate::world::{ExplicitSources, SourceBoundary, TypstWorld, WorldBuildError};
 
 /// Typst resources for one compilation, without site concepts.
 #[derive(Clone)]
 pub struct TypstHost {
-    files: FileResolver,
+    files: FileStore,
     virtual_files: Arc<FileMap>,
     file_cache: Arc<SharedFileCache>,
     fonts: Arc<FontStore>,
@@ -29,11 +29,7 @@ pub struct TypstHost {
 
 impl TypstHost {
     /// Bind already-decided resources.
-    pub fn new(
-        fonts: Arc<FontStore>,
-        files: FileResolver,
-        file_cache: Arc<SharedFileCache>,
-    ) -> Self {
+    pub fn new(fonts: Arc<FontStore>, files: FileStore, file_cache: Arc<SharedFileCache>) -> Self {
         Self {
             files,
             virtual_files: Arc::default(),
@@ -88,7 +84,7 @@ impl TypstHost {
     }
 
     /// Whether missing packages may be fetched.
-    pub fn fetch_policy(&self) -> PackageFetchPolicy {
+    pub fn fetch_policy(&self) -> PackageFetchMode {
         self.files.package_store().fetch_policy()
     }
 
@@ -115,11 +111,11 @@ impl TypstHost {
     /// The resolver every source read of this host uses.
     ///
     /// Virtual files, when present, are layered over the base provider.
-    pub fn file_resolver(&self) -> Arc<FileResolver> {
-        Arc::new(self.resolved_files())
+    pub fn file_resolver(&self) -> Arc<FileStore> {
+        Arc::new(self.file_store())
     }
 
-    fn resolved_files(&self) -> FileResolver {
+    fn file_store(&self) -> FileStore {
         if self.virtual_files.is_empty() {
             self.files.clone()
         } else {
@@ -178,7 +174,7 @@ impl TypstHost {
 
     /// Candidate files for one explicit source set.
     pub fn candidate_files(&self, sources: Arc<ExplicitSources>) -> Arc<FileView> {
-        Arc::new(FileView::new(sources, Arc::new(self.resolved_files())))
+        Arc::new(FileView::new(sources, Arc::new(self.file_store())))
     }
 
     /// Build a world from a main path below `root`.

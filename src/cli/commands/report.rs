@@ -56,7 +56,7 @@ impl SiteReport {
         }
     }
 
-    pub fn configuration(&mut self, config: &tola_build::config::ResolvedSiteConfig) {
+    pub fn configuration(&mut self, config: &tola_build::config::SiteConfig) {
         self.diagnostics
             .extend(tola_build::config::diagnostic::warning_diagnostics(config));
     }

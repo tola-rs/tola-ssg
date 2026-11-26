@@ -129,21 +129,18 @@ mod tests {
     use typst::syntax::{FileId, RootedPath, VirtualPath, VirtualRoot};
 
     #[test]
-    fn file_map_keys_on_full_identity() {
+    fn file_map_full_id() {
         let root = std::path::Path::new("/workspace");
-        let root_file = crate::world::file::file_id("lib.typ");
-        let package = FileId::new(RootedPath::new(
+        let fid = crate::world::file::file_id("lib.typ");
+        let pkg = FileId::new(RootedPath::new(
             VirtualRoot::Package("@preview/example:1.0.0".parse().unwrap()),
             VirtualPath::new("lib.typ").unwrap(),
         ));
         let mut files = FileMap::new();
-        files.insert(root_file, Arc::<[u8]>::from(&b"root"[..]));
+        files.insert(fid, Arc::<[u8]>::from(&b"root"[..]));
 
-        assert!(matches!(
-            files.target(root_file),
-            Some(FileTarget::Bytes(_))
-        ));
-        assert_eq!(files.target(package), None);
+        assert!(matches!(files.target(fid), Some(FileTarget::Bytes(_))));
+        assert_eq!(files.target(pkg), None);
 
         assert_eq!(
             files.insert_path(std::path::Path::new("/other/file.typ"), root, b"x".to_vec()),

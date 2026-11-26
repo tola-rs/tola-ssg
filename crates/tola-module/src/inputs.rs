@@ -114,57 +114,111 @@ pub fn declaration_root(
         ModuleSource::Builtin { builtin } => Ok(builtin_module(alias, builtin)?.root(site_root)),
         ModuleSource::Tarball { tarball } => {
             let lock = InputLock::read(site_root)?.unwrap_or_default();
-            match lock.modules.get(alias) {
-                Some(LockedModule::Tarball {
-                    tarball: recorded,
-                    tarball_sha256,
-                    ..
-                }) if recorded == &tarball.location
-                    && tarball
-                        .sha256
-                        .is_none_or(|expected| expected == *tarball_sha256) =>
-                {
-                    Ok(frozen_root(
-                        site_root,
-                        InputMode::new(InputScope::Online, false),
-                        vendor,
-                        alias,
-                    )?
-                    .unwrap_or_else(|| tarball_cache(site_root, *tarball_sha256)))
-                }
-                _ => Err(ModuleRootError::NotLocked {
+            let (digest, _) = match_tarball_lock(&lock, alias, tarball)?.ok_or_else(|| {
+                ModuleRootError::NotLocked {
                     alias: alias.to_owned(),
-                }),
-            }
+                }
+            })?;
+            Ok(frozen_root(
+                site_root,
+                InputMode::new(InputScope::Online, false),
+                vendor,
+                alias,
+            )?
+            .unwrap_or_else(|| tarball_cache(site_root, digest)))
         }
         ModuleSource::Git { git } => {
             let lock = InputLock::read(site_root)?.unwrap_or_default();
-            let selector = locked_revision(git.revision.as_ref());
-            match lock.modules.get(alias) {
-                Some(LockedModule::Git {
-                    git: recorded_git,
-                    revision: recorded_revision,
-                    subdir: recorded_subdir,
-                    commit,
-                    ..
-                }) if recorded_git == &git.url
-                    && recorded_revision == &selector
-                    && recorded_subdir == &git.subdir =>
-                {
-                    select_root(
-                        site_root,
-                        InputMode::new(InputScope::Online, false),
-                        vendor,
-                        alias,
-                        commit,
-                        &git.subdir,
-                    )
-                }
-                _ => Err(ModuleRootError::NotLocked {
-                    alias: alias.to_owned(),
-                }),
-            }
+            let (commit, _) =
+                match_git_lock(&lock, alias, &git.url, git.revision.as_ref(), &git.subdir)?
+                    .ok_or_else(|| ModuleRootError::NotLocked {
+                        alias: alias.to_owned(),
+                    })?;
+            select_root(
+                site_root,
+                InputMode::new(InputScope::Online, false),
+                vendor,
+                alias,
+                &commit,
+                &git.subdir,
+            )
         }
+    }
+}
+
+fn match_tarball_lock(
+    lock: &InputLock,
+    alias: &str,
+    src: &TarballSource,
+) -> Result<Option<(Sha256Digest, Sha256Digest)>, ModuleRootError> {
+    match lock.modules.get(alias) {
+        Some(LockedModule::Tarball {
+            tarball,
+            tarball_sha256,
+            tree_sha256,
+        }) if tarball == &src.location && src.sha256.is_none_or(|exp| exp == *tarball_sha256) => {
+            Ok(Some((*tarball_sha256, *tree_sha256)))
+        }
+        Some(_) => Err(ModuleRootError::DeclarationChanged {
+            alias: alias.to_owned(),
+        }),
+        None => Ok(None),
+    }
+}
+
+fn match_git_lock(
+    lock: &InputLock,
+    alias: &str,
+    url: &str,
+    rev: Option<&RemoteRevision>,
+    subdir: &Path,
+) -> Result<Option<(String, Sha256Digest)>, ModuleRootError> {
+    let sel = locked_revision(rev);
+    match lock.modules.get(alias) {
+        Some(LockedModule::Git {
+            git,
+            revision,
+            subdir: rec_subdir,
+            commit,
+            tree_sha256,
+        }) if git == url && revision == &sel && rec_subdir == subdir => {
+            Ok(Some((commit.clone(), *tree_sha256)))
+        }
+        Some(_) => Err(ModuleRootError::DeclarationChanged {
+            alias: alias.to_owned(),
+        }),
+        None => Ok(None),
+    }
+}
+
+fn ensure_inside_site(site: &Path, alias: &str, path: &Path) -> Result<(), ModuleRootError> {
+    let canonical = path
+        .canonicalize()
+        .map_err(|source| ModuleRootError::Root {
+            alias: alias.to_owned(),
+            path: path.to_path_buf(),
+            source,
+        })?;
+    if !canonical.starts_with(site) {
+        return Err(ModuleRootError::OutsideSite { path: canonical });
+    }
+    Ok(())
+}
+
+fn vendor_missing(vendor: Option<&Path>, alias: &str) -> ModuleRootError {
+    ModuleRootError::VendorMissing {
+        alias: alias.to_owned(),
+        path: vendor
+            .unwrap_or(Path::new("vendor"))
+            .join("modules")
+            .join(alias),
+    }
+}
+
+fn network_denied(mode: InputMode, alias: &str) -> ModuleRootError {
+    ModuleRootError::NetworkDenied {
+        alias: alias.to_owned(),
+        scope: mode.scope().as_str(),
     }
 }
 
@@ -178,51 +232,43 @@ struct ModuleAcquisition<'a> {
 }
 
 impl ModuleAcquisition<'_> {
-    /// Record the root and digest of every declaration into the lock.
     fn record(
         &mut self,
         declarations: &BTreeMap<String, ModuleDeclaration>,
         mut started: impl FnMut(&str, &ModuleSource),
     ) -> Result<BTreeMap<String, PathBuf>, ModuleRootError> {
         let mut roots = BTreeMap::new();
-        for (alias, declaration) in declarations {
+        for (alias, decl) in declarations {
             ensure_active(self.cancellation)?;
-            started(alias, &declaration.source);
-            let root = self.read(alias, declaration)?;
+            started(alias, &decl.source);
+            let root = self.read(alias, decl)?;
             roots.insert(alias.clone(), root);
         }
         Ok(roots)
     }
 
-    /// The directory one declaration reads, and the fact the lock records for it.
-    fn read(
-        &mut self,
-        alias: &str,
-        declaration: &ModuleDeclaration,
-    ) -> Result<PathBuf, ModuleRootError> {
-        match &declaration.source {
+    fn read(&mut self, alias: &str, decl: &ModuleDeclaration) -> Result<PathBuf, ModuleRootError> {
+        match &decl.source {
             ModuleSource::Local { path } => self.local(alias, path),
             ModuleSource::Git { git } => {
                 self.remote(alias, &git.url, git.revision.as_ref(), &git.subdir)
             }
             ModuleSource::Tarball { tarball } => self.tarball(alias, tarball),
             ModuleSource::Builtin { builtin } => {
-                let module = builtin_module(alias, builtin)?;
-                let root = materialize_builtin(self.site_root, alias, module, self.cancellation)?;
+                let pkg = builtin_module(alias, builtin)?;
+                let root = materialize_builtin(self.site_root, alias, pkg, self.cancellation)?;
                 self.lock.modules.remove(alias);
                 Ok(root)
             }
         }
     }
 
-    /// A local module's directory, recorded as the bytes a build reads.
     fn local(&mut self, alias: &str, path: &Path) -> Result<PathBuf, ModuleRootError> {
         let root = self.local_root(alias, path)?;
         self.record_local(alias, path, &root)?;
         Ok(root)
     }
 
-    /// A local module's directory, which must stay inside the site.
     fn local_root(&self, alias: &str, path: &Path) -> Result<PathBuf, ModuleRootError> {
         let declared = self.site_root.join(path);
         if !declared.is_dir() {
@@ -232,21 +278,11 @@ impl ModuleAcquisition<'_> {
             });
         }
         if self.mode.scope() == InputScope::Pure {
-            let canonical = declared
-                .canonicalize()
-                .map_err(|source| ModuleRootError::Root {
-                    alias: alias.to_owned(),
-                    path: declared.clone(),
-                    source,
-                })?;
-            if !canonical.starts_with(self.site_root) {
-                return Err(ModuleRootError::OutsideSite { path: canonical });
-            }
+            ensure_inside_site(self.site_root, alias, &declared)?;
         }
         Ok(declared)
     }
 
-    /// Record what a local module read, which only proves the bytes a build saw.
     fn record_local(
         &mut self,
         alias: &str,
@@ -258,57 +294,34 @@ impl ModuleAcquisition<'_> {
             .strip_prefix(self.site_root)
             .map(Path::to_path_buf)
             .unwrap_or_else(|_| path.to_path_buf());
-        let entry = LockedModule::Local {
-            path: recorded,
-            tree_sha256,
-        };
-        self.lock.modules.insert(alias.to_owned(), entry);
+        self.lock.modules.insert(
+            alias.to_owned(),
+            LockedModule::Local {
+                path: recorded,
+                tree_sha256,
+            },
+        );
         Ok(())
     }
 
-    /// A remote module's directory, fetched when this attempt may write and the lock has no fact.
     fn remote(
         &mut self,
         alias: &str,
         git: &str,
-        revision: Option<&RemoteRevision>,
+        rev: Option<&RemoteRevision>,
         subdir: &Path,
     ) -> Result<PathBuf, ModuleRootError> {
-        let selector = locked_revision(revision);
-        let recorded = match self.lock.modules.get(alias) {
-            Some(LockedModule::Git {
-                git: recorded_git,
-                revision: recorded_revision,
-                subdir: recorded_subdir,
-                commit,
-                tree_sha256,
-            }) if recorded_git == git
-                && recorded_revision == &selector
-                && recorded_subdir == subdir =>
-            {
-                Some((commit.clone(), *tree_sha256))
-            }
-            Some(_) => {
-                return Err(ModuleRootError::DeclarationChanged {
-                    alias: alias.to_owned(),
-                });
-            }
-            None => None,
-        };
-        let vendor = if recorded.is_some() {
-            self.vendor
-        } else {
-            None
-        };
+        let recorded = match_git_lock(self.lock, alias, git, rev, subdir)?;
+        let vendor = recorded.as_ref().and(self.vendor);
         let (commit, digest) = match recorded {
-            Some(recorded) => recorded,
+            Some(entry) => entry,
             None if self.mode.may_write_lock() => {
-                let (commit, digest) = self.fetch(alias, git, revision, subdir)?;
+                let (commit, digest) = self.fetch(alias, git, rev, subdir)?;
                 self.lock.modules.insert(
                     alias.to_owned(),
                     LockedModule::Git {
                         git: git.to_owned(),
-                        revision: selector,
+                        revision: locked_revision(rev),
                         subdir: subdir.to_path_buf(),
                         commit: commit.clone(),
                         tree_sha256: digest,
@@ -339,32 +352,14 @@ impl ModuleAcquisition<'_> {
         Ok(root)
     }
 
-    fn tarball(&mut self, alias: &str, source: &TarballSource) -> Result<PathBuf, ModuleRootError> {
+    fn tarball(&mut self, alias: &str, src: &TarballSource) -> Result<PathBuf, ModuleRootError> {
         ensure_active(self.cancellation)?;
-        let recorded = match self.lock.modules.get(alias) {
-            Some(LockedModule::Tarball {
-                tarball,
-                tarball_sha256,
-                tree_sha256,
-            }) if tarball == &source.location
-                && source
-                    .sha256
-                    .is_none_or(|expected| expected == *tarball_sha256) =>
-            {
-                Some((*tarball_sha256, *tree_sha256))
-            }
-            Some(_) => {
-                return Err(ModuleRootError::DeclarationChanged {
-                    alias: alias.to_owned(),
-                });
-            }
-            None if !self.mode.may_write_lock() => {
-                return Err(ModuleRootError::NotLocked {
-                    alias: alias.to_owned(),
-                });
-            }
-            None => None,
-        };
+        let recorded = match_tarball_lock(self.lock, alias, src)?;
+        if recorded.is_none() && !self.mode.may_write_lock() {
+            return Err(ModuleRootError::NotLocked {
+                alias: alias.to_owned(),
+            });
+        }
         if let Some((digest, tree)) = recorded {
             if let Some(root) = frozen_root(self.site_root, self.mode, self.vendor, alias)? {
                 verify_tree(alias, &root, tree)?;
@@ -376,25 +371,18 @@ impl ModuleAcquisition<'_> {
                     verify_tree(alias, &root, tree)?;
                     return Ok(root);
                 }
-            } else if matches!(source.location, TarballLocation::Url { .. }) {
-                return Err(ModuleRootError::VendorMissing {
-                    alias: alias.to_owned(),
-                    path: self
-                        .vendor
-                        .unwrap_or(Path::new("vendor"))
-                        .join("modules")
-                        .join(alias),
-                });
+            } else if matches!(src.location, TarballLocation::Url { .. }) {
+                return Err(vendor_missing(self.vendor, alias));
             }
         }
-        let result = self.materialize_tarball(alias, source, recorded);
+        let result = self.materialize_tarball(alias, src, recorded);
         ensure_active(self.cancellation)?;
         let (root, digest, tree) = result?;
         if recorded.is_none() {
             self.lock.modules.insert(
                 alias.to_owned(),
                 LockedModule::Tarball {
-                    tarball: source.location.clone(),
+                    tarball: src.location.clone(),
                     tarball_sha256: digest,
                     tree_sha256: tree,
                 },
@@ -406,22 +394,19 @@ impl ModuleAcquisition<'_> {
     fn materialize_tarball(
         &self,
         alias: &str,
-        source: &TarballSource,
+        src: &TarballSource,
         recorded: Option<(Sha256Digest, Sha256Digest)>,
     ) -> Result<(PathBuf, Sha256Digest, Sha256Digest), ModuleRootError> {
         let failure = |stage, cause: anyhow::Error| ModuleRootError::Tarball {
             alias: alias.to_owned(),
-            location: source.location.clone(),
+            location: src.location.clone(),
             stage,
             source: cause,
         };
-        let download = match &source.location {
+        let download = match &src.location {
             TarballLocation::Url { url } => {
                 if !self.mode.may_use_network() {
-                    return Err(ModuleRootError::NetworkDenied {
-                        alias: alias.to_owned(),
-                        scope: self.mode.scope().as_str(),
-                    });
+                    return Err(network_denied(self.mode, alias));
                 }
                 crate::archive::from_url(url, self.cancellation)
             }
@@ -437,44 +422,35 @@ impl ModuleAcquisition<'_> {
                             alias: alias.to_owned(),
                         });
                     }
-                    let canonical =
-                        path.canonicalize()
-                            .map_err(|source| ModuleRootError::Root {
-                                alias: alias.to_owned(),
-                                path: path.clone(),
-                                source,
-                            })?;
-                    if !canonical.starts_with(self.site_root) {
-                        return Err(ModuleRootError::OutsideSite { path });
-                    }
+                    ensure_inside_site(self.site_root, alias, &path)?;
                 }
                 crate::archive::from_file(&path, self.cancellation)
             }
         };
         ensure_active(self.cancellation)?;
-        let mut download = download.map_err(|error| failure(ArchiveStage::Read, error))?;
-        let expected = source.sha256.or(recorded.map(|(digest, _)| digest));
+        let mut download = download.map_err(|err| failure(ArchiveStage::Read, err))?;
+        let expected = src.sha256.or(recorded.map(|(digest, _)| digest));
         if let Some(expected) = expected
             && expected != download.digest
         {
             return Err(ModuleRootError::TarballDigestMismatch {
                 alias: alias.to_owned(),
-                declared: source.sha256.is_some(),
+                declared: src.sha256.is_some(),
                 expected,
                 found: download.digest,
             });
         }
-        let destination = tarball_cache(self.site_root, download.digest);
-        let parent = destination.parent().expect("module cache has a parent");
+        let dst = tarball_cache(self.site_root, download.digest);
+        let parent = dst.parent().expect("module cache has a parent");
         std::fs::create_dir_all(parent)
             .context("could not prepare the module cache")
-            .map_err(|error| failure(ArchiveStage::Cache, error))?;
-        let stage = tola_fs::DirectoryReplacement::new(&destination)
+            .map_err(|err| failure(ArchiveStage::Cache, err))?;
+        let stage = tola_fs::DirectoryReplacement::new(&dst)
             .context("could not stage the module directory")
-            .map_err(|error| failure(ArchiveStage::Cache, error))?;
+            .map_err(|err| failure(ArchiveStage::Cache, err))?;
         let root = stage.staged();
         crate::archive::extract(download.file.as_file_mut(), &root, self.cancellation)
-            .map_err(|error| failure(ArchiveStage::Extract, error))?;
+            .map_err(|err| failure(ArchiveStage::Extract, err))?;
         let manifest = crate::manifest::read_one(
             &root,
             alias,
@@ -482,16 +458,16 @@ impl ModuleAcquisition<'_> {
             InputMode::new(InputScope::Online, false),
             &[],
         )
-        .map_err(|error| failure(ArchiveStage::Manifest, error.into()))?;
+        .map_err(|err| failure(ArchiveStage::Manifest, err.into()))?;
         crate::check::check_loaded(&manifest)
-            .map_err(|error| failure(ArchiveStage::Manifest, error))?;
+            .map_err(|err| failure(ArchiveStage::Manifest, err))?;
         let tree = tree_digest(alias, &root)?;
         if let Some((_, expected)) = recorded
             && expected != tree
         {
             return Err(ModuleRootError::DigestMismatch {
                 alias: alias.to_owned(),
-                path: destination,
+                path: dst,
                 expected,
                 found: tree,
             });
@@ -500,27 +476,23 @@ impl ModuleAcquisition<'_> {
         stage
             .publish()
             .context("could not publish the module cache")
-            .map_err(|error| failure(ArchiveStage::Cache, error))?;
-        Ok((destination, download.digest, tree))
+            .map_err(|err| failure(ArchiveStage::Cache, err))?;
+        Ok((dst, download.digest, tree))
     }
 
-    /// Fetch one module revision into the resolution cache and digest the directory it reads.
     fn fetch(
         &self,
         alias: &str,
         git: &str,
-        revision: Option<&RemoteRevision>,
+        rev: Option<&RemoteRevision>,
         subdir: &Path,
     ) -> Result<(String, Sha256Digest), ModuleRootError> {
         if !self.mode.may_use_network() {
-            return Err(ModuleRootError::NetworkDenied {
-                alias: alias.to_owned(),
-                scope: self.mode.scope().as_str(),
-            });
+            return Err(network_denied(self.mode, alias));
         }
         let staging = stage(self.site_root)?;
-        let commit = acquire(alias, git, revision, &staging, self.cancellation)?;
-        if let Some(RemoteRevision::Rev(expected)) = revision
+        let commit = acquire(alias, git, rev, &staging, self.cancellation)?;
+        if let Some(RemoteRevision::Rev(expected)) = rev
             && expected != &commit
         {
             return Err(ModuleRootError::CommitMismatch {
@@ -769,13 +741,7 @@ fn select_root(
         return Ok(frozen);
     }
     if mode.scope() == InputScope::Pure {
-        return Err(ModuleRootError::VendorMissing {
-            alias: alias.to_owned(),
-            path: vendor
-                .unwrap_or(Path::new("vendor"))
-                .join("modules")
-                .join(alias),
-        });
+        return Err(vendor_missing(vendor, alias));
     }
     Ok(cache_root(site_root, commit, subdir))
 }
@@ -793,16 +759,7 @@ fn frozen_root(
         return Ok(None);
     };
     if mode.scope() == InputScope::Pure {
-        let canonical = root
-            .canonicalize()
-            .map_err(|source| ModuleRootError::Root {
-                alias: alias.to_owned(),
-                path: root.clone(),
-                source,
-            })?;
-        if !canonical.starts_with(site_root) {
-            return Err(ModuleRootError::OutsideSite { path: root });
-        }
+        ensure_inside_site(site_root, alias, &root)?;
     }
     Ok(Some(root))
 }
@@ -973,11 +930,11 @@ mod tests {
     }
 
     #[test]
-    fn locked_tarballs_rebuild_caches_verify_changes_and_use_vendor() {
+    fn locked_tarball_cache_and_vendor() {
         let site = tempfile::tempdir().unwrap();
-        let package = site.path().join("theme.tar.gz");
-        write_package(&package, b"#let value = 1");
-        let declarations = BTreeMap::from([(
+        let pkg = site.path().join("theme.tar.gz");
+        write_package(&pkg, b"#let value = 1");
+        let decls = BTreeMap::from([(
             "theme".into(),
             ModuleDeclaration {
                 source: ModuleSource::Tarball {
@@ -991,49 +948,47 @@ mod tests {
                 ..Default::default()
             },
         )]);
-        let cancellation = BundleCancellation::default();
+        let cancel = BundleCancellation::default();
         let offline = InputMode::new(InputScope::Offline, false);
         let locked = InputMode::new(InputScope::Online, true);
         let pure = InputMode::new(InputScope::Pure, false);
-        let roots =
-            module_roots_with_bundle(site.path(), offline, None, &declarations, &cancellation)
-                .unwrap();
-        let original = InputLock::read(site.path()).unwrap().unwrap();
+        let roots = module_roots_with_bundle(site.path(), offline, None, &decls, &cancel).unwrap();
+        let orig = InputLock::read(site.path()).unwrap().unwrap();
         fs::write(roots["theme"].join("lib.typ"), "tampered cache").unwrap();
         assert!(matches!(
             module_roots_with_bundle(
                 site.path(),
                 InputMode::new(InputScope::Online, false),
                 None,
-                &declarations,
-                &cancellation
+                &decls,
+                &cancel
             ),
             Err(ModuleRootError::DigestMismatch { .. })
         ));
-        module_roots_with_bundle(site.path(), pure, None, &declarations, &cancellation).unwrap();
+        module_roots_with_bundle(site.path(), pure, None, &decls, &cancel).unwrap();
         fs::remove_dir_all(&roots["theme"]).unwrap();
-        module_roots_with_bundle(site.path(), locked, None, &declarations, &cancellation).unwrap();
-        assert_eq!(InputLock::read(site.path()).unwrap().unwrap(), original);
-        write_package(&package, b"#let value = 2");
+        module_roots_with_bundle(site.path(), locked, None, &decls, &cancel).unwrap();
+        assert_eq!(InputLock::read(site.path()).unwrap().unwrap(), orig);
+        write_package(&pkg, b"#let value = 2");
         fs::remove_dir_all(&roots["theme"]).unwrap();
         assert!(matches!(
-            module_roots_with_bundle(site.path(), locked, None, &declarations, &cancellation),
+            module_roots_with_bundle(site.path(), locked, None, &decls, &cancel),
             Err(ModuleRootError::TarballDigestMismatch { .. })
         ));
-        assert_eq!(InputLock::read(site.path()).unwrap().unwrap(), original);
-        let mut updated = original.clone();
+        assert_eq!(InputLock::read(site.path()).unwrap().unwrap(), orig);
+        let mut updated = orig.clone();
         let roots = refresh_module_roots_with_bundle(
             site.path(),
             offline,
             None,
-            &declarations,
+            &decls,
             &mut updated,
-            &cancellation,
+            &cancel,
             |_, _| {},
         )
         .unwrap();
-        assert_ne!(updated, original);
-        updated.commit(site.path(), &original).unwrap();
+        assert_ne!(updated, orig);
+        updated.commit(site.path(), &orig).unwrap();
         let vendor = site.path().join("vendor");
         let frozen = vendor.join("modules/theme");
         fs::create_dir_all(&frozen).unwrap();
@@ -1041,16 +996,10 @@ mod tests {
             let entry = entry.unwrap();
             fs::copy(entry.path(), frozen.join(entry.file_name())).unwrap();
         }
-        fs::remove_file(package).unwrap();
+        fs::remove_file(pkg).unwrap();
         fs::remove_dir_all(&roots["theme"]).unwrap();
-        let roots = module_roots_with_bundle(
-            site.path(),
-            pure,
-            Some(&vendor),
-            &declarations,
-            &cancellation,
-        )
-        .unwrap();
+        let roots =
+            module_roots_with_bundle(site.path(), pure, Some(&vendor), &decls, &cancel).unwrap();
         assert_eq!(roots["theme"], frozen);
     }
 }

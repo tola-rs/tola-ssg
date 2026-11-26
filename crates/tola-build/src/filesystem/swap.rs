@@ -365,28 +365,28 @@ mod tests {
         (site, vendor)
     }
 
-    fn staged(swap: &TreeSwap, index: usize, files: &[(&str, &str)]) -> PathBuf {
-        let staged = swap.staged(index);
-        fs::create_dir_all(&staged).unwrap();
-        for (name, contents) in files {
-            let path = staged.join(name);
+    fn staged(swap: &TreeSwap, idx: usize, files: &[(&str, &str)]) -> PathBuf {
+        let dir = swap.staged(idx);
+        fs::create_dir_all(&dir).unwrap();
+        for (name, body) in files {
+            let path = dir.join(name);
             fs::create_dir_all(path.parent().unwrap()).unwrap();
-            fs::write(path, contents).unwrap();
+            fs::write(path, body).unwrap();
         }
-        staged
+        dir
     }
 
     #[test]
-    fn commit_replaces_only_its_members() {
+    fn commit_replaces_declared_members() {
         let (site, vendor) = vendor_site();
         let swap = TreeSwap::beside(site.path(), &vendor).unwrap();
         swap.claim().unwrap();
-        let packages = staged(&swap, 0, &[("new/typst.toml", "package")]);
+        let pkgs = staged(&swap, 0, &[("new/typst.toml", "package")]);
         let icons = staged(&swap, 1, &[("new.json", "icons")]);
 
         swap.commit(&[
             SwapMember {
-                staged: packages,
+                staged: pkgs,
                 destination: vendor.join("packages"),
             },
             SwapMember {
@@ -413,9 +413,8 @@ mod tests {
         assert!(!swap.workspace().exists());
     }
 
-    /// A destination never moves aside for a staged tree that is gone.
     #[test]
-    fn commit_refuses_no_staged_tree() {
+    fn commit_rejects_missing_staged() {
         let site = TempDir::new().unwrap();
         let target = site.path().join("public");
         fs::create_dir(&target).unwrap();
@@ -423,20 +422,19 @@ mod tests {
         let swap = TreeSwap::beside(site.path(), &target).unwrap();
         swap.claim().unwrap();
 
-        let error = swap
+        let err = swap
             .commit(&[SwapMember {
                 staged: swap.staged(0),
                 destination: target.clone(),
             }])
             .unwrap_err();
 
-        assert!(matches!(error, SwapError::MissingStaged { .. }));
+        assert!(matches!(err, SwapError::MissingStaged { .. }));
         assert_eq!(fs::read(target.join("index.html")).unwrap(), b"published");
     }
 
-    /// A journal written before the first move still installs its member on recovery.
     #[test]
-    fn recovery_installs_a_journaled_candidate() {
+    fn recovery_installs_journaled_candidate() {
         let site = TempDir::new().unwrap();
         let target = site.path().join("public");
         fs::create_dir(&target).unwrap();
@@ -444,7 +442,7 @@ mod tests {
         let swap = TreeSwap::beside(site.path(), &target).unwrap();
         swap.claim().unwrap();
         let candidate = staged(&swap, 0, &[("index.html", "candidate")]);
-        // A file where replaced trees are kept stops the commit right after its journal.
+        // Occupy `previous` so commit aborts right after writing the journal.
         fs::write(swap.previous(), "occupied").unwrap();
 
         let interrupted = swap.commit(&[SwapMember {
@@ -463,7 +461,7 @@ mod tests {
     }
 
     #[test]
-    fn recovery_completes_a_half_installed_commit() {
+    fn recovery_completes_partial_commit() {
         let site = TempDir::new().unwrap();
         let first = site.path().join("first");
         fs::create_dir(&first).unwrap();

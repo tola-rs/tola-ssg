@@ -6,14 +6,15 @@ use std::ops::Range;
 use std::sync::LazyLock;
 
 use syntect::easy::HighlightLines;
-use syntect::highlighting::{
-    Color, FontStyle, Highlighter, Style, Theme, ThemeItem, ThemeSettings,
-};
+use syntect::highlighting::{FontStyle, Highlighter, Style, Theme};
 use syntect::parsing::{Scope, SyntaxDefinition, SyntaxSet, SyntaxSetBuilder};
 use typst_library::text::RAW_SYNTAXES;
 use typst_syntax::{LinkedNode, SyntaxKind};
 
-/// The extra syntax files also available to Typst's `raw.syntaxes`, keyed by language.
+mod theme;
+pub use theme::ThemeChoice;
+
+/// Extra syntax files also available to Typst's `raw.syntaxes`, keyed by language.
 pub const CODE_SYNTAXES: &[(&str, &str)] = &[
     ("cuda", include_str!("syntaxes/cuda.sublime-syntax")),
     ("fennel", include_str!("syntaxes/fennel.sublime-syntax")),
@@ -24,8 +25,8 @@ pub const CODE_SYNTAXES: &[(&str, &str)] = &[
 ];
 
 /// Map a source-code fence label to the name of its built-in Typst syntax.
-pub fn code_language(language: &str) -> &str {
-    match language.to_ascii_lowercase().as_str() {
+pub fn code_language(lang: &str) -> &str {
+    match lang.to_ascii_lowercase().as_str() {
         "common-lisp" | "sbcl" | "ccl" | "clozure" | "clozure-cl" | "ecl" | "abcl" | "cmucl"
         | "clasp" | "lispworks" | "elisp" | "emacs-lisp" => "lisp",
         "clojurescript" => "cljs",
@@ -35,43 +36,7 @@ pub fn code_language(language: &str) -> &str {
         "docker" => "dockerfile",
         "golang" => "go",
         "python3" => "python",
-        _ => language,
-    }
-}
-
-/// The palette used to paint a preview.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ThemeChoice {
-    /// The terminal's ANSI colors and default foreground.
-    Terminal,
-    /// A dark palette for terminal previews.
-    Dark,
-    /// A light palette for terminal previews.
-    Light,
-    /// No ANSI escapes at all; the source is returned sanitized and tab-expanded.
-    Plain,
-}
-
-impl ThemeChoice {
-    /// Parse a theme name. Unknown names return `None` so the caller can decide.
-    pub fn parse(name: &str) -> Option<Self> {
-        match name.trim().to_ascii_lowercase().as_str() {
-            "terminal" => Some(Self::Terminal),
-            "dark" => Some(Self::Dark),
-            "light" => Some(Self::Light),
-            "plain" | "none" | "never" => Some(Self::Plain),
-            _ => None,
-        }
-    }
-
-    /// The canonical name of this choice.
-    pub const fn name(self) -> &'static str {
-        match self {
-            Self::Terminal => "terminal",
-            Self::Dark => "dark",
-            Self::Light => "light",
-            Self::Plain => "plain",
-        }
+        _ => lang,
     }
 }
 
@@ -80,11 +45,11 @@ static EXTRA_SYNTAXES: LazyLock<Vec<SyntaxSet>> = LazyLock::new(|| {
     CODE_SYNTAXES
         .iter()
         .copied()
-        .map(|(name, source)| {
+        .map(|(name, src)| {
             let mut builder = SyntaxSetBuilder::new();
             builder.add(
-                SyntaxDefinition::load_from_str(source, false, None)
-                    .unwrap_or_else(|error| panic!("invalid bundled {name} syntax: {error}")),
+                SyntaxDefinition::load_from_str(src, false, None)
+                    .unwrap_or_else(|err| panic!("invalid bundled {name} syntax: {err}")),
             );
             builder.build()
         })
@@ -92,128 +57,114 @@ static EXTRA_SYNTAXES: LazyLock<Vec<SyntaxSet>> = LazyLock::new(|| {
 });
 
 /// Whether a bundled syntax recognizes this language name or extension.
-pub fn has_bundled_syntax(language: &str) -> bool {
+pub fn has_bundled_syntax(lang: &str) -> bool {
     EXTRA_SYNTAXES
         .iter()
-        .any(|set| set.find_syntax_by_token(language).is_some())
+        .any(|set| set.find_syntax_by_token(lang).is_some())
 }
 
-static TERMINAL: LazyLock<Theme> = LazyLock::new(|| palette(ThemeChoice::Terminal));
-static DARK: LazyLock<Theme> = LazyLock::new(|| palette(ThemeChoice::Dark));
-static LIGHT: LazyLock<Theme> = LazyLock::new(|| palette(ThemeChoice::Light));
-
-/// Styles over the original source. Layout and source offsets are preserved.
+/// Styles over the original source, preserving layout and source offsets.
 pub struct Highlighted<'a> {
-    source: &'a str,
+    src: &'a str,
     runs: Vec<(Range<usize>, Style)>,
     terminal_colors: bool,
 }
 
 impl Highlighted<'_> {
-    /// Append a UTF-8 byte range as ANSI text. The range must be within the original source.
+    /// Append a UTF-8 byte range within the original source as ANSI text.
     pub fn paint(&self, range: Range<usize>, out: &mut String) {
-        let mut offset = range.start;
-        let first = self.runs.partition_point(|(span, _)| span.end <= offset);
+        let mut off = range.start;
+        let first = self.runs.partition_point(|(span, _)| span.end <= off);
         for (span, style) in &self.runs[first..] {
             if span.start >= range.end {
                 break;
             }
             let start = span.start.max(range.start);
             let end = span.end.min(range.end);
-            out.push_str(&self.source[offset..start]);
-            push_ansi(out, *style, &self.source[start..end], self.terminal_colors);
-            offset = end;
+            out.push_str(&self.src[off..start]);
+            push_ansi(out, *style, &self.src[start..end], self.terminal_colors);
+            off = end;
         }
-        out.push_str(&self.source[offset..range.end]);
+        out.push_str(&self.src[off..range.end]);
     }
 }
 
-/// Find terminal styles for a fence tag or file extension. Unknown languages read plain.
-pub fn highlight<'a>(source: &'a str, language: &str, theme: ThemeChoice) -> Highlighted<'a> {
+/// Compute terminal styles for a fence tag or file extension.
+pub fn highlight<'a>(src: &'a str, lang: &str, choice: ThemeChoice) -> Highlighted<'a> {
     let mut runs = Vec::new();
-    let terminal_colors = theme == ThemeChoice::Terminal;
-    if let Some(theme) = theme_of(theme) {
-        let highlighter = Highlighter::new(theme);
-        collect(source, language, theme, &highlighter, 0, &mut runs);
+    let terminal_colors = choice == ThemeChoice::Terminal;
+    if let Some(th) = theme::theme_of(choice) {
+        let hl = Highlighter::new(th);
+        collect(src, lang, th, &hl, 0, &mut runs);
     }
     Highlighted {
-        source,
+        src,
         runs,
         terminal_colors,
     }
 }
 
 /// Sanitize source for a terminal preview and paint the whole result.
-pub fn render(source: &str, language: &str, theme: ThemeChoice) -> String {
-    let source = sanitize(source);
-    let highlighted = highlight(&source, language, theme);
-    let mut out = String::with_capacity(source.len());
-    highlighted.paint(0..source.len(), &mut out);
+pub fn render(src: &str, lang: &str, choice: ThemeChoice) -> String {
+    let src = sanitize(src);
+    let hl = highlight(&src, lang, choice);
+    let mut out = String::with_capacity(src.len());
+    hl.paint(0..src.len(), &mut out);
     out
 }
 
-fn theme_of(choice: ThemeChoice) -> Option<&'static Theme> {
-    match choice {
-        ThemeChoice::Terminal => Some(&TERMINAL),
-        ThemeChoice::Dark => Some(&DARK),
-        ThemeChoice::Light => Some(&LIGHT),
-        ThemeChoice::Plain => None,
-    }
-}
-
 fn collect(
-    source: &str,
-    language: &str,
-    theme: &Theme,
-    highlighter: &Highlighter<'_>,
-    offset: usize,
+    src: &str,
+    lang: &str,
+    th: &Theme,
+    hl: &Highlighter<'_>,
+    off: usize,
     runs: &mut Vec<(Range<usize>, Style)>,
 ) {
-    let language = language.trim().to_ascii_lowercase();
-    let root = match language.as_str() {
-        "typ" | "typst" => typst_syntax::parse(source),
-        "typc" | "typst-code" => typst_syntax::parse_code(source),
-        "typm" | "typst-math" => typst_syntax::parse_math(source),
+    let lang = lang.trim().to_ascii_lowercase();
+    let root = match lang.as_str() {
+        "typ" | "typst" => typst_syntax::parse(src),
+        "typc" | "typst-code" => typst_syntax::parse_code(src),
+        "typm" | "typst-math" => typst_syntax::parse_math(src),
         _ => {
-            collect_syntect(source, &language, theme, offset, runs);
+            collect_syntect(src, &lang, th, off, runs);
             return;
         }
     };
     walk_typst(
         &LinkedNode::new(&root),
-        source,
-        theme,
-        highlighter,
+        src,
+        th,
+        hl,
         &mut Vec::new(),
-        offset,
+        off,
         runs,
     );
 }
 
 fn collect_syntect(
-    source: &str,
-    language: &str,
-    theme: &Theme,
-    mut offset: usize,
+    src: &str,
+    lang: &str,
+    th: &Theme,
+    mut off: usize,
     runs: &mut Vec<(Range<usize>, Style)>,
 ) {
-    let token = match language {
+    let tok = match lang {
         "shell" | "console" => "sh",
-        _ => code_language(language),
+        _ => code_language(lang),
     };
     let Some((syntaxes, syntax)) = EXTRA_SYNTAXES
         .iter()
         .chain([&*RAW_SYNTAXES])
-        .find_map(|set| set.find_syntax_by_token(token).map(|syntax| (set, syntax)))
+        .find_map(|set| set.find_syntax_by_token(tok).map(|s| (set, s)))
     else {
         return;
     };
-    let mut lines = HighlightLines::new(syntax, theme);
-    for line in source.split_inclusive('\n') {
-        let text = line.strip_suffix('\n').unwrap_or(line);
-        let text = text.strip_suffix('\r').unwrap_or(text);
+    let mut lines = HighlightLines::new(syntax, th);
+    for line in src.split_inclusive('\n') {
+        let text = line.trim_end_matches(['\r', '\n']);
         if let Ok(spans) = lines.highlight_line(text, syntaxes) {
-            let mut start = offset;
+            let mut start = off;
             for (style, piece) in spans {
                 let end = start + piece.len();
                 if start < end {
@@ -222,17 +173,17 @@ fn collect_syntect(
                 start = end;
             }
         }
-        offset += line.len();
+        off += line.len();
     }
 }
 
 fn walk_typst(
     node: &LinkedNode<'_>,
-    source: &str,
-    theme: &Theme,
-    highlighter: &Highlighter<'_>,
+    src: &str,
+    th: &Theme,
+    hl: &Highlighter<'_>,
     scopes: &mut Vec<Scope>,
-    offset: usize,
+    off: usize,
     runs: &mut Vec<(Range<usize>, Style)>,
 ) {
     let scope = typst_syntax::highlight(node).and_then(|tag| Scope::new(tag.tm_scope()).ok());
@@ -244,29 +195,26 @@ fn walk_typst(
             .and_then(|raw| raw.lang())
         && let Some(body) = raw_body(node)
     {
-        let range = node.range();
-        let style = highlighter.style_for_stack(scopes);
-        runs.push((offset + range.start..offset + body.start, style));
+        let span = node.range();
+        let style = hl.style_for_stack(scopes);
+        runs.push((off + span.start..off + body.start, style));
         collect(
-            &source[body.clone()],
+            &src[body.clone()],
             lang.get(),
-            theme,
-            highlighter,
-            offset + body.start,
+            th,
+            hl,
+            off + body.start,
             runs,
         );
-        runs.push((offset + body.end..offset + range.end, style));
+        runs.push((off + body.end..off + span.end, style));
     } else if node.children().len() == 0 {
-        let range = node.range();
-        if !range.is_empty() && !scopes.is_empty() {
-            runs.push((
-                offset + range.start..offset + range.end,
-                highlighter.style_for_stack(scopes),
-            ));
+        let span = node.range();
+        if !span.is_empty() && !scopes.is_empty() {
+            runs.push((off + span.start..off + span.end, hl.style_for_stack(scopes)));
         }
     } else {
         for child in node.children() {
-            walk_typst(&child, source, theme, highlighter, scopes, offset, runs);
+            walk_typst(&child, src, th, hl, scopes, off, runs);
         }
     }
 
@@ -275,15 +223,12 @@ fn walk_typst(
     }
 }
 
-/// The source between the first and last text nodes of a tagged raw element.
 fn raw_body(node: &LinkedNode<'_>) -> Option<Range<usize>> {
     let mut text = node
         .children()
         .filter(|child| child.kind() == SyntaxKind::Text);
     let first = text.next()?.range();
-    let end = text
-        .next_back()
-        .map_or(first.end, |child| child.range().end);
+    let end = text.next_back().map_or(first.end, |c| c.range().end);
     Some(first.start..end)
 }
 
@@ -292,8 +237,7 @@ fn push_ansi(out: &mut String, style: Style, text: &str, terminal_colors: bool) 
         return;
     }
     let fg = style.foreground;
-    // Syntect stores only RGB colors. The terminal palette stores SGR foreground codes
-    // in the blue channel so the same syntax scopes can use the terminal's own colors.
+    // Terminal palette encodes SGR fg codes in the blue channel of syntect's RGB Color.
     let mut codes = if terminal_colors {
         fg.b.to_string()
     } else {
@@ -317,11 +261,11 @@ fn push_ansi(out: &mut String, style: Style, text: &str, terminal_colors: bool) 
 }
 
 /// Strip terminal control sequences and expand tabs before painting.
-fn sanitize(source: &str) -> String {
-    let mut out = String::with_capacity(source.len());
-    let mut chars = source.chars().peekable();
-    while let Some(character) = chars.next() {
-        match character {
+fn sanitize(src: &str) -> String {
+    let mut out = String::with_capacity(src.len());
+    let mut chars = src.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
             '\x1b' => match chars.peek() {
                 Some('[') => {
                     chars.next();
@@ -350,149 +294,11 @@ fn sanitize(source: &str) -> String {
             },
             '\t' => out.push_str("    "),
             '\r' => {}
-            character if character.is_control() && character != '\n' => {}
-            character => out.push(character),
+            ch if ch.is_control() && ch != '\n' => {}
+            ch => out.push(ch),
         }
     }
     out
-}
-
-fn color(rgb: u32) -> Option<Color> {
-    Some(Color {
-        r: ((rgb >> 16) & 0xff) as u8,
-        g: ((rgb >> 8) & 0xff) as u8,
-        b: (rgb & 0xff) as u8,
-        a: 0xff,
-    })
-}
-
-fn item(scope: &str, foreground: Option<u32>, font_style: Option<FontStyle>) -> ThemeItem {
-    ThemeItem {
-        scope: scope.parse().expect("theme scope parses"),
-        style: syntect::highlighting::StyleModifier {
-            foreground: foreground.and_then(color),
-            background: None,
-            font_style,
-        },
-    }
-}
-
-fn palette(choice: ThemeChoice) -> Theme {
-    let (
-        foreground,
-        comment,
-        escape,
-        delimiter,
-        heading,
-        marker,
-        label,
-        keyword,
-        constant,
-        string,
-        function,
-        macro_,
-        annotation,
-        other,
-        diff,
-        inserted,
-        deleted,
-        key,
-        value,
-        invalid,
-    ) = match choice {
-        ThemeChoice::Terminal => (
-            39, 90, 36, 36, 39, 35, 36, 35, 33, 32, 36, 36, 33, 35, 35, 32, 31, 36, 32, 31,
-        ),
-        ThemeChoice::Dark => (
-            0xc9d1d9, 0x8b949e, 0x56d4dd, 0x56d4dd, 0xe6edf3, 0xd2a8ff, 0x79c0ff, 0xff7b72,
-            0xffa657, 0xa5d6a7, 0x79c0ff, 0x79c0ff, 0xffa657, 0xd2a8ff, 0xd2a8ff, 0x7ee787,
-            0xff7b72, 0x79c0ff, 0xa5d6a7, 0xff7b72,
-        ),
-        ThemeChoice::Light => (
-            0x24292f, 0x74747c, 0x1d6c76, 0x1d6c76, 0x1f2328, 0x8b41b1, 0x1d6c76, 0xd73948,
-            0xb60157, 0x198810, 0x4b69c6, 0x16718d, 0x301414, 0x8b41b1, 0x8b41b1, 0x198810,
-            0xd73948, 0x4b69c6, 0x198810, 0xd73948,
-        ),
-        ThemeChoice::Plain => unreachable!("plain text has no theme"),
-    };
-    let bold = Some(FontStyle::BOLD);
-    let italic = Some(FontStyle::ITALIC);
-    let underline = Some(FontStyle::UNDERLINE);
-    Theme {
-        name: Some(choice.name().into()),
-        author: Some("The Tola Project Developers".into()),
-        settings: ThemeSettings {
-            foreground: color(foreground),
-            background: None,
-            ..Default::default()
-        },
-        scopes: vec![
-            item("comment", Some(comment), None),
-            item("constant.character.escape", Some(escape), None),
-            item("markup.bold", None, bold),
-            item("markup.italic", None, italic),
-            item("markup.underline", None, underline),
-            item("markup.raw", Some(comment), None),
-            item("string.other.math.typst", None, None),
-            item("punctuation.definition.math", Some(delimiter), None),
-            item(
-                "keyword.operator.math, punctuation.math.typst",
-                Some(delimiter),
-                None,
-            ),
-            item("markup.heading, entity.name.section", Some(heading), bold),
-            item(
-                "markup.heading.typst",
-                Some(heading),
-                Some(FontStyle::BOLD | FontStyle::UNDERLINE),
-            ),
-            item("punctuation.definition.list", Some(marker), None),
-            item("markup.list.term", None, bold),
-            item(
-                "entity.name.label, markup.other.reference",
-                Some(label),
-                None,
-            ),
-            item(
-                "keyword, constant.language, variable.language",
-                Some(keyword),
-                None,
-            ),
-            item("storage.type, storage.modifier", Some(keyword), None),
-            item("constant", Some(constant), None),
-            item("string", Some(string), None),
-            item(
-                "entity.name, variable.function, support",
-                Some(function),
-                None,
-            ),
-            item("support.macro", Some(macro_), None),
-            item("meta.annotation", Some(annotation), None),
-            item("entity.other, meta.interpolation", Some(other), None),
-            item("meta.diff.range", Some(diff), None),
-            item(
-                "markup.inserted, meta.diff.header.to-file",
-                Some(inserted),
-                None,
-            ),
-            item(
-                "markup.deleted, meta.diff.header.from-file",
-                Some(deleted),
-                None,
-            ),
-            item(
-                "meta.mapping.key.json string.quoted.double.json",
-                Some(key),
-                None,
-            ),
-            item(
-                "meta.mapping.value.json string.quoted.double.json",
-                Some(value),
-                None,
-            ),
-            item("invalid, invalid.typst", Some(invalid), underline),
-        ],
-    }
 }
 
 #[cfg(test)]
@@ -500,7 +306,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rust_is_highlighted() {
+    fn rust_highlighted() {
         let ansi = render(
             "fn main() {\n    let x = 1;\n}\n",
             "rust",
@@ -514,7 +320,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_language_is_plain_but_sanitized() {
+    fn unknown_lang_sanitizes() {
         let ansi = render(
             "a\tb\x1b[31mred\x1b[0m",
             "not-a-language",
@@ -524,52 +330,52 @@ mod tests {
     }
 
     #[test]
-    fn plain_theme_has_no_ansi() {
+    fn plain_theme_uncolored() {
         let ansi = render("fn main() {}", "rust", ThemeChoice::Plain);
         assert_eq!(ansi, "fn main() {}");
     }
 
     #[test]
-    fn typst_tags_are_painted() {
+    fn typst_tags_painted() {
         let ansi = render("#let x = 1\n= Heading\n", "typ", ThemeChoice::Dark);
         assert!(ansi.contains("\x1b[38;2;"));
         assert!(ansi.contains("Heading"));
     }
 
     #[test]
-    fn typst_code_fence_uses_code_syntax() {
-        let source = "let x = 1";
-        assert!(highlight(source, "typ", ThemeChoice::Dark).runs.is_empty());
-        assert!(!highlight(source, "typc", ThemeChoice::Dark).runs.is_empty());
+    fn typst_code_fence() {
+        let src = "let x = 1";
+        assert!(highlight(src, "typ", ThemeChoice::Dark).runs.is_empty());
+        assert!(!highlight(src, "typc", ThemeChoice::Dark).runs.is_empty());
     }
 
     #[test]
-    fn just_styles_recipe_names_dependencies_and_interpolation() {
-        let source = "mode := \"release\"\ncheck: prepare\n    cargo check --profile {{mode}}\n";
-        let code = highlight(source, "justfile", ThemeChoice::Dark);
-        let style_at = |index| {
+    fn just_recipe_and_interp() {
+        let src = "mode := \"release\"\ncheck: prepare\n    cargo check --profile {{mode}}\n";
+        let code = highlight(src, "justfile", ThemeChoice::Dark);
+        let style_at = |idx| {
             code.runs
                 .iter()
-                .find(|(range, _)| range.contains(&index))
+                .find(|(span, _)| span.contains(&idx))
                 .map(|(_, style)| *style)
         };
-        let command = style_at(source.find("cargo").unwrap());
-        assert!(command.is_some());
-        assert_eq!(command, style_at(source.find("--profile").unwrap()));
-        for index in [
-            source.find("release").unwrap(),
-            source.find("check:").unwrap(),
-            source.find("prepare").unwrap(),
-            source.rfind("mode").unwrap(),
+        let cmd = style_at(src.find("cargo").unwrap());
+        assert!(cmd.is_some());
+        assert_eq!(cmd, style_at(src.find("--profile").unwrap()));
+        for idx in [
+            src.find("release").unwrap(),
+            src.find("check:").unwrap(),
+            src.find("prepare").unwrap(),
+            src.rfind("mode").unwrap(),
         ] {
-            let style = style_at(index);
+            let style = style_at(idx);
             assert!(style.is_some());
-            assert_ne!(style, command);
+            assert_ne!(style, cmd);
         }
     }
 
     #[test]
-    fn extra_fence_tags_select_their_syntax() {
+    fn extra_fence_tags() {
         let cases = [
             ("lean4", "def twice (x : Nat) := x + x"),
             ("chez-scheme", "(define (twice x) (+ x x))"),
@@ -578,9 +384,9 @@ mod tests {
             ("nu", "let x = 2"),
             ("cu", "kernel<<<grid, block>>>(data);"),
         ];
-        for (tag, source) in cases {
+        for (tag, src) in cases {
             assert!(
-                !highlight(source, tag, ThemeChoice::Dark).runs.is_empty(),
+                !highlight(src, tag, ThemeChoice::Dark).runs.is_empty(),
                 "{tag}"
             );
         }
@@ -592,29 +398,29 @@ mod tests {
     }
 
     #[test]
-    fn nushell_keeps_command_names_and_flags_whole() {
-        let source = "use tola [get-context get-site]\n(get-context | save --raw)\n1 - 2\n";
-        let code = highlight(source, "nu", ThemeChoice::Dark);
+    fn nu_cmd_and_flags() {
+        let src = "use tola [get-context get-site]\n(get-context | save --raw)\n1 - 2\n";
+        let code = highlight(src, "nu", ThemeChoice::Dark);
         let style = |start, len| {
             code.runs
                 .iter()
-                .find(|(range, _)| range.start <= start && start + len <= range.end)
+                .find(|(span, _)| span.start <= start && start + len <= span.end)
                 .map(|(_, style)| *style)
                 .expect("token has a single style")
         };
-        let minus = style(source.find(" - ").unwrap() + 1, 1);
-        assert_ne!(style(source.find("get-context").unwrap(), 11), minus);
-        assert_ne!(style(source.rfind("get-context").unwrap(), 11), minus);
-        assert_ne!(style(source.find("--raw").unwrap(), 5), minus);
+        let minus = style(src.find(" - ").unwrap() + 1, 1);
+        assert_ne!(style(src.find("get-context").unwrap(), 11), minus);
+        assert_ne!(style(src.rfind("get-context").unwrap(), 11), minus);
+        assert_ne!(style(src.find("--raw").unwrap(), 5), minus);
     }
 
     #[test]
-    fn nushell_uses_the_surrounding_syntax_to_classify_tokens() {
+    fn nu_token_context() {
         use syntect::parsing::{ParseState, ScopeStack};
 
         let (syntaxes, syntax) = EXTRA_SYNTAXES
             .iter()
-            .find_map(|set| set.find_syntax_by_token("nu").map(|syntax| (set, syntax)))
+            .find_map(|set| set.find_syntax_by_token("nu").map(|s| (set, s)))
             .unwrap();
         let mut parser = ParseState::new(syntax);
         let mut scopes = ScopeStack::new();
@@ -662,38 +468,38 @@ mod tests {
             ),
         ];
         for &(line, expected) in lines {
-            let operations = parser.parse_line(line, syntaxes).unwrap();
-            for &(token, name) in expected {
-                let start = line.find(token).unwrap();
-                let end = start + token.len() - 1;
+            let ops = parser.parse_line(line, syntaxes).unwrap();
+            for &(tok, name) in expected {
+                let start = line.find(tok).unwrap();
+                let end = start + tok.len() - 1;
                 let scope = Scope::new(name).unwrap();
-                for offset in [start, end] {
+                for off in [start, end] {
                     let mut stack = scopes.clone();
-                    for (_, operation) in operations.iter().take_while(|(at, _)| *at <= offset) {
-                        stack.apply(operation).unwrap();
+                    for (_, op) in ops.iter().take_while(|(at, _)| *at <= off) {
+                        stack.apply(op).unwrap();
                     }
-                    assert_eq!(stack.as_slice().last(), Some(&scope), "{line}: {token}");
+                    assert_eq!(stack.as_slice().last(), Some(&scope), "{line}: {tok}");
                 }
             }
-            for (_, operation) in operations {
-                scopes.apply(&operation).unwrap();
+            for (_, op) in ops {
+                scopes.apply(&op).unwrap();
             }
         }
     }
 
     #[test]
-    fn builtin_aliases_keep_the_builtin_syntax() {
+    fn builtin_aliases() {
         let cases = [
             ("SBCL", "lisp", "(defun twice (x) (+ x x))"),
             ("ccl", "lisp", "(defun twice (x) (+ x x))"),
             ("babashka", "clj", "(defn twice [x] (+ x x))"),
             ("fsharp", "F#", "let x = 2"),
         ];
-        for (alias, builtin, source) in cases {
-            let expected = highlight(source, builtin, ThemeChoice::Dark);
+        for (alias, builtin, src) in cases {
+            let expected = highlight(src, builtin, ThemeChoice::Dark);
             assert!(!expected.runs.is_empty(), "{builtin}");
             assert_eq!(
-                highlight(source, alias, ThemeChoice::Dark).runs,
+                highlight(src, alias, ThemeChoice::Dark).runs,
                 expected.runs,
                 "{alias}"
             );
@@ -701,7 +507,7 @@ mod tests {
     }
 
     #[test]
-    fn typst_raw_block_highlights_embedded_rust() {
+    fn typst_raw_embedded_rust() {
         let ansi = render(
             "\u{60}\u{60}\u{60}rust\nfn main() {}\n\u{60}\u{60}\u{60}\n",
             "typ",

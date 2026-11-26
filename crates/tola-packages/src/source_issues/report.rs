@@ -1,4 +1,4 @@
-//! Diagnostics for source metadata issues, located at the source they belong to.
+//! Source metadata issue diagnostics attributed to the declaring source.
 
 use typst::World;
 use typst::diag::{At, SourceDiagnostic, SourceResult, bail, eco_format};
@@ -11,7 +11,6 @@ use super::location::{IssueOrigin, source_origin};
 use super::projection::wrapper_projection;
 use crate::issue::{Issue, Region, describe, issue_path};
 
-/// Report every issue of one `parse-sources` call against its source metadata.
 #[func]
 pub(crate) fn tola_report_source_issues(
     engine: &mut Engine,
@@ -19,90 +18,88 @@ pub(crate) fn tola_report_source_issues(
     /// One `(path, issue)` record per schema Issue, in source order.
     issues: Array,
 ) -> SourceResult<Value> {
-    let mut diagnostics = EcoVec::new();
-    for record in issues.iter() {
-        diagnostics.extend(source_record(engine, span, record)?);
+    let mut diags = EcoVec::new();
+    for rec in issues.iter() {
+        diags.extend(source_record(engine, span, rec)?);
     }
-    if diagnostics.is_empty() {
+    if diags.is_empty() {
         return Ok(Value::None);
     }
-    Err(diagnostics)
+    Err(diags)
 }
 
-/// Every diagnostic one `(path, issue)` record produces. A raw wrapper can stand for several
-/// causes, so normalization may return more than one diagnostic for one record.
 fn source_record(
     engine: &Engine<'_>,
     span: Span,
-    record: &Value,
+    rec: &Value,
 ) -> SourceResult<Vec<SourceDiagnostic>> {
-    let described = "parse-sources issues are `(path, issue)` records";
-    let Value::Dict(record) = record else {
-        bail!(span, "{described}");
+    let shape = "parse-sources issues are `(path, issue)` records";
+    let Value::Dict(dict) = rec else {
+        bail!(span, "{shape}");
     };
-    let Ok(Value::Str(path)) = record.get("path") else {
-        bail!(span, "{described}");
+    let Some(path) = crate::dict_str(dict, "path") else {
+        bail!(span, "{shape}");
     };
-    let decoded = Issue::decode(record.get("issue").at(span)?)
-        .map_err(|message| eco_vec![SourceDiagnostic::error(span, message)])?;
-    let mut diagnostics = Vec::new();
-    for problem in crate::issue::normalize(&[decoded]) {
-        diagnostics.push(source_issue(engine, span, path.as_str(), &problem)?);
-    }
-    Ok(diagnostics)
+    let decoded = Issue::decode(dict.get("issue").at(span)?)
+        .map_err(|msg| eco_vec![SourceDiagnostic::error(span, msg)])?;
+    crate::issue::normalize(&[decoded])
+        .iter()
+        .map(|issue| source_issue(engine, span, path, issue))
+        .collect()
 }
 
 fn source_issue(
     engine: &Engine<'_>,
     span: Span,
     path: &str,
-    problem: &Issue,
+    issue: &Issue,
 ) -> SourceResult<SourceDiagnostic> {
-    let source_origin = source_origin(engine, path).at(span)?;
-    let site_path = source_origin.owner.vpath().get_without_slash();
-    let file = FileId::new(source_origin.file);
-    let source = engine.world.source(file).at(span)?;
+    let src_origin = source_origin(engine, path).at(span)?;
+    let site_path = src_origin.owner.vpath().get_without_slash();
+    let src = engine.world.source(FileId::new(src_origin.file)).at(span)?;
     let origin = IssueOrigin {
-        source: &source,
-        declaration: source_origin.range,
+        source: &src,
+        declaration: src_origin.range,
     };
-    let message = match &problem.origin {
-        Some(problem_origin) => eco_format!(
-            "`{site_path}`: {}",
-            problem.sentence(&problem.path, problem_origin.kind, &problem_origin.path)
+    let (msg, range) = match &issue.origin {
+        Some(o) => (
+            eco_format!(
+                "`{site_path}`: {}",
+                issue.sentence(&issue.path, o.kind, &o.path)
+            ),
+            origin.marker_range(),
         ),
-        None => eco_format!(
-            "`{site_path}`: `{}`: {}",
-            issue_path(&problem.path),
-            problem.message
+        None => (
+            eco_format!(
+                "`{site_path}`: `{}`: {}",
+                issue_path(&issue.path),
+                issue.message
+            ),
+            origin.locate(&issue.path),
         ),
     };
-    let range = match &problem.origin {
-        Some(_) => origin.marker_range(),
-        None => origin.locate(&problem.path),
-    };
-    let mut diagnostic = tola_typst::diagnostic::producer_error_at(
-        source.id(),
+    let mut diag = tola_typst::diagnostic::producer_error_at(
+        src.id(),
         range,
         crate::diagnostic::SOURCE_ISSUE_ORIGIN,
         &[],
-        message,
+        msg,
         wrapper_projection(),
     );
-    append_hints(problem, &origin, &mut diagnostic);
-    Ok(diagnostic)
+    append_hints(issue, &origin, &mut diag);
+    Ok(diag)
 }
 
-fn append_hints(problem: &Issue, origin: &IssueOrigin<'_>, diagnostic: &mut SourceDiagnostic) {
-    for note in &problem.notes {
-        diagnostic.hint(note.as_str());
+fn append_hints(issue: &Issue, origin: &IssueOrigin<'_>, diag: &mut SourceDiagnostic) {
+    for note in &issue.notes {
+        diag.hint(note.as_str());
     }
-    let region = match &problem.origin {
-        Some(problem_origin) => Region::generated(problem.path.clone(), problem_origin.kind),
+    let region = match &issue.origin {
+        Some(o) => Region::generated(issue.path.clone(), o.kind),
         None => Region::root(),
     };
-    for child in &problem.children {
-        append_child(child, &[], &region, origin, diagnostic);
+    for child in &issue.children {
+        append_child(child, &[], &region, origin, diag);
     }
 }
 
@@ -111,18 +108,14 @@ fn append_child(
     path: &[Value],
     region: &Region,
     origin: &IssueOrigin<'_>,
-    diagnostic: &mut SourceDiagnostic,
+    diag: &mut SourceDiagnostic,
 ) {
     let (hint, range, child_path, child_region) = match describe(issue, path, region) {
-        Some(description) => (
-            issue.sentence(
-                &description.field,
-                description.kind,
-                &description.origin_path,
-            ),
+        Some(desc) => (
+            issue.sentence(&desc.field, desc.kind, &desc.origin_path),
             origin.marker_range(),
             Vec::new(),
-            description.child,
+            desc.child,
         ),
         None => {
             let full = [path, &issue.path].concat();
@@ -139,11 +132,11 @@ fn append_child(
             )
         }
     };
-    diagnostic.spanned_hint(hint, origin.span(range));
+    diag.spanned_hint(hint, origin.span(range));
     for note in &issue.notes {
-        diagnostic.hint(note.as_str());
+        diag.hint(note.as_str());
     }
     for child in &issue.children {
-        append_child(child, &child_path, &child_region, origin, diagnostic);
+        append_child(child, &child_path, &child_region, origin, diag);
     }
 }

@@ -31,7 +31,7 @@ pub(in crate::cli) fn run(
         cancellation,
     )?;
     let config = loaded.config();
-    let root = config.get_root();
+    let root = config.root();
     let options = config.formatter().options();
     // The sources are formatted in place: every write below carries the bytes this run read, so a
     // file an editor changed meanwhile is never overwritten.
@@ -147,127 +147,115 @@ mod tests {
     use super::super::testing::{buffered_output, site};
     use super::*;
 
-    fn source_text(root: &Path, relative: &str) -> String {
-        std::fs::read_to_string(root.join(relative)).unwrap()
+    fn src_text(root: &Path, rel: &str) -> String {
+        std::fs::read_to_string(root.join(rel)).unwrap()
     }
 
-    fn format_site(
-        config: ConfigFileArgs,
-        check: bool,
-        output: &CommandOutput,
-    ) -> anyhow::Result<()> {
+    fn format_site(cfg: ConfigFileArgs, check: bool, out: &CommandOutput) -> anyhow::Result<()> {
         run(
-            config,
+            cfg,
             TypstPackageArgs::default(),
             InputScope::Online,
             check,
-            output,
+            out,
             &Cancellation::default(),
         )
     }
 
     #[test]
-    fn formats_sources_across_the_site() {
-        let (directory, config) = site(&[
+    fn formats_site_sources() {
+        let (dir, cfg) = site(&[
             ("content/index.typ", "#let  x =  1\n"),
             ("templates/page.typ", "#let  name =  \"page\"\n"),
         ]);
-        let root = directory.path();
-        let output = buffered_output();
+        let root = dir.path();
+        let out = buffered_output();
 
-        format_site(config, false, &output).unwrap();
+        format_site(cfg, false, &out).unwrap();
 
-        assert_eq!(source_text(root, "content/index.typ"), "#let x = 1\n");
+        assert_eq!(src_text(root, "content/index.typ"), "#let x = 1\n");
         assert_eq!(
-            source_text(root, "templates/page.typ"),
+            src_text(root, "templates/page.typ"),
             "#let name = \"page\"\n"
         );
-        assert_eq!(source_text(root, "site.typ"), "= Home\n");
+        assert_eq!(src_text(root, "site.typ"), "= Home\n");
     }
 
     #[test]
     fn check_reports_without_writing() {
-        let (directory, config) = site(&[("content/index.typ", "#let  x =  1\n")]);
-        let root = directory.path();
-        let output = buffered_output();
+        let (dir, cfg) = site(&[("content/index.typ", "#let  x =  1\n")]);
+        let root = dir.path();
+        let out = buffered_output();
 
-        let error = format_site(config, true, &output).unwrap_err();
+        let err = format_site(cfg, true, &out).unwrap_err();
 
-        assert_eq!(source_text(root, "content/index.typ"), "#let  x =  1\n");
-        let diagnostics = tola_diagnostic::attached(&error).expect("the check names sources");
-        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
-        assert_eq!(diagnostics[0].code, crate::codes::fmt::UNFORMATTED);
-        let location = diagnostics[0].location.as_ref().unwrap();
-        assert_eq!(location.path, "content/index.typ");
-    }
-
-    #[test]
-    fn formatted_sources_pass_check() {
-        let (directory, config) = site(&[("content/index.typ", "#let x = 1\n")]);
-        let output = buffered_output();
-
-        format_site(config, true, &output).unwrap();
-
+        assert_eq!(src_text(root, "content/index.typ"), "#let  x =  1\n");
+        let diags = tola_diagnostic::attached(&err).expect("the check names sources");
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].code, crate::codes::fmt::UNFORMATTED);
         assert_eq!(
-            source_text(directory.path(), "content/index.typ"),
-            "#let x = 1\n"
+            diags[0].location.as_ref().unwrap().path,
+            "content/index.typ"
         );
     }
 
     #[test]
-    fn vendor_published_output_left_alone() {
-        let (directory, config) = site(&[
+    fn formatted_sources_pass_check() {
+        let (dir, cfg) = site(&[("content/index.typ", "#let x = 1\n")]);
+        let out = buffered_output();
+
+        format_site(cfg, true, &out).unwrap();
+        assert_eq!(src_text(dir.path(), "content/index.typ"), "#let x = 1\n");
+    }
+
+    #[test]
+    fn vendor_and_output_untouched() {
+        let (dir, cfg) = site(&[
             ("vendor/package/lib.typ", "#let  vendored =  1"),
             ("public/index.typ", "#let  published =  1"),
             (".tola/state.typ", "#let  internal =  1"),
         ]);
-        let root = directory.path();
+        let root = dir.path();
         std::fs::write(
             root.join("tola.toml"),
             "[site]\norigin = \"https://example.com\"\n[vendor]\npath = \"vendor\"\n",
         )
         .unwrap();
-        let output = buffered_output();
+        let out = buffered_output();
 
-        format_site(config, false, &output).unwrap();
+        format_site(cfg, false, &out).unwrap();
 
         assert_eq!(
-            source_text(root, "vendor/package/lib.typ"),
+            src_text(root, "vendor/package/lib.typ"),
             "#let  vendored =  1"
         );
-        assert_eq!(
-            source_text(root, "public/index.typ"),
-            "#let  published =  1"
-        );
-        assert_eq!(source_text(root, ".tola/state.typ"), "#let  internal =  1");
+        assert_eq!(src_text(root, "public/index.typ"), "#let  published =  1");
+        assert_eq!(src_text(root, ".tola/state.typ"), "#let  internal =  1");
     }
 
     #[test]
-    fn unparsable_source_reported_others_formatted() {
-        let (directory, config) = site(&[
+    fn unparsable_reported_others_formatted() {
+        let (dir, cfg) = site(&[
             ("content/broken.typ", "#let = "),
             ("content/index.typ", "#let  y =  2\n"),
         ]);
-        let root = directory.path();
-        let output = buffered_output();
+        let root = dir.path();
+        let out = buffered_output();
 
-        let error = format_site(config, false, &output).unwrap_err();
+        let err = format_site(cfg, false, &out).unwrap_err();
 
-        let diagnostics = tola_diagnostic::attached(&error).expect("the failure is stated");
-        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
-        assert_eq!(diagnostics[0].code, crate::codes::fmt::FAILED);
-        assert!(diagnostics[0].message.contains("content/broken.typ"));
-        let location = diagnostics[0].location.as_ref().expect("a location");
-        assert!(
-            location.line.is_some(),
-            "the failure is placed: {location:?}"
-        );
-        assert_eq!(source_text(root, "content/broken.typ"), "#let = ");
-        assert_eq!(source_text(root, "content/index.typ"), "#let y = 2\n");
+        let diags = tola_diagnostic::attached(&err).expect("the failure is stated");
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].code, crate::codes::fmt::FAILED);
+        assert!(diags[0].message.contains("content/broken.typ"));
+        let loc = diags[0].location.as_ref().expect("a location");
+        assert!(loc.line.is_some(), "the failure is placed: {loc:?}");
+        assert_eq!(src_text(root, "content/broken.typ"), "#let = ");
+        assert_eq!(src_text(root, "content/index.typ"), "#let y = 2\n");
     }
 
     #[test]
-    fn differing_position_names_line_column() {
+    fn first_diff_line_col() {
         assert_eq!(first_difference("a\nb\n", "a\nc\n"), Some((2, 1)));
         assert_eq!(first_difference("a\nb", "a\nb\n"), Some((2, 2)));
         assert_eq!(first_difference("same\n", "same\n"), None);

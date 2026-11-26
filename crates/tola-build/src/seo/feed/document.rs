@@ -11,7 +11,7 @@ use typst::foundations::Dict;
 
 use super::target::resolve_target;
 use crate::cancellation::{BuildCancellation, BuildCancelled};
-use crate::config::ResolvedSiteConfig;
+use crate::config::SiteConfig;
 use crate::seo::RenderError;
 use crate::seo::declaration::{DocumentTarget, SeoDeclaration, SeoDeclarationError, field_path};
 use tola_address::OutputPath;
@@ -19,7 +19,7 @@ use tola_address::OutputPath;
 /// One rendering pass shares an exported selection across entries and feed formats.
 /// The compiled Bundle separately owns its reusable structural DOM indexes.
 pub(super) struct DocumentContents<'a> {
-    config: &'a ResolvedSiteConfig,
+    config: &'a SiteConfig,
     compilation: &'a BundleCompilation,
     bases: BTreeMap<OutputPath, url::Url>,
     selections: BTreeMap<(OutputPath, HtmlFragmentSelection), Arc<str>>,
@@ -27,7 +27,7 @@ pub(super) struct DocumentContents<'a> {
 }
 
 impl<'a> DocumentContents<'a> {
-    pub(super) fn new(config: &'a ResolvedSiteConfig, compilation: &'a BundleCompilation) -> Self {
+    pub(super) fn new(config: &'a SiteConfig, compilation: &'a BundleCompilation) -> Self {
         Self {
             config,
             compilation,

@@ -19,21 +19,17 @@ pub(crate) mod tests {
     use std::sync::Arc;
 
     use tola_build::build::{BuildMode, BuildRequest, BuildSession, CheckedRevision};
-    use tola_build::config::ResolvedSiteConfig;
+    use tola_build::config::SiteConfig;
 
     /// The site `root` holds, documented by `program` and configured by `configuration`.
-    pub(crate) fn write_site(
-        root: &Path,
-        program: &str,
-        configuration: &str,
-    ) -> Arc<ResolvedSiteConfig> {
+    pub(crate) fn write_site(root: &Path, program: &str, configuration: &str) -> Arc<SiteConfig> {
         std::fs::create_dir_all(root.join("content")).unwrap();
         std::fs::write(root.join("site.typ"), program).unwrap();
         Arc::new(site_config(root, configuration))
     }
 
     /// The site `root` holds, resolved from `configuration`.
-    pub(crate) fn site_config(root: &Path, configuration: &str) -> ResolvedSiteConfig {
+    pub(crate) fn site_config(root: &Path, configuration: &str) -> SiteConfig {
         tola_build::config::loading::resolve_site_config(
             &root.join("tola.toml"),
             configuration,
@@ -48,9 +44,9 @@ pub(crate) mod tests {
     /// [`BuildSession::install_revision`] requires.
     pub(crate) fn checked_candidate(
         session: &mut BuildSession,
-        config: Arc<ResolvedSiteConfig>,
+        config: Arc<SiteConfig>,
         mode: BuildMode,
-    ) -> (CheckedRevision, Arc<ResolvedSiteConfig>) {
+    ) -> (CheckedRevision, Arc<SiteConfig>) {
         let attempt = session.prepare(config, BuildRequest::new(mode));
         let candidate = attempt.run().unwrap().into_unchecked_revision(None);
         let config = Arc::clone(candidate.site().config());
@@ -64,7 +60,7 @@ pub(crate) mod tests {
 
     /// The outputs `config` publishes in `mode`, built outside any session.
     pub(crate) fn built_outputs(
-        config: &ResolvedSiteConfig,
+        config: &SiteConfig,
         mode: BuildMode,
     ) -> tola_build::output::revision::OutputRevision {
         tola_build::build::build_site(config, mode)
@@ -77,9 +73,9 @@ pub(crate) mod tests {
 
     /// Write the entry that reads `body` from `body.txt`, which the entry documents as
     /// `index.html`.
-    pub(crate) fn write_source(config: &ResolvedSiteConfig, body: Option<&[u8]>) {
+    pub(crate) fn write_source(config: &SiteConfig, body: Option<&[u8]>) {
         let source = if let Some(body) = body {
-            std::fs::write(config.get_root().join("body.txt"), body).unwrap();
+            std::fs::write(config.root().join("body.txt"), body).unwrap();
             "#document(\"index.html\")[#read(\"body.txt\")]"
         } else {
             ""

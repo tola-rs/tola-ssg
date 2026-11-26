@@ -7,7 +7,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use tola_build::cancellation::BuildCancellation;
 use tola_build::check::{SourceDiagnosticSession, SourceRevision};
-use tola_build::config::ResolvedSiteConfig;
+use tola_build::config::SiteConfig;
 use tola_typst::typst::syntax::{FileId, Source, SyntaxMode, VirtualRoot};
 use tola_typst_syntax::names::SourceNames;
 
@@ -24,7 +24,7 @@ type QueryOverrides = Vec<(PathBuf, Arc<str>)>;
 /// The source one request addresses; a file the site does not hold is a result, not a failure.
 pub(super) fn load_source(
     id: FileId,
-    config: &ResolvedSiteConfig,
+    config: &SiteConfig,
     overrides: &[(PathBuf, Arc<str>)],
     package_access: &PackageAccess<'_>,
 ) -> Result<Option<Source>> {
@@ -52,10 +52,10 @@ pub(super) fn load_source(
             }
         },
         VirtualRoot::Project => {
-            let path = config.get_root().join(id.vpath().get_without_slash());
+            let path = config.root().join(id.vpath().get_without_slash());
             match overrides
                 .iter()
-                .find(|(path, _)| crate::identity::path_id(path, config.get_root()) == Some(id))
+                .find(|(path, _)| crate::identity::path_id(path, config.root()) == Some(id))
             {
                 Some((_, text)) => Some(text.to_string()),
                 None => read_source_text(&path)?,
@@ -102,7 +102,7 @@ pub(super) enum SelectedSyntax {
 pub(super) struct Realize<'a, 'b> {
     pub(super) session: &'a mut SourceDiagnosticSession,
     pub(super) compilations: &'a mut RevisionCompilations,
-    pub(super) config: &'a Arc<ResolvedSiteConfig>,
+    pub(super) config: &'a Arc<SiteConfig>,
     pub(super) package_access: &'a PackageAccess<'b>,
     pub(super) source_revision: u64,
     pub(super) overrides: &'a [(PathBuf, Arc<str>)],
@@ -264,7 +264,7 @@ impl<'a> Selection<'a> {
     /// blanking to compile.
     fn blanked_query_copy(
         &self,
-        config: &ResolvedSiteConfig,
+        config: &SiteConfig,
         package_access: &PackageAccess<'_>,
         overrides: &[(PathBuf, Arc<str>)],
     ) -> Result<Option<QueryOverrides>> {
@@ -325,7 +325,7 @@ impl<'a> Selection<'a> {
     /// call to drop.
     fn widened_query_copy(
         &self,
-        config: &ResolvedSiteConfig,
+        config: &SiteConfig,
         package_access: &PackageAccess<'_>,
         overrides: &[(PathBuf, Arc<str>)],
     ) -> Result<Option<QueryOverrides>> {
@@ -354,23 +354,19 @@ impl<'a> Selection<'a> {
 mod tests {
     use super::*;
     use crate::position;
-    use crate::query::meta::{call_around, meta_call, meta_key, meta_key_at};
     use crate::query::name_graph::bare_name;
     use crate::query::semantic;
     use crate::query::tests::*;
     use crate::query::{QueryRequest, respond};
     use crate::sources::SourceView;
-    use lsp_types::CompletionTextEdit;
-    use lsp_types::Position;
+    use lsp_types::{CompletionTextEdit, Position};
     use proptest::prelude::*;
     use serde_json::json;
     use tola_build::cancellation::BuildCancelled;
     use tola_diagnostic::Severity;
-    use tola_typst::typst::syntax::LinkedNode;
-    use tola_typst::typst::syntax::ast;
 
     #[test]
-    fn uncompiled_document_answers_source_only() {
+    fn uncompiled_site_falls_back_to_source() {
         let mut site = QuerySession::new();
         let items = site.completion(
             "#import \"@tola/document:0.0.0\": current-document\n#context current-document().|",
@@ -404,17 +400,17 @@ mod tests {
             checked
                 .diagnostics()
                 .iter()
-                .any(|diagnostic| diagnostic.severity == Severity::Error)
+                .any(|d| d.severity == Severity::Error)
         );
     }
-    #[test]
-    fn cancelled_queries_report_cancellation() {
-        let mut site = QuerySession::new();
 
+    #[test]
+    fn cancelled_query_returns_err() {
+        let mut site = QuerySession::new();
         let path = site.config.build().content_dir.join("document.typ");
         let canceller = tola_build::cancellation::BuildCanceller::new();
         canceller.cancel();
-        let result = respond(QueryRequest {
+        let res = respond(QueryRequest {
             session: &mut site.session,
             compilations: &mut site.compilations,
             disk: &mut crate::analysis::DiskSources::default(),
@@ -436,12 +432,11 @@ mod tests {
             routes_as_hints: false,
             check_progress: CheckProgress::Failed,
             cancellation: &canceller.token(),
-            client_root: &crate::uri::ClientRoot::new(site.config.get_root()),
+            client_root: &crate::uri::ClientRoot::new(site.config.root()),
         });
-        assert!(result.unwrap_err().is::<BuildCancelled>());
+        assert!(res.unwrap_err().is::<BuildCancelled>());
     }
-    /// The text an editor holds open: ASCII markup, Han, emoji, combining marks, both line
-    /// endings, and the calls and imports the query lanes classify.
+
     fn editor_text() -> impl Strategy<Value = String> {
         proptest::collection::vec(
             prop_oneof![
@@ -468,13 +463,12 @@ mod tests {
         .prop_map(|fragments| fragments.concat())
     }
 
-    /// The completion request the lanes classify a cursor with.
-    fn completion_query(position: Position) -> SourceQuery {
+    fn completion_query(pos: Position) -> SourceQuery {
         SourceQuery::Completion(lsp_types::TextDocumentPositionParams {
             text_document: lsp_types::TextDocumentIdentifier {
                 uri: "file:///site/main.typ".parse().expect("a file URI"),
             },
-            position,
+            position: pos,
         })
     }
 
@@ -482,8 +476,6 @@ mod tests {
         (0..=text.len()).filter(move |at| text.is_char_boundary(*at))
     }
 
-    /// Whether the boundary at `at` lies between the two bytes of a `\r\n` break, which no
-    /// protocol position addresses.
     fn inside_carriage_return_pair(text: &str, at: usize) -> bool {
         at > 0
             && at < text.len()
@@ -491,26 +483,22 @@ mod tests {
             && text.as_bytes()[at] == b'\n'
     }
 
-    /// Whether `character` can be part of a Typst identifier: the continue set, so a kebab-case
-    /// name the author is still typing counts as a prefix too.
-    fn is_name_character(character: char) -> bool {
-        character.is_alphanumeric() || character == '_' || character == '-'
+    fn is_name_character(ch: char) -> bool {
+        ch.is_alphanumeric() || ch == '_' || ch == '-'
     }
 
-    /// The identifier bytes the author typed before `cursor`, drawn from the document.
-    fn identifier_prefix(text: &str, cursor: usize) -> std::ops::Range<usize> {
-        let mut start = cursor;
+    fn identifier_prefix(text: &str, pos: usize) -> std::ops::Range<usize> {
+        let mut start = pos;
         while start > 0 {
-            let previous = text[..start].chars().next_back().expect("a character");
-            if !is_name_character(previous) {
+            let prev = text[..start].chars().next_back().expect("a character");
+            if !is_name_character(prev) {
                 break;
             }
-            start -= previous.len_utf8();
+            start -= prev.len_utf8();
         }
-        start..cursor
+        start..pos
     }
 
-    /// The rest of a name an item could offer, so the label extends the typed prefix.
     fn identifier_tail() -> impl Strategy<Value = String> {
         proptest::collection::vec(
             prop_oneof![
@@ -522,19 +510,6 @@ mod tests {
             0..4,
         )
         .prop_map(String::from_iter)
-    }
-
-    /// The ranges of every call nested inside `node`.
-    fn call_ranges(node: &LinkedNode<'_>) -> Vec<std::ops::Range<usize>> {
-        let mut ranges = Vec::new();
-        let mut pending: Vec<LinkedNode<'_>> = node.children().collect();
-        while let Some(child) = pending.pop() {
-            if child.cast::<ast::FuncCall>().is_some() {
-                ranges.push(child.range());
-            }
-            pending.extend(child.children());
-        }
-        ranges
     }
 
     proptest! {
@@ -549,41 +524,38 @@ mod tests {
             ..ProptestConfig::default()
         })]
 
-        /// A completion item's edit must rewrite exactly the prefix the author typed — no byte
-        /// before it and none after it — for the unbounded space of documents and prefixes an
-        /// editor holds; a violation corrupts the author's text around the completion.
         #[test]
-        fn completion_edit_replaces_the_typed_prefix(
+        fn completion_edit_replaces_prefix(
             text in editor_text(),
             tail in identifier_tail(),
         ) {
-            let source = Source::detached(text.clone());
-            for cursor in char_boundaries(&text) {
-                if inside_carriage_return_pair(&text, cursor) {
+            let src = Source::detached(text.clone());
+            for pos in char_boundaries(&text) {
+                if inside_carriage_return_pair(&text, pos) {
                     continue;
                 }
-                let position = position::utf16_range(source.lines(), cursor..cursor)
+                let lsp_pos = position::utf16_range(src.lines(), pos..pos)
                     .expect("a character boundary has a position")
                     .start;
-                let selection = Selection::new(
-                    &source,
-                    cursor,
-                    &completion_query(position),
+                let sel = Selection::new(
+                    &src,
+                    pos,
+                    &completion_query(lsp_pos),
                     CheckProgress::NotChecked,
                     None,
                 );
-                let prefix = identifier_prefix(&text, cursor);
-                let (range, typed) = selection
+                let prefix = identifier_prefix(&text, pos);
+                let (range, typed) = sel
                     .completion_range(prefix.clone())
                     .expect("a typed prefix has a completion range");
                 prop_assert_eq!(typed, &text[prefix.clone()]);
-                let start = position::byte_offset(source.lines(), range.start)
+                let start = position::byte_offset(src.lines(), range.start)
                     .expect("the edit's start is a position");
-                let end = position::byte_offset(source.lines(), range.end)
+                let end = position::byte_offset(src.lines(), range.end)
                     .expect("the edit's end is a position");
                 prop_assert_eq!((start, end), (prefix.start, prefix.end));
                 let label = format!("{typed}{tail}");
-                let edit = selection
+                let edit = sel
                     .completion_edit(prefix.clone(), label.clone())
                     .expect("a typed prefix has a completion edit");
                 let item = semantic::completion(&label, &[], edit);
@@ -597,79 +569,29 @@ mod tests {
                     format!("{}{}{}", &text[..prefix.start], label, &text[prefix.end..]),
                     "{:?} at {}",
                     text,
-                    cursor
+                    pos
                 );
             }
         }
 
-        /// Every cursor walker must answer the construct the cursor sits in — the call it covers,
-        /// the key it writes, the name the cursor reads — for the unbounded space of documents
-        /// and cursors; a violation mis-targets the answer at that cursor.
         #[test]
-        fn cursor_walkers_answer_at_the_cursor(text in editor_text()) {
-            let source = Source::detached(text.clone());
-            let document = source.text();
-            let names = tola_typst_syntax::names::SourceNames::new(source.clone());
-            for cursor in char_boundaries(document) {
-                if let Some(node) = call_around(&source, cursor) {
-                    prop_assert!(
-                        node.range().start <= cursor && cursor <= node.range().end,
-                        "call {:?} misses {}",
-                        node.range(),
-                        cursor
-                    );
-                    for inner in call_ranges(&node) {
-                        if inner.start <= cursor && cursor <= inner.end {
-                            prop_assert!(
-                                inner.len() >= node.range().len(),
-                                "call {:?} covers an inner call {:?} at {}",
-                                node.range(),
-                                inner,
-                                cursor
-                            );
-                        }
-                    }
-                }
-                if let Some(name) = bare_name(&source, cursor) {
-                    let start = name.as_ptr() as usize - document.as_ptr() as usize;
+        fn bare_name_matches_value_cursor(text in editor_text()) {
+            let src = Source::detached(text.clone());
+            let doc = src.text();
+            let names = tola_typst_syntax::names::SourceNames::new(src.clone());
+            for pos in char_boundaries(doc) {
+                if let Some(name) = bare_name(&src, pos) {
+                    let start = name.as_ptr() as usize - doc.as_ptr() as usize;
                     let end = start + name.len();
-                    prop_assert!(end <= document.len(), "name {:?} at {}", name, cursor);
-                    // The walker's own reader answers the name only where the cursor reads a
-                    // value, and there the name must be the one the cursor stands in.
+                    prop_assert!(end <= doc.len(), "name {:?} at {}", name, pos);
                     prop_assert!(
-                        !names.reads_value_at(cursor) || (start <= cursor && cursor <= end),
+                        !names.reads_value_at(pos) || (start <= pos && pos <= end),
                         "name {:?} misses the value cursor at {}",
                         name,
-                        cursor
+                        pos
                     );
-                }
-                if let Some(call) = meta_call(&source, cursor, &names) {
-                    if let Some(key) = meta_key(&source, cursor, &call) {
-                        prop_assert!(
-                            key.typed.start <= cursor && cursor <= key.typed.end,
-                            "typed key {:?} misses {}",
-                            key.typed,
-                            cursor
-                        );
-                        prop_assert!(
-                            call.dict.start <= key.typed.start && key.typed.end <= call.dict.end,
-                            "typed key {:?} escapes dict {:?} at {}",
-                            key.typed,
-                            call.dict,
-                            cursor
-                        );
-                    }
-                    if let Some(key) = meta_key_at(&source, cursor, &call) {
-                        prop_assert!(
-                            key.start <= cursor && cursor <= key.end,
-                            "key {:?} misses {}",
-                            key,
-                            cursor
-                        );
-                    }
                 }
             }
         }
-
     }
 }

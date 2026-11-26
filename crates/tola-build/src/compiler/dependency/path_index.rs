@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use tola_typst::ReadLocator;
 
-use super::{DependencyReadEvidence, DependencyReaderEvidence, TypstDependencyReader};
+use super::{DepRead, DepReader, TypstDependencyReader};
 
 /// Readers are indexed by directory ancestor and by lexical symlink alias.
 #[derive(Debug, Clone, Default)]
@@ -17,14 +17,14 @@ pub(super) struct DependencyPathIndex {
 impl DependencyPathIndex {
     pub(super) fn build(
         root: &Path,
-        reader_evidence: &BTreeMap<TypstDependencyReader, DependencyReaderEvidence>,
+        reader_evidence: &BTreeMap<TypstDependencyReader, DepReader>,
         package_checks: &[tola_typst::PackageCheck],
     ) -> Self {
         let mut index = Self::default();
         for (reader_index, evidence) in reader_evidence.values().enumerate() {
             for read in &evidence.reads {
                 match read {
-                    DependencyReadEvidence::Physical {
+                    DepRead::Physical {
                         logical_path,
                         canonical_target,
                         ..
@@ -32,7 +32,7 @@ impl DependencyPathIndex {
                         index.add_reader_identity(logical_path, reader_index);
                         index.add_reader_identity(canonical_target, reader_index);
                     }
-                    DependencyReadEvidence::Virtual { evidence, .. } => {
+                    DepRead::Virtual { evidence, .. } => {
                         if let ReadLocator::Root(relative) | ReadLocator::ProvidedRoot(relative) =
                             evidence.locator()
                         {
@@ -78,7 +78,7 @@ impl DependencyPathIndex {
     pub(super) fn readers_for(
         &self,
         changed_paths: &[PathBuf],
-        reader_evidence: &BTreeMap<TypstDependencyReader, DependencyReaderEvidence>,
+        reader_evidence: &BTreeMap<TypstDependencyReader, DepReader>,
     ) -> Vec<TypstDependencyReader> {
         let mut reader_indices = BTreeSet::new();
         for alias in changed_paths.iter().flat_map(|path| path_aliases(path)) {
@@ -125,26 +125,26 @@ mod tests {
     use std::os::unix::fs::symlink;
 
     #[test]
-    fn deleted_alias_selects_physical_reader() {
-        let directory = tempfile::tempdir().unwrap();
-        let real = directory.path().join("real");
-        let alias = directory.path().join("alias");
+    fn deleted_alias_reader() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        let alias = dir.path().join("alias");
         fs::create_dir(&real).unwrap();
         symlink(&real, &alias).unwrap();
         fs::write(real.join("input.typ"), "content").unwrap();
-        let physical = real.join("input.typ").canonicalize().unwrap();
-        let mut index = DependencyPathIndex::default();
-        index.add_reader_identity(&physical, 0);
+        let phys = real.join("input.typ").canonicalize().unwrap();
+        let mut idx = DependencyPathIndex::default();
+        idx.add_reader_identity(&phys, 0);
         let readers = BTreeMap::from([(
             TypstDependencyReader::SiteProgram,
-            DependencyReaderEvidence {
+            DepReader {
                 reads: Vec::new(),
                 package_checks: Vec::new(),
             },
         )]);
         fs::remove_file(alias.join("input.typ")).unwrap();
         assert_eq!(
-            index.readers_for(&[alias.join("input.typ")], &readers),
+            idx.readers_for(&[alias.join("input.typ")], &readers),
             vec![TypstDependencyReader::SiteProgram]
         );
     }

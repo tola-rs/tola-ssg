@@ -119,34 +119,25 @@ impl CompiledBundleDocument<'_> {
     /// Returns `None` for paged Bundle documents.
     pub fn html_inventory(
         &self,
-        cancellation: &BundleCancellation,
+        cancel: &BundleCancellation,
     ) -> Result<Option<Arc<crate::html::HtmlDocumentInventory>>, CompileError> {
-        cancellation.ensure_active()?;
-        let BundleDocument::Html(document) = self.document else {
+        cancel.ensure_active()?;
+        let BundleDocument::Html(doc) = self.document else {
             return Ok(None);
         };
-        let indexes = self.compilation.html_indexes(cancellation)?;
-        if let Some(inventory) = indexes
-            .get(self.path)
-            .and_then(|indexes| indexes.inventory.as_ref())
-        {
-            return Ok(Some(Arc::clone(inventory)));
-        }
-        // Hold the index lock only for map operations, never for the DOM walk.
-        drop(indexes);
-        let inventory = Arc::new(crate::html::HtmlDocumentInventory::from_bundle_document(
+        let inventory = self.compilation.cached_html_index(
             self.path,
-            document,
-            self.compilation.introspector(),
-            cancellation,
-        )?);
-        cancellation.ensure_active()?;
-        let mut indexes = self.compilation.html_indexes(cancellation)?;
-        let slot = indexes.entry(self.path.clone()).or_default();
-        if let Some(existing) = &slot.inventory {
-            return Ok(Some(Arc::clone(existing)));
-        }
-        slot.inventory = Some(Arc::clone(&inventory));
+            cancel,
+            |slot| &mut slot.inventory,
+            || {
+                crate::html::HtmlDocumentInventory::from_bundle_document(
+                    self.path,
+                    doc,
+                    self.compilation.introspector(),
+                    cancel,
+                )
+            },
+        )?;
         Ok(Some(inventory))
     }
 
@@ -158,11 +149,9 @@ impl CompiledBundleDocument<'_> {
         &self,
         selection: &crate::html::HtmlFragmentSelection,
         options: &crate::html::HtmlFragmentOptions,
-        cancellation: &BundleCancellation,
+        cancel: &BundleCancellation,
     ) -> Result<crate::html::HtmlFragmentExport, crate::html::HtmlFragmentError> {
-        self.html_fragment_with_links(selection, options, cancellation, &mut |url, _| {
-            Ok(url.to_owned())
-        })
+        self.html_fragment_with_links(selection, options, cancel, &mut |url, _| Ok(url.to_owned()))
     }
 
     /// Export a compiled HTML subtree while the host rewrites its URL references.
@@ -173,32 +162,27 @@ impl CompiledBundleDocument<'_> {
         &self,
         selection: &crate::html::HtmlFragmentSelection,
         options: &crate::html::HtmlFragmentOptions,
-        cancellation: &BundleCancellation,
+        cancel: &BundleCancellation,
         rewrite: &mut dyn FnMut(
             &str,
             crate::html::HtmlReferenceUse,
         ) -> Result<String, crate::html::HtmlFragmentError>,
     ) -> Result<crate::html::HtmlFragmentExport, crate::html::HtmlFragmentError> {
-        if cancellation.is_cancelled() {
+        if cancel.is_cancelled() {
             return Err(crate::html::HtmlFragmentError::Cancelled);
         }
-        let BundleDocument::Html(document) = self.document else {
+        let BundleDocument::Html(doc) = self.document else {
             return Err(crate::html::HtmlFragmentError::NotHtmlDocument {
                 path: self.path.clone(),
             });
         };
-        let index = self
-            .compilation
-            .html_fragment_index(self.path, document, cancellation)?;
-        crate::html::export_fragment(
-            document,
-            self,
-            &index,
-            selection,
-            options,
-            cancellation,
-            rewrite,
-        )
+        let index = self.compilation.cached_html_index(
+            self.path,
+            cancel,
+            |slot| &mut slot.fragments,
+            || crate::html::HtmlFragmentIndex::new(doc, cancel),
+        )?;
+        crate::html::export_fragment(doc, self, &index, selection, options, cancel, rewrite)
     }
 
     pub(crate) fn link_resolver(&self) -> typst::model::LateLinkResolver<'_> {
@@ -349,51 +333,43 @@ impl BundleCompilation {
         Ok((replacements, count))
     }
 
-    fn html_fragment_index(
+    fn cached_html_index<T, E: crate::diagnostic::CancelledError>(
         &self,
         path: &typst::syntax::VirtualPath,
-        document: &typst_html::HtmlDocument,
-        cancellation: &BundleCancellation,
-    ) -> Result<Arc<crate::html::HtmlFragmentIndex>, crate::html::HtmlFragmentError> {
-        let indexes = self
-            .html_indexes(cancellation)
-            .map_err(|_| crate::html::HtmlFragmentError::Cancelled)?;
-        if let Some(index) = indexes
-            .get(path)
-            .and_then(|indexes| indexes.fragments.as_ref())
+        cancel: &BundleCancellation,
+        slot_field: impl Fn(&mut HtmlDocumentIndexes) -> &mut Option<Arc<T>>,
+        build: impl FnOnce() -> Result<T, E>,
+    ) -> Result<Arc<T>, E> {
+        let mut indexes = self.html_indexes(cancel)?;
+        if let Some(existing) = indexes
+            .get_mut(path)
+            .and_then(|slot| slot_field(slot).as_ref().map(Arc::clone))
         {
-            return Ok(Arc::clone(index));
+            return Ok(existing);
         }
+        // Hold the index lock only for map operations, never for the DOM walk.
         drop(indexes);
-        let index = Arc::new(crate::html::HtmlFragmentIndex::new(document, cancellation)?);
-        if cancellation.is_cancelled() {
-            return Err(crate::html::HtmlFragmentError::Cancelled);
-        }
-        let mut indexes = self
-            .html_indexes(cancellation)
-            .map_err(|_| crate::html::HtmlFragmentError::Cancelled)?;
-        let slot = indexes.entry(path.clone()).or_default();
-        if let Some(existing) = &slot.fragments {
-            return Ok(Arc::clone(existing));
-        }
-        slot.fragments = Some(Arc::clone(&index));
-        Ok(index)
+        let built = Arc::new(build()?);
+        cancel.ensure_active_as()?;
+        let mut indexes = self.html_indexes(cancel)?;
+        let slot = slot_field(indexes.entry(path.clone()).or_default());
+        Ok(Arc::clone(slot.get_or_insert_with(|| Arc::clone(&built))))
     }
 
-    fn html_indexes(
+    fn html_indexes<E: crate::diagnostic::CancelledError>(
         &self,
-        cancellation: &BundleCancellation,
+        cancel: &BundleCancellation,
     ) -> Result<
         parking_lot::MutexGuard<'_, HashMap<typst::syntax::VirtualPath, HtmlDocumentIndexes>>,
-        CompileError,
+        E,
     > {
         loop {
-            cancellation.ensure_active()?;
+            cancel.ensure_active_as()?;
             if let Some(indexes) = self
                 .html_indexes
                 .try_lock_for(HTML_INDEX_LOCK_POLL_INTERVAL)
             {
-                cancellation.ensure_active()?;
+                cancel.ensure_active_as()?;
                 return Ok(indexes);
             }
         }
@@ -483,7 +459,7 @@ mod tests {
     use super::*;
     use typst_bundle::BundleOptions;
     #[test]
-    fn raw_text_rewrite_replaces_only_payloads() {
+    fn raw_text_rewrite_payloads() {
         use crate::html::HtmlRawText;
 
         let mut compilation = compile_without_export(
@@ -495,10 +471,10 @@ mod tests {
   #html.elem("p", attrs: (id: "kept", class: "body"))[Body]
 ]"#,
         );
-        let cancellation = BundleCancellation::default();
+        let cancel = BundleCancellation::default();
         let mut observed = Vec::new();
         let rewritten = compilation
-            .rewrite_html_raw_text(&cancellation, |path, kind, span, text| {
+            .rewrite_html_raw_text(&cancel, |path, kind, span, text| {
                 observed.push((
                     path.get_with_slash().to_string(),
                     kind,
@@ -525,13 +501,11 @@ mod tests {
                 ("/index.html", HtmlRawText::Module),
             ]
         );
-        // Every payload reports the text it was written from, so a caller that cannot
-        // rewrite one can locate it in the source file.
         assert_eq!(
             observed
                 .iter()
                 .map(|(_, _, span, _)| {
-                    span.id().map(|id| id.vpath().get_with_slash().to_owned())
+                    span.id().map(|fid| fid.vpath().get_with_slash().to_owned())
                 })
                 .collect::<Vec<_>>(),
             vec![
@@ -541,7 +515,7 @@ mod tests {
             ]
         );
         let entries = compilation
-            .export(&BundleOptions::default(), &cancellation, None)
+            .export(&BundleOptions::default(), &cancel, None)
             .unwrap();
         let html = String::from_utf8(
             entry_from(entries.entries(), "/index.html")
@@ -557,9 +531,10 @@ mod tests {
             assert!(html.contains(payload), "{payload}: {html}");
         }
     }
+
     #[test]
-    fn rejected_frame_style_installs_nothing() {
-        for cancel in [false, true] {
+    fn frame_style_atomic_rollback() {
+        for cancel_flag in [false, true] {
             let mut compilation = compile_without_export(
                 r#"
 #document("a.html")[#box(html.frame(rect(width: 2pt, height: 3pt)))]
@@ -577,14 +552,14 @@ mod tests {
                 .html_inventory(&fresh)
                 .unwrap()
                 .unwrap();
-            let cancellation = BundleCancellation::new();
+            let cancel = BundleCancellation::new();
             let mut seen = 0;
-            let error = compilation
-                .style_html_frames(&cancellation, |_, _, frame| {
+            let err = compilation
+                .style_html_frames(&cancel, |_, _, frame| {
                     seen += 1;
                     if seen == 2 {
-                        if cancel {
-                            cancellation.cancel();
+                        if cancel_flag {
+                            cancel.cancel();
                         }
                         typst::diag::bail!(frame.span, "declined frame style");
                     }
@@ -593,7 +568,7 @@ mod tests {
                 .unwrap_err();
             assert_eq!(seen, 2);
             assert!(matches!(
-                (&error, cancel),
+                (&err, cancel_flag),
                 (crate::html::HtmlFrameStyleError::Cancelled, true)
                     | (crate::html::HtmlFrameStyleError::Rejected { .. }, false)
             ));

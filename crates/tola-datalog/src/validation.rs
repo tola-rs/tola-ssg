@@ -1,56 +1,48 @@
-//! Relation declarations, arity, variable binding, and stratification checks.
-//!
-//! Reporting follows the caller's order: declarations, facts, then rules. Within a clause, atoms
-//! retain their written order.
+//! Relation, arity, variable binding, and stratification validation.
+
 use crate::relation::RowBuffer;
 use crate::{Atom, Database, Error, ErrorKind, Literal, Location, Relation, Rule, Snapshot, Term};
 use std::borrow::Borrow;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
-pub(crate) fn atom<C>(literal: &Literal<C>) -> &Atom<C> {
-    match literal {
-        Literal::Positive(atom) | Literal::Negative(atom) => atom,
+pub(crate) fn atom<C>(lit: &Literal<C>) -> &Atom<C> {
+    match lit {
+        Literal::Positive(a) | Literal::Negative(a) => a,
     }
 }
 
 pub(crate) fn variables<C>(atom: &Atom<C>) -> impl Iterator<Item = &String> {
-    atom.terms.iter().filter_map(|term| match term {
-        Term::Variable(name) => Some(name),
+    atom.terms.iter().filter_map(|t| match t {
+        Term::Variable(v) => Some(v),
         Term::Constant(_) => None,
     })
 }
 
-fn arity_error(location: Location, arity: usize, actual: usize) -> Error {
+fn arity_error(location: Location, expected: usize, actual: usize) -> Error {
     Error {
         location,
-        kind: ErrorKind::Arity {
-            expected: arity,
-            actual,
-        },
+        kind: ErrorKind::Arity { expected, actual },
     }
 }
 
 fn declare_relations(
-    relations: impl IntoIterator<Item = impl Borrow<Relation>>,
+    rels: impl IntoIterator<Item = impl Borrow<Relation>>,
 ) -> Result<BTreeMap<String, usize>, Error> {
     let mut arities = BTreeMap::new();
-    for (index, relation) in relations.into_iter().enumerate() {
-        let relation = relation.borrow();
-        let location = Location::Relation(index);
-        if relation.name.is_empty() {
+    for (idx, rel) in rels.into_iter().enumerate() {
+        let rel = rel.borrow();
+        let location = Location::Relation(idx);
+        if rel.name.is_empty() {
             return Err(Error {
                 location,
                 kind: ErrorKind::EmptyRelation,
             });
         }
-        if arities
-            .insert(relation.name.clone(), relation.arity)
-            .is_some()
-        {
+        if arities.insert(rel.name.clone(), rel.arity).is_some() {
             return Err(Error {
                 location,
-                kind: ErrorKind::DuplicateRelation(relation.name.clone()),
+                kind: ErrorKind::DuplicateRelation(rel.name.clone()),
             });
         }
     }
@@ -59,26 +51,26 @@ fn declare_relations(
 
 fn validate_relation(
     arities: &BTreeMap<String, usize>,
-    relation: &Relation,
+    rel: &Relation,
     actual: usize,
     location: Location,
 ) -> Result<(), Error> {
-    if relation.arity != actual {
-        return Err(arity_error(location, relation.arity, actual));
+    if rel.arity != actual {
+        return Err(arity_error(location, rel.arity, actual));
     }
-    let Some(&expected) = arities.get(&relation.name) else {
+    let Some(&expected) = arities.get(&rel.name) else {
         return Err(Error {
             location,
-            kind: ErrorKind::UnknownRelation(relation.name.clone()),
+            kind: ErrorKind::UnknownRelation(rel.name.clone()),
         });
     };
-    if expected != relation.arity {
+    if expected != rel.arity {
         return Err(Error {
             location,
             kind: ErrorKind::RelationArity {
-                name: relation.name.clone(),
+                name: rel.name.clone(),
                 expected,
-                actual: relation.arity,
+                actual: rel.arity,
             },
         });
     }
@@ -95,11 +87,10 @@ fn validate_variables<C>(atom: &Atom<C>, location: Location) -> Result<(), Error
     Ok(())
 }
 
-/// Positive literals bind variables regardless of where the literals appear in the body.
 pub(crate) fn bound_variables<C>(body: &[Literal<C>]) -> BTreeSet<&String> {
     body.iter()
-        .filter_map(|literal| match literal {
-            Literal::Positive(atom) => Some(atom),
+        .filter_map(|lit| match lit {
+            Literal::Positive(a) => Some(a),
             Literal::Negative(_) => None,
         })
         .flat_map(variables)
@@ -107,59 +98,55 @@ pub(crate) fn bound_variables<C>(body: &[Literal<C>]) -> BTreeSet<&String> {
 }
 
 fn unbound_variable<'a, C>(atom: &'a Atom<C>, bound: &BTreeSet<&String>) -> Option<&'a String> {
-    variables(atom).find(|name| !bound.contains(*name))
+    variables(atom).find(|v| !bound.contains(*v))
 }
 
 pub(crate) fn validate_body<C>(
     body: &[Literal<C>],
     bound: &BTreeSet<&String>,
     arities: &BTreeMap<String, usize>,
-    location: impl Fn(usize) -> Location,
+    loc: impl Fn(usize) -> Location,
 ) -> Result<(), Error> {
-    for (index, literal) in body.iter().enumerate() {
-        let atom = atom(literal);
-        validate_relation(arities, &atom.relation, atom.terms.len(), location(index))?;
-        validate_variables(atom, location(index))?;
-        if matches!(literal, Literal::Negative(_))
-            && let Some(name) = unbound_variable(atom, bound)
+    for (idx, lit) in body.iter().enumerate() {
+        let a = atom(lit);
+        validate_relation(arities, &a.relation, a.terms.len(), loc(idx))?;
+        validate_variables(a, loc(idx))?;
+        if matches!(lit, Literal::Negative(_))
+            && let Some(var) = unbound_variable(a, bound)
         {
             return Err(Error {
-                location: location(index),
-                kind: ErrorKind::UnboundVariable(name.clone()),
+                location: loc(idx),
+                kind: ErrorKind::UnboundVariable(var.clone()),
             });
         }
     }
     Ok(())
 }
 
-/// Depth-first finish order along edges from body relations to rule heads.
 fn dependent_postorder(dependents: &[Vec<usize>]) -> Vec<usize> {
     let mut order = Vec::with_capacity(dependents.len());
     let mut visited = vec![false; dependents.len()];
-    let mut pending = Vec::new();
+    let mut stack = Vec::new();
     for root in 0..dependents.len() {
         if std::mem::replace(&mut visited[root], true) {
             continue;
         }
-        pending.push((root, dependents[root].iter()));
-        while let Some((relation, next)) = pending.last_mut() {
-            if let Some(&dependent) = next.next() {
-                if !std::mem::replace(&mut visited[dependent], true) {
-                    pending.push((dependent, dependents[dependent].iter()));
+        stack.push((root, dependents[root].iter()));
+        while let Some((rel, next)) = stack.last_mut() {
+            if let Some(&dep) = next.next() {
+                if !std::mem::replace(&mut visited[dep], true) {
+                    stack.push((dep, dependents[dep].iter()));
                 }
             } else {
-                order.push(*relation);
-                pending.pop();
+                order.push(*rel);
+                stack.pop();
             }
         }
     }
     order
 }
 
-/// The stratum of every declared relation name.
-///
-/// A negative edge inside a strongly connected component forms a cycle. Otherwise, each
-/// component takes the highest stratum of its dependencies, adding one for a negative edge.
+/// Assign each relation a stratum; any negative edge inside an SCC is a stratification cycle.
 fn stratify<C>(
     rules: &[Rule<C>],
     arities: &BTreeMap<String, usize>,
@@ -174,43 +161,41 @@ fn stratify<C>(
         .zip(0..arities.len())
         .collect();
     let mut dependents = vec![Vec::new(); ids.len()];
-    let mut dependencies = vec![Vec::new(); ids.len()];
-    for (rule_index, rule) in rules.iter().enumerate() {
+    let mut deps = vec![Vec::new(); ids.len()];
+    for (rule_idx, rule) in rules.iter().enumerate() {
         let head = ids[rule.head.relation.name.as_str()];
-        for (atom_index, literal) in rule.body.iter().enumerate() {
-            let body = ids[atom(literal).relation.name.as_str()];
-            let negated_at =
-                matches!(literal, Literal::Negative(_)).then_some((rule_index, atom_index));
+        for (atom_idx, lit) in rule.body.iter().enumerate() {
+            let body = ids[atom(lit).relation.name.as_str()];
+            let neg_at = matches!(lit, Literal::Negative(_)).then_some((rule_idx, atom_idx));
             dependents[body].push(head);
-            dependencies[head].push((body, negated_at));
+            deps[head].push((body, neg_at));
         }
     }
 
-    let mut components = vec![None; ids.len()];
+    let mut sccs = vec![None; ids.len()];
     let mut strata = vec![0; ids.len()];
     let mut first_cycle = None;
-    let mut pending = Vec::new();
-    // Traversing the reverse finish order along head-to-body edges visits each component
-    // after its dependencies. Any unassigned relation reached here belongs to this component.
+    let mut stack = Vec::new();
+    // Kosaraju reverse-postorder on head->body edges visits dependencies before dependents.
     for root in dependent_postorder(&dependents).into_iter().rev() {
-        if components[root].is_some() {
+        if sccs[root].is_some() {
             continue;
         }
-        components[root] = Some(root);
-        pending.push(root);
-        while let Some(head) = pending.pop() {
-            for &(body, negated_at) in &dependencies[head] {
-                let component = *components[body].get_or_insert_with(|| {
-                    pending.push(body);
+        sccs[root] = Some(root);
+        stack.push(root);
+        while let Some(head) = stack.pop() {
+            for &(body, neg_at) in &deps[head] {
+                let scc = *sccs[body].get_or_insert_with(|| {
+                    stack.push(body);
                     root
                 });
-                if component != root {
-                    let required = strata[component] + usize::from(negated_at.is_some());
-                    strata[root] = strata[root].max(required);
-                } else if let Some(location) = negated_at
-                    && first_cycle.is_none_or(|first| location < first)
+                if scc != root {
+                    let req = strata[scc] + usize::from(neg_at.is_some());
+                    strata[root] = strata[root].max(req);
+                } else if let Some(loc) = neg_at
+                    && first_cycle.is_none_or(|first| loc < first)
                 {
-                    first_cycle = Some(location);
+                    first_cycle = Some(loc);
                 }
             }
         }
@@ -224,18 +209,10 @@ fn stratify<C>(
     Ok(arities
         .keys()
         .cloned()
-        .zip(
-            components
-                .into_iter()
-                .map(|component| strata[component.unwrap()]),
-        )
+        .zip(sccs.into_iter().map(|scc| strata[scc.unwrap()]))
         .collect())
 }
 
-/// Collect rows into their relation buffers and validate them in caller order.
-///
-/// A buffer is only read after every row passes validation. Each source stays alive while its
-/// values are pushed.
 fn collect_facts<C, I, R, T>(
     rows: I,
     arities: &BTreeMap<String, usize>,
@@ -246,24 +223,24 @@ where
     T: IntoIterator<Item = C>,
 {
     let mut groups = BTreeMap::<String, RowBuffer<C>>::new();
-    for (index, (source, values)) in rows.into_iter().enumerate() {
-        let relation = source.borrow();
-        let actual = if let Some(buffer) = groups.get_mut(&relation.name) {
-            buffer.push_row(values)
+    for (idx, (src, vals)) in rows.into_iter().enumerate() {
+        let rel = src.borrow();
+        let actual = if let Some(buf) = groups.get_mut(&rel.name) {
+            buf.push_row(vals)
         } else {
-            let mut buffer = RowBuffer::new(relation.arity);
-            let actual = buffer.push_row(values);
-            groups.insert(relation.name.clone(), buffer);
+            let mut buf = RowBuffer::new(rel.arity);
+            let actual = buf.push_row(vals);
+            groups.insert(rel.name.clone(), buf);
             actual
         };
-        validate_relation(arities, relation, actual, Location::Fact(index))?;
+        validate_relation(arities, rel, actual, Location::Fact(idx))?;
     }
     Ok(groups)
 }
 
 fn validate_rules<C>(rules: &[Rule<C>], arities: &BTreeMap<String, usize>) -> Result<(), Error> {
-    for (index, rule) in rules.iter().enumerate() {
-        let head = Location::RuleHead(index);
+    for (idx, rule) in rules.iter().enumerate() {
+        let head = Location::RuleHead(idx);
         validate_relation(
             arities,
             &rule.head.relation,
@@ -279,13 +256,13 @@ fn validate_rules<C>(rules: &[Rule<C>], arities: &BTreeMap<String, usize>) -> Re
         validate_variables(&rule.head, head)?;
         let bound = bound_variables(&rule.body);
         validate_body(&rule.body, &bound, arities, |atom| Location::RuleBody {
-            rule: index,
+            rule: idx,
             atom,
         })?;
-        if let Some(name) = unbound_variable(&rule.head, &bound) {
+        if let Some(var) = unbound_variable(&rule.head, &bound) {
             return Err(Error {
-                location: Location::RuleHead(index),
-                kind: ErrorKind::UnboundVariable(name.clone()),
+                location: Location::RuleHead(idx),
+                kind: ErrorKind::UnboundVariable(var.clone()),
             });
         }
     }
@@ -293,7 +270,7 @@ fn validate_rules<C>(rules: &[Rule<C>], arities: &BTreeMap<String, usize>) -> Re
 }
 
 impl<C: Ord> Database<C> {
-    /// Validate relation declarations, ground tuples, and rules and build a snapshot.
+    /// Validate relation declarations, ground facts, and rules, returning an immutable snapshot.
     pub fn new(
         relations: Vec<Relation>,
         facts: Vec<(Relation, Vec<C>)>,
@@ -302,10 +279,7 @@ impl<C: Ord> Database<C> {
         Self::from_rows(relations, facts, rules)
     }
 
-    /// Build a snapshot from declarations and rows whose relations may be borrowed.
-    ///
-    /// Declarations, facts, and rules are validated in that order. Each row source
-    /// stays alive while its values are read.
+    /// Build a snapshot from declarations, streamed fact rows, and rules in caller order.
     pub fn from_rows<I, R, T>(
         relations: impl IntoIterator<Item = impl Borrow<Relation>>,
         rows: I,
@@ -321,10 +295,10 @@ impl<C: Ord> Database<C> {
         validate_rules(&rules, &arities)?;
         let strata = stratify(&rules, &arities)?;
 
-        // Canonicalize after validation, so rejected inputs pay no sorting cost.
+        // Canonicalize only after all validation succeeds.
         let relations = groups
             .into_iter()
-            .map(|(name, buffer)| (name, buffer.canonicalize()))
+            .map(|(name, buf)| (name, buf.canonicalize()))
             .collect();
         rules.sort();
         rules.dedup();
@@ -336,11 +310,11 @@ impl<C: Ord> Database<C> {
             })
             .collect();
         let mut rules_by_head = BTreeMap::<String, Vec<usize>>::new();
-        for (index, compiled) in rules.iter().enumerate() {
+        for (idx, compiled) in rules.iter().enumerate() {
             rules_by_head
                 .entry(compiled.rule.head.relation.name.clone())
                 .or_default()
-                .push(index);
+                .push(idx);
         }
         Ok(Self {
             snapshot: Arc::new(Snapshot {

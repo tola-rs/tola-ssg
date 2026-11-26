@@ -48,7 +48,7 @@ use super::builder::{MainSource, WorldBuildError, WorldBuilder};
 use super::path::normalize_path;
 use super::strategy::{FileAccess, FileCacheMode, FontMode, LibraryMode};
 use crate::world::file::{
-    FileResolver, FileView, Loaded, ReadAttempt, SharedFileCache, file_id_from_path,
+    FileStore, FileView, Loaded, ReadAttempt, SharedFileCache, file_id_from_path,
 };
 use crate::world::library::GLOBAL_LIBRARY;
 
@@ -89,7 +89,7 @@ impl TypstWorld {
     pub(crate) fn new(
         main: MainSource,
         root: &Path,
-        files: Arc<FileResolver>,
+        files: Arc<FileStore>,
         cache: FileCacheMode,
         fonts: FontMode,
         library: LibraryMode,
@@ -190,7 +190,7 @@ impl TypstWorld {
         self.resolver().local_package_path(id)
     }
 
-    fn resolver(&self) -> &FileResolver {
+    fn resolver(&self) -> &FileStore {
         match &self.files {
             FileAccess::Local(files) | FileAccess::Frozen(files) => files.resolver(),
             FileAccess::Live { files, .. } => files,
@@ -204,22 +204,15 @@ impl TypstWorld {
     /// retain attempted paths and package-selection evidence in the second value.
     pub fn read_file_with_evidence(
         &self,
-        id: FileId,
+        fid: FileId,
     ) -> (FileResult<Bytes>, crate::session::AccessedDeps) {
-        let ReadAttempt {
-            result,
-            reads,
-            disk_reads,
-            package_checks,
-        } = self.get_file(id);
-        (
-            result.map(|loaded| loaded.value),
-            crate::session::AccessedDeps {
-                reads: reads.into_iter().collect(),
-                disk_reads,
-                package_checks,
-            },
-        )
+        let attempt = self.get_file(fid);
+        let res = attempt
+            .result
+            .as_ref()
+            .map(|loaded| loaded.value.clone())
+            .map_err(Clone::clone);
+        (res, attempt.into_deps())
     }
 
     /// Reset per-world inputs before another compilation.
@@ -253,43 +246,35 @@ impl TypstWorld {
     pub(crate) fn source_from_read(
         &self,
         files: &FileView,
-        id: FileId,
-        read: ReadAttempt<Bytes>,
+        fid: FileId,
+        attempt: ReadAttempt<Bytes>,
     ) -> ReadAttempt<Loaded<Source>> {
-        if let Some(source) = files.source(id) {
-            return read.map_loaded(|_| Ok(source.value));
+        if let Some(src) = files.source(fid) {
+            return attempt.map_loaded(|_| Ok(src.value));
         }
-        self.parsed.source_from_observation(id, &self.root, read)
+        self.parsed.load_source(fid, &self.root, attempt)
     }
 
     pub(crate) fn file_from_read(
         &self,
         files: &FileView,
-        id: FileId,
-        read: ReadAttempt<Bytes>,
+        fid: FileId,
+        attempt: ReadAttempt<Bytes>,
     ) -> ReadAttempt<Loaded<Bytes>> {
-        if let Some(bytes) = files.file(id) {
-            return read.map_loaded(|_| Ok(bytes.value));
+        if let Some(buf) = files.file(fid) {
+            return attempt.map_loaded(|_| Ok(buf.value));
         }
-        self.parsed.file_from_observation(id, &self.root, read)
+        self.parsed.load_file(fid, &self.root, attempt)
     }
 
-    pub(crate) fn get_source(&self, id: FileId) -> ReadAttempt<Loaded<Source>> {
+    pub(crate) fn get_source(&self, fid: FileId) -> ReadAttempt<Loaded<Source>> {
         let files = self.file_view();
-        self.source_from_read(
-            &files,
-            id,
-            files.read_with_cancellation(id, &self.cancellation),
-        )
+        self.source_from_read(&files, fid, files.read_cancellable(fid, &self.cancellation))
     }
 
-    pub(crate) fn get_file(&self, id: FileId) -> ReadAttempt<Loaded<Bytes>> {
+    pub(crate) fn get_file(&self, fid: FileId) -> ReadAttempt<Loaded<Bytes>> {
         let files = self.file_view();
-        self.file_from_read(
-            &files,
-            id,
-            files.read_with_cancellation(id, &self.cancellation),
-        )
+        self.file_from_read(&files, fid, files.read_cancellable(fid, &self.cancellation))
     }
 }
 
@@ -312,12 +297,12 @@ impl World for TypstWorld {
         self.main
     }
 
-    fn source(&self, id: FileId) -> FileResult<Source> {
-        self.get_source(id).result.map(|loaded| loaded.value)
+    fn source(&self, fid: FileId) -> FileResult<Source> {
+        self.get_source(fid).result.map(|loaded| loaded.value)
     }
 
-    fn file(&self, id: FileId) -> FileResult<Bytes> {
-        self.get_file(id).result.map(|loaded| loaded.value)
+    fn file(&self, fid: FileId) -> FileResult<Bytes> {
+        self.get_file(fid).result.map(|loaded| loaded.value)
     }
 
     fn font(&self, index: usize) -> Option<Font> {
@@ -341,25 +326,25 @@ mod tests {
 
     use super::{TypstWorld, WorldBuildError};
     use crate::world::ExplicitSources;
-    use crate::world::file::{FileResolver, FileView, SharedFileCache};
+    use crate::world::file::{FileStore, FileView, SharedFileCache};
 
     #[test]
-    fn resource_reads_keep_read_evidence() {
-        let directory = TempDir::new().unwrap();
-        let main = directory.path().join("main.typ");
-        let resource = directory.path().join("image.bin");
+    fn resource_read_evidence() {
+        let dir = TempDir::new().unwrap();
+        let main = dir.path().join("main.typ");
+        let res = dir.path().join("image.bin");
         fs::write(&main, "").unwrap();
-        fs::write(&resource, b"original").unwrap();
-        let mut world = TypstWorld::builder(&main, directory.path())
+        fs::write(&res, b"original").unwrap();
+        let mut world = TypstWorld::builder(&main, dir.path())
             .with_local_cache()
             .no_fonts()
             .build(&crate::BundleCancellation::default())
             .unwrap();
         let parsed = Arc::downgrade(&world.parsed);
-        let id = crate::world::file::file_id("image.bin");
-        let (bytes, observed) = world.read_file_with_evidence(id);
-        assert_eq!(bytes.unwrap().as_slice(), b"original");
-        let original = observed
+        let fid = crate::world::file::file_id("image.bin");
+        let (buf, obs) = world.read_file_with_evidence(fid);
+        assert_eq!(buf.unwrap().as_slice(), b"original");
+        let original = obs
             .reads
             .first()
             .expect("a successful read has evidence")
@@ -367,8 +352,8 @@ mod tests {
             .clone();
         assert_eq!(original.digest(), crate::ContentDigest::of(b"original"));
 
-        fs::write(&resource, b"replacement").unwrap();
-        let (retained, retained_reads) = world.read_file_with_evidence(id);
+        fs::write(&res, b"replacement").unwrap();
+        let (retained, retained_reads) = world.read_file_with_evidence(fid);
         assert_eq!(retained.unwrap().as_slice(), b"original");
         assert_eq!(
             retained_reads.reads.first().map(|read| read.evidence()),
@@ -377,7 +362,7 @@ mod tests {
 
         world.reset();
         assert!(parsed.upgrade().is_none());
-        let (current, current_reads) = world.read_file_with_evidence(id);
+        let (current, current_reads) = world.read_file_with_evidence(fid);
         assert_eq!(current.unwrap().as_slice(), b"replacement");
         assert_eq!(
             current_reads
@@ -399,36 +384,33 @@ mod tests {
     }
 
     #[test]
-    fn mismatched_root_fails() {
-        let world_directory = TempDir::new().unwrap();
-        let sources_directory = TempDir::new().unwrap();
-        let main = world_directory.path().join("main.typ");
+    fn mismatched_root() {
+        let world_dir = TempDir::new().unwrap();
+        let src_dir = TempDir::new().unwrap();
+        let main = world_dir.path().join("main.typ");
         fs::write(&main, "= Main").unwrap();
         let sources = Arc::new(
-            ExplicitSources::build(&[], sources_directory.path())
+            ExplicitSources::build(&[], src_dir.path())
                 .unwrap()
                 .into_sources_and_accessed()
                 .0,
         );
 
-        let sources_error = TypstWorld::builder(&main, world_directory.path())
+        let src_err = TypstWorld::builder(&main, world_dir.path())
             .with_sources(Arc::clone(&sources))
             .no_fonts()
             .build(&crate::BundleCancellation::default())
             .err()
             .expect("mismatched sources unexpectedly built");
-        assert!(matches!(
-            sources_error,
-            WorldBuildError::RootMismatch { .. }
-        ));
+        assert!(matches!(src_err, WorldBuildError::RootMismatch { .. }));
 
-        let files = Arc::new(FileView::new(sources, Arc::new(FileResolver::new())));
-        let file_error = TypstWorld::builder(&main, world_directory.path())
+        let files = Arc::new(FileView::new(sources, Arc::new(FileStore::new())));
+        let view_err = TypstWorld::builder(&main, world_dir.path())
             .with_file_view(files, Arc::new(SharedFileCache::new()))
             .no_fonts()
             .build(&crate::BundleCancellation::default())
             .err()
             .expect("mismatched file view unexpectedly built");
-        assert!(matches!(file_error, WorldBuildError::RootMismatch { .. }));
+        assert!(matches!(view_err, WorldBuildError::RootMismatch { .. }));
     }
 }

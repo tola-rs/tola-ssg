@@ -1,18 +1,9 @@
-//! What an `asset(…)` argument publishes, and which published asset URLs an argument may name.
-//!
-//! An asset argument names an output the site creates rather than a file the site already holds,
-//! and it resolves from the site root: `asset("downloads/file.pdf", bytes)` publishes
-//! `public/downloads/file.pdf`. So it answers where the output lands, not where a file is served.
-//!
-//! The second question belongs to `asset-url(declared-url)`: its argument names one of the URLs an
-//! `assets` declaration publishes. The inventory of those URLs is the generator's (`AssetUrls`,
-//! the same view a check resolves against), while the domain an argument has is declared by
-//! the crate that owns the binding (`tola_packages::ARGUMENT_DOMAINS`).
+//! Asset output paths and declared `asset-url` resolution/completion.
 
 use std::path::Path;
 
 use lsp_types::Hover;
-use tola_build::config::ResolvedSiteConfig;
+use tola_build::config::SiteConfig;
 use tola_build::config::section::assets::{AssetUrl, AssetUrlError};
 use tola_build::{AssetOrigin, AssetUrls, PublishedAsset};
 use tola_packages::{ARGUMENT_DOMAINS, ArgumentDomain};
@@ -21,57 +12,44 @@ use tola_typst::typst::syntax::Source;
 
 use crate::position;
 
-/// What the site publishes the asset argument at the offset as, when the offset sits in one.
-pub(super) fn hover(config: &ResolvedSiteConfig, source: &Source, at: usize) -> Option<Hover> {
-    let argument = tola_typst_syntax::syntax::path_argument(source, at)?;
-    if argument.base != tola_typst_syntax::syntax::PathBase::Site {
+/// Hover summary for an `asset(…)` site-root path argument at `at`.
+pub(super) fn hover(cfg: &SiteConfig, src: &Source, at: usize) -> Option<Hover> {
+    let arg = tola_typst_syntax::syntax::path_argument(src, at)?;
+    if arg.base != tola_typst_syntax::syntax::PathBase::Site {
         return None;
     }
-    let range = argument.range;
-    let written_path = source.text().get(range.clone())?;
-    // An output is a logical path below the output root, so a path the Bundle cannot publish names
-    // no output at all: the answer says so rather than staying silent, and the rule the path breaks
-    // goes to the debug log.
-    let described = match published_path(config, written_path) {
-        Ok(published) => format!("Published at `{published}`."),
+    let range = arg.range;
+    let written = src.text().get(range.clone())?;
+    let desc = match published_path(cfg, written) {
+        Ok(out) => format!("Published at `{out}`."),
         Err(rule) => {
             tracing::debug!(%rule, "asset argument names no path the site publishes");
-            format!("`{written_path}` is not a path this site publishes")
+            format!("`{written}` is not a path this site publishes")
         }
     };
     Some(crate::protocol::markdown_hover(
-        described,
-        Some(position::utf16_range(source.lines(), range)?),
+        desc,
+        Some(position::utf16_range(src.lines(), range)?),
     ))
 }
 
-/// The site-relative path one asset argument publishes, or the rule the written path breaks.
-///
-/// The argument takes both spellings of the site root, and the logical output identity comes from
-/// the declaration rule the Bundle itself applies.
-fn published_path(config: &ResolvedSiteConfig, written: &str) -> Result<String, AssetUrlError> {
+fn published_path(cfg: &SiteConfig, written: &str) -> Result<String, AssetUrlError> {
     let declared = format!("/{}", written.trim_start_matches('/'));
     let asset = AssetUrl::parse(&declared)?;
-    let output = config
-        .get_root()
-        .join(&config.build().publish_dir)
+    let out = cfg
+        .root()
+        .join(&cfg.build().publish_dir)
         .join(asset.output_path().as_str());
-    Ok(tola_diagnostic::display_path(&output, config.get_root()))
+    Ok(tola_diagnostic::display_path(&out, cfg.root()))
 }
 
-/// What one written site-root URL resolves to among this site's published asset URLs.
+/// Resolution of a written site-root URL against declared site assets.
 pub(super) enum Written<'a> {
-    /// A declaration publishes it, at the address a browser fetches.
     Published(PublishedAsset<'a>),
-    /// No declaration of this site publishes it.
     Unpublished,
 }
 
-/// Resolve one written site-root URL the way `asset-url` resolves it.
-///
-/// The declaration's own spelling is the key, so the decode happens once here exactly as the
-/// lookup decodes it: `/caf%C3%A9.svg` and `/café.svg` name the one declaration. Everything else
-/// names nothing this site publishes, whether the spelling is wrong or no declaration covers it.
+/// Resolve a written URL by its decoded declaration spelling.
 pub(super) fn written<'a>(urls: &'a AssetUrls, text: &str) -> Written<'a> {
     let declared = decoded_spelling(text);
     urls.published()
@@ -79,10 +57,6 @@ pub(super) fn written<'a>(urls: &'a AssetUrls, text: &str) -> Written<'a> {
         .map_or(Written::Unpublished, Written::Published)
 }
 
-/// Every published URL whose declared spelling starts with `typed`, in declared order.
-///
-/// Completion answers with these, so the order is the inventory's own rather than a preference
-/// this function invents.
 fn matching_declared_urls<'a>(urls: &'a AssetUrls, typed: &str) -> Vec<&'a str> {
     let typed = decoded_spelling(typed);
     urls.published()
@@ -91,38 +65,28 @@ fn matching_declared_urls<'a>(urls: &'a AssetUrls, typed: &str) -> Vec<&'a str> 
         .collect()
 }
 
-/// The domain one named parameter of the function a call reaches declares, when one is declared.
-///
-/// The function is identified by the value's own name rather than by what the call site spells, so
-/// importing the binding under another name, or through another package that re-exports it, keeps
-/// the domain.
-pub(super) fn domain_of(callee: &Func, parameter: &str) -> Option<ArgumentDomain> {
-    let function = callee.name()?;
+/// Domain declared for `param` of `callee`, matched by function identity rather than call-site alias.
+pub(super) fn domain_of(callee: &Func, param: &str) -> Option<ArgumentDomain> {
+    let name = callee.name()?;
     ARGUMENT_DOMAINS
         .iter()
-        .find(|row| row.function == function && row.parameter == parameter)
+        .find(|row| row.function == name && row.parameter == param)
         .map(|row| row.domain)
 }
 
-/// The completion response one written asset-URL argument answers with.
-///
-/// Candidates keep the inventory's own order, and the edit replaces the inside of the argument's
-/// quotes: the insert range covers only what the author has typed, so a client that keeps typing
-/// after accepting a candidate replaces the rest of the quoted spelling. The edit is the
-/// insert-and-replace shape, which the reply boundary projects for a client that did not declare
-/// `completionItem.insertReplaceSupport`.
+/// Completions for a written asset-URL argument, keeping inventory order.
 pub(super) fn url_completions(
     urls: &AssetUrls,
     site_root: &Path,
-    source: &Source,
+    src: &Source,
     typed: &str,
     written: std::ops::Range<usize>,
     cursor: usize,
 ) -> lsp_types::CompletionResponse {
-    let Some(replace) = position::utf16_range(source.lines(), written.clone()) else {
+    let Some(replace) = position::utf16_range(src.lines(), written.clone()) else {
         return lsp_types::CompletionResponse::Array(Vec::new());
     };
-    let Some(insert) = position::utf16_range(source.lines(), written.start..cursor) else {
+    let Some(insert) = position::utf16_range(src.lines(), written.start..cursor) else {
         return lsp_types::CompletionResponse::Array(Vec::new());
     };
     let items = matching_declared_urls(urls, typed)
@@ -147,20 +111,20 @@ pub(super) fn url_completions(
         })
         .collect();
     lsp_types::CompletionResponse::List(lsp_types::CompletionList {
-        // Deploy-root URLs hold no relative navigation, so no candidate is ever withheld.
+        // Deploy-root URLs hold no relative navigation, so no candidate is withheld.
         is_incomplete: false,
         items,
     })
 }
 
-/// The file that declares one written URL, or nothing when the site publishes no such URL.
+/// Definition location for a written asset URL, if declared.
 pub(super) fn written_definition(
     urls: &AssetUrls,
     client_root: &crate::uri::ClientRoot,
-    source: &Source,
+    src: &Source,
     written_range: std::ops::Range<usize>,
 ) -> Option<lsp_types::GotoDefinitionResponse> {
-    let text = source.text().get(written_range)?;
+    let text = src.text().get(written_range)?;
     let Written::Published(asset) = written(urls, text) else {
         return None;
     };
@@ -176,7 +140,7 @@ pub(super) fn written_definition(
     ))
 }
 
-/// How one declaration is named to an author: its own file, or the tree a member came from.
+/// Author-facing note naming the file or tree that declared an asset.
 pub(super) fn declaration_note(origin: &AssetOrigin, site_root: &Path) -> String {
     match origin {
         AssetOrigin::File { source } => {
@@ -192,11 +156,8 @@ pub(super) fn declaration_note(origin: &AssetOrigin, site_root: &Path) -> String
     }
 }
 
-/// One written URL's decoded spelling, as the lookup keys it.
-///
-/// A URL that does not decode is returned as written: completion runs while the author is still
-/// typing, and a half-written escape is not yet a URL.
 fn decoded_spelling(text: &str) -> String {
+    // Keep invalid partial escapes literal while the author is typing.
     AssetUrl::parse(text)
         .map(|url| url.as_str().to_owned())
         .unwrap_or_else(|_| text.to_owned())
@@ -209,15 +170,13 @@ mod tests {
     use super::*;
 
     fn asset_output(written: &str) -> Result<String, AssetUrlError> {
-        let directory = tempfile::tempdir().expect("a site directory");
-        let config = crate::compiler::tests::site_configuration(directory.path(), "");
-        published_path(&config, written)
+        let dir = tempfile::tempdir().expect("a site directory");
+        let cfg = crate::compiler::tests::site_configuration(dir.path(), "");
+        published_path(&cfg, written)
     }
 
-    /// An asset argument publishes below the output root, taking both spellings of the site
-    /// root; a path that leaves the site publishes nothing.
     #[test]
-    fn asset_output_paths_stay_under_the_output_root() {
+    fn asset_output_under_root() {
         for (written, expected) in [
             ("downloads/file.pdf", Some("public/downloads/file.pdf")),
             ("/downloads/file.pdf", Some("public/downloads/file.pdf")),
@@ -235,15 +194,14 @@ mod tests {
         }
     }
 
-    /// A site that declares one exact file and one tree, mounted below `/docs/`.
-    fn site_with_declared_assets() -> (tempfile::TempDir, Arc<ResolvedSiteConfig>) {
-        let directory = tempfile::tempdir().expect("a site directory");
-        let root = directory.path();
+    fn site_with_assets() -> (tempfile::TempDir, Arc<SiteConfig>) {
+        let dir = tempfile::tempdir().expect("a site directory");
+        let root = dir.path();
         std::fs::create_dir_all(root.join("brand")).expect("a tree directory");
         std::fs::write(root.join("brand/logo.svg"), b"<svg></svg>").expect("a tree member");
         std::fs::write(root.join("app.js"), "export {}").expect("a declared file");
         std::fs::write(root.join("图.svg"), b"<svg></svg>").expect("a declared file");
-        let config = crate::compiler::tests::site_configuration(
+        let cfg = crate::compiler::tests::site_configuration(
             root,
             concat!(
                 "[site]\nbase-path = \"/docs/\"\n\n",
@@ -253,35 +211,30 @@ mod tests {
                 "trees = [{ source = \"brand\", url-prefix = \"/brand\" }]\n",
             ),
         );
-        (directory, config)
+        (dir, cfg)
     }
 
-    fn published_urls(config: &ResolvedSiteConfig) -> AssetUrls {
-        AssetUrls::for_check_project(config, &Default::default(), &Default::default())
+    fn published_urls(cfg: &SiteConfig) -> AssetUrls {
+        AssetUrls::for_check_project(cfg, &Default::default(), &Default::default())
             .expect("the site's asset URLs resolve")
     }
 
     #[test]
-    fn url_completion_replaces_written_url() {
-        let (_directory, config) = site_with_declared_assets();
-        let urls = published_urls(&config);
-        let source = Source::detached("#asset-url(\"/brand/\")".to_owned());
-        let written = source.text().find("/brand/").expect("the written url");
-        let written = written..written + "/brand/".len();
-        let cursor = written.end;
+    fn url_completion_replaces_written() {
+        let (_dir, cfg) = site_with_assets();
+        let urls = published_urls(&cfg);
+        let src = Source::detached("#asset-url(\"/brand/\")".to_owned());
+        let span = src.text().find("/brand/").expect("the written url");
+        let span = span..span + "/brand/".len();
+        let cursor = span.end;
 
-        let lsp_types::CompletionResponse::List(list) = url_completions(
-            &urls,
-            config.get_root(),
-            &source,
-            "/brand/",
-            written,
-            cursor,
-        ) else {
+        let lsp_types::CompletionResponse::List(list) =
+            url_completions(&urls, cfg.root(), &src, "/brand/", span, cursor)
+        else {
             panic!("a completion list")
         };
 
-        assert!(!list.is_incomplete, "a deploy-root URL withholds nothing");
+        assert!(!list.is_incomplete);
         assert_eq!(
             list.items
                 .iter()
@@ -295,27 +248,20 @@ mod tests {
         };
         assert_eq!(edit.new_text, "/brand/logo.svg");
         assert_eq!(edit.insert.start, edit.replace.start);
-        assert_eq!(
-            edit.insert.end, edit.replace.end,
-            "everything typed is replaced"
-        );
+        assert_eq!(edit.insert.end, edit.replace.end);
     }
 
     #[test]
-    fn declared_url_resolves_to_its_address() {
-        let (_directory, config) = site_with_declared_assets();
-        let urls = published_urls(&config);
+    fn declared_url_resolves() {
+        let (_dir, cfg) = site_with_assets();
+        let urls = published_urls(&cfg);
 
         let Written::Published(asset) = written(&urls, "/brand/logo.svg") else {
             panic!("the tree member is published")
         };
         assert_eq!(asset.declared, "/brand/logo.svg");
-        assert_eq!(
-            asset.address, "/docs/brand/logo.svg",
-            "the key is the declaration and the address has the mount"
-        );
-        // The declaration spells `/図.svg` and is written here percent-encoded, which is how
-        // the lookup decodes it too: one declaration, however it is spelled.
+        assert_eq!(asset.address, "/docs/brand/logo.svg");
+
         let Written::Published(encoded) = written(&urls, "/%E5%9B%BE.svg") else {
             panic!("the encoded spelling names the declaration")
         };

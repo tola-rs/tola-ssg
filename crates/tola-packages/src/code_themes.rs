@@ -1,10 +1,6 @@
-//! The code themes `@tola/code` carries: the catalog, the embedded files, and the values a site
-//! names.
+//! Embedded code highlighting themes carried by `@tola/code`.
 //!
-//! Every embedded file is one catalog row: the name a site writes (the `code-themes` key and the
-//! file stem), the appearance its palette is designed for, and the upstream project, revision,
-//! source file, and licence the data comes from. The licence audit record mirrored from these
-//! rows is `licenses/README.md` beside this crate's manifest.
+//! `licenses/README.md` beside this crate's manifest mirrors the upstream attribution rows.
 
 use std::sync::LazyLock;
 
@@ -13,34 +9,29 @@ use typst::syntax::{RootedPath, VirtualPath, VirtualRoot};
 
 use crate::builtin::TolaPackage;
 
-/// The `@tola/code` directory holding one file per theme.
+/// Directory under `@tola/code` holding one file per theme.
 pub const THEME_DIRECTORY: &str = "code-themes";
 
-// The packed theme files: their package paths, offsets, and lengths.
 include!(concat!(env!("OUT_DIR"), "/theme_files.rs"));
 
-/// The carried theme files, compressed by the build and decoded by the first lookup.
 static THEME_BYTES: LazyLock<Vec<u8>> = LazyLock::new(|| {
     let mut bytes = miniz_oxide::inflate::decompress_to_vec_zlib(include_bytes!(concat!(
         env!("OUT_DIR"),
         "/code-themes.z"
     )))
-    .expect("the carried theme files are the stream the build wrote");
-    // The bytes back every theme file for the process, so their growth slack is not kept.
+    .expect("bundled theme archive is valid zlib");
     bytes.shrink_to_fit();
     bytes
 });
 
-/// The embedded bytes of the theme file at `file`.
 pub(crate) fn file_contents(file: &str) -> &'static str {
-    let (_, offset, length) = THEME_FILES
+    let (_, offset, len) = THEME_FILES
         .iter()
         .find(|(path, _, _)| *path == file)
-        .expect("a catalog theme names a theme file the build carries");
-    std::str::from_utf8(&THEME_BYTES[*offset..*offset + *length]).expect("a theme file is UTF-8")
+        .expect("catalog theme references a bundled file");
+    std::str::from_utf8(&THEME_BYTES[*offset..*offset + *len]).expect("theme file is UTF-8")
 }
 
-/// Every code theme the package carries, in catalog order.
 const A11Y_SOURCE: ThemeSource = ThemeSource {
     project: "ericwbailey/a11y-syntax-highlighting",
     revision: "3200c11458e415933ca33ced7cdc3b4cf428c93b",
@@ -52,32 +43,26 @@ pub fn themes() -> &'static [CodeTheme] {
     CODE_THEMES
 }
 
-/// The name of every theme as a site writes it, in catalog order.
+/// Names of all offered themes in catalog order.
 pub fn theme_names() -> impl Iterator<Item = &'static str> {
-    themes().iter().map(|theme| theme.name)
+    themes().iter().map(|t| t.name)
 }
 
-/// The package-relative path of the theme named `name`, or `None` for a name the package does
-/// not offer.
+/// Package-relative path of the theme `name`, if offered.
 pub fn theme_file(name: &str) -> Option<&'static str> {
-    themes()
-        .iter()
-        .find(|theme| theme.name == name)
-        .map(|theme| theme.file)
+    themes().iter().find(|t| t.name == name).map(|t| t.file)
 }
 
-/// The `code-themes` host value: every theme name mapped to the package-anchored path of the
-/// file that colors it.
+/// `code-themes` host dictionary mapping each theme name to its package-anchored path.
 pub fn themes_dict() -> Dict {
-    let mut dict = Dict::new();
-    for theme in themes() {
+    let pkg = TolaPackage::Code.spec();
+    crate::dict(themes().iter().map(|t| {
         let path = RootedPath::new(
-            VirtualRoot::Package(TolaPackage::Code.spec()),
-            VirtualPath::new(theme.file).expect("a theme file path is virtualizable"),
+            VirtualRoot::Package(pkg.clone()),
+            VirtualPath::new(t.file).expect("theme path is virtualizable"),
         );
-        dict.insert(theme.name.into(), path.into_value());
-    }
-    dict
+        (t.name, path.into_value())
+    }))
 }
 
 /// One code theme `@tola/code` carries.
@@ -438,81 +423,38 @@ static CODE_THEMES: &[CodeTheme] = &[
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
     use std::sync::Arc;
 
-    use tola_typst::{
-        BundleCancellation, FileMap, FileProvider, FileResolver, FileTarget, TypstWorld,
-        compile_world, file_id,
-    };
+    use tola_typst::compile_world;
     use typst::foundations::{Module, Scope, Value};
-    use typst::syntax::FileId;
 
     use super::*;
-    use crate::builtin::TOLA_NAMESPACE;
     use crate::protocol::HOST_MODULE;
-    /// One site's sources, then the builtin packages serving their own files.
-    struct SiteFiles(FileMap);
-
-    impl FileProvider for SiteFiles {
-        fn target(&self, id: FileId) -> Option<FileTarget> {
-            if let Some(target) = self.0.target(id) {
-                return Some(target);
-            }
-            let VirtualRoot::Package(spec) = id.root() else {
-                return None;
-            };
-            let path = Path::new(id.vpath().get_with_slash().trim_start_matches('/'));
-            TolaPackage::from_spec(spec)
-                .and_then(|package| package.file(path))
-                .map(|bytes| FileTarget::Bytes(Arc::from(bytes.into_owned().into_bytes())))
-        }
-
-        fn owned_namespaces(&self) -> &'static [&'static str] {
-            &[TOLA_NAMESPACE]
-        }
-    }
+    use crate::test_support::{file_map, test_world};
 
     #[test]
-    fn offered_themes_load_from_package_paths() {
-        let mut source = String::from("#import \"@tola/host:0.0.0\": code-themes\n");
-        for theme in themes() {
-            source.push_str(&format!(
+    fn themes_load_in_world() {
+        let mut src = String::from("#import \"@tola/host:0.0.0\": code-themes\n");
+        for t in themes() {
+            src.push_str(&format!(
                 "#raw(\"let x = 1\", lang: \"rust\", block: true, theme: code-themes.{})\n",
-                theme.name
+                t.name
             ));
         }
 
-        let mut sources = FileMap::new();
-        sources.insert(file_id("main.typ"), source.into_bytes());
-
         let mut scope = Scope::new();
         scope.define("code-themes", themes_dict());
-        let mut inputs = Dict::new();
-        inputs.insert(
-            HOST_MODULE.into(),
-            Value::Module(Module::new(HOST_MODULE, scope)),
+        let inputs = crate::dict([(HOST_MODULE, Value::Module(Module::new(HOST_MODULE, scope)))]);
+        let world = test_world(
+            "tola-code-themes",
+            file_map(&[("main.typ", &src)]),
+            Arc::new(tola_typst::create_library_with_inputs(inputs)),
         );
-
-        let root = std::env::temp_dir().join("tola-code-themes");
-        let main = root.join("main.typ");
-        let world = TypstWorld::builder(&main, &root)
-            .with_files(Arc::new(
-                FileResolver::new().with_provider(SiteFiles(sources)),
-            ))
-            .with_local_cache()
-            .no_fonts()
-            .with_shared_library(Arc::new(tola_typst::create_library_with_inputs(inputs)))
-            .build(&BundleCancellation::default())
-            .expect("a valid theme check world");
 
         let html = compile_world(&world)
-            .expect("every offered theme loads from its package path")
+            .expect("all offered themes load")
             .html()
-            .expect("the check document exports to HTML");
-        assert!(
-            String::from_utf8_lossy(&html).contains("style=\"color:"),
-            "the loaded themes color the rendered code"
-        );
+            .expect("theme test exports to HTML");
+        assert!(String::from_utf8_lossy(&html).contains("style=\"color:"));
     }
 }

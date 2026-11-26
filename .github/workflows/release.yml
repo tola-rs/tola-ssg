@@ -133,7 +133,6 @@ jobs:
             os: ubuntu-24.04-arm
             packages: musl-tools
             cargo_jobs: '2'
-          # The GNU-linked Linux archives link the system OpenSSL each runner carries.
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             packages: ''

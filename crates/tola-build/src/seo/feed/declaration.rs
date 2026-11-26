@@ -11,7 +11,7 @@ use super::{
     target::resolve_target,
 };
 use crate::cancellation::{BuildCancellation, BuildCancelled};
-use crate::config::ResolvedSiteConfig;
+use crate::config::SiteConfig;
 use crate::seo::RenderError;
 use crate::seo::declaration::{
     SeoDeclaration, SeoDeclarationError, field_path, index_path, published_date,
@@ -127,7 +127,7 @@ impl EntryText {
 impl Feed {
     pub(super) fn parse(
         declaration: &SeoDeclaration,
-        config: &ResolvedSiteConfig,
+        config: &SiteConfig,
         compilation: &tola_typst::BundleCompilation,
         cancellation: &BuildCancellation,
         document_contents: &mut DocumentContents<'_>,
@@ -256,7 +256,7 @@ struct FeedMetadata {
 
 fn feed_metadata(
     declaration: &SeoDeclaration,
-    config: &ResolvedSiteConfig,
+    config: &SiteConfig,
     cancellation: &BuildCancellation,
 ) -> Result<FeedMetadata, RenderError> {
     let fields = &declaration.fields;

@@ -98,7 +98,7 @@ pub(crate) fn source_id_with_packages(
     {
         return Ok(tola_typst::file_id_from_path(&path, root));
     }
-    let resolver = tola_typst::FileResolver::new()
+    let resolver = tola_typst::FileStore::new()
         .with_source_boundary(boundary.clone())
         .with_local_packages(Arc::clone(local_packages));
     let spelled = crate::uri::file_path_of(&url)?;
@@ -276,7 +276,7 @@ pub(crate) fn package_file_path(
         return None;
     };
     let package =
-        tola_typst::PackageStore::new(locations.clone(), tola_typst::PackageFetchPolicy::LocalOnly)
+        tola_typst::PackageStore::new(locations.clone(), tola_typst::PackageFetchMode::LocalOnly)
             .with_source_boundary(boundary.clone())
             .prepare(spec)
             .ok()?;
@@ -295,7 +295,7 @@ pub(crate) fn package_file_path_with_packages(
         return None;
     };
     if local_packages.package(spec).is_some() || local_packages.owns_namespace(&spec.namespace) {
-        return tola_typst::FileResolver::new()
+        return tola_typst::FileStore::new()
             .with_source_boundary(boundary.clone())
             .with_local_packages(Arc::clone(local_packages))
             .local_package_path(id)

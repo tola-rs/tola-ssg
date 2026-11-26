@@ -7,23 +7,23 @@ use std::path::Path;
 use crate::ReplaceDirectoryError;
 
 pub(crate) fn replace_directory(
-    source: &Path,
-    target: &Path,
-    previous: &Path,
+    src: &Path,
+    dst: &Path,
+    prev: &Path,
 ) -> Result<(), ReplaceDirectoryError> {
-    let replaced = match fs::rename(target, previous) {
+    let replaced = match fs::rename(dst, prev) {
         Ok(()) => true,
-        Err(error) if error.kind() == ErrorKind::NotFound => false,
-        Err(error) => return Err(error.into()),
+        Err(err) if err.kind() == ErrorKind::NotFound => false,
+        Err(err) => return Err(err.into()),
     };
-    if let Err(error) = fs::rename(source, target) {
+    if let Err(err) = fs::rename(src, dst) {
         if replaced {
-            fs::rename(previous, target).map_err(|source| ReplaceDirectoryError::Restore {
+            fs::rename(prev, dst).map_err(|source| ReplaceDirectoryError::Restore {
                 source,
-                previous: previous.to_owned(),
+                previous: prev.to_owned(),
             })?;
         }
-        return Err(error.into());
+        return Err(err.into());
     }
     Ok(())
 }

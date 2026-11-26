@@ -5,12 +5,10 @@ use syn::{Type, ext::IdentExt};
 use crate::config::attr::{
     CollectionShape, ConfigAttrScope, ConfigAttrs, FieldStatus, extract_doc_comment,
 };
-use crate::config::field_type::{
-    is_collection_type, is_direct_named_config_type, is_vec_type, vec_element_type,
-};
 use crate::config::serde::parse_serde_field;
+use crate::config::ty::{is_collection, is_nested_config, is_vec, vec_elem};
 
-/// A configuration field with validated attributes and its canonical TOML key.
+/// Validated configuration field with its canonical TOML key.
 pub struct ConfigField {
     pub rust_ident: syn::Ident,
     pub toml_name: String,
@@ -27,9 +25,6 @@ pub struct ConfigField {
 }
 
 impl ConfigField {
-    /// Parse a configuration field from its Rust declaration.
-    ///
-    /// The derive accepts only structs with named fields, so every field has an identifier.
     pub fn from_field(field: &syn::Field) -> syn::Result<Self> {
         Self::parse(field, false)
     }
@@ -43,48 +38,47 @@ impl ConfigField {
             .ident
             .as_ref()
             .expect("a named field has an identifier");
-        let attrs = ConfigAttrs::parse(&field.attrs, ConfigAttrScope::Field)?;
-        if attrs.skip && attrs.collection.is_some() {
+        let attr = ConfigAttrs::parse(&field.attrs, ConfigAttrScope::Field)?;
+        if attr.skip && attr.collection.is_some() {
             return Err(syn::Error::new_spanned(
                 ident,
                 "collection cannot be combined with #[config(skip)]",
             ));
         }
-        match attrs.collection {
-            Some(CollectionShape::ArrayTable) if !is_vec_type(&field.ty) => {
+        match attr.collection {
+            Some(CollectionShape::ArrayTable) if !is_vec(&field.ty) => {
                 return Err(syn::Error::new_spanned(
                     ident,
                     "collection = array_table requires a Vec<T> field",
                 ));
             }
             Some(CollectionShape::ArrayTable)
-                if vec_element_type(&field.ty)
-                    .is_none_or(|element| !is_direct_named_config_type(element)) =>
+                if vec_elem(&field.ty).is_none_or(|el| !is_nested_config(el)) =>
             {
                 return Err(syn::Error::new_spanned(
                     ident,
                     "collection = array_table requires Vec<T> where T is a direct named type that derives Config",
                 ));
             }
-            Some(CollectionShape::ArrayTable) if !attrs.sub => {
+            Some(CollectionShape::ArrayTable) if !attr.sub => {
                 return Err(syn::Error::new_spanned(
                     ident,
                     "collection = array_table requires a non-skipped #[config(sub)] Vec<T> field",
                 ));
             }
-            Some(CollectionShape::Inline) if attrs.sub => {
+            Some(CollectionShape::Inline) if attr.sub => {
                 return Err(syn::Error::new_spanned(
                     ident,
                     "collection = inline cannot be combined with #[config(sub)]",
                 ));
             }
-            Some(CollectionShape::Inline) if !is_collection_type(&field.ty) => {
+            Some(CollectionShape::Inline) if !is_collection(&field.ty) => {
                 return Err(syn::Error::new_spanned(
                     ident,
                     "collection = inline requires a Vec<T> or Option<Vec<T>> field",
                 ));
             }
-            None if !fragment && !attrs.skip && is_collection_type(&field.ty) => {
+            None if !fragment && !attr.skip && is_collection(&field.ty) => {
                 return Err(syn::Error::new_spanned(
                     ident,
                     "Vec<T> fields require #[config(collection = inline)] or #[config(collection = array_table)]",
@@ -92,36 +86,35 @@ impl ConfigField {
             }
             _ => {}
         }
-        if attrs.sub && attrs.skip {
+        if attr.sub && attr.skip {
             return Err(syn::Error::new_spanned(
                 ident,
                 "#[config(sub)] cannot be combined with #[config(skip)]",
             ));
         }
-        if attrs.sub
-            && attrs.collection != Some(CollectionShape::ArrayTable)
-            && !is_direct_named_config_type(&field.ty)
+        if attr.sub
+            && attr.collection != Some(CollectionShape::ArrayTable)
+            && !is_nested_config(&field.ty)
         {
             return Err(syn::Error::new_spanned(
                 ident,
                 "#[config(sub)] requires a direct named field type that derives Config",
             ));
         }
-        if attrs.sub {
-            refuse_section_documentation(field)?;
+        if attr.sub {
+            refuse_section_doc(field)?;
         }
         let deserialize_skip =
-            super::serde::fragment_field(&field.attrs, attrs.fragment_with.is_some())?;
-        let (serde_name, key_span) =
-            parse_serde_field(&field.attrs, attrs.skip || fragment, ident)?;
-        let toml_name = match (attrs.name, serde_name) {
-            (Some(config_name), Some(serde_name)) if config_name != serde_name => {
+            super::serde::fragment_field(&field.attrs, attr.fragment_with.is_some())?;
+        let (serde_name, key_span) = parse_serde_field(&field.attrs, attr.skip || fragment, ident)?;
+        let toml_name = match (attr.name, serde_name) {
+            (Some(cfg_name), Some(serde_name)) if cfg_name != serde_name => {
                 return Err(syn::Error::new_spanned(
                     ident,
-                    format!("config name {config_name} does not match serde rename {serde_name}"),
+                    format!("config name {cfg_name} does not match serde rename {serde_name}"),
                 ));
             }
-            (Some(config_name), Some(_)) => config_name,
+            (Some(cfg_name), Some(_)) => cfg_name,
             (Some(_), None) => {
                 return Err(syn::Error::new_spanned(
                     ident,
@@ -139,47 +132,35 @@ impl ConfigField {
             rust_ident: ident.clone(),
             toml_name,
             doc: extract_doc_comment(&field.attrs),
-            status: attrs.status.unwrap_or(FieldStatus::Normal),
-            values: attrs.values,
-            default: attrs.default,
-            skip: attrs.skip,
-            sub: attrs.sub,
-            collection: attrs.collection,
+            status: attr.status.unwrap_or(FieldStatus::Normal),
+            values: attr.values,
+            default: attr.default,
+            skip: attr.skip,
+            sub: attr.sub,
+            collection: attr.collection,
             ty: field.ty.clone(),
-            fragment_with: attrs.fragment_with,
+            fragment_with: attr.fragment_with,
             deserialize_skip,
         })
     }
 }
 
 impl ConfigField {
-    /// The section whose documentation this key carries, when the key opens one.
-    ///
-    /// A `#[config(sub)]` field writes a table, or a table per element for an array table, and
-    /// that section's own declaration documents the key.
     pub fn section_type(&self) -> Option<&Type> {
         if !self.sub {
             return None;
         }
         match self.collection {
-            Some(CollectionShape::ArrayTable) => vec_element_type(&self.ty),
+            Some(CollectionShape::ArrayTable) => vec_elem(&self.ty),
             _ => Some(&self.ty),
         }
     }
 }
 
-/// Reject documentation on the key that opens a section.
-///
-/// The field path is the section's own table, so the section's declaration is the one place its
-/// documentation stays true; a comment here would be a second copy to keep in step.
-fn refuse_section_documentation(field: &syn::Field) -> syn::Result<()> {
-    const REFUSAL: &str = "a #[config(sub)] field takes its documentation from the section type, so document the section there";
-    if let Some(attribute) = field
-        .attrs
-        .iter()
-        .find(|attribute| attribute.path().is_ident("doc"))
-    {
-        return Err(syn::Error::new_spanned(attribute, REFUSAL));
+fn refuse_section_doc(field: &syn::Field) -> syn::Result<()> {
+    const MSG: &str = "a #[config(sub)] field takes its documentation from the section type, so document the section there";
+    if let Some(attr) = field.attrs.iter().find(|a| a.path().is_ident("doc")) {
+        return Err(syn::Error::new_spanned(attr, MSG));
     }
     Ok(())
 }
@@ -200,7 +181,7 @@ mod tests {
     use syn::parse_quote;
 
     #[test]
-    fn incompatible_field_declarations_are_refused() {
+    fn invalid_fields_refused() {
         let fields: Vec<syn::Field> = vec![
             parse_quote! { #[serde(flatten)] settings: Settings },
             parse_quote! { #[serde(rename(serialize = "other"))] value: String },

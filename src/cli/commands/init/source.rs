@@ -224,19 +224,7 @@ pub(super) fn generate(
     );
     super::validate::scaffold(&writes, args.force)?;
 
-    let mut proposed = FileWrites::new(&validation)?;
-    for path in writes.directory_paths() {
-        proposed.add_directory(writes.relative_path(path))?;
-    }
-    for path in writes.file_paths() {
-        let relative = writes.relative_path(path);
-        let contents = if relative == Path::new("tola.toml") {
-            text.as_bytes()
-        } else {
-            writes.file_contents(relative).expect("planned file exists")
-        };
-        proposed.create_file(relative, contents)?;
-    }
+    let proposed = copy_writes(&validation, &writes, &text, false)?;
     proposed.apply(&cancellation.token())?;
 
     let source =
@@ -314,22 +302,7 @@ pub(super) fn generate(
             set_lock_source(entry, &module.source);
         }
     }
-    let mut result = FileWrites::new(target)?;
-    for path in writes.directory_paths() {
-        result.add_directory(writes.relative_path(path))?;
-    }
-    for path in writes.file_paths() {
-        let relative = writes.relative_path(path);
-        if relative == Path::new(tola_input::LOCK_FILE) && mode.may_write_lock() {
-            continue;
-        }
-        let contents = if relative == Path::new("tola.toml") {
-            text.as_bytes()
-        } else {
-            writes.file_contents(relative).expect("planned file exists")
-        };
-        result.create_file(relative, contents)?;
-    }
+    let mut result = copy_writes(target, &writes, &text, mode.may_write_lock())?;
     if mode.may_write_lock() {
         result.create_file(tola_input::LOCK_FILE, final_lock.to_toml()?)?;
     }
@@ -338,6 +311,31 @@ pub(super) fn generate(
         _workspace: temporary,
         caches,
     })
+}
+
+fn copy_writes(
+    root: &Path,
+    src: &FileWrites,
+    cfg_text: &str,
+    skip_lock: bool,
+) -> Result<FileWrites> {
+    let mut dst = FileWrites::new(root)?;
+    for path in src.directory_paths() {
+        dst.add_directory(src.relative_path(path))?;
+    }
+    for path in src.file_paths() {
+        let rel = src.relative_path(path);
+        if skip_lock && rel == Path::new(tola_input::LOCK_FILE) {
+            continue;
+        }
+        let contents = if rel == Path::new("tola.toml") {
+            cfg_text.as_bytes()
+        } else {
+            src.file_contents(rel).expect("planned file exists")
+        };
+        dst.create_file(rel, contents)?;
+    }
+    Ok(dst)
 }
 
 /// Preserve the selected initializer's declared source in the generated configuration.
@@ -588,34 +586,37 @@ mod tests {
     use super::*;
 
     #[test]
-    fn generated_source_replaces_temporary_paths_and_keeps_options() {
-        let declaration: ModuleDeclaration = toml::from_str(
+    fn register_source_keeps_options() {
+        let decl: ModuleDeclaration = toml::from_str(
             "git = { url = 'https://github.com/example/theme', branch = 'preview', subdir = 'theme' }",
-        ).unwrap();
+        )
+        .unwrap();
         let text = register_source(
             "[modules.theme]\npath = '/temporary/download'\n[modules.theme.options]\ntitle = 'My site'\n",
-            "theme", &declaration.source,
-        ).unwrap();
-        let value: toml::Value = toml::from_str(&text).unwrap();
-        let module = &value["modules"]["theme"];
-        assert!(module.get("path").is_none());
-        assert_eq!(module["options"]["title"].as_str(), Some("My site"));
-        let selected: ModuleDeclaration = module.clone().try_into().unwrap();
-        assert_eq!(selected.source, declaration.source);
+            "theme",
+            &decl.source,
+        )
+        .unwrap();
+        let val: toml::Value = toml::from_str(&text).unwrap();
+        let mod_val = &val["modules"]["theme"];
+        assert!(mod_val.get("path").is_none());
+        assert_eq!(mod_val["options"]["title"].as_str(), Some("My site"));
+        let selected: ModuleDeclaration = mod_val.clone().try_into().unwrap();
+        assert_eq!(selected.source, decl.source);
     }
 
     #[cfg(unix)]
     #[test]
-    fn validation_keeps_external_state_read_only() {
-        let temporary = tempfile::tempdir().unwrap();
-        let root = temporary.path().canonicalize().unwrap();
+    fn validation_keeps_external_read_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
         let site = root.join("site");
         let validation = root.join("validation");
-        let external = root.join("external");
-        for path in [&site, &validation, &external] {
+        let ext = root.join("external");
+        for path in [&site, &validation, &ext] {
             fs::create_dir(path).unwrap();
         }
-        let lock = external.join("lock");
+        let lock = ext.join("lock");
         fs::write(&lock, "original").unwrap();
         std::os::unix::fs::symlink(&lock, site.join("tola.lock")).unwrap();
         snapshot(
@@ -628,7 +629,7 @@ mod tests {
         .unwrap();
         fs::write(validation.join("tola.lock"), "changed").unwrap();
         assert_eq!(fs::read_to_string(&lock).unwrap(), "original");
-        std::os::unix::fs::symlink(&external, site.join(".tola")).unwrap();
+        std::os::unix::fs::symlink(&ext, site.join(".tola")).unwrap();
         assert!(
             snapshot(
                 &site,
@@ -643,9 +644,9 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn existing_resolved_before_parent_components() {
-        let temporary = tempfile::tempdir().unwrap();
-        let root = temporary.path().canonicalize().unwrap();
+    fn existing_resolved_before_parents() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
         let target = root.join("target");
         let validation = root.join("validation");
         fs::create_dir_all(validation.join("actual/child")).unwrap();
@@ -658,9 +659,9 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_omits_its_own_workspace() {
-        let temporary = tempfile::tempdir().unwrap();
-        let root = temporary.path().canonicalize().unwrap();
+    fn snapshot_omits_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
         let validation = root.join("workspace/validation");
         fs::create_dir_all(&validation).unwrap();
         fs::write(root.join("input.txt"), "source").unwrap();
@@ -681,23 +682,15 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn candidate_rejected_before_target_writes() {
-        let temporary = tempfile::tempdir().unwrap();
-        let candidate = temporary.path().join("candidate");
-        fs::create_dir(&candidate).unwrap();
-        fs::write(candidate.join("actual"), "value").unwrap();
-        std::os::unix::fs::symlink("actual", candidate.join("alias")).unwrap();
-        let target = temporary.path().join("target");
+    fn candidate_rejected_before_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let cand = dir.path().join("candidate");
+        fs::create_dir(&cand).unwrap();
+        fs::write(cand.join("actual"), "value").unwrap();
+        std::os::unix::fs::symlink("actual", cand.join("alias")).unwrap();
+        let target = dir.path().join("target");
         let mut writes = FileWrites::new(&target).unwrap();
-        assert!(
-            collect(
-                &candidate,
-                &candidate,
-                &mut writes,
-                &Cancellation::default()
-            )
-            .is_err()
-        );
+        assert!(collect(&cand, &cand, &mut writes, &Cancellation::default()).is_err());
         assert!(!target.exists());
     }
 }

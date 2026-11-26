@@ -601,46 +601,44 @@ mod tests {
     use super::*;
     use std::fs;
 
-    /// A canonical temporary directory whose handle is opened before any rename, so a
-    /// passing assertion proves the checked path stayed bound to the opened entry.
     fn pinned_root() -> (tempfile::TempDir, PathBuf, Directory) {
-        let temporary = tempfile::tempdir().unwrap();
-        let path = fs::canonicalize(temporary.path()).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = fs::canonicalize(dir.path()).unwrap();
         let directory = Directory::open_existing(&path).unwrap();
-        (temporary, path, directory)
+        (dir, path, directory)
     }
 
     #[test]
-    fn missing_file_read_creates_nothing() {
-        let root = tempfile::tempdir().unwrap();
-        let files = FileWrites::new(root.path()).unwrap();
-        assert_eq!(files.read_file(".vscode/settings.json").unwrap(), None);
-        assert!(!root.path().join(".vscode").exists());
+    fn missing_read_creates_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let writes = FileWrites::new(dir.path()).unwrap();
+        assert_eq!(writes.read_file(".vscode/settings.json").unwrap(), None);
+        assert!(!dir.path().join(".vscode").exists());
     }
 
     #[test]
     #[cfg(unix)]
-    fn reads_reject_out_of_root_sources() {
-        let root = tempfile::tempdir().unwrap();
-        let outside = tempfile::tempdir().unwrap();
-        let target = outside.path().join("settings.json");
+    fn reads_reject_outside_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let target = out.path().join("settings.json");
         fs::write(&target, "private external contents").unwrap();
-        std::os::unix::fs::symlink(&target, root.path().join("file-link")).unwrap();
-        std::os::unix::fs::symlink(outside.path(), root.path().join("directory-link")).unwrap();
+        std::os::unix::fs::symlink(&target, dir.path().join("file-link")).unwrap();
+        std::os::unix::fs::symlink(out.path(), dir.path().join("directory-link")).unwrap();
         assert!(
             std::process::Command::new("mkfifo")
                 .args(["-m", "600"])
-                .arg(root.path().join("pipe"))
+                .arg(dir.path().join("pipe"))
                 .status()
                 .unwrap()
                 .success()
         );
-        let files = FileWrites::new(root.path()).unwrap();
+        let writes = FileWrites::new(dir.path()).unwrap();
 
-        assert!(files.read_file("file-link").is_err());
-        assert!(files.read_file("directory-link/settings.json").is_err());
-        assert!(files.read_file("pipe").is_err());
-        assert!(files.read_file("../settings.json").is_err());
+        assert!(writes.read_file("file-link").is_err());
+        assert!(writes.read_file("directory-link/settings.json").is_err());
+        assert!(writes.read_file("pipe").is_err());
+        assert!(writes.read_file("../settings.json").is_err());
         assert_eq!(
             fs::read_to_string(target).unwrap(),
             "private external contents"
@@ -648,79 +646,75 @@ mod tests {
     }
 
     #[test]
-    fn publication_keeps_competing_save() {
-        let (_temporary, path, directory) = pinned_root();
-        let staged = directory.stage(b"ours", "tmp").unwrap();
+    fn publish_keeps_competing_save() {
+        let (_tmp, path, dir) = pinned_root();
+        let staged = dir.stage(b"ours", "tmp").unwrap();
         fs::write(path.join("settings"), b"editor save").unwrap();
-        assert!(
-            directory
-                .publish(&staged.name, OsStr::new("settings"))
-                .is_err()
-        );
+        assert!(dir.publish(&staged.name, OsStr::new("settings")).is_err());
         assert_eq!(fs::read(path.join("settings")).unwrap(), b"editor save");
-        assert_eq!(directory.read(&staged.name).unwrap(), b"ours");
+        assert_eq!(dir.read(&staged.name).unwrap(), b"ours");
     }
 
     #[cfg(unix)]
     #[test]
-    fn symlinked_directory_redirects_nothing() {
-        let root = tempfile::tempdir().unwrap();
-        let outside = tempfile::tempdir().unwrap();
-        std::os::unix::fs::symlink(outside.path(), root.path().join("templates")).unwrap();
-        let mut writes = FileWrites::new(root.path()).unwrap();
+    fn symlinked_dir_redirects_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(out.path(), dir.path().join("templates")).unwrap();
+        let mut writes = FileWrites::new(dir.path()).unwrap();
         writes.create_file("templates/page.typ", "inside").unwrap();
         assert!(writes.apply(&Default::default()).is_err());
-        assert!(!outside.path().join("page.typ").exists());
+        assert!(!out.path().join("page.typ").exists());
     }
 
     #[cfg(unix)]
     #[test]
-    fn intermediate_links_are_not_followed() {
-        let root = tempfile::tempdir().unwrap();
-        fs::create_dir_all(root.path().join("real/nested")).unwrap();
-        fs::write(root.path().join("real/nested/settings"), b"original").unwrap();
-        std::os::unix::fs::symlink("real", root.path().join("alias")).unwrap();
-        let mut writes = FileWrites::new(root.path()).unwrap();
+    fn intermediate_links_not_followed() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("real/nested")).unwrap();
+        fs::write(dir.path().join("real/nested/settings"), b"original").unwrap();
+        std::os::unix::fs::symlink("real", dir.path().join("alias")).unwrap();
+        let mut writes = FileWrites::new(dir.path()).unwrap();
         assert!(writes.read_file("alias/nested/settings").is_err());
         writes
             .create_file("alias/nested/created/page.typ", b"ours")
             .unwrap();
         assert!(writes.apply(&Default::default()).is_err());
-        assert!(!root.path().join("real/nested/created").exists());
+        assert!(!dir.path().join("real/nested/created").exists());
         assert_eq!(
-            fs::read(root.path().join("real/nested/settings")).unwrap(),
+            fs::read(dir.path().join("real/nested/settings")).unwrap(),
             b"original"
         );
     }
 
     #[cfg(windows)]
     #[test]
-    fn intermediate_junctions_are_not_followed() {
+    fn intermediate_junctions_not_followed() {
         use std::os::windows::fs::MetadataExt;
         use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
 
-        let root = tempfile::tempdir().unwrap();
-        let target = root.path().join("real");
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("real");
         fs::create_dir_all(target.join("nested")).unwrap();
         fs::write(target.join("nested/settings"), b"original").unwrap();
-        let junction = root.path().join("junction");
-        let output = std::process::Command::new("cmd.exe")
+        let junction = dir.path().join("junction");
+        let out = std::process::Command::new("cmd.exe")
             .args(["/D", "/C", "mklink", "/J"])
             .arg(&junction)
             .arg(&target)
             .output()
             .unwrap();
         assert!(
-            output.status.success(),
+            out.status.success(),
             "cannot create junction: {}",
-            String::from_utf8_lossy(&output.stderr)
+            String::from_utf8_lossy(&out.stderr)
         );
         assert_ne!(
             fs::symlink_metadata(&junction).unwrap().file_attributes()
                 & FILE_ATTRIBUTE_REPARSE_POINT,
             0
         );
-        let mut writes = FileWrites::new(root.path()).unwrap();
+        let mut writes = FileWrites::new(dir.path()).unwrap();
         assert!(writes.read_file("junction/nested/settings").is_err());
         writes
             .create_file("junction/nested/created/page.typ", b"ours")
@@ -736,16 +730,16 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn directory_handle_survives_symlink_swap() {
-        let root = tempfile::tempdir().unwrap();
-        let outside = tempfile::tempdir().unwrap();
-        let root = fs::canonicalize(root.path()).unwrap();
+    fn dir_handle_survives_symlink_swap() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(dir.path()).unwrap();
         let path = root.join("templates");
         fs::create_dir(&path).unwrap();
-        let directory = Directory::open_existing(&path).unwrap();
+        let handle = Directory::open_existing(&path).unwrap();
         fs::rename(&path, root.join("original")).unwrap();
-        std::os::unix::fs::symlink(outside.path(), &path).unwrap();
-        directory
+        std::os::unix::fs::symlink(out.path(), &path).unwrap();
+        handle
             .replace(
                 OsStr::new("page.typ"),
                 None,
@@ -755,36 +749,36 @@ mod tests {
             )
             .unwrap();
         assert_eq!(fs::read(root.join("original/page.typ")).unwrap(), b"inside");
-        assert!(!outside.path().join("page.typ").exists());
+        assert!(!out.path().join("page.typ").exists());
     }
 
     #[cfg(unix)]
     #[test]
-    fn renamed_ancestors_keep_their_handle() {
-        let root = tempfile::tempdir().unwrap();
-        let root = fs::canonicalize(root.path()).unwrap();
+    fn renamed_ancestors_keep_handle() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(dir.path()).unwrap();
         let path = root.join("parent/nested");
         fs::create_dir_all(&path).unwrap();
         fs::write(path.join("settings"), b"original").unwrap();
-        let directory = Directory::open_existing(&path).unwrap();
+        let handle = Directory::open_existing(&path).unwrap();
         fs::rename(root.join("parent"), root.join("moved")).unwrap();
         fs::create_dir_all(&path).unwrap();
         fs::write(path.join("settings"), b"unrelated").unwrap();
 
         let name = OsStr::new("settings");
-        let previous = directory
+        let prev = handle
             .replace(name, Some(b"original"), b"ours", None, &Default::default())
             .unwrap();
         let moved = root.join("moved/nested");
         assert_eq!(fs::read(moved.join(name)).unwrap(), b"ours");
         assert_eq!(fs::read(path.join(name)).unwrap(), b"unrelated");
-        directory.rollback(name, b"ours", previous).unwrap();
+        handle.rollback(name, b"ours", prev).unwrap();
         assert_eq!(fs::read(moved.join(name)).unwrap(), b"original");
         assert_eq!(fs::read(path.join(name)).unwrap(), b"unrelated");
         assert_eq!(
             fs::read_dir(moved)
                 .unwrap()
-                .map(|entry| entry.unwrap().file_name())
+                .map(|e| e.unwrap().file_name())
                 .collect::<Vec<_>>(),
             vec![OsString::from("settings")]
         );
@@ -792,15 +786,15 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn ancestors_stay_pinned_until_close() {
-        let root = tempfile::tempdir().unwrap();
-        let root = fs::canonicalize(root.path()).unwrap();
+    fn ancestors_pinned_until_close() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(dir.path()).unwrap();
         let path = root.join("parent/nested");
         fs::create_dir_all(&path).unwrap();
-        let directory = Directory::open_existing(&path).unwrap();
+        let handle = Directory::open_existing(&path).unwrap();
 
         assert!(fs::rename(root.join("parent"), root.join("moved")).is_err());
-        directory
+        handle
             .replace(
                 OsStr::new("settings"),
                 None,
@@ -809,7 +803,7 @@ mod tests {
                 &Default::default(),
             )
             .unwrap();
-        drop(directory);
+        drop(handle);
         fs::rename(root.join("parent"), root.join("moved")).unwrap();
         assert_eq!(
             fs::read(root.join("moved/nested/settings")).unwrap(),
@@ -818,27 +812,25 @@ mod tests {
     }
 
     #[test]
-    fn conflict_retains_the_displaced_version() {
-        let (_temporary, path, directory) = pinned_root();
+    fn conflict_keeps_displaced() {
+        let (_tmp, path, dir) = pinned_root();
         fs::write(path.join("settings"), b"editor save").unwrap();
         assert!(
-            directory
-                .replace(
-                    OsStr::new("settings"),
-                    Some(b"expected"),
-                    b"ours",
-                    None,
-                    &Default::default()
-                )
-                .is_err()
+            dir.replace(
+                OsStr::new("settings"),
+                Some(b"expected"),
+                b"ours",
+                None,
+                &Default::default()
+            )
+            .is_err()
         );
         assert_eq!(fs::read(path.join("settings")).unwrap(), b"editor save");
         let saved = fs::read_dir(&path)
             .unwrap()
-            .map(|entry| entry.unwrap().path())
-            .find(|entry| {
-                entry
-                    .file_name()
+            .map(|e| e.unwrap().path())
+            .find(|e| {
+                e.file_name()
                     .unwrap()
                     .to_string_lossy()
                     .starts_with(".tola-")
@@ -848,10 +840,10 @@ mod tests {
     }
 
     #[test]
-    fn rollback_keeps_later_editor_save() {
-        let (_temporary, path, directory) = pinned_root();
+    fn rollback_keeps_competing_save() {
+        let (_tmp, path, dir) = pinned_root();
         fs::write(path.join("settings"), b"original").unwrap();
-        let previous = directory
+        let prev = dir
             .replace(
                 OsStr::new("settings"),
                 Some(b"original"),
@@ -861,37 +853,33 @@ mod tests {
             )
             .unwrap();
         fs::write(path.join("settings"), b"editor save").unwrap();
-        assert!(
-            directory
-                .rollback(OsStr::new("settings"), b"ours", previous)
-                .is_err()
-        );
+        assert!(dir.rollback(OsStr::new("settings"), b"ours", prev).is_err());
         assert_eq!(fs::read(path.join("settings")).unwrap(), b"editor save");
-        let versions = fs::read_dir(&path)
+        let versions: Vec<_> = fs::read_dir(&path)
             .unwrap()
-            .map(|entry| fs::read(entry.unwrap().path()).unwrap())
-            .collect::<Vec<_>>();
-        assert!(versions.iter().any(|bytes| bytes == b"original"));
-        assert!(versions.iter().any(|bytes| bytes == b"editor save"));
+            .map(|e| fs::read(e.unwrap().path()).unwrap())
+            .collect();
+        assert!(versions.iter().any(|b| b == b"original"));
+        assert!(versions.iter().any(|b| b == b"editor save"));
     }
 
     #[test]
     fn cancellation_creates_nothing() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().join("site");
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("site");
         let mut writes = FileWrites::new(&root).unwrap();
         writes.create_file("site.typ", "Hello").unwrap();
-        let canceller = tola_build::cancellation::BuildCanceller::default();
-        canceller.cancel();
-        let error = writes.apply(&canceller.token()).unwrap_err();
-        assert!(error.is::<tola_build::cancellation::BuildCancelled>());
+        let cancel = tola_build::cancellation::BuildCanceller::default();
+        cancel.cancel();
+        let err = writes.apply(&cancel.token()).unwrap_err();
+        assert!(err.is::<tola_build::cancellation::BuildCancelled>());
         assert!(!root.exists());
     }
 
     #[test]
-    fn conflict_is_detected_before_writing() {
-        let temporary = tempfile::tempdir().unwrap();
-        let root = temporary.path().join("site");
+    fn conflict_detected_before_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("site");
         fs::create_dir(&root).unwrap();
         fs::write(root.join("second"), "occupied").unwrap();
         let mut writes = FileWrites::new(&root).unwrap();
@@ -903,9 +891,9 @@ mod tests {
     }
 
     #[test]
-    fn failed_write_restores_every_target() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path();
+    fn failed_write_restores_targets() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
         fs::write(root.join("settings.toml"), "original").unwrap();
         let mut writes = FileWrites::new(root).unwrap();
         writes.replace_file("settings.toml", "replacement").unwrap();
@@ -920,9 +908,9 @@ mod tests {
     }
 
     #[test]
-    fn nested_targets_apply_once() {
-        let temporary = tempfile::tempdir().unwrap();
-        let root = temporary.path().join("site");
+    fn nested_targets_apply() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("site");
         let mut writes = FileWrites::new(&root).unwrap();
         writes.add_directory("content/posts").unwrap();
         writes
@@ -942,8 +930,8 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         for mode in [0o600, 0o755] {
             for fail in [false, true] {
-                let temporary = tempfile::tempdir().unwrap();
-                let root = temporary.path();
+                let dir = tempfile::tempdir().unwrap();
+                let root = dir.path();
                 let path = root.join("script.nu");
                 fs::write(&path, "original").unwrap();
                 fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();

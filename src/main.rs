@@ -13,7 +13,6 @@ mod dev;
 mod editor;
 mod embed;
 mod help;
-mod i18n;
 mod sys;
 mod terminal;
 mod tree;

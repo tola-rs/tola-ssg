@@ -1,4 +1,4 @@
-//! Decoded site-root paths and the percent encoding at browser boundaries.
+//! Decoded site-root paths and percent-encoding at browser boundaries.
 
 use std::borrow::{Borrow, Cow};
 use std::fmt;
@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::portable::{
-    MAX_PORTABLE_SEGMENT_BYTES, PortablePathError, is_control_character, validate_portable_segment,
+    MAX_PORTABLE_SEGMENT_BYTES, PortablePathError, is_control_char, validate_portable_segment,
 };
 use crate::link::split_destination;
 
@@ -26,11 +26,7 @@ const PATH_SEGMENT_ENCODE_SET: &AsciiSet = &CONTROLS
     .add(b'{')
     .add(b'}');
 
-/// Bytes no URI has literally: the control set, the space, and the other ASCII characters
-/// outside the set RFC 3986 allows.
-///
-/// `?`, `#`, and `%` are URI syntax and stay as written, so a target keeps its separators and an
-/// existing escape keeps its spelling; `[` and `]` are gen-delims a URI may hold.
+// `?`, `#`, `%`, `[`, `]` stay unencoded so query/fragment separators and existing escapes remain intact.
 const URI_ENCODE_SET: &AsciiSet = &CONTROLS
     .add(b' ')
     .add(b'"')
@@ -43,11 +39,9 @@ const URI_ENCODE_SET: &AsciiSet = &CONTROLS
     .add(b'|')
     .add(b'}');
 
-/// A decoded site-root path with portable filesystem segments.
+/// Decoded site-root path with portable filesystem segments.
 ///
-/// The trailing slash is part of the value: `/x/` names a directory and `/x` names a file, and no
-/// lookup may substitute one for the other. Everything after the leading `/` is a decoded filename
-/// segment, so a literal `%` or `#` is a name character until [`Self::to_encoded`] renders it.
+/// Trailing slashes are significant: `/x/` names a directory and `/x` names a file.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct UrlPath(Arc<str>);
 
@@ -92,22 +86,15 @@ pub enum UrlPathError {
 }
 
 impl UrlPath {
-    /// Parse one percent-encoded site-root path, decoding escapes exactly once.
-    ///
-    /// The trailing slash is preserved. This is a path-only input: `?` and `#` are rejected before
-    /// decoding, so a filename with one of them must escape it, and an escaped `/` or `\`
-    /// cannot introduce a hierarchy level.
-    pub fn parse(encoded_site_path: &str) -> Result<Self, UrlPathError> {
-        validate_encoded_path(encoded_site_path)?;
-        let decoded = decode_percent_path(encoded_site_path)?;
+    /// Parse a percent-encoded site-root path, decoding escapes exactly once.
+    pub fn parse(raw: &str) -> Result<Self, UrlPathError> {
+        validate_encoded_path(raw)?;
+        let decoded = decode_percent_path(raw)?;
         Self::validate_decoded(&decoded)?;
         Ok(Self(Arc::from(decoded)))
     }
 
-    /// Construct a path from decoded text, preserving its spelling and case.
-    ///
-    /// No percent decoding happens and no URL delimiter is interpreted: a literal `%` or `#` is
-    /// part of the filename.
+    /// Construct a path from decoded text without percent-decoding (`%` and `#` stay literal).
     pub fn from_decoded(path: &str) -> Result<Self, UrlPathError> {
         if path.trim() != path {
             return Err(UrlPathError::SurroundingWhitespace);
@@ -123,34 +110,33 @@ impl UrlPath {
         if path.contains('\0') {
             return Err(UrlPathError::Nul);
         }
-        if path.chars().any(is_control_character) {
+        if path.chars().any(is_control_char) {
             return Err(UrlPathError::Control);
         }
         if path.starts_with("//") {
             return Err(UrlPathError::Authority);
         }
         let body = path.strip_prefix('/').ok_or(UrlPathError::MissingRoot)?;
-        let segments = body.strip_suffix('/').unwrap_or(body);
-        if segments.is_empty() {
+        let segs = body.strip_suffix('/').unwrap_or(body);
+        if segs.is_empty() {
             return Ok(());
         }
-        for (index, segment) in segments.split('/').enumerate() {
-            if segment.is_empty() {
+        for (idx, seg) in segs.split('/').enumerate() {
+            if seg.is_empty() {
                 return Err(UrlPathError::EmptySegment);
             }
-            if segment == "." || segment == ".." {
+            if seg == "." || seg == ".." {
                 return Err(UrlPathError::DotSegment);
             }
-            validate_portable_segment(segment, index == 0).map_err(map_portable_path_error)?;
+            validate_portable_segment(seg, idx == 0).map_err(map_portable_path_error)?;
         }
         Ok(())
     }
 
-    /// Wrap decoded text that already satisfies the segment rules.
     pub(super) fn from_validated_decoded(path: String) -> Self {
         debug_assert!(
             Self::validate_decoded(&path).is_ok(),
-            "a derived route is a valid decoded site path"
+            "derived route must be a valid decoded site path"
         );
         Self(Arc::from(path))
     }
@@ -165,55 +151,44 @@ impl UrlPath {
         self.as_str()
             .trim_matches('/')
             .split('/')
-            .filter(|segment| !segment.is_empty())
+            .filter(|seg| !seg.is_empty())
             .map(super::portable::portable_collision_key)
             .collect()
     }
 
-    /// Percent-encode for a browser URL, including non-ASCII and special characters.
+    /// Percent-encode for a browser URL.
     pub fn to_encoded(&self) -> String {
-        let mut encoded = String::with_capacity(self.0.len());
-        self.push_encoded(&mut encoded);
-        encoded
+        let mut buf = String::with_capacity(self.0.len());
+        self.push_encoded(&mut buf);
+        buf
     }
 
     /// Append this path's percent-encoded spelling, including its leading `/`.
-    ///
-    /// A caller filling a buffer it owns writes one fewer whole-string copy than
-    /// [`Self::to_encoded`] would.
-    pub(crate) fn push_encoded(&self, encoded: &mut String) {
-        for (index, segment) in self.0.split('/').enumerate() {
-            if index > 0 {
-                encoded.push('/');
+    pub(crate) fn push_encoded(&self, buf: &mut String) {
+        for (idx, seg) in self.0.split('/').enumerate() {
+            if idx > 0 {
+                buf.push('/');
             }
-            for chunk in utf8_percent_encode(segment, PATH_SEGMENT_ENCODE_SET) {
-                encoded.push_str(chunk);
+            for chunk in utf8_percent_encode(seg, PATH_SEGMENT_ENCODE_SET) {
+                buf.push_str(chunk);
             }
         }
     }
 }
 
-/// One site-root browser reference: the decoded route it spelled, plus the suffix that is not
-/// identity.
-///
-/// The route keeps the spelling the reference used, including its trailing slash: `/x/` names a
-/// directory and `/x` names a file. The query and fragment never take part in output identity; a
-/// resolver looks the route up and only the final document checks a fragment's target.
+/// Site-root browser reference: decoded route plus optional query and serialized fragment.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SiteReference {
+pub struct SiteRef {
     pub route: UrlPath,
     pub query: Option<String>,
-    /// Serialized fragment without `#`; its interpretation belongs to the target media type.
+    /// Serialized fragment without `#`.
     pub fragment: Option<String>,
 }
 
-impl SiteReference {
-    /// Parse one percent-encoded site-root reference.
-    ///
-    /// The query and fragment are split before the path is decoded, so an escaped `%3F` or `%23`
-    /// stays a filename character.
-    pub fn parse(encoded_site_reference: &str) -> Result<Self, UrlPathError> {
-        let parts = split_destination(encoded_site_reference);
+impl SiteRef {
+    /// Parse a percent-encoded site-root reference, splitting query/fragment before decoding the path.
+    pub fn parse(raw: &str) -> Result<Self, UrlPathError> {
+        let parts = split_destination(raw);
         Ok(Self {
             route: UrlPath::parse(parts.path)?,
             query: parts.query.map(str::to_owned),
@@ -221,11 +196,11 @@ impl SiteReference {
         })
     }
 
-    /// Decode a fragment for consumers that compare decoded identifiers.
+    /// Decode the fragment for comparing decoded identifiers.
     pub fn decoded_fragment(&self) -> Option<Cow<'_, str>> {
         self.fragment
             .as_deref()
-            .map(|fragment| percent_decode_str(fragment).decode_utf8_lossy())
+            .map(|frag| percent_decode_str(frag).decode_utf8_lossy())
     }
 
     /// Render the mounted route with its query and serialized fragment intact.
@@ -235,24 +210,19 @@ impl SiteReference {
         origin: Option<&crate::SiteOrigin>,
     ) -> String {
         let mut url = crate::browser_url(&self.route, mount, origin);
-        if let Some(query) = &self.query {
+        if let Some(q) = &self.query {
             url.push('?');
-            url.push_str(query);
+            url.push_str(q);
         }
-        if let Some(fragment) = &self.fragment {
+        if let Some(frag) = &self.fragment {
             url.push('#');
-            url.push_str(fragment);
+            url.push_str(frag);
         }
         url
     }
 }
 
-/// A location a browser should request next, derived from the target it just used.
-///
-/// A location must be a URI: every byte that URI syntax leaves out is percent-encoded, while the
-/// bytes it has keep the spelling the request itself used — `?` and `#` stay separators, an
-/// escaped target such as `%e6%96%87` stays lowercase, and other non-ASCII text becomes UTF-8
-/// escapes.
+/// Percent-encode URI-illegal bytes in `target` while keeping `?`, `#`, and existing `%` escapes.
 pub fn browser_location(target: &str) -> String {
     utf8_percent_encode(target, URI_ENCODE_SET).to_string()
 }
@@ -276,8 +246,8 @@ fn validate_encoded_path(raw: &str) -> Result<(), UrlPathError> {
     Ok(())
 }
 
-fn map_portable_path_error(error: PortablePathError) -> UrlPathError {
-    match error {
+fn map_portable_path_error(err: PortablePathError) -> UrlPathError {
+    match err {
         PortablePathError::FilesystemPrefix => UrlPathError::FilesystemPrefix,
         PortablePathError::UnsafeCharacter => UrlPathError::FilesystemUnsafeCharacter,
         PortablePathError::TrailingDotOrSpace => UrlPathError::FilesystemTrailingDotOrSpace,
@@ -291,36 +261,36 @@ fn map_portable_path_error(error: PortablePathError) -> UrlPathError {
 
 fn decode_percent_path(raw: &str) -> Result<String, UrlPathError> {
     let bytes = raw.as_bytes();
-    let mut decoded = Vec::with_capacity(bytes.len());
-    let mut index = 0;
+    let mut buf = Vec::with_capacity(bytes.len());
+    let mut idx = 0;
 
-    while index < bytes.len() {
-        if bytes[index] != b'%' {
-            decoded.push(bytes[index]);
-            index += 1;
+    while idx < bytes.len() {
+        if bytes[idx] != b'%' {
+            buf.push(bytes[idx]);
+            idx += 1;
             continue;
         }
-        if index + 2 >= bytes.len() {
+        if idx + 2 >= bytes.len() {
             return Err(UrlPathError::InvalidPercentEncoding);
         }
-        let high = hex_value(bytes[index + 1]).ok_or(UrlPathError::InvalidPercentEncoding)?;
-        let low = hex_value(bytes[index + 2]).ok_or(UrlPathError::InvalidPercentEncoding)?;
-        let byte = (high << 4) | low;
-        if matches!(byte, b'/' | b'\\') {
+        let hi = hex_val(bytes[idx + 1]).ok_or(UrlPathError::InvalidPercentEncoding)?;
+        let lo = hex_val(bytes[idx + 2]).ok_or(UrlPathError::InvalidPercentEncoding)?;
+        let b = (hi << 4) | lo;
+        if matches!(b, b'/' | b'\\') {
             return Err(UrlPathError::EncodedSeparator);
         }
-        decoded.push(byte);
-        index += 3;
+        buf.push(b);
+        idx += 3;
     }
 
-    String::from_utf8(decoded).map_err(|_| UrlPathError::InvalidUtf8)
+    String::from_utf8(buf).map_err(|_| UrlPathError::InvalidUtf8)
 }
 
-fn hex_value(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
+fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
         _ => None,
     }
 }
@@ -352,8 +322,8 @@ impl Borrow<str> for UrlPath {
 impl FromStr for UrlPath {
     type Err = UrlPathError;
 
-    fn from_str(encoded_site_path: &str) -> Result<Self, Self::Err> {
-        Self::parse(encoded_site_path)
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        Self::parse(raw)
     }
 }
 
@@ -370,22 +340,15 @@ impl PartialEq<&str> for UrlPath {
 }
 
 impl Serialize for UrlPath {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        self.0.serialize(serializer)
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        self.0.serialize(s)
     }
 }
 
 impl<'de> Deserialize<'de> for UrlPath {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        // `Serialize` writes the decoded value, so the wire form is decoded: a literal `%` or
-        // `#` round-trips, where `parse` would read a bare `%` as malformed percent encoding.
-        let s = String::deserialize(deserializer)?;
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        // Wire form is decoded (`Serialize` emits `self.0`), so literal `%`/`#` round-trip.
+        let s = String::deserialize(d)?;
         Self::from_decoded(&s).map_err(serde::de::Error::custom)
     }
 }
@@ -393,10 +356,13 @@ impl<'de> Deserialize<'de> for UrlPath {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tests::test_support::url_path;
+
+    fn url_path(raw: &str) -> UrlPath {
+        UrlPath::parse(raw).unwrap()
+    }
 
     #[test]
-    fn trailing_slash_is_preserved() {
+    fn trailing_slash() {
         for raw in ["/", "/notes/", "/notes", "/notes.txt", "/a/b.html", "/a/b/"] {
             assert_eq!(url_path(raw).as_str(), raw);
             assert_eq!(UrlPath::from_decoded(raw).unwrap().as_str(), raw);
@@ -404,7 +370,7 @@ mod tests {
     }
 
     #[test]
-    fn encoded_paths_decode_once() {
+    fn percent_decode() {
         for (raw, expected) in [
             ("/posts/%E4%B8%AD%E6%96%87/", "/posts/中文/"),
             ("/posts/hello%20world/", "/posts/hello world/"),
@@ -424,7 +390,7 @@ mod tests {
     }
 
     #[test]
-    fn query_and_fragment_are_refused() {
+    fn invalid_urls() {
         for raw in [
             "/posts/hello?v=1",
             "/posts/hello#section",
@@ -436,8 +402,9 @@ mod tests {
             assert!(UrlPath::parse(raw).is_err(), "accepted {raw:?}");
         }
     }
+
     #[test]
-    fn literal_percent_and_hash_survive() {
+    fn literal_percent_hash() {
         for raw in ["/100%/", "/a#b", "/a%b/c#d"] {
             let decoded = UrlPath::from_decoded(raw).unwrap();
             assert_eq!(decoded.as_str(), raw);
@@ -448,7 +415,7 @@ mod tests {
     }
 
     #[test]
-    fn encoded_and_decoded_paths_refuse_ambiguity() {
+    fn dot_and_separator_errors() {
         for raw in ["/%2e%2e/outside/", "//host/path", "/a//b/", "/con/"] {
             assert!(UrlPath::parse(raw).is_err(), "accepted {raw:?}");
         }
@@ -456,15 +423,16 @@ mod tests {
             assert!(UrlPath::from_decoded(raw).is_err(), "accepted {raw:?}");
         }
     }
+
     #[test]
-    fn unicode_encodes_at_the_browser_boundary() {
+    fn unicode_encode() {
         let decoded = UrlPath::from_decoded("/中文 hello").unwrap();
         assert_eq!(decoded.as_str(), "/中文 hello");
         assert_eq!(decoded.to_encoded(), "/%E4%B8%AD%E6%96%87%20hello");
     }
 
     #[test]
-    fn nonportable_segments_are_refused() {
+    fn nonportable_segments() {
         for raw in [
             "/con/",
             "/AUX.txt/",
@@ -481,19 +449,19 @@ mod tests {
     }
 
     #[test]
-    fn segment_length_limit_is_enforced() {
-        let accepted = format!("/{}/", "a".repeat(MAX_PORTABLE_SEGMENT_BYTES));
-        assert!(UrlPath::parse(&accepted).is_ok());
+    fn segment_length_limit() {
+        let ok = format!("/{}/", "a".repeat(MAX_PORTABLE_SEGMENT_BYTES));
+        assert!(UrlPath::parse(&ok).is_ok());
 
-        let rejected = format!("/{}/", "A".repeat(MAX_PORTABLE_SEGMENT_BYTES + 1));
+        let too_long = format!("/{}/", "A".repeat(MAX_PORTABLE_SEGMENT_BYTES + 1));
         assert!(matches!(
-            UrlPath::parse(&rejected),
+            UrlPath::parse(&too_long),
             Err(UrlPathError::OutputSegmentTooLong { .. })
         ));
     }
 
     #[test]
-    fn site_reference_spells_the_route() {
+    fn site_ref_route() {
         for (raw, route) in [
             ("/", "/"),
             ("/notes", "/notes"),
@@ -504,55 +472,54 @@ mod tests {
             ("/100%25", "/100%"),
             ("/a%23b/", "/a#b/"),
         ] {
-            assert_eq!(SiteReference::parse(raw).unwrap().route.as_str(), route);
+            assert_eq!(SiteRef::parse(raw).unwrap().route.as_str(), route);
         }
     }
 
     #[test]
-    fn site_reference_splits_query_and_fragment() {
-        let reference = SiteReference::parse("/search/?q=rust#res%20ults").unwrap();
+    fn site_ref_parts() {
+        let site_ref = SiteRef::parse("/search/?q=rust#res%20ults").unwrap();
+        assert_eq!(site_ref.route.as_str(), "/search/");
+        assert_eq!(site_ref.query.as_deref(), Some("q=rust"));
+        assert_eq!(site_ref.fragment.as_deref(), Some("res%20ults"));
+        assert_eq!(site_ref.decoded_fragment().as_deref(), Some("res ults"));
 
-        assert_eq!(reference.route.as_str(), "/search/");
-        assert_eq!(reference.query.as_deref(), Some("q=rust"));
-        assert_eq!(reference.fragment.as_deref(), Some("res%20ults"));
-        assert_eq!(reference.decoded_fragment().as_deref(), Some("res ults"));
-
-        let bare = SiteReference::parse("/about.html").unwrap();
+        let bare = SiteRef::parse("/about.html").unwrap();
         assert_eq!(bare.query, None);
         assert_eq!(bare.fragment, None);
     }
 
     #[test]
-    fn site_reference_reports_path_errors() {
+    fn site_ref_errors() {
         for raw in ["/%2F/", "/../outside/", "relative", "", "/a%00b"] {
-            assert!(SiteReference::parse(raw).is_err(), "accepted {raw:?}");
+            assert!(SiteRef::parse(raw).is_err(), "accepted {raw:?}");
         }
     }
 
     #[test]
-    fn mounted_reference_preserves_suffixes() {
-        let reference = SiteReference::parse("/100%25/?q=1#part%2520x").unwrap();
+    fn site_ref_browser_url() {
+        let site_ref = SiteRef::parse("/100%25/?q=1#part%2520x").unwrap();
         let mount = crate::SiteUrlMount::from_base_path("/docs/").unwrap();
         assert_eq!(
-            reference.to_browser_url(&mount, None),
+            site_ref.to_browser_url(&mount, None),
             "/docs/100%25/?q=1#part%2520x"
         );
         let origin = crate::SiteOrigin::parse("https://example.test").unwrap();
         assert_eq!(
-            reference.to_browser_url(&mount, Some(&origin)),
+            site_ref.to_browser_url(&mount, Some(&origin)),
             "https://example.test/docs/100%25/?q=1#part%2520x"
         );
     }
 
     #[test]
-    fn location_encodes_uri_illegal_bytes() {
-        for (target, location) in [
+    fn browser_location_encode() {
+        for (target, expected) in [
             ("/a b\"c<d>e", "/a%20b%22c%3Cd%3Ee"),
             ("/a\\b^c`d", "/a%5Cb%5Ec%60d"),
             ("/a{b}|c", "/a%7Bb%7D%7Cc"),
             ("/café/?q=naïve#a b", "/caf%C3%A9/?q=na%C3%AFve#a%20b"),
         ] {
-            assert_eq!(browser_location(target), location, "{target:?}");
+            assert_eq!(browser_location(target), expected, "{target:?}");
         }
     }
 }

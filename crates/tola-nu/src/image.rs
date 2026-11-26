@@ -65,8 +65,8 @@ impl Command for Metadata {
         call: &Call,
         input: PipelineData,
     ) -> Result<PipelineData, ShellError> {
-        let source = call.opt::<Option<String>>(engine, stack, 0)?.flatten();
-        let bytes = image_input(source.as_deref(), input, engine, call.head)?;
+        let src = opt_str(call, engine, stack, 0)?;
+        let bytes = image_input(src.as_deref(), input, engine, call.head)?;
         metadata_result(&bytes, engine, call.head)
     }
 }
@@ -78,54 +78,54 @@ struct Resize {
 }
 
 impl Resize {
-    fn svg_pixels(
-        &self,
-        bytes: Vec<u8>,
-        request: ResizeRequest,
-        engine: &EngineState,
-        stack: &Stack,
-        span: Span,
-    ) -> Result<(ResampledPixels, ImageRecipe), ShellError> {
-        let fonts = self
+    fn svg_fonts(&self, span: Span) -> Result<&Arc<FontStore>, ShellError> {
+        Ok(self
             .host
             .get()
             .and_then(|host| host.svg_fonts.as_ref())
             .map(Result::as_ref)
             .transpose()
-            .map_err(|error| image_error(error.as_str(), span))?
-            .unwrap_or(&self.fonts);
-        let cancellation = engine
+            .map_err(|err| image_error(err.as_str(), span))?
+            .unwrap_or(&self.fonts))
+    }
+
+    fn svg_pixels(
+        &self,
+        bytes: Vec<u8>,
+        req: ResizeRequest,
+        engine: &EngineState,
+        stack: &Stack,
+        span: Span,
+    ) -> Result<(ResampledPixels, ImageRecipe), ShellError> {
+        let fonts = self.svg_fonts(span)?;
+        let cancel = engine
             .signals()
             .interrupt_flag()
             .map_or_else(BundleCancellation::new, BundleCancellation::from_flag);
-        let directory = engine.cwd(Some(stack))?;
-        let svg = SvgSource::parse_with_fonts(
-            Bytes::new(bytes),
-            directory.as_ref(),
-            fonts.clone(),
-            &cancellation,
-        );
+        let dir = engine.cwd(Some(stack))?;
+        let svg =
+            SvgSource::parse_with_fonts(Bytes::new(bytes), dir.as_ref(), fonts.clone(), &cancel);
         engine.signals().check(&span)?;
-        let svg = svg.map_err(|error| image_error(error.to_string(), span))?;
-        let (width, height) = svg.pixel_dimensions();
+        let svg = svg.map_err(|err| image_error(err.to_string(), span))?;
+        let (w, h) = svg.pixel_dimensions();
         let recipe = ImageRecipe::resolve_svg(
             (svg.width(), svg.height()),
-            request.with_source_size(width, height),
+            req.with_source_size(w, h),
             SvgRender::new(svg.hash()),
         )
-        .map_err(|error| image_error(error.to_string(), span))?;
-        let pixels = recipe.pixels();
-        let crop = pixels
+        .map_err(|err| image_error(err.to_string(), span))?;
+        let px = recipe.pixels();
+        let crop = px
             .vector_geometry()
             .expect("an SVG recipe has a source rectangle")
             .crop();
         engine.signals().check(&span)?;
-        let rgba = svg.render(pixels.width(), pixels.height(), Some(crop.into()));
+        let rgba = svg.render(px.width(), px.height(), Some(crop.into()));
         engine.signals().check(&span)?;
-        let rgba = rgba.map_err(|error| image_error(error.to_string(), span))?;
+        let rgba = rgba.map_err(|err| image_error(err.to_string(), span))?;
         let cancelled = || engine.signals().interrupted();
-        let rendered = ResampledPixels::from_rendered(pixels, rgba, &cancelled)
-            .map_err(|error| render_error(error, span))?;
+        let rendered = ResampledPixels::from_rendered(px, rgba, &cancelled)
+            .map_err(|err| render_error(err, span))?;
         Ok((rendered, recipe))
     }
 }
@@ -168,49 +168,59 @@ impl Command for Resize {
         call: &Call,
         input: PipelineData,
     ) -> Result<PipelineData, ShellError> {
-        let options: Record = call.req(engine, stack, 0)?;
-        let request = resize_request(&options)?;
-        let source = call.opt::<Option<String>>(engine, stack, 1)?.flatten();
-        let destination = call.opt::<Option<String>>(engine, stack, 2)?.flatten();
-        let bytes = image_input(source.as_deref(), input, engine, call.head)?;
-        let output = destination
-            .map(|path| Ok::<_, ShellError>((temporary_output(&path, call.head)?, path)))
+        let span = call.head;
+        let opts: Record = call.req(engine, stack, 0)?;
+        let req = resize_request(&opts)?;
+        let src = opt_str(call, engine, stack, 1)?;
+        let dst = opt_str(call, engine, stack, 2)?;
+        let bytes = image_input(src.as_deref(), input, engine, span)?;
+        let out_file = dst
+            .map(|path| Ok::<_, ShellError>((temporary_output(&path, span)?, path)))
             .transpose()?;
-        let (pixels, recipe) = if looks_like_svg(&bytes) {
-            self.svg_pixels(bytes, request, engine, stack, call.head)?
+        let (px, recipe) = if looks_like_svg(&bytes) {
+            self.svg_pixels(bytes, req, engine, stack, span)?
         } else {
-            resize_pixels(bytes, request, engine, call.head)?
+            resize_pixels(bytes, req, engine, span)?
         };
-        if let Some((file, path)) = output {
-            return write_file(file, path, source, &pixels, &recipe, engine, call.head);
+        if let Some((file, path)) = out_file {
+            return write_file(file, path, src, &px, &recipe, engine, span);
         }
         let cancelled = || engine.signals().interrupted();
-        let mut output = Vec::new();
-        let metadata = pixels
-            .encode_to(&mut output, &recipe, &cancelled)
-            .map_err(|error| render_error(error, call.head))?;
-        drop(pixels);
-        engine.signals().check(&call.head)?;
+        let mut out = Vec::new();
+        let meta = px
+            .encode_to(&mut out, &recipe, &cancelled)
+            .map_err(|err| render_error(err, span))?;
+        drop(px);
+        engine.signals().check(&span)?;
         Ok(PipelineData::ByteStream(
-            ByteStream::read_binary(output, call.head, engine.signals().clone()),
+            ByteStream::read_binary(out, span, engine.signals().clone()),
             Some(PipelineMetadata {
-                content_type: Some(metadata.format.mime().into()),
-                custom: record! { "tola_image" => metadata_value(&metadata, call.head) },
+                content_type: Some(meta.format.mime().into()),
+                custom: record! { "tola_image" => metadata_value(&meta, span) },
                 ..PipelineMetadata::default()
             }),
         ))
     }
 }
 
+fn opt_str(
+    call: &Call,
+    engine: &EngineState,
+    stack: &mut Stack,
+    idx: usize,
+) -> Result<Option<String>, ShellError> {
+    Ok(call.opt::<Option<String>>(engine, stack, idx)?.flatten())
+}
+
 fn image_input(
-    source: Option<&str>,
+    src: Option<&str>,
     input: PipelineData,
     engine: &EngineState,
     span: Span,
 ) -> Result<Vec<u8>, ShellError> {
     engine.signals().check(&span)?;
-    match (source, input.is_nothing()) {
-        (Some(source), true) => source_bytes(source, engine, span),
+    match (src, input.is_nothing()) {
+        (Some(src), true) => source_bytes(src, engine, span),
         (None, false) => binary_input(input, span),
         _ => Err(image_error(
             "provide a source path or pipe image bytes, but not both",
@@ -219,8 +229,8 @@ fn image_input(
     }
 }
 
-fn temporary_output(destination: &str, span: Span) -> Result<tempfile::NamedTempFile, ShellError> {
-    let parent = Path::new(destination).parent().ok_or_else(|| {
+fn temporary_output(dst: &str, span: Span) -> Result<tempfile::NamedTempFile, ShellError> {
+    let parent = Path::new(dst).parent().ok_or_else(|| {
         image_error(
             "choose a destination file inside an existing directory",
             span,
@@ -235,49 +245,49 @@ fn temporary_output(destination: &str, span: Span) -> Result<tempfile::NamedTemp
 }
 
 fn write_file(
-    mut output: tempfile::NamedTempFile,
-    destination: String,
-    source: Option<String>,
-    pixels: &ResampledPixels,
+    mut out: tempfile::NamedTempFile,
+    dst: String,
+    src: Option<String>,
+    px: &ResampledPixels,
     recipe: &ImageRecipe,
     engine: &EngineState,
     span: Span,
 ) -> Result<PipelineData, ShellError> {
     let cancelled = || engine.signals().interrupted();
-    let metadata = {
-        let mut writer = BufWriter::new(output.as_file_mut());
-        let metadata = pixels
+    let meta = {
+        let mut writer = BufWriter::new(out.as_file_mut());
+        let meta = px
             .encode_to(&mut writer, recipe, &cancelled)
-            .map_err(|error| render_error(error, span))?;
+            .map_err(|err| render_error(err, span))?;
         writer.flush().map_err(|_| {
             image_error(
                 "the resized image could not be written; check available disk space and destination permissions",
                 span,
             )
         })?;
-        metadata
+        meta
     };
     engine.signals().check(&span)?;
-    output.persist_noclobber(&destination).map_err(|error| {
-        let message = if error.error.kind() == std::io::ErrorKind::AlreadyExists {
+    out.persist_noclobber(&dst).map_err(|err| {
+        let msg = if err.error.kind() == std::io::ErrorKind::AlreadyExists {
             "the destination already exists; choose a new destination file"
         } else {
             "the resized image could not be saved; check the destination directory permissions"
         };
-        image_error(message, span)
+        image_error(msg, span)
     })?;
-    let mut metadata = metadata_value(&metadata, span).into_record()?;
-    metadata.push(
+    let mut meta = metadata_value(&meta, span).into_record()?;
+    meta.push(
         "source",
-        source.map_or_else(|| Value::nothing(span), |path| Value::string(path, span)),
+        src.map_or_else(|| Value::nothing(span), |path| Value::string(path, span)),
     );
-    metadata.push("destination", Value::string(destination, span));
-    Ok(Value::record(metadata, span).into_pipeline_data())
+    meta.push("destination", Value::string(dst, span));
+    Ok(Value::record(meta, span).into_pipeline_data())
 }
 
-fn source_bytes(source: &str, engine: &EngineState, span: Span) -> Result<Vec<u8>, ShellError> {
+fn source_bytes(src: &str, engine: &EngineState, span: Span) -> Result<Vec<u8>, ShellError> {
     engine.signals().check(&span)?;
-    let bytes = fs::read(source);
+    let bytes = fs::read(src);
     engine.signals().check(&span)?;
     bytes.map_err(|_| {
         image_error(
@@ -293,41 +303,40 @@ struct ResizeRequest {
 }
 
 impl ResizeRequest {
-    fn with_source_size(self, width: u32, height: u32) -> ResizeOptions {
-        let mut options = self.options;
+    fn with_source_size(self, w: u32, h: u32) -> ResizeOptions {
+        let mut opts = self.options;
         if self.keep_size {
-            options.width = Some(width);
-            options.height = Some(height);
+            opts.width = Some(w);
+            opts.height = Some(h);
         }
-        options
+        opts
     }
 }
 
 fn resize_pixels(
     bytes: Vec<u8>,
-    request: ResizeRequest,
+    req: ResizeRequest,
     engine: &EngineState,
     span: Span,
 ) -> Result<(ResampledPixels, ImageRecipe), ShellError> {
-    let source = tola_image::inspect(&bytes).map_err(|error| render_error(error, span))?;
+    let src = tola_image::inspect(&bytes).map_err(|err| render_error(err, span))?;
     engine.signals().check(&span)?;
-    let options = request.with_source_size(source.width, source.height);
-    let recipe = ImageRecipe::resolve(&source, options)
-        .map_err(|error| image_error(error.to_string(), span))?;
+    let opts = req.with_source_size(src.width, src.height);
+    let recipe =
+        ImageRecipe::resolve(&src, opts).map_err(|err| image_error(err.to_string(), span))?;
     let cancelled = || engine.signals().interrupted();
-    let decoded =
-        DecodedSource::open(&bytes, &cancelled).map_err(|error| render_error(error, span))?;
+    let decoded = DecodedSource::open(&bytes, &cancelled).map_err(|err| render_error(err, span))?;
     drop(bytes);
-    let pixels = decoded
+    let px = decoded
         .into_pixels(recipe.pixels(), &cancelled)
-        .map_err(|error| render_error(error, span))?;
-    Ok((pixels, recipe))
+        .map_err(|err| render_error(err, span))?;
+    Ok((px, recipe))
 }
 
-fn render_error(error: tola_image::ImageError, span: Span) -> ShellError {
-    match error {
+fn render_error(err: tola_image::ImageError, span: Span) -> ShellError {
+    match err {
         tola_image::ImageError::Cancelled(_) => ShellError::Interrupted { span },
-        error => image_error(error.to_string(), span),
+        err => image_error(err.to_string(), span),
     }
 }
 
@@ -338,191 +347,178 @@ fn binary_input(input: PipelineData, span: Span) -> Result<Vec<u8>, ShellError> 
     }
 }
 
-/// Inspect encoded image bytes and return their metadata record.
 fn metadata_result(
     bytes: &[u8],
     engine: &EngineState,
     span: Span,
 ) -> Result<PipelineData, ShellError> {
-    let metadata = tola_image::inspect(bytes).map_err(|error| render_error(error, span))?;
+    let meta = tola_image::inspect(bytes).map_err(|err| render_error(err, span))?;
     engine.signals().check(&span)?;
-    Ok(metadata_value(&metadata, span).into_pipeline_data())
+    Ok(metadata_value(&meta, span).into_pipeline_data())
 }
 
-fn metadata_value(metadata: &ImageMetadata, span: Span) -> Value {
+fn metadata_value(meta: &ImageMetadata, span: Span) -> Value {
     Value::record(
         record! {
-            "width" => Value::int(i64::from(metadata.width), span),
-            "height" => Value::int(i64::from(metadata.height), span),
-            "format" => Value::string(metadata.format.extension(), span),
-            "mime" => Value::string(metadata.format.mime(), span),
-            "has-alpha" => Value::bool(metadata.has_alpha, span),
-            "is-lossy" => Value::bool(metadata.is_lossy, span),
+            "width" => Value::int(i64::from(meta.width), span),
+            "height" => Value::int(i64::from(meta.height), span),
+            "format" => Value::string(meta.format.extension(), span),
+            "mime" => Value::string(meta.format.mime(), span),
+            "has-alpha" => Value::bool(meta.has_alpha, span),
+            "is-lossy" => Value::bool(meta.is_lossy, span),
         },
         span,
     )
 }
 
-fn image_error(message: impl Into<String>, span: Span) -> ShellError {
-    GenericError::new("Image operation failed", message.into(), span)
+fn image_error(msg: impl Into<String>, span: Span) -> ShellError {
+    GenericError::new("Image operation failed", msg.into(), span)
         .with_code("tola::image")
         .into()
 }
 
-fn field<'a>(options: &'a Record, name: &str) -> Option<&'a Value> {
-    options
-        .get(name)
-        .filter(|value| !matches!(value, Value::Nothing { .. }))
+fn field<'a>(opts: &'a Record, name: &str) -> Option<&'a Value> {
+    opts.get(name)
+        .filter(|val| !matches!(val, Value::Nothing { .. }))
 }
 
-fn positive_dimension(options: &Record, name: &str) -> Result<Option<u32>, ShellError> {
-    field(options, name)
-        .map(|value| {
-            let number = value.as_int()?;
-            u32::try_from(number)
+fn int_in_range<T: TryFrom<i64>>(
+    opts: &Record,
+    name: &str,
+    valid: impl FnOnce(&T) -> bool,
+    err_msg: impl FnOnce() -> String,
+) -> Result<Option<T>, ShellError> {
+    field(opts, name)
+        .map(|val| {
+            let n = val.as_int()?;
+            T::try_from(n)
                 .ok()
-                .filter(|number| *number > 0)
-                .ok_or_else(|| {
-                    image_error(
-                        format!(
-                            "--{name} must be a positive integer no larger than {}",
-                            u32::MAX
-                        ),
-                        value.span(),
-                    )
-                })
+                .filter(valid)
+                .ok_or_else(|| image_error(err_msg(), val.span()))
         })
         .transpose()
 }
 
 fn choice<T: Copy>(
-    options: &Record,
+    opts: &Record,
     name: &str,
     choices: &[(&str, T)],
     default: T,
 ) -> Result<T, ShellError> {
-    let Some(value) = field(options, name) else {
+    let Some(val) = field(opts, name) else {
         return Ok(default);
     };
-    let selected = value.as_str()?;
+    let selected = val.as_str()?;
     choices
         .iter()
-        .find(|(name, _)| *name == selected)
-        .map(|(_, value)| *value)
+        .find(|(k, _)| *k == selected)
+        .map(|(_, v)| *v)
         .ok_or_else(|| {
             image_error(
                 format!(
                     "--{name} must be one of: {}",
                     choices
                         .iter()
-                        .map(|(name, _)| *name)
+                        .map(|(k, _)| *k)
                         .collect::<Vec<_>>()
                         .join(", ")
                 ),
-                value.span(),
+                val.span(),
             )
         })
 }
 
-fn resize_request(options: &Record) -> Result<ResizeRequest, ShellError> {
-    let quality = field(options, "quality")
-        .map(|value| {
-            let quality = value.as_int()?;
-            u8::try_from(quality)
-                .ok()
-                .filter(|quality| *quality <= 100)
-                .ok_or_else(|| {
-                    image_error(
-                        "--quality must be between 0 and 100 (JPEG requires at least 1)",
-                        value.span(),
-                    )
-                })
-        })
-        .transpose()?;
-    let background = field(options, "background")
-        .map(|value| {
-            let text = value.as_str()?;
+const OPS: &[(&str, ResizeOperation)] = &[
+    ("scale", ResizeOperation::Scale),
+    ("fit-width", ResizeOperation::FitWidth),
+    ("fit-height", ResizeOperation::FitHeight),
+    ("fit", ResizeOperation::Fit),
+    ("fill", ResizeOperation::Fill),
+];
+
+const ANCHORS: &[(&str, CropAnchor)] = &[
+    ("center", CropAnchor::Center),
+    ("top", CropAnchor::Top),
+    ("bottom", CropAnchor::Bottom),
+    ("left", CropAnchor::Left),
+    ("right", CropAnchor::Right),
+    ("top-left", CropAnchor::TopLeft),
+    ("top-right", CropAnchor::TopRight),
+    ("bottom-left", CropAnchor::BottomLeft),
+    ("bottom-right", CropAnchor::BottomRight),
+];
+
+const FORMATS: &[(&str, OutputFormat)] = &[
+    ("auto", OutputFormat::Auto),
+    ("jpeg", OutputFormat::Jpeg),
+    ("jpg", OutputFormat::Jpeg),
+    ("png", OutputFormat::Png),
+    ("webp", OutputFormat::WebP),
+];
+
+const FILTERS: &[(&str, ResizeFilter)] = &[
+    ("nearest", ResizeFilter::Nearest),
+    ("triangle", ResizeFilter::Triangle),
+    ("catmull-rom", ResizeFilter::CatmullRom),
+    ("gaussian", ResizeFilter::Gaussian),
+    ("lanczos3", ResizeFilter::Lanczos3),
+];
+
+fn parse_background(opts: &Record) -> Result<Option<Background>, ShellError> {
+    field(opts, "background")
+        .map(|val| {
+            let text = val.as_str()?;
             let rgb = text
                 .strip_prefix('#')
-                .filter(|rgb| rgb.len() == 6 && rgb.bytes().all(|byte| byte.is_ascii_hexdigit()))
-                .and_then(|rgb| u32::from_str_radix(rgb, 16).ok())
+                .filter(|hex| hex.len() == 6 && hex.bytes().all(|b| b.is_ascii_hexdigit()))
+                .and_then(|hex| u32::from_str_radix(hex, 16).ok())
                 .ok_or_else(|| {
                     image_error(
                         "--background must be an opaque sRGB color in #RRGGBB form",
-                        value.span(),
+                        val.span(),
                     )
                 })?;
-            Ok::<_, ShellError>(Background {
+            Ok(Background {
                 red: (rgb >> 16) as u8,
                 green: (rgb >> 8) as u8,
                 blue: rgb as u8,
             })
         })
-        .transpose()?;
-    let width = positive_dimension(options, "width")?;
-    let height = positive_dimension(options, "height")?;
-    let keep_size = width.is_none() && height.is_none() && field(options, "op").is_none();
-    let default_operation = match (width, height) {
+        .transpose()
+}
+
+fn resize_request(opts: &Record) -> Result<ResizeRequest, ShellError> {
+    let quality = int_in_range::<u8>(
+        opts,
+        "quality",
+        |&q| q <= 100,
+        || "--quality must be between 0 and 100 (JPEG requires at least 1)".into(),
+    )?;
+    let background = parse_background(opts)?;
+    fn dim_err(name: &'static str) -> impl FnOnce() -> String {
+        move || {
+            format!(
+                "--{name} must be a positive integer no larger than {}",
+                u32::MAX
+            )
+        }
+    }
+    let w = int_in_range::<u32>(opts, "width", |&v| v > 0, dim_err("width"))?;
+    let h = int_in_range::<u32>(opts, "height", |&v| v > 0, dim_err("height"))?;
+    let keep_size = w.is_none() && h.is_none() && field(opts, "op").is_none();
+    let default_op = match (w, h) {
         (None, None) => ResizeOperation::Scale,
         (Some(_), None) => ResizeOperation::FitWidth,
         (None, Some(_)) => ResizeOperation::FitHeight,
         (Some(_), Some(_)) => ResizeOperation::Fill,
     };
     let options = ResizeOptions {
-        width,
-        height,
-        operation: choice(
-            options,
-            "op",
-            &[
-                ("scale", ResizeOperation::Scale),
-                ("fit-width", ResizeOperation::FitWidth),
-                ("fit-height", ResizeOperation::FitHeight),
-                ("fit", ResizeOperation::Fit),
-                ("fill", ResizeOperation::Fill),
-            ],
-            default_operation,
-        )?,
-        anchor: choice(
-            options,
-            "anchor",
-            &[
-                ("center", CropAnchor::Center),
-                ("top", CropAnchor::Top),
-                ("bottom", CropAnchor::Bottom),
-                ("left", CropAnchor::Left),
-                ("right", CropAnchor::Right),
-                ("top-left", CropAnchor::TopLeft),
-                ("top-right", CropAnchor::TopRight),
-                ("bottom-left", CropAnchor::BottomLeft),
-                ("bottom-right", CropAnchor::BottomRight),
-            ],
-            CropAnchor::Center,
-        )?,
-        format: choice(
-            options,
-            "format",
-            &[
-                ("auto", OutputFormat::Auto),
-                ("jpeg", OutputFormat::Jpeg),
-                ("jpg", OutputFormat::Jpeg),
-                ("png", OutputFormat::Png),
-                ("webp", OutputFormat::WebP),
-            ],
-            OutputFormat::Auto,
-        )?,
-        filter: choice(
-            options,
-            "filter",
-            &[
-                ("nearest", ResizeFilter::Nearest),
-                ("triangle", ResizeFilter::Triangle),
-                ("catmull-rom", ResizeFilter::CatmullRom),
-                ("gaussian", ResizeFilter::Gaussian),
-                ("lanczos3", ResizeFilter::Lanczos3),
-            ],
-            ResizeFilter::Lanczos3,
-        )?,
+        width: w,
+        height: h,
+        operation: choice(opts, "op", OPS, default_op)?,
+        anchor: choice(opts, "anchor", ANCHORS, CropAnchor::Center)?,
+        format: choice(opts, "format", FORMATS, OutputFormat::Auto)?,
+        filter: choice(opts, "filter", FILTERS, ResizeFilter::Lanczos3)?,
         quality,
         background,
     };
@@ -544,19 +540,18 @@ mod tests {
         130,
     ];
 
-    fn parsed(command: &str, signals: Signals) -> (EngineState, Arc<nu_protocol::ast::Block>) {
+    fn parsed(cmd: &str, signals: Signals) -> (EngineState, Arc<nu_protocol::ast::Block>) {
         let mut engine = crate::Runtime::new(Vec::new(), Vec::new()).unwrap().engine;
         engine.set_signals(signals);
-        let mut working = StateWorkingSet::new(&engine);
-        let source = format!("use tola image\n{command}");
-        let block =
-            crate::execution::parse(&mut working, "image-test.nu", source.as_bytes()).unwrap();
-        engine.merge_delta(working.render()).unwrap();
+        let mut ws = StateWorkingSet::new(&engine);
+        let src = format!("use tola image\n{cmd}");
+        let block = crate::execution::parse(&mut ws, "image-test.nu", src.as_bytes()).unwrap();
+        engine.merge_delta(ws.render()).unwrap();
         (engine, block)
     }
 
-    fn eval(command: &str, signals: Signals) -> Result<PipelineData, ShellError> {
-        let (engine, block) = parsed(command, signals);
+    fn eval(cmd: &str, signals: Signals) -> Result<PipelineData, ShellError> {
+        let (engine, block) = parsed(cmd, signals);
         let mut stack = Stack::new();
         stack.add_env_var(
             "PWD".into(),
@@ -570,42 +565,44 @@ mod tests {
         )
     }
 
-    fn png_input() -> String {
+    fn hex_literal(bytes: &[u8]) -> String {
         format!(
             "0x[{}]",
-            PNG.iter()
-                .map(|byte| format!("{byte:02x}"))
+            bytes
+                .iter()
+                .map(|b| format!("{b:02x}"))
                 .collect::<Vec<_>>()
                 .join(" ")
         )
     }
 
-    fn value(command: &str) -> Value {
-        eval(command, Signals::empty())
+    fn val(cmd: &str) -> Value {
+        eval(cmd, Signals::empty())
             .unwrap()
             .into_value(Span::test_data())
             .unwrap()
     }
 
     #[test]
-    fn module_metadata_and_resize_use_encoded_pixels() {
-        let info = value(&format!("{} | image metadata", png_input()));
+    fn metadata_and_resize_bytes() {
+        let png = hex_literal(PNG);
+        let info = val(&format!("{png} | image metadata"));
         let info = info.as_record().unwrap();
         assert_eq!(info.get("width").unwrap().as_int().unwrap(), 2);
         assert_eq!(info.get("height").unwrap().as_int().unwrap(), 1);
         assert_eq!(info.get("mime").unwrap().as_str().unwrap(), "image/png");
         assert!(info.get("has-alpha").unwrap().as_bool().unwrap());
-        let output = eval(
-            &format!("{} | image resize --width 4 --format png", png_input()),
+        let out = eval(
+            &format!("{png} | image resize --width 4 --format png"),
             Signals::empty(),
         )
         .unwrap();
-        assert!(matches!(&output, PipelineData::ByteStream(..)));
+        assert!(matches!(&out, PipelineData::ByteStream(..)));
         assert_eq!(
-            output.metadata_ref().unwrap().content_type.as_deref(),
+            out.metadata_ref().unwrap().content_type.as_deref(),
             Some("image/png")
         );
-        let bytes = output
+        let bytes = out
             .into_value(Span::test_data())
             .unwrap()
             .into_binary()
@@ -616,17 +613,20 @@ mod tests {
     }
 
     #[test]
-    fn format_only_keeps_source_dimensions() {
-        let bytes = value(&format!("{} | image resize --format webp", png_input()))
-            .into_binary()
-            .unwrap();
+    fn format_only_resize() {
+        let bytes = val(&format!(
+            "{} | image resize --format webp",
+            hex_literal(PNG)
+        ))
+        .into_binary()
+        .unwrap();
 
-        let directory = tempfile::tempdir().unwrap();
-        let source = directory.path().join("source.png");
-        let destination = directory.path().join("converted.webp");
-        fs::write(&source, PNG).unwrap();
-        let source_path = source.to_str().unwrap();
-        let info = value(&format!("image metadata '{source_path}'"));
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("source.png");
+        let dst = dir.path().join("converted.webp");
+        fs::write(&src, PNG).unwrap();
+        let src_path = src.to_str().unwrap();
+        let info = val(&format!("image metadata '{src_path}'"));
         assert_eq!(
             info.as_record()
                 .unwrap()
@@ -636,16 +636,16 @@ mod tests {
                 .unwrap(),
             2
         );
-        let from_path = value(&format!("image resize '{source_path}' --format webp"))
+        let from_path = val(&format!("image resize '{src_path}' --format webp"))
             .into_binary()
             .unwrap();
         assert_eq!(from_path, bytes);
 
-        let piped = directory.path().join("piped.webp");
+        let piped = dir.path().join("piped.webp");
         let piped_path = piped.to_str().unwrap();
         let piped_resize =
-            format!("open --raw '{source_path}' | image resize --format webp -o '{piped_path}'");
-        let info = value(&piped_resize);
+            format!("open --raw '{src_path}' | image resize --format webp -o '{piped_path}'");
+        let info = val(&piped_resize);
         let info = info.as_record().unwrap();
         assert!(info.get("source").unwrap().is_nothing());
         assert_eq!(
@@ -662,33 +662,34 @@ mod tests {
         let entry = runtime.resolve_locator("@tola-scripts/image").unwrap();
         let args = [
             "resize".into(),
-            source.to_str().unwrap().into(),
+            src.to_str().unwrap().into(),
             "--output".into(),
-            destination.to_str().unwrap().into(),
+            dst.to_str().unwrap().into(),
             "--format".into(),
             "webp".into(),
         ];
         assert_eq!(runtime.run_module(&entry, &args, false, None), 0);
 
-        for bytes in [bytes, fs::read(destination).unwrap()] {
-            let image = tola_image::inspect(&bytes).unwrap();
-            assert_eq!((image.width, image.height), (2, 1));
-            assert_eq!(image.format, ImageFormat::WebP);
+        for bytes in [bytes, fs::read(dst).unwrap()] {
+            let img = tola_image::inspect(&bytes).unwrap();
+            assert_eq!((img.width, img.height), (2, 1));
+            assert_eq!(img.format, ImageFormat::WebP);
         }
     }
 
     #[test]
-    fn module_rejects_empty_damaged_and_nonsensical_requests() {
-        for command in ["image metadata", "image resize"] {
-            assert!(eval(command, Signals::empty()).is_err());
-            let conflict = format!("{} | {command} 'unused.png'", png_input());
-            let error = eval(&conflict, Signals::empty()).unwrap_err();
-            assert!(format!("{error:?}").contains("pipe image bytes, but not both"));
+    fn reject_invalid_image_args() {
+        let png = hex_literal(PNG);
+        for cmd in ["image metadata", "image resize"] {
+            assert!(eval(cmd, Signals::empty()).is_err());
+            let conflict = format!("{png} | {cmd} 'unused.png'");
+            let err = eval(&conflict, Signals::empty()).unwrap_err();
+            assert!(format!("{err:?}").contains("pipe image bytes, but not both"));
         }
         for input in ["0x[]", "0x[00 01 02]"] {
             assert!(eval(&format!("{input} | image metadata"), Signals::empty()).is_err());
         }
-        for arguments in [
+        for args in [
             "--width 0 --op fit-width",
             "--height -1 --op fit-height",
             "--width 4294967296 --op fit-width",
@@ -701,25 +702,16 @@ mod tests {
             "--width 2 --op fit-width --background '#FFFFFF00'",
             "--op fill",
         ] {
-            let result = eval(
-                &format!("{} | image resize {arguments}", png_input()),
-                Signals::empty(),
-            );
-            assert!(result.is_err(), "request was accepted: {arguments}");
+            let res = eval(&format!("{png} | image resize {args}"), Signals::empty());
+            assert!(res.is_err(), "request was accepted: {args}");
         }
     }
 
     #[test]
-    fn svg_resizes_to_explicit_raster_format() {
+    fn svg_resize_raster_format() {
         let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 4"><path fill="red" d="M0 0H8V4H0Z"/></svg>"#;
-        let literal = format!(
-            "0x[{}]",
-            svg.iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect::<Vec<_>>()
-                .join(" ")
-        );
-        let info = value(&format!("{literal} | image metadata"));
+        let literal = hex_literal(svg);
+        let info = val(&format!("{literal} | image metadata"));
         assert_eq!(
             info.as_record()
                 .unwrap()
@@ -736,12 +728,12 @@ mod tests {
             )
             .is_err()
         );
-        let png = value(&format!("{literal} | image resize --width 4 --format png"))
+        let png = val(&format!("{literal} | image resize --width 4 --format png"))
             .into_binary()
             .unwrap();
         let cancelled = || false;
-        let source = DecodedSource::open(&png, &cancelled).unwrap();
-        let info = source.metadata();
+        let src = DecodedSource::open(&png, &cancelled).unwrap();
+        let info = src.metadata();
         assert_eq!(
             (info.format, info.width, info.height),
             (ImageFormat::Png, 4, 2)
@@ -755,24 +747,27 @@ mod tests {
             },
         )
         .unwrap();
-        let pixels = source.into_pixels(recipe.pixels(), &cancelled).unwrap();
-        assert_eq!(pixels.rgba(), [255u8, 0, 0, 255].repeat(8));
+        let px = src.into_pixels(recipe.pixels(), &cancelled).unwrap();
+        assert_eq!(px.rgba(), [255u8, 0, 0, 255].repeat(8));
     }
 
     #[test]
-    fn interrupted_resize_is_a_nushell_interrupt() {
+    fn interrupted_resize_error() {
         let signals = Signals::new(Arc::new(AtomicBool::new(true)));
-        let error = eval(
-            &format!("{} | image resize --width 4 --op fit-width", png_input()),
+        let err = eval(
+            &format!(
+                "{} | image resize --width 4 --op fit-width",
+                hex_literal(PNG)
+            ),
             signals,
         )
         .unwrap_err();
-        assert!(matches!(error, ShellError::Interrupted { .. }));
+        assert!(matches!(err, ShellError::Interrupted { .. }));
     }
 
     #[test]
-    fn module_help_and_signature_are_public_nushell_commands() {
-        let help = value("help image resize");
+    fn image_command_signatures() {
+        let help = val("help image resize");
         let help = help.as_str().unwrap();
         for name in [
             "--output",
@@ -785,19 +780,19 @@ mod tests {
             assert!(help.contains(name), "missing {name}: {help}");
         }
         let (engine, _) = parsed("null", Signals::empty());
-        for (name, expected_output) in [
+        for (name, expected_out) in [
             ("image metadata", Type::record()),
             ("image resize", Type::Any),
         ] {
-            let declaration = engine
+            let decl = engine
                 .find_decl(name.as_bytes(), &[])
                 .expect("the module exports this command");
-            let signature = engine.get_decl(declaration).signature();
+            let sig = engine.get_decl(decl).signature();
             assert_eq!(
-                signature.input_output_types,
+                sig.input_output_types,
                 vec![
-                    (Type::Nothing, expected_output.clone()),
-                    (Type::Binary, expected_output)
+                    (Type::Nothing, expected_out.clone()),
+                    (Type::Binary, expected_out)
                 ],
                 "{name}"
             );
@@ -824,12 +819,12 @@ mod tests {
                 "--{name}"
             );
         }
-        let public = value("scope commands | where name =~ '^image ' | get name");
+        let public = val("scope commands | where name =~ '^image ' | get name");
         let mut names: Vec<_> = public
             .as_list()
             .unwrap()
             .iter()
-            .map(|value| value.as_str().unwrap())
+            .map(|val| val.as_str().unwrap())
             .collect();
         names.sort_unstable();
         assert_eq!(names, ["image metadata", "image resize"]);

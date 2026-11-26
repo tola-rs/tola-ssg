@@ -591,16 +591,16 @@ mod tests {
     }
 
     #[test]
-    fn one_evaluation_supplies_all_reads() {
-        let directory = TempDir::new().unwrap();
-        let path = directory.path().join("document.typ");
+    fn scan_extracts_all() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("document.typ");
         fs::write(
             &path,
             "#let title = [Document]\n#let rank = 3\n#metadata(rank) <rank>\n= #title",
         )
         .unwrap();
 
-        let scan = scan(directory.path(), &path);
+        let scan = scan(dir.path(), &path);
 
         assert!(matches!(
             scan.module().field("title", ()).unwrap(),
@@ -611,14 +611,14 @@ mod tests {
         assert_eq!(scan.headings()[0].text, "Document");
         assert_eq!(scan.module().clone().content(), *scan.content());
         assert_eq!(scan.file_reads().len(), 1);
-        let declaration = scan.metadata_declarations("rank").pop().unwrap();
-        assert_eq!(declaration.span().id(), Some(scan.source().id()));
-        let range = scan.source().find(declaration.span()).unwrap().range();
+        let decl = scan.metadata_declarations("rank").pop().unwrap();
+        assert_eq!(decl.span().id(), Some(scan.source().id()));
+        let range = scan.source().find(decl.span()).unwrap().range();
         assert_eq!(&scan.source().text()[range], "metadata(rank)");
     }
 
     #[test]
-    fn failed_scan_retains_the_missing_path() {
+    fn scan_failure_keeps_disk_read() {
         let dir = TempDir::new().unwrap();
         let file = dir.path().join("test.typ");
         let missing = std::fs::canonicalize(dir.path())
@@ -641,11 +641,11 @@ mod tests {
     }
 
     #[test]
-    fn repeated_scan_replays_capture() {
-        let directory = TempDir::new().unwrap();
-        let path = directory.path().join("repeated.typ");
+    fn scan_replays_capture() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("repeated.typ");
         fs::write(&path, "#record(\"from-cache\")\n").unwrap();
-        let world = recording_world(directory.path(), &path);
+        let world = recording_world(dir.path(), &path);
 
         let first = scan_world_observed(&world, []);
         let first_runs = take_runs();
@@ -666,7 +666,7 @@ mod tests {
     }
 
     #[test]
-    fn source_capture_follows_module_scope() {
+    fn source_capture_scope() {
         for (name, body, count, completes) in [
             ("wrapper", "#note(\"own\")", 1, true),
             (
@@ -733,32 +733,32 @@ mod tests {
                 false,
             ),
         ] {
-            let directory = TempDir::new().unwrap();
-            let file = directory.path().join("main.typ");
+            let dir = TempDir::new().unwrap();
+            let file = dir.path().join("main.typ");
             fs::write(&file, format!("#import \"theme.typ\": note\n{body}")).unwrap();
             fs::write(
-                directory.path().join("theme.typ"),
+                dir.path().join("theme.typ"),
                 "#let note(value) = declare(value)\n\
                  #let generated(value) = eval(\"declare(value)\", scope: (declare: declare, value: value))\n\
                  #let compiled = eval(\"value => declare(value)\", scope: (declare: declare))",
             )
             .unwrap();
             fs::write(
-                directory.path().join("layer.typ"),
+                dir.path().join("layer.typ"),
                 "#import \"theme.typ\": note\n#let outer(value) = note(value)",
             )
             .unwrap();
             fs::write(
-                directory.path().join("included.typ"),
+                dir.path().join("included.typ"),
                 "#import \"theme.typ\": note\n#let number = 1\n#(\"foreign\",).map(note)",
             )
             .unwrap();
             fs::write(
-                directory.path().join("evaluated.typ"),
+                dir.path().join("evaluated.typ"),
                 "#eval(\"declare(\\\"foreign\\\")\", scope: (declare: declare))\n#let number = 1",
             )
             .unwrap();
-            let world = recording_world(directory.path(), &file);
+            let world = recording_world(dir.path(), &file);
             let header = Value::Str("capture header".into());
             let mut expected = vec![header.clone()];
             expected.extend(std::iter::repeat_n(Value::Str("own".into()), count));
@@ -792,10 +792,10 @@ mod tests {
     }
 
     #[test]
-    fn source_capture_keeps_source_snapshot() {
-        let directory = TempDir::new().unwrap();
-        let file = directory.path().join("main.typ");
-        let theme = directory.path().join("theme.typ");
+    fn source_capture_snapshot() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("main.typ");
+        let theme = dir.path().join("theme.typ");
         fs::write(&theme, "#let note(value) = declare(value)").unwrap();
         fs::write(
             &file,
@@ -805,7 +805,7 @@ mod tests {
             ),
         )
         .unwrap();
-        let world = TypstWorld::builder(&file, directory.path())
+        let world = TypstWorld::builder(&file, dir.path())
             .with_shared_cache(Arc::new(crate::SharedFileCache::new()))
             .no_fonts()
             .with_shared_library(recording_library())

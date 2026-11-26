@@ -162,7 +162,7 @@ pub struct Diagnostic {
     /// proof that the statements executed.
     pub imported_by: Vec<String>,
     /// The package this diagnostic imports that could not be provided.
-    pub package_failure: Option<super::resolved::ResolvedPackageFailure>,
+    pub package_failure: Option<super::location::PackageFailure>,
 }
 
 /// A retained window of one source line.

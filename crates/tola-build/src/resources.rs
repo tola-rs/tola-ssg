@@ -65,7 +65,7 @@ impl BuildResources {
     /// tiers its configuration resolved.
     pub fn package_locations(
         &self,
-        config: &crate::config::ResolvedSiteConfig,
+        config: &crate::config::SiteConfig,
     ) -> tola_typst::PackageLocations {
         let locations = config.package_locations().clone();
         if self.scope == InputScope::Pure {
@@ -78,7 +78,7 @@ impl BuildResources {
     /// The same physical restrictions used by built-in source readers and editor integrations.
     pub fn source_boundary(
         &self,
-        config: &crate::config::ResolvedSiteConfig,
+        config: &crate::config::SiteConfig,
     ) -> tola_typst::SourceBoundary {
         source_boundary(config, self.scope)
     }
@@ -210,12 +210,12 @@ fn source_boundary_with_modules(
 }
 
 pub(crate) fn source_boundary(
-    config: &crate::config::ResolvedSiteConfig,
+    config: &crate::config::SiteConfig,
     scope: InputScope,
 ) -> tola_typst::SourceBoundary {
     add_source_exclusions(
         source_boundary_with_modules(
-            config.get_root(),
+            config.root(),
             scope,
             config.fresh_archive_roots.iter().cloned(),
         ),
@@ -387,7 +387,7 @@ mod tests {
     /// A site whose output already holds the published `404.html` page.
     fn site_with_published_page(
         directory: &tempfile::TempDir,
-    ) -> (crate::config::ResolvedSiteConfig, PathBuf) {
+    ) -> (crate::config::SiteConfig, PathBuf) {
         let config = crate::config::tests::load_test_config(directory.path(), "");
         std::fs::create_dir_all(&config.build.publish_dir).unwrap();
         let published = config.build.publish_dir.join("404.html");
@@ -413,7 +413,7 @@ mod tests {
     fn symlink_to_build_output_is_refused() {
         let directory = tempfile::TempDir::new().unwrap();
         let (config, published) = site_with_published_page(&directory);
-        let alias = config.get_root().join("error.html");
+        let alias = config.root().join("error.html");
         std::os::unix::fs::symlink(&published, &alias).unwrap();
 
         let boundary = source_boundary(&config, InputScope::Online);

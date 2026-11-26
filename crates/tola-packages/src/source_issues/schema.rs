@@ -1,38 +1,40 @@
-//! Schema argument and declaration diagnostics, located at the author's call.
+//! Schema argument and declaration diagnostics attributed to the author's call.
 
+use tola_typst::diagnostic::{DiagnosticOrigin, NativeDiagnostic, producer_error};
 use typst::comemo::Tracked;
 use typst::diag::{At, SourceDiagnostic, SourceResult, eco_format};
 use typst::ecow::{EcoVec, eco_vec};
 use typst::engine::Engine;
-use typst::foundations::{Context, Dict, Func, Value, func};
-use typst::syntax::Span;
+use typst::foundations::{Context, Dict, Func, Str, Value, func};
+use typst::syntax::{Span, VirtualRoot};
 
 use super::location::source_origin;
 use super::projection::{SCHEMA_WRAPPERS, wrapper_projection};
 
 const SCHEMA_ARGUMENT: &str = "SchemaArgument";
+
 #[func]
 pub(crate) fn tola_report_schema_error(
     span: Span,
     /// The value supplied where a schema declaration was required.
     candidate: Value,
     /// The schema operation whose argument was invalid.
-    owner: typst::foundations::Str,
+    owner: Str,
 ) -> SourceResult<Value> {
     let actual = candidate.ty().short_name();
-    let mut error = tola_typst::diagnostic::producer_error(
+    let mut err = producer_error(
         span,
         SCHEMA_ARGUMENT,
         &[("owner", owner.as_str()), ("actual", actual)],
         eco_format!("{owner}: expected a Typst type or schema declaration, found `{actual}`"),
         wrapper_projection(),
     );
-    error.hint(if matches!(candidate, Value::Dict(_)) {
+    err.hint(if matches!(candidate, Value::Dict(_)) {
         "wrap the field dictionary with `schema(...)`"
     } else {
         "pass a Typst type such as `str` or a declaration such as `schema((title: str))`"
     });
-    Err(eco_vec![error])
+    Err(eco_vec![err])
 }
 
 #[func(contextual)]
@@ -51,56 +53,39 @@ pub(crate) fn tola_parse_source(
         .get("path")
         .at(span)?
         .clone()
-        .cast::<typst::foundations::Str>()
+        .cast::<Str>()
         .at(span)?;
     let origin = source_origin(engine, path.as_str()).at(span)?;
     let path = origin.owner.vpath().get_without_slash();
     let is_factory = matches!(schema, Value::Func(_));
-    let declaration = if let Value::Func(factory) = schema {
-        factory
+    let decl = match schema {
+        Value::Func(factory) => factory
             .call(engine, context, [Value::Dict(source.clone())])
-            .map_err(|mut errors| {
-                for error in errors.make_mut() {
-                    error.hint(eco_format!("while choosing the schema for `{path}`"));
+            .map_err(|mut errs| {
+                for err in errs.make_mut() {
+                    err.hint(eco_format!("while choosing the schema for `{path}`"));
                 }
-                errors
-            })?
-    } else {
-        schema
+                errs
+            })?,
+        other => other,
     };
-    let metadata = match source.get("meta").at(span)? {
+    let meta = match source.get("meta").at(span)? {
         Value::None => Value::Dict(Dict::new()),
-        value => value.clone(),
+        val => val.clone(),
     };
     parse
-        .call(engine, context, [metadata, declaration])
-        .map_err(|errors| source_schema_errors(errors, path, is_factory))
+        .call(engine, context, [meta, decl])
+        .map_err(|errs| source_schema_errors(errs, path, is_factory))
 }
 
 fn source_schema_errors(
-    mut errors: EcoVec<SourceDiagnostic>,
+    mut errs: EcoVec<SourceDiagnostic>,
     path: &str,
     is_factory: bool,
 ) -> EcoVec<SourceDiagnostic> {
-    for error in errors.make_mut() {
-        let native = tola_typst::diagnostic::NativeDiagnostic::from(error.clone());
-        if let tola_typst::diagnostic::DiagnosticOrigin::Producer(origin) = native.origin()
-            && origin.name() == SCHEMA_ARGUMENT
-            && origin
-                .fields()
-                .iter()
-                .any(|(key, value)| key == "owner" && value == "try-parse")
-            && !error.trace.iter().any(|trace| {
-                trace.span.id().is_some_and(|id| match id.root() {
-                    typst::syntax::VirtualRoot::Project => true,
-                    typst::syntax::VirtualRoot::Package(package) => !SCHEMA_WRAPPERS
-                        .into_iter()
-                        .any(|owned| owned.spec() == *package),
-                })
-            })
-            && let Some((_, actual)) = origin.fields().iter().find(|(key, _)| key == "actual")
-        {
-            error.message = if is_factory {
+    for err in errs.make_mut() {
+        if let Some(actual) = try_parse_actual(err) {
+            err.message = if is_factory {
                 eco_format!(
                     "schema function for `{path}` returned `{actual}`; expected a Typst type or schema declaration"
                 )
@@ -110,8 +95,37 @@ fn source_schema_errors(
                 )
             };
         } else {
-            error.hint(eco_format!("while resolving the schema for `{path}`"));
+            err.hint(eco_format!("while resolving the schema for `{path}`"));
         }
     }
-    errors
+    errs
+}
+
+fn try_parse_actual(err: &SourceDiagnostic) -> Option<String> {
+    let native = NativeDiagnostic::from(err.clone());
+    let DiagnosticOrigin::Producer(origin) = native.origin() else {
+        return None;
+    };
+    if origin.name() != SCHEMA_ARGUMENT
+        || !origin
+            .fields()
+            .iter()
+            .any(|(k, v)| k == "owner" && v == "try-parse")
+        || has_caller_frame(err)
+    {
+        return None;
+    }
+    origin
+        .fields()
+        .iter()
+        .find_map(|(k, v)| (k == "actual").then(|| v.to_string()))
+}
+
+fn has_caller_frame(err: &SourceDiagnostic) -> bool {
+    err.trace.iter().any(|t| {
+        t.span.id().is_some_and(|id| match id.root() {
+            VirtualRoot::Project => true,
+            VirtualRoot::Package(pkg) => !SCHEMA_WRAPPERS.into_iter().any(|w| w.spec() == *pkg),
+        })
+    })
 }

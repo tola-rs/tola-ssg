@@ -11,7 +11,7 @@ use tola_minify::MinifiedLanguages;
 use crate::asset::AssetOrigin;
 use crate::asset::output::{self, AssetOutput};
 use crate::asset::urls::{ModuleAsset, ModuleAssetInput, browser_url};
-use crate::config::ResolvedSiteConfig;
+use crate::config::SiteConfig;
 use crate::filesystem::{FilesystemSourceKind, absolute_path};
 
 use super::AssetSourceError;
@@ -123,7 +123,7 @@ impl AssetDeclaration {
 
     pub(super) fn published(
         &self,
-        config: &ResolvedSiteConfig,
+        config: &SiteConfig,
         output: &AssetOutput,
         relative: &Path,
     ) -> (String, String, AssetOrigin, Option<ModuleAsset>) {
@@ -157,14 +157,14 @@ impl AssetDeclaration {
 }
 
 pub(super) fn collect(
-    config: &ResolvedSiteConfig,
-    assets: crate::modules::prepared::AppliedAssets<'_>,
+    config: &SiteConfig,
+    assets: crate::modules::site::AppliedAssets<'_>,
 ) -> Result<Vec<AssetDeclaration>> {
     let mut declarations = Vec::new();
     append_declarations(
         &mut declarations,
-        config.get_root(),
-        config.get_root(),
+        config.root(),
+        config.root(),
         &config.assets.trees,
         &config.assets.files,
         &config.options,
@@ -174,7 +174,7 @@ pub(super) fn collect(
         append_declarations(
             &mut declarations,
             &module.root,
-            config.get_root(),
+            config.root(),
             &module.declarations.trees,
             &module.declarations.files,
             &module.options,
@@ -192,7 +192,7 @@ fn append_declarations(
     trees: &[tola_module::assets::AssetTreeDeclaration],
     files: &[tola_module::assets::AssetFileDeclaration],
     options: &toml::Table,
-    module: Option<&tola_module::prepared::AssetContribution>,
+    module: Option<&tola_module::bundle::AssetContribution>,
 ) -> Result<()> {
     use tola_module::assets::is_enabled;
 

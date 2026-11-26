@@ -1,7 +1,6 @@
 //! Native filesystem operations shared by Tola's readers and writers.
 //!
-//! Checks on opened files inspect their handles. Path observations never prove that a later
-//! open sees the same entry. Callers own selection, publication timing, and author diagnostics.
+//! Handle checks inspect the opened descriptor; callers own selection, timing, and diagnostics.
 
 #![forbid(unsafe_code)]
 
@@ -23,8 +22,7 @@ pub use sys::{
 
 /// Open a regular file for reading, following or refusing a final link.
 ///
-/// Unix opens do not wait on FIFOs. Windows refuses device handles and, when following is
-/// disabled, every reparse point. Intermediate directories are not pinned by this operation.
+/// Unix avoids blocking on FIFOs; Windows refuses device handles and (when unfollowed) reparse points.
 pub fn open_regular_file(path: &Path, follow_symlink: bool) -> io::Result<File> {
     let file = sys::open_regular_file(path, follow_symlink)?;
     if !file.metadata()?.is_file() {
@@ -39,42 +37,40 @@ pub fn open_regular_file(path: &Path, follow_symlink: bool) -> io::Result<File> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Read;
+    use std::io::{Read, Write};
 
     #[test]
-    fn regular_inputs_are_read_only() {
-        use std::io::Write;
-
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("input.css");
+    fn read_only_handle() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("input.css");
         std::fs::write(&path, b"original input").unwrap();
         let mut file = open_regular_file(&path, false).unwrap();
         assert!(file.write_all(b"replacement").is_err());
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes).unwrap();
-        assert_eq!(bytes, b"original input");
+        let mut buf = Vec::new();
+        file.read_to_end(&mut buf).unwrap();
+        assert_eq!(buf, b"original input");
     }
 
     #[cfg(unix)]
     #[test]
-    fn links_require_explicit_following() {
-        let directory = tempfile::tempdir().unwrap();
-        let target = directory.path().join("target.css");
-        let link = directory.path().join("linked.css");
+    fn symlink_follow_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target.css");
+        let link = dir.path().join("linked.css");
         std::fs::write(&target, b"linked input").unwrap();
         std::os::unix::fs::symlink(&target, &link).unwrap();
 
         assert!(open_regular_file(&link, false).is_err());
         let mut file = open_regular_file(&link, true).unwrap();
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes).unwrap();
-        assert_eq!(bytes, b"linked input");
+        let mut buf = Vec::new();
+        file.read_to_end(&mut buf).unwrap();
+        assert_eq!(buf, b"linked input");
     }
 
     #[cfg(windows)]
     #[test]
-    fn device_handles_are_rejected() {
-        let error = open_regular_file(Path::new("NUL"), true).unwrap_err();
-        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    fn reject_device_handle() {
+        let err = open_regular_file(Path::new("NUL"), true).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
     }
 }

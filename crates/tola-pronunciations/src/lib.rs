@@ -1,19 +1,7 @@
-//! The pronunciations Tola names for text, and the tables that name them.
+//! Word and character pronunciation lookups for Han text.
 //!
-//! A pronunciation is how text is said, which is not how it is written: `重庆` is said
-//! `chong qing`. A table names the pronunciation of a word or a single character, and the
-//! lookup prefers the longest name a position starts with, so a word beats the
-//! characters it is built from.
-//!
-//! A match uses the pronunciation stored in its source table; text no table names
-//! keeps its own characters.
-//!
-//! Every source is a feature; only the enabled ones are compiled in. With none
-//! enabled, each function returns its input unchanged.
-//!
-//! Output storage is allocated only after a match. Every generated key carries a Han
-//! character, so text carrying none of the CJK code points a key is written in returns
-//! without parsing a table.
+//! Each enabled source feature compiles in its lookup table; queries take the longest match at
+//! each position, borrowing the input unchanged when no key matches or no table is active.
 //!
 //! ```
 //! # #[cfg(feature = "unihan")]
@@ -43,34 +31,22 @@ mod jmdict;
 #[cfg(feature = "unihan")]
 mod unihan;
 
-/// Rewrite `text` into the pronunciations its words and characters have in Chinese.
-///
-/// Each position takes the longest name the enabled tables carry, so a word wins
-/// over the characters it is spelled with. Pronunciations are separated from each other,
-/// and text no table names keeps its own characters.
+/// Rewrite `text` into space-separated Chinese pronunciations, keeping unmatched text verbatim.
 pub fn chinese_pronunciations(text: &str) -> Cow<'_, str> {
     pronunciations(sources::CHINESE_TABLES, text)
 }
 
-/// Rewrite `text` into the pronunciations its words have in Japanese.
-///
-/// A Japanese word is named by kana, the script Japanese writes its own words with:
-/// `東京` is `とうきょう`, which a rule set reads as Latin.
-/// Text no table names keeps its own characters.
+/// Rewrite `text` into Japanese kana pronunciations, keeping unmatched text verbatim.
 pub fn japanese_pronunciations(text: &str) -> Cow<'_, str> {
     pronunciations(sources::JAPANESE_TABLES, text)
 }
 
-/// `text` rewritten by the pronunciations `tables` name, or borrowed when none of them does.
-///
-/// Text with no character a generated key is written with holds no key, so it answers before any
-/// table is parsed.
 fn pronunciations<'a>(tables: &[&table::PronunciationTable], text: &'a str) -> Cow<'a, str> {
     if tables.is_empty() || !han::contains_han(text) {
         return Cow::Borrowed(text);
     }
     match table::rewrite(tables, text) {
-        Some(rewritten) => Cow::Owned(rewritten),
+        Some(out) => Cow::Owned(out),
         None => Cow::Borrowed(text),
     }
 }
@@ -83,7 +59,7 @@ mod tests {
 
     #[cfg(feature = "unihan")]
     #[test]
-    fn pronunciations_keep_neighbours_apart() {
+    fn word_spacing() {
         assert_eq!(chinese_pronunciations("中文"), "zhong wen");
         assert_eq!(chinese_pronunciations("中文abc"), "zhong wen abc");
         assert_eq!(chinese_pronunciations("中文，abc"), "zhong wen，abc");
@@ -91,7 +67,7 @@ mod tests {
 
     #[cfg(feature = "cedict")]
     #[test]
-    fn word_pronunciation_beats_its_characters() {
+    fn longest_word_wins() {
         assert_eq!(chinese_pronunciations("重庆"), "chong qing");
         assert_eq!(chinese_pronunciations("银行"), "yin hang");
         assert_eq!(chinese_pronunciations("中国人"), "zhong guo ren");
@@ -99,14 +75,14 @@ mod tests {
 
     #[cfg(feature = "jmdict")]
     #[test]
-    fn japanese_words_read_as_kana() {
+    fn japanese_kana() {
         assert_eq!(japanese_pronunciations("東京"), "とうきょう");
         assert_eq!(japanese_pronunciations("新聞"), "しんぶん");
         assert_eq!(japanese_pronunciations("食べる"), "たべる");
     }
 
     #[test]
-    fn unknown_text_is_borrowed() {
+    fn unknown_borrows() {
         for text in ["", "tola", "Crème かな 한국어"] {
             assert!(matches!(
                 chinese_pronunciations(text),
@@ -124,7 +100,7 @@ mod tests {
         not(feature = "jmdict")
     ))]
     #[test]
-    fn missing_sources_leave_text_borrowed() {
+    fn disabled_features_borrow() {
         #[cfg(not(any(feature = "cedict", feature = "unihan")))]
         assert!(matches!(
             chinese_pronunciations("中文"),
@@ -139,7 +115,7 @@ mod tests {
 
     #[cfg(any(feature = "cedict", feature = "jmdict"))]
     #[test]
-    fn mixed_names_keep_ascii_prefixes() {
+    fn mixed_ascii_prefix() {
         #[cfg(feature = "cedict")]
         assert_eq!(chinese_pronunciations("3D打印"), "san d da yin");
         #[cfg(feature = "jmdict")]

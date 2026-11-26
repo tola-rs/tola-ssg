@@ -5,8 +5,8 @@ use std::path::Path;
 use tola_diagnostic::{Diagnostic, DiagnosticError};
 
 /// Warning emitted when the completed output graph contains no HTML pages.
-pub fn no_pages_diagnostic(config: &crate::config::ResolvedSiteConfig) -> Diagnostic {
-    let entry = tola_diagnostic::display_path(&config.build.entry, config.get_root());
+pub fn no_pages_diagnostic(config: &crate::config::SiteConfig) -> Diagnostic {
+    let entry = tola_diagnostic::display_path(&config.build.entry, config.root());
     Diagnostic::new(
         tola_diagnostic::codes::site::NO_PAGES,
         tola_diagnostic::Severity::Warning,
@@ -18,10 +18,8 @@ pub fn no_pages_diagnostic(config: &crate::config::ResolvedSiteConfig) -> Diagno
 }
 
 /// Warning emitted when the completed output graph publishes no page at `404.html`.
-pub(super) fn not_found_missing_diagnostic(
-    config: &crate::config::ResolvedSiteConfig,
-) -> Diagnostic {
-    let entry = tola_diagnostic::display_path(&config.build.entry, config.get_root());
+pub(super) fn not_found_missing_diagnostic(config: &crate::config::SiteConfig) -> Diagnostic {
+    let entry = tola_diagnostic::display_path(&config.build.entry, config.root());
     Diagnostic::new(
         tola_diagnostic::codes::site::NOT_FOUND_MISSING,
         tola_diagnostic::Severity::Warning,
@@ -36,9 +34,7 @@ pub(super) fn not_found_missing_diagnostic(
 ///
 /// A present swap workspace means the last replacement never finished, so the vendored trees may
 /// be mixed; `tola vendor` completes it.
-pub(super) fn refuse_incomplete_vendor(
-    config: &crate::config::ResolvedSiteConfig,
-) -> anyhow::Result<()> {
+pub(super) fn refuse_incomplete_vendor(config: &crate::config::SiteConfig) -> anyhow::Result<()> {
     // A vendor candidate is the tree `tola vendor` is preparing now, not an installed one a
     // stopped run left under recovery.
     if config.vendor_candidate.is_some() {
@@ -47,10 +43,10 @@ pub(super) fn refuse_incomplete_vendor(
     let Some(vendor_path) = config.vendor.path.as_ref() else {
         return Ok(());
     };
-    if !crate::filesystem::TreeSwap::beside(config.get_root(), vendor_path)?.is_claimed()? {
+    if !crate::filesystem::TreeSwap::beside(config.root(), vendor_path)?.is_claimed()? {
         return Ok(());
     }
-    let vendor = tola_diagnostic::display_path(vendor_path, config.get_root());
+    let vendor = tola_diagnostic::display_path(vendor_path, config.root());
     let diagnostic = Diagnostic::new(
         tola_diagnostic::codes::vendor::INCOMPLETE,
         tola_diagnostic::Severity::Error,
@@ -113,86 +109,76 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cancelled_error_keeps_its_cancellation() {
-        let error = anyhow::Error::new(tola_typst::CompileError::Cancelled);
-        let error = with_site(error, Path::new("/site"));
-        assert!(crate::cancellation::is_cancelled(&error));
-        assert!(tola_diagnostic::attached(&error).is_none());
-        assert!(for_error(&error, Path::new("/site")).is_empty());
+    fn cancelled_error_stays_cancelled() {
+        let err = anyhow::Error::new(tola_typst::CompileError::Cancelled);
+        let err = with_site(err, Path::new("/site"));
+        assert!(crate::cancellation::is_cancelled(&err));
+        assert!(tola_diagnostic::attached(&err).is_none());
+        assert!(for_error(&err, Path::new("/site")).is_empty());
     }
 
     #[test]
-    fn font_failure_names_the_configuration_key() {
-        let error = anyhow::Error::new(tola_typst::FontLoadError::NotDirectory {
+    fn font_failure_cites_config_key() {
+        let err = anyhow::Error::new(tola_typst::FontLoadError::NotDirectory {
             path: std::path::PathBuf::from("/site/fonts/Arial.ttf"),
         });
 
-        let diagnosed = with_site(error, Path::new("/site"));
-        let diagnostics = for_error(&diagnosed, Path::new("/site"));
+        let diagnosed = with_site(err, Path::new("/site"));
+        let diag = for_error(&diagnosed, Path::new("/site"));
 
-        assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].code, tola_diagnostic::codes::typst::FONT);
-        assert!(diagnostics[0].message.contains("fonts/Arial.ttf"));
-        assert!(!diagnostics[0].message.contains("/site"));
-        assert!(!diagnostics[0].help.is_empty());
+        assert_eq!(diag.len(), 1);
+        assert_eq!(diag[0].code, tola_diagnostic::codes::typst::FONT);
+        assert!(diag[0].message.contains("fonts/Arial.ttf"));
+        assert!(!diag[0].message.contains("/site"));
+        assert!(!diag[0].help.is_empty());
     }
 
     #[test]
-    fn invalid_manifest_keeps_its_diagnostic_before_compilation() {
+    fn invalid_manifest_reports_diagnostic() {
         let site = tempfile::tempdir().unwrap();
         let root = site.path();
-        let directory = root.join("theme");
-        std::fs::create_dir(&directory).unwrap();
-        let manifest = directory.join("tola-module.toml");
+        let dir = root.join("theme");
+        std::fs::create_dir(&dir).unwrap();
+        let manifest = dir.join("tola-module.toml");
         std::fs::write(&manifest, "# Module\n[buid]\n").unwrap();
-        let config =
-            crate::config::tests::load_test_config(root, "[modules.theme]\npath = 'theme'\n");
+        let cfg = crate::config::tests::load_test_config(root, "[modules.theme]\npath = 'theme'\n");
 
-        let Err(failure) = super::super::build_site(&config, crate::build::BuildMode::Production)
+        let Err(failure) = super::super::build_site(&cfg, crate::build::BuildMode::Production)
         else {
             panic!("the module manifest should fail before compilation");
         };
-        let error = anyhow::Error::new(failure);
-        let [diagnostic] = tola_diagnostic::attached(&error).unwrap() else {
+        let err = anyhow::Error::new(failure);
+        let [diag] = tola_diagnostic::attached(&err).unwrap() else {
             panic!("expected a single manifest diagnostic");
         };
-        assert_eq!(diagnostic.code, tola_diagnostic::codes::module::MANIFEST);
-        assert!(diagnostic.message.contains("`buid`"));
-        assert!(
-            diagnostic
-                .help
-                .iter()
-                .any(|help| help.message.contains("`build`"))
-        );
-        let location = diagnostic.location.as_ref().unwrap();
+        assert_eq!(diag.code, tola_diagnostic::codes::module::MANIFEST);
+        assert!(diag.message.contains("`buid`"));
+        assert!(diag.help.iter().any(|h| h.message.contains("`build`")));
+        let loc = diag.location.as_ref().unwrap();
         assert_eq!(
-            location.file.as_deref(),
+            loc.file.as_deref(),
             Some(manifest.canonicalize().unwrap().as_path())
         );
-        assert_eq!(location.range.unwrap().start.line, 1);
+        assert_eq!(loc.range.unwrap().start.line, 1);
     }
 
-    /// A build reads no vendored input while a stopped replacement waits for `tola vendor`.
     #[test]
-    fn unfinished_vendor_replacement_refuses_the_build() {
+    fn incomplete_vendor_refuses_build() {
         let site = tempfile::TempDir::new().unwrap();
-        let config = crate::config::tests::load_test_config(
+        let cfg = crate::config::tests::load_test_config(
             site.path(),
             crate::config::tests::VENDORED_SITE_SOURCE,
         );
-        assert!(refuse_incomplete_vendor(&config).is_ok());
+        assert!(refuse_incomplete_vendor(&cfg).is_ok());
 
-        let vendor = config.vendor.path.as_ref().expect("a declared vendor path");
-        crate::filesystem::TreeSwap::beside(config.get_root(), vendor)
+        let vendor = cfg.vendor.path.as_ref().expect("a declared vendor path");
+        crate::filesystem::TreeSwap::beside(cfg.root(), vendor)
             .unwrap()
             .claim()
             .unwrap();
 
-        let error = refuse_incomplete_vendor(&config).unwrap_err();
-        let diagnostics = tola_diagnostic::attached(&error).expect("the refusal is a diagnostic");
-        assert_eq!(
-            diagnostics[0].code,
-            tola_diagnostic::codes::vendor::INCOMPLETE
-        );
+        let err = refuse_incomplete_vendor(&cfg).unwrap_err();
+        let diag = tola_diagnostic::attached(&err).expect("the refusal is a diagnostic");
+        assert_eq!(diag[0].code, tola_diagnostic::codes::vendor::INCOMPLETE);
     }
 }

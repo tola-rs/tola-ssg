@@ -220,7 +220,7 @@ mod tests {
     use std::sync::atomic::Ordering;
 
     #[test]
-    fn attempt_cancellation_stays_scoped() {
+    fn cancellation_scoped() {
         let superseded = BuildCanceller::new();
         let current = BuildCanceller::new();
         let superseded_worker = superseded.token();
@@ -251,8 +251,8 @@ mod tests {
     }
 
     #[test]
-    fn cancelled_failure_keeps_attached_diagnostics() {
-        let diagnostics = vec![
+    fn cancelled_error_retains_diagnostics() {
+        let diag = vec![
             tola_diagnostic::Diagnostic::new(
                 tola_diagnostic::codes::typst::SOURCE_ANALYSIS,
                 tola_diagnostic::Severity::Error,
@@ -261,14 +261,14 @@ mod tests {
             .with_note("the previous revision stays published"),
         ];
 
-        let error = anyhow::Error::new(tola_diagnostic::DiagnosticError::attach(
+        let err = anyhow::Error::new(tola_diagnostic::DiagnosticError::attach(
             anyhow::Error::new(BuildCancelled),
-            diagnostics,
+            diag,
         ));
 
-        assert!(is_cancelled(&error));
-        assert_eq!(error.to_string(), "build cancelled");
-        let attached = tola_diagnostic::attached(&error).expect("the diagnostics stay attached");
+        assert!(is_cancelled(&err));
+        assert_eq!(err.to_string(), "build cancelled");
+        let attached = tola_diagnostic::attached(&err).expect("the diagnostics stay attached");
         assert_eq!(attached.len(), 1);
         assert_eq!(
             attached[0].code,

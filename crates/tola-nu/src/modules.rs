@@ -15,7 +15,7 @@ pub(super) const NATIVE_MODULE: &str = "tola-native";
 
 /// One site module's public Nu entry, as the CLI resolved it from configuration.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct ConfiguredModule {
+pub struct ScriptModule {
     pub alias: String,
     pub root: PathBuf,
     pub entry: PathBuf,
@@ -92,7 +92,7 @@ impl Library {
         }
     }
 
-    pub fn configured(module: ConfiguredModule, overlays: &BTreeSet<PathBuf>) -> Result<Self> {
+    pub fn configured(module: ScriptModule, overlays: &BTreeSet<PathBuf>) -> Result<Self> {
         if !(module.root.is_absolute() && module.manifest.is_absolute()) {
             return Err(NuError::ModuleNotAbsolute);
         }
@@ -104,10 +104,7 @@ impl Library {
         if !module.entry.is_relative() {
             return Err(NuError::ModuleEntryRelative);
         }
-        let root = fs::canonicalize(&module.root).map_err(|source| NuError::IoStep {
-            action: "resolve Nu module root",
-            source,
-        })?;
+        let root = canonicalize_step(&module.root, "resolve Nu module root")?;
         let entry = source_path(&root.join(&module.entry)).map_err(|source| NuError::Context {
             action: "resolve Nu module entry",
             source: Box::new(source),
@@ -115,12 +112,9 @@ impl Library {
         if !(entry.starts_with(&root) && (entry.is_file() || overlays.contains(&entry))) {
             return Err(NuError::ModuleEntryEscapes);
         }
-        let manifest = fs::canonicalize(&module.manifest).map_err(|source| NuError::IoStep {
-            action: "resolve Nu module manifest",
-            source,
-        })?;
-        let declaration: toml::Table = fs::read_to_string(&manifest)?.parse()?;
-        let declared_entry = declaration
+        let manifest = canonicalize_step(&module.manifest, "resolve Nu module manifest")?;
+        let doc: toml::Table = fs::read_to_string(&manifest)?.parse()?;
+        let declared_entry = doc
             .get("nu")
             .and_then(|nu| nu.get("entry"))
             .and_then(toml::Value::as_str)
@@ -135,7 +129,7 @@ impl Library {
         let origin = Origin::Module {
             alias: module.alias.clone(),
             root: root.clone(),
-            manifest: manifest.clone(),
+            manifest,
         };
         Ok(Self {
             alias: module.alias,
@@ -146,49 +140,66 @@ impl Library {
     }
 }
 
+fn canonicalize_step(path: &Path, action: &'static str) -> Result<PathBuf> {
+    fs::canonicalize(path).map_err(|source| NuError::IoStep { action, source })
+}
+
 pub(super) fn register<'a>(
     engine: &mut EngineState,
     builtins: impl Iterator<Item = &'a crate::BuiltinModule>,
     configured: &[Library],
     overlays: &[SourceOverlay],
-    directories: &mut BTreeSet<PathBuf>,
-    observed_sources: &mut BTreeSet<PathBuf>,
+    dirs: &mut BTreeSet<PathBuf>,
+    observed: &mut BTreeSet<PathBuf>,
     host: &std::sync::Arc<std::sync::OnceLock<crate::Host>>,
 ) -> Result<(BTreeMap<String, ModuleEntry>, ModuleId)> {
     let mut entries = BTreeMap::new();
-    let mut working = StateWorkingSet::new(engine);
-    directories.extend(
+    let (native, builtin_entries) =
+        register_builtins(engine, builtins, configured, overlays, dirs, host)?;
+    entries.extend(builtin_entries);
+    let configured_entries = load_configured(engine, configured, overlays, dirs, observed)?;
+    entries.extend(configured_entries);
+    Ok((entries, native))
+}
+
+fn register_builtins<'a>(
+    engine: &mut EngineState,
+    builtins: impl Iterator<Item = &'a crate::BuiltinModule>,
+    configured: &[Library],
+    overlays: &[SourceOverlay],
+    dirs: &mut BTreeSet<PathBuf>,
+    host: &std::sync::Arc<std::sync::OnceLock<crate::Host>>,
+) -> Result<(ModuleId, Vec<(String, ModuleEntry)>)> {
+    let mut entries = Vec::new();
+    let mut ws = StateWorkingSet::new(engine);
+    dirs.extend(
         configured
             .iter()
-            .map(|module| module.entry.parent().unwrap().to_path_buf())
+            .map(|m| m.entry.parent().unwrap().to_path_buf())
             .chain(
                 overlays
                     .iter()
-                    .filter_map(|overlay| overlay.path.parent().map(Path::to_path_buf)),
+                    .filter_map(|o| o.path.parent().map(Path::to_path_buf)),
             ),
     );
-    add_overlays(&mut working, overlays, directories)?;
-    working.enter_scope();
+    add_overlays(&mut ws, overlays, dirs)?;
+    ws.enter_scope();
     // Register declarations without leaving their unqualified names in scope.
-    working.enter_scope();
+    ws.enter_scope();
     let mut native = Module::new(NATIVE_MODULE.as_bytes().to_vec());
-    for command in crate::image::declarations(host.clone()) {
-        add_command(&mut working, &mut native, command);
+    for cmd in crate::image::declarations(host.clone()) {
+        add_command(&mut ws, &mut native, cmd);
     }
-    for operation in [Operation::Context, Operation::Render, Operation::Submit] {
+    for op in [Operation::Context, Operation::Render, Operation::Submit] {
         add_command(
-            &mut working,
+            &mut ws,
             &mut native,
-            Box::new(HostCommand(operation, host.clone())),
+            Box::new(HostCommand(op, host.clone())),
         );
     }
     let mut root = Module::new(b"tola".to_vec());
-    add_command(
-        &mut working,
-        &mut root,
-        Box::new(crate::highlight::Highlight),
-    );
-    for operation in [
+    add_command(&mut ws, &mut root, Box::new(crate::highlight::Highlight));
+    for op in [
         Operation::Context,
         Operation::Site,
         Operation::Module,
@@ -197,78 +208,80 @@ pub(super) fn register<'a>(
         Operation::Init,
         Operation::Query,
     ] {
-        add_command(
-            &mut working,
-            &mut root,
-            Box::new(HostCommand(operation, host.clone())),
-        );
+        add_command(&mut ws, &mut root, Box::new(HostCommand(op, host.clone())));
     }
-    working.exit_scope();
+    ws.exit_scope();
     // These commands are Custom so Nu's forced-builtin lookup cannot bypass the import.
-    let native = working.add_module(NATIVE_MODULE, native, Vec::new());
+    let native = ws.add_module(NATIVE_MODULE, native, Vec::new());
     for builtin in builtins {
-        let library = Library::builtin(builtin);
-        crate::resources::register(&mut working, &library.root, builtin.sources);
-        let id = parse(&mut working, &library)?;
-        let main = module_has_main(&working, id);
+        let lib = Library::builtin(builtin);
+        crate::resources::register(&mut ws, &lib.root, builtin.sources);
+        let id = parse(&mut ws, &lib)?;
+        let main = module_has_main(&ws, id);
         root.add_submodule(builtin.name.as_bytes().to_vec(), id);
-        entries.insert(
-            format!("@tola-scripts/{}", builtin.name),
-            entry(&library, main, "@tola-scripts"),
-        );
+        let entry = entry(&lib, main, "@tola-scripts");
+        entries.push((entry.locator.clone(), entry));
     }
-    working.exit_scope();
-    working.add_module("tola", root, Vec::new());
-    working.add_module(
+    ws.exit_scope();
+    ws.add_module("tola", root, Vec::new());
+    ws.add_module(
         "tola-modules",
         Module::new(b"tola-modules".to_vec()),
         Vec::new(),
     );
-    engine.merge_delta(working.render())?;
-    // Imports express dependencies themselves. Retry against the growing root without
-    // retaining a failed parse's declarations; cycles or invalid exports fail as a group.
+    engine.merge_delta(ws.render())?;
+    Ok((native, entries))
+}
+
+fn load_configured(
+    engine: &mut EngineState,
+    configured: &[Library],
+    overlays: &[SourceOverlay],
+    dirs: &mut BTreeSet<PathBuf>,
+    observed: &mut BTreeSet<PathBuf>,
+) -> Result<Vec<(String, ModuleEntry)>> {
+    // Retry against the growing root without retaining a failed parse's declarations.
+    let mut entries = Vec::new();
     let mut pending: Vec<_> = configured.iter().collect();
     let mut loaded: Vec<(String, ModuleId)> = Vec::new();
     while !pending.is_empty() {
         let before = loaded.len();
         let mut next = Vec::new();
         let mut failures = Vec::new();
-        for library in pending {
+        for lib in pending {
             let mut candidate = engine.clone();
-            let mut working = StateWorkingSet::new(&candidate);
-            add_overlays(&mut working, overlays, directories)?;
-            working.enter_scope();
-            let parsed = parse(&mut working, library);
-            for file in working.files() {
+            let mut ws = StateWorkingSet::new(&candidate);
+            add_overlays(&mut ws, overlays, dirs)?;
+            ws.enter_scope();
+            let parsed = parse(&mut ws, lib);
+            for file in ws.files() {
                 let path = Path::new(file.name.as_ref());
                 if path.is_absolute()
                     && let Some(parent) = path.parent()
                 {
-                    directories.insert(parent.to_path_buf());
-                    observed_sources.insert(source_path(path)?);
+                    dirs.insert(parent.to_path_buf());
+                    observed.insert(source_path(path)?);
                 }
             }
             match parsed {
                 Ok(id) => {
-                    let main = module_has_main(&working, id);
-                    working.exit_scope();
+                    let main = module_has_main(&ws, id);
+                    ws.exit_scope();
                     let mut root = Module::new(b"tola-modules".to_vec());
                     for (name, id) in &loaded {
                         root.add_submodule(name.as_bytes().to_vec(), *id);
                     }
-                    root.add_submodule(library.alias.as_bytes().to_vec(), id);
-                    working.add_module("tola-modules", root, Vec::new());
-                    candidate.merge_delta(working.render())?;
+                    root.add_submodule(lib.alias.as_bytes().to_vec(), id);
+                    ws.add_module("tola-modules", root, Vec::new());
+                    candidate.merge_delta(ws.render())?;
                     *engine = candidate;
-                    loaded.push((library.alias.clone(), id));
-                    entries.insert(
-                        format!("@tola-modules/{}", library.alias),
-                        entry(library, main, "@tola-modules"),
-                    );
+                    loaded.push((lib.alias.clone(), id));
+                    let entry = entry(lib, main, "@tola-modules");
+                    entries.push((entry.locator.clone(), entry));
                 }
-                Err(error) => {
-                    failures.push(format!("{}:\n{error:#}", library.alias));
-                    next.push(library);
+                Err(err) => {
+                    failures.push(format!("{}:\n{err:#}", lib.alias));
+                    next.push(lib);
                 }
             }
         }
@@ -279,56 +292,53 @@ pub(super) fn register<'a>(
         }
         pending = next;
     }
-    Ok((entries, native))
+    Ok(entries)
 }
 
-fn add_command(working: &mut StateWorkingSet, module: &mut Module, command: Box<dyn Command>) {
-    let name = command.name().as_bytes().to_vec();
-    module.add_decl(name, working.add_decl(command));
+fn add_command(ws: &mut StateWorkingSet, module: &mut Module, cmd: Box<dyn Command>) {
+    let name = cmd.name().as_bytes().to_vec();
+    module.add_decl(name, ws.add_decl(cmd));
 }
 
-fn parse(working: &mut StateWorkingSet, library: &Library) -> Result<ModuleId> {
-    let path = library
-        .entry
-        .to_str()
-        .ok_or(NuError::NotUtf8 { what: "module" })?;
-    // The parser reads this literal as the module path. Naming the module after the configured
-    // alias prefixes its public commands with that alias instead of the entry's file stem.
+fn parse(ws: &mut StateWorkingSet, lib: &Library) -> Result<ModuleId> {
+    let path = crate::path_str(&lib.entry, "module")?;
+    // Naming after the alias prefixes public commands with the configured alias instead of the file stem.
     let literal = nu_utils::escape_quote_string(path);
     let id = nu_parser::parse_module_file_or_dir(
-        working,
+        ws,
         literal.as_bytes(),
         nu_protocol::Span::unknown(),
-        Some(library.alias.clone()),
+        Some(lib.alias.clone()),
     );
-    crate::execution::check_errors(working)?;
+    crate::execution::check_errors(ws)?;
     let id = id.ok_or(NuError::ModuleUnresolved)?;
-    if working.get_module(id).name == library.alias.as_bytes() {
+    if ws.get_module(id).name == lib.alias.as_bytes() {
         return Ok(id);
     }
-    // The parser caches one module per source span, so a second alias of the same entry answers
-    // with the first alias's module. Register that parsed module under this alias too.
-    let mut module = working.get_module(id).clone();
-    module.name = library.alias.as_bytes().to_vec();
-    let comments = working.get_module_comments(id).unwrap_or_default().to_vec();
-    Ok(working.add_module(&library.alias, module, comments))
+    // The parser caches one module per source span, so a second alias reuses the first module;
+    // register that parsed module under this alias too.
+    let mut module = ws.get_module(id).clone();
+    module.name = lib.alias.as_bytes().to_vec();
+    let comments = ws.get_module_comments(id).unwrap_or_default().to_vec();
+    Ok(ws.add_module(&lib.alias, module, comments))
 }
 
-fn module_has_main(working: &StateWorkingSet, id: ModuleId) -> bool {
-    let module = working.get_module(id);
+fn module_has_main(ws: &StateWorkingSet, id: ModuleId) -> bool {
+    let module = ws.get_module(id);
     module
         .main
-        .is_some_and(|id| working.get_decl(id).block_id().is_some())
-        || module.decls.iter().any(|(name, id)| {
-            name.starts_with(b"main ") && working.get_decl(*id).block_id().is_some()
-        })
+        .is_some_and(|id| ws.get_decl(id).block_id().is_some())
+        || module
+            .decls
+            .iter()
+            .any(|(name, id)| name.starts_with(b"main ") && ws.get_decl(*id).block_id().is_some())
 }
 
-fn entry(library: &Library, has_main: bool, namespace: &str) -> ModuleEntry {
+fn entry(lib: &Library, has_main: bool, namespace: &str) -> ModuleEntry {
     ModuleEntry {
-        path: library.entry.clone(),
-        origin: library.origin.clone(),
-        locator: format!("{namespace}/{}", library.alias),
+        path: lib.entry.clone(),
+        origin: lib.origin.clone(),
+        locator: format!("{namespace}/{}", lib.alias),
         has_main,
     }
 }
@@ -345,7 +355,7 @@ pub(super) fn capture(path: &Path) -> Result<Dependency> {
         path: path.to_path_buf(),
         source,
     })?;
-    let bytes = fs::read(path).map_err(|source| NuError::Input {
+    let buf = fs::read(path).map_err(|source| NuError::Input {
         action: "read Nu input",
         path: path.to_path_buf(),
         source,
@@ -353,7 +363,7 @@ pub(super) fn capture(path: &Path) -> Result<Dependency> {
     Ok(Dependency {
         path: path.to_path_buf(),
         canonical_path,
-        digest: digest(&bytes),
+        digest: digest(&buf),
     })
 }
 
@@ -370,8 +380,7 @@ pub(super) fn source_path(path: &Path) -> Result<PathBuf> {
     if let Ok(path) = fs::canonicalize(path) {
         return Ok(path);
     }
-    // A buffer may name a source that is not saved yet. Normalize the path as Nu's own path
-    // commands do, then resolve it against the nearest existing ancestor.
+    // Unsaved buffer: normalize without disk access, then resolve from nearest existing ancestor.
     let normalized = nu_path::expand_path(path, false);
     let existing = normalized
         .ancestors()
@@ -382,15 +391,15 @@ pub(super) fn source_path(path: &Path) -> Result<PathBuf> {
     Ok(fs::canonicalize(existing)?.join(normalized.strip_prefix(existing)?))
 }
 
-fn relative_alias(directory: &Path, source: &Path) -> PathBuf {
-    let normalized = source_path(directory).unwrap_or_else(|_| directory.to_path_buf());
+fn relative_alias(dir: &Path, src: &Path) -> PathBuf {
+    let normalized = source_path(dir).unwrap_or_else(|_| dir.to_path_buf());
     let base: Vec<_> = normalized.components().collect();
-    let target: Vec<_> = source.components().collect();
+    let target: Vec<_> = src.components().collect();
     let common = base.iter().zip(&target).take_while(|(a, b)| a == b).count();
     if common == 0 {
-        return source.to_path_buf();
+        return src.to_path_buf();
     }
-    let mut path = directory.to_path_buf();
+    let mut path = dir.to_path_buf();
     for _ in common..base.len() {
         path.push("..");
     }
@@ -400,24 +409,19 @@ fn relative_alias(directory: &Path, source: &Path) -> PathBuf {
     path
 }
 
-/// Register each overlay's text as a file, addressed by its own path and by the alias each
-/// directory in `directories` needs to reach it.
 fn add_overlays(
-    working: &mut StateWorkingSet,
+    ws: &mut StateWorkingSet,
     overlays: &[SourceOverlay],
-    directories: &BTreeSet<PathBuf>,
+    dirs: &BTreeSet<PathBuf>,
 ) -> Result<()> {
     for overlay in overlays {
-        let path = overlay
-            .path
-            .to_str()
-            .ok_or(NuError::NotUtf8 { what: "overlay" })?;
-        let id = working.add_file(path, overlay.text.as_bytes());
-        let _ = working.add_virtual_path(path.into(), nu_protocol::engine::VirtualPath::File(id));
-        for directory in directories {
-            if let Some(alias) = relative_alias(directory, &overlay.path).to_str() {
-                let _ = working
-                    .add_virtual_path(alias.into(), nu_protocol::engine::VirtualPath::File(id));
+        let path = crate::path_str(&overlay.path, "overlay")?;
+        let id = ws.add_file(path, overlay.text.as_bytes());
+        let _ = ws.add_virtual_path(path.into(), nu_protocol::engine::VirtualPath::File(id));
+        for dir in dirs {
+            if let Some(alias) = relative_alias(dir, &overlay.path).to_str() {
+                let _ =
+                    ws.add_virtual_path(alias.into(), nu_protocol::engine::VirtualPath::File(id));
             }
         }
     }

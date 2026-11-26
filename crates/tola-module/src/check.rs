@@ -18,21 +18,18 @@ pub fn check(directory: &Path) -> Result<()> {
 
 pub(crate) fn check_loaded(loaded: &ReadManifest) -> Result<()> {
     let manifest = &loaded.manifest;
+    let root = &loaded.root;
     if let Some(pack) = &manifest.pack {
         crate::pack::validate_selection(pack)?;
     }
-    let file = |key: &str, path: &Path| check_path(&loaded.root, key, path, false);
+    let file = |key: &str, path: &Path| check_path(root, key, path, false);
+    let dir = |key: &str, path: &Path| check_path(root, key, path, true);
     if let Some(typst) = &manifest.typst {
         if let Some(entry) = &typst.entry {
             file("typst.entry", entry)?;
         }
-        for (index, directory) in typst.fonts.iter().enumerate() {
-            check_path(
-                &loaded.root,
-                &format!("typst.fonts[{index}]"),
-                directory,
-                true,
-            )?;
+        for (idx, path) in typst.fonts.iter().enumerate() {
+            dir(&format!("typst.fonts[{idx}]"), path)?;
         }
     }
     for (key, entry) in [("nu.entry", &manifest.nu), ("build.entry", &manifest.build)] {
@@ -43,43 +40,36 @@ pub(crate) fn check_loaded(loaded: &ReadManifest) -> Result<()> {
     for (name, query) in &manifest.queries {
         file(&format!("queries.{name}.entry"), &query.entry)?;
     }
-    for (name, source) in &manifest.icons.collections {
-        if let Some(path) = source.path() {
+    for (name, src) in &manifest.icons.collections {
+        if let Some(path) = src.path() {
+            let is_dir = matches!(src, crate::icons::IconCollectionSource::LocalSvgDir { .. });
             check_path(
-                &loaded.root,
+                root,
                 &format!("icons.collections.{name}.path"),
                 path,
-                matches!(
-                    source,
-                    crate::icons::IconCollectionSource::LocalSvgDir { .. }
-                ),
+                is_dir,
             )?;
         }
     }
     if let Some(assets) = &manifest.assets {
-        for (index, asset) in assets.files.iter().enumerate() {
-            file(&format!("assets.files[{index}].source"), &asset.source)?;
+        for (idx, asset) in assets.files.iter().enumerate() {
+            file(&format!("assets.files[{idx}].source"), &asset.source)?;
         }
-        for (index, asset) in assets.trees.iter().enumerate() {
-            check_path(
-                &loaded.root,
-                &format!("assets.trees[{index}].source"),
-                &asset.source,
-                true,
-            )?;
+        for (idx, asset) in assets.trees.iter().enumerate() {
+            dir(&format!("assets.trees[{idx}].source"), &asset.source)?;
         }
     }
-    for (name, command) in &manifest.commands {
-        match command.action()? {
+    for (name, cmd) in &manifest.commands {
+        match cmd.action()? {
             CommandAction::Execute(action) => {
-                check_action(&loaded.root, &format!("commands.{name}.nu"), &action)?;
+                check_action(root, &format!("commands.{name}.nu"), &action)?;
             }
             CommandAction::Skill { path } => file(&format!("commands.{name}.skill"), &path)?,
             CommandAction::Query { .. } => {}
         }
     }
     if let Some(init) = &manifest.init {
-        check_action(&loaded.root, "init.nu", &init.action)?;
+        check_action(root, "init.nu", &init.action)?;
     }
     for (stage, name, path) in manifest.hooks.runtime_scripts() {
         file(&format!("hooks.{} ({name}).nu", stage.as_str()), path)?;
@@ -87,7 +77,7 @@ pub(crate) fn check_loaded(loaded: &ReadManifest) -> Result<()> {
     for hook in &manifest.hooks.before_pack {
         let key = format!("hooks.before-pack ({}).nu", hook.name);
         let action = hook.action().map_err(anyhow::Error::msg)?;
-        check_action(&loaded.root, &key, &action)?;
+        check_action(root, &key, &action)?;
     }
     Ok(())
 }
@@ -101,14 +91,12 @@ pub(crate) fn read(directory: &Path) -> Result<ReadManifest> {
         InputMode::new(InputScope::Online, false),
         &[],
     )
-    .map_err(|error| {
-        let diagnostic = crate::diagnostic::manifest_diagnostic(&error);
-        let error = anyhow::Error::new(error);
-        match diagnostic {
-            Some(diagnostic) => {
-                tola_diagnostic::DiagnosticError::attach(error, vec![diagnostic]).into()
-            }
-            None => error,
+    .map_err(|err| {
+        let diag = crate::diagnostic::manifest_diagnostic(&err);
+        let err = anyhow::Error::new(err);
+        match diag {
+            Some(diag) => tola_diagnostic::DiagnosticError::attach(err, vec![diag]).into(),
+            None => err,
         }
     })
 }
@@ -120,8 +108,8 @@ pub(crate) fn check_action(root: &Path, key: &str, action: &Action) -> Result<()
     Ok(())
 }
 
-fn check_path(root: &Path, key: &str, path: &Path, directory: bool) -> Result<()> {
-    validate_module_path(root, "module", root, path, directory)
+fn check_path(root: &Path, key: &str, path: &Path, is_dir: bool) -> Result<()> {
+    validate_module_path(root, "module", root, path, is_dir)
         .map(|_| ())
-        .map_err(|error| anyhow::anyhow!("`tola-module.toml` `{key}`: {error}"))
+        .map_err(|err| anyhow::anyhow!("`tola-module.toml` `{key}`: {err}"))
 }

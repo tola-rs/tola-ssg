@@ -601,28 +601,9 @@ impl Drop for LogWriter {
 mod tests {
     use super::*;
 
-    /// A log this session stops must not open again and must not keep writing.
-    #[test]
-    fn disabled_log_drops_later_records() {
-        let directory = tempfile::TempDir::new().unwrap();
-        let path = directory.path().join("session.jsonl");
-        let log = LogFile::prepare_session(&path, unexpected_write_failure).unwrap();
-        started(&log);
-        assert!(log.start().unwrap());
-
-        // The first refusal changes the state; a later round has nothing left to report.
-        assert!(log.disable());
-        assert!(!log.disable());
-        assert!(log.is_stopped());
-        assert!(!log.start().unwrap());
-
-        log.record("INFO", "tola::terminal", json!({"kind": "late"}));
-        assert!(!std::fs::read_to_string(&path).unwrap().contains("late"));
-    }
-
-    fn unexpected_write_failure(path: &Path, error: &io::Error) {
+    fn unexpected_write_failure(path: &Path, err: &io::Error) {
         panic!(
-            "unexpected log write failure at `{}`: {error}",
+            "unexpected log write failure at `{}`: {err}",
             path.display()
         );
     }
@@ -639,10 +620,33 @@ mod tests {
             .collect()
     }
 
+    fn opened_log(path: &Path) -> (File, same_file::Handle) {
+        let file = File::open(path).unwrap();
+        let handle = same_file::Handle::from_file(file.try_clone().unwrap()).unwrap();
+        (file, handle)
+    }
+
     #[test]
-    fn preparing_log_creates_no_target() {
-        let directory = tempfile::tempdir().unwrap();
-        let target = directory.path().join("site");
+    fn disabled_log_drops_records() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let log = LogFile::prepare_session(&path, unexpected_write_failure).unwrap();
+        started(&log);
+        assert!(log.start().unwrap());
+
+        assert!(log.disable());
+        assert!(!log.disable());
+        assert!(log.is_stopped());
+        assert!(!log.start().unwrap());
+
+        log.record("INFO", "tola::terminal", json!({"kind": "late"}));
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("late"));
+    }
+
+    #[test]
+    fn prepare_creates_no_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("site");
         let log =
             LogFile::prepare(&target.join(".tola/init.jsonl"), unexpected_write_failure).unwrap();
         started(&log);
@@ -654,8 +658,8 @@ mod tests {
 
     #[test]
     fn sessions_append_early_records() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("session.jsonl");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
         for _ in 0..2 {
             let log = LogFile::prepare(&path, unexpected_write_failure).unwrap();
             started(&log);
@@ -669,22 +673,22 @@ mod tests {
             );
             log.start().unwrap();
         }
-        let records = read_records(&path);
-        assert_eq!(records.len(), 4);
-        assert_eq!(records[1]["fields"]["diagnostic"]["code"], "config.invalid");
+        let recs = read_records(&path);
+        assert_eq!(recs.len(), 4);
+        assert_eq!(recs[1]["fields"]["diagnostic"]["code"], "config.invalid");
     }
 
     #[test]
-    fn startup_buffer_evicts_oldest_records() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("session.jsonl");
+    fn startup_buffer_evicts_oldest() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
         let log = LogFile::prepare(&path, unexpected_write_failure).unwrap();
         started(&log);
-        for sequence in 1..=3 {
+        for seq in 1..=3 {
             log.record(
                 "INFO",
                 "tola::terminal",
-                json!({"sequence": sequence, "message": "x".repeat(MAX_BUFFERED_STARTUP_BYTES / 2)}),
+                json!({"sequence": seq, "message": "x".repeat(MAX_BUFFERED_STARTUP_BYTES / 2)}),
             );
         }
         log.record(
@@ -694,18 +698,18 @@ mod tests {
         );
         log.start().unwrap();
 
-        let records = read_records(&path);
-        assert_eq!(records.len(), 3);
-        assert_eq!(records[0]["fields"]["kind"], "command_started");
-        assert_eq!(records[1]["fields"]["sequence"], 3);
-        assert_eq!(records[2]["fields"]["kind"], "startup_omitted");
-        assert_eq!(records[2]["fields"]["omitted"], 3);
+        let recs = read_records(&path);
+        assert_eq!(recs.len(), 3);
+        assert_eq!(recs[0]["fields"]["kind"], "command_started");
+        assert_eq!(recs[1]["fields"]["sequence"], 3);
+        assert_eq!(recs[2]["fields"]["kind"], "startup_omitted");
+        assert_eq!(recs[2]["fields"]["omitted"], 3);
     }
 
     #[test]
-    fn source_files_stay_untouched() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("tola.toml");
+    fn source_files_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tola.toml");
         std::fs::write(&path, "[site]\ntitle = 'Keep me'\n").unwrap();
         assert!(LogFile::prepare(&path, unexpected_write_failure).is_err());
         assert_eq!(
@@ -715,64 +719,52 @@ mod tests {
     }
 
     #[test]
-    fn hard_links_cannot_alias_log() {
-        let directory = tempfile::tempdir().unwrap();
-        let source = directory.path().join("site.typ");
-        let alias = directory.path().join("session.jsonl");
+    fn hard_links_cannot_alias() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("site.typ");
+        let alias = dir.path().join("session.jsonl");
         let contents = "{\"fields\":{\"kind\":\"command_started\"}}\n";
-        std::fs::write(&source, contents).unwrap();
-        std::fs::hard_link(&source, &alias).unwrap();
+        std::fs::write(&src, contents).unwrap();
+        std::fs::hard_link(&src, &alias).unwrap();
         assert!(LogFile::prepare(&alias, unexpected_write_failure).is_err());
-        assert_eq!(std::fs::read_to_string(source).unwrap(), contents);
+        assert_eq!(std::fs::read_to_string(src).unwrap(), contents);
     }
 
-    /// The opened log file and the same-file handle that must keep naming it.
-    fn opened_log(path: &Path) -> (File, same_file::Handle) {
-        let file = File::open(path).unwrap();
-        let handle = same_file::Handle::from_file(file.try_clone().unwrap()).unwrap();
-        (file, handle)
-    }
-
-    /// A path replaced while its log is being opened must not be recorded into.
     #[test]
-    fn replaced_log_path_is_refused() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("session.jsonl");
+    fn replaced_path_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
         std::fs::write(&path, "{}\n").unwrap();
         let (file, handle) = opened_log(&path);
-        // The path is moved aside and recreated while this handle still refers to the first file;
-        // moving keeps that file alive, so its inode cannot be reused by the replacement.
-        std::fs::rename(&path, directory.path().join("moved.jsonl")).unwrap();
+        // Move aside so the inode stays live and cannot be reused by the new file.
+        std::fs::rename(&path, dir.path().join("moved.jsonl")).unwrap();
         std::fs::write(&path, "{}\n").unwrap();
 
         assert!(require_path_names_file(&path, &file, &handle).is_err());
     }
 
-    /// A log that gained a second link after the early check must be refused at the opened-file
-    /// boundary too.
     #[test]
-    fn log_linked_after_validation_is_refused() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("session.jsonl");
+    fn post_check_hard_link_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
         std::fs::write(&path, "{}\n").unwrap();
         let (file, handle) = opened_log(&path);
-        std::fs::hard_link(&path, directory.path().join("alias.jsonl")).unwrap();
+        std::fs::hard_link(&path, dir.path().join("alias.jsonl")).unwrap();
 
         assert!(require_path_names_file(&path, &file, &handle).is_err());
     }
 
     #[cfg(unix)]
     #[test]
-    fn device_files_are_refused() {
+    fn device_files_rejected() {
         assert!(LogFile::prepare(Path::new("/dev/null"), unexpected_write_failure).is_err());
     }
 
-    /// A FIFO at the log path is refused rather than waited on for a writer.
     #[cfg(unix)]
     #[test]
-    fn fifo_log_path_is_refused() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("session.jsonl");
+    fn fifo_path_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
         let fifo = std::process::Command::new("mkfifo")
             .arg(&path)
             .status()
@@ -782,13 +774,11 @@ mod tests {
         assert!(LogFile::prepare(&path, unexpected_write_failure).is_err());
     }
 
-    /// A FIFO that replaced the log path after its early check is refused without waiting for a
-    /// writer on it.
     #[cfg(unix)]
     #[test]
-    fn fifo_replacing_log_path_refused() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("session.jsonl");
+    fn fifo_replacement_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
         std::fs::write(&path, "{}\n").unwrap();
         let (file, handle) = opened_log(&path);
         std::fs::remove_file(&path).unwrap();
@@ -803,8 +793,8 @@ mod tests {
 
     #[test]
     fn write_failure_reports_once() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("session.jsonl");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
         std::fs::write(&path, "").unwrap();
         let failures = Arc::new(Mutex::new(Vec::new()));
         let reported = Arc::clone(&failures);
@@ -817,11 +807,11 @@ mod tests {
                     file: File::open(&path).unwrap(),
                     stopped: false,
                 }),
-                on_write_failure: Box::new(move |path, error| {
+                on_write_failure: Box::new(move |path, err| {
                     reported
                         .lock()
                         .unwrap()
-                        .push((path.to_owned(), error.to_string()));
+                        .push((path.to_owned(), err.to_string()));
                 }),
             }),
         };

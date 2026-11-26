@@ -746,9 +746,9 @@ mod tests {
     use super::load;
 
     #[test]
-    fn optional_dangling_link_tracks_target_and_its_creation() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(directory.path()).unwrap();
+    fn optional_dangling_link_tracked() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
         let entry = root.join("tola.toml");
         let link = root.join("optional.toml");
         let target = root.join("missing.toml");
@@ -767,10 +767,10 @@ mod tests {
     }
 
     #[test]
-    fn pure_scope_rejects_optional_dangling_link_outside_site() {
-        let directory = tempfile::tempdir().unwrap();
+    fn pure_rejects_outside_optional_link() {
+        let dir = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(directory.path()).unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
         let entry = root.join("tola.toml");
         std::fs::write(
             &entry,

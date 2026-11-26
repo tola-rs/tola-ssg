@@ -220,7 +220,7 @@ fn select_location(
 ///
 /// `AllowNetwork` exists only in a build with the `network` feature.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum PackageFetchPolicy {
+pub enum PackageFetchMode {
     /// Allow Typst Universe downloads into the configured cache.
     #[cfg(feature = "network")]
     AllowNetwork,
@@ -399,12 +399,12 @@ pub fn sort_package_reads(reads: &mut [PackageRead]) {
 
 /// A package directory selected for a resolver read.
 #[derive(Debug)]
-pub struct PreparedPackage {
+pub struct PackageDir {
     directory: PathBuf,
     checks: Vec<PackageCheck>,
 }
 
-impl PreparedPackage {
+impl PackageDir {
     /// Return the selected physical package directory.
     ///
     /// Symbolic links in the logical candidate are resolved during selection.
@@ -481,7 +481,7 @@ pub type PackageVerifier = std::sync::Arc<
 #[derive(Clone)]
 pub struct PackageStore {
     locations: Result<PackageLocations, FileError>,
-    fetch_policy: PackageFetchPolicy,
+    fetch_policy: PackageFetchMode,
     boundary: crate::world::SourceBoundary,
     /// Typst Universe downloader, absent from a build without the `network` feature.
     #[cfg(feature = "network")]
@@ -492,7 +492,7 @@ pub struct PackageStore {
 
 impl PackageStore {
     /// Create a store from already-frozen package locations.
-    pub fn new(locations: PackageLocations, fetch_policy: PackageFetchPolicy) -> Self {
+    pub fn new(locations: PackageLocations, fetch_policy: PackageFetchMode) -> Self {
         Self::frozen(Ok(locations), fetch_policy)
     }
 
@@ -514,7 +514,7 @@ impl PackageStore {
     #[cfg(feature = "network")]
     pub fn with_user_agent(
         locations: PackageLocations,
-        fetch_policy: PackageFetchPolicy,
+        fetch_policy: PackageFetchMode,
         user_agent: impl Into<String>,
     ) -> Self {
         Self {
@@ -528,7 +528,7 @@ impl PackageStore {
 
     /// A store over frozen roots, or the invocation error that prevented discovery.
     #[cfg(feature = "network")]
-    fn frozen(locations: FileResult<PackageLocations>, fetch_policy: PackageFetchPolicy) -> Self {
+    fn frozen(locations: FileResult<PackageLocations>, fetch_policy: PackageFetchMode) -> Self {
         Self {
             locations,
             fetch_policy,
@@ -540,7 +540,7 @@ impl PackageStore {
 
     /// A store over frozen roots, or the invocation error that prevented discovery.
     #[cfg(not(feature = "network"))]
-    fn frozen(locations: FileResult<PackageLocations>, fetch_policy: PackageFetchPolicy) -> Self {
+    fn frozen(locations: FileResult<PackageLocations>, fetch_policy: PackageFetchMode) -> Self {
         Self {
             locations,
             fetch_policy,
@@ -556,7 +556,7 @@ impl PackageStore {
     }
 
     /// Return the store's network policy.
-    pub fn fetch_policy(&self) -> PackageFetchPolicy {
+    pub fn fetch_policy(&self) -> PackageFetchMode {
         self.fetch_policy
     }
 
@@ -566,23 +566,20 @@ impl PackageStore {
     /// packages, then the downloaded-package cache. A download
     /// happens only in the cache tier, and only for the namespace Typst
     /// Universe serves.
-    pub fn prepare(
-        &self,
-        package: &PackageSpec,
-    ) -> Result<PreparedPackage, PackagePreparationFailure> {
+    pub fn prepare(&self, package: &PackageSpec) -> Result<PackageDir, PackagePreparationFailure> {
         self.prepare_with_cancellation(package, &BundleCancellation::default())
     }
 
     pub(crate) fn prepare_with_cancellation(
         &self,
-        package: &PackageSpec,
-        cancellation: &BundleCancellation,
-    ) -> Result<PreparedPackage, PackagePreparationFailure> {
+        pkg: &PackageSpec,
+        cancel: &BundleCancellation,
+    ) -> Result<PackageDir, PackagePreparationFailure> {
         let locations = match &self.locations {
             Ok(locations) => locations,
-            Err(error) => {
+            Err(err) => {
                 return Err(PackagePreparationFailure {
-                    error: error.clone(),
+                    error: err.clone(),
                     checks: Vec::new(),
                 });
             }
@@ -590,15 +587,15 @@ impl PackageStore {
         let mut checks = Vec::new();
 
         for (tier, location) in locations.tiers() {
-            if cancellation.is_cancelled() {
+            if cancel.is_cancelled() {
                 return Err(PackagePreparationFailure {
                     error: super::file::cancelled(),
                     checks,
                 });
             }
             if let Some(prepared) = settle(
-                package,
-                check_package_directory(package, tier, location.root(), &self.boundary),
+                pkg,
+                check_package_directory(pkg, tier, location.root(), &self.boundary),
                 &mut checks,
                 self.verifier.as_ref(),
             )? {
@@ -607,64 +604,64 @@ impl PackageStore {
 
             #[cfg(feature = "network")]
             if tier == PackageTier::Cache
-                && self.fetch_policy == PackageFetchPolicy::AllowNetwork
-                && package.namespace == UniversePackages::NAMESPACE
+                && self.fetch_policy == PackageFetchMode::AllowNetwork
+                && pkg.namespace == UniversePackages::NAMESPACE
+                && let Some(prepared) =
+                    self.download_package(pkg, location.root(), cancel, &mut checks)?
             {
-                let universe = UniversePackages::new(HttpDownloader::new(
-                    &self.user_agent,
-                    cancellation.clone(),
-                ));
-                let archive = universe.package(package);
-                if cancellation.is_cancelled() {
-                    return Err(PackagePreparationFailure {
-                        error: super::file::cancelled(),
-                        checks,
-                    });
-                }
-                let mut archive = archive.map_err(|error| PackagePreparationFailure {
-                    error: FileError::from(error),
-                    checks: checks.clone(),
-                })?;
-                FsPackages::new(location.root())
-                    .store(package, |directory| {
-                        archive.unpack(directory).map_err(|error| {
-                            PackageError::MalformedArchive(Some(format!("{error}").into()))
-                        })
-                    })
-                    .map_err(|error| PackagePreparationFailure {
-                        error: FileError::from(error),
-                        checks: checks.clone(),
-                    })?;
-
-                let check = check_package_directory(
-                    package,
-                    PackageTier::Cache,
-                    location.root(),
-                    &self.boundary,
-                );
-                if let PackageDirectoryCheck::Present { check, .. } = &check {
-                    checks.retain(|observed| {
-                        observed.tier != PackageTier::Cache || observed.candidate != check.candidate
-                    });
-                }
-                if let Some(prepared) = settle(package, check, &mut checks, self.verifier.as_ref())?
-                {
-                    return Ok(prepared);
-                }
+                return Ok(prepared);
             }
         }
 
         Err(PackagePreparationFailure {
-            error: FileError::from(PackageError::NotFound(package.clone())),
+            error: FileError::from(PackageError::NotFound(pkg.clone())),
             checks,
         })
+    }
+
+    #[cfg(feature = "network")]
+    fn download_package(
+        &self,
+        pkg: &PackageSpec,
+        cache_root: &Path,
+        cancel: &BundleCancellation,
+        checks: &mut Vec<PackageCheck>,
+    ) -> Result<Option<PackageDir>, PackagePreparationFailure> {
+        let universe = UniversePackages::new(HttpDownloader::new(&self.user_agent, cancel.clone()));
+        let archive = universe.package(pkg);
+        if cancel.is_cancelled() {
+            return Err(PackagePreparationFailure {
+                error: super::file::cancelled(),
+                checks: std::mem::take(checks),
+            });
+        }
+        let mut archive = archive.map_err(|err| PackagePreparationFailure {
+            error: FileError::from(err),
+            checks: checks.clone(),
+        })?;
+        FsPackages::new(cache_root)
+            .store(pkg, |dir| {
+                archive
+                    .unpack(dir)
+                    .map_err(|err| PackageError::MalformedArchive(Some(format!("{err}").into())))
+            })
+            .map_err(|err| PackagePreparationFailure {
+                error: FileError::from(err),
+                checks: checks.clone(),
+            })?;
+
+        let check = check_package_directory(pkg, PackageTier::Cache, cache_root, &self.boundary);
+        if let PackageDirectoryCheck::Present { check, .. } = &check {
+            checks.retain(|obs| obs.tier != PackageTier::Cache || obs.candidate != check.candidate);
+        }
+        settle(pkg, check, checks, self.verifier.as_ref())
     }
 
     /// Parse and prepare a package directory.
     pub fn prepare_package(
         &self,
         package: impl AsRef<str>,
-    ) -> Result<PreparedPackage, PackagePreparationFailure> {
+    ) -> Result<PackageDir, PackagePreparationFailure> {
         let package =
             package
                 .as_ref()
@@ -682,7 +679,7 @@ impl Default for PackageStore {
     fn default() -> Self {
         Self::frozen(
             PackageLocations::discover(None, None),
-            PackageFetchPolicy::LocalOnly,
+            PackageFetchMode::LocalOnly,
         )
     }
 }
@@ -708,7 +705,7 @@ fn settle(
     check: PackageDirectoryCheck,
     checks: &mut Vec<PackageCheck>,
     verifier: Option<&PackageVerifier>,
-) -> Result<Option<PreparedPackage>, PackagePreparationFailure> {
+) -> Result<Option<PackageDir>, PackagePreparationFailure> {
     match check {
         PackageDirectoryCheck::Present {
             mut check,
@@ -726,7 +723,7 @@ fn settle(
                     checks: std::mem::take(checks),
                 });
             }
-            Ok(Some(PreparedPackage {
+            Ok(Some(PackageDir {
                 directory,
                 checks: std::mem::take(checks),
             }))
@@ -828,33 +825,31 @@ mod tests {
     }
 
     #[test]
-    fn declared_roots_precede_other_tiers() {
+    fn declared_roots_precedence() {
         for (name, declared) in [
             ("single declared root", &["declared"][..]),
             ("declaration order", &["overlay", "vendored"][..]),
         ] {
-            let directory = TempDir::new().unwrap();
-            let data = directory.path().join("data");
-            let cache = directory.path().join("cache");
+            let dir = TempDir::new().unwrap();
+            let data = dir.path().join("data");
+            let cache = dir.path().join("cache");
             for root in [&data, &cache] {
                 std::fs::create_dir_all(root.join("preview/demo/0.1.0")).unwrap();
             }
             let locations = PackageLocations::from_absolute_roots(Some(data), Some(cache))
                 .unwrap()
-                .with_declared_roots(declared.iter().map(|root| directory.path().join(root)))
+                .with_declared_roots(declared.iter().map(|root| dir.path().join(root)))
                 .unwrap();
             for root in declared {
-                std::fs::create_dir_all(directory.path().join(root).join("preview/demo/0.1.0"))
-                    .unwrap();
+                std::fs::create_dir_all(dir.path().join(root).join("preview/demo/0.1.0")).unwrap();
             }
-            let store = PackageStore::new(locations, PackageFetchPolicy::LocalOnly);
+            let store = PackageStore::new(locations, PackageFetchMode::LocalOnly);
 
             let prepared = store.prepare(&package()).unwrap();
 
             assert_eq!(
                 prepared.directory(),
-                directory
-                    .path()
+                dir.path()
                     .join(declared[0])
                     .join("preview/demo/0.1.0")
                     .canonicalize()

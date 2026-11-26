@@ -1,4 +1,4 @@
-//! Turning text into a slug.
+//! Text-to-slug transformation.
 
 use std::borrow::Cow;
 
@@ -6,34 +6,27 @@ use unicode_normalization::{UnicodeNormalization, char::is_combining_mark, is_nf
 
 use crate::romanization;
 
-/// The characters a name may hold: every script's own, or Latin script only.
+/// Character set allowed in a generated slug.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SlugMode {
-    /// Keep every script's letters, marks, and numbers.
+    /// Retain letters, combining marks, and numbers from any script.
     Unicode,
-    /// Read the text in Latin script, naming each word and character it can.
+    /// Transliterate non-ASCII spans to Latin script.
     Ascii,
 }
 
-/// Which language's pronunciations name the Han text in a name.
-///
-/// Chinese names a word, then its characters; Japanese names a word in kana, which the
-/// romanization rules read as Latin.
+/// Language used to pronounce Han characters in ASCII mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum HanPronunciations {
-    /// A word from CC-CEDICT, otherwise the character's Unihan pronunciation.
+    /// Pronounce words via CC-CEDICT and single characters via Unihan.
     #[default]
     Chinese,
-    /// A word from JMdict, whose pronunciation is kana.
+    /// Pronounce words via JMdict kana followed by Hepburn romanization.
     Japanese,
 }
 
 impl HanPronunciations {
-    /// The pronunciations a site that declares `language` expects.
-    ///
-    /// The subtag before the first `-` names the language, and case does not matter there:
-    /// `ja`, `JA`, and `ja-JP` read Han in Japanese, and every other tag, and no tag at all,
-    /// reads it in Chinese.
+    /// Select the Han pronunciation mode for a BCP-47 language tag.
     pub fn for_language(language: &str) -> Self {
         let (primary, _) = language.split_once('-').unwrap_or((language, ""));
         if primary.eq_ignore_ascii_case("ja") {
@@ -44,25 +37,21 @@ impl HanPronunciations {
     }
 }
 
-/// How a name is written: which characters may survive, how it is cased, what separates
-/// its words, and which language's pronunciations name its Han text.
+/// Configuration controlling character filtering, casing, separator, and Han pronunciation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NamingRules {
-    /// The characters a name may hold.
+    /// Allowed character script mode.
     pub mode: SlugMode,
-    /// The case a name is written in.
+    /// Case transformation applied to the slug.
     pub case: SlugCase,
-    /// The separator between a name's words.
+    /// Separator inserted between words.
     pub separator: SlugSeparator,
-    /// The language whose pronunciations name Han text in ASCII mode.
-    ///
-    /// Without `han-tables`, this choice is unused and Han text takes the character map.
+    /// Language used to pronounce Han text in ASCII mode.
     pub pronunciations: HanPronunciations,
 }
 
 impl Default for NamingRules {
-    /// The rules a source's own layout recommends: a Unicode name, lowercase, dashed, with
-    /// the Han text it holds read in Chinese where this build carries the tables.
+    /// Default rules: Unicode mode, lowercase, dash-separated, Chinese Han pronunciations.
     fn default() -> Self {
         Self {
             mode: SlugMode::Unicode,
@@ -73,25 +62,25 @@ impl Default for NamingRules {
     }
 }
 
-/// The case a name is written in.
+/// Case transformation applied to a slug segment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SlugCase {
     /// Lowercase every character.
     Lower,
     /// Uppercase every character.
     Upper,
-    /// Uppercase the first character of each word.
+    /// Uppercase the first character of each word and lowercase the rest.
     Capitalize,
-    /// Keep the case the text was written in.
+    /// Keep the original character casing.
     Preserve,
 }
 
-/// The character between a name's words.
+/// Word separator character in a slug.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SlugSeparator {
-    /// `-`
+    /// Hyphen-minus (`-`).
     Dash,
-    /// `_`
+    /// Underscore (`_`).
     Underscore,
 }
 
@@ -104,103 +93,89 @@ impl SlugSeparator {
     }
 }
 
-/// Transform text without interpreting any character as a directory boundary.
+/// Transform a single path segment into a slug without interpreting directory separators.
 ///
-/// Canonically equivalent input spellings meet the character policy in NFC form.
-/// Rejected characters separate words before any pronunciation lookup or compatibility
-/// folding, so neither transformation can erase a boundary or admit a rejected symbol.
-///
-/// An ASCII name takes the pronunciations the rules' language names for each allowed
-/// span, then compatibility-folds and romanizes it. A character no table names falls to
-/// the character map, and a script that spells its own pronunciation is romanized by a
-/// rule (`しんぶん` is `shinbun`). The result is NFC normalized after case conversion.
-/// Returns `None` when no retained character can name the segment on its own after
-/// filtering and transliteration, before case conversion.
+/// Input is NFC-normalized before filtering, rejected characters split words before
+/// pronunciation lookup or NFKC folding so boundaries are never erased, and the final
+/// cased output is re-normalized to NFC. Returns `None` if no standalone character remains.
 pub fn slugify_segment(text: &str, rules: NamingRules) -> Option<String> {
     let canonical = canonical_form(text);
-    let segment = Segment::of(&canonical, rules);
-    if !segment.renders_alone {
+    let seg = Segment::of(&canonical, rules);
+    if !seg.renders_alone {
         return None;
     }
-    Some(nfc_normalized(apply_case(segment, rules.case)))
+    Some(nfc_normalized(apply_case(seg, rules.case)))
 }
 
-fn canonical_form(text: &str) -> Cow<'_, str> {
-    if text.is_ascii() || is_nfc(text) {
-        return Cow::Borrowed(text);
+fn canonical_form(src: &str) -> Cow<'_, str> {
+    if src.is_ascii() || is_nfc(src) {
+        return Cow::Borrowed(src);
     }
-    Cow::Owned(text.nfc().collect())
+    Cow::Owned(src.nfc().collect())
 }
 
-fn compatibility_form(text: &str) -> Cow<'_, str> {
-    if text.is_ascii() || is_nfkc(text) {
-        return Cow::Borrowed(text);
+fn compatibility_form(src: &str) -> Cow<'_, str> {
+    if src.is_ascii() || is_nfkc(src) {
+        return Cow::Borrowed(src);
     }
-    Cow::Owned(text.nfkc().collect())
+    Cow::Owned(src.nfkc().collect())
 }
 
-/// Lowercasing the whole string keeps contextual mappings such as Greek final
-/// sigma, so it runs once over the result rather than per character. The scan
-/// records whether anything can change, which lets an already-lowercase segment
-/// through untouched.
-fn apply_case(mut segment: Segment, case: SlugCase) -> String {
+/// Lowercase the whole segment at once to preserve contextual rules like Greek final sigma.
+fn apply_case(mut seg: Segment, case: SlugCase) -> String {
     match case {
-        SlugCase::Lower if segment.needs_lowercase && segment.text.is_ascii() => {
-            segment.text.make_ascii_lowercase();
-            segment.text
+        SlugCase::Lower if seg.needs_lowercase && seg.out.is_ascii() => {
+            seg.out.make_ascii_lowercase();
+            seg.out
         }
-        SlugCase::Lower if segment.needs_lowercase => segment.text.to_lowercase(),
-        SlugCase::Lower => segment.text,
-        SlugCase::Upper if segment.text.is_ascii() => {
-            segment.text.make_ascii_uppercase();
-            segment.text
+        SlugCase::Lower if seg.needs_lowercase => seg.out.to_lowercase(),
+        SlugCase::Lower => seg.out,
+        SlugCase::Upper if seg.out.is_ascii() => {
+            seg.out.make_ascii_uppercase();
+            seg.out
         }
-        SlugCase::Upper => segment.text.to_uppercase(),
-        SlugCase::Capitalize => capitalize_words(segment.text),
-        SlugCase::Preserve => segment.text,
+        SlugCase::Upper => seg.out.to_uppercase(),
+        SlugCase::Capitalize => capitalize_words(seg.out),
+        SlugCase::Preserve => seg.out,
     }
 }
 
-/// Uppercasing can decompose a composed Greek character, so source normalization
-/// does not replace this final check.
-fn nfc_normalized(text: String) -> String {
-    if text.is_ascii() || is_nfc(&text) {
-        return text;
+/// Re-normalize to NFC because uppercasing can decompose characters such as precomposed Greek.
+fn nfc_normalized(src: String) -> String {
+    if src.is_ascii() || is_nfc(&src) {
+        return src;
     }
-    text.nfc().collect()
+    src.nfc().collect()
 }
 
-/// One name segment under construction, and the evidence the caller needs to
-/// finish it.
 struct Segment {
-    text: String,
-    pending_separator: bool,
+    out: String,
+    pending_sep: bool,
     needs_lowercase: bool,
     renders_alone: bool,
     sep: char,
 }
 
 impl Segment {
-    /// Every rejected character becomes a separator, which collapses and trims.
-    fn of(text: &str, rules: NamingRules) -> Self {
-        let mut segment = Self {
-            text: String::with_capacity(text.len()),
-            pending_separator: false,
+    fn of(src: &str, rules: NamingRules) -> Self {
+        let mut seg = Self {
+            out: String::with_capacity(src.len()),
+            pending_sep: false,
             needs_lowercase: false,
             renders_alone: false,
             sep: rules.separator.as_char(),
         };
-        if rules.mode == SlugMode::Unicode || text.is_ascii() {
-            segment.push_all(text);
-            return segment;
+        if rules.mode == SlugMode::Unicode || src.is_ascii() {
+            seg.push_all(src);
+            return seg;
         }
 
-        let mut romanized = String::new();
-        for span in text.split(|c| is_boundary(c, rules.separator.as_char())) {
+        let mut buf = String::new();
+        for span in src.split(|ch| is_boundary(ch, rules.separator.as_char())) {
             if span.is_ascii() {
-                segment.push_all(span);
+                seg.push_all(span);
             } else {
-                // Dictionary keys retain their original compatibility spelling.
+                // Dictionary keys retain their original compatibility spelling before NFKC.
                 #[cfg(feature = "han-tables")]
                 let pronounced = match rules.pronunciations {
                     HanPronunciations::Chinese => tola_pronunciations::chinese_pronunciations(span),
@@ -210,116 +185,95 @@ impl Segment {
                 };
                 #[cfg(not(feature = "han-tables"))]
                 let pronounced = Cow::Borrowed(span);
-                let compatible = compatibility_form(&pronounced);
-                segment.push_transliterated(&compatible, &mut romanized);
+                let compat = compatibility_form(&pronounced);
+                seg.push_transliterated(&compat, &mut buf);
             }
-            segment.boundary();
+            seg.boundary();
         }
-        segment
+        seg
     }
 
-    fn push_transliterated(&mut self, text: &str, romanized: &mut String) {
-        let mut rest = text;
-        while let Some(character) = rest.chars().next() {
-            let length = character.len_utf8();
-            // Pronunciations and compatibility expansions can introduce fresh boundaries.
-            if character.is_ascii() || !is_name_character(character) {
-                self.push(character);
-                rest = &rest[length..];
+    fn push_transliterated(&mut self, src: &str, buf: &mut String) {
+        let mut rest = src;
+        while let Some(ch) = rest.chars().next() {
+            let len = ch.len_utf8();
+            if ch.is_ascii() || !is_name_character(ch) {
+                self.push(ch);
+                rest = &rest[len..];
                 continue;
             }
-            romanized.clear();
-            if let Some(consumed) = romanization::romanize(rest, romanized) {
-                // A mark without a pronunciation must keep its neighbours apart.
-                if romanized.is_empty() {
+            buf.clear();
+            if let Some(consumed) = romanization::romanize(rest, buf) {
+                // Unpronounced kana marks (leading っ/ー/ゞ) must still separate neighbours.
+                if buf.is_empty() {
                     self.boundary();
                 } else {
-                    self.push_all(romanized);
+                    self.push_all(buf);
                 }
                 rest = &rest[consumed..];
                 continue;
             }
-            match deunicode::deunicode_char(character) {
-                Some(translated) => self.push_all(translated),
+            match deunicode::deunicode_char(ch) {
+                Some(ascii) => self.push_all(ascii),
                 None => self.boundary(),
             }
-            rest = &rest[length..];
+            rest = &rest[len..];
         }
     }
 
-    /// Record that a separator belongs here, without emitting it until the next
-    /// kept character proves it is interior rather than leading or trailing.
     fn boundary(&mut self) {
-        self.pending_separator = !self.text.is_empty();
+        self.pending_sep = !self.out.is_empty();
     }
 
-    fn push(&mut self, c: char) {
-        if is_boundary(c, self.sep) {
+    fn push(&mut self, ch: char) {
+        if is_boundary(ch, self.sep) {
             self.boundary();
             return;
         }
-        self.needs_lowercase |= needs_lowercasing(c);
-        self.renders_alone |= !is_mark(c);
-        if self.pending_separator {
-            self.text.push(self.sep);
-            self.pending_separator = false;
+        self.needs_lowercase |= needs_lowercasing(ch);
+        self.renders_alone |= !is_mark(ch);
+        if self.pending_sep {
+            self.out.push(self.sep);
+            self.pending_sep = false;
         }
-        self.text.push(c);
+        self.out.push(ch);
     }
 
-    fn push_all(&mut self, text: &str) {
-        for c in text.chars() {
-            self.push(c);
+    fn push_all(&mut self, src: &str) {
+        for ch in src.chars() {
+            self.push(ch);
         }
     }
 }
 
-/// Whether a name segment keeps a character.
-///
-/// A name character is one a reader can see, distinguish, and store: a letter, a
-/// number, a combining mark, or one of the punctuation characters listed here.
-/// That punctuation is the URL-safe, filename-safe part of RFC 3986's path segment
-/// characters — unreserved, the sub-delimiters, and `@`. Grouping and quoting
-/// punctuation stays out, because half a pair is not a name, and `*` stays out
-/// because no filename can hold it. Everything else becomes a word boundary.
-///
-/// A closed forbidden-character list can only exclude hazards someone already
-/// thought of: it would admit unassigned and private-use code points, and every
-/// character whose rendering is indistinguishable from the separator's, such as
-/// U+2013 EN DASH.
+/// Allowlist of letters, numbers, combining marks, and path-safe RFC 3986 punctuation
+/// (excluding grouping/quoting chars, `*`, and lookalike dashes such as U+2013).
 #[inline]
-fn is_name_character(c: char) -> bool {
-    if c.is_ascii() {
-        return c.is_ascii_alphanumeric() || is_name_punctuation(c);
+fn is_name_character(ch: char) -> bool {
+    if ch.is_ascii() {
+        return ch.is_ascii_alphanumeric() || is_name_punctuation(ch);
     }
-    !is_invisible_name_character(c) && (c.is_alphanumeric() || is_mark(c))
-}
-
-/// Whether a character is a combining mark, which draws only together with what
-/// precedes it.
-#[inline]
-fn is_mark(c: char) -> bool {
-    !c.is_ascii() && is_combining_mark(c)
+    !is_invisible_name_character(ch) && (ch.is_alphanumeric() || is_mark(ch))
 }
 
 #[inline]
-fn is_name_punctuation(c: char) -> bool {
+fn is_mark(ch: char) -> bool {
+    !ch.is_ascii() && is_combining_mark(ch)
+}
+
+#[inline]
+fn is_name_punctuation(ch: char) -> bool {
     matches!(
-        c,
+        ch,
         '-' | '.' | '_' | '~' | '!' | '$' | '&' | '\'' | '+' | ',' | ';' | '=' | '@'
     )
 }
 
-/// The invisible characters a name would otherwise admit.
-///
-/// These are the `Default_Ignorable_Code_Point` characters whose general category
-/// is a letter or a mark, which [`is_name_character`] would otherwise keep. Every
-/// other default-ignorable character is already excluded: it is a control, a
-/// format character, or an unassigned code point. A variation selector or a Hangul
-/// filler occupies a position without drawing anything.
-fn is_invisible_name_character(c: char) -> bool {
+/// `Default_Ignorable_Code_Point` letters/marks that carry no visible glyph (e.g. variation
+/// selectors and Hangul fillers).
+fn is_invisible_name_character(ch: char) -> bool {
     matches!(
-        c as u32,
+        ch as u32,
         0x034F
             | 0x115F..=0x1160
             | 0x17B4..=0x17B5
@@ -333,61 +287,49 @@ fn is_invisible_name_character(c: char) -> bool {
 }
 
 #[inline]
-fn is_boundary(c: char, sep: char) -> bool {
-    c == sep || !is_name_character(c)
+fn is_boundary(ch: char, sep: char) -> bool {
+    ch == sep || !is_name_character(ch)
 }
 
-/// Whether lowercasing a character could change it.
-///
-/// Any non-ASCII character reports `true`. A few cased letters, such as the
-/// titlecase forms, are not `is_uppercase`, and testing each character against the
-/// case tables costs more than the pass this flag exists to skip. Over-reporting
-/// only runs a `to_lowercase` that is correct regardless; under-reporting would
-/// emit un-lowercased text. Plain ASCII settles with a range comparison, which is
-/// what source-derived segments are made of.
+/// Over-report non-ASCII chars so titlecase letters don't skip `to_lowercase`.
 #[inline]
-fn needs_lowercasing(c: char) -> bool {
-    !c.is_ascii() || c.is_ascii_uppercase()
+fn needs_lowercasing(ch: char) -> bool {
+    !ch.is_ascii() || ch.is_ascii_uppercase()
 }
 
-/// Uppercase the first character after `-` or `_` and lowercase the others individually.
-///
-/// A name segment keeps its words apart with those two characters alone — every other
-/// boundary between words became the separator — so this word rule is not linguistic
-/// title casing.
-fn capitalize_words(text: String) -> String {
-    if text.is_ascii() {
-        let mut bytes = text.into_bytes();
-        let mut at_word_start = true;
-        for byte in &mut bytes {
-            if *byte == b'-' || *byte == b'_' {
-                at_word_start = true;
+fn capitalize_words(src: String) -> String {
+    if src.is_ascii() {
+        let mut bytes = src.into_bytes();
+        let mut word_start = true;
+        for b in &mut bytes {
+            if *b == b'-' || *b == b'_' {
+                word_start = true;
             } else {
-                *byte = if at_word_start {
-                    byte.to_ascii_uppercase()
+                *b = if word_start {
+                    b.to_ascii_uppercase()
                 } else {
-                    byte.to_ascii_lowercase()
+                    b.to_ascii_lowercase()
                 };
-                at_word_start = false;
+                word_start = false;
             }
         }
         return String::from_utf8(bytes).expect("ASCII casing preserves UTF-8");
     }
-    let mut result = String::with_capacity(text.len());
-    let mut at_word_start = true;
+    let mut out = String::with_capacity(src.len());
+    let mut word_start = true;
 
-    for c in text.chars() {
-        if c == '-' || c == '_' {
-            result.push(c);
-            at_word_start = true;
-        } else if at_word_start {
-            result.extend(c.to_uppercase());
-            at_word_start = false;
+    for ch in src.chars() {
+        if ch == '-' || ch == '_' {
+            out.push(ch);
+            word_start = true;
+        } else if word_start {
+            out.extend(ch.to_uppercase());
+            word_start = false;
         } else {
-            result.extend(c.to_lowercase());
+            out.extend(ch.to_lowercase());
         }
     }
-    result
+    out
 }
 
 #[cfg(test)]
@@ -395,32 +337,29 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
 
-    fn naming_rules() -> impl Iterator<Item = NamingRules> {
-        [SlugMode::Unicode, SlugMode::Ascii]
-            .into_iter()
-            .flat_map(|mode| {
-                [
-                    SlugCase::Lower,
-                    SlugCase::Upper,
-                    SlugCase::Capitalize,
-                    SlugCase::Preserve,
-                ]
-                .into_iter()
-                .flat_map(move |case| {
-                    [SlugSeparator::Dash, SlugSeparator::Underscore]
-                        .into_iter()
-                        .flat_map(move |separator| {
-                            [HanPronunciations::Chinese, HanPronunciations::Japanese]
-                                .into_iter()
-                                .map(move |pronunciations| NamingRules {
-                                    mode,
-                                    case,
-                                    separator,
-                                    pronunciations,
-                                })
-                        })
-                })
-            })
+    fn naming_rules() -> Vec<NamingRules> {
+        let mut out = Vec::new();
+        for mode in [SlugMode::Unicode, SlugMode::Ascii] {
+            for case in [
+                SlugCase::Lower,
+                SlugCase::Upper,
+                SlugCase::Capitalize,
+                SlugCase::Preserve,
+            ] {
+                for separator in [SlugSeparator::Dash, SlugSeparator::Underscore] {
+                    for pronunciations in [HanPronunciations::Chinese, HanPronunciations::Japanese]
+                    {
+                        out.push(NamingRules {
+                            mode,
+                            case,
+                            separator,
+                            pronunciations,
+                        });
+                    }
+                }
+            }
+        }
+        out
     }
 
     proptest! {
@@ -435,35 +374,35 @@ mod tests {
         })]
 
         #[test]
-        fn canonical_spellings_agree(
+        fn canonical_spellings(
             left in proptest::collection::vec(any::<char>(), 0..9),
             witness in proptest::sample::select(vec!["é", "ñ", "Å", "ΐ", "≠", "ᾳ"]),
             right in proptest::collection::vec(any::<char>(), 0..9),
         ) {
-            let mut source: String = left.into_iter().collect();
-            source.push_str(witness);
-            source.extend(right);
-            let nfd: String = source.nfd().collect();
-            let nfc: String = source.nfc().collect();
+            let mut src: String = left.into_iter().collect();
+            src.push_str(witness);
+            src.extend(right);
+            let nfd: String = src.nfd().collect();
+            let nfc: String = src.nfc().collect();
             for rules in naming_rules() {
-                let name = slugify_segment(&source, rules);
+                let name = slugify_segment(&src, rules);
                 prop_assert_eq!(&name, &slugify_segment(&nfd, rules));
                 prop_assert_eq!(&name, &slugify_segment(&nfc, rules));
             }
         }
 
         #[test]
-        fn ascii_names_stay_ascii(
+        fn ascii_stays_ascii(
             left in "[ -~]{0,8}",
             scalars in proptest::collection::vec(any::<char>(), 0..5),
             right in "[ -~]{0,8}",
         ) {
-            let scalar_span: String = scalars.into_iter().collect();
+            let span: String = scalars.into_iter().collect();
             for witness in ["é", "Æ", "う", "한", "東京", "食べる", "うｐ主", "重庆", "3D打印机", "\u{323af}"] {
-                let source = format!("a{left} {witness} {scalar_span} {right}z");
-                for rules in naming_rules().filter(|rules| rules.mode == SlugMode::Ascii) {
-                    let name = slugify_segment(&source, rules).expect("separated ASCII anchors name text");
-                    prop_assert!(name.is_ascii(), "{:?} {:?}: {:?}", source, rules, name);
+                let src = format!("a{left} {witness} {span} {right}z");
+                for rules in naming_rules().into_iter().filter(|r| r.mode == SlugMode::Ascii) {
+                    let name = slugify_segment(&src, rules).expect("ASCII anchors produce a slug");
+                    prop_assert!(name.is_ascii(), "{:?} {:?}: {:?}", src, rules, name);
                 }
             }
         }
@@ -478,26 +417,23 @@ mod tests {
         }
     }
 
-    /// Slug one segment under those rules.
-    fn segment_slug(
-        text: &str,
+    fn seg_slug(
+        src: &str,
         mode: SlugMode,
         case: SlugCase,
         separator: SlugSeparator,
     ) -> Option<String> {
-        slugify_segment(text, rules(mode, case, separator))
+        slugify_segment(src, rules(mode, case, separator))
     }
 
-    /// Slug one segment as a lowercase ASCII name with dashes.
-    fn ascii_slug(text: &str) -> Option<String> {
-        segment_slug(text, SlugMode::Ascii, SlugCase::Lower, SlugSeparator::Dash)
+    fn ascii_slug(src: &str) -> Option<String> {
+        seg_slug(src, SlugMode::Ascii, SlugCase::Lower, SlugSeparator::Dash)
     }
 
-    /// Slug one segment as a lowercase ASCII name whose Han text is read in Japanese.
     #[cfg(feature = "han-tables")]
-    fn japanese_slug(text: &str) -> Option<String> {
+    fn ja_slug(src: &str) -> Option<String> {
         slugify_segment(
-            text,
+            src,
             NamingRules {
                 mode: SlugMode::Ascii,
                 pronunciations: HanPronunciations::Japanese,
@@ -507,9 +443,9 @@ mod tests {
     }
 
     #[test]
-    fn separators_never_split_segments() {
+    fn separators_stay_segment_local() {
         assert_eq!(
-            segment_slug(
+            seg_slug(
                 "posts/½/／Child＼Name\\Leaf",
                 SlugMode::Ascii,
                 SlugCase::Lower,
@@ -519,7 +455,7 @@ mod tests {
             Some("posts-1-2-child-name-leaf")
         );
         assert_eq!(
-            segment_slug(
+            seg_slug(
                 "posts/Child\\Leaf",
                 SlugMode::Unicode,
                 SlugCase::Lower,
@@ -531,69 +467,53 @@ mod tests {
     }
 
     #[test]
-    fn slugless_text_yields_no_slug() {
+    fn slugless_yields_none() {
         for mode in [SlugMode::Unicode, SlugMode::Ascii] {
-            for text in [
+            for src in [
                 "",
                 "#",
                 "---",
                 " /\\ \u{80}",
                 "\u{200b}\u{feff}",
                 "\u{ad}",
-                // A mark draws only together with what precedes it.
                 "\u{301}",
                 "\u{301}\u{308}",
                 "\u{fe0f}",
-                // Unassigned, private use, and the last code point.
                 "\u{378}",
                 "\u{e000}",
                 "\u{f0000}",
                 "\u{10ffff}",
             ] {
                 assert_eq!(
-                    segment_slug(text, mode, SlugCase::Lower, SlugSeparator::Dash),
+                    seg_slug(src, mode, SlugCase::Lower, SlugSeparator::Dash),
                     None,
-                    "{text:?} {mode:?}"
+                    "{src:?} {mode:?}"
                 );
             }
         }
     }
 
-    /// A character no name may keep separates the words around it, however often it repeats.
     #[test]
-    fn rejected_characters_separate_words() {
+    fn rejected_chars_split_words() {
         let cases = [
-            0x2100,  // account of
-            0x2260,  // not equal
-            0x2603,  // snowman
-            0x1f984, // unicorn
-            0x200b,  // zero width space
-            0x002f, 0x005c, // slash and backslash
-            0x2122, // trademark
-            0x0000, // NUL
-            0x0022, // double quote
-            0x001f, 0x007f, 0x009f, // C0 and C1 controls
-            0x00ad, 0x200d, 0x200e, 0x202e, 0x2060, 0x2066, 0xfeff, // format characters
-            0x180f, // a free variation selector
-            0xe0001, 0xe007f, 0xfff9, // tags and interlinear annotation
-            0x2010, 0x2013, 0x2212, // hyphen, en dash, minus sign
-            0x00a9, 0x20ac, 0x1f308, // copyright, euro, rainbow
-            0x0378,  // unassigned
-            0xe000, 0xf0000, 0x10ffff, // private use and the last code point
+            0x2100, 0x2260, 0x2603, 0x1f984, 0x200b, 0x002f, 0x005c, 0x2122, 0x0000, 0x0022,
+            0x001f, 0x007f, 0x009f, 0x00ad, 0x200d, 0x200e, 0x202e, 0x2060, 0x2066, 0xfeff, 0x180f,
+            0xe0001, 0xe007f, 0xfff9, 0x2010, 0x2013, 0x2212, 0x00a9, 0x20ac, 0x1f308, 0x0378,
+            0xe000, 0xf0000, 0x10ffff,
         ];
-        for code in cases {
-            let rejected = char::from_u32(code).expect("case is a code point");
-            for repeats in 1..=5 {
-                let span = rejected.to_string().repeat(repeats);
-                let source = format!("{span}left{span}right{span}");
+        for cp in cases {
+            let ch = char::from_u32(cp).expect("valid scalar");
+            for reps in 1..=5 {
+                let span = ch.to_string().repeat(reps);
+                let src = format!("{span}left{span}right{span}");
                 for mode in [SlugMode::Unicode, SlugMode::Ascii] {
-                    for (separator, separator_char) in
+                    for (sep, sep_ch) in
                         [(SlugSeparator::Dash, '-'), (SlugSeparator::Underscore, '_')]
                     {
                         assert_eq!(
-                            segment_slug(&source, mode, SlugCase::Lower, separator),
-                            Some(format!("left{separator_char}right")),
-                            "U+{code:04X} x{repeats} {mode:?} {separator:?}"
+                            seg_slug(&src, mode, SlugCase::Lower, sep),
+                            Some(format!("left{sep_ch}right")),
+                            "U+{cp:04X} x{reps} {mode:?} {sep:?}"
                         );
                     }
                 }
@@ -602,46 +522,35 @@ mod tests {
     }
 
     #[test]
-    fn separator_look_alikes_share_one_name() {
-        for text in [
+    fn dash_lookalikes_match() {
+        for src in [
             "release-notes",
             "release\u{2010}notes",
             "release\u{2013}notes",
             "release\u{2212}notes",
         ] {
             assert_eq!(
-                segment_slug(
-                    text,
-                    SlugMode::Unicode,
-                    SlugCase::Lower,
-                    SlugSeparator::Dash
-                )
-                .as_deref(),
+                seg_slug(src, SlugMode::Unicode, SlugCase::Lower, SlugSeparator::Dash).as_deref(),
                 Some("release-notes"),
-                "{text:?}"
-            );
-        }
-    }
-    #[test]
-    fn titlecase_letters_lowercase_fully() {
-        for (input, expected) in [("ǅ", "ǆ"), ("ᾼ", "ᾳ"), ("ΟΔΟΣ", "οδος")] {
-            assert_eq!(
-                segment_slug(
-                    input,
-                    SlugMode::Unicode,
-                    SlugCase::Lower,
-                    SlugSeparator::Dash,
-                )
-                .as_deref(),
-                Some(expected),
-                "{input:?}"
+                "{src:?}"
             );
         }
     }
 
     #[test]
-    fn mode_case_and_separator_shape_the_slug() {
-        for (mode, case, separator, input, expected) in [
+    fn titlecase_lowercases() {
+        for (src, expected) in [("ǅ", "ǆ"), ("ᾼ", "ᾳ"), ("ΟΔΟΣ", "οδος")] {
+            assert_eq!(
+                seg_slug(src, SlugMode::Unicode, SlugCase::Lower, SlugSeparator::Dash).as_deref(),
+                Some(expected),
+                "{src:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn mode_case_and_sep() {
+        for (mode, case, sep, src, expected) in [
             (
                 SlugMode::Unicode,
                 SlugCase::Lower,
@@ -664,8 +573,6 @@ mod tests {
                 "chong-qing",
             ),
             (
-                // A script no table names keeps its own letters: the vowels it does not write
-                // stay unwritten.
                 SlugMode::Ascii,
                 SlugCase::Lower,
                 SlugSeparator::Dash,
@@ -716,16 +623,16 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                segment_slug(input, mode, case, separator).as_deref(),
+                seg_slug(src, mode, case, sep).as_deref(),
                 Some(expected),
-                "{input:?} {mode:?} {case:?} {separator:?}"
+                "{src:?} {mode:?} {case:?} {sep:?}"
             );
         }
     }
 
     #[cfg(feature = "han-tables")]
     #[test]
-    fn han_reads_in_chinese() {
+    fn han_chinese() {
         assert_eq!(ascii_slug("中文").as_deref(), Some("zhong-wen"));
         assert_eq!(ascii_slug("中文abc").as_deref(), Some("zhong-wen-abc"));
         assert_eq!(ascii_slug("重庆").as_deref(), Some("chong-qing"));
@@ -734,7 +641,7 @@ mod tests {
     }
 
     #[test]
-    fn kana_reads_as_hepburn() {
+    fn kana_hepburn() {
         assert_eq!(ascii_slug("しんぶん").as_deref(), Some("shinbun"));
         assert_eq!(ascii_slug("まっちゃ").as_deref(), Some("matcha"));
         assert_eq!(ascii_slug("コンピュータ").as_deref(), Some("konpyuuta"));
@@ -744,42 +651,41 @@ mod tests {
     }
 
     #[test]
-    fn mark_without_pronunciation_separates() {
+    fn bare_mark_splits() {
         assert_eq!(ascii_slug("aーb").as_deref(), Some("a-b"));
         assert_eq!(ascii_slug("aっb").as_deref(), Some("a-b"));
     }
 
     #[test]
-    fn hangul_reads_as_revised_romanization() {
+    fn hangul_rr() {
         assert_eq!(ascii_slug("한국어").as_deref(), Some("hangugeo"));
         assert_eq!(ascii_slug("서울 大学").as_deref(), Some("seoul-da-xue"));
     }
 
     #[cfg(feature = "han-tables")]
     #[test]
-    fn han_reads_in_japanese() {
-        assert_eq!(japanese_slug("東京").as_deref(), Some("toukyou"));
-        assert_eq!(japanese_slug("新聞").as_deref(), Some("shinbun"));
-        assert_eq!(japanese_slug("食べる").as_deref(), Some("taberu"));
-        // The same text under Chinese pronunciations reads the words it knows in Chinese.
+    fn han_japanese() {
+        assert_eq!(ja_slug("東京").as_deref(), Some("toukyou"));
+        assert_eq!(ja_slug("新聞").as_deref(), Some("shinbun"));
+        assert_eq!(ja_slug("食べる").as_deref(), Some("taberu"));
         assert_eq!(ascii_slug("東京").as_deref(), Some("dong-jing"));
     }
 
     #[cfg(feature = "han-tables")]
     #[test]
-    fn japanese_words_keep_boundaries() {
-        assert_eq!(japanese_slug("政府・与党").as_deref(), Some("seifu-yotou"));
+    fn japanese_word_boundaries() {
+        assert_eq!(ja_slug("政府・与党").as_deref(), Some("seifu-yotou"));
     }
 
     #[cfg(feature = "han-tables")]
     #[test]
-    fn japanese_compatibility_keys_resolve() {
-        assert_eq!(japanese_slug("うｐ主").as_deref(), Some("upunushi"));
+    fn japanese_compat_keys() {
+        assert_eq!(ja_slug("うｐ主").as_deref(), Some("upunushi"));
     }
 
     #[test]
-    fn language_tag_picks_han_pronunciations() {
-        for (language, expected) in [
+    fn han_by_lang_tag() {
+        for (lang, expected) in [
             ("ja", HanPronunciations::Japanese),
             ("JA", HanPronunciations::Japanese),
             ("ja-JP", HanPronunciations::Japanese),
@@ -789,11 +695,7 @@ mod tests {
             ("japanese", HanPronunciations::Chinese),
             ("", HanPronunciations::Chinese),
         ] {
-            assert_eq!(
-                HanPronunciations::for_language(language),
-                expected,
-                "{language:?}"
-            );
+            assert_eq!(HanPronunciations::for_language(lang), expected, "{lang:?}");
         }
     }
 }

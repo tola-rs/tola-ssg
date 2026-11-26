@@ -2,11 +2,13 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use typst_syntax::{FileId, VirtualRoot};
+use typst_syntax::{FileId, SyntaxKind, SyntaxNode, VirtualRoot};
 
 use crate::names::{DeclarationKind, OccurrenceKind};
 
 use super::{BindingId, NameEdit, NameGraph, RenameError};
+
+type EditMap = HashMap<FileId, BTreeMap<(usize, usize), String>>;
 
 impl NameGraph {
     /// Renames a local binding or site export while preserving explicit import aliases.
@@ -32,88 +34,18 @@ impl NameGraph {
                 file.vpath().get_without_slash().to_owned(),
             ));
         }
-        let mut edits: HashMap<FileId, BTreeMap<(usize, usize), String>> = HashMap::new();
-        for &file in &self.files {
-            let source = &self.sources[&file];
-            if !matches!(file.root(), VirtualRoot::Project) {
-                continue;
-            }
-            for (occurrence, resolved) in source.occurrences().iter().zip(self.occurrences(file)) {
-                let changed = match &occurrence.kind {
-                    OccurrenceKind::Import { import, path } => self
-                        .import_path(file, *import, path, &mut BTreeSet::new())
-                        .0
-                        .is_some_and(|target| renamed.contains(&target)),
-                    _ => resolved
-                        .binding
-                        .is_some_and(|target| renamed.contains(&target)),
-                };
-                if changed {
-                    edits.entry(file).or_default().insert(
-                        (occurrence.range.start, occurrence.range.end),
-                        new_name.into(),
-                    );
-                }
-            }
-        }
-        for &id in &renamed {
-            let candidate = &self.bindings[id];
-            let source = self.source(candidate.file).unwrap();
-            if let Some(declaration) = candidate.declaration {
-                let declaration = &source.declarations()[declaration];
-                let replacement = match declaration.kind {
-                    DeclarationKind::Import {
-                        explicit_alias: false,
-                        implicit: true,
-                        ..
-                    } => {
-                        edits.entry(candidate.file).or_default().insert(
-                            (declaration.range.end, declaration.range.end),
-                            format!(" as {new_name}"),
-                        );
-                        continue;
-                    }
-                    DeclarationKind::Import {
-                        explicit_alias: false,
-                        ..
-                    } if id == binding
-                        && self.imported[id].is_none_or(|target| !renamed.contains(&target)) =>
-                    {
-                        format!("{} as {new_name}", declaration.name)
-                    }
-                    _ => new_name.into(),
-                };
-                edits.entry(candidate.file).or_default().insert(
-                    (declaration.range.start, declaration.range.end),
-                    replacement,
-                );
-            }
-        }
-        // A wildcard has no local spelling to replace; add one explicit alias beside it.
-        if let Some(import) = selected.wildcard {
-            let source = self.source(selected.file).unwrap();
-            let import = &source.imports()[import];
-            let prefix = if source.source().text()[..import.range.start].ends_with('#') {
-                "\n#import "
-            } else {
-                "; import "
-            };
-            let replacement = format!(
-                "{prefix}{}: {} as {new_name}",
-                source.text(&import.source_range),
-                selected.name
-            );
-            edits
-                .entry(selected.file)
-                .or_default()
-                .insert((import.range.end, import.range.end), replacement);
-        }
+
+        let mut edits = EditMap::new();
+        self.collect_occurrence_edits(&renamed, new_name, &mut edits);
+        self.apply_declaration_edits(binding, &renamed, new_name, &mut edits);
+        self.apply_wildcard_edit(binding, new_name, &mut edits);
+
         Ok(self
             .files
             .iter()
-            .filter_map(|file| edits.remove(file).map(|edits| (*file, edits)))
-            .flat_map(|(file, edits)| {
-                edits
+            .filter_map(|file| edits.remove(file).map(|file_edits| (*file, file_edits)))
+            .flat_map(|(file, file_edits)| {
+                file_edits
                     .into_iter()
                     .map(move |((start, end), replacement)| NameEdit {
                         file,
@@ -122,6 +54,101 @@ impl NameGraph {
                     })
             })
             .collect())
+    }
+
+    fn collect_occurrence_edits(
+        &self,
+        renamed: &BTreeSet<BindingId>,
+        new_name: &str,
+        edits: &mut EditMap,
+    ) {
+        for &file in &self.files {
+            if !matches!(file.root(), VirtualRoot::Project) {
+                continue;
+            }
+            let src = &self.sources[&file];
+            for (occ, res) in src.occurrences().iter().zip(self.occurrences(file)) {
+                let changed = match &occ.kind {
+                    OccurrenceKind::Import { import, path } => self
+                        .import_path(file, *import, path, &mut BTreeSet::new())
+                        .0
+                        .is_some_and(|target| renamed.contains(&target)),
+                    _ => res.binding.is_some_and(|target| renamed.contains(&target)),
+                };
+                if changed {
+                    edits
+                        .entry(file)
+                        .or_default()
+                        .insert((occ.range.start, occ.range.end), new_name.into());
+                }
+            }
+        }
+    }
+
+    fn apply_declaration_edits(
+        &self,
+        binding: BindingId,
+        renamed: &BTreeSet<BindingId>,
+        new_name: &str,
+        edits: &mut EditMap,
+    ) {
+        for &id in renamed {
+            let candidate = &self.bindings[id];
+            let src = self.source(candidate.file).unwrap();
+            let Some(decl) = candidate.declaration else {
+                continue;
+            };
+            let decl = &src.declarations()[decl];
+            let replacement = match decl.kind {
+                DeclarationKind::Import {
+                    explicit_alias: false,
+                    implicit: true,
+                    ..
+                } => {
+                    edits
+                        .entry(candidate.file)
+                        .or_default()
+                        .insert((decl.range.end, decl.range.end), format!(" as {new_name}"));
+                    continue;
+                }
+                DeclarationKind::Import {
+                    explicit_alias: false,
+                    ..
+                } if id == binding
+                    && self.imported[id].is_none_or(|target| !renamed.contains(&target)) =>
+                {
+                    format!("{} as {new_name}", decl.name)
+                }
+                _ => new_name.into(),
+            };
+            edits
+                .entry(candidate.file)
+                .or_default()
+                .insert((decl.range.start, decl.range.end), replacement);
+        }
+    }
+
+    fn apply_wildcard_edit(&self, binding: BindingId, new_name: &str, edits: &mut EditMap) {
+        let selected = &self.bindings[binding];
+        let Some(import) = selected.wildcard else {
+            return;
+        };
+        let src = self.source(selected.file).unwrap();
+        let import = &src.imports()[import];
+        let prefix = if src.source().text()[..import.range.start].ends_with('#') {
+            "\n#import "
+        } else {
+            "; import "
+        };
+        let replacement = format!(
+            "{prefix}{}: {} as {new_name}",
+            src.text(&import.source_range),
+            selected.name
+        );
+        edits
+            .entry(selected.file)
+            .or_default()
+            .insert((import.range.end, import.range.end), replacement);
     }
 
     fn renamed_bindings(&self, binding: BindingId) -> BTreeSet<BindingId> {
@@ -143,32 +170,22 @@ impl NameGraph {
         renamed
     }
 
-    /// The first statement whose consumer spelling this rename would have to edit while its
-    /// target stays unknown.
-    ///
-    /// A statement in a renamed binding's own file cannot import that file, and one in a package
-    /// resolves inside its own package or the engine module Tola injects, so only another site
-    /// file's statement leaves the edit set incomplete.
+    /// First site-file statement whose consumer spelling this rename would have to edit while
+    /// its target remains unknown.
     fn unfinished_consumers(&self, renamed: &BTreeSet<BindingId>) -> Option<FileId> {
-        for (file, statement) in self.pending_statements() {
+        for (file, stmt) in self.pending_statements() {
             if !matches!(file.root(), VirtualRoot::Project) {
                 continue;
             }
-            let source = &self.sources[&file];
-            let mut spelled = self.unresolved_import_names(file, statement);
-            if source.imports()[statement].wildcard && !self.interface_established(file, statement)
-            {
-                // A wildcard whose interface the graph never established can bind any name this
-                // file leaves unresolved.
+            let src = &self.sources[&file];
+            let mut spelled = self.unresolved_import_names(file, stmt);
+            if src.imports()[stmt].wildcard && !self.interface_established(file, stmt) {
                 spelled.extend(
-                    source
-                        .occurrences()
+                    src.occurrences()
                         .iter()
                         .zip(self.occurrences(file))
-                        .filter(|(_, resolved)| {
-                            resolved.binding.is_none() && resolved.class.is_none()
-                        })
-                        .map(|(occurrence, _)| source.text(&occurrence.range)),
+                        .filter(|(_, res)| res.binding.is_none() && res.class.is_none())
+                        .map(|(occ, _)| src.text(&occ.range)),
                 );
             }
             for name in spelled {
@@ -201,58 +218,58 @@ impl NameGraph {
             let names = &self.lexical[&(binding.file, scope)];
             if names
                 .get(new_name)
-                .is_some_and(|bindings| bindings.iter().any(|id| !renamed.contains(id)))
+                .is_some_and(|ids| ids.iter().any(|id| !renamed.contains(id)))
             {
                 return Err(RenameError::Conflict(new_name.into()));
             }
         }
-        let mut valid_math_name = None;
+        let mut valid_math = None;
         for &file in &self.files {
-            let source = &self.sources[&file];
-            for (occurrence, resolved) in source.occurrences().iter().zip(self.occurrences(file)) {
-                if occurrence.math
-                    && resolved
-                        .binding
-                        .is_some_and(|binding| renamed.contains(&binding))
-                    && !*valid_math_name.get_or_insert_with(|| {
-                        single_identifier(
-                            &typst_syntax::parse_math(new_name),
-                            typst_syntax::SyntaxKind::MathIdent,
-                        )
-                    })
-                {
-                    return Err(RenameError::InvalidMathIdentifier(new_name.into()));
-                }
-                if let OccurrenceKind::Argument(callee) = &occurrence.kind
-                    && resolved.binding.is_some_and(|binding| renamed.contains(&binding))
-                    && source.occurrences().iter().any(|other| {
-                        matches!(&other.kind, OccurrenceKind::Argument(other_callee) if other_callee.at == callee.at)
-                            && other.range != occurrence.range && source.text(&other.range) == new_name
-                    }) {
-                    return Err(RenameError::Conflict(new_name.into()));
-                }
-                if !matches!(occurrence.kind, OccurrenceKind::Name) {
-                    continue;
-                }
-                let name = if resolved
-                    .binding
-                    .is_some_and(|binding| renamed.contains(&binding))
-                {
-                    new_name
-                } else {
-                    source.text(&occurrence.range)
-                };
-                if self.resolve(
-                    file,
-                    name,
-                    occurrence.scope,
-                    occurrence.range.start,
-                    renamed,
-                    new_name,
-                ) != resolved.binding
-                {
-                    return Err(RenameError::Conflict(new_name.into()));
-                }
+            self.check_file_capture(file, renamed, new_name, &mut valid_math)?;
+        }
+        Ok(())
+    }
+
+    fn check_file_capture(
+        &self,
+        file: FileId,
+        renamed: &BTreeSet<BindingId>,
+        new_name: &str,
+        valid_math: &mut Option<bool>,
+    ) -> Result<(), RenameError> {
+        let src = &self.sources[&file];
+        for (occ, res) in src.occurrences().iter().zip(self.occurrences(file)) {
+            let is_renamed = res.binding.is_some_and(|id| renamed.contains(&id));
+            if occ.math
+                && is_renamed
+                && !*valid_math.get_or_insert_with(|| {
+                    single_identifier(&typst_syntax::parse_math(new_name), SyntaxKind::MathIdent)
+                })
+            {
+                return Err(RenameError::InvalidMathIdentifier(new_name.into()));
+            }
+            if let OccurrenceKind::Argument(callee) = &occ.kind
+                && is_renamed
+                && src.occurrences().iter().any(|other| {
+                    matches!(&other.kind, OccurrenceKind::Argument(other_callee) if other_callee.at == callee.at)
+                        && other.range != occ.range
+                        && src.text(&other.range) == new_name
+                })
+            {
+                return Err(RenameError::Conflict(new_name.into()));
+            }
+            if !matches!(occ.kind, OccurrenceKind::Name) {
+                continue;
+            }
+            let name = if is_renamed {
+                new_name
+            } else {
+                src.text(&occ.range)
+            };
+            if self.resolve(file, name, occ.scope, occ.range.start, renamed, new_name)
+                != res.binding
+            {
+                return Err(RenameError::Conflict(new_name.into()));
             }
         }
         Ok(())
@@ -260,9 +277,9 @@ impl NameGraph {
 
     fn explicit_alias(&self, id: BindingId) -> bool {
         let binding = &self.bindings[id];
-        binding.declaration.is_some_and(|declaration| {
+        binding.declaration.is_some_and(|decl| {
             matches!(
-                self.sources[&binding.file].declarations()[declaration].kind,
+                self.sources[&binding.file].declarations()[decl].kind,
                 DeclarationKind::Import {
                     explicit_alias: true,
                     ..
@@ -274,15 +291,12 @@ impl NameGraph {
 
 fn valid_identifier(name: &str) -> bool {
     typst_syntax::is_ident(name)
-        && single_identifier(
-            &typst_syntax::parse_code(name),
-            typst_syntax::SyntaxKind::Ident,
-        )
+        && single_identifier(&typst_syntax::parse_code(name), SyntaxKind::Ident)
 }
 
-fn single_identifier(syntax: &typst_syntax::SyntaxNode, kind: typst_syntax::SyntaxKind) -> bool {
-    let mut children = syntax.children();
-    !syntax.diagnosis().errors
-        && children.next().is_some_and(|node| node.kind() == kind)
+fn single_identifier(node: &SyntaxNode, kind: SyntaxKind) -> bool {
+    let mut children = node.children();
+    !node.diagnosis().errors
+        && children.next().is_some_and(|child| child.kind() == kind)
         && children.next().is_none()
 }

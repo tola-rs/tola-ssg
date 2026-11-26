@@ -282,15 +282,15 @@ mod tests {
     use typst::comemo::Track;
 
     fn world() -> (TempDir, TypstWorld) {
-        let directory = TempDir::new().unwrap();
-        let main = directory.path().join("main.typ");
+        let dir = TempDir::new().unwrap();
+        let main = dir.path().join("main.typ");
         fs::write(&main, "").unwrap();
-        let world = TypstWorld::builder(&main, directory.path())
+        let world = TypstWorld::builder(&main, dir.path())
             .no_fonts()
             .with_local_cache()
             .build(&BundleCancellation::default())
             .unwrap();
-        (directory, world)
+        (dir, world)
     }
 
     fn parse(world: &TypstWorld, svg: &str) -> Result<SvgSource, SvgError> {
@@ -302,8 +302,8 @@ mod tests {
     }
 
     #[test]
-    fn linked_image_is_refused() {
-        let (_directory, world) = world();
+    fn svg_refuses_linked_images() {
+        let (_dir, world) = world();
         let refused = parse(
             &world,
             r##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><image href="photo.png"/></svg>"##,

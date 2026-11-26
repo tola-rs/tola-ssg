@@ -261,12 +261,20 @@ fn ok_subtag(value: &str, lengths: std::ops::RangeInclusive<usize>) -> bool {
 mod tests {
     use super::*;
 
-    fn declared(value: &str) -> LanguageDeclaration {
-        LanguageDeclaration::Tag(value.to_owned())
+    fn declared(val: &str) -> LanguageDeclaration {
+        LanguageDeclaration::Tag(val.to_owned())
+    }
+
+    fn declared_in_toml(src: &str) -> Result<LanguageDeclaration, toml::de::Error> {
+        #[derive(Deserialize)]
+        struct Holder {
+            language: LanguageDeclaration,
+        }
+        toml::from_str::<Holder>(&format!("language = {src}")).map(|h| h.language)
     }
 
     #[test]
-    fn spellings_declare_one_language() {
+    fn tag_and_parts_equivalent() {
         let tag = SiteLanguage::parse(&declared("zh-hant-tw")).unwrap();
         let parts = SiteLanguage::parse(&LanguageDeclaration::Parts {
             lang: "ZH".to_owned(),
@@ -282,12 +290,12 @@ mod tests {
     }
 
     #[test]
-    fn omitted_subtags_shorten_the_tag() {
-        let language = SiteLanguage::parse(&declared("ja")).unwrap();
-        assert_eq!(language.tag(), "ja");
-        assert_eq!(language.lang(), "ja");
-        assert_eq!(language.script(), None);
-        assert_eq!(language.region(), None);
+    fn omitted_subtags_elided() {
+        let lang = SiteLanguage::parse(&declared("ja")).unwrap();
+        assert_eq!(lang.tag(), "ja");
+        assert_eq!(lang.lang(), "ja");
+        assert_eq!(lang.script(), None);
+        assert_eq!(lang.region(), None);
 
         let script = SiteLanguage::parse(&LanguageDeclaration::Parts {
             lang: "zh".to_owned(),
@@ -298,25 +306,16 @@ mod tests {
         assert_eq!(script.tag(), "zh-Hans");
     }
 
-    fn declared_in_toml(source: &str) -> Result<LanguageDeclaration, toml::de::Error> {
-        #[derive(Deserialize)]
-        struct Holder {
-            language: LanguageDeclaration,
-        }
-
-        toml::from_str::<Holder>(&format!("language = {source}")).map(|holder| holder.language)
-    }
-
     #[test]
-    fn wrong_subtags_name_their_key() {
-        let error = SiteLanguage::parse(&LanguageDeclaration::Parts {
+    fn wrong_subtags_report_key() {
+        let err = SiteLanguage::parse(&LanguageDeclaration::Parts {
             lang: "zh".to_owned(),
             script: None,
             region: Some("Hans".to_owned()),
         })
         .expect_err("a region is exactly two letters");
         assert_eq!(
-            error,
+            err,
             UnusableLanguage::Subtag {
                 key: LanguageSubtag::Region,
                 declared: "Hans".to_owned(),
@@ -333,7 +332,7 @@ mod tests {
     }
 
     #[test]
-    fn only_the_two_spellings_deserialize() {
+    fn deserialize_valid_shapes_only() {
         assert_eq!(
             declared_in_toml("\"zh-Hans-CN\"").unwrap(),
             LanguageDeclaration::Tag("zh-Hans-CN".to_owned())
@@ -347,20 +346,20 @@ mod tests {
             }
         );
 
-        for source in [
+        for src in [
             "5",
             "{}",
             "{ script = \"Hans\" }",
             "{ lang = \"zh\", tag = \"zh-Hans-CN\" }",
             "{ lang = \"zh\", region = \"CN\", fallback = false }",
         ] {
-            assert!(declared_in_toml(source).is_err(), "{source} deserialized");
+            assert!(declared_in_toml(src).is_err(), "{src} deserialized");
         }
     }
 
     #[test]
-    fn malformed_tags_are_rejected() {
-        for value in [
+    fn malformed_tags_rejected() {
+        for val in [
             "",
             "-",
             "zh-Hans-CN-extra",
@@ -370,10 +369,7 @@ mod tests {
             "zh-",
             "en-US-",
         ] {
-            assert!(
-                SiteLanguage::parse(&declared(value)).is_err(),
-                "{value} parsed"
-            );
+            assert!(SiteLanguage::parse(&declared(val)).is_err(), "{val} parsed");
         }
         assert!(SiteLanguage::parse(&declared("zhx")).is_ok());
     }

@@ -1,4 +1,4 @@
-//! Logical output paths, URL paths, and their shared portable component rules.
+//! Logical output paths, URL paths, and shared portable component rules.
 
 mod output;
 mod portable;
@@ -13,4 +13,4 @@ pub use portable::PortablePathError;
 pub use portable::{
     portable_collision_key, portable_key_is_below, portable_keys_overlap, validate_portable_segment,
 };
-pub use url::{SiteReference, UrlPath, UrlPathError, browser_location};
+pub use url::{SiteRef, UrlPath, UrlPathError, browser_location};

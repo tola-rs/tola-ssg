@@ -3,7 +3,7 @@ name = "tola-subprocess"
 version.workspace = true
 edition = "2024"
 rust-version.workspace = true
-description = "External command execution with bounded output capture and process-tree termination"
+description = "Managed subprocess execution for Tola"
 license = "MIT"
 repository = "https://github.com/tola-rs/tola-ssg"
 

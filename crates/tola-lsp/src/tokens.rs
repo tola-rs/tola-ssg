@@ -1,4 +1,4 @@
-//! The semantic tokens of one source, as the protocol has them.
+//! Semantic tokens for Typst sources in LSP delta encoding.
 
 use lsp_types::{
     SemanticToken, SemanticTokenModifier, SemanticTokenType, SemanticTokens, SemanticTokensDelta,
@@ -8,7 +8,6 @@ use tola_typst_syntax::imports::NameGraph;
 use tola_typst_syntax::tokens::{Token, TokenClass};
 use tola_typst_syntax::typst_syntax::Source;
 
-/// The token types, in the order the protocol legend has them.
 const TYPES: [SemanticTokenType; 21] = [
     SemanticTokenType::new("text"),
     SemanticTokenType::new("heading"),
@@ -33,7 +32,6 @@ const TYPES: [SemanticTokenType; 21] = [
     SemanticTokenType::NAMESPACE,
 ];
 
-/// The styles a client may receive, in the order the legend has them.
 const MODIFIERS: [SemanticTokenModifier; 3] = [
     SemanticTokenModifier::new("math"),
     SemanticTokenModifier::new("strong"),
@@ -47,58 +45,56 @@ pub(super) fn legend() -> SemanticTokensLegend {
     }
 }
 
-/// Full or range tokens without a result identifier; the connection commits their delta baseline.
+/// Full or range tokens without `result_id`; the connection commits the delta baseline.
 pub(crate) fn tokens(
-    source: &Source,
+    src: &Source,
     names: &NameGraph,
     range: Option<lsp_types::Range>,
-    cancellation: &tola_build::cancellation::BuildCancellation,
+    cancel: &tola_build::cancellation::BuildCancellation,
 ) -> Result<SemanticTokens, tola_build::cancellation::BuildCancelled> {
-    let bytes = range.map(|range| {
-        let start = crate::position::byte_offset(source.lines(), range.start).unwrap_or(0);
-        let end =
-            crate::position::byte_offset(source.lines(), range.end).unwrap_or(source.text().len());
+    let bytes = range.map(|r| {
+        let start = crate::position::byte_offset(src.lines(), r.start).unwrap_or(0);
+        let end = crate::position::byte_offset(src.lines(), r.end).unwrap_or(src.text().len());
         start..end
     });
     encoded_with_check(
-        source,
+        src,
         names,
-        |token| {
+        |tok| {
             bytes
                 .as_ref()
-                .is_none_or(|range| token.range.end > range.start && token.range.start < range.end)
+                .is_none_or(|r| tok.range.end > r.start && tok.range.start < r.end)
         },
-        || cancellation.ensure_active(),
+        || cancel.ensure_active(),
     )
 }
 
 fn encoded_with_check<E>(
-    source: &Source,
+    src: &Source,
     names: &NameGraph,
     keep: impl Fn(&Token) -> bool,
     check: impl Fn() -> Result<(), E>,
 ) -> Result<SemanticTokens, E> {
     check()?;
-    let mut encoder = Encoder {
-        source,
-        first_break: crate::position::first_break(source.text()),
+    let mut enc = Encoder {
+        src,
+        first_break: crate::position::first_break(src.text()),
         tokens: Vec::new(),
-        previous: None,
+        prev: None,
     };
-    for token in tola_typst_syntax::tokens::tokens_with_check(source, names, &check)? {
+    for tok in tola_typst_syntax::tokens::tokens_with_check(src, names, &check)? {
         check()?;
-        if keep(&token) {
-            encoder.push(token, &check)?;
+        if keep(&tok) {
+            enc.push(tok, &check)?;
         }
     }
     check()?;
     Ok(SemanticTokens {
         result_id: None,
-        data: encoder.tokens,
+        data: enc.tokens,
     })
 }
 
-/// The index one token class has in [`TYPES`].
 fn class_index(class: TokenClass) -> u32 {
     match class {
         TokenClass::Text => 0,
@@ -125,28 +121,23 @@ fn class_index(class: TokenClass) -> u32 {
     }
 }
 
-/// How many numbers one token contributes to the stream `start` and `delete_count` index.
 const NUMBERS_PER_TOKEN: u32 = 5;
 
-/// The edit that turns `previous`'s tokens into `current`'s.
-///
-/// Only the span between the two lists' longest common prefix and suffix is sent, so the tokens
-/// they share at either end stay on the client. [`SemanticTokensDelta::result_id`] is left empty:
-/// the caller stamps the revision its reply reports.
-pub(super) fn delta(previous: &SemanticTokens, current: &SemanticTokens) -> SemanticTokensDelta {
-    let from = previous.data.as_slice();
-    let to = current.data.as_slice();
+/// Minimal delta edit from `prev` to `curr`, leaving `result_id` for the caller to stamp.
+pub(super) fn delta(prev: &SemanticTokens, curr: &SemanticTokens) -> SemanticTokensDelta {
+    let from = prev.data.as_slice();
+    let to = curr.data.as_slice();
 
     let prefix = from
         .iter()
         .zip(to.iter())
-        .take_while(|(left, right)| left == right)
+        .take_while(|(a, b)| a == b)
         .count();
     let suffix = from[prefix..]
         .iter()
         .rev()
         .zip(to[prefix..].iter().rev())
-        .take_while(|(left, right)| left == right)
+        .take_while(|(a, b)| a == b)
         .count();
 
     let removed = &from[prefix..from.len() - suffix];
@@ -166,85 +157,76 @@ pub(super) fn delta(previous: &SemanticTokens, current: &SemanticTokens) -> Sema
     }
 }
 
-/// Emits tokens in document order, each encoded relative to the one before it.
 struct Encoder<'a> {
-    source: &'a Source,
-    /// Where the compiler's line model first parts from the protocol's, found once per document.
+    src: &'a Source,
     first_break: Option<usize>,
     tokens: Vec<SemanticToken>,
-    /// The line and column of the last token, which a delta is measured from.
-    previous: Option<(u32, u32)>,
+    prev: Option<(u32, u32)>,
 }
 
 impl Encoder<'_> {
-    /// Record one token.
-    ///
-    /// A token never crosses a line break, and its line start and length count UTF-16 code units,
-    /// which is the position encoding this server negotiates.
-    fn push<E>(&mut self, token: Token, check: &impl Fn() -> Result<(), E>) -> Result<(), E> {
+    fn push<E>(&mut self, tok: Token, check: &impl Fn() -> Result<(), E>) -> Result<(), E> {
         check()?;
-        let range = token.range;
-        let lines = self.source.lines();
+        let lines = self.src.lines();
         let (Some(first), Some(last)) = (
-            lines.byte_to_line(range.start),
-            lines.byte_to_line(range.end.saturating_sub(1)),
+            lines.byte_to_line(tok.range.start),
+            lines.byte_to_line(tok.range.end.saturating_sub(1)),
         ) else {
             return Ok(());
         };
         for line in first..=last {
             check()?;
-            // A line without a following newline is the source's last line, whose end is the
-            // text's own length; `line_to_byte` has no entry past it.
-            let Some(line_start) = lines.line_to_byte(line) else {
-                continue;
-            };
-            let line_end = lines
-                .line_to_byte(line + 1)
-                .unwrap_or_else(|| self.source.text().len());
-            let end = range.end.min(line_end).max(line_start);
-            let Some(text) = self.source.text().get(line_start..end) else {
-                continue;
-            };
-            let end = line_start
-                + text
-                    .trim_end_matches(tola_typst_syntax::typst_syntax::is_newline)
-                    .len();
-            let start = range.start.max(line_start);
-            // The segment lies inside one line, so its two ends are the protocol positions that
-            // bound it and the text between them is its length.
-            let Some(line_range) =
-                crate::position::utf16_range_indexed(lines, start..end, self.first_break)
-            else {
-                continue;
-            };
-            if line_range.start.line != line_range.end.line
-                || line_range.end.character <= line_range.start.character
-            {
-                continue;
-            }
-            let (line, column, length) = (
-                line_range.start.line,
-                line_range.start.character,
-                line_range.end.character - line_range.start.character,
-            );
-            let (delta_line, delta_start) = match self.previous {
-                Some((previous_line, previous_column)) if previous_line == line => {
-                    (0, column.saturating_sub(previous_column))
-                }
-                Some((previous_line, _)) => (line - previous_line, column),
-                None => (line, column),
-            };
-            self.tokens.push(SemanticToken {
-                delta_line,
-                delta_start,
-                length,
-                token_type: class_index(token.class),
-                token_modifiers_bitset: token.modifiers.bits(),
-            });
-            self.previous = Some((line, column));
+            self.push_line(line, &tok);
         }
         check()?;
         Ok(())
+    }
+
+    fn push_line(&mut self, line: usize, tok: &Token) {
+        let lines = self.src.lines();
+        let Some(line_start) = lines.line_to_byte(line) else {
+            return;
+        };
+        let line_end = lines
+            .line_to_byte(line + 1)
+            .unwrap_or_else(|| self.src.text().len());
+        let end = tok.range.end.min(line_end).max(line_start);
+        let Some(text) = self.src.text().get(line_start..end) else {
+            return;
+        };
+        let end = line_start
+            + text
+                .trim_end_matches(tola_typst_syntax::typst_syntax::is_newline)
+                .len();
+        let start = tok.range.start.max(line_start);
+        let Some(line_range) =
+            crate::position::utf16_range_indexed(lines, start..end, self.first_break)
+        else {
+            return;
+        };
+        if line_range.start.line != line_range.end.line
+            || line_range.end.character <= line_range.start.character
+        {
+            return;
+        }
+        let (ln, col, len) = (
+            line_range.start.line,
+            line_range.start.character,
+            line_range.end.character - line_range.start.character,
+        );
+        let (delta_line, delta_start) = match self.prev {
+            Some((prev_ln, prev_col)) if prev_ln == ln => (0, col.saturating_sub(prev_col)),
+            Some((prev_ln, _)) => (ln - prev_ln, col),
+            None => (ln, col),
+        };
+        self.tokens.push(SemanticToken {
+            delta_line,
+            delta_start,
+            length: len,
+            token_type: class_index(tok.class),
+            token_modifiers_bitset: tok.modifiers.bits(),
+        });
+        self.prev = Some((ln, col));
     }
 }
 
@@ -253,7 +235,6 @@ mod tests {
     use super::*;
     use tola_typst_syntax::tokens::Modifiers;
 
-    /// One recorded token, with the absolute position its delta encoded.
     struct Recorded {
         line: u32,
         start: u32,
@@ -263,10 +244,10 @@ mod tests {
     }
 
     fn decode(text: &str) -> Vec<Recorded> {
-        let source = Source::detached(text);
+        let src = Source::detached(text);
         let names = NameGraph::new(
             [std::sync::Arc::new(
-                tola_typst_syntax::names::SourceNames::new(source.clone()),
+                tola_typst_syntax::names::SourceNames::new(src.clone()),
             )],
             |_| None,
             Some(&tola_typst::GLOBAL_LIBRARY),
@@ -276,7 +257,7 @@ mod tests {
         let mut line = 0;
         let mut start = 0;
         tokens(
-            &source,
+            &src,
             &names,
             None,
             &tola_build::cancellation::BuildCancellation::new(),
@@ -284,67 +265,61 @@ mod tests {
         .unwrap()
         .data
         .into_iter()
-        .map(|token| {
-            line += token.delta_line;
-            start = if token.delta_line == 0 {
-                start + token.delta_start
+        .map(|tok| {
+            line += tok.delta_line;
+            start = if tok.delta_line == 0 {
+                start + tok.delta_start
             } else {
-                token.delta_start
+                tok.delta_start
             };
             Recorded {
                 line,
                 start,
-                length: token.length,
-                token_type: TYPES[token.token_type as usize].as_str().to_owned(),
-                modifiers: token.token_modifiers_bitset,
+                length: tok.length,
+                token_type: TYPES[tok.token_type as usize].as_str().to_owned(),
+                modifiers: tok.token_modifiers_bitset,
             }
         })
         .collect()
     }
 
-    /// The token that begins at the first occurrence of `needle`.
     fn token_at(text: &str, needle: &str) -> Recorded {
-        let source = Source::detached(text);
-        let at = source
+        let src = Source::detached(text);
+        let at = src
             .text()
             .find(needle)
             .expect("the source holds the needle");
-        let at =
-            crate::position::utf16_range(source.lines(), at..at).expect("a position in the text");
-        let (line, column) = (at.start.line, at.start.character);
+        let at = crate::position::utf16_range(src.lines(), at..at).expect("a position in the text");
+        let (line, col) = (at.start.line, at.start.character);
         let mut recorded = decode(text);
-        let index = recorded
+        let idx = recorded
             .iter()
-            .position(|token| token.line == line && token.start == column)
+            .position(|tok| tok.line == line && tok.start == col)
             .expect("a token begins at the needle");
-        recorded.remove(index)
+        recorded.remove(idx)
     }
 
-    /// Tokens stay ordered without overlap, and no token is empty.
     #[test]
-    fn tokens_stay_ordered_without_overlap() {
+    fn tokens_ordered_non_overlapping() {
         let text = "#\"first\n\nsecond\"\n\n*strong* _emph_ $a_1 + b$\n";
         let recorded = decode(text);
-        assert!(
-            recorded.iter().all(|token| token.length > 0),
-            "a token is empty"
-        );
+        assert!(recorded.iter().all(|tok| tok.length > 0), "empty token");
         for pair in recorded.windows(2) {
-            let (left, right) = (&pair[0], &pair[1]);
-            if left.line == right.line {
+            let (a, b) = (&pair[0], &pair[1]);
+            if a.line == b.line {
                 assert!(
-                    left.start + left.length <= right.start,
-                    "tokens overlap on line {}: {} then {}",
-                    left.line,
-                    left.start,
-                    right.start
+                    a.start + a.length <= b.start,
+                    "overlap on line {}: {} then {}",
+                    a.line,
+                    a.start,
+                    b.start
                 );
             }
         }
     }
 
     #[test]
-    fn constructs_have_their_token_types() {
+    fn token_types() {
         let markup = "= Heading\n\n- item\n\n<label> @label\n\nhttps://example.com\n\n`raw`\n";
         let term = "/ *term*: a `raw` description\n";
         let imports =
@@ -387,13 +362,10 @@ mod tests {
         assert_eq!(token_at(term, "term").modifiers, Modifiers::STRONG.bits());
         assert_eq!(token_at(math, "sin").modifiers, Modifiers::MATH.bits());
     }
+
     #[test]
-    fn token_columns_count_utf16_code_units() {
-        let text = "= 标题\n";
-        let heading = decode(text);
-        assert_eq!(
-            heading[0].length, 4,
-            "the marker, a space, and two ideographs"
-        );
+    fn token_columns_utf16() {
+        let heading = decode("= 标题\n");
+        assert_eq!(heading[0].length, 4);
     }
 }

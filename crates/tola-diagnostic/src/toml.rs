@@ -6,26 +6,20 @@ use std::borrow::Cow;
 pub const UNKNOWN_FIELD_HELP: &str =
     "Check the field name, or remove the field if this version of Tola does not support it";
 
-/// The declared key in the same table that the written key nearly spells.
 pub fn field_replacement<'a>(path: &str, fields: impl Iterator<Item = &'a str>) -> Option<&'a str> {
-    let (table, written) = path.rsplit_once('.').unwrap_or(("", path));
-    tola_typst::spelling::closest(
-        written,
-        fields.filter_map(|field| immediate_key(field, table)),
-    )
+    let (tbl, written) = path.rsplit_once('.').unwrap_or(("", path));
+    tola_typst::spelling::closest(written, fields.filter_map(|f| immediate_key(f, tbl)))
 }
 
-/// The key `path` writes directly inside `table_path`, if it writes one at all.
-pub fn immediate_key<'a>(path: &'a str, table_path: &str) -> Option<&'a str> {
-    let remainder = if table_path.is_empty() {
+pub fn immediate_key<'a>(path: &'a str, tbl_path: &str) -> Option<&'a str> {
+    let rem = if tbl_path.is_empty() {
         (!path.contains('.')).then_some(path)?
     } else {
-        path.strip_prefix(table_path)?.strip_prefix('.')?
+        path.strip_prefix(tbl_path)?.strip_prefix('.')?
     };
-    (!remainder.contains('.')).then_some(remainder)
+    (!rem.contains('.')).then_some(rem)
 }
 
-/// A TOML error in terms of the keys and values the author can change.
 pub struct TomlMessage<'a> {
     pub message: Cow<'a, str>,
     pub help: Option<Cow<'a, str>>,
@@ -44,37 +38,36 @@ impl<'a> TomlMessage<'a> {
         self
     }
 
-    /// Present a TOML parsing or deserialization error in the author's vocabulary.
-    pub fn from_error(message: &'a str) -> Self {
-        let message = message.trim();
-        if let Some(rest) = message
+    pub fn from_error(msg: &'a str) -> Self {
+        let msg = msg.trim();
+        if let Some(rest) = msg
             .strip_prefix("invalid type: ")
-            .or_else(|| message.strip_prefix("invalid value: "))
-            && let Some((found, expected)) = rest.split_once(", expected ")
+            .or_else(|| msg.strip_prefix("invalid value: "))
+            && let Some((found, exp)) = rest.split_once(", expected ")
         {
             return Self::new(Cow::Owned(format!(
                 "expected {}, found {}",
-                accepted_form(expected),
+                accepted_form(exp),
                 written_value(found)
             )));
         }
-        if let Some(rest) = message.strip_prefix("unknown variant `")
-            && let Some((variant, accepted)) = rest.split_once("`, expected ")
+        if let Some(rest) = msg.strip_prefix("unknown variant `")
+            && let Some((var, acc)) = rest.split_once("`, expected ")
         {
-            return Self::new(Cow::Owned(format!("`{variant}` is not a supported value")))
-                .with_help(format!("Choose {accepted}"));
+            return Self::new(Cow::Owned(format!("`{var}` is not a supported value")))
+                .with_help(format!("Choose {acc}"));
         }
-        if let Some(rest) = message.strip_prefix("unknown field `")
-            && let Some((field, accepted)) = rest.split_once("`, expected ")
+        if let Some(rest) = msg.strip_prefix("unknown field `")
+            && let Some((field, acc)) = rest.split_once("`, expected ")
         {
-            let candidates = accepted.split('`').skip(1).step_by(2);
+            let candidates = acc.split('`').skip(1).step_by(2);
             let help = tola_typst::spelling::closest(field, candidates)
-                .map_or(Cow::Borrowed(UNKNOWN_FIELD_HELP), |key| {
-                    Cow::Owned(format!("Check whether you meant `{key}`"))
+                .map_or(Cow::Borrowed(UNKNOWN_FIELD_HELP), |k| {
+                    Cow::Owned(format!("Check whether you meant `{k}`"))
                 });
             return Self::new(Cow::Owned(format!("unknown field `{field}`"))).with_help(help);
         }
-        if let Some(field) = message.strip_prefix("missing field `")
+        if let Some(field) = msg.strip_prefix("missing field `")
             && let Some(field) = field.strip_suffix('`')
         {
             return Self::new(Cow::Owned(format!(
@@ -82,70 +75,69 @@ impl<'a> TomlMessage<'a> {
             )))
             .with_help(format!("Add a value for `{field}` in this table"));
         }
-        if let Some(rest) = message.strip_prefix("unexpected keys in table: ")
+        if let Some(rest) = msg.strip_prefix("unexpected keys in table: ")
             && let Some((unknown, allowed)) = rest.split_once(", available keys: ")
         {
             return Self::new(Cow::Owned(format!("unknown fields {unknown}")))
                 .with_help(format!("Use a supported field from {allowed}"));
         }
-        if let Some(found) = message.strip_prefix("expected table, found ") {
+        if let Some(found) = msg.strip_prefix("expected table, found ") {
             return Self::new(Cow::Owned(format!(
                 "expected a table, found {}",
                 written_value(found)
             )));
         }
-        if message.starts_with("data did not match any variant of untagged enum ") {
+        if msg.starts_with("data did not match any variant of untagged enum ") {
             return Self::new(Cow::Borrowed(
                 "this value does not match any supported form",
             ));
         }
-        if message == "expected table with exactly 1 entry, found empty table" {
+        if msg == "expected table with exactly 1 entry, found empty table" {
             return Self::new(Cow::Borrowed("this table must contain exactly one entry"));
         }
-        if let Some(rest) = message.strip_prefix("expected table key `")
-            && let Some((key, found)) = rest.split_once("`, but was `")
+        if let Some(rest) = msg.strip_prefix("expected table key `")
+            && let Some((k, found)) = rest.split_once("`, but was `")
         {
             return Self::new(Cow::Owned(format!(
-                "expected the table key `{key}`, found `{}`",
+                "expected the table key `{k}`, found `{}`",
                 found.trim_end_matches('`')
             )));
         }
-        if message.starts_with("missing value for key") {
+        if msg.starts_with("missing value for key") {
             return Self::new(Cow::Borrowed("this key needs an `=` and a value"))
                 .with_help("Write the assignment as `key = value`");
         }
-        if message.starts_with("missing value") {
+        if msg.starts_with("missing value") {
             return Self::new(Cow::Borrowed("this key is missing a value"))
                 .with_help("Add a value after `=`");
         }
-        if message.starts_with("unclosed array table") {
+        if msg.starts_with("unclosed array table") {
             return Self::new(Cow::Borrowed(
                 "this table header is missing its closing brackets",
             ))
             .with_help("Close the header with `]]`");
         }
-        if message.starts_with("unclosed table") {
+        if msg.starts_with("unclosed table") {
             return Self::new(Cow::Borrowed(
                 "this table header is missing its closing bracket",
             ))
             .with_help("Close the header with `]`");
         }
-        if let Some((reason, expected)) = message.split_once('\n')
-            && let Some(expected) = expected.strip_prefix("expected ")
+        if let Some((reason, exp)) = msg.split_once('\n')
+            && let Some(exp) = exp.strip_prefix("expected ")
         {
             return Self::new(Cow::Borrowed(reason))
-                .with_help(format!("Use {}", super::collapse_whitespace(expected)));
+                .with_help(format!("Use {}", super::collapse_whitespace(exp)));
         }
-        if message.contains('\n') {
-            return Self::new(Cow::Owned(super::collapse_whitespace(message)));
+        if msg.contains('\n') {
+            return Self::new(Cow::Owned(super::collapse_whitespace(msg)));
         }
-        Self::new(Cow::Borrowed(message))
+        Self::new(Cow::Borrowed(msg))
     }
 }
 
-/// The TOML form one serde expectation asks for.
-fn accepted_form(expected: &str) -> Cow<'_, str> {
-    match expected {
+fn accepted_form(exp: &str) -> Cow<'_, str> {
+    match exp {
         "u8" => Cow::Owned(format!("an integer from {} to {}", u8::MIN, u8::MAX)),
         "u16" => Cow::Owned(format!("an integer from {} to {}", u16::MIN, u16::MAX)),
         "u32" => Cow::Owned(format!("an integer from {} to {}", u32::MIN, u32::MAX)),
@@ -165,16 +157,15 @@ fn accepted_form(expected: &str) -> Cow<'_, str> {
         "a sequence" => Cow::Borrowed("an array"),
         "a map" => Cow::Borrowed("a table"),
         // An enum expectation lists the accepted values as quoted keys.
-        expected if expected.contains('`') => Cow::Borrowed(expected),
-        expected if expected.starts_with("struct ") || expected.starts_with("tuple struct ") => {
+        exp if exp.contains('`') => Cow::Borrowed(exp),
+        exp if exp.starts_with("struct ") || exp.starts_with("tuple struct ") => {
             Cow::Borrowed("a table")
         }
-        expected if expected.starts_with("a tuple") => Cow::Borrowed("an array"),
+        exp if exp.starts_with("a tuple") => Cow::Borrowed("an array"),
         _ => Cow::Borrowed("a supported value"),
     }
 }
 
-/// The TOML value an author wrote, named in TOML terms.
 fn written_value(found: &str) -> Cow<'_, str> {
     match found {
         "array" | "sequence" => return Cow::Borrowed("an array"),
@@ -183,9 +174,9 @@ fn written_value(found: &str) -> Cow<'_, str> {
         "unit value" => return Cow::Borrowed("an empty value"),
         _ => {}
     }
-    let (kind, value) = found
+    let (kind, val) = found
         .strip_prefix("floating point ")
-        .map(|value| ("floating point", value))
+        .map(|v| ("floating point", v))
         .or_else(|| found.split_once(' '))
         .unwrap_or(("", found));
     let named = match kind {
@@ -195,5 +186,5 @@ fn written_value(found: &str) -> Cow<'_, str> {
         "integer" | "floating point" => "the number",
         _ => return Cow::Borrowed("a value"),
     };
-    Cow::Owned(format!("{named} `{}`", value.trim_matches('`')))
+    Cow::Owned(format!("{named} `{}`", val.trim_matches('`')))
 }

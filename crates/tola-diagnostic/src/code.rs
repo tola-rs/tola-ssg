@@ -23,7 +23,6 @@ impl DiagnosticCode {
         self.0
     }
 
-    /// The part before the dot.
     pub fn surface(self) -> &'static str {
         self.0
             .split_once('.')
@@ -31,14 +30,14 @@ impl DiagnosticCode {
     }
 }
 
-/// The `<surface>.<contract>` shape: lowercase, digits, `_`, exactly one dot.
+/// `<surface>.<contract>`: lowercase, digits, `_`, one dot.
 const fn well_formed(code: &str) -> bool {
     let bytes = code.as_bytes();
-    let mut index = 0;
+    let mut idx = 0;
     let mut dots = 0;
     let mut part_len = 0;
-    while index < bytes.len() {
-        match bytes[index] {
+    while idx < bytes.len() {
+        match bytes[idx] {
             b'a'..=b'z' | b'0'..=b'9' | b'_' => part_len += 1,
             b'.' => {
                 if part_len == 0 {
@@ -49,20 +48,20 @@ const fn well_formed(code: &str) -> bool {
             }
             _ => return false,
         }
-        index += 1;
+        idx += 1;
     }
     dots == 1 && part_len > 0
 }
 
 impl fmt::Display for DiagnosticCode {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.0)
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.0)
     }
 }
 
 impl fmt::Debug for DiagnosticCode {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Debug::fmt(self.0, formatter)
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(self.0, f)
     }
 }
 
@@ -78,10 +77,10 @@ mod tests {
 
     #[test]
     fn code_shape() {
-        for accepted in ["config.toml", "site.no_pages", "typst.bundle_export"] {
-            assert!(well_formed(accepted), "{accepted}");
+        for ok in ["config.toml", "site.no_pages", "typst.bundle_export"] {
+            assert!(well_formed(ok), "{ok}");
         }
-        for refused in [
+        for bad in [
             "",
             "config",
             "config.",
@@ -93,7 +92,7 @@ mod tests {
             "config.toml.x",
             "config toml",
         ] {
-            assert!(!well_formed(refused), "{refused}");
+            assert!(!well_formed(bad), "{bad}");
         }
     }
 }

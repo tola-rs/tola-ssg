@@ -5,7 +5,7 @@ use std::collections::HashSet;
 
 use anyhow::Result;
 use tola_build::check::SourceCompilation;
-use tola_build::config::ResolvedSiteConfig;
+use tola_build::config::SiteConfig;
 use tola_build::{SourceDescriptorField, SourceDescriptorFieldKind};
 use tola_typst::typst::World;
 use tola_typst::typst::foundations::Value;
@@ -121,7 +121,7 @@ pub(super) struct DeclaredKey {
 /// The metadata schemas the site program's own `parse-sources` calls declare.
 pub(super) fn site_schemas(
     compilation: &SourceCompilation,
-    config: &ResolvedSiteConfig,
+    config: &SiteConfig,
     semantics: &mut Semantic<'_>,
 ) -> Result<Vec<SiteSchema>> {
     let world = compilation.world();
@@ -156,11 +156,11 @@ pub(super) fn site_schemas(
 }
 
 /// How an answer spells a declaring file: site-root relative, or the package spec supplying it.
-fn declaration_path(id: FileId, config: &ResolvedSiteConfig) -> String {
+fn declaration_path(id: FileId, config: &SiteConfig) -> String {
     match id.root() {
         VirtualRoot::Project => tola_diagnostic::display_path(
-            &config.get_root().join(id.vpath().get_without_slash()),
-            config.get_root(),
+            &config.root().join(id.vpath().get_without_slash()),
+            config.root(),
         ),
         VirtualRoot::Package(package) => format!("{package}{}", id.vpath().get_with_slash()),
     }
@@ -173,7 +173,7 @@ fn program_imports(
     source: &Source,
     names: &tola_typst_syntax::names::SourceNames,
     semantics: &mut Semantic<'_>,
-    config: &ResolvedSiteConfig,
+    config: &SiteConfig,
     entry: FileId,
 ) -> Result<Vec<FileId>> {
     let mut files = Vec::new();
@@ -191,7 +191,7 @@ fn program_imports(
         };
         if (file.root() == &VirtualRoot::Project
             && !config
-                .get_root()
+                .root()
                 .join(file.vpath().get_without_slash())
                 .starts_with(&config.build().content_dir))
             || (matches!(entry.root(), VirtualRoot::Package(_)) && file.root() == entry.root())
@@ -323,7 +323,7 @@ impl Selection<'_> {
     pub(super) fn meta_schemas(
         &self,
         compilation: &SourceCompilation,
-        config: &ResolvedSiteConfig,
+        config: &SiteConfig,
         semantics: &mut Semantic<'_>,
     ) -> Result<SourceSchemas> {
         let declared = site_schemas(compilation, config, semantics)?;

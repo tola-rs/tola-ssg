@@ -14,7 +14,7 @@ use crate::cli::output::CommandOutput;
 pub(super) fn run_initializer(
     module: &ModuleCommands,
     tail: &[OsString],
-    config: &tola_build::config::ResolvedSiteConfig,
+    config: &tola_build::config::SiteConfig,
     mode: InputMode,
     output: &CommandOutput,
     cancellation: &Cancellation,
@@ -53,11 +53,11 @@ pub(super) fn run_initializer(
         _ => tola_input::InputScope::Online,
     };
     let mode = InputMode::new(scope, mode.locked() || args.input.locked);
-    let locked = tola_input::InputLock::read(config.get_root())?
+    let locked = tola_input::InputLock::read(config.root())?
         .and_then(|lock| lock.modules.get(&module.name).cloned());
     let source = super::super::init::Source::selected(
         &config.modules()[&module.name].source,
-        config.get_root(),
+        config.root(),
         &module.root,
         locked,
     );

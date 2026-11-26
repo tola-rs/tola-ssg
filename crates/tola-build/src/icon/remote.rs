@@ -346,28 +346,39 @@ fn all_mirrors_failed(namespace: &str, urls: Vec<String>, last: Option<IconError
     }
 }
 
+pub(super) fn map_download_error(
+    namespace: &str,
+    url: &str,
+    err: HttpDownloadError,
+    on_request: impl FnOnce(HttpDownloadError) -> IconError,
+) -> IconError {
+    match err {
+        HttpDownloadError::Cancelled(cancelled) => IconError::Cancelled(cancelled),
+        HttpDownloadError::NetworkDenied => IconError::NetworkDenied {
+            namespace: namespace.into(),
+            url: url.into(),
+        },
+        HttpDownloadError::Runtime(source) => IconError::NetworkRuntime(source),
+        HttpDownloadError::TooLarge { limit } => IconError::RemoteTooLarge {
+            namespace: namespace.into(),
+            url: url.into(),
+            limit,
+        },
+        HttpDownloadError::WorkerStopped => IconError::NetworkWorker,
+        req @ HttpDownloadError::Request(_) => on_request(req),
+    }
+}
+
 fn download(request: &RemoteCollection<'_>, url: &str, limit: usize) -> Result<Vec<u8>, IconError> {
     request
         .resources
         .download(url, limit, request.cancellation)
-        .map_err(|error| match error {
-            HttpDownloadError::Cancelled(cancelled) => IconError::Cancelled(cancelled),
-            HttpDownloadError::NetworkDenied => IconError::NetworkDenied {
-                namespace: request.namespace.into(),
-                url: url.into(),
-            },
-            HttpDownloadError::Runtime(source) => IconError::NetworkRuntime(source),
-            HttpDownloadError::Request(source) => IconError::Remote {
+        .map_err(|err| {
+            map_download_error(request.namespace, url, err, |source| IconError::Remote {
                 namespace: request.namespace.into(),
                 urls: vec![url.into()],
-                source: HttpDownloadError::Request(source),
-            },
-            HttpDownloadError::TooLarge { limit } => IconError::RemoteTooLarge {
-                namespace: request.namespace.into(),
-                url: url.into(),
-                limit,
-            },
-            HttpDownloadError::WorkerStopped => IconError::NetworkWorker,
+                source,
+            })
         })
 }
 
@@ -393,34 +404,34 @@ fn verify_locked(
     })))
 }
 
-/// The cache entry one digest is stored in.
 fn cache_entry(cache_root: &Path, sha256: Sha256Digest) -> PathBuf {
     cache_root.join(format!("{sha256}.json"))
 }
 
-/// Read one source file, treating a missing file as no copy at all.
+fn ensure_optional_regular_file(
+    path: &Path,
+    not_file_msg: &'static str,
+) -> Result<bool, IconError> {
+    match std::fs::symlink_metadata(path) {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(source) => Err(IconError::Read {
+            path: path.to_path_buf(),
+            source,
+        }),
+        Ok(meta) if !meta.is_file() => Err(IconError::Read {
+            path: path.to_path_buf(),
+            source: std::io::Error::new(std::io::ErrorKind::InvalidData, not_file_msg),
+        }),
+        Ok(_) => Ok(true),
+    }
+}
+
 fn read_if_present(
     request: &RemoteCollection<'_>,
     path: &Path,
 ) -> Result<Option<(Vec<u8>, IconFileRead)>, IconError> {
-    match std::fs::symlink_metadata(path) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(source) => {
-            return Err(IconError::Read {
-                path: path.to_path_buf(),
-                source,
-            });
-        }
-        Ok(metadata) if !metadata.is_file() => {
-            return Err(IconError::Read {
-                path: path.to_path_buf(),
-                source: std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "an icon collection source is not a regular file",
-                ),
-            });
-        }
-        Ok(_) => {}
+    if !ensure_optional_regular_file(path, "an icon collection source is not a regular file")? {
+        return Ok(None);
     }
     let overrides = SourceOverrides::default();
     let (bytes, read) = read_file(path, &overrides, request.cancellation, request.boundary)?;
@@ -429,24 +440,8 @@ fn read_if_present(
 
 /// Read one verified cache entry; the cache is not a source and is not watched.
 fn read_cache(request: &RemoteCollection<'_>, path: &Path) -> Result<Option<Vec<u8>>, IconError> {
-    match std::fs::symlink_metadata(path) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(source) => {
-            return Err(IconError::Read {
-                path: path.to_path_buf(),
-                source,
-            });
-        }
-        Ok(metadata) if !metadata.is_file() => {
-            return Err(IconError::Read {
-                path: path.to_path_buf(),
-                source: std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "an icon cache entry is not a regular file",
-                ),
-            });
-        }
-        Ok(_) => {}
+    if !ensure_optional_regular_file(path, "an icon cache entry is not a regular file")? {
+        return Ok(None);
     }
     let mut file = tola_fs::open_regular_file(path, false).map_err(|source| IconError::Read {
         path: path.to_path_buf(),

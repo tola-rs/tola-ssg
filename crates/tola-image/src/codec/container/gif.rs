@@ -12,143 +12,143 @@ const DAMAGED: &str = "the GIF image is damaged or incomplete; re-export it";
 
 fn gif_sub_blocks(
     bytes: &[u8],
-    offset: &mut usize,
-    mut collect: Option<&mut Vec<u8>>,
-    cancellation: Option<&dyn Cancellation>,
+    off: &mut usize,
+    mut out: Option<&mut Vec<u8>>,
+    cancel: Option<&dyn Cancellation>,
 ) -> ImageResult<()> {
     loop {
-        ensure_active_if_present(cancellation)?;
-        let length = usize::from(
+        ensure_active_if_present(cancel)?;
+        let len = usize::from(
             *bytes
-                .get(*offset)
+                .get(*off)
                 .ok_or_else(|| ImageError::unreadable(DAMAGED))?,
         );
-        *offset += 1;
-        if length == 0 {
+        *off += 1;
+        if len == 0 {
             return Ok(());
         }
         let block = bytes
-            .get(*offset..*offset + length)
+            .get(*off..*off + len)
             .ok_or_else(|| ImageError::unreadable(DAMAGED))?;
-        if let Some(output) = collect.as_deref_mut() {
-            output.extend_from_slice(block);
+        if let Some(buf) = out.as_deref_mut() {
+            buf.extend_from_slice(block);
         }
-        *offset += length;
+        *off += len;
     }
 }
 
 pub(in crate::codec) fn scan_gif<'a>(
     bytes: &'a [u8],
-    cancellation: Option<&dyn Cancellation>,
+    cancel: Option<&dyn Cancellation>,
 ) -> ImageResult<ContainerMetadata<'a>> {
     if bytes.len() < 13 {
         return Err(ImageError::unreadable(DAMAGED));
     }
-    let canvas_width = u32::from(le16(&bytes[6..8]));
-    let canvas_height = u32::from(le16(&bytes[8..10]));
-    check_dimensions(canvas_width, canvas_height)?;
-    let mut metadata = ContainerMetadata::default();
-    let mut offset = 13
+    let canvas_w = u32::from(le16(&bytes[6..8]));
+    let canvas_h = u32::from(le16(&bytes[8..10]));
+    check_dimensions(canvas_w, canvas_h)?;
+    let mut meta = ContainerMetadata::default();
+    let mut off = 13
         + if bytes[10] & 128 != 0 {
             3usize << ((bytes[10] & 7) + 1)
         } else {
             0
         };
     let mut frames = 0usize;
-    let mut has_alpha = false;
-    let mut profile = None;
+    let mut alpha = false;
+    let mut icc = None;
     loop {
-        ensure_active_if_present(cancellation)?;
+        ensure_active_if_present(cancel)?;
         let marker = *bytes
-            .get(offset)
+            .get(off)
             .ok_or_else(|| ImageError::unreadable(DAMAGED))?;
-        offset += 1;
+        off += 1;
         match marker {
             0x3b => {
-                if frames == 0 || offset != bytes.len() {
+                if frames == 0 || off != bytes.len() {
                     return Err(ImageError::unreadable(DAMAGED));
                 }
                 break;
             }
             0x2c => {
-                let descriptor = bytes
-                    .get(offset..offset + 9)
+                let desc = bytes
+                    .get(off..off + 9)
                     .ok_or_else(|| ImageError::unreadable(DAMAGED))?;
-                let width = u32::from(le16(&descriptor[4..6]));
-                let height = u32::from(le16(&descriptor[6..8]));
-                check_dimensions(width, height)?;
-                if u32::from(le16(descriptor)) + width > canvas_width
-                    || u32::from(le16(&descriptor[2..4])) + height > canvas_height
+                let w = u32::from(le16(&desc[4..6]));
+                let h = u32::from(le16(&desc[6..8]));
+                check_dimensions(w, h)?;
+                if u32::from(le16(desc)) + w > canvas_w
+                    || u32::from(le16(&desc[2..4])) + h > canvas_h
                 {
                     return Err(ImageError::unreadable(DAMAGED));
                 }
                 // The decoder leaves uncovered canvas transparent, ignoring the palette background.
-                has_alpha |= width != canvas_width || height != canvas_height;
-                offset += 9 + if descriptor[8] & 128 != 0 {
-                    3usize << ((descriptor[8] & 7) + 1)
+                alpha |= w != canvas_w || h != canvas_h;
+                off += 9 + if desc[8] & 128 != 0 {
+                    3usize << ((desc[8] & 7) + 1)
                 } else {
                     0
                 };
-                if offset >= bytes.len() {
+                if off >= bytes.len() {
                     return Err(ImageError::unreadable(DAMAGED));
                 }
-                offset += 1;
-                gif_sub_blocks(bytes, &mut offset, None, cancellation)?;
+                off += 1;
+                gif_sub_blocks(bytes, &mut off, None, cancel)?;
                 frames += 1;
-                metadata.is_animated |= frames > 1;
+                meta.is_animated |= frames > 1;
             }
             0x21 => {
                 let label = *bytes
-                    .get(offset)
+                    .get(off)
                     .ok_or_else(|| ImageError::unreadable(DAMAGED))?;
-                offset += 1;
+                off += 1;
                 if label == 0xf9 {
-                    let control = bytes
-                        .get(offset..offset + 6)
+                    let ctrl = bytes
+                        .get(off..off + 6)
                         .ok_or_else(|| ImageError::unreadable(DAMAGED))?;
-                    if control[0] != 4 || control[5] != 0 {
+                    if ctrl[0] != 4 || ctrl[5] != 0 {
                         return Err(ImageError::unreadable(DAMAGED));
                     }
-                    has_alpha |= control[1] & 1 != 0;
-                    offset += 6;
+                    alpha |= ctrl[1] & 1 != 0;
+                    off += 6;
                 } else if label == 0xff {
                     let size = usize::from(
                         *bytes
-                            .get(offset)
+                            .get(off)
                             .ok_or_else(|| ImageError::unreadable(DAMAGED))?,
                     );
-                    offset += 1;
-                    let application = bytes
-                        .get(offset..offset + size)
+                    off += 1;
+                    let app = bytes
+                        .get(off..off + size)
                         .ok_or_else(|| ImageError::unreadable(DAMAGED))?;
-                    offset += size;
-                    if application == b"ICCRGBG1012" {
-                        if profile.is_some() {
+                    off += size;
+                    if app == b"ICCRGBG1012" {
+                        if icc.is_some() {
                             return Err(ImageError::unreadable(
                                 "the GIF image has more than one color profile; re-export it with sRGB colors",
                             ));
                         }
-                        let mut collected = Vec::new();
-                        gif_sub_blocks(bytes, &mut offset, Some(&mut collected), cancellation)?;
-                        profile = Some(collected);
+                        let mut buf = Vec::new();
+                        gif_sub_blocks(bytes, &mut off, Some(&mut buf), cancel)?;
+                        icc = Some(buf);
                     } else {
-                        gif_sub_blocks(bytes, &mut offset, None, cancellation)?;
+                        gif_sub_blocks(bytes, &mut off, None, cancel)?;
                     }
                 } else {
-                    gif_sub_blocks(bytes, &mut offset, None, cancellation)?;
+                    gif_sub_blocks(bytes, &mut off, None, cancel)?;
                 }
             }
             _ => return Err(ImageError::unreadable(DAMAGED)),
         }
     }
-    metadata.has_alpha = Some(has_alpha);
+    meta.has_alpha = Some(alpha);
     // The gif reader collects an ICC application extension only up to the first frame, so the
     // profile a GIF records anywhere in the file is this scan's to read.
-    metadata.color = match profile {
-        Some(profile) => SampleColor::StoredIcc(Cow::Owned(profile)),
+    meta.color = match icc {
+        Some(icc) => SampleColor::StoredIcc(Cow::Owned(icc)),
         None => SampleColor::Srgb,
     };
-    Ok(metadata)
+    Ok(meta)
 }
 
 #[cfg(test)]
@@ -166,16 +166,16 @@ mod tests {
     ];
 
     #[test]
-    fn opaque_gif_allows_jpeg() {
-        for control in [None, Some([0x21, 0xf9, 4, 0, 0, 0, 1, 0])] {
-            let mut source = OPAQUE_GIF.to_vec();
-            if let Some(control) = control {
-                source.splice(19..19, control);
+    fn gif_opaque_jpeg() {
+        for ctrl in [None, Some([0x21, 0xf9, 4, 0, 0, 0, 1, 0])] {
+            let mut src = OPAQUE_GIF.to_vec();
+            if let Some(ctrl) = ctrl {
+                src.splice(19..19, ctrl);
             }
-            assert!(!inspect(&source).unwrap().has_alpha);
+            assert!(!inspect(&src).unwrap().has_alpha);
             let jpeg = render(
-                &source,
-                &recipe(&source, 1, 1, OutputFormat::Jpeg, None),
+                &src,
+                &recipe(&src, 1, 1, OutputFormat::Jpeg, None),
                 &NO_CANCELLATION,
             )
             .unwrap();
@@ -185,17 +185,17 @@ mod tests {
     }
 
     #[test]
-    fn gif_transparency_guards_jpeg() {
-        for (transparent_index, alpha) in [(0, 0), (1, 255)] {
-            let mut source = OPAQUE_GIF.to_vec();
-            source.splice(19..19, [0x21, 0xf9, 4, 1, 0, 0, transparent_index, 0]);
-            let metadata = inspect(&source).unwrap();
-            assert!(metadata.has_alpha);
-            let png = render_png(&source, 1, 1);
+    fn gif_alpha_rejects_jpeg() {
+        for (idx, alpha) in [(0, 0), (1, 255)] {
+            let mut src = OPAQUE_GIF.to_vec();
+            src.splice(19..19, [0x21, 0xf9, 4, 1, 0, 0, idx, 0]);
+            let meta = inspect(&src).unwrap();
+            assert!(meta.has_alpha);
+            let png = render_png(&src, 1, 1);
             assert_eq!(rgba(&png)[3], alpha);
             assert!(
                 ImageRecipe::resolve(
-                    &metadata,
+                    &meta,
                     ResizeOptions {
                         width: Some(1),
                         height: Some(1),
@@ -211,26 +211,20 @@ mod tests {
     }
 
     #[test]
-    fn partial_gif_canvas_keeps_transparency() {
-        for (width, height, left, top, expected) in [
+    fn gif_partial_canvas_alpha() {
+        for (w, h, left, top, expected) in [
             (2, 1, 1, 0, [0, 0, 0, 0, 255, 255, 255, 255]),
             (1, 2, 0, 1, [0, 0, 0, 0, 255, 255, 255, 255]),
         ] {
-            let mut source = OPAQUE_GIF.to_vec();
-            source[6] = width;
-            source[8] = height;
-            source[20] = left;
-            source[22] = top;
-            assert!(inspect(&source).unwrap().has_alpha);
+            let mut src = OPAQUE_GIF.to_vec();
+            src[6] = w;
+            src[8] = h;
+            src[20] = left;
+            src[22] = top;
+            assert!(inspect(&src).unwrap().has_alpha);
             let png = render(
-                &source,
-                &recipe(
-                    &source,
-                    u32::from(width),
-                    u32::from(height),
-                    OutputFormat::Png,
-                    None,
-                ),
+                &src,
+                &recipe(&src, u32::from(w), u32::from(h), OutputFormat::Png, None),
                 &NO_CANCELLATION,
             )
             .unwrap();
@@ -239,24 +233,24 @@ mod tests {
     }
 
     #[test]
-    fn animated_gif_input_is_rejected() {
-        let output = render(
+    fn reject_animated_gif() {
+        let out = render(
             OPAQUE_GIF,
             &recipe(OPAQUE_GIF, 1, 1, OutputFormat::Png, None),
             &NO_CANCELLATION,
         )
         .unwrap();
-        assert_eq!(rgba(&output), [255, 255, 255, 255]);
-        let mut animation = Vec::new();
+        assert_eq!(rgba(&out), [255, 255, 255, 255]);
+        let mut anim = Vec::new();
         {
-            let mut encoder = image::codecs::gif::GifEncoder::new(&mut animation);
-            for pixels in [[255, 0, 0, 255], [0, 0, 255, 255]] {
+            let mut enc = image::codecs::gif::GifEncoder::new(&mut anim);
+            for px in [[255, 0, 0, 255], [0, 0, 255, 255]] {
                 let frame =
-                    image::Frame::new(image::RgbaImage::from_raw(1, 1, pixels.to_vec()).unwrap());
-                encoder.encode_frame(frame).unwrap();
+                    image::Frame::new(image::RgbaImage::from_raw(1, 1, px.to_vec()).unwrap());
+                enc.encode_frame(frame).unwrap();
             }
         }
-        let recipe = recipe(&animation, 1, 1, OutputFormat::Png, None);
-        assert!(render(&animation, &recipe, &NO_CANCELLATION).is_err());
+        let r = recipe(&anim, 1, 1, OutputFormat::Png, None);
+        assert!(render(&anim, &r, &NO_CANCELLATION).is_err());
     }
 }

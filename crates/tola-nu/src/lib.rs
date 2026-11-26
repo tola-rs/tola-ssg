@@ -1,7 +1,7 @@
 //! One prepared Nushell environment with built-in sources and configured site modules.
 //!
 //! A [`Runtime`] owns nothing about the site itself. The caller decides which configuration,
-//! modules, overlays, and invocation directory apply, and passes them in as [`ConfiguredModule`],
+//! modules, overlays, and invocation directory apply, and passes them in as [`ScriptModule`],
 //! [`SourceOverlay`], and [`InvocationContext`]; the caller also reads the dependency evidence and
 //! source origins back out. This layer does not read site configuration, resolve routes, or publish
 //! output, and it reads the process environment only to place the child evaluation (`PWD`, the
@@ -27,8 +27,8 @@ mod signatures;
 pub use error::NuError;
 pub use host::{GetAssets, Host, Query, SubmitDiagnostics};
 pub use lsp::serve_lsp;
-pub use modules::{ConfiguredModule, Dependency, ModuleEntry, Origin, SourceOrigin, SourceOverlay};
-pub use nu_protocol::{Flag, PositionalArg, Signature};
+pub use modules::{Dependency, ModuleEntry, Origin, ScriptModule, SourceOrigin, SourceOverlay};
+pub use nu_protocol::{Flag, PositionalArg, Signature, Value};
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -43,7 +43,7 @@ use crate::error::Result;
 
 use nu_protocol::{
     ByteStream, Config, Handlers, IntoValue, ModuleId, PipelineData, SignalAction, Signals, Span,
-    Type, Value,
+    Type,
     engine::{EngineState, Stack, StateWorkingSet},
     record, report_shell_error,
 };
@@ -146,13 +146,13 @@ impl InvocationContext {
 
 impl Runtime {
     /// Prepare a session in the process's own directory and environment.
-    pub fn new(modules: Vec<ConfiguredModule>, dependencies: Vec<PathBuf>) -> Result<Self> {
+    pub fn new(modules: Vec<ScriptModule>, dependencies: Vec<PathBuf>) -> Result<Self> {
         Self::for_invocation(modules, dependencies, InvocationContext::current()?)
     }
 
     /// Prepare a session for `context`, with no in-memory source replacements.
     pub fn for_invocation(
-        modules: Vec<ConfiguredModule>,
+        modules: Vec<ScriptModule>,
         dependencies: Vec<PathBuf>,
         context: InvocationContext,
     ) -> Result<Self> {
@@ -162,7 +162,7 @@ impl Runtime {
     /// Prepare a session for `context`, parsing `overlays` in place of the files they stand in
     /// for.
     pub fn for_invocation_with_overlays(
-        modules: Vec<ConfiguredModule>,
+        modules: Vec<ScriptModule>,
         dependencies: Vec<PathBuf>,
         context: InvocationContext,
         overlays: Vec<SourceOverlay>,
@@ -172,7 +172,7 @@ impl Runtime {
 
     /// Prepare an invocation with additional built-in modules supplied by the application.
     pub fn for_invocation_with_builtins(
-        modules: Vec<ConfiguredModule>,
+        modules: Vec<ScriptModule>,
         dependencies: Vec<PathBuf>,
         context: InvocationContext,
         overlays: Vec<SourceOverlay>,
@@ -181,163 +181,26 @@ impl Runtime {
         if !(context.directory.is_absolute() && context.directory.is_dir()) {
             return Err(NuError::InvocationDirectory);
         }
-        let mut sources = BTreeMap::<PathBuf, SourceOverlay>::new();
-        for mut overlay in overlays {
-            overlay.path = modules::source_path(&overlay.path)?;
-            if let Some(previous) = sources.get(&overlay.path)
-                && (previous.text != overlay.text || previous.version != overlay.version)
-            {
-                return Err(NuError::OverlayConflict {
-                    path: overlay.path.clone(),
-                });
-            }
-            sources.insert(overlay.path.clone(), overlay);
-        }
+        let sources = collect_overlays(overlays)?;
         let overlay_paths = sources.keys().cloned().collect();
         let builtins = BUILTIN_MODULES.iter().chain(builtins);
         let binding_paths: Vec<_> = modules
             .iter()
-            .flat_map(|module| [module.root.join(&module.entry), module.manifest.clone()])
+            .flat_map(|m| [m.root.join(&m.entry), m.manifest.clone()])
             .collect();
-        let configured = modules
-            .into_iter()
-            .map(|module| modules::Library::configured(module, &overlay_paths))
-            .collect::<Result<Vec<_>>>()?;
-        let mut aliases = BTreeSet::new();
-        for module in &configured {
-            if !aliases.insert(&module.alias) {
-                return Err(NuError::DuplicateAlias {
-                    alias: module.alias.clone(),
-                });
-            }
-        }
-        let mut captured = BTreeMap::new();
-        for path in dependencies.iter().chain(&binding_paths) {
-            let path = if path.is_absolute() {
-                path.clone()
-            } else {
-                context.directory.join(path)
-            };
-            if !sources.contains_key(&modules::source_path(&path)?) {
-                insert_dependency(&mut captured, modules::capture(&path)?)?;
-            }
-        }
+        let configured = configure_libraries(modules, &overlay_paths)?;
+        let mut captured =
+            capture_initial_deps(&dependencies, &binding_paths, &context.directory, &sources)?;
         let (mut engine, stack) =
             initialize_engine(false, &context).map_err(|()| NuError::Engine)?;
         let supplied: Vec<_> = sources.values().cloned().collect();
-        let base = engine.clone();
-        let mut directories = BTreeSet::new();
-        let mut observed_sources = BTreeSet::new();
-        let mut attempts = 0;
         let host = Arc::new(OnceLock::new());
-        let (entries, native_module) = loop {
-            attempts += 1;
-            let count = directories.len();
-            engine = base.clone();
-            let result = modules::register(
-                &mut engine,
-                builtins.clone(),
-                &configured,
-                &supplied,
-                &mut directories,
-                &mut observed_sources,
-                &host,
-            );
-            if !supplied.is_empty() && directories.len() > count {
-                if attempts > observed_sources.len() + 1 {
-                    return Err(NuError::ImportsUnstable);
-                }
-                continue;
-            }
-            break result?;
-        };
-        let mut used_sources = BTreeMap::new();
-        let mut missing_sources = Vec::new();
-        for file in engine.files() {
-            let path = Path::new(file.name.as_ref());
-            let consumed = (0..engine.num_blocks()).any(|index| {
-                engine
-                    .get_block(nu_protocol::BlockId::new(index))
-                    .span
-                    .is_some_and(|span| {
-                        span.start >= file.covered_span.start && span.end <= file.covered_span.end
-                    })
-            }) || (0..engine.num_modules()).any(|index| {
-                engine
-                    .get_module(nu_protocol::ModuleId::new(index))
-                    .span
-                    .is_some_and(|span| {
-                        span.start >= file.covered_span.start && span.end <= file.covered_span.end
-                    })
-            });
-            if path.is_absolute() && consumed {
-                let identity = modules::source_path(path)?;
-                if let Some(overlay) = sources.get(&identity) {
-                    if file.content.as_ref() != overlay.text.as_bytes() {
-                        return Err(NuError::BufferNotUsed {
-                            path: path.to_path_buf(),
-                        });
-                    }
-                    if path.exists() {
-                        insert_dependency(&mut captured, modules::capture(path)?)?;
-                    } else {
-                        if !configured
-                            .iter()
-                            .any(|module| identity.starts_with(&module.root))
-                        {
-                            return Err(NuError::BufferOutsideModules);
-                        }
-                        missing_sources.push(identity.clone());
-                    }
-                    used_sources.insert(
-                        identity,
-                        (modules::digest(&file.content), Some(overlay.version)),
-                    );
-                    continue;
-                }
-                if !path.is_file() {
-                    return Err(NuError::SourceDisappeared {
-                        path: path.to_path_buf(),
-                    });
-                }
-                insert_dependency(
-                    &mut captured,
-                    Dependency {
-                        path: path.to_path_buf(),
-                        canonical_path: std::fs::canonicalize(path)?,
-                        digest: modules::digest(&file.content),
-                    },
-                )?;
-                used_sources.insert(identity, (modules::digest(&file.content), None));
-            }
-        }
+        let (entries, native_module) =
+            load_modules(&mut engine, builtins.clone(), &configured, &supplied, &host)?;
+        let (used_sources, missing_sources) =
+            collect_used_sources(&engine, &sources, &configured, &mut captured)?;
         let dependencies: Vec<_> = captured.into_values().collect();
-        let mut origins = Vec::new();
-        for library in &configured {
-            for (path, (digest, version)) in &used_sources {
-                if let Ok(relative) = path.strip_prefix(&library.root) {
-                    origins.push(SourceOrigin {
-                        path: path.clone(),
-                        relative: relative.to_path_buf(),
-                        origin: library.origin.clone(),
-                        digest: digest.clone(),
-                        version: *version,
-                    });
-                }
-            }
-        }
-        for builtin in builtins {
-            let library = modules::Library::builtin(builtin);
-            for &(name, bytes) in builtin.sources {
-                origins.push(SourceOrigin {
-                    path: library.root.join(name),
-                    relative: name.into(),
-                    origin: library.origin.clone(),
-                    digest: modules::digest(bytes),
-                    version: None,
-                });
-            }
-        }
+        let origins = collect_origins(&configured, builtins, &used_sources);
         let runtime = Self {
             engine,
             native_module,
@@ -348,7 +211,7 @@ impl Runtime {
             context,
             overlays: sources
                 .into_values()
-                .filter(|overlay| used_sources.contains_key(&overlay.path))
+                .filter(|o| used_sources.contains_key(&o.path))
                 .collect(),
             missing_sources,
             source_paths: used_sources.keys().cloned().collect(),
@@ -460,6 +323,14 @@ impl Runtime {
         Ok(())
     }
 
+    fn check_fresh(&self) -> bool {
+        if let Err(err) = self.ensure_fresh() {
+            eprintln!("{err:#}");
+            return false;
+        }
+        true
+    }
+
     /// Run one public module entry, reporting a failure on stderr and answering its exit code.
     pub fn run_module(
         &self,
@@ -468,8 +339,7 @@ impl Runtime {
         read_stdin: bool,
         input_scope: Option<&str>,
     ) -> i32 {
-        if let Err(error) = self.ensure_fresh() {
-            eprintln!("{error:#}");
+        if !self.check_fresh() {
             return 1;
         }
         if !entry.has_main {
@@ -494,8 +364,7 @@ impl Runtime {
         read_stdin: bool,
         input_scope: Option<&str>,
     ) -> i32 {
-        if let Err(error) = self.ensure_fresh() {
-            eprintln!("{error:#}");
+        if !self.check_fresh() {
             return 1;
         }
         let mut engine = self.engine.clone();
@@ -508,20 +377,19 @@ impl Runtime {
 
     /// Serve one prepared project context. Restart/replay after its inventory changes.
     pub fn lsp(&self, builtin_dev: bool) -> i32 {
-        if let Err(error) = self.ensure_fresh() {
-            eprintln!("{error:#}");
+        if !self.check_fresh() {
             return 1;
         }
         let mut engine = self.engine.clone();
         engine.is_lsp = true;
         if builtin_dev {
-            let mut working = StateWorkingSet::new(&engine);
-            working.use_modules(vec![(
+            let mut ws = StateWorkingSet::new(&engine);
+            ws.use_modules(vec![(
                 modules::NATIVE_MODULE.as_bytes().to_vec(),
                 self.native_module,
             )]);
-            if let Err(error) = engine.merge_delta(working.render()) {
-                eprintln!("{error:#}");
+            if let Err(err) = engine.merge_delta(ws.render()) {
+                eprintln!("{err:#}");
                 return 1;
             }
         }
@@ -532,27 +400,213 @@ impl Runtime {
             .and_then(|server| server.serve_requests())
         {
             Ok(()) => 0,
-            Err(error) => {
-                eprintln!("{error:?}");
+            Err(err) => {
+                eprintln!("{err:?}");
                 1
             }
         }
     }
 }
 
-fn insert_dependency(
-    inputs: &mut BTreeMap<PathBuf, Dependency>,
-    dependency: Dependency,
-) -> Result<()> {
-    if let Some(previous) = inputs.get(&dependency.path)
-        && (previous.digest != dependency.digest
-            || previous.canonical_path != dependency.canonical_path)
+pub(crate) fn path_str<'a>(path: &'a Path, what: &'static str) -> Result<&'a str> {
+    path.to_str().ok_or(NuError::NotUtf8 { what })
+}
+
+type UsedSources = BTreeMap<PathBuf, (String, Option<i64>)>;
+
+fn collect_overlays(overlays: Vec<SourceOverlay>) -> Result<BTreeMap<PathBuf, SourceOverlay>> {
+    let mut sources = BTreeMap::<PathBuf, SourceOverlay>::new();
+    for mut overlay in overlays {
+        overlay.path = modules::source_path(&overlay.path)?;
+        if let Some(prev) = sources.get(&overlay.path)
+            && (prev.text != overlay.text || prev.version != overlay.version)
+        {
+            return Err(NuError::OverlayConflict {
+                path: overlay.path.clone(),
+            });
+        }
+        sources.insert(overlay.path.clone(), overlay);
+    }
+    Ok(sources)
+}
+
+fn configure_libraries(
+    modules: Vec<ScriptModule>,
+    overlay_paths: &BTreeSet<PathBuf>,
+) -> Result<Vec<modules::Library>> {
+    let configured = modules
+        .into_iter()
+        .map(|m| modules::Library::configured(m, overlay_paths))
+        .collect::<Result<Vec<_>>>()?;
+    let mut aliases = BTreeSet::new();
+    for lib in &configured {
+        if !aliases.insert(&lib.alias) {
+            return Err(NuError::DuplicateAlias {
+                alias: lib.alias.clone(),
+            });
+        }
+    }
+    Ok(configured)
+}
+
+fn capture_initial_deps(
+    dependencies: &[PathBuf],
+    binding_paths: &[PathBuf],
+    dir: &Path,
+    sources: &BTreeMap<PathBuf, SourceOverlay>,
+) -> Result<BTreeMap<PathBuf, Dependency>> {
+    let mut captured = BTreeMap::new();
+    for path in dependencies.iter().chain(binding_paths) {
+        let path = if path.is_absolute() {
+            path.clone()
+        } else {
+            dir.join(path)
+        };
+        if !sources.contains_key(&modules::source_path(&path)?) {
+            insert_dependency(&mut captured, modules::capture(&path)?)?;
+        }
+    }
+    Ok(captured)
+}
+
+fn load_modules<'a>(
+    engine: &mut EngineState,
+    builtins: impl Iterator<Item = &'a BuiltinModule> + Clone,
+    configured: &[modules::Library],
+    supplied: &[SourceOverlay],
+    host: &Arc<OnceLock<Host>>,
+) -> Result<(BTreeMap<String, ModuleEntry>, ModuleId)> {
+    let base = engine.clone();
+    let mut dirs = BTreeSet::new();
+    let mut observed = BTreeSet::new();
+    let mut attempts = 0;
+    loop {
+        attempts += 1;
+        let count = dirs.len();
+        *engine = base.clone();
+        let res = modules::register(
+            engine,
+            builtins.clone(),
+            configured,
+            supplied,
+            &mut dirs,
+            &mut observed,
+            host,
+        );
+        if !supplied.is_empty() && dirs.len() > count {
+            if attempts > observed.len() + 1 {
+                return Err(NuError::ImportsUnstable);
+            }
+            continue;
+        }
+        return res;
+    }
+}
+
+fn file_consumed(engine: &EngineState, covered: Span) -> bool {
+    let in_file =
+        |span: Option<Span>| span.is_some_and(|s| s.start >= covered.start && s.end <= covered.end);
+    (0..engine.num_blocks()).any(|i| in_file(engine.get_block(nu_protocol::BlockId::new(i)).span))
+        || (0..engine.num_modules())
+            .any(|i| in_file(engine.get_module(nu_protocol::ModuleId::new(i)).span))
+}
+
+fn collect_used_sources(
+    engine: &EngineState,
+    sources: &BTreeMap<PathBuf, SourceOverlay>,
+    configured: &[modules::Library],
+    captured: &mut BTreeMap<PathBuf, Dependency>,
+) -> Result<(UsedSources, Vec<PathBuf>)> {
+    let mut used = BTreeMap::new();
+    let mut missing = Vec::new();
+    for file in engine.files() {
+        let path = Path::new(file.name.as_ref());
+        if !(path.is_absolute() && file_consumed(engine, file.covered_span)) {
+            continue;
+        }
+        let identity = modules::source_path(path)?;
+        if let Some(overlay) = sources.get(&identity) {
+            if file.content.as_ref() != overlay.text.as_bytes() {
+                return Err(NuError::BufferNotUsed {
+                    path: path.to_path_buf(),
+                });
+            }
+            if path.exists() {
+                insert_dependency(captured, modules::capture(path)?)?;
+            } else {
+                if !configured.iter().any(|m| identity.starts_with(&m.root)) {
+                    return Err(NuError::BufferOutsideModules);
+                }
+                missing.push(identity.clone());
+            }
+            used.insert(
+                identity,
+                (modules::digest(&file.content), Some(overlay.version)),
+            );
+            continue;
+        }
+        if !path.is_file() {
+            return Err(NuError::SourceDisappeared {
+                path: path.to_path_buf(),
+            });
+        }
+        let digest = modules::digest(&file.content);
+        insert_dependency(
+            captured,
+            Dependency {
+                path: path.to_path_buf(),
+                canonical_path: std::fs::canonicalize(path)?,
+                digest: digest.clone(),
+            },
+        )?;
+        used.insert(identity, (digest, None));
+    }
+    Ok((used, missing))
+}
+
+fn collect_origins<'a>(
+    configured: &[modules::Library],
+    builtins: impl Iterator<Item = &'a BuiltinModule>,
+    used_sources: &UsedSources,
+) -> Vec<SourceOrigin> {
+    let mut origins = Vec::new();
+    for lib in configured {
+        for (path, (digest, version)) in used_sources {
+            if let Ok(relative) = path.strip_prefix(&lib.root) {
+                origins.push(SourceOrigin {
+                    path: path.clone(),
+                    relative: relative.to_path_buf(),
+                    origin: lib.origin.clone(),
+                    digest: digest.clone(),
+                    version: *version,
+                });
+            }
+        }
+    }
+    for builtin in builtins {
+        let lib = modules::Library::builtin(builtin);
+        for &(name, bytes) in builtin.sources {
+            origins.push(SourceOrigin {
+                path: lib.root.join(name),
+                relative: name.into(),
+                origin: lib.origin.clone(),
+                digest: modules::digest(bytes),
+                version: None,
+            });
+        }
+    }
+    origins
+}
+
+fn insert_dependency(inputs: &mut BTreeMap<PathBuf, Dependency>, dep: Dependency) -> Result<()> {
+    if let Some(prev) = inputs.get(&dep.path)
+        && (prev.digest != dep.digest || prev.canonical_path != dep.canonical_path)
     {
         return Err(NuError::InputChangedDuringSetup {
-            path: dependency.path.clone(),
+            path: dep.path.clone(),
         });
     }
-    inputs.insert(dependency.path.clone(), dependency);
+    inputs.insert(dep.path.clone(), dep);
     Ok(())
 }
 
@@ -574,8 +628,8 @@ fn evaluate_file(
     let input = if read_stdin {
         match ByteStream::stdin(Span::unknown()) {
             Ok(stream) => PipelineData::byte_stream(stream, None),
-            Err(error) => {
-                report_shell_error(Some(stack), engine, &error);
+            Err(err) => {
+                report_shell_error(Some(stack), engine, &err);
                 return 1;
             }
         }
@@ -587,7 +641,7 @@ fn evaluate_file(
 
 fn initialize_engine(
     is_lsp: bool,
-    context: &InvocationContext,
+    ctx: &InvocationContext,
 ) -> std::result::Result<(EngineState, Stack), ()> {
     // Nu's environment merges (including display hooks) must keep PWD engine-local.
     nu_protocol::engine::UPDATE_CWD.store(false, Ordering::Relaxed);
@@ -598,8 +652,8 @@ fn initialize_engine(
     let engine = nu_explore::add_explore_context(engine);
     let mut engine = nu_tui::add_tui_context(engine);
     engine.is_lsp = is_lsp;
-    if let Err(error) = nu_command::init_shared_memory_db() {
-        report_shell_error(None, &engine, &error);
+    if let Err(err) = nu_command::init_shared_memory_db() {
+        report_shell_error(None, &engine, &err);
         return Err(());
     }
     let _ = nu_cmd_lang::VERSION_NU_FEATURES.set(
@@ -613,7 +667,7 @@ fn initialize_engine(
     nu_command::tls::CRYPTO_PROVIDER.default();
 
     let mut stack = Stack::new();
-    if initialize_environment(&mut engine, &mut stack, context).is_err() {
+    if initialize_environment(&mut engine, &mut stack, ctx).is_err() {
         return Err(());
     }
     Ok((engine, stack))
@@ -633,8 +687,8 @@ fn flag_name_is_unsafe(name: &str) -> bool {
 }
 
 fn escape_argument(arg: &str) -> String {
-    if let Some(option) = arg.strip_prefix("--") {
-        let name = option.split_once('=').map_or(option, |(name, _)| name);
+    if let Some(opt) = arg.strip_prefix("--") {
+        let name = opt.split_once('=').map_or(opt, |(name, _)| name);
         if flag_name_is_unsafe(name) {
             return nu_utils::escape_quote_string(arg);
         }
@@ -661,13 +715,13 @@ fn install_ctrlc_handler(engine: &mut EngineState) -> std::result::Result<(), ct
         interrupt.store(true, Ordering::Relaxed);
         handlers.run(SignalAction::Interrupt);
     })
-    .inspect_err(|error| eprintln!("Could not install the script interrupt handler: {error}"))
+    .inspect_err(|err| eprintln!("Could not install the script interrupt handler: {err}"))
 }
 
 fn initialize_environment(
     engine: &mut EngineState,
     stack: &mut Stack,
-    context: &InvocationContext,
+    ctx: &InvocationContext,
 ) -> std::result::Result<(), ()> {
     engine.add_env_var(
         "config".into(),
@@ -677,60 +731,59 @@ fn initialize_environment(
         "ENV_CONVERSIONS".into(),
         Value::record(record! {}, Span::unknown()),
     );
-    nu_cli::gather_parent_env_vars(engine, &context.directory);
-    let executable = std::env::current_exe().map_err(|error| {
-        eprintln!("Could not determine the Tola executable: {error}");
+    nu_cli::gather_parent_env_vars(engine, &ctx.directory);
+    let exe = std::env::current_exe().map_err(|err| {
+        eprintln!("Could not determine the Tola executable: {err}");
     })?;
-    let executable = executable.to_str().ok_or_else(|| {
+    let exe = exe.to_str().ok_or_else(|| {
         eprintln!("The Tola executable path is not valid UTF-8");
     })?;
     engine.add_env_var(
         "TOLA_EXECUTABLE".into(),
-        Value::string(executable, Span::unknown()),
+        Value::string(exe, Span::unknown()),
     );
-    for (name, value) in &context.environment {
-        match value {
-            Some(value) => engine.add_env_var(name.clone(), Value::string(value, Span::unknown())),
+    for (name, val) in &ctx.environment {
+        match val {
+            Some(val) => engine.add_env_var(name.clone(), Value::string(val, Span::unknown())),
             None => {
-                for environment in Arc::make_mut(&mut engine.env_vars).values_mut() {
-                    environment.retain(|key, _| key.as_str() != name);
+                for env in Arc::make_mut(&mut engine.env_vars).values_mut() {
+                    env.retain(|key, _| key.as_str() != name);
                 }
             }
         }
     }
-    let directory = context
+    let dir = ctx
         .directory
         .to_str()
         .ok_or_else(|| eprintln!("Nu invocation directory is not UTF-8"))?;
-    engine.add_env_var("PWD".into(), Value::string(directory, Span::unknown()));
-    if let Err(error) = nu_engine::convert_env_values(engine, stack) {
-        report_shell_error(None, engine, &error);
+    engine.add_env_var("PWD".into(), Value::string(dir, Span::unknown()));
+    if let Err(err) = nu_engine::convert_env_values(engine, stack) {
+        report_shell_error(None, engine, &err);
         return Err(());
     }
     palette::apply(engine);
     let lib_dirs = Value::list(Vec::new(), Span::unknown());
     engine.add_env_var("NU_LIB_DIRS".into(), lib_dirs.clone());
-    let mut working_set = StateWorkingSet::new(engine);
-    let id = working_set.add_variable(
+    let mut ws = StateWorkingSet::new(engine);
+    let id = ws.add_variable(
         b"$NU_LIB_DIRS".into(),
         Span::unknown(),
         Type::List(Box::new(Type::String)),
         false,
     );
-    working_set.set_variable_const_val(id, lib_dirs);
-    if let Err(error) = engine.merge_delta(working_set.render()) {
-        report_shell_error(None, engine, &error);
+    ws.set_variable_const_val(id, lib_dirs);
+    if let Err(err) = engine.merge_delta(ws.render()) {
+        report_shell_error(None, engine, &err);
         return Err(());
     }
     engine.add_env_var(
         "NU_VERSION".into(),
         Value::string(NU_VERSION, Span::unknown()),
     );
-    if let Err(error) = nu_std::load_standard_library(engine) {
-        eprintln!("{error:?}");
+    if let Err(err) = nu_std::load_standard_library(engine) {
+        eprintln!("{err:?}");
         return Err(());
     }
-    // Scripts are never interactive, log in, or own a history session.
     engine.is_interactive = false;
     engine.is_login = false;
     engine.history_enabled = false;
@@ -754,22 +807,14 @@ mod tests {
         }
     }
 
-    fn evaluate(runtime: &Runtime, source: &str) -> Value {
+    fn evaluate(runtime: &Runtime, src: &str) -> Value {
         let mut engine = runtime.engine.clone();
         let mut stack = runtime.stack.clone();
-        let mut working = StateWorkingSet::new(&engine);
-        let block = nu_parser::parse(&mut working, Some("runtime test"), source.as_bytes(), false);
-        assert!(
-            working.parse_errors.is_empty(),
-            "{:?}",
-            working.parse_errors
-        );
-        assert!(
-            working.compile_errors.is_empty(),
-            "{:?}",
-            working.compile_errors
-        );
-        engine.merge_delta(working.render()).unwrap();
+        let mut ws = StateWorkingSet::new(&engine);
+        let block = nu_parser::parse(&mut ws, Some("runtime test"), src.as_bytes(), false);
+        assert!(ws.parse_errors.is_empty(), "{:?}", ws.parse_errors);
+        assert!(ws.compile_errors.is_empty(), "{:?}", ws.compile_errors);
+        engine.merge_delta(ws.render()).unwrap();
         nu_engine::eval_block::<nu_protocol::debugger::WithoutDebug>(
             &engine,
             &mut stack,
@@ -782,7 +827,7 @@ mod tests {
         .unwrap()
     }
 
-    fn module_root(scenario: &Scenario, alias: &str, source: &str) -> PathBuf {
+    fn module_root(scenario: &Scenario, alias: &str, src: &str) -> PathBuf {
         let root = scenario.root().join(alias);
         std::fs::create_dir_all(root.join("tools")).unwrap();
         std::fs::write(
@@ -790,12 +835,12 @@ mod tests {
             "[nu]\nentry='tools/mod.nu'\n",
         )
         .unwrap();
-        std::fs::write(root.join("tools/mod.nu"), source).unwrap();
+        std::fs::write(root.join("tools/mod.nu"), src).unwrap();
         root
     }
 
-    fn library(root: &Path, alias: &str) -> ConfiguredModule {
-        ConfiguredModule {
+    fn library(root: &Path, alias: &str) -> ScriptModule {
+        ScriptModule {
             alias: alias.into(),
             root: root.into(),
             entry: "tools/mod.nu".into(),
@@ -804,18 +849,18 @@ mod tests {
     }
 
     #[test]
-    fn syntax_highlight_reaches_the_native_highlighter() {
+    fn syntax_highlight_native() {
         let runtime = Runtime::new(Vec::new(), Vec::new()).unwrap();
-        let value = evaluate(
+        let val = evaluate(
             &runtime,
             r#"use tola
 "fn main() {}" | tola syntax-highlight rust | str contains '[38;2;'"#,
         );
-        assert!(value.as_bool().unwrap());
+        assert!(val.as_bool().unwrap());
     }
 
     #[test]
-    fn user_scripts_cannot_import_native_commands() {
+    fn native_cmd_isolation() {
         let scenario = Scenario::new();
         let runtime = Runtime::for_invocation(
             Vec::new(),
@@ -826,26 +871,26 @@ mod tests {
             },
         )
         .unwrap();
-        let mut working = StateWorkingSet::new(&runtime.engine);
-        nu_parser::parse(&mut working, None, b"use tola-native", false);
+        let mut ws = StateWorkingSet::new(&runtime.engine);
+        nu_parser::parse(&mut ws, None, b"use tola-native", false);
         assert!(matches!(
-            working.parse_errors.first(),
+            ws.parse_errors.first(),
             Some(nu_protocol::ParseError::ModuleNotFound(..))
         ));
-        for command in [
+        for cmd in [
             "inspect-image",
             "resize-image",
             "render-diagnostics",
             "submit",
             "syntax-highlight",
         ] {
-            assert!(runtime.engine.find_decl(command.as_bytes(), &[]).is_none());
-            assert!(nu_engine::find_builtin_decl(&runtime.engine, command).is_none());
+            assert!(runtime.engine.find_decl(cmd.as_bytes(), &[]).is_none());
+            assert!(nu_engine::find_builtin_decl(&runtime.engine, cmd).is_none());
         }
     }
 
     #[test]
-    fn diagnostic_commands_reach_the_invocation_host() {
+    fn diagnostic_host_roundtrip() {
         let submitted = Arc::new(OnceLock::new());
         let rendered = Arc::new(OnceLock::new());
         let submit = submitted.clone();
@@ -887,7 +932,7 @@ mod tests {
     }
 
     #[test]
-    fn script_main_runs_with_a_dot_component() {
+    fn script_main_dot_path() {
         let scenario = Scenario::new();
         let script = scenario.root().join("./main.nu");
         std::fs::write(&script, "def main [code: int] { exit $code }").unwrap();
@@ -896,7 +941,7 @@ mod tests {
     }
 
     #[test]
-    fn overlay_replaces_disk_text() {
+    fn overlay_overrides_disk() {
         let scenario = Scenario::new();
         let root = module_root(&scenario, "catalog", "export use ../shared.nu name\n");
         let disk = "export def broken [ {";
@@ -931,8 +976,8 @@ mod tests {
             runtime
                 .dependencies()
                 .iter()
-                .any(|dependency| dependency.path.ends_with("shared.nu")
-                    && dependency.digest == modules::digest(disk.as_bytes()))
+                .any(|dep| dep.path.ends_with("shared.nu")
+                    && dep.digest == modules::digest(disk.as_bytes()))
         );
         runtime.ensure_fresh().unwrap();
         let conflict = SourceOverlay {
@@ -951,7 +996,7 @@ mod tests {
     }
 
     #[test]
-    fn unsaved_import_invalidates_on_save() {
+    fn unsaved_import_invalidates() {
         let scenario = Scenario::new();
         let root = module_root(&scenario, "catalog", "export use ./unsaved.nu name");
         let path = root.join("tools/unsaved.nu");
@@ -987,7 +1032,7 @@ mod tests {
     }
 
     #[test]
-    fn option_values_are_quoted() {
+    fn quote_flag_values() {
         assert_eq!(escape_argument("--two words"), r#""--two words""#);
         assert_eq!(
             escape_argument("--x; print injected"),

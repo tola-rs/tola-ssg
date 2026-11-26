@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use tola_build::cancellation::BuildCancellation;
-use tola_build::config::{ConfigSource, ResolvedSiteConfig};
+use tola_build::config::{ConfigSource, SiteConfig};
 use tola_diagnostic::{DiagnosticError, Location};
 
 use crate::cancellation::Cancellation;
@@ -81,7 +81,7 @@ struct LoadedConfiguration {
     /// The configuration document the sources resolve from, absent for a workspace that holds no
     /// site configuration: its documents are compiled on their own.
     file: Option<PathBuf>,
-    configuration: Arc<ResolvedSiteConfig>,
+    configuration: Arc<SiteConfig>,
     loader: crate::config::ConfigLoader,
 }
 
@@ -196,7 +196,7 @@ impl SourceConfiguration {
                 .context("configuration source has no parent")?,
         );
         anyhow::ensure!(
-            site_root == loaded.configuration.get_root(),
+            site_root == loaded.configuration.root(),
             "the site root changed; restart the Tola language server"
         );
         // A workspace that holds no configuration document has no file to re-read: its defaults
@@ -294,85 +294,74 @@ fn configuration_text<'a>(
 mod tests {
     use super::*;
 
+    fn test_output() -> CommandOutput {
+        let (sink, _) = crate::terminal::OutputSink::buffered();
+        CommandOutput::new(
+            crate::terminal::Terminal::with_sink(sink, false, false),
+            None,
+        )
+    }
+
     #[test]
-    fn workspace_configuration_is_local() {
-        let directory = tempfile::tempdir().unwrap();
-        let parent = directory.path();
+    fn workspace_config_is_local() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path();
         let root = parent.join("documents");
         std::fs::create_dir(&root).unwrap();
         std::fs::write(parent.join("tola.toml"), "invalid configuration").unwrap();
-        let (sink, _) = crate::terminal::OutputSink::buffered();
-        let output = CommandOutput::new(
-            crate::terminal::Terminal::with_sink(sink, false, false),
-            None,
-        );
-        let mut configuration = source_configuration(
+        let out = test_output();
+        let mut cfg = source_configuration(
             ConfigFileArgs::default(),
             TypstPackageArgs::default(),
             InputScope::Offline,
         )
         .unwrap();
-        let cancellation = BuildCancellation::new();
+        let cancel = BuildCancellation::new();
         assert!(matches!(
-            configuration
-                .load(&root, &[], &output, &cancellation)
-                .unwrap(),
+            cfg.load(&root, &[], &out, &cancel).unwrap(),
             ServedWorkspace::Documents(_)
         ));
 
         std::fs::write(root.join("tola.toml"), "").unwrap();
         assert!(matches!(
-            configuration
-                .load(&root, &[], &output, &cancellation)
-                .unwrap(),
+            cfg.load(&root, &[], &out, &cancel).unwrap(),
             ServedWorkspace::Site(_)
         ));
         std::fs::write(root.join("tola.toml"), "invalid configuration").unwrap();
-        assert!(
-            configuration
-                .load(&root, &[], &output, &cancellation)
-                .is_err()
-        );
+        assert!(cfg.load(&root, &[], &out, &cancel).is_err());
     }
 
     #[test]
-    fn explicit_configuration_can_select_parent() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("tola.toml");
+    fn explicit_config_selects_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tola.toml");
         std::fs::write(&path, "").unwrap();
-        let root = directory.path().join("documents");
+        let root = dir.path().join("documents");
         std::fs::create_dir(&root).unwrap();
-        let (sink, _) = crate::terminal::OutputSink::buffered();
-        let output = CommandOutput::new(
-            crate::terminal::Terminal::with_sink(sink, false, false),
-            None,
-        );
-        let mut configuration = source_configuration(
+        let out = test_output();
+        let mut cfg = source_configuration(
             ConfigFileArgs { path: Some(path) },
             TypstPackageArgs::default(),
             InputScope::Offline,
         )
         .unwrap();
-        let ServedWorkspace::Site(site) = configuration
-            .load(&root, &[], &output, &BuildCancellation::new())
+        let ServedWorkspace::Site(site) = cfg
+            .load(&root, &[], &out, &BuildCancellation::new())
             .unwrap()
         else {
             panic!("explicit configuration selects its site");
         };
-        assert_eq!(
-            site.get_root(),
-            tola_input::normalize_path(directory.path())
-        );
+        assert_eq!(site.root(), tola_input::normalize_path(dir.path()));
     }
 
     #[test]
-    fn conflicting_buffers_are_refused() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = tola_input::normalize_existing_prefix(&directory.path().join("tola.toml"));
-        let sources = vec![
+    fn conflicting_buffers_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = tola_input::normalize_existing_prefix(&dir.path().join("tola.toml"));
+        let srcs = vec![
             (path.clone(), Arc::from("first")),
             (path.clone(), Arc::from("second")),
         ];
-        assert!(configuration_text(&path, &sources).is_err());
+        assert!(configuration_text(&path, &srcs).is_err());
     }
 }

@@ -329,16 +329,13 @@ mod tests {
     use crate::asset::tests::file_declaration;
     use std::path::PathBuf;
 
-    fn tree_declaration(
-        source: impl Into<PathBuf>,
-        prefix: impl AsRef<str>,
-    ) -> AssetTreeDeclaration {
-        AssetTreeDeclaration::new(source, AssetUrlPrefix::parse(prefix.as_ref()).unwrap())
+    fn tree_decl(src: impl Into<PathBuf>, prefix: impl AsRef<str>) -> AssetTreeDeclaration {
+        AssetTreeDeclaration::new(src, AssetUrlPrefix::parse(prefix.as_ref()).unwrap())
     }
 
     #[test]
-    fn incomplete_declarations_are_refused() {
-        for source in [
+    fn incomplete_declarations_refused() {
+        for src in [
             "trees = [\"assets\"]",
             "trees = [{ source = \"assets\" }]",
             "trees = [{ url-prefix = \"/assets\" }]",
@@ -347,41 +344,32 @@ mod tests {
             "files = [{ url = \"/favicon.ico\" }]",
         ] {
             assert!(
-                toml::from_str::<AssetsConfig>(source).is_err(),
-                "accepted {source}"
+                toml::from_str::<AssetsConfig>(src).is_err(),
+                "accepted {src}"
             );
         }
     }
 
     #[test]
-    fn source_paths_must_not_be_empty() {
-        let config: AssetsConfig = toml::from_str(
-            r#"
-trees = [{ source = "", url-prefix = "/assets" }]
-files = [{ source = "", url = "/favicon.ico" }]
-"#,
+    fn source_paths_nonempty() {
+        let cfg: AssetsConfig = toml::from_str(
+            "trees = [{ source = \"\", url-prefix = \"/assets\" }]\nfiles = [{ source = \"\", url = \"/favicon.ico\" }]\n",
         )
         .unwrap();
-        let mut diagnostics = ConfigDiagnostics::new();
-
-        config.validate_paths(&mut diagnostics);
-
+        let mut diag = ConfigDiagnostics::new();
+        cfg.validate_paths(&mut diag);
         assert_eq!(
-            diagnostics
-                .errors()
-                .iter()
-                .map(|error| error.field)
-                .collect::<Vec<_>>(),
+            diag.errors().iter().map(|e| e.field).collect::<Vec<_>>(),
             [AssetsConfig::FIELDS.trees, AssetsConfig::FIELDS.files]
         );
     }
 
     #[test]
-    fn portable_urls_have_one_owner() {
-        let config = AssetsConfig {
+    fn portable_urls_single_owner() {
+        let cfg = AssetsConfig {
             trees: vec![
-                tree_declaration("first-tree", "/Assets"),
-                tree_declaration("second-tree", "/%61ssets/icons"),
+                tree_decl("first-tree", "/Assets"),
+                tree_decl("second-tree", "/%61ssets/icons"),
             ],
             files: vec![
                 file_declaration("first.svg", "/Logo.svg"),
@@ -390,110 +378,98 @@ files = [{ source = "", url = "/favicon.ico" }]
             ],
             ..AssetsConfig::default()
         };
-        let mut diagnostics = ConfigDiagnostics::new();
-
-        config.validate(&mut diagnostics);
-
-        let errors = diagnostics.errors();
-        assert_eq!(errors.len(), 4);
+        let mut diag = ConfigDiagnostics::new();
+        cfg.validate(&mut diag);
+        let errs = diag.errors();
+        assert_eq!(errs.len(), 4);
         assert!(
-            errors[0].message.contains("`assets.trees[1]`")
-                && errors[0].message.contains("`assets.trees[0]`"),
+            errs[0].message.contains("`assets.trees[1]`")
+                && errs[0].message.contains("`assets.trees[0]`"),
             "{}",
-            errors[0].message
+            errs[0].message
         );
         assert!(
-            errors[1..]
+            errs[1..]
                 .iter()
-                .all(|error| error.field == AssetsConfig::FIELDS.files)
+                .all(|e| e.field == AssetsConfig::FIELDS.files)
         );
     }
 
     #[test]
-    fn file_may_own_source_inside_tree() {
-        let config = AssetsConfig {
-            trees: vec![tree_declaration("assets", "/assets")],
+    fn file_owns_source_inside_tree() {
+        let cfg = AssetsConfig {
+            trees: vec![tree_decl("assets", "/assets")],
             files: vec![
                 file_declaration("assets/app.js", "/assets/app.js"),
                 file_declaration("assets/theme.css", "/js/theme.css"),
             ],
             ..AssetsConfig::default()
         };
-        let mut diagnostics = ConfigDiagnostics::new();
-
-        config.validate(&mut diagnostics);
-
-        let result = diagnostics.into_result();
-        assert!(result.is_ok(), "{result:?}");
+        let mut diag = ConfigDiagnostics::new();
+        cfg.validate(&mut diag);
+        let res = diag.into_result();
+        assert!(res.is_ok(), "{res:?}");
     }
 
     #[test]
-    fn sources_cannot_overlap_exclusive_roots() {
-        let directory = tempfile::tempdir().unwrap();
-        let site = directory.path();
+    fn sources_reject_owned_roots() {
+        let dir = tempfile::tempdir().unwrap();
+        let site = dir.path();
         let content = site.join("content");
-        let output = site.join("public");
+        let out = site.join("public");
         let internal = site.join(tola_input::INTERNAL_DIR);
         std::fs::create_dir_all(&content).unwrap();
-        std::fs::create_dir_all(&output).unwrap();
+        std::fs::create_dir_all(&out).unwrap();
         std::fs::create_dir_all(&internal).unwrap();
 
-        for (source, tree) in [
+        for (src, tree) in [
             (content.join("assets"), true),
             (content.join("download.bin"), false),
-            (output.join("assets"), true),
+            (out.join("assets"), true),
             (internal.join("cache.bin"), false),
         ] {
-            let config = if tree {
+            let cfg = if tree {
                 AssetsConfig {
-                    trees: vec![tree_declaration(source, "/assets")],
+                    trees: vec![tree_decl(src, "/assets")],
                     ..AssetsConfig::default()
                 }
             } else {
                 AssetsConfig {
-                    files: vec![file_declaration(source, "/download.bin")],
+                    files: vec![file_declaration(src, "/download.bin")],
                     ..AssetsConfig::default()
                 }
             };
-            let mut diagnostics = ConfigDiagnostics::new();
+            let mut diag = ConfigDiagnostics::new();
             crate::config::boundaries::validate_asset_source_boundaries(
-                &config,
-                site,
-                &content,
-                &output,
-                &mut diagnostics,
+                &cfg, site, &content, &out, &mut diag,
             );
-            assert!(!diagnostics.errors().is_empty());
+            assert!(!diag.errors().is_empty());
         }
     }
 
     #[cfg(unix)]
     #[test]
-    fn source_symlink_cannot_alias_owned_roots() {
+    fn source_symlink_rejects_owned_roots() {
         use std::os::unix::fs::symlink;
 
-        let directory = tempfile::tempdir().unwrap();
-        let site = directory.path().join("site");
+        let dir = tempfile::tempdir().unwrap();
+        let site = dir.path().join("site");
         let content = site.join("content");
-        let output = site.join("public");
+        let out = site.join("public");
         std::fs::create_dir_all(&content).unwrap();
-        std::fs::create_dir_all(&output).unwrap();
+        std::fs::create_dir_all(&out).unwrap();
         let alias = site.join("external-looking");
         symlink(&content, &alias).unwrap();
-        let config = AssetsConfig {
-            trees: vec![tree_declaration(alias, "/assets")],
+        let cfg = AssetsConfig {
+            trees: vec![tree_decl(alias, "/assets")],
             ..AssetsConfig::default()
         };
-        let mut diagnostics = ConfigDiagnostics::new();
+        let mut diag = ConfigDiagnostics::new();
 
         crate::config::boundaries::validate_asset_source_boundaries(
-            &config,
-            &site,
-            &content,
-            &output,
-            &mut diagnostics,
+            &cfg, &site, &content, &out, &mut diag,
         );
 
-        assert!(diagnostics.to_string().contains("content root"));
+        assert!(diag.to_string().contains("content root"));
     }
 }

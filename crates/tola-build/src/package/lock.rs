@@ -605,24 +605,24 @@ fn resolve_failure(
 #[cfg(test)]
 mod tests {
     use tempfile::TempDir;
-
-    use super::*;
     use tola_input::InputScope;
 
-    fn spec(name: &str, version: &str) -> PackageSpec {
-        format!("@{name}:{version}").parse().unwrap()
+    use super::*;
+
+    fn spec(name: &str, ver: &str) -> PackageSpec {
+        format!("@{name}:{ver}").parse().unwrap()
     }
 
-    fn package_tree(root: &Path, name: &str, version: &str) -> PathBuf {
-        let directory = root.join(name).join(version);
-        std::fs::create_dir_all(&directory).unwrap();
-        std::fs::write(directory.join("lib.typ"), format!("= {name} {version}")).unwrap();
-        directory
+    fn pkg_tree(root: &Path, name: &str, ver: &str) -> PathBuf {
+        let dir = root.join(name).join(ver);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("lib.typ"), format!("= {name} {ver}")).unwrap();
+        dir
     }
 
-    fn locked(version: &str, root: &Path) -> LockedPackage {
+    fn locked(ver: &str, root: &Path) -> LockedPackage {
         LockedPackage {
-            version: version.to_owned(),
+            version: ver.to_owned(),
             tree_sha256: tree_sha256(root).unwrap(),
         }
     }
@@ -632,9 +632,9 @@ mod tests {
     }
 
     #[test]
-    fn verifier_refuses_an_unlocked_or_changed_package() {
+    fn verifier_rejects_unlocked_or_changed() {
         let site = TempDir::new().unwrap();
-        let root = package_tree(site.path(), "preview/demo", "0.1.0");
+        let root = pkg_tree(site.path(), "preview/demo", "0.1.0");
         let mut lock = InputLock::default();
         lock.packages
             .insert("@preview/demo".to_owned(), locked("0.1.0", &root));
@@ -652,7 +652,7 @@ mod tests {
     }
 
     #[test]
-    fn vendored_tree_must_match_the_lock_exactly() {
+    fn vendored_tree_matches_lock() {
         let site = TempDir::new().unwrap();
         let vendor = site.path().join("vendor");
         let vendored = vendor.join("typst-packages/@preview/demo/0.1.0");
@@ -666,26 +666,20 @@ mod tests {
 
         let extra = vendor.join("typst-packages/preview/extra/1.0.0");
         std::fs::create_dir_all(&extra).unwrap();
-        let error = verify_vendored_packages(&vendor, &lock, site.path()).unwrap_err();
-        assert!(
-            matches!(error, PackageLockError::VendorExtra { .. }),
-            "{error}"
-        );
+        let err = verify_vendored_packages(&vendor, &lock, site.path()).unwrap_err();
+        assert!(matches!(err, PackageLockError::VendorExtra { .. }), "{err}");
         std::fs::remove_dir_all(&extra).unwrap();
 
         std::fs::write(vendored.join("lib.typ"), "= changed").unwrap();
-        let error = verify_vendored_packages(&vendor, &lock, site.path()).unwrap_err();
-        assert!(
-            matches!(error, PackageLockError::TreeMismatch(_)),
-            "{error}"
-        );
+        let err = verify_vendored_packages(&vendor, &lock, site.path()).unwrap_err();
+        assert!(matches!(err, PackageLockError::TreeMismatch(_)), "{err}");
         std::fs::write(vendored.join("lib.typ"), "= demo").unwrap();
 
         std::fs::remove_dir_all(&vendored).unwrap();
-        let error = verify_vendored_packages(&vendor, &lock, site.path()).unwrap_err();
+        let err = verify_vendored_packages(&vendor, &lock, site.path()).unwrap_err();
         assert!(
-            matches!(error, PackageLockError::VendorMissing { .. }),
-            "{error}"
+            matches!(err, PackageLockError::VendorMissing { .. }),
+            "{err}"
         );
     }
 }

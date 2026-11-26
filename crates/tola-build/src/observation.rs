@@ -129,7 +129,7 @@ impl InputObservation {
     pub(crate) fn filesystem_sources(
         &mut self,
         input: InputKind,
-        evidence: &crate::filesystem::FilesystemWatchEvidence,
+        evidence: &crate::filesystem::WatchPaths,
         required: bool,
     ) {
         for boundary in evidence.boundaries() {
@@ -156,7 +156,7 @@ pub enum InputKind {
     ModuleManifests,
     TypstPackageSelection,
     ContentInventory,
-    ConfiguredAssets,
+    SiteAssets,
     Icons,
     FontInventory,
     BeforeBuildHookOutputs,
@@ -171,7 +171,7 @@ impl InputKind {
             Self::ModuleManifests => "module manifests",
             Self::TypstPackageSelection => "Typst packages",
             Self::ContentInventory => "`build.content-dir` files",
-            Self::ConfiguredAssets => "`assets` files",
+            Self::SiteAssets => "`assets` files",
             Self::Icons => "`icons` sources",
             Self::FontInventory => "`fonts` files",
             Self::BeforeBuildHookOutputs => "`hooks.before-build` generates",

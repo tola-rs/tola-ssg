@@ -6,7 +6,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use tola_address::OutputPath;
 use tola_packages::{PublishedIcon, published_icon_path};
-use tola_typst::ReadEvidence;
+use tola_typst::ReadRecord;
 
 use crate::cancellation::BuildCancellation;
 use crate::output::graph::OutputGraphBuilder;
@@ -21,7 +21,7 @@ pub(crate) struct IconOutputs {
 impl IconOutputs {
     /// The icons one compilation published, with the bytes each serves.
     pub(crate) fn prepare<'a>(
-        evidence: impl IntoIterator<Item = &'a ReadEvidence>,
+        evidence: impl IntoIterator<Item = &'a ReadRecord>,
         collections: &tola_icons::IconCollections,
         cancellation: &BuildCancellation,
     ) -> Result<Arc<Self>> {
@@ -88,7 +88,7 @@ mod tests {
             path = "icons"
             "#,
         );
-        let root = site_config.config.get_root();
+        let root = site_config.config.root();
         fs::create_dir_all(root.join("icons")).unwrap();
         fs::write(root.join("icons/mark.svg"), MARK).unwrap();
         fs::write(root.join("icons/dot.svg"), DOT).unwrap();
@@ -109,7 +109,7 @@ mod tests {
     }
 
     #[test]
-    fn only_published_icons_are_outputs() {
+    fn only_published_icons_written() {
         let site_config = config_with_icons(
             r#"#import "@tola/icon:0.0.0": icon-url
 #document("index.html")[#html.img(src: icon-url("brand:mark"), alt: "Mark")
@@ -176,7 +176,7 @@ mod tests {
         let site_config = config_with_icons(
             "#import \"preferences.typ\": preferences\n#document(\"index.html\")[#preferences()]",
         );
-        let root = site_config.config.get_root();
+        let root = site_config.config.root();
         fs::write(root.join("helper.typ"), "#import \"@tola/icon:0.0.0\": icon as render-icon\n#let icon(name) = render-icon(\"brand:\" + name)").unwrap();
         fs::write(
             root.join("preferences.typ"),
@@ -217,7 +217,7 @@ mod tests {
     }
 
     #[test]
-    fn module_icons_keep_instance_scope_and_site_replacement_paths() {
+    fn module_icons_scope_and_replacements() {
         let site = config_with_icons(
             r#"
 #import "@tola/icon:0.0.0": icon-bytes, icon-url
@@ -230,7 +230,7 @@ mod tests {
 #document("index.html")[#html.img(src: icon-url("brand:mark", module: "first"), alt: "First")]
 "#,
         );
-        let root = site.config.get_root();
+        let root = site.config.root();
         fs::create_dir(root.join("theme")).unwrap();
         fs::write(root.join("theme/tola-module.toml"), "[typst]\nentry = 'lib.typ'\n[icons.collections.brand]\nsource-type = 'local-json'\npath = 'icons.json'\n").unwrap();
         let collection = |body: &str| {
@@ -272,7 +272,7 @@ mod tests {
             let mut site_config = config_with_icons(&format!(
                 "#import \"@tola/icon:0.0.0\": icon\n#let unused = icon(\"{id}\")\n#document(\"index.html\")[Body]"
             ));
-            let other = site_config.config.get_root().join("other-icons");
+            let other = site_config.config.root().join("other-icons");
             fs::create_dir(&other).unwrap();
             fs::write(other.join("palette.svg"), MARK).unwrap();
             site_config.config.icons.collections.insert(
@@ -303,7 +303,7 @@ mod tests {
         let mut site_config = config_with_icons(
             "#import \"@tola/icon:0.0.0\": icon, icon-bytes\n#let alias = icon-bytes(\"brand:alias\")\n#assert.eq(alias, icon-bytes(\"brand:e001\"))\n#let unused = icon(\"brand:alais\")\n#document(\"index.html\")[Body]",
         );
-        let path = site_config.config.get_root().join("icons.json");
+        let path = site_config.config.root().join("icons.json");
         fs::write(&path, r#"{"prefix":"other","icons":{"palette":{"body":"<path/>"}},"aliases":{"alias":{"parent":"palette"}},"chars":{"e001":"alias"}}"#).unwrap();
         site_config.config.icons.collections.insert(
             "brand".into(),

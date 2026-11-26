@@ -8,7 +8,7 @@ use tola_typst::prelude::*;
 
 use crate::{
     cancellation::{BuildCancellation, BuildCancelled},
-    config::ResolvedSiteConfig,
+    config::SiteConfig,
     package,
     resources::BuildResources,
 };
@@ -80,7 +80,7 @@ pub struct SiteHost {
 
 impl SiteHost {
     pub(crate) fn for_config(
-        config: &ResolvedSiteConfig,
+        config: &SiteConfig,
         resources: &BuildResources,
         local_packages: Arc<LocalPackages>,
         cancellation: &BuildCancellation,
@@ -88,7 +88,7 @@ impl SiteHost {
         let package_locations = resources.package_locations(config);
         let source_boundary = resources.source_boundary(config);
         let fetch_policy = fetch_policy(resources.network_access());
-        let files = FileResolver::from_package_locations(package_locations, fetch_policy)
+        let files = FileStore::from_package_locations(package_locations, fetch_policy)
             .with_provider(TolaPackageFiles)
             .with_source_boundary(source_boundary)
             .with_local_packages(local_packages);
@@ -111,7 +111,7 @@ impl SiteHost {
     }
 
     /// Whether this host may serve one build of `config` with `resources`.
-    pub(crate) fn matches(&self, config: &ResolvedSiteConfig, resources: &BuildResources) -> bool {
+    pub(crate) fn matches(&self, config: &SiteConfig, resources: &BuildResources) -> bool {
         self.typst.font_options() == &config.compiler_font_options(resources)
             && self
                 .typst
@@ -191,7 +191,7 @@ impl SiteHost {
     }
 
     /// The resolver every source read of this host uses.
-    pub(crate) fn file_resolver(&self) -> Arc<FileResolver> {
+    pub(crate) fn file_resolver(&self) -> Arc<FileStore> {
         self.typst.file_resolver()
     }
 
@@ -223,21 +223,17 @@ impl SiteHost {
     /// Compiles by entry file id, or by `build.entry` when the configuration names none.
     pub(crate) fn site_world(
         &self,
-        config: &ResolvedSiteConfig,
+        config: &SiteConfig,
         library: &tola_packages::library::SiteLibrary,
         candidate_files: Arc<FileView>,
         cancellation: &BundleCancellation,
     ) -> Result<TypstWorld, WorldBuildError> {
         match config.entry_file() {
-            Some(main) => self.world_with_id(
-                config.get_root(),
-                main,
-                library,
-                candidate_files,
-                cancellation,
-            ),
+            Some(main) => {
+                self.world_with_id(config.root(), main, library, candidate_files, cancellation)
+            }
             None => self.world(
-                config.get_root(),
+                config.root(),
                 &config.build.entry,
                 library,
                 candidate_files,
@@ -264,7 +260,7 @@ impl SiteHost {
     }
 
     /// Compare replayable dynamic provider input without reading unrelated disk files.
-    pub(crate) fn virtual_read_matches(&self, evidence: &ReadEvidence) -> bool {
+    pub(crate) fn virtual_read_matches(&self, evidence: &ReadRecord) -> bool {
         match evidence.locator() {
             ReadLocator::ProvidedPackage { package, path } => {
                 if let Some(bytes) = self.typst.virtual_bytes(package, path) {
@@ -298,10 +294,10 @@ impl SiteHost {
     }
 }
 
-fn fetch_policy(network: NetworkAccess) -> tola_typst::PackageFetchPolicy {
+fn fetch_policy(network: NetworkAccess) -> tola_typst::PackageFetchMode {
     match network {
-        NetworkAccess::Allowed => tola_typst::PackageFetchPolicy::AllowNetwork,
-        NetworkAccess::Denied => tola_typst::PackageFetchPolicy::LocalOnly,
+        NetworkAccess::Allowed => tola_typst::PackageFetchMode::AllowNetwork,
+        NetworkAccess::Denied => tola_typst::PackageFetchMode::LocalOnly,
     }
 }
 
@@ -316,7 +312,7 @@ mod tests {
     fn pure_hosts_ignore_machine_packages() {
         let directory = TempDir::new().unwrap();
         let mut config = crate::config::tests::load_test_config(directory.path(), "");
-        let machine = config.get_root().join("machine-packages");
+        let machine = config.root().join("machine-packages");
         let package = machine.join("local/demo/1.0.0");
         std::fs::create_dir_all(&package).unwrap();
         std::fs::write(package.join("value.typ"), "host-only").unwrap();
@@ -331,15 +327,12 @@ mod tests {
             typst::syntax::VirtualPath::new("value.typ").unwrap(),
         ));
         assert_eq!(
-            ordinary
-                .file_resolver()
-                .read(id, config.get_root())
-                .unwrap(),
+            ordinary.file_resolver().read(id, config.root()).unwrap(),
             b"host-only"
         );
         let pure_resources = resources.with_input_scope(tola_input::InputScope::Pure);
         assert!(!ordinary.matches(&config, &pure_resources));
         let pure = compiler_host_with(&config, &pure_resources).unwrap();
-        assert!(pure.file_resolver().read(id, config.get_root()).is_err());
+        assert!(pure.file_resolver().read(id, config.root()).is_err());
     }
 }

@@ -9,7 +9,7 @@ use typst::syntax::{FileId, Source};
 
 use super::path::normalize_path;
 use crate::session::AccessedDeps;
-use crate::world::file::{FileResolver, Loaded, ReadAttempt, decode_utf8, file_id_from_path};
+use crate::world::file::{FileStore, Loaded, ReadAttempt, decode_utf8, file_id_from_path};
 
 /// Failure to construct the explicit sources.
 #[derive(Debug, thiserror::Error)]
@@ -133,14 +133,14 @@ const LOAD_CHUNK_SIZE: usize = 128;
 impl ExplicitSources {
     /// Load the explicitly listed source files.
     pub fn build(content_files: &[PathBuf], root: &Path) -> Result<SourceLoad, SourceLoadFailure> {
-        Self::build_with_files(content_files, root, Arc::new(FileResolver::new()))
+        Self::build_with_files(content_files, root, Arc::new(FileStore::new()))
     }
 
     /// Load the same sources through a caller-supplied resolver.
     pub fn build_with_files(
         content_files: &[PathBuf],
         root: &Path,
-        files: Arc<FileResolver>,
+        files: Arc<FileStore>,
     ) -> Result<SourceLoad, SourceLoadFailure> {
         Self::build_with_files_and_cancellation(content_files, root, files, None)
     }
@@ -152,7 +152,7 @@ impl ExplicitSources {
     pub fn build_with_files_cancellable(
         content_files: &[PathBuf],
         root: &Path,
-        files: Arc<FileResolver>,
+        files: Arc<FileStore>,
         cancellation: &crate::BundleCancellation,
     ) -> Result<SourceLoad, SourceLoadFailure> {
         Self::build_with_files_and_cancellation(content_files, root, files, Some(cancellation))
@@ -161,7 +161,7 @@ impl ExplicitSources {
     fn build_with_files_and_cancellation(
         content_files: &[PathBuf],
         root: &Path,
-        files: Arc<FileResolver>,
+        files: Arc<FileStore>,
         cancellation: Option<&crate::BundleCancellation>,
     ) -> Result<SourceLoad, SourceLoadFailure> {
         if cancellation.is_some_and(|token| token.is_cancelled()) {
@@ -198,7 +198,7 @@ impl ExplicitSources {
         content_files: &[PathBuf],
         reload: &[PathBuf],
         root: &Path,
-        files: Arc<FileResolver>,
+        files: Arc<FileStore>,
     ) -> Result<SourceLoad, SourceLoadFailure> {
         self.refresh_with_files_and_cancellation(content_files, reload, root, files, None)
     }
@@ -211,7 +211,7 @@ impl ExplicitSources {
         content_files: &[PathBuf],
         reload: &[PathBuf],
         root: &Path,
-        files: Arc<FileResolver>,
+        files: Arc<FileStore>,
         cancellation: &crate::BundleCancellation,
     ) -> Result<SourceLoad, SourceLoadFailure> {
         self.refresh_with_files_and_cancellation(
@@ -228,7 +228,7 @@ impl ExplicitSources {
         content_files: &[PathBuf],
         reload: &[PathBuf],
         root: &Path,
-        files: Arc<FileResolver>,
+        files: Arc<FileStore>,
         cancellation: Option<&crate::BundleCancellation>,
     ) -> Result<SourceLoad, SourceLoadFailure> {
         if cancellation.is_some_and(|token| token.is_cancelled()) {
@@ -405,7 +405,7 @@ fn normalize_source_paths(paths: &[PathBuf], root: &Path) -> Result<Vec<PathBuf>
 fn load_sources(
     content_files: &[PathBuf],
     root: &Path,
-    files: &FileResolver,
+    files: &FileStore,
     cancellation: Option<&crate::BundleCancellation>,
     previous: Option<&ExplicitSources>,
 ) -> Result<(FxHashMap<FileId, Loaded<FrozenSource>>, AccessedDeps), SourceLoadFailure> {
@@ -464,7 +464,7 @@ fn merge_loaded_sources(
             cancelled = true;
             continue;
         };
-        accessed.reads.extend(attempt.reads);
+        accessed.reads.extend(attempt.read);
         accessed.disk_reads.extend(attempt.disk_reads);
         accessed.package_checks.extend(attempt.package_checks);
         match attempt.result {
@@ -484,30 +484,30 @@ fn merge_loaded_sources(
 fn load_source(
     path: &Path,
     root: &Path,
-    files: &FileResolver,
-    cancellation: Option<&crate::BundleCancellation>,
-    previous: Option<&ExplicitSources>,
+    files: &FileStore,
+    cancel: Option<&crate::BundleCancellation>,
+    prev: Option<&ExplicitSources>,
 ) -> (PathBuf, FileId, Option<ReadAttempt<Loaded<FrozenSource>>>) {
-    let id = file_id_from_path(path, root).expect("validated source path has a file ID");
-    if cancellation.is_some_and(|cancellation| cancellation.is_cancelled()) {
-        return (path.to_path_buf(), id, None);
+    let fid = file_id_from_path(path, root).expect("validated source path has a file ID");
+    if cancel.is_some_and(|cancel| cancel.is_cancelled()) {
+        return (path.to_path_buf(), fid, None);
     }
-    let previous = previous.and_then(|sources| sources.get_source(id).map(|loaded| loaded.value));
-    let attempt = files.read_attempt(id, root).map_loaded(move |bytes| {
-        let text = decode_utf8(&bytes)?;
-        let source = match previous {
-            Some(mut source) => {
-                source.replace(text);
-                source
+    let prev = prev.and_then(|sources| sources.get_source(fid).map(|loaded| loaded.value));
+    let attempt = files.read_attempt(fid, root).map_loaded(move |buf| {
+        let text = decode_utf8(&buf)?;
+        let source = match prev {
+            Some(mut src) => {
+                src.replace(text);
+                src
             }
-            None => Source::new(id, text.into()),
+            None => Source::new(fid, text.into()),
         };
         Ok(FrozenSource {
             source,
-            bytes: Bytes::new(bytes),
+            bytes: Bytes::new(buf),
         })
     });
-    (path.to_path_buf(), id, Some(attempt))
+    (path.to_path_buf(), fid, Some(attempt))
 }
 
 impl SourceLoadFailure {
@@ -536,14 +536,14 @@ mod tests {
     use typst::syntax::FileId;
 
     use super::{ExplicitSources, file_id_from_path};
-    use crate::world::file::{FileProvider, FileResolver, FileTarget};
+    use crate::world::file::{FileProvider, FileStore, FileTarget};
 
     struct CancelAfterResolution {
         cancellation: crate::BundleCancellation,
     }
 
     impl FileProvider for CancelAfterResolution {
-        fn target(&self, _id: FileId) -> Option<FileTarget> {
+        fn target(&self, _fid: FileId) -> Option<FileTarget> {
             self.cancellation.cancel();
             Some(FileTarget::Bytes(Arc::from(&b"source"[..])))
         }
@@ -557,7 +557,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_sources_freeze_exactly_listed_files() {
+    fn explicit_sources_membership() {
         let dir = TempDir::new().unwrap();
         let main = dir.path().join("main.typ");
         fs::write(&main, "#import \"shared.typ\": value\n#value").unwrap();
@@ -579,19 +579,19 @@ mod tests {
     }
 
     #[test]
-    fn cancelled_load_keeps_earlier_reads() {
+    fn cancelled_load_retains_reads() {
         let dir = TempDir::new().unwrap();
-        let source = dir.path().join("source.typ");
-        let cancellation = crate::BundleCancellation::default();
-        let files = FileResolver::new().with_provider(CancelAfterResolution {
-            cancellation: cancellation.clone(),
+        let src = dir.path().join("source.typ");
+        let cancel = crate::BundleCancellation::default();
+        let files = FileStore::new().with_provider(CancelAfterResolution {
+            cancellation: cancel.clone(),
         });
 
         let failure = ExplicitSources::build_with_files_cancellable(
-            &[source],
+            &[src],
             dir.path(),
             Arc::new(files),
-            &cancellation,
+            &cancel,
         )
         .err()
         .expect("load cancelled after resolution unexpectedly loaded");
@@ -602,7 +602,7 @@ mod tests {
     }
 
     #[test]
-    fn refresh_reads_only_changed_sources() {
+    fn refresh_reads_changed_only() {
         let dir = TempDir::new().unwrap();
         let first = dir.path().join("first.typ");
         let second = dir.path().join("second.typ");
@@ -618,20 +618,20 @@ mod tests {
                 &[first.clone(), second.clone(), third.clone()],
                 std::slice::from_ref(&first),
                 dir.path(),
-                Arc::new(FileResolver::new()),
+                Arc::new(FileStore::new()),
             )
             .unwrap();
         assert_eq!(loaded.accessed().disk_reads.len(), 2);
         let refreshed = loaded.into_sources_and_accessed().0;
 
         assert_eq!(refreshed.source_count(), 3);
-        let source_text = |sources: &ExplicitSources, path: &std::path::Path| {
-            let id = file_id_from_path(path, dir.path()).unwrap();
-            sources.get_source(id).unwrap().value.text().to_owned()
+        let src_text = |sources: &ExplicitSources, path: &std::path::Path| {
+            let fid = file_id_from_path(path, dir.path()).unwrap();
+            sources.get_source(fid).unwrap().value.text().to_owned()
         };
-        assert_eq!(source_text(&refreshed, &first), "first-v2");
-        assert_eq!(source_text(&refreshed, &second), "second-v1");
-        assert_eq!(source_text(&refreshed, &third), "third-v1");
-        assert_eq!(source_text(&initial, &first), "first-v1");
+        assert_eq!(src_text(&refreshed, &first), "first-v2");
+        assert_eq!(src_text(&refreshed, &second), "second-v1");
+        assert_eq!(src_text(&refreshed, &third), "third-v1");
+        assert_eq!(src_text(&initial, &first), "first-v1");
     }
 }

@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use tola_input::{InputMode, InputScope};
 
 use crate::editor::Editor;
-use crate::i18n::HelpLanguage;
+use crate::help::language::HelpLanguage;
 
 #[derive(clap::Args, Debug, Clone, Default)]
 pub struct ProcessArgs {
@@ -525,6 +525,10 @@ pub struct HelpArgs {
     /// or a `tola-help://` address. Omit the target to open the help overview.
     #[arg(value_name = "TARGET", num_args = 0..)]
     pub targets: Vec<String>,
+
+    /// Output the complete reference catalog (all configuration tables, packages, and scripts).
+    #[arg(long, conflicts_with_all = ["targets", "interactive"])]
+    pub all: bool,
 
     /// Browse configuration, packages, and built-in scripts in the terminal.
     #[arg(short = 'i', long, conflicts_with = "targets")]
@@ -1066,7 +1070,7 @@ mod tests {
     use clap::CommandFactory;
 
     #[test]
-    fn font_options_belong_to_font_inspection() {
+    fn inspect_fonts_accepts_font_path() {
         let cli =
             Cli::try_parse_from(["tola", "inspect", "fonts", "--font-path", "fonts"]).unwrap();
         let Commands::Inspect {
@@ -1088,7 +1092,7 @@ mod tests {
     }
 
     #[test]
-    fn minify_reads_an_optional_value() {
+    fn minify_optional_value() {
         assert_eq!(
             build_override(&["tola", "build", "--minify=false"]).minify,
             Some(false)
@@ -1097,13 +1101,13 @@ mod tests {
     }
 
     #[test]
-    fn verbosity_counts_repeated_flags() {
+    fn verbose_counts_flags() {
         let cli = Cli::try_parse_from(["tola", "build", "-vv"]).unwrap();
         assert_eq!(cli.command.process().verbose, 2);
     }
 
     #[test]
-    fn init_forwards_arguments_after_separator() {
+    fn init_forwards_trailing_args() {
         let cli = Cli::try_parse_from(["tola", "init", "site", "--from", "theme", "--", "--force"])
             .unwrap();
         let Commands::Init { args, .. } = cli.command else {
@@ -1113,42 +1117,36 @@ mod tests {
     }
 
     #[test]
-    fn help_lists_only_the_options_a_command_runs() {
-        let command = Cli::command();
-        let completions = command.find_subcommand("completions").unwrap();
+    fn subcommand_help_scoped_options() {
+        let cmd = Cli::command();
+        let completions = cmd.find_subcommand("completions").unwrap();
         for long in ["pure", "lang", "no-pager"] {
             assert!(
                 !completions
                     .get_arguments()
-                    .any(|argument| argument.get_long() == Some(long)),
+                    .any(|arg| arg.get_long() == Some(long)),
                 "completions: {long}"
             );
         }
-        let help = command.find_subcommand("help").unwrap();
+        let help = cmd.find_subcommand("help").unwrap();
         assert!(
             help.get_arguments()
-                .any(|argument| argument.get_long() == Some("lang")),
+                .any(|arg| arg.get_long() == Some("lang")),
             "help carries --lang"
         );
     }
 
     #[test]
-    fn input_options_live_on_their_command() {
+    fn input_options_scoped() {
         let cli = Cli::try_parse_from(["tola", "build", "--locked"]).unwrap();
         assert!(cli.command.input_mode().locked());
         assert!(Cli::try_parse_from(["tola", "--pure", "build"]).is_err());
         assert!(Cli::try_parse_from(["tola", "completions", "--pure", "zsh"]).is_err());
     }
 
-    /// Site options reach the commands that declare them, and no other.
-    ///
-    /// The shared option structs are flattened per command, so a missing flatten (or a stray
-    /// `global`) changes which command accepts which option.
     #[test]
-    fn site_options_stay_scoped_commands() {
-        fn parses(argv: &[&str]) -> bool {
-            Cli::try_parse_from(argv.iter().copied()).is_ok()
-        }
+    fn site_options_scoped() {
+        let parses = |argv: &[&str]| Cli::try_parse_from(argv.iter().copied()).is_ok();
         for argv in [
             &["tola", "fmt", "--config", "x.toml", "--check"][..],
             &["tola", "inspect", "-C", "x.toml", "sources"][..],

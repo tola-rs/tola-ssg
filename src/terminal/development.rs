@@ -860,7 +860,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn copy_is_available_before_a_round_finishes() {
+    fn copy_available_during_build() {
         let rounds = Rounds::default();
         let progress = crate::dev::round::BuildProgress {
             title: "Restarting".to_owned(),

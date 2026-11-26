@@ -128,7 +128,7 @@ fn value(
 
 fn icons(
     args: IconInspectArgs,
-    config: &tola_build::config::ResolvedSiteConfig,
+    config: &tola_build::config::SiteConfig,
     resources: &tola_build::BuildResources,
     output: &CommandOutput,
     cancellation: &Cancellation,
@@ -195,7 +195,7 @@ fn unknown_icon_namespace(
 
 fn sources(
     args: SourceInspectArgs,
-    config: &tola_build::config::ResolvedSiteConfig,
+    config: &tola_build::config::SiteConfig,
     resources: &tola_build::BuildResources,
     cancellation: &Cancellation,
 ) -> Result<Value> {
@@ -206,7 +206,7 @@ fn sources(
         .iter()
         .map(|source| {
             json!({
-                "path": tola_diagnostic::display_path(&source.source, config.get_root()),
+                "path": tola_diagnostic::display_path(&source.source, config.root()),
                 "contentPath": source.id.to_string(),
             })
         })
@@ -262,11 +262,11 @@ mod tests {
     use crate::terminal::{OutputSink, Terminal};
 
     #[test]
-    fn invalid_config_reports_json_and_returns_an_error() {
-        let (_directory, config) = site(&[("tola.toml", "[build]\nentry = @\n")]);
-        let (sink, captured) = OutputSink::buffered();
-        let output = CommandOutput::new(Terminal::with_sink(sink, false, false), None);
-        let command = InspectCommand::Config(InspectConfigArgs {
+    fn invalid_config_emits_json_error() {
+        let (_dir, cfg) = site(&[("tola.toml", "[build]\nentry = @\n")]);
+        let (sink, cap) = OutputSink::buffered();
+        let out = CommandOutput::new(Terminal::with_sink(sink, false, false), None);
+        let cmd = InspectCommand::Config(InspectConfigArgs {
             display: OutputArgs {
                 json: true,
                 pretty: true,
@@ -275,15 +275,15 @@ mod tests {
             ..Default::default()
         });
 
-        let result = run(
-            config,
-            command,
+        let res = run(
+            cfg,
+            cmd,
             InputMode::new(tola_input::InputScope::Pure, false),
-            &output,
+            &out,
             &Cancellation::default(),
         );
-        assert!(result.is_err());
-        let report: Value = serde_json::from_slice(&captured.bytes()).unwrap();
+        assert!(res.is_err());
+        let report: Value = serde_json::from_slice(&cap.bytes()).unwrap();
         assert_eq!(report["success"], false);
         assert_eq!(report["diagnostics"][0]["code"], "config.toml");
         assert_eq!(report["diagnostics"][0]["location"]["line"], 2);

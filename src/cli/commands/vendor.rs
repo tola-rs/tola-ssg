@@ -9,7 +9,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result, ensure};
 use tola_build::BuildResources;
 use tola_build::cancellation::BuildCancellation;
-use tola_build::config::ResolvedSiteConfig;
+use tola_build::config::SiteConfig;
 use tola_build::filesystem::{SwapError, SwapMember, TreeSwap};
 use tola_diagnostic::{Diagnostic, DiagnosticError, Severity};
 use tola_input::InputScope;
@@ -170,7 +170,7 @@ struct SelectedIconCollection {
 }
 
 fn selected_icon_collections(
-    config: &tola_build::config::ResolvedSiteConfig,
+    config: &tola_build::config::SiteConfig,
     resources: &BuildResources,
     cancellation: &BuildCancellation,
 ) -> Result<Vec<SelectedIconCollection>> {
@@ -212,7 +212,7 @@ struct SelectedModule {
 }
 
 fn build_without_hooks(
-    config: Arc<tola_build::config::ResolvedSiteConfig>,
+    config: Arc<tola_build::config::SiteConfig>,
     resources: BuildResources,
     cancellation: &BuildCancellation,
 ) -> Result<tola_build::build::SiteBuild> {
@@ -231,7 +231,7 @@ fn build_without_hooks(
 }
 
 fn select_inputs(
-    config: Arc<tola_build::config::ResolvedSiteConfig>,
+    config: Arc<tola_build::config::SiteConfig>,
     resources: BuildResources,
     cancellation: &BuildCancellation,
 ) -> Result<SelectedInputs> {
@@ -618,11 +618,11 @@ struct VendorReplacement {
 
 impl VendorReplacement {
     /// Resolves the site's vendor destinations without touching them.
-    fn locate(config: &ResolvedSiteConfig, vendor_path: &Path) -> Result<Self> {
-        let site = fs::canonicalize(config.get_root()).with_context(|| {
+    fn locate(config: &SiteConfig, vendor_path: &Path) -> Result<Self> {
+        let site = fs::canonicalize(config.root()).with_context(|| {
             format!(
                 "could not resolve the site directory `{}`",
-                crate::terminal::display_path(config.get_root())
+                crate::terminal::display_path(config.root())
             )
         })?;
         let root = site.join(config.root_relative(vendor_path));
@@ -815,7 +815,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn selection_uses_vendored_modules_without_a_cache() {
+    fn selection_uses_vendored_modules() {
         use tola_input::{InputLock, LockedModule, tree_sha256};
 
         let site = tempfile::tempdir().unwrap();
@@ -828,7 +828,7 @@ mod tests {
         )
         .unwrap();
         fs::write(frozen.join("lib.typ"), "#let title = [Theme]").unwrap();
-        let config = crate::dev::tests::write_site(
+        let cfg = crate::dev::tests::write_site(
             &root,
             "#document(\"index.html\")[Site]",
             "[build]\nentry = 'site.typ'\n[vendor]\npath = 'vendor'\n[modules.theme.git]\nurl = 'https://example.com/theme.git'\n",
@@ -845,29 +845,25 @@ mod tests {
             },
         );
         lock.commit(&root, &InputLock::default()).unwrap();
-        let selection = select_inputs(
-            config,
+        let sel = select_inputs(
+            cfg,
             BuildResources::new().with_input_scope(InputScope::Pure),
             &BuildCancellation::default(),
         )
         .unwrap();
-        assert_eq!(selection.modules.len(), 1);
-        assert_eq!(selection.modules[0].source, frozen);
+        assert_eq!(sel.modules.len(), 1);
+        assert_eq!(sel.modules[0].source, frozen);
         assert!(!tola_input::layout::modules(&root).exists());
     }
 
-    /// The vendor replacement of this site's declared `vendor` directory, workspace claimed.
-    fn replacement(site: &Path) -> VendorReplacement {
-        // The resolved site root is canonical, so the test spells the target the same way.
+    fn open_replacement(site: &Path) -> VendorReplacement {
         let site = site.canonicalize().unwrap();
-        let replacement =
-            VendorReplacement::locate(&site_config(&site), &site.join("vendor")).unwrap();
-        replacement.open().unwrap();
-        replacement
+        let rep = VendorReplacement::locate(&site_config(&site), &site.join("vendor")).unwrap();
+        rep.open().unwrap();
+        rep
     }
 
-    /// A site configuration whose `[vendor] path` names this root's `vendor` directory.
-    fn site_config(root: &Path) -> ResolvedSiteConfig {
+    fn site_config(root: &Path) -> SiteConfig {
         tola_build::config::loading::resolve_site_config(
             &root.join("tola.toml"),
             "[vendor]\npath = \"vendor\"\n",
@@ -878,122 +874,92 @@ mod tests {
         .into_config()
     }
 
-    /// A copy that reads `boundary` and writes through `replacement`.
     fn vendor_copy<'a>(
-        boundary: tola_typst::SourceBoundary,
-        replacement: &'a VendorReplacement,
-        cancellation: &'a BuildCancellation,
+        root: &Path,
+        rep: &'a VendorReplacement,
+        cancel: &'a BuildCancellation,
     ) -> VendorCopy<'a> {
         VendorCopy {
-            boundary,
-            replacement,
-            cancellation,
+            boundary: tola_typst::SourceBoundary::new(root, false),
+            replacement: rep,
+            cancellation: cancel,
             buffer: [0; 64 * 1024],
         }
     }
 
     #[test]
-    fn foreign_swap_workspace_is_refused() {
+    fn foreign_swap_rejected() {
         let site = tempfile::TempDir::new().unwrap();
-        let workspace = site.path().join(".vendor-swap");
-        fs::create_dir(&workspace).unwrap();
-        fs::write(workspace.join("owner"), b"another site").unwrap();
-        fs::write(workspace.join("author.txt"), b"author bytes").unwrap();
+        let ws = site.path().join(".vendor-swap");
+        fs::create_dir(&ws).unwrap();
+        fs::write(ws.join("owner"), b"another site").unwrap();
+        fs::write(ws.join("author.txt"), b"author bytes").unwrap();
 
-        let site_root = site.path().canonicalize().unwrap();
-        let replacement =
-            VendorReplacement::locate(&site_config(&site_root), &site_root.join("vendor")).unwrap();
-        assert!(replacement.open().is_err());
-
-        assert_eq!(
-            fs::read(workspace.join("author.txt")).unwrap(),
-            b"author bytes"
-        );
+        let root = site.path().canonicalize().unwrap();
+        let rep = VendorReplacement::locate(&site_config(&root), &root.join("vendor")).unwrap();
+        assert!(rep.open().is_err());
+        assert_eq!(fs::read(ws.join("author.txt")).unwrap(), b"author bytes");
     }
 
     #[test]
-    fn source_copy_cannot_enter_itself() {
+    fn source_copy_rejects_overlap() {
         let site = tempfile::TempDir::new().unwrap();
-        let source = fs::canonicalize(site.path()).unwrap();
-        fs::write(source.join("lib.typ"), b"source bytes").unwrap();
-        let replacement = replacement(&source);
-        let destination = source.join("candidate");
-        let cancellation = BuildCancellation::default();
-        let mut copy = vendor_copy(
-            tola_typst::SourceBoundary::new(&source, false),
-            &replacement,
-            &cancellation,
-        );
+        let src = fs::canonicalize(site.path()).unwrap();
+        fs::write(src.join("lib.typ"), b"source bytes").unwrap();
+        let rep = open_replacement(&src);
+        let dst = src.join("candidate");
+        let cancel = BuildCancellation::default();
+        let mut copy = vendor_copy(&src, &rep, &cancel);
 
-        assert!(
-            copy.directory(&source, &destination, &mut Vec::new())
-                .is_err()
-        );
-
-        assert_eq!(fs::read(source.join("lib.typ")).unwrap(), b"source bytes");
-        assert!(!destination.exists());
+        assert!(copy.directory(&src, &dst, &mut Vec::new()).is_err());
+        assert_eq!(fs::read(src.join("lib.typ")).unwrap(), b"source bytes");
+        assert!(!dst.exists());
     }
 
     #[cfg(unix)]
     #[test]
-    fn source_links_become_regular_bytes() {
+    fn source_links_copied_as_files() {
         let site = tempfile::TempDir::new().unwrap();
-        let source = site.path().join("packages");
-        fs::create_dir(&source).unwrap();
-        fs::write(source.join("lib.typ"), b"package bytes").unwrap();
-        tola_fs::set_unix_mode(&source.join("lib.typ"), 0o755).unwrap();
-        fs::create_dir(source.join("original")).unwrap();
-        fs::write(source.join("original/data.txt"), b"shared directory").unwrap();
-        std::os::unix::fs::symlink("original", source.join("alias")).unwrap();
-        std::os::unix::fs::symlink("lib.typ", source.join("linked.typ")).unwrap();
-        let replacement = replacement(site.path());
-        let destination = site.path().join("candidate");
-        let cancellation = BuildCancellation::default();
-        let mut copy = vendor_copy(
-            tola_typst::SourceBoundary::new(site.path(), false),
-            &replacement,
-            &cancellation,
-        );
-        copy.directory(&source, &destination, &mut Vec::new())
-            .unwrap();
+        let src = site.path().join("packages");
+        fs::create_dir(&src).unwrap();
+        fs::write(src.join("lib.typ"), b"package bytes").unwrap();
+        tola_fs::set_unix_mode(&src.join("lib.typ"), 0o755).unwrap();
+        fs::create_dir(src.join("original")).unwrap();
+        fs::write(src.join("original/data.txt"), b"shared directory").unwrap();
+        std::os::unix::fs::symlink("original", src.join("alias")).unwrap();
+        std::os::unix::fs::symlink("lib.typ", src.join("linked.typ")).unwrap();
+        let rep = open_replacement(site.path());
+        let dst = site.path().join("candidate");
+        let cancel = BuildCancellation::default();
+        let mut copy = vendor_copy(site.path(), &rep, &cancel);
+        copy.directory(&src, &dst, &mut Vec::new()).unwrap();
         assert!(
-            !fs::symlink_metadata(destination.join("linked.typ"))
+            !fs::symlink_metadata(dst.join("linked.typ"))
                 .unwrap()
                 .is_symlink()
         );
+        assert_eq!(fs::read(dst.join("linked.typ")).unwrap(), b"package bytes");
         assert_eq!(
-            fs::read(destination.join("linked.typ")).unwrap(),
-            b"package bytes"
-        );
-        assert_eq!(
-            tola_fs::unix_mode(&fs::metadata(destination.join("lib.typ")).unwrap()).unwrap()
-                & 0o777,
+            tola_fs::unix_mode(&fs::metadata(dst.join("lib.typ")).unwrap()).unwrap() & 0o777,
             0o755
         );
         assert_eq!(
-            tola_input::tree_sha256(&source).unwrap(),
-            tola_input::tree_sha256(&destination).unwrap()
+            tola_input::tree_sha256(&src).unwrap(),
+            tola_input::tree_sha256(&dst).unwrap()
         );
     }
 
     #[cfg(unix)]
     #[test]
-    fn source_cycles_are_refused() {
+    fn source_cycles_rejected() {
         let site = tempfile::TempDir::new().unwrap();
-        let source = site.path().join("packages");
-        fs::create_dir(&source).unwrap();
-        std::os::unix::fs::symlink(".", source.join("cycle")).unwrap();
-        let replacement = replacement(site.path());
-        let destination = site.path().join("candidate");
-        let cancellation = BuildCancellation::default();
-        let mut copy = vendor_copy(
-            tola_typst::SourceBoundary::new(site.path(), false),
-            &replacement,
-            &cancellation,
-        );
-        assert!(
-            copy.directory(&source, &destination, &mut Vec::new())
-                .is_err()
-        );
+        let src = site.path().join("packages");
+        fs::create_dir(&src).unwrap();
+        std::os::unix::fs::symlink(".", src.join("cycle")).unwrap();
+        let rep = open_replacement(site.path());
+        let dst = site.path().join("candidate");
+        let cancel = BuildCancellation::default();
+        let mut copy = vendor_copy(site.path(), &rep, &cancel);
+        assert!(copy.directory(&src, &dst, &mut Vec::new()).is_err());
     }
 }

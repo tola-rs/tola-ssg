@@ -4,10 +4,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use tola_minify::{
-    CssMinifyError, JavaScriptMinifyError, MinifiedLanguages, MinifyFailure, MinifyLanguage,
-    MinifyRequest,
-};
+use tola_minify::{CssMinifyError, JsMinifyError, MinifiedLanguages, MinifyError, MinifyLanguage};
 
 use tola_diagnostic::{Diagnostic, Severity};
 
@@ -15,7 +12,7 @@ use tola_diagnostic::{Diagnostic, Severity};
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct AssetMinifyKey {
     digest: tola_typst::ContentDigest,
-    request: MinifyRequest,
+    language: MinifyLanguage,
 }
 
 impl AssetMinifyKey {
@@ -24,7 +21,7 @@ impl AssetMinifyKey {
         digest: tola_typst::ContentDigest,
         languages: MinifiedLanguages,
     ) -> Option<Self> {
-        MinifyRequest::for_source(source_path, languages).map(|request| Self { digest, request })
+        MinifyLanguage::for_source(source_path, languages).map(|language| Self { digest, language })
     }
 }
 
@@ -59,7 +56,7 @@ impl AssetMinification {
         if let Some(bytes) = self.bytes.get(&key) {
             return Arc::clone(bytes);
         }
-        let language = key.request.language();
+        let language = key.language;
         let Ok(source) = std::str::from_utf8(raw) else {
             self.warnings.push(AssetMinifyWarning::NotUtf8 {
                 path: display_source.to_owned(),
@@ -67,7 +64,7 @@ impl AssetMinification {
             });
             return Arc::clone(raw);
         };
-        match key.request.minify(source) {
+        match language.minify(source) {
             Ok(minified) => {
                 let bytes: Arc<[u8]> = minified.into_bytes().into();
                 self.bytes.insert(key, Arc::clone(&bytes));
@@ -176,15 +173,15 @@ impl AssetMinifyWarning {
         }
     }
 
-    fn from_failure(language: MinifyLanguage, path: &str, failure: MinifyFailure) -> Self {
+    fn from_failure(language: MinifyLanguage, path: &str, failure: MinifyError) -> Self {
         let path = path.to_owned();
         match failure {
-            MinifyFailure::Css(CssMinifyError::Syntax {
+            MinifyError::Css(CssMinifyError::Syntax {
                 reason,
                 line,
                 column,
             })
-            | MinifyFailure::JavaScript(JavaScriptMinifyError::Syntax {
+            | MinifyError::Js(JsMinifyError::Syntax {
                 reason,
                 line,
                 column,
@@ -196,7 +193,7 @@ impl AssetMinifyWarning {
                 column,
             },
             // A semantic or printer failure Tola's own options cannot produce; report it honestly.
-            MinifyFailure::Css(other) => Self::Unexpected {
+            MinifyError::Css(other) => Self::Unexpected {
                 path,
                 language,
                 reason: other.to_string(),
@@ -209,9 +206,7 @@ impl AssetMinifyWarning {
 const fn minify_key(language: MinifyLanguage) -> &'static str {
     match language {
         MinifyLanguage::Css => "build.minify.css",
-        MinifyLanguage::ClassicJavaScript | MinifyLanguage::ModuleJavaScript => {
-            "build.minify.javascript"
-        }
+        MinifyLanguage::ClassicJs | MinifyLanguage::ModuleJs => "build.minify.javascript",
     }
 }
 
@@ -260,7 +255,7 @@ mod tests {
     }
 
     #[test]
-    fn unminifiable_source_keeps_its_bytes() {
+    fn unminifiable_source_stays_raw() {
         for (path, source, line) in [
             ("app.js", b"function =".as_slice(), Some(1)),
             ("app.css", &[0xff, 0xfe][..], None),

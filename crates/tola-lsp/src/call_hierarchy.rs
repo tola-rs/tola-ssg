@@ -37,7 +37,7 @@ use lsp_types::{
 use serde::{Deserialize, Serialize};
 use tola_build::cancellation::BuildCancellation;
 use tola_build::check::SourceCompilation;
-use tola_build::config::ResolvedSiteConfig;
+use tola_build::config::SiteConfig;
 use tola_typst::typst::syntax::{FileId, Source, VirtualRoot};
 use tola_typst::{PackageLocations, SourceBoundary};
 use tola_typst_syntax::syntax::module_paths;
@@ -102,7 +102,7 @@ pub(super) struct Incoming<'a> {
     pub(super) view: &'a SourceView,
     pub(super) locations: Option<&'a PackageLocations>,
     pub(super) boundary: &'a SourceBoundary,
-    pub(super) config: &'a ResolvedSiteConfig,
+    pub(super) config: &'a SiteConfig,
     pub(super) compilation: &'a SourceCompilation,
     pub(super) source: &'a Source,
     pub(super) cancellation: &'a BuildCancellation,
@@ -335,7 +335,7 @@ mod tests {
             ("content/note.typ", "Note.\n"),
             ("content/lib.typ", "#let greet() = [hi]\n"),
         ]);
-        let root = configuration.get_root();
+        let root = configuration.root();
         let source = source(root, "content/document.typ");
 
         let found = outgoing(

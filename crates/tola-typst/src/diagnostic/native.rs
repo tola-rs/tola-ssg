@@ -301,8 +301,6 @@ impl From<SourceDiagnostic> for NativeDiagnostic {
 ///
 /// The caller emits this value with `engine.sink.warn`. Only warnings retained by Typst are
 /// unwrapped on ingress, preserving memoized replay, deduplication, and final realization selection.
-/// The diagnostic's span spells the original location, so ingress restores it without reading any
-/// source text.
 pub fn producer_warning(
     span: Span,
     name: &str,
@@ -310,7 +308,7 @@ pub fn producer_warning(
     message: impl Into<EcoString>,
 ) -> SourceDiagnostic {
     SourceDiagnostic::warning(
-        diagnostic_file_span(
+        diag_span(
             Location::Span(span),
             &DiagnosticProjection::default(),
             Some(name),
@@ -329,18 +327,8 @@ pub fn producer_error(
     message: impl Into<EcoString>,
     projection: DiagnosticProjection,
 ) -> SourceDiagnostic {
-    producer_error_at_location(Location::Span(span), name, fields, message, projection)
-}
-
-fn producer_error_at_location(
-    location: Location,
-    name: &str,
-    fields: &[(&str, &str)],
-    message: impl Into<EcoString>,
-    projection: DiagnosticProjection,
-) -> SourceDiagnostic {
     SourceDiagnostic::error(
-        diagnostic_file_span(location, &projection, Some(name), fields),
+        diag_span(Location::Span(span), &projection, Some(name), fields),
         message,
     )
 }
@@ -358,12 +346,14 @@ pub fn producer_error_at(
     message: impl Into<EcoString>,
     projection: DiagnosticProjection,
 ) -> SourceDiagnostic {
-    producer_error_at_location(
-        Location::Range { file, range },
-        name,
-        fields,
+    SourceDiagnostic::error(
+        diag_span(
+            Location::Range { file, range },
+            &projection,
+            Some(name),
+            fields,
+        ),
         message,
-        projection,
     )
 }
 
@@ -376,15 +366,12 @@ pub fn projected_span(
     range: std::ops::Range<usize>,
     projection: DiagnosticProjection,
 ) -> DiagSpan {
-    diagnostic_file_span(Location::Range { file, range }, &projection, None, &[])
+    diag_span(Location::Range { file, range }, &projection, None, &[])
 }
 
-/// The location one diagnostic was reported at, as either form a diagnostic span takes.
 #[derive(Debug, Clone)]
 enum Location {
-    /// A span into a source file, as a producer's own native call supplies it.
     Span(Span),
-    /// A byte range of one file, for a position a reporter computes itself.
     Range {
         file: FileId,
         range: std::ops::Range<usize>,
@@ -392,7 +379,6 @@ enum Location {
 }
 
 impl Location {
-    /// The path segment that spells this location, as `decoded_location` reads it back.
     fn encoded(self) -> String {
         match self {
             Self::Span(span) => format!("s{}", span.into_raw()),
@@ -403,19 +389,18 @@ impl Location {
     }
 }
 
-/// The diagnostic span one spelled path segment restores.
 fn decoded_location(encoded: &str) -> Option<DiagSpan> {
     let (kind, rest) = encoded.split_at_checked(1)?;
     match kind {
         "s" => Some(Span::from_raw(NonZeroU64::new(rest.parse().ok()?)?).into()),
         "r" => {
-            let (file, rest) = rest.split_once('-')?;
+            let (fid, rest) = rest.split_once('-')?;
             let (start, end) = rest.split_once('-')?;
             if end.contains('-') {
                 return None;
             }
             Some(DiagSpan::from_range(
-                FileId::from_raw(NonZeroU16::new(file.parse().ok()?)?),
+                FileId::from_raw(NonZeroU16::new(fid.parse().ok()?)?),
                 start.parse().ok()?..end.parse().ok()?,
             ))
         }
@@ -423,37 +408,35 @@ fn decoded_location(encoded: &str) -> Option<DiagSpan> {
     }
 }
 
-/// The span one Tola-produced diagnostic is reported at: a virtual file inside `DIAGNOSTIC_PACKAGE`
-/// whose path spells the location it stands for, the projection, and the producer identity.
-fn diagnostic_file_span(
-    location: Location,
+fn diag_span(
+    loc: Location,
     projection: &DiagnosticProjection,
     name: Option<&str>,
     fields: &[(&str, &str)],
 ) -> DiagSpan {
-    let location = location.encoded();
+    let loc = loc.encoded();
     let projection = projection.encoded();
     let name = name.unwrap_or_default();
     let mut path = String::new();
     path.push_str(PRODUCER_DIRECTORY);
-    path.push_str(&location);
+    path.push_str(&loc);
     path.push('/');
     encode(&projection, &mut path);
     path.push('/');
     encode(name, &mut path);
-    for (key, value) in fields {
+    for (key, val) in fields {
         path.push('/');
         encode(key, &mut path);
         path.push('/');
-        encode(value, &mut path);
+        encode(val, &mut path);
     }
     let path = VirtualPath::new(path)
         .expect("diagnostic file paths contain only fixed segments and hexadecimal bytes");
-    let id = FileId::new(RootedPath::new(
+    let fid = FileId::new(RootedPath::new(
         VirtualRoot::Package(DIAGNOSTIC_PACKAGE.clone()),
         path,
     ));
-    DiagSpan::from_range(id, 0..0)
+    DiagSpan::from_range(fid, 0..0)
 }
 
 fn encode(text: &str, encoded: &mut String) {
@@ -495,74 +478,51 @@ fn decode(encoded: &str) -> Option<EcoString> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::Cell;
-
-    use typst::diag::SourceResult;
-    use typst::engine::Engine;
-    use typst::foundations::{Value, func};
     use typst::syntax::Span;
 
-    thread_local! {
-        static NATIVE_RUNS: Cell<usize> = const { Cell::new(0) };
-    }
-
-    #[func]
-    fn warn_path(engine: &mut Engine, span: Span, number: i64) -> SourceResult<Value> {
-        NATIVE_RUNS.with(|runs| runs.set(runs.get() + 1));
-        let warning = producer_warning(
-            span,
-            "SampleWarning",
-            &[("number", &number.to_string())],
-            format!("different warning wording {number}"),
-        );
-        engine.sink.warn(warning);
-        Ok(Value::None)
-    }
-
     #[test]
-    fn caller_location_preserves_native_evidence() {
+    fn projection_caller_span() {
         use typst::diag::Tracepoint;
         use typst::syntax::Spanned;
-        let package_span = |package: &str| {
-            let id = FileId::new(RootedPath::new(
-                VirtualRoot::Package(package.parse().unwrap()),
+        let pkg_span = |pkg: &str| {
+            let fid = FileId::new(RootedPath::new(
+                VirtualRoot::Package(pkg.parse().unwrap()),
                 VirtualPath::new("lib.typ").unwrap(),
             ));
-            typst::syntax::Source::new(id, "text".into()).root().span()
+            typst::syntax::Source::new(fid, "text".into()).root().span()
         };
-        let original = package_span("@tola/schema:0.0.0");
-        let wrapper = package_span("@tola/source:0.0.0");
-        let helper = package_span("@preview/site-helper:1.0.0");
-        let mut error = producer_error(
-            original,
+        let orig = pkg_span("@tola/schema:0.0.0");
+        let wrapper = pkg_span("@tola/source:0.0.0");
+        let helper = pkg_span("@preview/site-helper:1.0.0");
+        let mut err = producer_error(
+            orig,
             "SchemaArgument",
             &[("actual", "none")],
             "schema argument is invalid",
             DiagnosticProjection::through(
                 ["@tola/schema:0.0.0", "@tola/source:0.0.0"]
                     .into_iter()
-                    .map(|package| package.parse().unwrap()),
+                    .map(|pkg| pkg.parse().unwrap()),
             ),
         );
         for span in [wrapper, helper] {
-            error
-                .trace
+            err.trace
                 .push(Spanned::new(Tracepoint::Call(Some("parse".into())), span));
         }
-        let native = NativeDiagnostic::from(error);
-        assert_eq!(native.source().span, DiagSpan::from(original));
+        let native = NativeDiagnostic::from(err);
+        assert_eq!(native.source().span, DiagSpan::from(orig));
         assert_eq!(native.source().trace.len(), 2);
         assert_eq!(native.primary_span(), DiagSpan::from(helper));
         assert!(matches!(native.origin(), DiagnosticOrigin::Producer(_)));
     }
 
     #[test]
-    fn public_diagnostic_package_sources_are_not_producer_envelopes() {
-        let id = FileId::new(RootedPath::new(
+    fn diag_pkg_non_producer() {
+        let fid = FileId::new(RootedPath::new(
             VirtualRoot::Package(DIAGNOSTIC_PACKAGE.clone()),
             VirtualPath::new("lib.typ").unwrap(),
         ));
-        let span = typst::syntax::Source::new(id, "report".into())
+        let span = typst::syntax::Source::new(fid, "report".into())
             .root()
             .span();
         let native =
@@ -572,7 +532,7 @@ mod tests {
     }
 
     #[test]
-    fn traced_report_without_primary_span() {
+    fn detached_producer_keeps_trace() {
         let caller_id = FileId::new(RootedPath::new(
             VirtualRoot::Project,
             VirtualPath::new("caller.typ").unwrap(),
@@ -580,44 +540,44 @@ mod tests {
         let caller = typst::syntax::Source::new(caller_id, "report()".into())
             .root()
             .span();
-        let warning = producer_warning(
+        let warn = producer_warning(
             Span::detached(),
             "TypstReport",
             &[("severity", "info"), ("hints", "0"), ("caller", "project")],
             "an issue without a location",
         )
         .with_tracepoint(Tracepoint::Call(Some("report".into())), caller);
-        let native = NativeDiagnostic::from(warning);
+        let native = NativeDiagnostic::from(warn);
         assert!(native.primary_span().is_detached());
         assert_eq!(native.retained_traces().count(), 1);
         assert_eq!(native.source().trace[0].span, caller);
     }
 
     #[test]
-    fn projection_reports_at_the_caller() {
+    fn projected_span_caller() {
         let wrapper: PackageSpec = "@tola/schema:0.0.0".parse().unwrap();
         let wrapper_id = FileId::new(RootedPath::new(
             VirtualRoot::Package(wrapper.clone()),
             VirtualPath::new("lib.typ").unwrap(),
         ));
         let caller_span = |path| {
-            let id = FileId::new(RootedPath::new(
+            let fid = FileId::new(RootedPath::new(
                 VirtualRoot::Project,
                 VirtualPath::new(path).unwrap(),
             ));
-            typst::syntax::Source::new(id, "sample()".into())
+            typst::syntax::Source::new(fid, "sample()".into())
                 .root()
                 .span()
         };
         let caller = caller_span("caller.typ");
         let outer = caller_span("outer.typ");
-        let error = SourceDiagnostic::error(
+        let err = SourceDiagnostic::error(
             projected_span(wrapper_id, 2..5, DiagnosticProjection::through([wrapper])),
             "an ordinary projected error",
         )
         .with_tracepoint(Tracepoint::Call(Some("sample".into())), caller)
         .with_tracepoint(Tracepoint::Call(Some("outer".into())), outer);
-        let native = NativeDiagnostic::from(error);
+        let native = NativeDiagnostic::from(err);
         assert_eq!(native.origin(), &DiagnosticOrigin::Typst);
         assert_eq!(native.source().span, DiagSpan::from_range(wrapper_id, 2..5));
         assert_eq!(native.primary_span(), DiagSpan::from(caller));

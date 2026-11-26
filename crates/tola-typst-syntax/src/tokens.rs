@@ -94,65 +94,63 @@ pub struct Token {
 }
 
 /// Produces tokens in source order; `names` must describe the same source version.
-pub fn tokens(source: &Source, names: &NameGraph) -> Vec<Token> {
-    tokens_with_check(source, names, || Ok::<(), std::convert::Infallible>(()))
+pub fn tokens(src: &Source, names: &NameGraph) -> Vec<Token> {
+    tokens_with_check(src, names, || Ok::<(), std::convert::Infallible>(()))
         .unwrap_or_else(|never| match never {})
 }
 
 /// Cancellation is checked while traversing syntax, before name classification can continue.
 pub fn tokens_with_check<E>(
-    source: &Source,
+    src: &Source,
     names: &NameGraph,
     check: impl Fn() -> Result<(), E>,
 ) -> Result<Vec<Token>, E> {
     check()?;
     let classify = |range: &Range<usize>| {
-        names.class_at(source.id(), range).map(|class| match class {
+        names.class_at(src.id(), range).map(|class| match class {
             NameClass::Function => TokenClass::Function,
             NameClass::Namespace => TokenClass::Namespace,
             NameClass::Value => TokenClass::Interpolated,
         })
     };
-    let mut tokens = Vec::new();
+    let mut toks = Vec::new();
     walk_text(
-        &LinkedNode::new(source.root()),
+        &LinkedNode::new(src.root()),
         Modifiers::NONE,
         None,
         &classify,
-        &mut tokens,
+        &mut toks,
         &check,
     )?;
     check()?;
-    Ok(tokens)
+    Ok(toks)
 }
 
-/// Walk one node, with `text` naming the class plain text takes inside the enclosing construct.
 fn walk_text<E>(
     node: &LinkedNode<'_>,
-    modifiers: Modifiers,
-    text: Option<TokenClass>,
+    mods: Modifiers,
+    text_class: Option<TokenClass>,
     classify: &impl Fn(&Range<usize>) -> Option<TokenClass>,
-    tokens: &mut Vec<Token>,
+    toks: &mut Vec<Token>,
     check: &impl Fn() -> Result<(), E>,
 ) -> Result<(), E> {
     check()?;
-    let inherited = modifiers.or(style(node.kind()));
+    let inherited = mods.or(style(node.kind()));
     if let Some(group) = node.cast::<MathDelimited>() {
         for child in node.children() {
             if child.span() == group.open().span() || child.span() == group.close().span() {
-                tokens.push(Token {
+                toks.push(Token {
                     range: child.range(),
                     class: TokenClass::Delimiter,
                     modifiers: inherited,
                 });
             } else {
-                walk_text(&child, inherited, text, classify, tokens, check)?;
+                walk_text(&child, inherited, text_class, classify, toks, check)?;
             }
         }
         return Ok(());
     }
     if node.kind() == SyntaxKind::TermItem {
-        // The term of `/ term: details` is the text between the marker and the colon.
         let marker_end = node
             .children()
             .next()
@@ -168,18 +166,17 @@ fn walk_text<E>(
                 inherited,
                 is_term.then_some(TokenClass::Term),
                 classify,
-                tokens,
+                toks,
                 check,
             )?;
         }
         return Ok(());
     }
     match token_class(node, classify) {
-        // Plain text takes the class its enclosing construct names, which the term list owns.
-        Some(class) => tokens.push(Token {
+        Some(class) => toks.push(Token {
             range: node.range(),
             class: if class == TokenClass::Text {
-                text.unwrap_or(class)
+                text_class.unwrap_or(class)
             } else {
                 class
             },
@@ -187,7 +184,7 @@ fn walk_text<E>(
         }),
         None => {
             for child in node.children() {
-                walk_text(&child, inherited, text, classify, tokens, check)?;
+                walk_text(&child, inherited, text_class, classify, toks, check)?;
             }
         }
     }
@@ -204,7 +201,6 @@ fn style(kind: SyntaxKind) -> Modifiers {
     }
 }
 
-/// The class of a node, or `None` when its children carry their own.
 fn token_class(
     node: &LinkedNode<'_>,
     classify: &impl Fn(&Range<usize>) -> Option<TokenClass>,
@@ -218,7 +214,6 @@ fn token_class(
         Underscore if node.parent_kind() == Some(MathAttach) => TokenClass::Operator,
         Star => TokenClass::Operator,
         Ident | MathIdent => classify(&node.range()).unwrap_or_else(|| syntactic_name_class(node)),
-        // A name `_` discards in a pattern; emphasis and attachment hold their own cases above.
         Underscore => TokenClass::Interpolated,
         Hash => hashtag_class(node, classify),
         LeftBrace | RightBrace | LeftBracket | RightBracket | LeftParen | RightParen | Comma
@@ -246,9 +241,6 @@ fn token_class(
     })
 }
 
-/// A hashtag writes the class of the expression it introduces, so `#let` reads as its keyword and
-/// `#(1)` as its opening parenthesis. A hashtag the parser could attach no expression to, as in
-/// markup that writes one alone, stays plain text.
 fn hashtag_class(
     node: &LinkedNode<'_>,
     classify: &impl Fn(&Range<usize>) -> Option<TokenClass>,
@@ -260,12 +252,11 @@ fn hashtag_class(
 }
 
 fn syntactic_name_class(node: &LinkedNode<'_>) -> TokenClass {
-    // `#import "site.typ" as site` binds a module. A renamed item of a specific import belongs to
-    // the `ImportItem` node, so the parent separates the two.
+    // `#import "site.typ" as site` binds a module; renamed items belong to `ImportItem`.
     if node.parent_kind() == Some(SyntaxKind::ModuleImport)
         && node
             .prev_leaf()
-            .is_some_and(|previous| previous.kind() == SyntaxKind::As)
+            .is_some_and(|prev| prev.kind() == SyntaxKind::As)
     {
         return TokenClass::Namespace;
     }
@@ -283,10 +274,10 @@ fn syntactic_name_class(node: &LinkedNode<'_>) -> TokenClass {
 mod tests {
     use super::*;
 
-    fn name_graph(source: &Source) -> NameGraph {
+    fn name_graph(src: &Source) -> NameGraph {
         NameGraph::new(
             [std::sync::Arc::new(crate::names::SourceNames::new(
-                source.clone(),
+                src.clone(),
             ))],
             |_| None,
             None,
@@ -295,22 +286,21 @@ mod tests {
         .unwrap()
     }
 
-    /// Every token of a source, as the text it covers and the class it carries.
     fn classified(text: &str) -> Vec<(String, TokenClass, Modifiers)> {
-        let source = Source::detached(text.to_owned());
-        let names = name_graph(&source);
-        tokens(&source, &names)
+        let src = Source::detached(text.to_owned());
+        let graph = name_graph(&src);
+        tokens(&src, &graph)
             .into_iter()
-            .map(|token| (text[token.range].to_owned(), token.class, token.modifiers))
+            .map(|tok| (text[tok.range].to_owned(), tok.class, tok.modifiers))
             .collect()
     }
 
     #[test]
-    fn cancelled_scan_returns_no_tokens() {
-        let source = Source::detached("#let count = 1\n#count\n".repeat(32));
-        let names = name_graph(&source);
+    fn tokens_cancellation() {
+        let src = Source::detached("#let count = 1\n#count\n".repeat(32));
+        let graph = name_graph(&src);
         let visits = std::cell::Cell::new(0);
-        let cancelled = tokens_with_check(&source, &names, || {
+        let err = tokens_with_check(&src, &graph, || {
             visits.set(visits.get() + 1);
             if visits.get() >= 8 {
                 Err("cancelled")
@@ -318,24 +308,23 @@ mod tests {
                 Ok(())
             }
         });
-        assert!(matches!(cancelled, Err("cancelled")));
+        assert!(matches!(err, Err("cancelled")));
     }
 
     #[test]
-    fn math_groups_keep_inner_tokens() {
+    fn tokens_math_delimited() {
         for text in ["$(alpha + beta)$", "$[alpha + beta]$", "$(alpha / beta)$"] {
-            let tokens = classified(text);
+            let toks = classified(text);
             assert!(
-                tokens.iter().any(|(text, class, modifiers)| text == "alpha"
+                toks.iter().any(|(text, class, mods)| text == "alpha"
                     && *class == TokenClass::Interpolated
-                    && modifiers.contains(Modifiers::MATH)),
-                "{tokens:?}"
+                    && mods.contains(Modifiers::MATH)),
+                "{toks:?}"
             );
             assert!(
-                tokens
-                    .iter()
+                toks.iter()
                     .all(|(text, _, _)| !text.contains("alpha + beta")),
-                "{tokens:?}"
+                "{toks:?}"
             );
         }
     }

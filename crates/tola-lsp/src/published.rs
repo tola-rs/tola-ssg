@@ -1,4 +1,4 @@
-//! Published packages for one compiler connection, never a process-global cache.
+//! Per-connection published package index, never a process-global cache.
 
 use std::sync::Arc;
 
@@ -36,17 +36,17 @@ pub(super) struct PublishedIndex {
 impl PublishedIndex {
     pub(super) fn published_packages(
         &mut self,
-        resources: &BuildResources,
-        locations: &PackageLocations,
+        res: &BuildResources,
+        locs: &PackageLocations,
         requested: bool,
     ) -> &[PublishedPackage] {
-        // A connection must not advertise packages its build cannot obtain.
-        if resources.network_access() == NetworkAccess::Denied || locations.cache().is_none() {
+        // Never advertise packages the connection's build policy cannot obtain.
+        if res.network_access() == NetworkAccess::Denied || locs.cache().is_none() {
             return &[];
         }
         #[cfg(feature = "network")]
         if requested {
-            self.poll(resources, "https://packages.typst.org/preview/index.json");
+            self.poll(res, "https://packages.typst.org/preview/index.json");
         }
         #[cfg(not(feature = "network"))]
         let _ = requested;
@@ -54,31 +54,27 @@ impl PublishedIndex {
     }
 
     #[cfg(feature = "network")]
-    fn poll(&mut self, resources: &BuildResources, url: &str) {
-        if self
-            .worker
-            .as_ref()
-            .is_some_and(|worker| worker.is_finished())
-        {
+    fn poll(&mut self, res: &BuildResources, url: &str) {
+        if self.worker.as_ref().is_some_and(|w| w.is_finished()) {
             match self.worker.take().expect("completed index worker").join() {
-                Ok(Some(packages)) => self.packages = packages,
+                Ok(Some(pkgs)) => self.packages = pkgs,
                 Ok(None) => {}
                 Err(_) => tracing::debug!("published package index worker stopped"),
             }
         }
-        if self.started || resources.network_access() == NetworkAccess::Denied {
+        if self.started || res.network_access() == NetworkAccess::Denied {
             return;
         }
         self.started = true;
-        let resources = resources.clone();
-        let cancellation = self.canceller.token();
+        let res = res.clone();
+        let cancel = self.canceller.token();
         let url = url.to_owned();
         match std::thread::Builder::new()
             .name("tola-lsp-packages".into())
-            .spawn(move || download(&resources, &url, &cancellation))
+            .spawn(move || download(&res, &url, &cancel))
         {
-            Ok(worker) => self.worker = Some(worker),
-            Err(error) => tracing::debug!(%error, "published package index worker could not start"),
+            Ok(w) => self.worker = Some(w),
+            Err(err) => tracing::debug!(%err, "published package index worker could not start"),
         }
     }
 }
@@ -87,29 +83,29 @@ impl PublishedIndex {
 impl Drop for PublishedIndex {
     fn drop(&mut self) {
         self.canceller.cancel();
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
+        if let Some(w) = self.worker.take() {
+            let _ = w.join();
         }
     }
 }
 
 #[cfg(any(feature = "network", test))]
-fn parse_index(index: &[u8]) -> Option<Arc<[PublishedPackage]>> {
-    serde_json::from_slice::<Vec<PublishedPackage>>(index)
+fn parse_index(raw: &[u8]) -> Option<Arc<[PublishedPackage]>> {
+    serde_json::from_slice::<Vec<PublishedPackage>>(raw)
         .ok()
         .map(Arc::from)
 }
 
 #[cfg(feature = "network")]
 fn download(
-    resources: &BuildResources,
+    res: &BuildResources,
     url: &str,
-    cancellation: &BuildCancellation,
+    cancel: &BuildCancellation,
 ) -> Option<Arc<[PublishedPackage]>> {
     const INDEX_LIMIT: usize = 16 * 1024 * 1024;
-    let bytes = resources
-        .download(url, INDEX_LIMIT, cancellation)
-        .map_err(|error| tracing::debug!(%error, "published package index is unavailable"))
+    let bytes = res
+        .download(url, INDEX_LIMIT, cancel)
+        .map_err(|err| tracing::debug!(%err, "published package index is unavailable"))
         .ok()?;
     parse_index(&bytes).or_else(|| {
         tracing::debug!("published package index did not parse");
@@ -122,19 +118,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn packages_without_network_access_cache() {
-        let directory = tempfile::tempdir().unwrap();
+    fn packages_require_network_and_cache() {
+        let dir = tempfile::tempdir().unwrap();
         let index_bytes = br#"[{"name":"remote-only","version":"1.0.0"}]"#;
         for (scope, cache) in [
             (tola_input::InputScope::Online, None),
             (
                 tola_input::InputScope::Offline,
-                Some(directory.path().to_path_buf()),
+                Some(dir.path().to_path_buf()),
             ),
-            (
-                tola_input::InputScope::Pure,
-                Some(directory.path().to_path_buf()),
-            ),
+            (tola_input::InputScope::Pure, Some(dir.path().to_path_buf())),
         ] {
             let mut index = PublishedIndex {
                 packages: parse_index(index_bytes).unwrap(),
@@ -145,13 +138,9 @@ mod tests {
                 #[cfg(feature = "network")]
                 started: false,
             };
-            let resources = BuildResources::new().with_input_scope(scope);
-            let locations = PackageLocations::from_absolute_roots(None, cache).unwrap();
-            assert!(
-                index
-                    .published_packages(&resources, &locations, false)
-                    .is_empty()
-            );
+            let res = BuildResources::new().with_input_scope(scope);
+            let locs = PackageLocations::from_absolute_roots(None, cache).unwrap();
+            assert!(index.published_packages(&res, &locs, false).is_empty());
         }
     }
 
@@ -165,9 +154,9 @@ mod tests {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             listener.set_nonblocking(true).unwrap();
             let url = format!("http://{}/index.json", listener.local_addr().unwrap());
-            let resources = BuildResources::new().with_input_scope(scope);
+            let res = BuildResources::new().with_input_scope(scope);
             let mut index = PublishedIndex::default();
-            index.poll(&resources, &url);
+            index.poll(&res, &url);
             drop(index);
             assert_eq!(
                 listener.accept().unwrap_err().kind(),

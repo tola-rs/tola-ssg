@@ -264,22 +264,22 @@ fn emit(help: String) -> ExitCode {
 mod tests {
     use super::*;
 
-    fn args(values: &[&str]) -> Vec<OsString> {
-        values.iter().map(OsString::from).collect()
+    fn args(vals: &[&str]) -> Vec<OsString> {
+        vals.iter().map(OsString::from).collect()
     }
 
     #[test]
-    fn help_reads_the_query_config_and_scope() {
+    fn help_reads_query_config_scope() {
         let matches =
             help_matches(&args(&["tola", "query", "-Csite.toml", "--pure", "-h"])).unwrap();
-        let request = site_help(&matches).unwrap();
-        assert_eq!(request.page, Page::Queries);
-        assert_eq!(request.config, Some(PathBuf::from("site.toml")));
-        assert_eq!(request.scope, InputScope::Pure);
+        let req = site_help(&matches).unwrap();
+        assert_eq!(req.page, Page::Queries);
+        assert_eq!(req.config, Some(PathBuf::from("site.toml")));
+        assert_eq!(req.scope, InputScope::Pure);
     }
 
     #[test]
-    fn nu_help_respects_the_script_entry() {
+    fn nu_help_forwards_script_entry() {
         for flag in ["-h", "--help"] {
             let native = Cli::command()
                 .try_get_matches_from(["tola", "nu", "-C", "site.toml", flag])
@@ -287,7 +287,7 @@ mod tests {
             assert_eq!(native.kind(), clap::error::ErrorKind::DisplayHelp);
             let matches = help_matches(&args(&["tola", "nu", "-C", "site.toml", flag])).unwrap();
             assert_eq!(
-                site_help(&matches).map(|request| request.page),
+                site_help(&matches).map(|r| r.page),
                 (flag == "--help").then_some(Page::Nu)
             );
 
@@ -302,8 +302,8 @@ mod tests {
                     "--color",
                     "never",
                 ];
-                let command = Cli::command().try_get_matches_from(argv).unwrap();
-                let nu = command.subcommand_matches("nu").unwrap();
+                let cmd = Cli::command().try_get_matches_from(argv).unwrap();
+                let nu = cmd.subcommand_matches("nu").unwrap();
                 assert_eq!(
                     nu.get_many::<OsString>("invocation")
                         .unwrap()

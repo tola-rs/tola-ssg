@@ -1,4 +1,4 @@
-//! Normalized SVG serialization and the reference spans retained for inline rendering.
+//! Normalized SVG serialization and local-reference byte spans.
 
 use std::{
     fmt::{self, Write},
@@ -7,132 +7,114 @@ use std::{
 
 use super::{properties, properties::ReferenceKind, SvgChild, SvgDocument};
 
-const SVG_NAMESPACE_ATTRIBUTE: &str = " xmlns=\"http://www.w3.org/2000/svg\"";
+const SVG_NS_ATTR: &str = " xmlns=\"http://www.w3.org/2000/svg\"";
 
-/// The escaped-attribute byte range of one reference-bearing value, retained so inline
-/// prefixing need not reparse the serialized SVG.
+/// Byte range of a reference-bearing attribute value in the serialized SVG.
 #[derive(Debug)]
 pub(in crate::svg) struct ReferenceSpan {
     pub(in crate::svg) range: Range<usize>,
     kind: ReferenceKind,
-    value: String,
+    val: String,
 }
 
 impl ReferenceSpan {
-    pub(in crate::svg) fn write_prefixed(
-        &self,
-        prefix: &str,
-        output: &mut impl Write,
-    ) -> fmt::Result {
-        properties::prefix_references(self.kind, &self.value, prefix, &mut XmlEscape(output))
+    pub(in crate::svg) fn write_prefixed(&self, prefix: &str, out: &mut impl Write) -> fmt::Result {
+        properties::prefix_references(self.kind, &self.val, prefix, &mut XmlEscape(out))
     }
 }
 
-// Both the size preflight and final output use exactly the same escaping path.
 struct XmlEscape<'a, W>(&'a mut W);
 
 impl<W: Write> Write for XmlEscape<'_, W> {
-    fn write_str(&mut self, source: &str) -> fmt::Result {
+    fn write_str(&mut self, src: &str) -> fmt::Result {
         let mut start = 0;
-        for (index, character) in source.char_indices() {
-            let Some(escaped) = escaped_xml_char(character) else {
+        for (idx, ch) in src.char_indices() {
+            let Some(esc) = escaped_xml_char(ch) else {
                 continue;
             };
-            self.0.write_str(&source[start..index])?;
-            self.0.write_str(escaped)?;
-            start = index + character.len_utf8();
+            self.0.write_str(&src[start..idx])?;
+            self.0.write_str(esc)?;
+            start = idx + ch.len_utf8();
         }
-        self.0.write_str(&source[start..])
+        self.0.write_str(&src[start..])
     }
 }
 
 impl SvgDocument {
-    /// Exact normalized size, used to reserve collection storage before serialization.
     pub(crate) fn serialized_len(&self) -> usize {
         self.elements
             .iter()
             .enumerate()
-            .map(|(index, element)| {
-                let opening = 1
-                    + element.name.len()
-                    + if index == 0 {
-                        SVG_NAMESPACE_ATTRIBUTE.len()
-                    } else {
-                        0
-                    };
-                let attributes = element
-                    .attributes
+            .map(|(idx, el)| {
+                let open = 1 + el.name.len() + if idx == 0 { SVG_NS_ATTR.len() } else { 0 };
+                let attrs = el
+                    .attrs
                     .iter()
-                    .map(|(name, value)| 4 + name.len() + escaped_len(value))
+                    .map(|(name, val)| 4 + name.len() + escaped_len(val))
                     .sum::<usize>();
-                let closing = if element.children.is_empty() {
+                let close = if el.children.is_empty() {
                     2
                 } else {
-                    4 + element.name.len()
+                    4 + el.name.len()
                 };
-                let text = element
+                let text = el
                     .children
                     .iter()
                     .map(|child| match child {
-                        SvgChild::Text(text) => escaped_len(text),
+                        SvgChild::Text(t) => escaped_len(t),
                         SvgChild::Element(_) => 0,
                     })
                     .sum::<usize>();
-                opening + attributes + closing + text
+                open + attrs + close + text
             })
             .sum()
     }
 
-    pub(super) fn write(&self, output: &mut String, references: &mut Vec<ReferenceSpan>) {
-        self.write_element(0, output, references);
+    pub(super) fn write(&self, out: &mut String, refs: &mut Vec<ReferenceSpan>) {
+        self.write_element(0, out, refs);
     }
 
-    fn write_element(
-        &self,
-        index: usize,
-        output: &mut String,
-        references: &mut Vec<ReferenceSpan>,
-    ) {
-        let element = &self.elements[index];
-        output.push('<');
-        output.push_str(&element.name);
-        if index == 0 {
-            output.push_str(SVG_NAMESPACE_ATTRIBUTE);
+    fn write_element(&self, idx: usize, out: &mut String, refs: &mut Vec<ReferenceSpan>) {
+        let el = &self.elements[idx];
+        out.push('<');
+        out.push_str(&el.name);
+        if idx == 0 {
+            out.push_str(SVG_NS_ATTR);
         }
-        for (attribute, value) in &element.attributes {
-            output.push(' ');
-            output.push_str(attribute);
-            output.push_str("=\"");
-            let start = output.len();
-            escape_xml(value, output);
+        for (attr, val) in &el.attrs {
+            out.push(' ');
+            out.push_str(attr);
+            out.push_str("=\"");
+            let start = out.len();
+            escape_xml(val, out);
             if let Some(kind) =
-                properties::reference_attribute(attribute).filter(|kind| kind.has_references(value))
+                properties::reference_attribute(attr).filter(|kind| kind.has_references(val))
             {
-                references.push(ReferenceSpan {
-                    range: start..output.len(),
+                refs.push(ReferenceSpan {
+                    range: start..out.len(),
                     kind,
-                    value: value.clone(),
+                    val: val.clone(),
                 });
             }
-            output.push('"');
+            out.push('"');
         }
-        if element.children.is_empty() {
-            output.push_str("/>");
+        if el.children.is_empty() {
+            out.push_str("/>");
             return;
         }
-        output.push('>');
-        for child in &element.children {
+        out.push('>');
+        for child in &el.children {
             match child {
-                SvgChild::Element(child) => self.write_element(*child, output, references),
-                SvgChild::Text(text) => escape_xml(text, output),
+                SvgChild::Element(c) => self.write_element(*c, out, refs),
+                SvgChild::Text(t) => escape_xml(t, out),
             }
         }
-        let _ = write!(output, "</{}>", element.name);
+        let _ = write!(out, "</{}>", el.name);
     }
 }
 
-fn escaped_xml_char(character: char) -> Option<&'static str> {
-    match character {
+fn escaped_xml_char(ch: char) -> Option<&'static str> {
+    match ch {
         '&' => Some("&amp;"),
         '<' => Some("&lt;"),
         '>' => Some("&gt;"),
@@ -144,19 +126,18 @@ fn escaped_xml_char(character: char) -> Option<&'static str> {
     }
 }
 
-fn escaped_len(source: &str) -> usize {
-    source
-        .chars()
-        .map(|character| escaped_xml_char(character).map_or(character.len_utf8(), str::len))
+fn escaped_len(src: &str) -> usize {
+    src.chars()
+        .map(|ch| escaped_xml_char(ch).map_or(ch.len_utf8(), str::len))
         .sum()
 }
 
-fn escape_xml(source: &str, output: &mut String) {
-    for character in source.chars() {
-        if let Some(escaped) = escaped_xml_char(character) {
-            output.push_str(escaped);
+fn escape_xml(src: &str, out: &mut String) {
+    for ch in src.chars() {
+        if let Some(esc) = escaped_xml_char(ch) {
+            out.push_str(esc);
         } else {
-            output.push(character);
+            out.push(ch);
         }
     }
 }

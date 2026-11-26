@@ -1,4 +1,4 @@
-//! The transient import tree one SVG document is read into, and the validation it passes.
+//! Transient SVG import tree and structural/reference validation.
 
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -14,9 +14,9 @@ use paint::validate_rendered;
 use properties::{parse_style, validate_attribute, ReferenceKind, StyleDeclaration};
 pub(super) use serialize::ReferenceSpan;
 
-const SVG_NAMESPACE: &str = "http://www.w3.org/2000/svg";
-const XLINK_NAMESPACE: &str = "http://www.w3.org/1999/xlink";
-const XML_NAMESPACE: &str = "http://www.w3.org/XML/1998/namespace";
+const SVG_NS: &str = "http://www.w3.org/2000/svg";
+const XLINK_NS: &str = "http://www.w3.org/1999/xlink";
+const XML_NS: &str = "http://www.w3.org/XML/1998/namespace";
 const MAX_SVG_NODES: u32 = 131_072;
 const MAX_SVG_DEPTH: usize = 128;
 const MAX_XML_NAME_BYTES: usize = 128;
@@ -30,22 +30,22 @@ enum SvgChild {
 #[derive(Debug)]
 struct SvgElement {
     name: String,
-    attributes: BTreeMap<String, String>,
-    declarations: BTreeMap<String, StyleDeclaration>,
+    attrs: BTreeMap<String, String>,
+    decls: BTreeMap<String, StyleDeclaration>,
     paint: paint::SpecifiedPaint,
     children: Vec<SvgChild>,
 }
 
 impl SvgElement {
-    fn property(&self, name: &str) -> Option<&str> {
-        self.declarations
+    fn prop(&self, name: &str) -> Option<&str> {
+        self.decls
             .get(name)
-            .map(|declaration| declaration.value.as_str())
-            .or_else(|| self.attributes.get(name).map(String::as_str))
+            .map(|decl| decl.value.as_str())
+            .or_else(|| self.attrs.get(name).map(String::as_str))
             .map(str::trim)
     }
 
-    fn is_resource_or_description(&self) -> bool {
+    fn is_resource_or_desc(&self) -> bool {
         matches!(
             self.name.as_str(),
             "defs"
@@ -62,24 +62,75 @@ impl SvgElement {
     }
 }
 
+fn is_allowed_element(name: &str) -> bool {
+    matches!(
+        name,
+        "svg"
+            | "g"
+            | "defs"
+            | "path"
+            | "rect"
+            | "circle"
+            | "ellipse"
+            | "line"
+            | "polyline"
+            | "polygon"
+            | "linearGradient"
+            | "radialGradient"
+            | "stop"
+            | "clipPath"
+            | "mask"
+            | "use"
+            | "symbol"
+            | "pattern"
+            | "title"
+            | "desc"
+            | "filter"
+            | "feBlend"
+            | "feColorMatrix"
+            | "feComponentTransfer"
+            | "feComposite"
+            | "feConvolveMatrix"
+            | "feDiffuseLighting"
+            | "feDisplacementMap"
+            | "feDistantLight"
+            | "feDropShadow"
+            | "feFlood"
+            | "feFuncA"
+            | "feFuncB"
+            | "feFuncG"
+            | "feFuncR"
+            | "feGaussianBlur"
+            | "feMerge"
+            | "feMergeNode"
+            | "feMorphology"
+            | "feOffset"
+            | "fePointLight"
+            | "feSpecularLighting"
+            | "feSpotLight"
+            | "feTile"
+            | "feTurbulence"
+    )
+}
+
 #[derive(Debug)]
 pub(crate) struct SvgDocument {
     elements: Vec<SvgElement>,
-    identifiers: BTreeMap<String, usize>,
+    ids: BTreeMap<String, usize>,
 }
 
 impl SvgDocument {
     pub(crate) fn from_iconify(
         body: &str,
-        view_box: ViewBox,
+        vb: ViewBox,
         transform: &str,
     ) -> Result<Self, InvalidSvg> {
-        let mut source = format!(
-            r#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="{}" height="{}" viewBox="{view_box}">"#,
-            view_box.width(),
-            view_box.height(),
+        let mut src = format!(
+            r#"<svg xmlns="{SVG_NS}" xmlns:xlink="{XLINK_NS}" width="{}" height="{}" viewBox="{vb}">"#,
+            vb.width(),
+            vb.height(),
         );
-        if source
+        if src
             .len()
             .saturating_add(body.len())
             .saturating_add("</svg>".len())
@@ -87,94 +138,85 @@ impl SvgDocument {
         {
             return Err(InvalidSvg::limit());
         }
-        source.reserve_exact(body.len() + "</svg>".len());
-        source.push_str(body);
-        source.push_str("</svg>");
-        let mut document = SvgDocument::parse(&source)?;
+        src.reserve_exact(body.len() + "</svg>".len());
+        src.push_str(body);
+        src.push_str("</svg>");
+        let mut doc = SvgDocument::parse(&src)?;
         if !transform.is_empty() {
             validate_attribute("g", "transform", transform)?;
-            let mut definitions = Vec::new();
-            let mut graphics = Vec::new();
-            for child in std::mem::take(&mut document.elements[0].children) {
-                if matches!(&child, SvgChild::Element(index) if matches!(document.elements[*index].name.as_str(), "defs" | "title" | "desc"))
+            let mut defs = Vec::new();
+            let mut gfx = Vec::new();
+            for child in std::mem::take(&mut doc.elements[0].children) {
+                if matches!(&child, SvgChild::Element(idx) if matches!(doc.elements[*idx].name.as_str(), "defs" | "title" | "desc"))
                 {
-                    definitions.push(child);
+                    defs.push(child);
                 } else {
-                    graphics.push(child);
+                    gfx.push(child);
                 }
             }
-            let wrapper = document.elements.len();
-            document.elements.push(SvgElement {
+            let wrapper = doc.elements.len();
+            doc.elements.push(SvgElement {
                 name: "g".to_owned(),
-                attributes: BTreeMap::from([("transform".to_owned(), transform.to_owned())]),
-                declarations: BTreeMap::new(),
+                attrs: BTreeMap::from([("transform".to_owned(), transform.to_owned())]),
+                decls: BTreeMap::new(),
                 paint: paint::SpecifiedPaint::default(),
-                children: graphics,
+                children: gfx,
             });
-            definitions.push(SvgChild::Element(wrapper));
-            document.elements[0].children = definitions;
+            defs.push(SvgChild::Element(wrapper));
+            doc.elements[0].children = defs;
         }
-        Ok(document)
+        Ok(doc)
     }
 
     pub(crate) fn into_icon(self, serialized_len: usize) -> Result<SvgIcon, InvalidSvg> {
-        let document = self;
-        let (view_box, aspect_ratio) = document.geometry()?;
-        document.validate_references()?;
-        let paint = validate_rendered(&document)?;
+        let (vb, aspect_ratio) = self.geometry()?;
+        self.validate_references()?;
+        let paint = validate_rendered(&self)?;
         if serialized_len > MAX_SVG_BYTES {
             return Err(InvalidSvg::limit());
         }
         let mut svg = String::with_capacity(serialized_len);
-        let mut references = Vec::new();
-        document.write(&mut svg, &mut references);
+        let mut refs = Vec::new();
+        self.write(&mut svg, &mut refs);
         Ok(SvgIcon(Arc::new(ValidatedSvg {
             svg: svg.into_boxed_str(),
-            view_box,
+            vb,
             aspect_ratio,
             paint,
-            longest_id: document
-                .identifiers
-                .keys()
-                .map(String::len)
-                .max()
-                .unwrap_or(0),
-            references: references.into_boxed_slice(),
+            longest_id: self.ids.keys().map(String::len).max().unwrap_or(0),
+            refs: refs.into_boxed_slice(),
         })))
     }
 
-    pub(super) fn parse(source: &str) -> Result<Self, InvalidSvg> {
+    pub(super) fn parse(src: &str) -> Result<Self, InvalidSvg> {
         let xml = roxmltree::Document::parse_with_options(
-            source,
+            src,
             roxmltree::ParsingOptions {
                 nodes_limit: MAX_SVG_NODES,
                 ..Default::default()
             },
         )
-        .map_err(|error| InvalidSvg::Xml {
-            line: error.pos().row,
-            column: error.pos().col,
+        .map_err(|err| InvalidSvg::Xml {
+            line: err.pos().row,
+            column: err.pos().col,
         })?;
         let root = xml.root_element();
         if root.tag_name().name() != "svg"
-            || root
-                .tag_name()
-                .namespace()
-                .is_some_and(|namespace| namespace != SVG_NAMESPACE)
+            || root.tag_name().namespace().is_some_and(|ns| ns != SVG_NS)
         {
             return Err(InvalidSvg::Root);
         }
-        if xml.descendants().any(|node| node.is_pi()) {
+        if xml.descendants().any(|n| n.is_pi()) {
             return Err(InvalidSvg::Element {
                 element: "processing-instruction".to_owned(),
             });
         }
-        let mut document = Self {
+        let mut doc = Self {
             elements: Vec::new(),
-            identifiers: BTreeMap::new(),
+            ids: BTreeMap::new(),
         };
-        document.import_element(root, 0, root.tag_name().namespace().is_none())?;
-        Ok(document)
+        doc.import_element(root, 0, root.tag_name().namespace().is_none())?;
+        Ok(doc)
     }
 
     fn import_element(
@@ -193,74 +235,24 @@ impl SvgDocument {
         if node
             .tag_name()
             .namespace()
-            .map_or(!root_unqualified, |namespace| namespace != SVG_NAMESPACE)
-            || !matches!(
-                name,
-                "svg"
-                    | "g"
-                    | "defs"
-                    | "path"
-                    | "rect"
-                    | "circle"
-                    | "ellipse"
-                    | "line"
-                    | "polyline"
-                    | "polygon"
-                    | "linearGradient"
-                    | "radialGradient"
-                    | "stop"
-                    | "clipPath"
-                    | "mask"
-                    | "use"
-                    | "symbol"
-                    | "pattern"
-                    | "title"
-                    | "desc"
-                    | "filter"
-                    | "feBlend"
-                    | "feColorMatrix"
-                    | "feComponentTransfer"
-                    | "feComposite"
-                    | "feConvolveMatrix"
-                    | "feDiffuseLighting"
-                    | "feDisplacementMap"
-                    | "feDistantLight"
-                    | "feDropShadow"
-                    | "feFlood"
-                    | "feFuncA"
-                    | "feFuncB"
-                    | "feFuncG"
-                    | "feFuncR"
-                    | "feGaussianBlur"
-                    | "feMerge"
-                    | "feMergeNode"
-                    | "feMorphology"
-                    | "feOffset"
-                    | "fePointLight"
-                    | "feSpecularLighting"
-                    | "feSpotLight"
-                    | "feTile"
-                    | "feTurbulence"
-            )
+            .map_or(!root_unqualified, |ns| ns != SVG_NS)
+            || !is_allowed_element(name)
         {
             return Err(InvalidSvg::Element {
                 element: name.to_owned(),
             });
         }
-        let index = self.elements.len();
-        let mut attributes = BTreeMap::new();
-        let mut declarations = BTreeMap::new();
-        for attribute in node.attributes() {
-            if attribute.name().len() > MAX_XML_NAME_BYTES {
+        let idx = self.elements.len();
+        let mut attrs = BTreeMap::new();
+        let mut decls = BTreeMap::new();
+        for attr in node.attributes() {
+            if attr.name().len() > MAX_XML_NAME_BYTES {
                 return Err(InvalidSvg::limit());
             }
-            let attribute_name = match attribute.namespace() {
-                None => attribute.name().to_owned(),
-                Some(XLINK_NAMESPACE) if attribute.name() == "href" => {
-                    if node
-                        .attribute("href")
-                        .is_some_and(|href| href != attribute.value())
-                    {
+            let attr_name = match attr.namespace() {
+                None => attr.name().to_owned(),
+                Some(XLINK_NS) if attr.name() == "href" => {
+                    if node.attribute("href").is_some_and(|h| h != attr.value()) {
                         return Err(InvalidSvg::Value {
                             element: name.to_owned(),
                             attribute: "href".to_owned(),
@@ -268,37 +260,37 @@ impl SvgDocument {
                     }
                     "href".to_owned()
                 }
-                Some(XML_NAMESPACE) if matches!(attribute.name(), "space" | "lang") => {
-                    format!("xml:{}", attribute.name())
+                Some(XML_NS) if matches!(attr.name(), "space" | "lang") => {
+                    format!("xml:{}", attr.name())
                 }
                 _ => {
                     return Err(InvalidSvg::Attribute {
                         element: name.to_owned(),
-                        attribute: attribute.name().to_owned(),
+                        attribute: attr.name().to_owned(),
                     });
                 }
             };
-            let value = properties::normalize_property(&attribute_name, attribute.value());
-            validate_attribute(name, &attribute_name, &value)?;
-            if attribute_name == "style" {
-                declarations = parse_style(name, attribute.value())?;
+            let val = properties::normalize_property(&attr_name, attr.value());
+            validate_attribute(name, &attr_name, &val)?;
+            if attr_name == "style" {
+                decls = parse_style(name, attr.value())?;
             }
-            if attribute_name == "id" {
-                let id = attribute.value();
-                if self.identifiers.insert(id.to_owned(), index).is_some() {
+            if attr_name == "id" {
+                let id = attr.value();
+                if self.ids.insert(id.to_owned(), idx).is_some() {
                     return Err(InvalidSvg::DuplicateId { id: id.to_owned() });
                 }
             }
-            attributes.insert(attribute_name, value);
+            attrs.insert(attr_name, val);
         }
         self.elements.push(SvgElement {
             name: name.to_owned(),
-            attributes,
-            declarations,
+            attrs,
+            decls,
             paint: paint::SpecifiedPaint::default(),
             children: Vec::new(),
         });
-        self.elements[index].paint = paint::SpecifiedPaint::for_element(&self.elements[index]);
+        self.elements[idx].paint = paint::SpecifiedPaint::for_element(&self.elements[idx]);
         let mut children = Vec::new();
         for child in node.children() {
             if child.is_element() {
@@ -319,77 +311,72 @@ impl SvgDocument {
                 }
             }
         }
-        self.elements[index].children = children;
-        Ok(index)
+        self.elements[idx].children = children;
+        Ok(idx)
     }
 
     fn geometry(&self) -> Result<(ViewBox, f64), InvalidSvg> {
         let root = &self.elements[0];
-        let explicit_width = root
-            .attributes
+        let w = root
+            .attrs
             .get("width")
-            .map(|width| geometry::absolute_dimension(width))
+            .map(|v| geometry::absolute_dimension(v))
             .transpose()?;
-        let explicit_height = root
-            .attributes
+        let h = root
+            .attrs
             .get("height")
-            .map(|height| geometry::absolute_dimension(height))
+            .map(|v| geometry::absolute_dimension(v))
             .transpose()?;
-        let view_box = if let Some(value) = root.attributes.get("viewBox") {
-            geometry::parse_view_box(value)?
+        let vb = if let Some(val) = root.attrs.get("viewBox") {
+            geometry::parse_view_box(val)?
         } else {
             ViewBox::new(
                 0.0,
                 0.0,
-                explicit_width.ok_or(InvalidSvg::Geometry)?,
-                explicit_height.ok_or(InvalidSvg::Geometry)?,
+                w.ok_or(InvalidSvg::Geometry)?,
+                h.ok_or(InvalidSvg::Geometry)?,
             )?
         };
-        let aspect_ratio = match (explicit_width, explicit_height) {
-            (Some(width), Some(height)) => ViewBox::new(0.0, 0.0, width, height)?.aspect_ratio(),
-            _ => view_box.aspect_ratio(),
+        let aspect_ratio = match (w, h) {
+            (Some(w), Some(h)) => ViewBox::new(0.0, 0.0, w, h)?.aspect_ratio(),
+            _ => vb.aspect_ratio(),
         };
-        Ok((view_box, aspect_ratio))
+        Ok((vb, aspect_ratio))
     }
 
     fn validate_references(&self) -> Result<(), InvalidSvg> {
         let mut edges = vec![Vec::new(); self.elements.len()];
-        for (index, element) in self.elements.iter().enumerate() {
-            edges[index].extend(element.children.iter().filter_map(|child| match child {
-                SvgChild::Element(child) => Some(*child),
+        for (idx, el) in self.elements.iter().enumerate() {
+            edges[idx].extend(el.children.iter().filter_map(|child| match child {
+                SvgChild::Element(c) => Some(*c),
                 SvgChild::Text(_) => None,
             }));
-            for (attribute, value) in &element.attributes {
-                // Validate effective declarations, but retain the original style for rendering.
-                if attribute == "style" {
+            for (attr, val) in &el.attrs {
+                // Validate parsed declarations, while keeping raw `style` text for rendering.
+                if attr == "style" {
                     continue;
                 }
-                self.add_references(index, attribute, value, &mut edges)?;
+                self.add_references(idx, attr, val, &mut edges)?;
             }
-            for (property, declaration) in &element.declarations {
-                self.add_references(index, property, &declaration.value, &mut edges)?;
+            for (prop, decl) in &el.decls {
+                self.add_references(idx, prop, &decl.value, &mut edges)?;
             }
         }
         let mut visits = vec![0_u8; self.elements.len()];
-        let mut expansion_depth = vec![0_usize; self.elements.len()];
+        let mut depth = vec![0_usize; self.elements.len()];
         for start in 0..self.elements.len() {
             if visits[start] != 0 {
                 continue;
             }
             visits[start] = 1;
             let mut stack = vec![(start, 0)];
-            while let Some((index, next)) = stack.last_mut() {
-                let Some(&target) = edges[*index].get(*next) else {
-                    expansion_depth[*index] = edges[*index]
-                        .iter()
-                        .map(|target| expansion_depth[*target])
-                        .max()
-                        .unwrap_or(0)
-                        + 1;
-                    if expansion_depth[*index] > MAX_SVG_DEPTH {
+            while let Some((idx, next)) = stack.last_mut() {
+                let Some(&target) = edges[*idx].get(*next) else {
+                    depth[*idx] = edges[*idx].iter().map(|t| depth[*t]).max().unwrap_or(0) + 1;
+                    if depth[*idx] > MAX_SVG_DEPTH {
                         return Err(InvalidSvg::limit());
                     }
-                    visits[*index] = 2;
+                    visits[*idx] = 2;
                     stack.pop();
                     continue;
                 };
@@ -412,57 +399,57 @@ impl SvgDocument {
 
     fn add_references(
         &self,
-        index: usize,
-        attribute: &str,
-        value: &str,
+        idx: usize,
+        attr: &str,
+        val: &str,
         edges: &mut [Vec<usize>],
     ) -> Result<(), InvalidSvg> {
-        let Some(kind) = properties::reference_attribute(attribute) else {
+        let Some(kind) = properties::reference_attribute(attr) else {
             return Ok(());
         };
-        let references = match kind {
+        let refs = match kind {
             ReferenceKind::Id => return Ok(()),
-            ReferenceKind::Fragment => vec![properties::local_reference(value)?],
+            ReferenceKind::Fragment => vec![properties::local_reference(val)?],
             ReferenceKind::IdRefs => {
-                for id in value.split_ascii_whitespace() {
-                    if !self.identifiers.contains_key(id) {
+                for id in val.split_ascii_whitespace() {
+                    if !self.ids.contains_key(id) {
                         return Err(InvalidSvg::MissingReference { id: id.to_owned() });
                     }
                 }
                 return Ok(());
             }
-            ReferenceKind::Urls => properties::local_urls(value)?,
+            ReferenceKind::Urls => properties::local_urls(val)?,
         };
-        for id in references {
+        for id in refs {
             let &target = self
-                .identifiers
+                .ids
                 .get(&id)
                 .ok_or_else(|| InvalidSvg::MissingReference { id: id.clone() })?;
             let target_name = self.elements[target].name.as_str();
-            let compatible = match attribute {
+            let compat = match attr {
                 "fill" | "stroke" => {
                     matches!(target_name, "linearGradient" | "radialGradient" | "pattern")
                 }
                 "clip-path" => target_name == "clipPath",
                 "mask" => target_name == "mask",
                 "filter" => target_name == "filter",
-                "href" => match self.elements[index].name.as_str() {
+                "href" => match self.elements[idx].name.as_str() {
                     "linearGradient" | "radialGradient" => {
                         matches!(target_name, "linearGradient" | "radialGradient")
                     }
                     "pattern" => target_name == "pattern",
-                    "use" => !self.elements[target].is_resource_or_description(),
+                    "use" => !self.elements[target].is_resource_or_desc(),
                     _ => false,
                 },
                 _ => true,
             };
-            if !compatible {
+            if !compat {
                 return Err(InvalidSvg::ReferenceTarget {
-                    attribute: attribute.to_owned(),
+                    attribute: attr.to_owned(),
                     id,
                 });
             }
-            edges[index].push(target);
+            edges[idx].push(target);
         }
         Ok(())
     }

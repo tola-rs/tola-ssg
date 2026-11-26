@@ -47,15 +47,15 @@ type ReloadClients<S = tokio::net::TcpStream> = StreamMap<SocketAddr, ReloadClie
 #[derive(Clone)]
 pub(crate) struct ReloadEndpoint {
     port: u16,
-    session_token: std::sync::Arc<str>,
-    generation: std::sync::Arc<str>,
+    session_token: Arc<str>,
+    generation: Arc<str>,
 }
 
 impl ReloadEndpoint {
     pub(crate) fn new(
         port: u16,
-        session_token: impl Into<std::sync::Arc<str>>,
-        generation: impl Into<std::sync::Arc<str>>,
+        session_token: impl Into<Arc<str>>,
+        generation: impl Into<Arc<str>>,
     ) -> Self {
         Self {
             port,
@@ -84,14 +84,21 @@ enum RevisionChange {
     Resync(RevisionId),
 }
 
+impl RevisionChange {
+    fn from_diff(diff: RevisionDiff) -> Self {
+        if diff.is_unchanged() {
+            Self::Unchanged
+        } else {
+            Self::Changed(diff)
+        }
+    }
+}
+
 #[derive(Default)]
 struct PendingUpdates {
     revision: Option<RevisionChange>,
-    /// The newest build round's counts, replacing the retained ones.
     counts: Option<DiagnosticCounts>,
-    /// The newest failed after-publish round, replacing the retained failure.
     consumer: Option<ConsumerFailure>,
-    /// The newest guard's rebuild state, replacing the retained one.
     rebuilding: Option<bool>,
     shutdown: bool,
 }
@@ -101,19 +108,19 @@ impl PendingUpdates {
         let next = RevisionChange::from_diff(diff);
         self.revision = Some(match (self.revision.take(), next) {
             (None, next) | (Some(RevisionChange::Unchanged), next) => next,
-            (Some(previous @ RevisionChange::Changed(_)), RevisionChange::Unchanged)
-            | (Some(previous @ RevisionChange::Resync(_)), RevisionChange::Unchanged) => previous,
-            (Some(RevisionChange::Changed(previous)), RevisionChange::Changed(next)) => {
+            (Some(prev @ RevisionChange::Changed(_)), RevisionChange::Unchanged)
+            | (Some(prev @ RevisionChange::Resync(_)), RevisionChange::Unchanged) => prev,
+            (Some(RevisionChange::Changed(prev)), RevisionChange::Changed(next)) => {
                 assert_eq!(
-                    previous.to(),
+                    prev.to(),
                     next.from(),
                     "queued revision diffs must be contiguous"
                 );
                 RevisionChange::Resync(next.to().clone())
             }
-            (Some(RevisionChange::Resync(previous)), RevisionChange::Changed(next)) => {
+            (Some(RevisionChange::Resync(prev)), RevisionChange::Changed(next)) => {
                 assert_eq!(
-                    &previous,
+                    &prev,
                     next.from(),
                     "queued revision diffs must be contiguous"
                 );
@@ -138,16 +145,12 @@ impl PendingUpdates {
     }
 }
 
-/// The failure one after-publish round reported for the revision it consumed.
 struct ConsumerFailure {
-    /// The installed revision the round consumed; weak, because a superseded site must not be
-    /// kept alive by a failure about it.
+    /// Weak so a superseded site is not kept alive by its failure count.
     revision: Weak<SiteRevision>,
     counts: DiagnosticCounts,
 }
 
-/// What a browser indicator counts: the newest build's diagnostics plus the newest
-/// after-publish failure, which counts only while its revision stays installed.
 #[derive(Default)]
 struct IndicatorCounts {
     build: DiagnosticCounts,
@@ -163,13 +166,10 @@ impl IndicatorCounts {
         self.consumer = Some(failure);
     }
 
-    /// The counts to show for the installed `revision`; a replaced site's failure no longer
-    /// counts.
-    fn for_revision(&self, revision: Option<&Arc<SiteRevision>>) -> DiagnosticCounts {
+    fn for_revision(&self, rev: Option<&Arc<SiteRevision>>) -> DiagnosticCounts {
         let mut counts = self.build;
         if let Some(failure) = &self.consumer
-            && revision
-                .is_some_and(|revision| Weak::ptr_eq(&failure.revision, &Arc::downgrade(revision)))
+            && rev.is_some_and(|rev| Weak::ptr_eq(&failure.revision, &Arc::downgrade(rev)))
         {
             counts.merge(failure.counts);
         }
@@ -188,16 +188,11 @@ struct ReloadUpdateMailbox {
 pub(crate) struct ReloadDiagnostics(Arc<ReloadUpdateMailbox>);
 
 impl ReloadDiagnostics {
-    /// Report one round's failure for the revision it consumed.
-    pub(crate) fn after_publish_failed(
-        &self,
-        revision: &Arc<SiteRevision>,
-        diagnostic: &Diagnostic,
-    ) {
+    pub(crate) fn after_publish_failed(&self, rev: &Arc<SiteRevision>, diag: &Diagnostic) {
         let mut counts = DiagnosticCounts::default();
-        counts.count(diagnostic);
+        counts.count(diag);
         self.0.consumer_failed(ConsumerFailure {
-            revision: Arc::downgrade(revision),
+            revision: Arc::downgrade(rev),
             counts,
         });
     }
@@ -214,9 +209,9 @@ impl ReloadUpdateMailbox {
         self.available.notify_one();
     }
 
-    fn first_revision_ready(&self, revision: RevisionId, counts: DiagnosticCounts) {
+    fn first_revision_ready(&self, rev: RevisionId, counts: DiagnosticCounts) {
         self.publish(|pending| {
-            pending.revision = Some(RevisionChange::Resync(revision));
+            pending.revision = Some(RevisionChange::Resync(rev));
             pending.counts = Some(counts);
         });
     }
@@ -250,16 +245,6 @@ impl ReloadUpdateMailbox {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take()
-    }
-}
-
-impl RevisionChange {
-    fn from_diff(diff: RevisionDiff) -> Self {
-        if diff.is_unchanged() {
-            Self::Unchanged
-        } else {
-            Self::Changed(diff)
-        }
     }
 }
 
@@ -311,19 +296,18 @@ impl ReloadTransport {
         ReloadDiagnostics(Arc::clone(&self.updates))
     }
 
-    pub(crate) fn first_revision_ready(&self, revision: RevisionId, diagnostics: &[Diagnostic]) {
+    pub(crate) fn first_revision_ready(&self, rev: RevisionId, diags: &[Diagnostic]) {
         self.updates
-            .first_revision_ready(revision, DiagnosticCounts::of(diagnostics));
+            .first_revision_ready(rev, DiagnosticCounts::of(diags));
     }
 
-    pub(crate) fn revision_replaced(&self, diff: RevisionDiff, diagnostics: &[Diagnostic]) {
+    pub(crate) fn revision_replaced(&self, diff: RevisionDiff, diags: &[Diagnostic]) {
         self.updates
-            .revision_replaced(diff, DiagnosticCounts::of(diagnostics));
+            .revision_replaced(diff, DiagnosticCounts::of(diags));
     }
 
-    pub(crate) fn replace_diagnostics(&self, diagnostics: &[Diagnostic]) {
-        self.updates
-            .counts_replaced(DiagnosticCounts::of(diagnostics));
+    pub(crate) fn replace_diagnostics(&self, diags: &[Diagnostic]) {
+        self.updates.counts_replaced(DiagnosticCounts::of(diags));
     }
 
     pub(crate) fn begin_rebuild(&self) -> RebuildStatusGuard {
@@ -373,24 +357,17 @@ async fn run(
             return;
         }
         if let Some(change) = pending.revision {
-            let current_site = sites
+            let cur_site = sites
                 .revision()
                 .expect("reload transport retains a current site");
-            let current_revision = current_site.manifest().revision();
-            let page_availability = current_site.page_availability();
+            let cur_rev = cur_site.manifest().revision();
+            let page_avail = cur_site.page_availability();
             match change {
                 RevisionChange::Changed(diff) => {
-                    broadcast_revision(
-                        &mut clients,
-                        Some(&diff),
-                        current_revision,
-                        page_availability,
-                    )
-                    .await;
+                    broadcast_revision(&mut clients, Some(&diff), cur_rev, page_avail).await;
                 }
                 RevisionChange::Resync(_) => {
-                    broadcast_revision(&mut clients, None, current_revision, page_availability)
-                        .await;
+                    broadcast_revision(&mut clients, None, cur_rev, page_avail).await;
                 }
                 RevisionChange::Unchanged => {}
             }
@@ -402,8 +379,6 @@ async fn run(
         if let Some(failure) = pending.consumer {
             indicator.consumer_failed(failure);
         }
-        // A failure of the revision that is still installed keeps counting; a replaced
-        // revision's failure stops here, even when no round reported for its successor.
         let site = sites.revision();
         let counts = indicator.for_revision(site.as_ref());
         let counts_changed = counts != announced;
@@ -427,30 +402,22 @@ async fn run(
         tokio::select! {
             accepted = listener.accept() => {
                 match accepted {
-                    Ok((stream, address)) => {
+                    Ok((stream, addr)) => {
                         if clients.len() + handshakes.len() >= MAX_RELOAD_CLIENTS {
-                            tracing::debug!(
-                                target: "tola::reload",
-                                limit = MAX_RELOAD_CLIENTS,
-                                "reload client limit reached"
-                            );
+                            tracing::debug!(target: "tola::reload", limit = MAX_RELOAD_CLIENTS, "reload client limit reached");
                             continue;
                         }
                         if handshakes.len() >= MAX_PENDING_HANDSHAKES {
-                            tracing::debug!(
-                                target: "tola::reload",
-                                limit = MAX_PENDING_HANDSHAKES,
-                                "reload handshake limit reached"
-                            );
+                            tracing::debug!(target: "tola::reload", limit = MAX_PENDING_HANDSHAKES, "reload handshake limit reached");
                             continue;
                         }
-                        let session_token = Arc::clone(&session_token);
+                        let token = Arc::clone(&session_token);
                         handshakes.spawn(async move {
-                            handshake_client(stream, &session_token, address).await
+                            handshake_client(stream, &token, addr).await
                         });
                     }
-                    Err(error) => {
-                        tracing::debug!(target: "tola::reload", %error, "WebSocket accept failed");
+                    Err(err) => {
+                        tracing::debug!(target: "tola::reload", %err, "WebSocket accept failed");
                         tokio::time::sleep(ACCEPT_ERROR_BACKOFF).await;
                     }
                 }
@@ -481,25 +448,25 @@ async fn admit_client(
     handshake: std::result::Result<(ClientStream, SocketAddr), SocketAddr>,
 ) {
     match handshake {
-        Ok((mut client, address)) => {
-            tracing::debug!(target: "tola::reload", %address, "client connected");
-            let current_site = sites.revision();
-            let revision = current_site
+        Ok((mut client, addr)) => {
+            tracing::debug!(target: "tola::reload", %addr, "client connected");
+            let cur_site = sites.revision();
+            let rev = cur_site
                 .as_ref()
                 .map(|site| site.manifest().revision().clone());
-            let counts = indicator.for_revision(current_site.as_ref());
-            if send_initial_state(&mut client, current_site.as_deref(), counts, rebuilding).await {
+            let counts = indicator.for_revision(cur_site.as_ref());
+            if send_initial_state(&mut client, cur_site.as_deref(), counts, rebuilding).await {
                 clients.insert(
-                    address,
+                    addr,
                     ReloadClient {
                         socket: client,
-                        delivered_revision: revision,
+                        delivered_revision: rev,
                     },
                 );
             }
         }
-        Err(address) => {
-            tracing::debug!(target: "tola::reload", %address, "WebSocket handshake failed");
+        Err(addr) => {
+            tracing::debug!(target: "tola::reload", %addr, "WebSocket handshake failed");
         }
     }
 }
@@ -507,36 +474,27 @@ async fn admit_client(
 async fn handshake_client(
     stream: tokio::net::TcpStream,
     session_token: &str,
-    address: SocketAddr,
+    addr: SocketAddr,
 ) -> std::result::Result<(ClientStream, SocketAddr), SocketAddr> {
-    let websocket_config = websocket_config();
+    let ws_cfg = websocket_config();
     let handshake = tokio::time::timeout(
         HANDSHAKE_TIMEOUT,
         tokio_tungstenite::accept_hdr_async_with_config(
             stream,
             SessionHandshake { session_token },
-            Some(websocket_config),
+            Some(ws_cfg),
         ),
     )
     .await;
     match handshake {
-        Ok(Ok(client)) => Ok((client, address)),
-        Ok(Err(error)) => {
-            tracing::debug!(
-                target: "tola::reload",
-                %address,
-                error = ?error,
-                "WebSocket handshake worker failed"
-            );
-            Err(address)
+        Ok(Ok(client)) => Ok((client, addr)),
+        Ok(Err(err)) => {
+            tracing::debug!(target: "tola::reload", %addr, error = ?err, "WebSocket handshake worker failed");
+            Err(addr)
         }
-        Err(_elapsed) => {
-            tracing::debug!(
-                target: "tola::reload",
-                %address,
-                "WebSocket handshake timed out"
-            );
-            Err(address)
+        Err(_) => {
+            tracing::debug!(target: "tola::reload", %addr, "WebSocket handshake timed out");
+            Err(addr)
         }
     }
 }
@@ -551,11 +509,11 @@ fn websocket_config() -> WebSocketConfig {
 }
 
 fn new_session_id() -> Result<String> {
-    let mut bytes = [0u8; SESSION_ID_BYTES];
-    getrandom::fill(&mut bytes).map_err(|_| {
+    let mut buf = [0u8; SESSION_ID_BYTES];
+    getrandom::fill(&mut buf).map_err(|_| {
         anyhow!("Tola could not start the browser reload session; restart `tola dev`")
     })?;
-    Ok(hex::encode(bytes))
+    Ok(hex::encode(buf))
 }
 
 struct SessionHandshake<'a> {
@@ -565,13 +523,13 @@ struct SessionHandshake<'a> {
 impl Callback for SessionHandshake<'_> {
     fn on_request(
         self,
-        request: &Request,
-        response: Response,
+        req: &Request,
+        resp: Response,
     ) -> std::result::Result<Response, ErrorResponse> {
-        if valid_session_query(request.uri().query(), self.session_token)
-            && origin_matches_host(request.headers())
+        if valid_session_query(req.uri().query(), self.session_token)
+            && origin_matches_host(req.headers())
         {
-            Ok(response)
+            Ok(resp)
         } else {
             Err(forbidden_handshake())
         }
@@ -584,25 +542,21 @@ fn valid_session_query(query: Option<&str>, session_token: &str) -> bool {
     };
     let mut sessions = url::form_urlencoded::parse(query.as_bytes())
         .filter(|(name, _)| name == "tola-session")
-        .map(|(_, value)| value);
-    matches!((sessions.next(), sessions.next()), (Some(value), None) if value.as_ref() == session_token)
+        .map(|(_, val)| val);
+    matches!((sessions.next(), sessions.next()), (Some(val), None) if val.as_ref() == session_token)
 }
 
-fn origin_matches_host(headers: &HeaderMap) -> bool {
-    let mut origins = headers.get_all("origin").iter();
-    let Some(origin) = origins.next().and_then(|value| value.to_str().ok()) else {
+fn single_header<'a>(hdrs: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    let mut vals = hdrs.get_all(name).iter();
+    let val = vals.next()?.to_str().ok()?;
+    vals.next().is_none().then_some(val)
+}
+
+fn origin_matches_host(hdrs: &HeaderMap) -> bool {
+    let (Some(origin), Some(host)) = (single_header(hdrs, "origin"), single_header(hdrs, "host"))
+    else {
         return false;
     };
-    if origins.next().is_some() {
-        return false;
-    }
-    let mut hosts = headers.get_all("host").iter();
-    let Some(host) = hosts.next().and_then(|value| value.to_str().ok()) else {
-        return false;
-    };
-    if hosts.next().is_some() {
-        return false;
-    }
     let Ok(origin) = url::Url::parse(origin) else {
         return false;
     };
@@ -651,11 +605,11 @@ enum RevisionDelivery {
 fn revision_delivery(
     client: Option<&RevisionId>,
     diff: Option<&RevisionDiff>,
-    current: &RevisionId,
+    cur: &RevisionId,
 ) -> RevisionDelivery {
-    if client == Some(current) {
+    if client == Some(cur) {
         RevisionDelivery::AlreadyCurrent
-    } else if diff.is_some_and(|diff| diff.to() == current && client == Some(diff.from())) {
+    } else if diff.is_some_and(|diff| diff.to() == cur && client == Some(diff.from())) {
         RevisionDelivery::AdjacentDiff
     } else {
         RevisionDelivery::Resync
@@ -665,22 +619,20 @@ fn revision_delivery(
 async fn broadcast_revision<S: AsyncRead + AsyncWrite + Unpin>(
     clients: &mut ReloadClients<S>,
     diff: Option<&RevisionDiff>,
-    current: &RevisionId,
-    page_availability: PageAvailability,
+    cur: &RevisionId,
+    page_avail: PageAvailability,
 ) {
-    let mut adjacent_message = None::<Bytes>;
-    let mut resync_message = None::<Bytes>;
-    // Admission bounds this batch; keep one in-flight send per client.
+    let mut adjacent_msg = None::<Bytes>;
+    let mut resync_msg = None::<Bytes>;
     let sends = FuturesUnordered::new();
-    for (address, client) in clients.iter_mut() {
-        let delivery = revision_delivery(client.delivered_revision.as_ref(), diff, current);
-        let message = match delivery {
+    for (addr, client) in clients.iter_mut() {
+        let msg = match revision_delivery(client.delivered_revision.as_ref(), diff, cur) {
             RevisionDelivery::AdjacentDiff => Some(
-                adjacent_message
+                adjacent_msg
                     .get_or_insert_with(|| {
                         HotReloadMessage::revision(
                             diff.expect("adjacent delivery requires a matching revision diff"),
-                            page_availability,
+                            page_avail,
                         )
                         .to_json()
                         .into()
@@ -689,9 +641,9 @@ async fn broadcast_revision<S: AsyncRead + AsyncWrite + Unpin>(
             ),
             RevisionDelivery::AlreadyCurrent => None,
             RevisionDelivery::Resync => Some(
-                resync_message
+                resync_msg
                     .get_or_insert_with(|| {
-                        HotReloadMessage::connected(current, page_availability)
+                        HotReloadMessage::connected(cur, page_avail)
                             .to_json()
                             .into()
                     })
@@ -699,11 +651,11 @@ async fn broadcast_revision<S: AsyncRead + AsyncWrite + Unpin>(
             ),
         };
         sends.push(async move {
-            if let Some(message) = message {
-                if !send_to_client(client, &message).await {
-                    return Some(*address);
+            if let Some(msg) = msg {
+                if !send_to_client(client, &msg).await {
+                    return Some(*addr);
                 }
-                client.delivered_revision = Some(current.clone());
+                client.delivered_revision = Some(cur.clone());
             }
             None
         });
@@ -716,21 +668,19 @@ async fn broadcast_revision<S: AsyncRead + AsyncWrite + Unpin>(
 }
 
 async fn read_clients<S: AsyncRead + AsyncWrite + Unpin>(clients: &mut ReloadClients<S>) {
-    // Return to the mailbox and accept branches after one message; cooperative
-    // budgeting also yields when a peer keeps its read buffer continuously ready.
-    let Some((address, message)) = tokio::task::coop::cooperative(clients.next()).await else {
+    let Some((addr, msg)) = tokio::task::coop::cooperative(clients.next()).await else {
         return;
     };
     if matches!(
-        message,
+        msg,
         Ok(Message::Close(_) | Message::Text(_) | Message::Binary(_)) | Err(_)
     ) {
-        clients.remove(&address);
+        clients.remove(&addr);
     }
 }
 
-async fn send_initial(client: &mut ClientStream, message: &HotReloadMessage<'_>) -> bool {
-    send(client, &message.to_json().into()).await.is_ok()
+async fn send_initial(client: &mut ClientStream, msg: &HotReloadMessage<'_>) -> bool {
+    send(client, &msg.to_json().into()).await.is_ok()
 }
 
 async fn send_initial_state(
@@ -754,13 +704,13 @@ async fn send_initial_state(
 
 async fn broadcast<S: AsyncRead + AsyncWrite + Unpin>(
     clients: &mut ReloadClients<S>,
-    message: &HotReloadMessage<'_>,
+    msg: &HotReloadMessage<'_>,
 ) {
-    let message = Bytes::from(message.to_json());
+    let payload = Bytes::from(msg.to_json());
     let sends = FuturesUnordered::new();
-    for (address, client) in clients.iter_mut() {
-        let message = &message;
-        sends.push(async move { (!send_to_client(client, message).await).then_some(*address) });
+    for (addr, client) in clients.iter_mut() {
+        let payload = &payload;
+        sends.push(async move { (!send_to_client(client, payload).await).then_some(*addr) });
     }
     let failed = sends
         .filter_map(std::future::ready)
@@ -773,8 +723,8 @@ fn evict_failed_sends<S: AsyncRead + AsyncWrite + Unpin>(
     clients: &mut ReloadClients<S>,
     failed: Vec<SocketAddr>,
 ) {
-    for address in failed {
-        clients.remove(&address);
+    for addr in failed {
+        clients.remove(&addr);
     }
 }
 
@@ -792,12 +742,12 @@ async fn close_clients<S: AsyncRead + AsyncWrite + Unpin>(clients: &mut ReloadCl
 
 async fn send_to_client<S: AsyncRead + AsyncWrite + Unpin>(
     client: &mut ReloadClient<S>,
-    message: &Bytes,
+    msg: &Bytes,
 ) -> bool {
-    match send(&mut client.socket, message).await {
+    match send(&mut client.socket, msg).await {
         Ok(()) => true,
-        Err(error) => {
-            tracing::debug!(target: "tola::reload", %error, "dropping slow reload client");
+        Err(err) => {
+            tracing::debug!(target: "tola::reload", %err, "dropping slow reload client");
             false
         }
     }
@@ -805,24 +755,22 @@ async fn send_to_client<S: AsyncRead + AsyncWrite + Unpin>(
 
 async fn send<S: AsyncRead + AsyncWrite + Unpin>(
     client: &mut WebSocketStream<S>,
-    message: &Bytes,
+    msg: &Bytes,
 ) -> Result<()> {
-    // One JSON text message, fragmented on the wire only. Shared slices avoid
-    // copying the whole payload per client; flushing each bounded frame caps
-    // tungstenite's private buffer.
+    // Fragment as shared slices to avoid per-client payload copies and bound write buffers.
     tokio::time::timeout(CLIENT_WRITE_TIMEOUT, async {
         let mut start = 0;
         loop {
-            let end = (start + SERVER_FRAME_BYTES).min(message.len());
+            let end = (start + SERVER_FRAME_BYTES).min(msg.len());
             let opcode = if start == 0 {
                 Data::Text
             } else {
                 Data::Continue
             };
-            let finished = end == message.len();
+            let finished = end == msg.len();
             client
                 .send(Message::Frame(Frame::message(
-                    message.slice(start..end),
+                    msg.slice(start..end),
                     OpCode::Data(opcode),
                     finished,
                 )))
@@ -838,20 +786,18 @@ async fn send<S: AsyncRead + AsyncWrite + Unpin>(
     .map_err(anyhow::Error::from)
 }
 
-/// Bind the browser reload listener: the preferred port when it is free, otherwise a port the
-/// system assigns, so two development servers on one machine each keep their reload channel.
 fn bind_listener(interface: IpAddr, preferred_port: u16) -> Result<(TcpListener, u16)> {
     match bind_port(interface, preferred_port) {
         Ok(bound) => Ok(bound),
-        Err(error) => {
+        Err(err) => {
             tracing::debug!(
                 target: "tola::reload",
-                %error,
+                %err,
                 preferred_port,
-                "the preferred reload port is unavailable; binding a system-assigned port"
+                "preferred reload port unavailable; binding system-assigned port"
             );
             bind_port(interface, 0)
-                .map_err(|error| anyhow!("the browser reload port is unavailable: {error}"))
+                .map_err(|err| anyhow!("the browser reload port is unavailable: {err}"))
         }
     }
 }
@@ -863,606 +809,5 @@ fn bind_port(interface: IpAddr, port: u16) -> Result<(TcpListener, u16)> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use futures_util::{FutureExt, StreamExt};
-    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-
-    struct ReloadSite {
-        _directory: tempfile::TempDir,
-        config: std::sync::Arc<tola_build::config::ResolvedSiteConfig>,
-    }
-
-    impl ReloadSite {
-        fn new() -> Self {
-            let directory = tempfile::tempdir().unwrap();
-            Self {
-                config: crate::dev::tests::write_site(directory.path(), "", ""),
-                _directory: directory,
-            }
-        }
-
-        fn manifest(&self, body: Option<&[u8]>) -> tola_build::output::manifest::SiteManifest {
-            crate::dev::tests::write_source(&self.config, body);
-            crate::dev::tests::built_outputs(
-                &self.config,
-                tola_build::build::BuildMode::Development,
-            )
-            .manifest()
-            .clone()
-        }
-    }
-
-    type TestClient = WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
-
-    async fn read_json<S: AsyncRead + AsyncWrite + Unpin>(
-        client: &mut WebSocketStream<S>,
-    ) -> serde_json::Value {
-        let message = client.next().await.unwrap().unwrap().into_text().unwrap();
-        serde_json::from_str(&message).unwrap()
-    }
-
-    fn current_sites() -> (CurrentSite, ReloadSite) {
-        let sites = CurrentSite::new();
-        let site = ReloadSite::new();
-        replace(&sites, &site.config, None);
-        (sites, site)
-    }
-
-    fn status_message(rebuilding: bool) -> HotReloadMessage<'static> {
-        HotReloadMessage::status(rebuilding, DiagnosticCounts::default())
-    }
-
-    /// The wire frame a client parses for `rebuilding` with `errors` errors and `warnings`
-    /// warnings. One constructor keeps every status assertion spelling the same shape.
-    fn status_frame(rebuilding: bool, errors: usize, warnings: usize) -> serde_json::Value {
-        serde_json::json!({
-            "type": "status",
-            "rebuilding": rebuilding,
-            "errors": errors,
-            "warnings": warnings,
-        })
-    }
-
-    #[tokio::test]
-    async fn client_resyncs_after_first_revision() {
-        let sites = CurrentSite::new();
-        let site = ReloadSite::new();
-        let transport =
-            ReloadTransport::start("127.0.0.1".parse().unwrap(), 0, sites.clone()).unwrap();
-        transport.replace_diagnostics(&[Diagnostic::new(
-            tola_diagnostic::codes::typst::COMPILE,
-            tola_diagnostic::Severity::Error,
-            "First build failed",
-        )]);
-        let mut client = connect(&transport).await;
-        assert_eq!(
-            read_json(&mut client).await,
-            serde_json::json!({"type": "awaiting"})
-        );
-        assert_eq!(read_json(&mut client).await, status_frame(false, 1, 0));
-
-        let revision = replace(&sites, &site.config, Some(b"Recovered"));
-        transport.first_revision_ready(revision.clone(), &[]);
-
-        assert_eq!(
-            read_json(&mut client).await,
-            serde_json::json!({
-                "type": "connected", "revision": revision.as_str(), "page_availability": "present",
-            })
-        );
-        assert_eq!(read_json(&mut client).await, status_frame(false, 0, 0));
-        transport.shutdown().await.unwrap();
-    }
-
-    /// Install through `session`, because a candidate from
-    /// [`tola_build::build::build_site`] has no origin and
-    /// [`CurrentSite::replace`] rejects it.
-    fn replace(
-        sites: &CurrentSite,
-        config: &tola_build::config::ResolvedSiteConfig,
-        body: Option<&[u8]>,
-    ) -> RevisionId {
-        crate::dev::tests::write_source(config, body);
-        let mut session = tola_build::build::BuildSession::new();
-        let (checked, _) = crate::dev::tests::checked_candidate(
-            &mut session,
-            std::sync::Arc::new(config.clone()),
-            tola_build::build::BuildMode::Development,
-        );
-        let (_, current) = sites.replace(&mut session, checked).unwrap();
-        current.manifest().revision().clone()
-    }
-
-    fn client_request(
-        transport: &ReloadTransport,
-        session_token: &str,
-        origin: &str,
-    ) -> tokio_tungstenite::tungstenite::http::Request<()> {
-        let mut request = format!(
-            "ws://127.0.0.1:{}/?tola-session={session_token}",
-            transport.endpoint().port()
-        )
-        .into_client_request()
-        .unwrap();
-        request
-            .headers_mut()
-            .insert("Origin", origin.parse().unwrap());
-        request
-    }
-
-    async fn connect(transport: &ReloadTransport) -> TestClient {
-        tokio_tungstenite::connect_async(client_request(
-            transport,
-            transport.endpoint().session_token(),
-            "http://127.0.0.1:8080",
-        ))
-        .await
-        .unwrap()
-        .0
-    }
-
-    #[test]
-    fn listener_binds_configured_interface() {
-        let interface = "0.0.0.0".parse().unwrap();
-        let (listener, port) = bind_listener(interface, 0).unwrap();
-
-        assert_eq!(listener.local_addr().unwrap().ip(), interface);
-        assert_ne!(port, 0);
-    }
-
-    #[test]
-    fn taken_reload_port_binds_another() {
-        let interface: IpAddr = "127.0.0.1".parse().unwrap();
-        let (held, taken) = bind_port(interface, 0).unwrap();
-
-        let (listener, bound) = bind_listener(interface, taken).unwrap();
-
-        assert_ne!(bound, taken);
-        assert_eq!(listener.local_addr().unwrap().ip(), interface);
-        drop(held);
-    }
-
-    #[test]
-    fn revision_change_reports_output_diffs() {
-        let site = ReloadSite::new();
-        let manifest = site.manifest(None);
-
-        assert!(matches!(
-            RevisionChange::from_diff(manifest.diff(&manifest)),
-            RevisionChange::Unchanged
-        ));
-
-        let after = site.manifest(Some(b"page"));
-        assert!(matches!(
-            RevisionChange::from_diff(manifest.diff(&after)),
-            RevisionChange::Changed(_)
-        ));
-    }
-
-    #[test]
-    fn pending_revisions_coalesce_to_resync() {
-        let site = ReloadSite::new();
-        let first = site.manifest(Some(b"first"));
-        let second = site.manifest(Some(b"second"));
-        let third = site.manifest(Some(b"third"));
-        let mut pending = PendingUpdates::default();
-        pending.revision_replaced(first.diff(&second), DiagnosticCounts::default());
-        pending.revision_replaced(second.diff(&third), DiagnosticCounts::default());
-
-        assert!(matches!(
-            &pending.revision,
-            Some(RevisionChange::Resync(revision)) if revision == third.revision()
-        ));
-    }
-
-    #[tokio::test]
-    async fn every_client_learns_the_rebuild_state() {
-        let (sites, _site) = current_sites();
-        let transport = ReloadTransport::start("127.0.0.1".parse().unwrap(), 0, sites).unwrap();
-        let mut existing = connect(&transport).await;
-        read_json(&mut existing).await;
-        read_json(&mut existing).await;
-
-        let rebuilding = transport.begin_rebuild();
-        assert_eq!(read_json(&mut existing).await, status_frame(true, 0, 0));
-
-        let mut connected_during_rebuild = connect(&transport).await;
-        read_json(&mut connected_during_rebuild).await;
-        assert_eq!(
-            read_json(&mut connected_during_rebuild).await,
-            status_frame(true, 0, 0)
-        );
-
-        drop(rebuilding);
-        let finished = status_frame(false, 0, 0);
-        assert_eq!(read_json(&mut existing).await, finished);
-        assert_eq!(read_json(&mut connected_during_rebuild).await, finished);
-        transport.shutdown().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn handshake_rejects_untrusted_requests() {
-        let (sites, _site) = current_sites();
-        let transport = ReloadTransport::start("127.0.0.1".parse().unwrap(), 0, sites).unwrap();
-
-        let missing_token = client_request(&transport, "wrong", "http://127.0.0.1:8080");
-        let error = tokio_tungstenite::connect_async(missing_token)
-            .await
-            .unwrap_err();
-        if !matches!(
-            &error,
-            tokio_tungstenite::tungstenite::Error::Http(response)
-                if response.status() == StatusCode::FORBIDDEN
-        ) {
-            let shutdown = transport.shutdown().await;
-            panic!(
-                "unexpected missing-token handshake error: {error:?}; transport shutdown: {shutdown:?}"
-            );
-        }
-
-        let foreign_origin = client_request(
-            &transport,
-            transport.endpoint().session_token(),
-            "https://example.com",
-        );
-        let error = tokio_tungstenite::connect_async(foreign_origin)
-            .await
-            .unwrap_err();
-        if !matches!(
-            &error,
-            tokio_tungstenite::tungstenite::Error::Http(response)
-                if response.status() == StatusCode::FORBIDDEN
-        ) {
-            let shutdown = transport.shutdown().await;
-            panic!(
-                "unexpected foreign-origin handshake error: {error:?}; transport shutdown: {shutdown:?}"
-            );
-        }
-
-        let mut accepted = connect(&transport).await;
-        assert_eq!(read_json(&mut accepted).await["type"], "connected");
-        transport.shutdown().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn current_revision_client_skips_diff() {
-        let (sites, site) = current_sites();
-        let before = sites.revision().unwrap().manifest().clone();
-        let transport =
-            ReloadTransport::start("127.0.0.1".parse().unwrap(), 0, sites.clone()).unwrap();
-        let mut existing = connect(&transport).await;
-        read_json(&mut existing).await;
-        read_json(&mut existing).await;
-
-        let next_revision = replace(&sites, &site.config, Some(b"next"));
-        let after = sites.revision().unwrap().manifest().clone();
-        let mut loaded_after_http_update = connect(&transport).await;
-        assert_eq!(
-            read_json(&mut loaded_after_http_update).await,
-            serde_json::json!({
-                "type": "connected",
-                "revision": next_revision.as_str(),
-                "page_availability": "present",
-            })
-        );
-        read_json(&mut loaded_after_http_update).await;
-
-        transport.revision_replaced(before.diff(&after), &[]);
-
-        assert_eq!(read_json(&mut existing).await["type"], "revision");
-        assert_eq!(read_json(&mut existing).await["type"], "status");
-        assert_eq!(
-            read_json(&mut loaded_after_http_update).await["type"],
-            "status"
-        );
-        transport.shutdown().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn stale_diff_resyncs_to_current() {
-        let (sites, site) = current_sites();
-        replace(&sites, &site.config, Some(b"first"));
-        let before = sites.revision().unwrap().manifest().clone();
-        let transport =
-            ReloadTransport::start("127.0.0.1".parse().unwrap(), 0, sites.clone()).unwrap();
-        let mut client = connect(&transport).await;
-        read_json(&mut client).await;
-        read_json(&mut client).await;
-
-        replace(&sites, &site.config, Some(b"second"));
-        let intermediate = sites.revision().unwrap().manifest().clone();
-        let current = replace(&sites, &site.config, None);
-        transport.revision_replaced(before.diff(&intermediate), &[]);
-
-        assert_eq!(
-            read_json(&mut client).await,
-            serde_json::json!({
-                "type": "connected",
-                "revision": current.as_str(),
-                "page_availability": "empty",
-            })
-        );
-        transport.shutdown().await.unwrap();
-    }
-
-    fn hook_failure() -> Diagnostic {
-        Diagnostic::new(
-            crate::codes::hook::AFTER_PUBLISH,
-            tola_diagnostic::Severity::Error,
-            "After-publish command failed",
-        )
-    }
-
-    fn build_failure() -> Diagnostic {
-        Diagnostic::new(
-            tola_diagnostic::codes::typst::COMPILE,
-            tola_diagnostic::Severity::Error,
-            "Page build failed",
-        )
-    }
-
-    fn build_warning() -> Diagnostic {
-        Diagnostic::new(
-            tola_diagnostic::codes::typst::COMPILE,
-            tola_diagnostic::Severity::Warning,
-            "Unused import",
-        )
-    }
-
-    #[tokio::test]
-    async fn identical_output_publication_clears_failure() {
-        let sites = CurrentSite::new();
-        let site = ReloadSite::new();
-        replace(&sites, &site.config, Some(b"same"));
-        let first = sites.revision().unwrap();
-        let transport =
-            ReloadTransport::start("127.0.0.1".parse().unwrap(), 0, sites.clone()).unwrap();
-        let mut client = connect(&transport).await;
-        read_json(&mut client).await;
-        read_json(&mut client).await;
-
-        transport
-            .diagnostics_sender()
-            .after_publish_failed(&first, &hook_failure());
-        assert_eq!(read_json(&mut client).await, status_frame(false, 1, 0));
-
-        // No round reports for the replacement, so only the publication can clear the failure.
-        replace(&sites, &site.config, Some(b"same"));
-        let second = sites.revision().unwrap();
-        assert!(!Arc::ptr_eq(&first, &second));
-        assert_eq!(first.manifest().revision(), second.manifest().revision());
-        transport.revision_replaced(first.manifest().diff(second.manifest()), &[build_warning()]);
-
-        assert_eq!(read_json(&mut client).await, status_frame(false, 0, 1));
-        transport.shutdown().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn new_client_status_omits_superseded_failure() {
-        let (sites, site) = current_sites();
-        let transport =
-            ReloadTransport::start("127.0.0.1".parse().unwrap(), 0, sites.clone()).unwrap();
-        let consumed = sites.revision().unwrap();
-        replace(&sites, &site.config, Some(b"second"));
-        let installed = sites.revision().unwrap();
-        transport.revision_replaced(
-            consumed.manifest().diff(installed.manifest()),
-            &[build_warning()],
-        );
-
-        // The replaced revision's round reports after the new revision is installed.
-        transport
-            .diagnostics_sender()
-            .after_publish_failed(&consumed, &hook_failure());
-
-        let mut client = connect(&transport).await;
-        assert_eq!(read_json(&mut client).await["type"], "connected");
-        assert_eq!(read_json(&mut client).await, status_frame(false, 0, 1));
-        transport.shutdown().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn failed_build_keeps_consumer_failure() {
-        let (sites, _site) = current_sites();
-        let transport =
-            ReloadTransport::start("127.0.0.1".parse().unwrap(), 0, sites.clone()).unwrap();
-        let installed = sites.revision().unwrap();
-        let mut client = connect(&transport).await;
-        read_json(&mut client).await;
-        read_json(&mut client).await;
-
-        transport
-            .diagnostics_sender()
-            .after_publish_failed(&installed, &hook_failure());
-        assert_eq!(read_json(&mut client).await, status_frame(false, 1, 0));
-
-        // The failed build publishes no revision, so the installed revision's failure stays.
-        transport.replace_diagnostics(&[build_failure()]);
-        assert_eq!(read_json(&mut client).await, status_frame(false, 2, 0));
-        transport.shutdown().await.unwrap();
-    }
-
-    async fn socket_pair(
-        capacity: usize,
-    ) -> (
-        ReloadClient<tokio::io::DuplexStream>,
-        WebSocketStream<tokio::io::DuplexStream>,
-    ) {
-        use tokio_tungstenite::tungstenite::protocol::Role;
-        let (server, browser) = tokio::io::duplex(capacity);
-        let server =
-            WebSocketStream::from_raw_socket(server, Role::Server, Some(websocket_config())).await;
-        let browser = WebSocketStream::from_raw_socket(browser, Role::Client, None).await;
-        (
-            ReloadClient {
-                socket: server,
-                delivered_revision: None,
-            },
-            browser,
-        )
-    }
-
-    #[tokio::test]
-    async fn reads_do_not_stall_broadcasts() {
-        let closing_address = SocketAddr::from(([127, 0, 0, 1], 1));
-        let healthy_address = SocketAddr::from(([127, 0, 0, 1], 2));
-        let (closing, mut closing_browser) = socket_pair(1024).await;
-        let (healthy, mut healthy_browser) = socket_pair(1024).await;
-        let mut clients = ReloadClients::new();
-        clients.insert(closing_address, closing);
-        clients.insert(healthy_address, healthy);
-
-        // A cancelled pending read must leave the same sockets available to write.
-        assert!(read_clients(&mut clients).now_or_never().is_none());
-        broadcast(&mut clients, &status_message(true)).await;
-        assert_eq!(read_json(&mut closing_browser).await["rebuilding"], true);
-        assert_eq!(read_json(&mut healthy_browser).await["rebuilding"], true);
-
-        let ping = Bytes::from_static(b"ready");
-        closing_browser
-            .send(Message::Ping(ping.clone()))
-            .await
-            .unwrap();
-        assert!(read_clients(&mut clients).now_or_never().is_some());
-        // Polling the next read flushes tungstenite's automatic pong.
-        assert!(read_clients(&mut clients).now_or_never().is_none());
-        assert_eq!(
-            closing_browser
-                .next()
-                .now_or_never()
-                .expect("pong must be ready without advancing a timer")
-                .unwrap()
-                .unwrap(),
-            Message::Pong(ping)
-        );
-
-        closing_browser.close(None).await.unwrap();
-        assert!(read_clients(&mut clients).now_or_never().is_some());
-        assert!(!clients.contains_key(&closing_address));
-        broadcast(&mut clients, &status_message(false)).await;
-        assert_eq!(read_json(&mut healthy_browser).await["rebuilding"], false);
-
-        drop(healthy_browser);
-        assert!(read_clients(&mut clients).now_or_never().is_some());
-        assert!(clients.is_empty());
-    }
-
-    #[tokio::test]
-    async fn large_revision_diff_arrives_whole() {
-        let site = ReloadSite::new();
-        let before = site.manifest(None);
-        let source = (0..400)
-            .map(|index| format!("#asset(\"images/item-{index}.txt\", \"content\")\n"))
-            .collect::<String>();
-        std::fs::write(&site.config.build().entry, source).unwrap();
-        let built =
-            tola_build::build::build_site(&site.config, tola_build::build::BuildMode::Development)
-                .unwrap();
-        let candidate = built.into_unchecked_revision(None);
-        let after = candidate.site().manifest();
-        let diff = before.diff(after);
-        let expected = HotReloadMessage::revision(&diff, PageAvailability::Empty).to_json();
-        assert!(expected.len() > SERVER_WRITE_BUFFER_BYTES);
-        // A smaller pipe races `CLIENT_WRITE_TIMEOUT` and evicts the client instead.
-        let (mut client, mut browser) = socket_pair(expected.len() + 1024).await;
-        client.delivered_revision = Some(before.revision().clone());
-        let mut clients = ReloadClients::new();
-        clients.insert(SocketAddr::from(([127, 0, 0, 1], 0)), client);
-        tokio::time::timeout(Duration::from_secs(60), async {
-            tokio::join!(
-                async {
-                    broadcast_revision(
-                        &mut clients,
-                        Some(&diff),
-                        after.revision(),
-                        PageAvailability::Empty,
-                    )
-                    .await;
-                    // A successful delivery must suppress the same revision next time.
-                    broadcast_revision(
-                        &mut clients,
-                        Some(&diff),
-                        after.revision(),
-                        PageAvailability::Empty,
-                    )
-                    .await;
-                    broadcast(&mut clients, &status_message(false)).await;
-                },
-                async {
-                    assert_eq!(
-                        read_json(&mut browser).await,
-                        serde_json::from_str::<serde_json::Value>(&expected).unwrap()
-                    );
-                    assert_eq!(read_json(&mut browser).await, status_frame(false, 0, 0));
-                }
-            );
-        })
-        .await
-        .unwrap();
-    }
-
-    /// Eight clients whose transport buffers are full, plus one healthy client at port 8.
-    async fn blocked_clients() -> (
-        ReloadClients<tokio::io::DuplexStream>,
-        Vec<WebSocketStream<tokio::io::DuplexStream>>,
-        WebSocketStream<tokio::io::DuplexStream>,
-    ) {
-        use tokio::io::AsyncWriteExt;
-        let mut clients = ReloadClients::new();
-        let mut blocked_browsers = Vec::new();
-        for port in 0..8 {
-            let (mut client, browser) = socket_pair(64).await;
-            // Fill the bounded transport without relying on platform TCP buffers.
-            client.socket.get_mut().write_all(&[0; 64]).await.unwrap();
-            clients.insert(SocketAddr::from(([127, 0, 0, 1], port)), client);
-            blocked_browsers.push(browser);
-        }
-        let (healthy, browser) = socket_pair(1024).await;
-        clients.insert(SocketAddr::from(([127, 0, 0, 1], 8)), healthy);
-        (clients, blocked_browsers, browser)
-    }
-
-    #[tokio::test]
-    async fn blocked_clients_never_delay_delivery() {
-        let (mut clients, blocked_browsers, mut browser) = blocked_clients().await;
-        let status = status_message(true);
-        tokio::time::timeout(CLIENT_WRITE_TIMEOUT * 3, async {
-            tokio::join!(broadcast(&mut clients, &status), async {
-                let received =
-                    tokio::time::timeout(CLIENT_WRITE_TIMEOUT / 2, read_json(&mut browser))
-                        .await
-                        .unwrap();
-                assert_eq!(
-                    received,
-                    serde_json::from_str::<serde_json::Value>(&status.to_json()).unwrap()
-                );
-            });
-        })
-        .await
-        .unwrap();
-        assert_eq!(clients.len(), 1);
-        let idle = status_message(false);
-        tokio::join!(broadcast(&mut clients, &idle), async {
-            assert_eq!(read_json(&mut browser).await["rebuilding"], false);
-        });
-        drop(blocked_browsers);
-    }
-
-    #[tokio::test]
-    async fn blocked_clients_share_one_deadline() {
-        let (mut clients, blocked_browsers, mut browser) = blocked_clients().await;
-        tokio::time::timeout(CLIENT_WRITE_TIMEOUT * 3, async {
-            tokio::join!(close_clients(&mut clients), async {
-                let received = tokio::time::timeout(CLIENT_WRITE_TIMEOUT / 2, browser.next())
-                    .await
-                    .unwrap();
-                assert!(matches!(received, Some(Ok(Message::Close(_)))));
-            });
-        })
-        .await
-        .unwrap();
-        assert!(clients.is_empty());
-        drop(blocked_browsers);
-    }
-}
+#[path = "transport_tests.rs"]
+mod tests;

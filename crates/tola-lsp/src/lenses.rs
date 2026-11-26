@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use lsp_types::{CodeLens, Command, Position, Range, Uri};
 use tola_build::cancellation::BuildCancellation;
 use tola_build::check::SourceDiagnosticSession;
-use tola_build::config::ResolvedSiteConfig;
+use tola_build::config::SiteConfig;
 use tola_typst::typst::syntax::{FileId, Source};
 
 use crate::compiler::RevisionCompilations;
@@ -18,7 +18,7 @@ use crate::compiler::RevisionCompilations;
 pub(super) struct Lens<'a> {
     pub(super) session: &'a mut SourceDiagnosticSession,
     pub(super) compilations: &'a mut RevisionCompilations,
-    pub(super) config: &'a Arc<ResolvedSiteConfig>,
+    pub(super) config: &'a Arc<SiteConfig>,
     pub(super) source_revision: u64,
     pub(super) client_root: &'a Path,
     pub(super) overrides: &'a [(PathBuf, Arc<str>)],
@@ -78,10 +78,10 @@ pub(super) fn respond(inputs: Lens<'_>) -> Result<Option<Vec<CodeLens>>> {
 /// The document a lens opens: the source's own file, addressed in the spelling the client named.
 fn document_uri(
     id: FileId,
-    config: &ResolvedSiteConfig,
+    config: &SiteConfig,
     client_root: &crate::uri::ClientRoot,
 ) -> Result<Uri> {
-    let root = tola_input::normalize_existing_prefix(config.get_root());
+    let root = tola_input::normalize_existing_prefix(config.root());
     crate::identity::client_uri(id, &root, client_root).context("a lens names one file's address")
 }
 

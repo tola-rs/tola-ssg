@@ -1,4 +1,4 @@
-//! The paths a file rename moves, and the edit that keeps every source reaching them.
+//! Import/include/resource path rewrites when files or directories are renamed.
 
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
@@ -6,38 +6,35 @@ use std::path::{Component, Path, PathBuf};
 use anyhow::Result;
 use lsp_types::{TextEdit, Uri, WorkspaceEdit};
 use tola_build::cancellation::BuildCancellation;
-use tola_build::config::ResolvedSiteConfig;
+use tola_build::config::SiteConfig;
 use tola_typst::typst::foundations::Repr;
 use tola_typst::typst::syntax::{LinkedNode, Source, ast};
 use tola_typst_syntax::syntax::node_at_range;
 
 use crate::links;
 
-/// The edit that keeps every import pointing at a file the editor renames.
-///
-/// A rename moves a file, so the paths that reach it change: every source that writes one is
-/// edited to the path that reaches the new location from its own directory.
+/// Compute workspace edits keeping source links pointed at moved files.
 pub(super) fn imports(
-    config: &ResolvedSiteConfig,
+    cfg: &SiteConfig,
     client_root: &crate::uri::ClientRoot,
     view: &crate::sources::SourceView,
     files: &[(PathBuf, PathBuf)],
     boundary: &tola_typst::SourceBoundary,
     disk: &mut crate::analysis::DiskSources,
-    cancellation: &BuildCancellation,
+    cancel: &BuildCancellation,
 ) -> Result<Option<WorkspaceEdit>> {
-    let root = tola_input::normalize_existing_prefix(config.get_root());
-    let sources = crate::analysis::site_sources(&root, view, boundary, disk, cancellation)?;
+    let root = tola_input::normalize_existing_prefix(cfg.root());
+    let sources = crate::analysis::site_sources(&root, view, boundary, disk, cancel)?;
     let mut changes: HashMap<Uri, Vec<TextEdit>> = HashMap::new();
     for names in sources {
-        cancellation.ensure_active()?;
-        let source = names.source();
-        let edits = source_edits(source, &root, files, cancellation)?;
+        cancel.ensure_active()?;
+        let src = names.source();
+        let edits = source_edits(src, &root, files, cancel)?;
         if edits.is_empty() {
             continue;
         }
-        let source_path = root.join(source.id().vpath().get_without_slash());
-        let Ok(uri) = client_root.address(&source_path) else {
+        let src_path = root.join(src.id().vpath().get_without_slash());
+        let Ok(uri) = client_root.address(&src_path) else {
             continue;
         };
         changes.insert(uri, edits);
@@ -48,34 +45,33 @@ pub(super) fn imports(
     }))
 }
 
-/// The edits that keep one source's links reaching the files they name after the rename.
 fn source_edits(
-    source: &Source,
+    src: &Source,
     root: &Path,
     files: &[(PathBuf, PathBuf)],
-    cancellation: &BuildCancellation,
+    cancel: &BuildCancellation,
 ) -> Result<Vec<TextEdit>> {
-    let source_path = root.join(source.id().vpath().get_without_slash());
-    let moved_source = moved_path(&source_path, root, files);
-    let new_source = moved_source.as_deref().unwrap_or(&source_path);
+    let src_path = root.join(src.id().vpath().get_without_slash());
+    let moved_src = moved_path(&src_path, root, files);
+    let new_src = moved_src.as_deref().unwrap_or(&src_path);
     let mut edits = Vec::new();
-    for link in links::declared(source) {
-        cancellation.ensure_active()?;
+    for link in links::declared(src) {
+        cancel.ensure_active()?;
         let Some(target) = link.site_path(root) else {
             continue;
         };
         let moved_target = moved_path(&target, root, files);
         let new_target = moved_target.as_deref().unwrap_or(&target);
-        let Some(literal) = node_at_range(source, &link.literal) else {
+        let Some(lit) = node_at_range(src, &link.literal) else {
             continue;
         };
-        let Some(written) = literal.cast::<ast::Str>() else {
+        let Some(written) = lit.cast::<ast::Str>() else {
             continue;
         };
         let rooted = written.get().starts_with('/');
-        let spell = |writer: &Path, target: &Path| {
+        let spell = |writer: &Path, dst: &Path| {
             if rooted {
-                target.strip_prefix(root).ok().map(|path| {
+                dst.strip_prefix(root).ok().map(|path| {
                     let path = path
                         .components()
                         .map(|part| part.as_os_str().to_string_lossy())
@@ -84,76 +80,61 @@ fn source_edits(
                     format!("/{path}")
                 })
             } else {
-                relative_path(writer, target)
+                relative_path(writer, dst)
             }
         };
-        let Some(new_path) = spell(new_source, new_target) else {
+        let Some(new_path) = spell(new_src, new_target) else {
             continue;
         };
-        if spell(&source_path, &target).as_ref() == Some(&new_path) {
+        if spell(&src_path, &target).as_ref() == Some(&new_path) {
             continue;
         }
         edits.push(TextEdit {
             range: link.range,
             new_text: quoted_path(&new_path),
         });
-        if let Some(alias) = module_alias(source, &literal, &new_path) {
+        if let Some(alias) = module_alias(src, &lit, &new_path) {
             edits.push(alias);
         }
     }
     Ok(edits)
 }
 
-/// The text that writes `path` inside a Typst string, quotation marks excluded.
 fn quoted_path(path: &str) -> String {
     let quoted = path.repr();
     quoted[1..quoted.len() - 1].to_owned()
 }
 
-fn module_alias(source: &Source, literal: &LinkedNode<'_>, replacement: &str) -> Option<TextEdit> {
-    let import = literal.parent()?.cast::<ast::ModuleImport>()?;
+fn module_alias(src: &Source, lit: &LinkedNode<'_>, replacement: &str) -> Option<TextEdit> {
+    let import = lit.parent()?.cast::<ast::ModuleImport>()?;
     if import.new_name().is_some() || import.imports().is_some() {
         return None;
     }
     let name = import.bare_name().ok()?;
-    if Path::new(replacement)
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        == Some(name.as_str())
-    {
+    if Path::new(replacement).file_stem().and_then(|s| s.to_str()) == Some(name.as_str()) {
         return None;
     }
     Some(TextEdit {
-        range: crate::position::utf16_range(
-            source.lines(),
-            literal.range().end..literal.range().end,
-        )?,
+        range: crate::position::utf16_range(src.lines(), lit.range().end..lit.range().end)?,
         new_text: format!(" as {name}"),
     })
 }
 
-/// The path that reaches `to` from the directory of `from`, with `/` separators.
 fn relative_path(from: &Path, to: &Path) -> Option<String> {
-    let directory: Vec<Component<'_>> = from.parent()?.components().collect();
+    let dir: Vec<Component<'_>> = from.parent()?.components().collect();
     let target: Vec<Component<'_>> = to.components().collect();
-    let common = directory
-        .iter()
-        .zip(&target)
-        .take_while(|(left, right)| left == right)
-        .count();
-    let mut parts = vec!["..".to_owned(); directory.len() - common];
+    let common = dir.iter().zip(&target).take_while(|(a, b)| a == b).count();
+    let mut parts = vec!["..".to_owned(); dir.len() - common];
     parts.extend(
         target[common..]
             .iter()
-            .map(|component| component.as_os_str().to_string_lossy().into_owned()),
+            .map(|c| c.as_os_str().to_string_lossy().into_owned()),
     );
     Some(parts.join("/"))
 }
 
-/// The destination of one site path under the editor's file or directory renames.
-///
-/// Renaming the site root or an ancestor changes no site-relative path.
 fn moved_path(path: &Path, root: &Path, files: &[(PathBuf, PathBuf)]) -> Option<PathBuf> {
+    // Renaming the site root or an ancestor changes no site-relative path.
     files.iter().rev().find_map(|(old, new)| {
         let inside = old.strip_prefix(root).ok()?;
         if inside.as_os_str().is_empty() {
@@ -169,20 +150,19 @@ mod tests {
 
     use super::*;
 
-    /// A site root reachable without symlinks: resolved paths take the target's spelling.
     fn temp_site() -> (tempfile::TempDir, PathBuf) {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().canonicalize().unwrap();
-        (directory, root)
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        (dir, root)
     }
 
     fn rename(
-        config: &ResolvedSiteConfig,
+        cfg: &SiteConfig,
         root: &Path,
         files: &[(PathBuf, PathBuf)],
     ) -> Option<WorkspaceEdit> {
         imports(
-            config,
+            cfg,
             &crate::uri::ClientRoot::new(root),
             &crate::sources::SourceView::default(),
             files,
@@ -193,7 +173,6 @@ mod tests {
         .unwrap()
     }
 
-    /// The edits the rename makes to the site's `content/document.typ`.
     fn document_edits(edit: WorkspaceEdit, root: &Path) -> Vec<TextEdit> {
         let uri = crate::uri::from_file_path(&root.join("content/document.typ")).unwrap();
         edit.changes
@@ -203,12 +182,9 @@ mod tests {
             .expect("the edit targets the importing document")
     }
 
-    /// A rename rewrites every relative path that reaches the moved file: the importer's own
-    /// link when it moves, and resource and import arguments when a folder holding the target
-    /// moves.
     #[test]
     fn rename_path_rewrite() {
-        for (document, files, moved, expected) in [
+        for (doc, files, moved, expected) in [
             (
                 "#include \"head.typ\"\n",
                 &[("content/head.typ", "Head\n")][..],
@@ -240,9 +216,9 @@ mod tests {
                 &["../layouts/partials/head.typ"][..],
             ),
         ] {
-            let (_directory, root) = temp_site();
-            let config = site_config(&root, document, files);
-            let edit = rename(&config, &root, &[(root.join(moved.0), root.join(moved.1))])
+            let (_dir, root) = temp_site();
+            let cfg = site_cfg(&root, doc, files);
+            let edit = rename(&cfg, &root, &[(root.join(moved.0), root.join(moved.1))])
                 .expect("the rename rewrites the reaching path");
             let edits = document_edits(edit, &root);
             assert_eq!(
@@ -255,10 +231,11 @@ mod tests {
             );
         }
     }
+
     #[test]
     fn rename_updates_unsaved_importer() {
-        let (_directory, root) = temp_site();
-        let config = site_config(&root, "Body\n", &[("content/head.typ", "Head\n")]);
+        let (_dir, root) = temp_site();
+        let cfg = site_cfg(&root, "Body\n", &[("content/head.typ", "Head\n")]);
         let draft = root.join("content/draft.typ");
         let uri = crate::uri::from_file_path(&draft).unwrap();
         let mut open = crate::sources::OpenSources::new(&root);
@@ -275,7 +252,7 @@ mod tests {
         ))
         .unwrap();
         let edit = imports(
-            &config,
+            &cfg,
             &crate::uri::ClientRoot::new(&root),
             &open.view(),
             &[(
@@ -296,15 +273,15 @@ mod tests {
     }
 
     #[test]
-    fn escaped_root_path_keeps_root_spelling() {
-        let (_directory, root) = temp_site();
-        let config = site_config(
+    fn escaped_root_path() {
+        let (_dir, root) = temp_site();
+        let cfg = site_cfg(
             &root,
             "#include \"\\u{2f}templates/head.typ\"\n",
             &[("templates/head.typ", "Head\n")],
         );
         let edit = rename(
-            &config,
+            &cfg,
             &root,
             &[(
                 root.join("templates/head.typ"),
@@ -320,17 +297,17 @@ mod tests {
 
     #[test]
     fn rename_reaches_linked_sources() {
-        for (directory, relation) in [
+        for (dir, rel) in [
             (".hidden", "import"),
             ("ignored", "import"),
             (".hidden", "include"),
             ("ignored", "include"),
         ] {
-            let (_directory, root) = temp_site();
-            let helper = format!("{directory}/helper.typ");
-            let config = site_config(
+            let (_dir, root) = temp_site();
+            let helper = format!("{dir}/helper.typ");
+            let cfg = site_cfg(
                 &root,
-                &format!("#{relation} \"../{helper}\"\n"),
+                &format!("#{rel} \"../{helper}\"\n"),
                 &[
                     (
                         &helper,
@@ -339,9 +316,9 @@ mod tests {
                     ("content/head.typ", "Head\n"),
                 ],
             );
-            std::fs::write(root.join(".ignore"), format!("{directory}/\n")).unwrap();
+            std::fs::write(root.join(".ignore"), format!("{dir}/\n")).unwrap();
             let edit = rename(
-                &config,
+                &cfg,
                 &root,
                 &[(
                     root.join("content/head.typ"),
@@ -359,25 +336,22 @@ mod tests {
         }
     }
 
-    /// A folder above the site holds the whole site, so renaming it moves nothing the site's own
-    /// paths name.
     #[test]
-    fn rename_above_site_leaves_links_alone() {
-        let (_directory, workspace) = temp_site();
-        let root = workspace.join("site");
-        let config = site_config(
+    fn rename_above_site_ignored() {
+        let (_dir, ws) = temp_site();
+        let root = ws.join("site");
+        let cfg = site_cfg(
             &root,
             "#include \"head.typ\"\nBody\n",
             &[("content/head.typ", "Head\n")],
         );
-        let renamed = [(workspace.clone(), workspace.join("renamed"))];
-        assert!(rename(&config, &root, &renamed).is_none());
+        let renamed = [(ws.clone(), ws.join("renamed"))];
+        assert!(rename(&cfg, &root, &renamed).is_none());
     }
-    /// A site below `root` whose `content/document.typ` holds `document`, with every other file
-    /// written as named and its empty `tola.toml` loaded.
-    fn site_config(root: &Path, document: &str, files: &[(&str, &str)]) -> Arc<ResolvedSiteConfig> {
+
+    fn site_cfg(root: &Path, doc: &str, files: &[(&str, &str)]) -> Arc<SiteConfig> {
         std::fs::create_dir_all(root.join("content")).unwrap();
-        std::fs::write(root.join("content/document.typ"), document).unwrap();
+        std::fs::write(root.join("content/document.typ"), doc).unwrap();
         for (name, text) in files {
             let path = root.join(name);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();

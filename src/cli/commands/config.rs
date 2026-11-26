@@ -10,7 +10,7 @@ use anyhow::Result;
 use serde::Serialize;
 use tola_build::config::section::build::HookJobs;
 use tola_build::config::section::build::hooks::{DevParticipation, HookStage, ModuleHookOrigin};
-use tola_build::modules::PreparedSite;
+use tola_build::modules::LoadedSite;
 use tola_diagnostic::{SourcePositions, SourceRange, display_path};
 use tola_typst_syntax::style::ProseWrap;
 
@@ -116,7 +116,7 @@ pub(super) fn value(
         .collect();
     let document = ConfigDocument {
         config: config.config_path(),
-        root: config.get_root(),
+        root: config.root(),
         content: config.build().content_dir.as_path(),
         entry: config.build().entry.as_path(),
         entry_module: config.module_entry(),
@@ -146,7 +146,7 @@ pub(super) fn value(
             .cache()
             .map(|location| location.root()),
         vendored_package_path: config.vendor().typst_packages(),
-        icon_cache_directory: tola_build::BuildResources::icon_cache_directory(config.get_root()),
+        icon_cache_directory: tola_build::BuildResources::icon_cache_directory(config.root()),
         system_fonts: config.system_fonts_allowed(&request.resources),
         server: ServerDocument {
             interface: loaded.server().interface.to_string(),
@@ -162,7 +162,7 @@ pub(super) fn value(
         value["config_sources"] = serde_json::Value::Array(source.applications().iter().map(|app| {
             serde_json::json!({
                 "id": app.id,
-                "path": display_path(&app.path, config.get_root()),
+                "path": display_path(&app.path, config.root()),
                 "state": match &app.state {
                     tola_build::config::ConfigFileState::Loaded => "loaded",
                     tola_build::config::ConfigFileState::OptionalMissing => "optional-missing",
@@ -189,7 +189,7 @@ type OriginMap = BTreeMap<Vec<tola_config::ValueStep>, OriginList>;
 
 fn field_origins(
     source: &tola_build::config::ConfigSource,
-    site: &PreparedSite,
+    site: &LoadedSite,
     build: &BuildOverrideArgs,
 ) -> Result<serde_json::Value> {
     let (core, host) = source.decode_with_host::<crate::config::ConfigSchema>()?;
@@ -248,7 +248,7 @@ fn field_origins(
             &ModuleOrigin {
                 alias,
                 module,
-                site_root: site.get_root(),
+                site_root: site.root(),
                 positions: positions.as_ref(),
             },
             &mut entries,
@@ -529,7 +529,7 @@ struct Hook<'a> {
 }
 
 impl<'a> HookDocument<'a> {
-    fn new(site: &'a PreparedSite, mode: InspectConfigMode) -> Self {
+    fn new(site: &'a LoadedSite, mode: InspectConfigMode) -> Self {
         let development = mode == InspectConfigMode::Dev;
         let build = site.build();
         let auto_limit = std::thread::available_parallelism().map_or(1, |cores| cores.get());
@@ -572,7 +572,7 @@ impl<'a> HookDocument<'a> {
             par_hooks: build.par_hooks,
             hook_jobs: HookJobsDocument {
                 requested: build.hook_jobs,
-                resolved: build.hook_jobs.resolved(auto_limit),
+                resolved: build.hook_jobs.count(auto_limit),
                 effective: tola_build::hooks::hook_limit(
                     build.par_hooks,
                     build.hook_jobs,
@@ -586,7 +586,7 @@ impl<'a> HookDocument<'a> {
 
 impl<'a> HookStageDocument<'a> {
     fn new(
-        site: &'a PreparedSite,
+        site: &'a LoadedSite,
         module_positions: &BTreeMap<&str, SourcePositions>,
         stage: HookStage,
         hooks: Vec<Hook<'a>>,
@@ -668,7 +668,7 @@ impl<'a> Hook<'a> {
 
     fn source(
         &self,
-        site: &PreparedSite,
+        site: &LoadedSite,
         module_positions: &BTreeMap<&str, SourcePositions>,
         stage: &'static str,
         index: usize,
@@ -701,7 +701,7 @@ impl<'a> Hook<'a> {
         let excerpt = positions.and_then(|positions| positions.excerpt(&key));
         serde_json::to_value(HookSource {
             kind,
-            path: display_path(path, site.get_root()),
+            path: display_path(path, site.root()),
             alias,
             key_path: ("hooks", stage, index),
             line: excerpt.as_ref().map(|excerpt| excerpt.line),
@@ -720,11 +720,11 @@ mod tests {
     use tola_input::InputScope;
 
     #[test]
-    fn theme_resolved_without_executing_driver() {
-        let directory = tempfile::tempdir().unwrap();
-        let project = directory.path().join("project");
-        let theme = directory.path().join("theme");
-        std::fs::create_dir_all(project.join("content")).unwrap();
+    fn theme_resolved_without_driver() {
+        let dir = tempfile::tempdir().unwrap();
+        let proj = dir.path().join("project");
+        let theme = dir.path().join("theme");
+        std::fs::create_dir_all(proj.join("content")).unwrap();
         std::fs::create_dir(&theme).unwrap();
         std::fs::write(theme.join("lib.typ"), "").unwrap();
         std::fs::write(theme.join("site.typ"), "#panic(\"must not run\")").unwrap();
@@ -747,7 +747,7 @@ only-module = true
         )
         .unwrap();
         std::fs::write(
-            project.join("tola.toml"),
+            proj.join("tola.toml"),
             r#"
 [modules.notes]
 path = "../theme"
@@ -770,23 +770,23 @@ shared = "site"
 "#,
         )
         .unwrap();
-        let output = super::super::testing::buffered_output();
-        let cancellation = Cancellation::default();
-        let request = super::super::SiteRequest::new(
+        let out = super::super::testing::buffered_output();
+        let cancel = Cancellation::default();
+        let req = super::super::SiteRequest::new(
             crate::cli::SiteArgs {
                 config: ConfigFileArgs {
-                    path: Some(project.join("tola.toml")),
+                    path: Some(proj.join("tola.toml")),
                 },
                 packages: TypstPackageArgs::default(),
             },
             crate::cli::BuildArgs::default(),
             tola_input::InputMode::new(InputScope::Offline, false),
-            &output,
-            &cancellation,
+            &out,
+            &cancel,
         )
         .unwrap();
         let shown = value(
-            &request,
+            &req,
             &BuildOverrideArgs {
                 minify: Some(false),
                 ..Default::default()
@@ -794,28 +794,24 @@ shared = "site"
             InspectConfigMode::Dev,
         )
         .unwrap();
-        let module = &shown["modules"]["notes"];
+        let mod_doc = &shown["modules"]["notes"];
         assert_eq!(shown["entry_module"], "notes");
         assert_eq!(
             shown["entry"],
             serde_json::json!(theme.canonicalize().unwrap().join("site.typ"))
         );
         assert_eq!(
-            module["library"],
+            mod_doc["library"],
             serde_json::json!(theme.canonicalize().unwrap().join("lib.typ"))
         );
-        assert_eq!(module["build_entry"], shown["entry"]);
+        assert_eq!(mod_doc["build_entry"], shown["entry"]);
         assert_eq!(
             shown["content"],
-            serde_json::json!(project.canonicalize().unwrap().join("content"))
+            serde_json::json!(proj.canonicalize().unwrap().join("content"))
         );
         let origins = shown["field_origins"].as_array().unwrap();
-        let field = |path: serde_json::Value| {
-            origins
-                .iter()
-                .find(|entry| entry["key_path"] == path)
-                .unwrap()
-        };
+        let field =
+            |path: serde_json::Value| origins.iter().find(|e| e["key_path"] == path).unwrap();
         assert_eq!(
             field(serde_json::json!([
                 "modules",
@@ -837,25 +833,19 @@ shared = "site"
             hooks["stages"]["before-build"]["declarations"][0]["reuse"],
             serde_json::json!({"eligible": true, "hit": null})
         );
-        let generators = &hooks["stages"]["generate-outputs"];
-        let module_hook = &generators["declarations"][0];
-        assert_eq!(module_hook["name"], "catalog");
-        assert_eq!(module_hook["owner"]["alias"], "notes");
-        assert_eq!(module_hook["source"]["line"], 6);
-        assert_eq!(module_hook["skip_reason"], "dev-skip");
+        let gens = &hooks["stages"]["generate-outputs"];
+        let mod_hook = &gens["declarations"][0];
+        assert_eq!(mod_hook["name"], "catalog");
+        assert_eq!(mod_hook["owner"]["alias"], "notes");
+        assert_eq!(mod_hook["source"]["line"], 6);
+        assert_eq!(mod_hook["skip_reason"], "dev-skip");
+        assert_eq!(gens["batches"][0]["participants"], serde_json::json!([]));
+        assert_eq!(gens["batches"][1]["participants"], serde_json::json!([1]));
         assert_eq!(
-            generators["batches"][0]["participants"],
-            serde_json::json!([])
-        );
-        assert_eq!(
-            generators["batches"][1]["participants"],
-            serde_json::json!([1])
-        );
-        assert_eq!(
-            generators["declarations"][1]["reuse"],
+            gens["declarations"][1]["reuse"],
             serde_json::json!({"eligible": true, "hit": null})
         );
-        assert!(!project.join("site.typ").exists());
-        assert!(!project.join("public").exists());
+        assert!(!proj.join("site.typ").exists());
+        assert!(!proj.join("public").exists());
     }
 }

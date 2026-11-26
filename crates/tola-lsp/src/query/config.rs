@@ -1,4 +1,7 @@
-//! Configuration key completion and hover for the site's `tola.toml`, read from its schema.
+//! Configuration key completion and hover for `tola.toml`, read from its schema.
+
+#[cfg(test)]
+mod tests;
 
 use std::ops::Range;
 
@@ -12,7 +15,6 @@ use tola_typst::typst::syntax::Lines;
 use crate::position;
 use crate::server::HostSections;
 
-/// The completions for the site's configuration document at `position`, from the editor's text.
 pub(crate) fn document(text: &str, position: Position, host: HostSections) -> Vec<CompletionItem> {
     let Some((lines, offset)) = at_offset(text, position) else {
         return Vec::new();
@@ -20,75 +22,67 @@ pub(crate) fn document(text: &str, position: Position, host: HostSections) -> Ve
     completion(&lines, offset, host)
 }
 
-fn at_offset(text: &str, position: Position) -> Option<(Lines<String>, usize)> {
+fn at_offset(text: &str, pos: Position) -> Option<(Lines<String>, usize)> {
     let lines = Lines::new(text.to_owned());
-    let offset = position::byte_offset(&lines, position).ok()?;
+    let offset = position::byte_offset(&lines, pos).ok()?;
     Some((lines, offset))
 }
 
 fn line_range_at(text: &str, offset: usize) -> Range<usize> {
-    let start = text[..offset].rfind('\n').map_or(0, |newline| newline + 1);
+    let start = text[..offset].rfind('\n').map_or(0, |nl| nl + 1);
     let end = text[offset..]
         .find('\n')
-        .map_or(text.len(), |newline| offset + newline);
+        .map_or(text.len(), |nl| offset + nl);
     start..end
 }
 
-/// The document with `blanked` replaced by spaces, so every other offset still parses.
 fn parsed_with_blanked(text: &str, blanked: Range<usize>) -> Option<toml_edit::Document<String>> {
     let mut blanked_text = text.to_owned();
     blanked_text.replace_range(blanked.clone(), &" ".repeat(blanked.len()));
     blanked_text.parse::<toml_edit::Document<String>>().ok()
 }
 
-/// The hover over a key, a table header, or a value: the innermost declared path answers.
 pub(crate) fn document_hover(text: &str, position: Position, host: HostSections) -> Option<Hover> {
     let (lines, offset) = at_offset(text, position)?;
     let field = at_field(&lines, offset)?;
     let range = position::utf16_range(&lines, field.range)?;
-    let (path, documentation) = field
+    let (path, docs) = field
         .paths
         .into_iter()
-        .find_map(|path| documentation(host, &path).map(|documentation| (path, documentation)))?;
+        .find_map(|path| documentation(host, &path).map(|docs| (path, docs)))?;
     Some(crate::protocol::markdown_hover(
-        format!("`{path}`\n\n{documentation}"),
+        format!("`{path}`\n\n{docs}"),
         Some(range),
     ))
 }
 
-/// Every declared configuration key with its documentation, the core schema's first, then the
-/// host's.
 fn declared_paths(
     host: HostSections,
 ) -> impl Iterator<Item = (&'static str, Option<&'static str>)> {
-    let core = field_paths().map(|field| (field.as_str(), field_documentation(field.as_str())));
+    let core = field_paths().map(|f| (f.as_str(), field_documentation(f.as_str())));
     let host_fields = host
         .iter()
-        .flat_map(|section| section.iter())
-        .map(|(field, documentation)| (field.as_str(), *documentation));
+        .flat_map(|s| s.iter())
+        .map(|(f, docs)| (f.as_str(), *docs));
     core.chain(host_fields)
 }
 
-/// The documentation a declared configuration key has: the core schema's, or a host section's.
 fn documentation(host: HostSections, path: &str) -> Option<&'static str> {
     declared_paths(host)
         .find(|(field, _)| *field == path)
-        .and_then(|(_, documentation)| documentation)
+        .and_then(|(_, docs)| docs)
 }
 
-/// Whether the core schema or one of the host's sections declares `path`.
 fn declares(host: HostSections, path: &str) -> bool {
     declared_paths(host).any(|(field, _)| field == path)
 }
 
-/// The field the cursor reads: the range it occupies and the declared paths naming it.
 struct CursorField {
     range: Range<usize>,
     paths: Vec<String>,
 }
 
 impl CursorField {
-    /// The field one declared path names, over the range it occupies.
     fn named(path: String, range: Range<usize>) -> Self {
         Self {
             range,
@@ -96,32 +90,28 @@ impl CursorField {
         }
     }
 
-    /// The same field, also named by the member that writes it.
     fn within(mut self, member: String) -> Self {
         self.paths.push(member);
         self
     }
 }
 
-/// The field the cursor reads: the key it names, or the value that key has.
 fn at_field<T: AsRef<str>>(lines: &Lines<T>, offset: usize) -> Option<CursorField> {
     key_path(lines, offset)
         .map(|(range, path)| CursorField::named(path, range))
         .or_else(|| value_path(lines, offset))
 }
 
-/// The value's range and declared paths; unparsable text falls back to the cursor's line.
 fn value_path<T: AsRef<str>>(lines: &Lines<T>, offset: usize) -> Option<CursorField> {
     let text = lines.text();
-    if let Ok(document) = toml_edit::Document::parse(text)
-        && let Some(value) = enclosing_value(document.as_table(), offset)
+    if let Ok(doc) = toml_edit::Document::parse(text)
+        && let Some(val) = enclosing_value(doc.as_table(), offset)
     {
-        return Some(value);
+        return Some(val);
     }
     value_on_its_line(lines, offset).map(|(range, path)| CursorField::named(path, range))
 }
 
-/// The innermost value the cursor reads; an inline member is a declared path of its own.
 fn enclosing_value(root: &toml_edit::Table, offset: usize) -> Option<CursorField> {
     fn walk(
         table: &toml_edit::Table,
@@ -131,13 +121,13 @@ fn enclosing_value(root: &toml_edit::Table, offset: usize) -> Option<CursorField
     ) {
         for (key, item) in table.iter() {
             match item {
-                toml_edit::Item::Value(value) => {
-                    let Some(span) = value.span() else { continue };
+                toml_edit::Item::Value(val) => {
+                    let Some(span) = val.span() else { continue };
                     if !span.contains(&offset) {
                         continue;
                     }
                     let member_path = child_path(path, key);
-                    *found = Some(match member_in(value, &member_path, offset) {
+                    *found = Some(match member_in(val, &member_path, offset) {
                         Some(member) => member.within(member_path),
                         None => CursorField::named(member_path, span.clone()),
                     });
@@ -160,17 +150,16 @@ fn enclosing_value(root: &toml_edit::Table, offset: usize) -> Option<CursorField
     found
 }
 
-/// The inline member the cursor reads; a scalar answers nothing.
-fn member_in(value: &toml_edit::Value, path: &str, offset: usize) -> Option<CursorField> {
-    match value {
+fn member_in(val: &toml_edit::Value, path: &str, offset: usize) -> Option<CursorField> {
+    match val {
         toml_edit::Value::InlineTable(table) => inline_member(table, path, offset),
-        toml_edit::Value::Array(array) => {
-            for element in array.iter() {
-                let Some(span) = element.span() else { continue };
+        toml_edit::Value::Array(arr) => {
+            for elem in arr.iter() {
+                let Some(span) = elem.span() else { continue };
                 if !span.contains(&offset) {
                     continue;
                 }
-                if let toml_edit::Value::InlineTable(table) = element
+                if let toml_edit::Value::InlineTable(table) = elem
                     && let Some(found) = inline_member(table, path, offset)
                 {
                     return Some(found);
@@ -183,21 +172,19 @@ fn member_in(value: &toml_edit::Value, path: &str, offset: usize) -> Option<Curs
     }
 }
 
-/// The member of an inline table the cursor reads, with the declared paths from that member
-/// outward.
 fn inline_member(table: &toml_edit::InlineTable, path: &str, offset: usize) -> Option<CursorField> {
-    for (key, value) in table.iter() {
+    for (key, val) in table.iter() {
         let member = child_path(path, key);
-        if let Some(span) = table.key(key).and_then(|key| key.span())
+        if let Some(span) = table.key(key).and_then(|k| k.span())
             && span.contains(&offset)
         {
             return Some(CursorField::named(member, span.clone()));
         }
-        let Some(span) = value.span() else { continue };
+        let Some(span) = val.span() else { continue };
         if !span.contains(&offset) {
             continue;
         }
-        return Some(match member_in(value, &member, offset) {
+        return Some(match member_in(val, &member, offset) {
             Some(field) => field.within(member),
             None => CursorField::named(member, span.clone()),
         });
@@ -205,7 +192,6 @@ fn inline_member(table: &toml_edit::InlineTable, path: &str, offset: usize) -> O
     None
 }
 
-/// The value the cursor writes on its line, for text the parser cannot read yet.
 fn value_on_its_line<T: AsRef<str>>(
     lines: &Lines<T>,
     offset: usize,
@@ -213,22 +199,16 @@ fn value_on_its_line<T: AsRef<str>>(
     let text = lines.text();
     let line_range = line_range_at(text, offset);
     let line = &text[line_range.clone()];
-    let (name, value) = line.split_once('=')?;
+    let (name, val) = line.split_once('=')?;
     let name = name.trim();
     let key_start = line_range.start + line.find(name)?;
     let (_, path) = key_path(lines, key_start)?;
-    let value = value.trim();
-    let value_start = line_range.start + value_offset(line, value)?;
-    Some((value_start..value_start + value.len(), path))
-}
-
-/// Where `value` begins inside its line, right of the `=` that names it.
-fn value_offset(line: &str, value: &str) -> Option<usize> {
+    let val = val.trim();
     let equals = line.find('=')?;
-    Some(equals + 1 + line[equals + 1..].find(value)?)
+    let val_start = line_range.start + equals + 1 + line[equals + 1..].find(val)?;
+    Some((val_start..val_start + val.len(), path))
 }
 
-/// The edit that replaces a misspelled key with the declared key it nearly spells.
 pub(crate) fn replacement(text: &str, position: Position, host: HostSections) -> Option<TextEdit> {
     let (lines, offset) = at_offset(text, position)?;
     let (range, path) = key_path(&lines, offset)?;
@@ -241,12 +221,10 @@ pub(crate) fn replacement(text: &str, position: Position, host: HostSections) ->
     valid_edits(&lines, std::slice::from_ref(&edit)).then_some(edit)
 }
 
-/// The declared key a written path nearly spells; only the key, since its tables stand.
 pub(crate) fn corrected(host: HostSections, path: &str) -> Option<String> {
     field_replacement(path, declared_paths(host).map(|(field, _)| field)).map(str::to_owned)
 }
 
-/// Check the edited TOML, including collisions that are only visible after applying the edits.
 pub(crate) fn valid_edits<T: AsRef<str>>(lines: &Lines<T>, edits: &[TextEdit]) -> bool {
     let mut patches = Vec::with_capacity(edits.len());
     for edit in edits {
@@ -256,72 +234,58 @@ pub(crate) fn valid_edits<T: AsRef<str>>(lines: &Lines<T>, edits: &[TextEdit]) -
         patches.push((range, &edit.new_text));
     }
     patches.sort_by_key(|(range, _)| range.start);
-    if patches
-        .windows(2)
-        .any(|pair| pair[0].0.end > pair[1].0.start)
-    {
+    if patches.windows(2).any(|p| p[0].0.end > p[1].0.start) {
         return false;
     }
     let mut text = lines.text().to_owned();
-    for (range, value) in patches.into_iter().rev() {
-        text.replace_range(range, value);
+    for (range, val) in patches.into_iter().rev() {
+        text.replace_range(range, val);
     }
     toml_edit::Document::parse(text).is_ok()
 }
 
-/// The dotted path of the key the cursor names, and the range it occupies.
 pub(crate) fn key_path<T: AsRef<str>>(
     lines: &Lines<T>,
     offset: usize,
 ) -> Option<(Range<usize>, String)> {
     let text = lines.text();
     let (key_range, key) = key_at(text, offset)?;
-    // A table header names its own section rather than a key of one, and the `[` the key stands
-    // behind is what tells a header from an array element that opens its line with one.
+    // A `[` before the key distinguishes a table header from an array element opening with `[`.
     if text[..key_range.start].trim_end().ends_with('[') {
         return Some((key_range, key.to_owned()));
     }
-    let document = parsed_with_blanked(text, line_range_at(text, offset))?;
-    let (_, table_path) = enclosing_table(document.as_table(), offset)?;
-    let path = child_path(&table_path, key);
-    Some((key_range, path))
+    let doc = parsed_with_blanked(text, line_range_at(text, offset))?;
+    let (_, table_path) = enclosing_table(doc.as_table(), offset)?;
+    Some((key_range, child_path(&table_path, key)))
 }
 
-/// The key the cursor is inside or at the end of, and the range it occupies.
 fn key_at(text: &str, offset: usize) -> Option<(Range<usize>, &str)> {
     if !text.is_char_boundary(offset) {
         return None;
     }
-    let name = |character: char| {
-        character.is_ascii_alphanumeric()
-            || character == '_'
-            || character == '-'
-            || character == '.'
-    };
+    let is_key = |c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.');
     let line_range = line_range_at(text, offset);
     let line = &text[line_range.clone()];
-    let column = offset - line_range.start;
-    // A key is named before its `=`; a value or a comment names none.
-    if line[..column].contains(['=', '#']) {
+    let col = offset - line_range.start;
+    if line[..col].contains(['=', '#']) {
         return None;
     }
     let start = line
         .char_indices()
-        .take_while(|(index, _)| *index < column)
-        .filter(|(_, character)| !name(*character))
-        .map(|(index, character)| index + character.len_utf8())
+        .take_while(|(idx, _)| *idx < col)
+        .filter(|(_, c)| !is_key(*c))
+        .map(|(idx, c)| idx + c.len_utf8())
         .last()
         .unwrap_or(0);
     let end = line
         .char_indices()
-        .find(|(index, character)| *index >= column && !name(*character))
-        .map_or(line.len(), |(index, _)| index);
+        .find(|(idx, c)| *idx >= col && !is_key(*c))
+        .map_or(line.len(), |(idx, _)| idx);
     let key = &line[start..end];
     (!key.is_empty()).then_some((line_range.start + start..line_range.start + end, key))
 }
 
-/// The keys an author may write at `offset`, minus the ones the enclosing table declares.
-pub(super) fn completion<T: AsRef<str>>(
+fn completion<T: AsRef<str>>(
     lines: &Lines<T>,
     offset: usize,
     host: HostSections,
@@ -330,38 +294,32 @@ pub(super) fn completion<T: AsRef<str>>(
     let Some((key_range, prefix)) = key_position(text, offset) else {
         return value_completions(lines, offset, host);
     };
-    let Some(document) = parsed_with_blanked(text, key_range.clone()) else {
+    let Some(doc) = parsed_with_blanked(text, key_range.clone()) else {
         return Vec::new();
     };
-    let Some((table, table_path)) = enclosing_table(document.as_table(), offset) else {
+    let Some((table, table_path)) = enclosing_table(doc.as_table(), offset) else {
         return Vec::new();
     };
     let Some(range) = position::utf16_range(lines, key_range) else {
         return Vec::new();
     };
-    let mut items = Vec::new();
-    for (path, _) in declared_paths(host) {
-        let Some(key) = immediate_key(path, &table_path) else {
-            continue;
-        };
-        if !key.starts_with(prefix) || table.contains_key(key) {
-            continue;
-        }
-        items.push(CompletionItem {
-            label: key.to_owned(),
-            kind: Some(CompletionItemKind::FIELD),
-            detail: Some(path.to_owned()),
-            text_edit: Some(CompletionTextEdit::Edit(TextEdit {
-                range,
-                new_text: key.to_owned(),
-            })),
-            ..CompletionItem::default()
-        });
-    }
-    items
+    declared_paths(host)
+        .filter_map(|(path, _)| {
+            let key = immediate_key(path, &table_path)?;
+            (key.starts_with(prefix) && !table.contains_key(key)).then(|| CompletionItem {
+                label: key.to_owned(),
+                kind: Some(CompletionItemKind::FIELD),
+                detail: Some(path.to_owned()),
+                text_edit: Some(CompletionTextEdit::Edit(TextEdit {
+                    range,
+                    new_text: key.to_owned(),
+                })),
+                ..CompletionItem::default()
+            })
+        })
+        .collect()
 }
 
-/// The values a field's type states, such as a boolean's `true` and `false`.
 fn value_completions<T: AsRef<str>>(
     lines: &Lines<T>,
     offset: usize,
@@ -371,42 +329,40 @@ fn value_completions<T: AsRef<str>>(
     let Some(field) = at_field(lines, offset) else {
         return Vec::new();
     };
-    let value_range = field.range;
-    let Some(declared_path) = field.paths.into_iter().find(|path| declares(host, path)) else {
+    let val_range = field.range;
+    let Some(declared_path) = field.paths.into_iter().find(|p| declares(host, p)) else {
         return Vec::new();
     };
     let Some(accepted) = field_values(&declared_path) else {
         return Vec::new();
     };
-    let typed_range = value_range.start..offset.min(value_range.end);
+    let typed_range = val_range.start..offset.min(val_range.end);
     let Some(range) = position::utf16_range(lines, typed_range.clone()) else {
         return Vec::new();
     };
     let typed = &text[typed_range];
     accepted
         .iter()
-        .filter(|candidate| candidate.starts_with(typed))
-        .map(|candidate| CompletionItem {
-            label: (*candidate).to_owned(),
+        .filter(|cand| cand.starts_with(typed))
+        .map(|cand| CompletionItem {
+            label: (*cand).to_owned(),
             kind: Some(CompletionItemKind::VALUE),
             detail: Some(declared_path.clone()),
             text_edit: Some(CompletionTextEdit::Edit(TextEdit {
                 range,
-                new_text: (*candidate).to_owned(),
+                new_text: (*cand).to_owned(),
             })),
             ..CompletionItem::default()
         })
         .collect()
 }
 
-/// The byte range a completion replaces and the partial key it replaces.
 fn key_position(text: &str, offset: usize) -> Option<(Range<usize>, &str)> {
     if !text.is_char_boundary(offset) {
         return None;
     }
     let line_start = line_range_at(text, offset).start;
     let prefix = &text[line_start..offset];
-    // `[` opens a table, `=` a value, and `#` a comment; none of them names a key.
     if prefix.contains(['[', ']', '=', '#']) {
         return None;
     }
@@ -414,21 +370,18 @@ fn key_position(text: &str, offset: usize) -> Option<(Range<usize>, &str)> {
     let partial = &text[start..offset];
     partial
         .chars()
-        .all(|character| character.is_ascii_alphanumeric() || character == '_' || character == '-')
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
         .then_some((start..offset, partial))
 }
 
-/// The latest table header at or before an offset, and the dotted path naming it.
 struct EnclosingTable<'a> {
     table: &'a toml_edit::Table,
-    /// The dotted path of the table's own keys, empty for the document root.
     path: String,
-    /// Where the header this table was read from starts.
     start: usize,
 }
 
-/// The latest table header before the cursor owns trailing blank lines, even when
-/// an array's entries are interleaved with other sections. Values own their full spans.
+/// The latest table header before the cursor owns trailing blank lines even across interleaved
+/// array entries; values own their own spans.
 fn enclosing_table(root: &toml_edit::Table, offset: usize) -> Option<(&toml_edit::Table, String)> {
     fn walk<'a>(
         table: &'a toml_edit::Table,
@@ -447,22 +400,20 @@ fn enclosing_table(root: &toml_edit::Table, offset: usize) -> Option<(&toml_edit
         }
         for (key, item) in table.iter() {
             match item {
-                toml_edit::Item::Value(value) => {
-                    if value.span().is_some_and(|span| span.contains(&offset)) {
+                toml_edit::Item::Value(val) => {
+                    if val.span().is_some_and(|span| span.contains(&offset)) {
                         return None;
                     }
                 }
                 toml_edit::Item::Table(inner) => {
                     with_key(path, key, |path| walk(inner, path, offset, owner))?;
                 }
-                toml_edit::Item::ArrayOfTables(tables) => {
-                    with_key(path, key, |path| {
-                        for table in tables {
-                            walk(table, path, offset, owner)?;
-                        }
-                        Some(())
-                    })?;
-                }
+                toml_edit::Item::ArrayOfTables(tables) => with_key(path, key, |path| {
+                    for table in tables {
+                        walk(table, path, offset, owner)?;
+                    }
+                    Some(())
+                })?,
                 toml_edit::Item::None => {}
             }
         }
@@ -478,404 +429,21 @@ fn enclosing_table(root: &toml_edit::Table, offset: usize) -> Option<(&toml_edit
     Some((owner.table, owner.path))
 }
 
-/// Run `visit` with `key` appended to the dotted path, then restore the path.
 fn with_key<R>(path: &mut String, key: &str, visit: impl FnOnce(&mut String) -> R) -> R {
     let parent = path.len();
-    push_key(path, key);
-    let result = visit(path);
-    path.truncate(parent);
-    result
-}
-
-/// Extend `path` with one key written below it.
-fn push_key(path: &mut String, key: &str) {
     if !path.is_empty() {
         path.push('.');
     }
     path.push_str(key);
+    let res = visit(path);
+    path.truncate(parent);
+    res
 }
 
-/// The declared path of `key` written inside `table_path`.
 fn child_path(table_path: &str, key: &str) -> String {
     if table_path.is_empty() {
         key.to_owned()
     } else {
         format!("{table_path}.{key}")
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tola_build::config::FieldPath;
-
-    /// One completion, as the label an author reads, the key it writes, and where it edits.
-    struct Completed {
-        label: String,
-        key: String,
-        range: lsp_types::Range,
-    }
-
-    /// The completions for `text` at its `|` marker, over a host's own declarations.
-    fn completed_in(host: HostSections, text: &str) -> Vec<Completed> {
-        let offset = text.find('|').expect("a cursor marker");
-        let lines = Lines::new(text.replace('|', ""));
-        completion(&lines, offset, host)
-            .into_iter()
-            .map(|item| {
-                let CompletionTextEdit::Edit(edit) = item.text_edit.unwrap() else {
-                    panic!("expected a text edit");
-                };
-                Completed {
-                    label: item.label,
-                    key: edit.new_text,
-                    range: edit.range,
-                }
-            })
-            .collect()
-    }
-
-    /// The completions for `text` at its `|` marker, which the completion replaces.
-    fn completed(text: &str) -> Vec<Completed> {
-        completed_in(&[], text)
-    }
-
-    fn labels(text: &str) -> Vec<String> {
-        completed(text).into_iter().map(|item| item.label).collect()
-    }
-
-    fn labels_in(host: HostSections, text: &str) -> Vec<String> {
-        completed_in(host, text)
-            .into_iter()
-            .map(|item| item.label)
-            .collect()
-    }
-
-    /// The markdown the hover at the `|` marker answers with, over a host's own declarations.
-    fn hover_in(host: HostSections, text: &str) -> Option<String> {
-        let offset = text.find('|').expect("a cursor marker");
-        let unmarked = text.replace('|', "");
-        let lines = Lines::new(unmarked);
-        let position = position::utf16_range(&lines, offset..offset)?.start;
-        let hover = document_hover(lines.text(), position, host)?;
-        match hover.contents {
-            lsp_types::HoverContents::Markup(markup) => Some(markup.value),
-            contents => panic!("markdown, got {contents:?}"),
-        }
-    }
-
-    /// The markdown the hover at the `|` marker answers with, when it answers.
-    fn hover(text: &str) -> Option<String> {
-        hover_in(&[], text)
-    }
-
-    /// The declared path a hover names and the documentation it carries.
-    ///
-    /// The expected text is written here, never read back from `field_documentation`: a hover
-    /// compared against the schema it renders from would pass however wrong the rendering is.
-    fn documented_path(hover: &str) -> (&str, &str) {
-        let (head, body) = hover
-            .split_once("\n\n")
-            .unwrap_or_else(|| panic!("a path line and its documentation: {hover:?}"));
-        let path = head
-            .strip_prefix('`')
-            .and_then(|head| head.strip_suffix('`'))
-            .unwrap_or_else(|| panic!("the path as code: {hover:?}"));
-        assert!(!body.trim().is_empty(), "documentation: {hover:?}");
-        (path, body)
-    }
-
-    /// A host's own declarations, as the server receives them: one section's field list per entry,
-    /// each path paired with the documentation its declaring type wrote.
-    const HOST: HostSections = &[&[
-        (
-            FieldPath::new("diagnostics.max_errors"),
-            Some("Host-declared errors limit."),
-        ),
-        (FieldPath::new("build.entry"), Some("Host-declared entry.")),
-    ]];
-
-    /// A field only a host section declares answers that declaration's documentation.
-    #[test]
-    fn host_field_answers_documentation() {
-        assert_eq!(
-            hover_in(HOST, "[diagnostics]\nmax_erro|rs = 3\n"),
-            Some("`diagnostics.max_errors`\n\nHost-declared errors limit.".to_owned())
-        );
-    }
-
-    /// A host declaration of a path the core schema owns leaves the core documentation in place.
-    #[test]
-    fn core_documentation_wins_over_host() {
-        let answer = hover_in(HOST, "[build]\nent|ry = \"site.typ\"\n").expect("a hover");
-        let (path, documentation) = documented_path(&answer);
-        assert_eq!(path, "build.entry");
-        assert!(
-            !documentation.contains("Host-declared"),
-            "the core schema's documentation wins: {answer}"
-        );
-    }
-
-    /// A host-declared key completes inside its own section.
-    #[test]
-    fn host_declared_keys_complete() {
-        let offered = labels_in(HOST, "[diagnostics]\n|");
-        assert!(offered.contains(&"max_errors".to_owned()), "{offered:?}");
-    }
-
-    /// A boolean field completes the two values it takes.
-    #[test]
-    fn boolean_field_completes_its_values() {
-        let labels = labels("[build.minify]\njavascript = tr|\n");
-        assert_eq!(labels, ["true"], "{labels:?}");
-    }
-
-    /// A value answers the field it belongs to, exactly as its key does.
-    #[test]
-    fn value_answers_its_field() {
-        assert_eq!(
-            documented_path(&hover("[site]\nlanguage = \"z|h\"\n").expect("a hover")).0,
-            "site.language"
-        );
-    }
-
-    /// The fix for the key at the `|` marker, with the marker removed from the text.
-    fn fix(text: &str) -> Option<TextEdit> {
-        let offset = text.find('|').expect("a cursor marker");
-        let unmarked = text.replace('|', "");
-        let lines = Lines::new(unmarked.clone());
-        let position = position::utf16_range(&lines, offset..offset)?.start;
-        replacement(&unmarked, position, &[])
-    }
-
-    #[test]
-    fn misspelled_key_finds_nearest() {
-        let edit = fix("[build]\nentr| = \"content\"\n").expect("a fix");
-        assert_eq!(edit.new_text, "entry");
-        assert_eq!(
-            (
-                edit.range.start.line,
-                edit.range.start.character,
-                edit.range.end.character
-            ),
-            (1, 0, 4),
-            "the fix replaces the key the author wrote"
-        );
-    }
-
-    #[test]
-    fn spelling_edits_keep_the_parent_and_refuse_collisions() {
-        let edit = fix("site.tite|l = \"Site\"\n").expect("a dotted key has a fix");
-        assert_eq!(edit.new_text, "title");
-        assert_eq!(edit.range.start.character, 5);
-        assert!(fix("[site]\ntitle = \"Keep\"\ntite|l = \"Typo\"\n").is_none());
-    }
-
-    #[test]
-    fn only_misspelled_keys_are_fixed() {
-        assert!(
-            fix("[build]\nent|ry = \"content\"\n").is_none(),
-            "a declared key"
-        );
-        assert!(
-            fix("[build]\nentry = \"cont|ent\"\n").is_none(),
-            "a value names no key"
-        );
-        assert!(fix("[bu|ild]\n").is_none(), "a declared table header");
-        assert_eq!(
-            fix("[bul|d]\n").map(|edit| edit.new_text),
-            Some("build".to_owned()),
-            "a misspelled table header"
-        );
-        assert!(
-            fix("[site]\nzzzzzz|zz = 1\n").is_none(),
-            "a key no declared key resembles"
-        );
-    }
-
-    #[test]
-    fn keys_complete_inside_their_table() {
-        let offered = labels("[build]\n|");
-        assert!(offered.contains(&"entry".to_owned()), "{offered:?}");
-        assert!(offered.contains(&"content-dir".to_owned()), "{offered:?}");
-        assert!(!offered.contains(&"title".to_owned()), "{offered:?}");
-
-        let offered = labels("[build]\nent|");
-        assert_eq!(offered, ["entry"]);
-    }
-
-    #[test]
-    fn nested_sections_complete_own_keys() {
-        let offered = labels("[hooks]\n|");
-        assert!(offered.contains(&"before-build".to_owned()), "{offered:?}");
-        assert!(!offered.contains(&"entry".to_owned()), "{offered:?}");
-
-        assert!(!offered.contains(&"site".to_owned()), "{offered:?}");
-        assert!(offered.iter().all(|key| !key.contains('.')), "{offered:?}");
-
-        let offered = labels("|");
-        for section in ["site", "build"] {
-            assert!(offered.iter().any(|key| key == section), "{offered:?}");
-        }
-        assert!(offered.iter().all(|key| !key.contains('.')), "{offered:?}");
-        assert!(
-            !offered
-                .iter()
-                .any(|key| matches!(key.as_str(), "title" | "entry")),
-            "{offered:?}"
-        );
-    }
-
-    #[test]
-    fn declared_keys_do_not_repeat() {
-        let offered = labels("[site]\ntitle = \"Title\"\n|");
-        assert!(!offered.contains(&"title".to_owned()), "{offered:?}");
-        assert!(offered.contains(&"description".to_owned()), "{offered:?}");
-    }
-
-    #[test]
-    fn values_name_no_key() {
-        for text in [
-            "[build]\nentry = |\n",
-            "version = |\n",
-            "[bui|]\n",
-            "# |\n",
-            "[build]\nentry = \"|\"\n",
-        ] {
-            assert!(labels(text).is_empty(), "{text:?}");
-        }
-    }
-
-    /// Every position that names a declared path answers that path: a key, a value, a table
-    /// header, a dotted key, an array-of-tables entry, and an inline member.
-    #[test]
-    fn hover_answers_declared_path() {
-        let cases: [(&str, &str); 11] = [
-            ("[build]\nentr|y = \"content\"\n", "build.entry"),
-            ("[hoo|ks]\n", "hooks"),
-            ("[site]\nti|tle = \"Title\"\n", "site.title"),
-            ("[build]\nminify = { ht|ml = true }\n", "build.minify.html"),
-            ("[build]\nminify = { html = tr|ue }\n", "build.minify.html"),
-            ("site.ti|tle = \"T\"\n", "site.title"),
-            (
-                "[build.references]\nnaviga|tion = \"warn\"\n",
-                "build.references.navigation",
-            ),
-            (
-                "[[hooks.before-build]]\nna|me = \"icons\"\n",
-                "hooks.before-build.name",
-            ),
-            ("[si|te]\n", "site"),
-            ("[[hooks.before-|build]]\n", "hooks.before-build"),
-            (
-                "[[hooks.before-build]]\nname = \"icons\"\n\
-                 argv = [\n  \"node\",\n  \"|scripts/icons.mjs\",\n]\n",
-                "hooks.before-build.argv",
-            ),
-        ];
-        for (source, path) in cases {
-            let answer = hover(source).unwrap_or_else(|| panic!("a hover for {source:?}"));
-            assert_eq!(documented_path(&answer).0, path, "{source:?}");
-        }
-    }
-
-    /// An array element that opens its line with `[` is no table header: its text answers as the
-    /// array's field, not as a declared path it happens to spell.
-    #[test]
-    fn array_element_answers_its_field() {
-        assert_eq!(
-            documented_path(
-                &hover("[[hooks.before-build]]\nargv = [\n  [\"s|ite\"],\n]\n").expect("a hover")
-            )
-            .0,
-            "hooks.before-build.argv"
-        );
-    }
-
-    /// Text no declared path describes answers no hover.
-    #[test]
-    fn undeclared_text_answers_nothing() {
-        for source in [
-            "|nope = 1\n",
-            "[build]\nnope| = 1\n",
-            "[bui|]\n",
-            "[build]\n|",
-            "# |note\n",
-        ] {
-            assert_eq!(hover(source), None, "{source:?}");
-        }
-    }
-
-    #[test]
-    fn edit_covers_typed_prefix() {
-        let completed = completed("[build]\nent|");
-        let [item] = &completed[..] else {
-            panic!("expected one completion");
-        };
-        assert_eq!(item.key, "entry");
-        assert_eq!(item.range.start.line, 1);
-        assert_eq!(item.range.start.character, 0);
-        assert_eq!(item.range.end.character, 3);
-    }
-
-    /// A hook stage completes the field only it declares: before-build generates files, and
-    /// generate-outputs names the files an earlier stage generated.
-    #[test]
-    fn hook_stages_complete_own_fields() {
-        for (stage, own, foreign) in [
-            ("before-build", "generates", "outputs"),
-            ("generate-outputs", "outputs", "generates"),
-        ] {
-            let offered = labels(&format!("[[hooks.{stage}]]\n|"));
-            assert!(offered.contains(&own.to_owned()), "{stage}: {offered:?}");
-            assert!(
-                !offered.contains(&foreign.to_owned()),
-                "{stage} offers {foreign}: {offered:?}"
-            );
-        }
-    }
-
-    /// A hook completion answers the entry the cursor sits in, whatever sections are interleaved
-    /// between its own.
-    #[test]
-    fn hook_completion_answers_own_entry() {
-        for (source, expected) in [
-            (
-                r#"[build]
-entry = "site.typ"
-[[hooks.before-build]]
-name = "icons"
-[site]
-title = "Example"
-[[hooks.after-publish]]
-name = "deploy"
-[[hooks.before-build]]
-gen|
-"#,
-                ["generates"],
-            ),
-            (
-                r#"[[hooks.before-build]]
-name = "icons"
-argv = ["icons"]
-[[hooks.before-build]]
-na|
-"#,
-                ["name"],
-            ),
-        ] {
-            assert_eq!(labels(source), expected);
-        }
-    }
-
-    #[test]
-    fn hook_dev_completes_finite_values() {
-        for (stage, expected) in [
-            ("before-build", vec!["\"run\"", "\"skip\"", "\"reuse\""]),
-            ("generate-outputs", vec!["\"run\"", "\"skip\"", "\"reuse\""]),
-            ("after-publish", vec!["\"run\"", "\"skip\""]),
-        ] {
-            assert_eq!(labels(&format!("[[hooks.{stage}]]\ndev = |")), expected,);
-        }
     }
 }

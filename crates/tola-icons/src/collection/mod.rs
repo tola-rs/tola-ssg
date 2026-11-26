@@ -1,4 +1,4 @@
-//! One collection's validated icon values and its Iconify import.
+//! Validated icon collections and Iconify JSON import.
 
 use std::collections::BTreeMap;
 
@@ -9,9 +9,7 @@ mod iconify;
 const MAX_ICONS: usize = 98_304;
 const MAX_LICENSE_FIELD_BYTES: usize = 4_096;
 
-/// License metadata in an Iconify collection's `info.license`.
-///
-/// Each field is retained as written by the source, up to the per-field byte limit.
+/// License metadata from an Iconify collection's `info.license`.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize)]
 pub struct IconLicense {
     #[serde(default, deserialize_with = "deserialize_license_field")]
@@ -23,15 +21,17 @@ pub struct IconLicense {
 }
 
 impl IconLicense {
-    /// Human-readable license name.
+    /// Return the human-readable license title.
     pub fn title(&self) -> Option<&str> {
         self.title.as_deref()
     }
-    /// SPDX expression.
+
+    /// Return the SPDX license identifier.
     pub fn spdx(&self) -> Option<&str> {
         self.spdx.as_deref()
     }
-    /// License document URL, retained but not fetched.
+
+    /// Return the license document URL.
     pub fn url(&self) -> Option<&str> {
         self.url.as_deref()
     }
@@ -41,100 +41,98 @@ fn deserialize_license_field<'de, D>(deserializer: D) -> Result<Option<String>, 
 where
     D: serde::Deserializer<'de>,
 {
-    let value = <Option<String> as serde::Deserialize>::deserialize(deserializer)?;
-    if value
+    let val = <Option<String> as serde::Deserialize>::deserialize(deserializer)?;
+    if val
         .as_ref()
-        .is_some_and(|value| value.len() > MAX_LICENSE_FIELD_BYTES)
+        .is_some_and(|s| s.len() > MAX_LICENSE_FIELD_BYTES)
     {
         return Err(serde::de::Error::custom(format_args!(
             "license field exceeds the {MAX_LICENSE_FIELD_BYTES}-byte limit"
         )));
     }
-    Ok(value)
+    Ok(val)
 }
 
-/// Invalid collection data or an exceeded import limit.
+/// Error returned when importing or mutating an [`IconCollection`].
 #[derive(Debug, thiserror::Error)]
 pub enum InvalidCollection {
-    /// The input exceeds the collection byte budget.
+    /// Input exceeds the collection byte budget.
     #[error("this file is larger than the {limit}-byte icon collection limit")]
     TooLarge {
-        /// Maximum accepted input size.
+        /// Maximum accepted input size in bytes.
         limit: usize,
     },
-    /// Unique SVG variants exceed the aggregate parsing-work and frozen-storage budget.
+    /// Expanded SVG variants exceed the cumulative parsing and storage budget.
     #[error("the collection expands past the {limit}-byte limit")]
     ExpandedTooLarge {
-        /// Maximum cumulative raw body bytes parsed plus normalized SVG bytes retained.
+        /// Maximum cumulative raw body plus normalized SVG bytes.
         limit: usize,
     },
-    /// Invalid JSON or a violation of the bounded collection schema.
+    /// Input is invalid JSON or violates the bounded collection schema.
     #[error("the icon collection is not valid JSON at line {line}, column {column}")]
     Json {
-        /// One-based JSON line.
+        /// One-based JSON line number.
         line: usize,
-        /// One-based JSON column.
+        /// One-based JSON column number.
         column: usize,
     },
-    /// An icon or alias has an invalid identity.
+    /// An icon or alias name violates the identity grammar.
     #[error("an icon name in this collection is not valid: {0}")]
     Name(#[from] InvalidIconName),
-    /// An icon name is already in use.
+    /// An icon name or alias collides with an existing entry.
     #[error("two icons in this collection are both named `{name}`")]
     DuplicateIcon {
-        /// The colliding name.
+        /// Colliding icon name.
         name: String,
     },
-    /// The number of retained icons would exceed the collection budget.
+    /// Retained icon count exceeds the collection limit.
     #[error("the collection contains more than {limit} icons")]
     TooManyIcons {
         /// Maximum retained icon count.
         limit: usize,
     },
-    /// Non-finite, non-positive or otherwise unrepresentable geometry.
+    /// Coordinates or dimensions are non-finite or non-positive.
     #[error("icon coordinates and sizes must be finite, and sizes and aspect ratios positive")]
     Geometry,
-    /// Alias inheritance is cyclic.
+    /// Alias inheritance forms a cycle.
     #[error("icon alias `{name}` resolves in a cycle")]
     AliasCycle {
-        /// The alias at which a cycle was found.
+        /// Alias name where the cycle was detected.
         name: String,
     },
-    /// An alias has no base icon.
+    /// Alias references a missing parent icon.
     #[error("icon alias `{name}` names no icon in this collection")]
     AliasTarget {
-        /// The unresolved alias.
+        /// Unresolved alias name.
         name: String,
     },
-    /// A character mapping key is not a hyphen-separated hexadecimal Unicode sequence.
+    /// Character mapping key is not hyphen-separated hexadecimal Unicode scalar values.
     #[error("a `chars` key must be hexadecimal Unicode scalar values separated by hyphens")]
     CharacterKey,
-    /// A character mapping does not name an icon or alias.
+    /// Character mapping target names no icon or alias in the collection.
     #[error("a `chars` value names no icon or alias in this collection")]
     CharacterTarget,
-    /// An individual icon violates the self-contained static SVG contract.
+    /// Individual icon SVG violates the static self-contained SVG contract.
     #[error("icon `{name}`: {source}")]
     Svg {
-        /// The icon whose SVG is invalid.
+        /// Name of the icon whose SVG failed validation.
         name: String,
-        /// Structured SVG diagnostic.
+        /// Underlying SVG validation error.
         #[source]
         source: InvalidSvg,
     },
 }
 
 impl From<serde_json::Error> for InvalidCollection {
-    fn from(error: serde_json::Error) -> Self {
+    fn from(err: serde_json::Error) -> Self {
         Self::Json {
-            line: error.line(),
-            column: error.column(),
+            line: err.line(),
+            column: err.column(),
         }
     }
 }
 
-/// Validated icons with resolved aliases and optional Iconify source metadata.
-///
-/// Icons are immutable and cheaply cloned.
+/// Validated SVG icons with resolved aliases and optional Iconify source metadata.
 #[derive(Clone, Debug, Default)]
 pub struct IconCollection {
     source_prefix: Option<String>,
@@ -144,7 +142,7 @@ pub struct IconCollection {
 }
 
 impl IconCollection {
-    /// Create an empty collection for caller-supplied SVG icons.
+    /// Create an empty collection.
     pub fn new() -> Self {
         Self::default()
     }
@@ -154,7 +152,7 @@ impl IconCollection {
         iconify::parse(bytes.as_ref())
     }
 
-    /// Parse and insert an SVG without requiring its bytes to have a static lifetime.
+    /// Parse and insert an SVG under `name`.
     pub fn insert_svg(
         &mut self,
         name: impl AsRef<str>,
@@ -170,7 +168,7 @@ impl IconCollection {
         Ok(())
     }
 
-    /// Insert an already validated icon. A failed insertion leaves the collection unchanged.
+    /// Insert an already validated icon under `name`, leaving the collection unchanged on error.
     pub fn insert(
         &mut self,
         name: impl AsRef<str>,
@@ -195,7 +193,7 @@ impl IconCollection {
         Ok(())
     }
 
-    /// Resolve an icon, alias or Iconify character mapping.
+    /// Resolve an icon, alias, or Iconify character mapping.
     pub fn get(&self, name: &str) -> Option<&SvgIcon> {
         self.icons.get(name).or_else(|| {
             self.characters
@@ -213,25 +211,25 @@ impl IconCollection {
     pub fn characters(&self) -> impl ExactSizeIterator<Item = (&str, &str)> {
         self.characters
             .iter()
-            .map(|(character, target)| (character.as_str(), target.as_str()))
+            .map(|(ch, target)| (ch.as_str(), target.as_str()))
     }
 
-    /// The source JSON prefix, independent of the collection namespace.
+    /// Return the source JSON prefix, independent of the mounted namespace.
     pub fn source_prefix(&self) -> Option<&str> {
         self.source_prefix.as_deref()
     }
 
-    /// License metadata from the source IconifyJSON.
+    /// Return license metadata from the source IconifyJSON.
     pub fn license(&self) -> Option<&IconLicense> {
         self.source_license.as_ref()
     }
 
-    /// Number of icons and aliases, excluding additional character lookup names.
+    /// Return the number of icons and aliases, excluding extra character mappings.
     pub fn len(&self) -> usize {
         self.icons.len()
     }
 
-    /// Whether the collection has no icons.
+    /// Return `true` when the collection contains no icons.
     pub fn is_empty(&self) -> bool {
         self.icons.is_empty()
     }
@@ -242,16 +240,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn duplicate_insertion_keeps_first_icon() {
-        let mut collection = IconCollection::new();
-        collection
-            .insert_svg("mark", br#"<svg viewBox="0 0 12 24"/>"#)
+    fn duplicate_insert_keeps_first() {
+        let mut col = IconCollection::new();
+        col.insert_svg("mark", br#"<svg viewBox="0 0 12 24"/>"#)
             .unwrap();
-        let rejection = collection.insert_svg("mark", br#"<svg viewBox="0 0 24 12"/>"#);
-        assert!(matches!(
-            rejection,
-            Err(InvalidCollection::DuplicateIcon { .. })
-        ));
-        assert_eq!(collection.get("mark").unwrap().aspect_ratio(), 0.5);
+        let err = col.insert_svg("mark", br#"<svg viewBox="0 0 24 12"/>"#);
+        assert!(matches!(err, Err(InvalidCollection::DuplicateIcon { .. })));
+        assert_eq!(col.get("mark").unwrap().aspect_ratio(), 0.5);
     }
 }

@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use thiserror::Error;
-use tola_build::config::ResolvedSiteConfig;
+use tola_build::config::SiteConfig;
 use tola_typst::typst::syntax::{LinkedNode, Side, Source, SyntaxKind, VirtualRoot};
 
 use crate::packages::PackageAccess;
@@ -28,7 +28,7 @@ pub(super) fn import_star(source: &Source, cursor: usize) -> Option<LinkedNode<'
 pub(super) fn blank_query_name(
     source: &Source,
     range: std::ops::Range<usize>,
-    config: &ResolvedSiteConfig,
+    config: &SiteConfig,
     package_access: &PackageAccess<'_>,
     overrides: &mut Vec<(PathBuf, Arc<str>)>,
 ) -> Result<()> {
@@ -53,7 +53,7 @@ pub(super) fn blank_query_name(
 pub(super) fn blank_query_syntax(
     source: &Source,
     range: std::ops::Range<usize>,
-    config: &ResolvedSiteConfig,
+    config: &SiteConfig,
     package_access: &PackageAccess<'_>,
     overrides: &mut Vec<(PathBuf, Arc<str>)>,
 ) -> Result<()> {
@@ -74,7 +74,7 @@ pub(super) fn blank_query_syntax(
 pub(crate) fn pin_source(
     source: &Source,
     text: Arc<str>,
-    config: &ResolvedSiteConfig,
+    config: &SiteConfig,
     package_access: &PackageAccess<'_>,
     overrides: &mut Vec<(PathBuf, Arc<str>)>,
 ) -> std::result::Result<(), RepairError> {
@@ -100,13 +100,11 @@ pub(crate) fn pin_source(
 
 pub(super) fn editable_source_path(
     source: &Source,
-    config: &ResolvedSiteConfig,
+    config: &SiteConfig,
     package_access: &PackageAccess<'_>,
 ) -> Option<PathBuf> {
     let path = match source.id().root() {
-        VirtualRoot::Project => config
-            .get_root()
-            .join(source.id().vpath().get_without_slash()),
+        VirtualRoot::Project => config.root().join(source.id().vpath().get_without_slash()),
         VirtualRoot::Package(_) => {
             if crate::identity::embedded_source(source.id()).is_some() {
                 return None;

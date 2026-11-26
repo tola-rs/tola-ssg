@@ -1,8 +1,6 @@
 # tola-config-macros
 
-Derive macros for `tola-config`. `#[derive(Config)]` generates field-path accessors
-(`FIELDS`) and the fallible TOML template methods (`try_template`, `try_template_with_header`,
-`try_template_with_header_from`).
+`#[derive(Config)]` proc macro for `tola-config`. Generates `FIELDS` key-path accessors and TOML template helpers (`try_template`, `try_template_with_header`, `try_template_with_header_from`).
 
 ```rust
 #[derive(Config)]
@@ -16,16 +14,10 @@ pub struct SiteConfig {
     #[config(default = "en")]
     pub language: String,
 
-    /// Experimental switch.
-    #[config(status = experimental)]
-    pub dark_mode: bool,
-
-    /// Internal field: not in field paths, templates, or status validation.
+    /// Internal field excluded from templates and validation.
     #[config(skip)]
     pub internal: String,
 }
 ```
 
-Struct attributes: `section`, `crate`/`tola_config`, `collection`. Field attributes: `skip`,
-`hidden`, `name`, `default`, `values`, `collection`, `status`, `sub`. The macro's rustdoc
-has the details.
+Struct attributes: `section`, `crate`/`tola_config`, `collection`. Field attributes: `skip`, `hidden`, `name`, `default`, `values`, `collection`, `status`, `sub`.

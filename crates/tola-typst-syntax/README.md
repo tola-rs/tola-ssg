@@ -1,21 +1,5 @@
 # tola-typst-syntax
 
-Typst source analysis for editors and tooling: positions, scoped names, imports, outlines, folds,
-tokens, colours, and small edits. It never compiles and does no I/O; sources and import views are
-supplied to it.
+Pure, I/O-free Typst source analysis for editors and tooling: positions, scopes, dead bindings, import graphs, outlines, folds, tokens, colors, and formatting (optional `format` feature).
 
-`names::SourceNames` indexes one parsed source, and its ranges address that exact source.
-`names::SourceNames::liveness` answers which local bindings no read reaches and which stores no
-read observes, over the source's own control flow. `imports::NameGraph` connects the bindings the
-source views publish; references, rename, highlighting, and token classification all read that
-one graph.
-
-Modules: `syntax`, `names`, `usage`, `imports`, `outline`, `sections`, `folds`, `nesting`,
-`loops`, `tokens`, `colours`, `continuation`, `wraps`, `edit`, `errors`, `position`, and `docs`;
-`format` (optional) adds source and range formatting.
-
-Formatting uses the Typst syntax tree to check the replacement in context. It preserves string
-and raw values, and the bytes of nodes marked `@typstyle off`. Generated line breaks follow the
-first physical line ending in the source.
-
-`typst-syntax` and `typst-library` are re-exported at the versions `tola-typst` uses.
+Formatting checks edits against the syntax tree, preserves strings, raw blocks, `@typstyle off` regions, and existing line endings. Re-exports `typst-syntax` and `typst-library` at Tola's compiler version.

@@ -1,4 +1,4 @@
-//! Presentation properties read from an element's style attribute and CSS declarations.
+//! Presentation property and SVG attribute validation and local-URL prefixing.
 
 use std::{
     collections::BTreeMap,
@@ -21,15 +21,15 @@ pub(super) struct StyleDeclaration {
 }
 
 pub(super) fn parse_style(
-    element: &str,
-    source: &str,
+    el: &str,
+    src: &str,
 ) -> Result<BTreeMap<String, StyleDeclaration>, InvalidSvg> {
-    let invalid = || invalid_value(element, "style");
-    let mut input = ParserInput::new(source);
+    let invalid = || invalid_value(el, "style");
+    let mut input = ParserInput::new(src);
     let mut parser = Parser::new(&mut input);
-    let mut declarations: BTreeMap<String, StyleDeclaration> = BTreeMap::new();
+    let mut decls: BTreeMap<String, StyleDeclaration> = BTreeMap::new();
     while !parser.is_exhausted() {
-        if parser.try_parse(|parser| parser.expect_semicolon()).is_ok() {
+        if parser.try_parse(|p| p.expect_semicolon()).is_ok() {
             continue;
         }
         let name = parser
@@ -38,34 +38,34 @@ pub(super) fn parse_style(
             .to_ascii_lowercase();
         if !is_presentation_property(&name) {
             return Err(InvalidSvg::Attribute {
-                element: element.to_owned(),
+                element: el.to_owned(),
                 attribute: name,
             });
         }
         parser.expect_colon().map_err(|_| invalid())?;
-        let mut declaration = parser
-            .parse_until_before(Delimiter::Semicolon, |parser| {
-                let value = parser.parse_until_before(Delimiter::Bang, |parser| {
-                    let start = parser.position();
-                    consume_value(parser, 0)?;
-                    Ok(parser.slice_from(start).trim().to_owned())
+        let mut decl = parser
+            .parse_until_before(Delimiter::Semicolon, |p| {
+                let value = p.parse_until_before(Delimiter::Bang, |p| {
+                    let start = p.position();
+                    consume_value(p, 0)?;
+                    Ok(p.slice_from(start).trim().to_owned())
                 })?;
-                let important = parser.try_parse(cssparser::parse_important).is_ok();
-                parser.expect_exhausted()?;
+                let important = p.try_parse(cssparser::parse_important).is_ok();
+                p.expect_exhausted()?;
                 Ok::<_, cssparser::ParseError<'_, ()>>(StyleDeclaration { value, important })
             })
             .map_err(|_| invalid())?;
-        declaration.value = normalize_property(&name, &declaration.value);
-        validate_attribute(element, &name, &declaration.value)?;
-        if declarations
+        decl.value = normalize_property(&name, &decl.value);
+        validate_attribute(el, &name, &decl.value)?;
+        if decls
             .get(&name)
-            .is_none_or(|previous| declaration.important || !previous.important)
+            .is_none_or(|prev| decl.important || !prev.important)
         {
-            declarations.insert(name, declaration);
+            decls.insert(name, decl);
         }
-        let _ = parser.try_parse(|parser| parser.expect_semicolon());
+        let _ = parser.try_parse(|p| p.expect_semicolon());
     }
-    Ok(declarations)
+    Ok(decls)
 }
 
 fn consume_value<'i>(
@@ -76,11 +76,11 @@ fn consume_value<'i>(
         return Err(parser.new_custom_error(()));
     }
     while !parser.is_exhausted() {
-        let token = parser.next()?.clone();
-        if token.is_parse_error() {
+        let tok = parser.next()?.clone();
+        if tok.is_parse_error() {
             return Err(parser.new_custom_error(()));
         }
-        match token {
+        match tok {
             Token::Function(_) | Token::ParenthesisBlock | Token::SquareBracketBlock => {
                 parser.parse_nested_block(|nested| consume_value(nested, depth + 1))?;
             }
@@ -91,22 +91,22 @@ fn consume_value<'i>(
     Ok(())
 }
 
-pub(super) fn normalize_property(name: &str, value: &str) -> String {
+pub(super) fn normalize_property(name: &str, val: &str) -> String {
     if is_presentation_property(name)
         && !matches!(
             name,
             "fill" | "stroke" | "color" | "stop-color" | "flood-color" | "lighting-color"
         )
     {
-        let mut input = ParserInput::new(value);
+        let mut input = ParserInput::new(val);
         let mut parser = Parser::new(&mut input);
-        if let Ok(keyword) = parser.expect_ident_cloned() {
+        if let Ok(kw) = parser.expect_ident_cloned() {
             if parser.is_exhausted() {
-                return keyword.to_ascii_lowercase();
+                return kw.to_ascii_lowercase();
             }
         }
     }
-    value.to_owned()
+    val.to_owned()
 }
 
 fn is_presentation_property(name: &str) -> bool {
@@ -148,10 +148,10 @@ fn is_presentation_property(name: &str) -> bool {
     )
 }
 
-fn invalid_value(element: &str, attribute: &str) -> InvalidSvg {
+fn invalid_value(el: &str, attr: &str) -> InvalidSvg {
     InvalidSvg::Value {
-        element: element.to_owned(),
-        attribute: attribute.to_owned(),
+        element: el.to_owned(),
+        attribute: attr.to_owned(),
     }
 }
 
@@ -159,14 +159,8 @@ fn is_valid_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= MAX_SVG_ID_BYTES && !id.chars().any(char::is_whitespace)
 }
 
-/// The keywords every presentation property accepts whatever its own values are.
 const CSS_WIDE_KEYWORDS: &[&str] = &["inherit", "initial", "unset"];
 
-/// Attributes whose value is one keyword from a fixed set.
-///
-/// A list more than one attribute accepts is a const; a list only one attribute accepts is written
-/// in its row. An attribute whose keywords depend on its element stays in the match below, beside
-/// its guard.
 const KEYWORD_VALUES: &[(&str, &[&str])] = &[
     ("fill-rule", RULE_KEYWORDS),
     ("clip-rule", RULE_KEYWORDS),
@@ -192,7 +186,6 @@ const KEYWORD_VALUES: &[(&str, &[&str])] = &[
     ("isolation", &["auto", "isolate"]),
 ];
 
-/// The keywords the two rules accept, and the units keywords every units attribute accepts.
 const RULE_KEYWORDS: &[&str] = &["nonzero", "evenodd", "inherit"];
 const OBJECT_UNITS: &[&str] = &["userSpaceOnUse", "objectBoundingBox"];
 const STROKE_JOIN_KEYWORDS: &[&str] = &["miter", "miter-clip", "round", "bevel", "arcs", "inherit"];
@@ -201,103 +194,104 @@ const OVERFLOW_KEYWORDS: &[&str] = &["visible", "hidden", "scroll", "auto", "inh
 const COLOR_KEYWORDS: &[&str] = &["auto", "srgb", "linearrgb", "inherit"];
 const RENDERING_KEYWORDS: &[&str] = &["auto", "optimizespeed", "crispedges", "geometricprecision"];
 
-fn keyword_values(attribute: &str) -> Option<&'static [&'static str]> {
+fn keyword_values(attr: &str) -> Option<&'static [&'static str]> {
     KEYWORD_VALUES
         .iter()
-        .find_map(|(name, keywords)| (*name == attribute).then_some(*keywords))
+        .find_map(|(name, kws)| (*name == attr).then_some(*kws))
 }
 
-pub(super) fn validate_attribute(
-    element: &str,
-    attribute: &str,
-    value: &str,
-) -> Result<(), InvalidSvg> {
-    let invalid = || invalid_value(element, attribute);
+fn validate_kw(val: &str, kws: &[&str], el: &str, attr: &str) -> Result<(), InvalidSvg> {
+    kws.contains(&val.trim())
+        .then_some(())
+        .ok_or_else(|| invalid_value(el, attr))
+}
+
+fn validate_f64(val: &str, nonnegative: bool, el: &str, attr: &str) -> Result<(), InvalidSvg> {
+    let n = val
+        .trim()
+        .parse::<f64>()
+        .map_err(|_| invalid_value(el, attr))?;
+    (n.is_finite() && (!nonnegative || n >= 0.0))
+        .then_some(())
+        .ok_or_else(|| invalid_value(el, attr))
+}
+
+fn validate_length(val: &str, nonnegative: bool, el: &str, attr: &str) -> Result<(), InvalidSvg> {
+    let len = svgtypes::Length::from_str(val.trim()).map_err(|_| invalid_value(el, attr))?;
+    (len.number.is_finite() && (!nonnegative || len.number >= 0.0))
+        .then_some(())
+        .ok_or_else(|| invalid_value(el, attr))
+}
+
+pub(super) fn validate_attribute(el: &str, attr: &str, val: &str) -> Result<(), InvalidSvg> {
+    let invalid = || invalid_value(el, attr);
     if matches!(
-        attribute,
+        attr,
         "class" | "role" | "style" | "xml:space" | "xml:lang" | "version"
-    ) || attribute.starts_with("aria-")
-        || attribute.starts_with("data-")
+    ) || attr.starts_with("aria-")
+        || attr.starts_with("data-")
     {
         return Ok(());
     }
-    // A presentation property accepts the CSS-wide keywords whatever its own values are.
-    if is_presentation_property(attribute) && CSS_WIDE_KEYWORDS.contains(&value.trim()) {
+    if is_presentation_property(attr) && CSS_WIDE_KEYWORDS.contains(&val.trim()) {
         return Ok(());
     }
-    if let Some(keywords) = keyword_values(attribute) {
-        return validate_keyword(value, keywords).map_err(|_| invalid());
+    if let Some(kws) = keyword_values(attr) {
+        return validate_kw(val, kws, el, attr);
     }
-    match attribute {
-        "id" => is_valid_id(value).then_some(()).ok_or_else(invalid),
-        "d" if element == "path" => validate_path(value),
-        "viewBox" => parse_view_box(value).map(|_| ()),
-        "preserveAspectRatio" => svgtypes::AspectRatio::from_str(value)
+    match attr {
+        "id" => is_valid_id(val).then_some(()).ok_or_else(invalid),
+        "d" if el == "path" => validate_path(val),
+        "viewBox" => parse_view_box(val).map(|_| ()),
+        "preserveAspectRatio" => svgtypes::AspectRatio::from_str(val)
             .map(|_| ())
             .map_err(|_| invalid()),
-        "href"
-            if matches!(
-                element,
-                "use" | "linearGradient" | "radialGradient" | "pattern"
-            ) =>
-        {
-            local_reference(value).map(|_| ())
+        "href" if matches!(el, "use" | "linearGradient" | "radialGradient" | "pattern") => {
+            local_reference(val).map(|_| ())
         }
         "transform" | "gradientTransform" | "patternTransform" => {
-            let transform = svgtypes::Transform::from_str(value).map_err(|_| invalid())?;
-            [
-                transform.a,
-                transform.b,
-                transform.c,
-                transform.d,
-                transform.e,
-                transform.f,
-            ]
-            .iter()
-            .all(|number| number.is_finite())
-            .then_some(())
-            .ok_or_else(invalid)
+            let t = svgtypes::Transform::from_str(val).map_err(|_| invalid())?;
+            [t.a, t.b, t.c, t.d, t.e, t.f]
+                .iter()
+                .all(|n| n.is_finite())
+                .then_some(())
+                .ok_or_else(invalid)
         }
-        "fill" | "stroke" => parse_paint(value).map(|_| ()).map_err(|_| invalid()),
+        "fill" | "stroke" => parse_paint(val).map(|_| ()).map_err(|_| invalid()),
         "color" | "stop-color" | "flood-color" | "lighting-color" => {
-            parse_color(value).map(|_| ()).map_err(|_| invalid())
+            parse_color(val).map(|_| ()).map_err(|_| invalid())
         }
         "clip-path" | "mask" | "filter" => {
-            if value.trim().eq_ignore_ascii_case("none") {
+            if val.trim().eq_ignore_ascii_case("none") {
                 return Ok(());
             }
-            let references = local_urls(value)?;
-            if references.len() != 1 {
+            if local_urls(val)?.len() != 1 {
                 return Err(invalid());
             }
-            let mut input = ParserInput::new(value);
+            let mut input = ParserInput::new(val);
             let mut parser = Parser::new(&mut input);
             parser.expect_url().map_err(|_| invalid())?;
             parser.expect_exhausted().map_err(|_| invalid())
         }
         "x" | "y" | "x1" | "y1" | "x2" | "y2" | "cx" | "cy" | "fx" | "fy" | "width" | "height"
         | "r" | "rx" | "ry" | "fr" | "stroke-width" | "stroke-dashoffset" => {
-            let length = svgtypes::Length::from_str(value.trim()).map_err(|_| invalid())?;
-            let nonnegative = matches!(
-                attribute,
+            let nonneg = matches!(
+                attr,
                 "width" | "height" | "r" | "rx" | "ry" | "fr" | "stroke-width"
             );
-            if !length.number.is_finite() || (nonnegative && length.number < 0.0) {
-                return Err(invalid());
-            }
-            Ok(())
+            validate_length(val, nonneg, el, attr)
         }
         "points" => {
-            let count = validate_number_list(value).map_err(|_| invalid())?;
+            let count = validate_number_list(val).map_err(|_| invalid())?;
             (count % 2 == 0).then_some(()).ok_or_else(invalid)
         }
         "stroke-dasharray" => {
-            if value.trim() == "none" {
+            if val.trim() == "none" {
                 return Ok(());
             }
-            for length in svgtypes::LengthListParser::from(value) {
-                let length = length.map_err(|_| invalid())?;
-                if !length.number.is_finite() || length.number < 0.0 {
+            for len in svgtypes::LengthListParser::from(val) {
+                let len = len.map_err(|_| invalid())?;
+                if !len.number.is_finite() || len.number < 0.0 {
                     return Err(invalid());
                 }
             }
@@ -305,66 +299,60 @@ pub(super) fn validate_attribute(
         }
         "opacity" | "fill-opacity" | "stroke-opacity" | "stop-opacity" | "flood-opacity"
         | "offset" => {
-            let source = value.trim().strip_suffix('%').unwrap_or(value.trim());
-            let number = source.parse::<f64>().map_err(|_| invalid())?;
-            number.is_finite().then_some(()).ok_or_else(invalid)
+            let num = val.trim().strip_suffix('%').unwrap_or(val.trim());
+            validate_f64(num, false, el, attr)
         }
-        "pathLength" | "stroke-miterlimit" => {
-            let number = value.trim().parse::<f64>().map_err(|_| invalid())?;
-            (number.is_finite() && number >= 0.0)
-                .then_some(())
-                .ok_or_else(invalid)
-        }
-        "paint-order" => validate_paint_order(value).map_err(|_| invalid()),
+        "pathLength" | "stroke-miterlimit" => validate_f64(val, true, el, attr),
+        "paint-order" => validate_paint_order(val).map_err(|_| invalid()),
         "mix-blend-mode" => {
-            if value == "plus-lighter" {
+            if val == "plus-lighter" {
                 return Ok(());
             }
-            validate_keyword(value, BLEND_MODES).map_err(|_| invalid())
+            validate_kw(val, BLEND_MODES, el, attr)
         }
-        "in" | "in2" | "result" if element.starts_with("fe") => {
-            let mut input = ParserInput::new(value);
+        "in" | "in2" | "result" if el.starts_with("fe") => {
+            let mut input = ParserInput::new(val);
             let mut parser = Parser::new(&mut input);
-            let identifier = parser.expect_ident().map_err(|_| invalid())?;
+            let ident = parser.expect_ident().map_err(|_| invalid())?;
             if matches!(
-                identifier.to_ascii_lowercase().as_str(),
+                ident.to_ascii_lowercase().as_str(),
                 "initial" | "inherit" | "unset" | "revert" | "revert-layer" | "default"
             ) {
                 return Err(invalid());
             }
             parser.expect_exhausted().map_err(|_| invalid())
         }
-        "type" if element == "feColorMatrix" => validate_keyword(
-            value,
+        "type" if el == "feColorMatrix" => validate_kw(
+            val,
             &["matrix", "saturate", "hueRotate", "luminanceToAlpha"],
-        )
-        .map_err(|_| invalid()),
-        "type" if matches!(element, "feFuncA" | "feFuncR" | "feFuncG" | "feFuncB") => {
-            validate_keyword(value, &["identity", "table", "discrete", "linear", "gamma"])
-                .map_err(|_| invalid())
+            el,
+            attr,
+        ),
+        "type" if matches!(el, "feFuncA" | "feFuncR" | "feFuncG" | "feFuncB") => validate_kw(
+            val,
+            &["identity", "table", "discrete", "linear", "gamma"],
+            el,
+            attr,
+        ),
+        "type" if el == "feTurbulence" => {
+            validate_kw(val, &["fractalNoise", "turbulence"], el, attr)
         }
-        "type" if element == "feTurbulence" => {
-            validate_keyword(value, &["fractalNoise", "turbulence"]).map_err(|_| invalid())
-        }
-        "mode" if element == "feBlend" => {
-            validate_keyword(value, BLEND_MODES).map_err(|_| invalid())
-        }
-        "operator" if element == "feComposite" => validate_keyword(
-            value,
+        "mode" if el == "feBlend" => validate_kw(val, BLEND_MODES, el, attr),
+        "operator" if el == "feComposite" => validate_kw(
+            val,
             &["over", "in", "out", "atop", "xor", "arithmetic", "lighter"],
-        )
-        .map_err(|_| invalid()),
-        "operator" if element == "feMorphology" => {
-            validate_keyword(value, &["erode", "dilate"]).map_err(|_| invalid())
+            el,
+            attr,
+        ),
+        "operator" if el == "feMorphology" => validate_kw(val, &["erode", "dilate"], el, attr),
+        "edgeMode" if el == "feConvolveMatrix" => {
+            validate_kw(val, &["duplicate", "wrap", "none"], el, attr)
         }
-        "edgeMode" if element == "feConvolveMatrix" => {
-            validate_keyword(value, &["duplicate", "wrap", "none"]).map_err(|_| invalid())
+        "stitchTiles" if el == "feTurbulence" => {
+            validate_kw(val, &["stitch", "noStitch"], el, attr)
         }
-        "stitchTiles" if element == "feTurbulence" => {
-            validate_keyword(value, &["stitch", "noStitch"]).map_err(|_| invalid())
-        }
-        "preserveAlpha" if element == "feConvolveMatrix" => {
-            validate_keyword(value, &["true", "false"]).map_err(|_| invalid())
+        "preserveAlpha" if el == "feConvolveMatrix" => {
+            validate_kw(val, &["true", "false"], el, attr)
         }
         "values" | "stdDeviation" | "dx" | "dy" | "k1" | "k2" | "k3" | "k4" | "slope"
         | "intercept" | "amplitude" | "exponent" | "tableValues" | "order" | "kernelMatrix"
@@ -372,24 +360,18 @@ pub(super) fn validate_attribute(
         | "diffuseConstant" | "specularConstant" | "specularExponent" | "scale" | "radius"
         | "azimuth" | "elevation" | "z" | "pointsAtX" | "pointsAtY" | "pointsAtZ"
         | "limitingConeAngle" | "baseFrequency" | "numOctaves" | "seed"
-            if element.starts_with("fe") =>
+            if el.starts_with("fe") =>
         {
-            validate_number_list(value)
-                .map(|_| ())
-                .map_err(|_| invalid())
+            validate_number_list(val).map(|_| ()).map_err(|_| invalid())
         }
-        "xChannelSelector" | "yChannelSelector" if element == "feDisplacementMap" => {
-            validate_keyword(value, &["R", "G", "B", "A"]).map_err(|_| invalid())
+        "xChannelSelector" | "yChannelSelector" if el == "feDisplacementMap" => {
+            validate_kw(val, &["R", "G", "B", "A"], el, attr)
         }
         _ => Err(InvalidSvg::Attribute {
-            element: element.to_owned(),
-            attribute: attribute.to_owned(),
+            element: el.to_owned(),
+            attribute: attr.to_owned(),
         }),
     }
-}
-
-fn validate_keyword(value: &str, keywords: &[&str]) -> Result<(), ()> {
-    keywords.contains(&value.trim()).then_some(()).ok_or(())
 }
 
 const BLEND_MODES: &[&str] = &[
@@ -411,31 +393,31 @@ const BLEND_MODES: &[&str] = &[
     "luminosity",
 ];
 
-fn validate_paint_order(value: &str) -> Result<(), ()> {
-    let mut input = ParserInput::new(value);
+fn validate_paint_order(val: &str) -> Result<(), ()> {
+    let mut input = ParserInput::new(val);
     let mut parser = Parser::new(&mut input);
     let mut seen = 0_u8;
     while !parser.is_exhausted() {
-        let keyword = parser.expect_ident_cloned().map_err(|_| ())?;
-        let part = match keyword.to_ascii_lowercase().as_str() {
+        let kw = parser.expect_ident_cloned().map_err(|_| ())?;
+        let bit = match kw.to_ascii_lowercase().as_str() {
             "normal" if seen == 0 && parser.is_exhausted() => return Ok(()),
             "fill" => 1,
             "stroke" => 2,
             "markers" => 4,
             _ => return Err(()),
         };
-        if seen & part != 0 {
+        if seen & bit != 0 {
             return Err(());
         }
-        seen |= part;
+        seen |= bit;
     }
     (seen != 0).then_some(()).ok_or(())
 }
 
-fn validate_number_list(value: &str) -> Result<usize, ()> {
+fn validate_number_list(val: &str) -> Result<usize, ()> {
     let mut count = 0;
-    for number in svgtypes::NumberListParser::from(value) {
-        if !number.map_err(|_| ())?.is_finite() {
+    for n in svgtypes::NumberListParser::from(val) {
+        if !n.map_err(|_| ())?.is_finite() {
             return Err(());
         }
         count += 1;
@@ -443,16 +425,14 @@ fn validate_number_list(value: &str) -> Result<usize, ()> {
     Ok(count)
 }
 
-fn validate_path(value: &str) -> Result<(), InvalidSvg> {
+fn validate_path(val: &str) -> Result<(), InvalidSvg> {
     use svgtypes::PathSegment;
-    for segment in svgtypes::PathParser::from(value) {
-        let segment = segment.map_err(|_| InvalidSvg::Path)?;
-        let finite = match segment {
+    for seg in svgtypes::PathParser::from(val) {
+        let seg = seg.map_err(|_| InvalidSvg::Path)?;
+        let finite = match seg {
             PathSegment::MoveTo { x, y, .. }
             | PathSegment::LineTo { x, y, .. }
-            | PathSegment::SmoothQuadratic { x, y, .. } => {
-                [x, y].iter().all(|number| number.is_finite())
-            }
+            | PathSegment::SmoothQuadratic { x, y, .. } => [x, y].iter().all(|n| n.is_finite()),
             PathSegment::HorizontalLineTo { x, .. } => x.is_finite(),
             PathSegment::VerticalLineTo { y, .. } => y.is_finite(),
             PathSegment::CurveTo {
@@ -463,14 +443,12 @@ fn validate_path(value: &str) -> Result<(), InvalidSvg> {
                 x,
                 y,
                 ..
-            } => [x1, y1, x2, y2, x, y]
-                .iter()
-                .all(|number| number.is_finite()),
+            } => [x1, y1, x2, y2, x, y].iter().all(|n| n.is_finite()),
             PathSegment::SmoothCurveTo { x2, y2, x, y, .. } => {
-                [x2, y2, x, y].iter().all(|number| number.is_finite())
+                [x2, y2, x, y].iter().all(|n| n.is_finite())
             }
             PathSegment::Quadratic { x1, y1, x, y, .. } => {
-                [x1, y1, x, y].iter().all(|number| number.is_finite())
+                [x1, y1, x, y].iter().all(|n| n.is_finite())
             }
             PathSegment::EllipticalArc {
                 rx,
@@ -481,7 +459,7 @@ fn validate_path(value: &str) -> Result<(), InvalidSvg> {
                 ..
             } => [rx, ry, x_axis_rotation, x, y]
                 .iter()
-                .all(|number| number.is_finite()),
+                .all(|n| n.is_finite()),
             PathSegment::ClosePath { .. } => true,
         };
         if !finite {
@@ -503,12 +481,12 @@ pub(super) enum PaintValue {
     Resource(Arc<str>),
 }
 
-fn parse_color(value: &str) -> Result<PaintValue, ()> {
-    let mut input = ParserInput::new(value);
+fn parse_color(val: &str) -> Result<PaintValue, ()> {
+    let mut input = ParserInput::new(val);
     let mut parser = Parser::new(&mut input);
-    if let Ok(keyword) = parser.try_parse(|parser| parser.expect_ident_cloned()) {
+    if let Ok(kw) = parser.try_parse(|p| p.expect_ident_cloned()) {
         if parser.is_exhausted() {
-            match keyword.to_ascii_lowercase().as_str() {
+            match kw.to_ascii_lowercase().as_str() {
                 "inherit" => return Ok(PaintValue::Inherit),
                 "initial" => return Ok(PaintValue::Initial),
                 "unset" => return Ok(PaintValue::Unset),
@@ -516,24 +494,23 @@ fn parse_color(value: &str) -> Result<PaintValue, ()> {
             }
         }
     }
-    let mut input = ParserInput::new(value);
+    let mut input = ParserInput::new(val);
     let mut parser = Parser::new(&mut input);
     let color = cssparser_color::Color::parse(&mut parser).map_err(|_| ())?;
     parser.expect_exhausted().map_err(|_| ())?;
     use cssparser_color::Color;
     let alpha = match color {
         Color::CurrentColor => return Ok(PaintValue::CurrentColor),
-        Color::Rgba(color) => Some(color.alpha),
-        Color::Hsl(color) => color.alpha,
-        Color::Hwb(color) => color.alpha,
-        Color::Lab(color) => color.alpha,
-        Color::Lch(color) => color.alpha,
-        Color::Oklab(color) => color.alpha,
-        Color::Oklch(color) => color.alpha,
-        Color::ColorFunction(color) => color.alpha,
+        Color::Rgba(c) => Some(c.alpha),
+        Color::Hsl(c) => c.alpha,
+        Color::Hwb(c) => c.alpha,
+        Color::Lab(c) => c.alpha,
+        Color::Lch(c) => c.alpha,
+        Color::Oklab(c) => c.alpha,
+        Color::Oklch(c) => c.alpha,
+        Color::ColorFunction(c) => c.alpha,
     };
-    // Keep zero-alpha color distinct from no paint: SVG gradient interpolation still uses RGB.
-    // A missing component is zero when the stop color is resolved outside CSS interpolation.
+    // Distinguish zero-alpha color from `none` because SVG gradients interpolate non-premultiplied RGB.
     Ok(if alpha.unwrap_or(0.0) == 0.0 {
         PaintValue::Transparent
     } else {
@@ -541,54 +518,45 @@ fn parse_color(value: &str) -> Result<PaintValue, ()> {
     })
 }
 
-pub(super) fn parse_paint(value: &str) -> Result<PaintValue, ()> {
-    let mut input = ParserInput::new(value);
+pub(super) fn parse_paint(val: &str) -> Result<PaintValue, ()> {
+    let mut input = ParserInput::new(val);
     let mut parser = Parser::new(&mut input);
-    if let Ok(keyword) = parser.try_parse(|parser| parser.expect_ident_cloned()) {
+    if let Ok(kw) = parser.try_parse(|p| p.expect_ident_cloned()) {
         if parser.is_exhausted() {
-            if keyword.eq_ignore_ascii_case("none") {
-                return Ok(PaintValue::None);
-            }
-            if keyword.eq_ignore_ascii_case("inherit") {
-                return Ok(PaintValue::Inherit);
-            }
-            if keyword.eq_ignore_ascii_case("initial") {
-                return Ok(PaintValue::Initial);
-            }
-            if keyword.eq_ignore_ascii_case("unset") {
-                return Ok(PaintValue::Unset);
-            }
-            if keyword.eq_ignore_ascii_case("currentcolor") {
-                return Ok(PaintValue::CurrentColor);
+            match kw.to_ascii_lowercase().as_str() {
+                "none" => return Ok(PaintValue::None),
+                "inherit" => return Ok(PaintValue::Inherit),
+                "initial" => return Ok(PaintValue::Initial),
+                "unset" => return Ok(PaintValue::Unset),
+                "currentcolor" => return Ok(PaintValue::CurrentColor),
+                _ => {}
             }
         }
     }
-    let mut input = ParserInput::new(value);
+    let mut input = ParserInput::new(val);
     let mut parser = Parser::new(&mut input);
-    if let Ok(url) = parser.try_parse(|parser| parser.expect_url()) {
+    if let Ok(url) = parser.try_parse(|p| p.expect_url()) {
         let id = local_reference(&url).map_err(|_| ())?;
-        if !parser.is_exhausted() {
-            // A validated local paint server resolves; still validate the syntactic fallback.
-            if parser
-                .try_parse(|parser| parser.expect_ident_matching("none"))
+        if !parser.is_exhausted()
+            && parser
+                .try_parse(|p| p.expect_ident_matching("none"))
                 .is_err()
-            {
-                cssparser_color::Color::parse(&mut parser).map_err(|_| ())?;
-            }
+        {
+            cssparser_color::Color::parse(&mut parser).map_err(|_| ())?;
         }
         parser.expect_exhausted().map_err(|_| ())?;
         return Ok(PaintValue::Resource(id.into()));
     }
-    parse_color(value)
+    parse_color(val)
 }
 
-pub(super) fn local_reference(value: &str) -> Result<String, InvalidSvg> {
-    let fragment = value
+pub(super) fn local_reference(val: &str) -> Result<String, InvalidSvg> {
+    let frag = val
         .trim()
         .strip_prefix('#')
-        .filter(|fragment| !fragment.is_empty())
+        .filter(|s| !s.is_empty())
         .ok_or(InvalidSvg::ExternalReference)?;
-    let id = percent_encoding::percent_decode_str(fragment)
+    let id = percent_encoding::percent_decode_str(frag)
         .decode_utf8()
         .map_err(|_| InvalidSvg::ExternalReference)?;
     if !is_valid_id(&id) {
@@ -597,24 +565,24 @@ pub(super) fn local_reference(value: &str) -> Result<String, InvalidSvg> {
     Ok(id.into_owned())
 }
 
-pub(super) fn local_urls(source: &str) -> Result<Vec<String>, InvalidSvg> {
-    let mut input = ParserInput::new(source);
+pub(super) fn local_urls(src: &str) -> Result<Vec<String>, InvalidSvg> {
+    let mut input = ParserInput::new(src);
     let mut parser = Parser::new(&mut input);
-    let mut references = Vec::new();
+    let mut refs = Vec::new();
     while !parser.is_exhausted() {
-        if let Ok(url) = parser.try_parse(|parser| parser.expect_url()) {
-            references.push(local_reference(&url)?);
+        if let Ok(url) = parser.try_parse(|p| p.expect_url()) {
+            refs.push(local_reference(&url)?);
             continue;
         }
-        let token = parser
+        let tok = parser
             .next()
             .map_err(|_| InvalidSvg::ExternalReference)?
             .clone();
-        if token.is_parse_error() {
+        if tok.is_parse_error() {
             return Err(InvalidSvg::ExternalReference);
         }
         if matches!(
-            token,
+            tok,
             Token::Function(_)
                 | Token::ParenthesisBlock
                 | Token::SquareBracketBlock
@@ -625,7 +593,7 @@ pub(super) fn local_urls(source: &str) -> Result<Vec<String>, InvalidSvg> {
                 .map_err(|_| InvalidSvg::ExternalReference)?;
         }
     }
-    Ok(references)
+    Ok(refs)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -637,18 +605,18 @@ pub(super) enum ReferenceKind {
 }
 
 impl ReferenceKind {
-    pub(super) fn has_references(self, value: &str) -> bool {
+    pub(super) fn has_references(self, val: &str) -> bool {
         match self {
             Self::Id | Self::Fragment | Self::IdRefs => true,
-            Self::Urls => !local_urls(value)
+            Self::Urls => !local_urls(val)
                 .expect("validated local SVG URLs")
                 .is_empty(),
         }
     }
 }
 
-pub(super) fn reference_attribute(attribute: &str) -> Option<ReferenceKind> {
-    match attribute {
+pub(super) fn reference_attribute(attr: &str) -> Option<ReferenceKind> {
+    match attr {
         "id" => Some(ReferenceKind::Id),
         "href" => Some(ReferenceKind::Fragment),
         "aria-activedescendant"
@@ -664,52 +632,51 @@ pub(super) fn reference_attribute(attribute: &str) -> Option<ReferenceKind> {
     }
 }
 
-// `prefix` is the already length-delimited instance component, shared by every reference.
 pub(super) fn prefix_references(
     kind: ReferenceKind,
-    source: &str,
+    src: &str,
     prefix: &str,
-    output: &mut impl Write,
+    out: &mut impl Write,
 ) -> fmt::Result {
     match kind {
-        ReferenceKind::Id => write!(output, "{prefix}{source}"),
-        ReferenceKind::Fragment => output.write_str(&prefixed_fragment(
+        ReferenceKind::Id => write!(out, "{prefix}{src}"),
+        ReferenceKind::Fragment => out.write_str(&prefixed_fragment(
             prefix,
-            &local_reference(source).expect("validated local href"),
+            &local_reference(src).expect("validated local href"),
         )),
         ReferenceKind::IdRefs => {
-            for (index, id) in source.split_ascii_whitespace().enumerate() {
-                if index != 0 {
-                    output.write_char(' ')?;
+            for (idx, id) in src.split_ascii_whitespace().enumerate() {
+                if idx != 0 {
+                    out.write_char(' ')?;
                 }
-                output.write_str(prefix)?;
-                output.write_str(id)?;
+                out.write_str(prefix)?;
+                out.write_str(id)?;
             }
             Ok(())
         }
-        ReferenceKind::Urls => prefix_urls(source, prefix, output),
+        ReferenceKind::Urls => prefix_urls(src, prefix, out),
     }
 }
 
-fn prefix_urls(source: &str, prefix: &str, output: &mut impl Write) -> fmt::Result {
-    let mut input = ParserInput::new(source);
+fn prefix_urls(src: &str, prefix: &str, out: &mut impl Write) -> fmt::Result {
+    let mut input = ParserInput::new(src);
     let mut parser = Parser::new(&mut input);
-    let mut copied_until = 0;
+    let mut pos = 0;
     while !parser.is_exhausted() {
         parser.skip_whitespace();
         let start = parser.position().byte_index();
-        if let Ok(url) = parser.try_parse(|parser| parser.expect_url()) {
+        if let Ok(url) = parser.try_parse(|p| p.expect_url()) {
             let id = local_reference(&url).expect("validated local URL");
-            output.write_str(&source[copied_until..start])?;
-            output.write_str("url(")?;
-            cssparser::serialize_string(&prefixed_fragment(prefix, &id), output)?;
-            output.write_char(')')?;
-            copied_until = parser.position().byte_index();
+            out.write_str(&src[pos..start])?;
+            out.write_str("url(")?;
+            cssparser::serialize_string(&prefixed_fragment(prefix, &id), out)?;
+            out.write_char(')')?;
+            pos = parser.position().byte_index();
         } else if parser.next_including_whitespace_and_comments().is_err() {
             break;
         }
     }
-    output.write_str(&source[copied_until..])
+    out.write_str(&src[pos..])
 }
 
 fn prefixed_fragment(prefix: &str, id: &str) -> String {
@@ -740,42 +707,34 @@ mod tests {
     use crate::SvgIcon;
 
     #[test]
-    fn values_follow_their_property_grammar() {
-        for (property, accepted, rejected) in [
+    fn property_grammar() {
+        for (prop, accepted, rejected) in [
             ("mix-blend-mode", "plus-lighter", "banana"),
             ("shape-rendering", "geometricPrecision", "banana"),
             ("isolation", "isolate", "normal"),
             ("paint-order", "stroke fill markers", "fill stroke fill"),
             ("paint-order", "markers", "normal fill"),
         ] {
-            let svg = |value| {
-                format!(r#"<svg viewBox="0 0 24 24"><path style="{property}:{value}"/></svg>"#)
-            };
-            assert!(
-                SvgIcon::parse(svg(accepted)).is_ok(),
-                "{property}:{accepted}"
-            );
-            assert!(
-                SvgIcon::parse(svg(rejected)).is_err(),
-                "{property}:{rejected}"
-            );
-            for keyword in ["inherit", "initial", "unset"] {
-                assert!(SvgIcon::parse(svg(keyword)).is_ok(), "{property}:{keyword}");
+            let svg = |v| format!(r#"<svg viewBox="0 0 24 24"><path style="{prop}:{v}"/></svg>"#);
+            assert!(SvgIcon::parse(svg(accepted)).is_ok(), "{prop}:{accepted}");
+            assert!(SvgIcon::parse(svg(rejected)).is_err(), "{prop}:{rejected}");
+            for kw in ["inherit", "initial", "unset"] {
+                assert!(SvgIcon::parse(svg(kw)).is_ok(), "{prop}:{kw}");
             }
         }
     }
 
     #[test]
-    fn presentation_attributes_accept_inherit() {
-        for attribute in [
+    fn attrs_accept_inherit() {
+        for attr in [
             "stroke-linejoin",
             "overflow",
             "color-interpolation",
             "color-interpolation-filters",
             "visibility",
         ] {
-            let svg = format!(r#"<svg viewBox="0 0 24 24"><path {attribute}="inherit"/></svg>"#);
-            assert!(SvgIcon::parse(svg).is_ok(), "{attribute}");
+            let svg = format!(r#"<svg viewBox="0 0 24 24"><path {attr}="inherit"/></svg>"#);
+            assert!(SvgIcon::parse(svg).is_ok(), "{attr}");
         }
     }
 }

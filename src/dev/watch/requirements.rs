@@ -28,7 +28,7 @@ pub(crate) fn append_observed_paths<'a>(
             InputKind::ModuleManifests => ProducerKind::Modules,
             InputKind::TypstPackageSelection => ProducerKind::PackageResolution,
             InputKind::ContentInventory => ProducerKind::Content,
-            InputKind::ConfiguredAssets => ProducerKind::ConfiguredAssets,
+            InputKind::SiteAssets => ProducerKind::SiteAssets,
             InputKind::Icons => ProducerKind::Icons,
             InputKind::FontInventory => ProducerKind::Fonts,
             InputKind::BeforeBuildHookOutputs => ProducerKind::Hooks,

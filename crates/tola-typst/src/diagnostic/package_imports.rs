@@ -146,7 +146,7 @@ mod tests {
     }
 
     #[test]
-    fn specifier_drops_package_relative_path() {
+    fn package_specifier_parses() {
         assert_eq!(
             package_specifier("@preview/cetz:0.3.4"),
             Some("@preview/cetz:0.3.4")
@@ -161,7 +161,7 @@ mod tests {
     }
 
     #[test]
-    fn importers_name_each_importing_file_once() {
+    fn package_importers_dedups() {
         let importers = PackageImporters::collect(
             [
                 (

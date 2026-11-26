@@ -33,54 +33,49 @@ pub enum CheckoutError {
 
 /// Write `tree` from `repository` into the empty directory `root`.
 pub(crate) fn materialize(
-    repository: &gix::Repository,
+    repo: &gix::Repository,
     tree: gix::ObjectId,
     root: &Path,
-    cancellation: &BundleCancellation,
+    cancel: &BundleCancellation,
 ) -> Result<(), CheckoutError> {
-    let mut index = repository
+    let mut index = repo
         .index_from_tree(&tree)
         .map_err(|source| CheckoutError::Revision { source })?;
-    let mut options = repository
+    let mut opts = repo
         .checkout_options(gix::worktree::stack::state::attributes::Source::IdMapping)
         .map_err(|source| CheckoutError::Revision { source })?;
-    options.destination_is_initially_empty = true;
-    // A repository's `.gitattributes` can select a filter driver from the user's
-    // configuration, and `permissions.attributes` does not stop that program. Clear the
-    // drivers so module content never invokes a local command; keep EOL conversion,
-    // which is pinned for deterministic bytes.
-    let mut filters = gix::filter::Pipeline::options(repository)
-        .map_err(|source| CheckoutError::Filters { source })?;
+    opts.destination_is_initially_empty = true;
+    // Clear `.gitattributes` filter drivers so module content never invokes local commands;
+    // keep EOL conversion pinned for deterministic bytes.
+    let mut filters =
+        gix::filter::Pipeline::options(repo).map_err(|source| CheckoutError::Filters { source })?;
     filters.drivers.clear();
-    options.filters = gix::filter::plumbing::Pipeline::new(
-        repository
-            .command_context()
+    opts.filters = gix::filter::plumbing::Pipeline::new(
+        repo.command_context()
             .map_err(|source| CheckoutError::Filters { source })?,
-        repository.object_hash(),
+        repo.object_hash(),
         filters,
     );
     std::fs::create_dir(root).map_err(|source| CheckoutError::Directory { source })?;
-    let objects =
-        repository
-            .objects
-            .clone()
-            .into_arc()
-            .map_err(|source| CheckoutError::Revision {
-                source: gix::Error::from_error(source),
-            })?;
-    let checkout = gix::worktree::state::checkout(
+    let objs = repo
+        .objects
+        .clone()
+        .into_arc()
+        .map_err(|source| CheckoutError::Revision {
+            source: gix::Error::from_error(source),
+        })?;
+    let out = gix::worktree::state::checkout(
         &mut index,
         root,
-        objects,
+        objs,
         &gix::progress::Discard,
         &gix::progress::Discard,
-        cancellation.flag(),
-        options,
-    );
-    // gix yields a successful partial checkout after interruption; the caller rechecks
-    // cancellation before trusting the directory.
-    let checkout = checkout.map_err(|source| CheckoutError::Extract { source })?;
-    if !checkout.collisions.is_empty() || !checkout.errors.is_empty() {
+        cancel.flag(),
+        opts,
+    )
+    // gix yields a successful partial checkout after interruption; caller rechecks cancellation.
+    .map_err(|source| CheckoutError::Extract { source })?;
+    if !out.collisions.is_empty() || !out.errors.is_empty() {
         return Err(CheckoutError::Collision);
     }
     Ok(())

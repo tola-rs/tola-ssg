@@ -234,7 +234,7 @@ pub(super) fn check_publish_dir<'a>(
     crate::filesystem::OutputBoundary::resolve(
         root,
         &schema.build.publish_dir,
-        super::resolved::protected_input_paths(
+        super::site::protected_input_paths(
             config_path,
             std::iter::once(("content-dir", schema.build.content_dir.as_path())).chain(
                 schema
@@ -276,7 +276,7 @@ pub(super) fn validate_site_paths(
     let boundary = crate::resources::source_boundary_with_exclusions(
         root,
         tola_input::InputScope::Online,
-        super::resolved::generated_exclusions(&config.build.publish_dir, vendor_workspace, None),
+        super::site::generated_exclusions(&config.build.publish_dir, vendor_workspace, None),
     );
     for (field, path) in [
         ("build.entry", config.build.entry.project_path()),

@@ -42,17 +42,16 @@ pub enum IconCollectionSource {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct LocalIconFields {
+struct LocalFields {
     path: PathBuf,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RemoteIconFields {
+struct RemoteFields {
     preset: Option<String>,
     version: Option<String>,
     url: Option<String>,
-    /// A key this model replaced; accepted only to name the repair.
     sha256: Option<String>,
     mirrors: Option<Vec<String>>,
 }
@@ -60,23 +59,21 @@ struct RemoteIconFields {
 const REMOVED_ICON_CHECKSUM: &str = "`sha256` is no longer part of `[icons.collections]`: icon integrity lives in `tola.lock`; delete `sha256` and run `tola update`";
 
 impl<'de> Deserialize<'de> for IconCollectionSource {
-    fn deserialize<D: serde::Deserializer<'de>>(
-        deserializer: D,
-    ) -> std::result::Result<Self, D::Error> {
+    fn deserialize<D: serde::Deserializer<'de>>(deser: D) -> std::result::Result<Self, D::Error> {
         #[derive(Deserialize)]
         #[serde(tag = "source-type", rename_all = "kebab-case")]
         enum Written {
-            LocalJson(LocalIconFields),
-            LocalSvgDir(LocalIconFields),
-            RemoteJson(RemoteIconFields),
+            LocalJson(LocalFields),
+            LocalSvgDir(LocalFields),
+            RemoteJson(RemoteFields),
         }
-        match Written::deserialize(deserializer)? {
-            Written::LocalJson(LocalIconFields { path }) => Ok(Self::LocalJson { path }),
-            Written::LocalSvgDir(LocalIconFields { path }) => Ok(Self::LocalSvgDir { path }),
-            Written::RemoteJson(RemoteIconFields {
+        match Written::deserialize(deser)? {
+            Written::LocalJson(LocalFields { path }) => Ok(Self::LocalJson { path }),
+            Written::LocalSvgDir(LocalFields { path }) => Ok(Self::LocalSvgDir { path }),
+            Written::RemoteJson(RemoteFields {
                 sha256: Some(_), ..
             }) => Err(serde::de::Error::custom(REMOVED_ICON_CHECKSUM)),
-            Written::RemoteJson(RemoteIconFields {
+            Written::RemoteJson(RemoteFields {
                 preset,
                 version,
                 url,
@@ -93,29 +90,25 @@ impl<'de> Deserialize<'de> for IconCollectionSource {
 }
 
 impl fmt::Debug for IconCollectionSource {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::LocalJson { path } => formatter
-                .debug_struct("LocalJson")
-                .field("path", path)
-                .finish(),
-            Self::LocalSvgDir { path } => formatter
-                .debug_struct("LocalSvgDir")
-                .field("path", path)
-                .finish(),
+            Self::LocalJson { path } => fmt.debug_struct("LocalJson").field("path", path).finish(),
+            Self::LocalSvgDir { path } => {
+                fmt.debug_struct("LocalSvgDir").field("path", path).finish()
+            }
             Self::RemoteJson {
                 preset,
                 version,
                 url,
                 mirrors,
             } => {
-                // A URL's query may hold credentials or a token, so it never reaches a log.
-                let mut entry = formatter.debug_struct("RemoteJson");
+                // Redact URLs and mirrors so query tokens never reach logs.
+                let mut entry = fmt.debug_struct("RemoteJson");
                 if let Some(preset) = preset {
                     entry.field("preset", preset);
                 }
-                if let Some(version) = version {
-                    entry.field("version", version);
+                if let Some(ver) = version {
+                    entry.field("version", ver);
                 }
                 if url.is_some() {
                     entry.field("url", &"<redacted>");
@@ -131,7 +124,7 @@ impl fmt::Debug for IconCollectionSource {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "kebab-case")]
-struct IconFields {
+struct FragmentFields {
     source_type: Option<String>,
     path: Option<PathBuf>,
     preset: Option<String>,
@@ -144,12 +137,11 @@ struct IconFields {
 impl Icons {
     /// Validate collection names and source selectors.
     pub fn validate(&self) -> Result<(), String> {
-        for (name, source) in &self.collections {
+        for (name, src) in &self.collections {
             name.parse::<tola_icons::IconCollectionName>()
-                .map_err(|error| format!("icon collection `{name}`: {error}"))?;
-            source
-                .validate()
-                .map_err(|message| format!("icon collection `{name}`: {message}"))?;
+                .map_err(|err| format!("icon collection `{name}`: {err}"))?;
+            src.validate()
+                .map_err(|msg| format!("icon collection `{name}`: {msg}"))?;
         }
         Ok(())
     }
@@ -161,10 +153,9 @@ impl Icons {
             collections: Option<BTreeMap<String, toml::Value>>,
         }
         let fields = read_fragment::<Fields>(value)?;
-        for (name, value) in fields.collections.unwrap_or_default() {
-            IconCollectionSource::validate_fragment(&value).map_err(|error| {
-                error
-                    .at(FragmentStep::Key(name))
+        for (name, val) in fields.collections.unwrap_or_default() {
+            IconCollectionSource::validate_fragment(&val).map_err(|err| {
+                err.at(FragmentStep::Key(name))
                     .at(FragmentStep::Key("collections".into()))
             })?;
         }
@@ -186,12 +177,17 @@ impl IconCollectionSource {
         };
         match (preset.as_deref(), url.as_deref()) {
             (Some(preset), None) if usable_preset(preset) => {
-                if version.as_deref().is_some_and(|version| !usable_version(version)) {
+                if version.as_deref().is_some_and(|ver| !usable_version(ver)) {
                     return Err("`version` must name an exact published release".into());
                 }
             }
             (None, Some(url)) if usable_url(url) && version.is_none() => {}
-            _ => return Err("declare either a usable `preset` with optional `version`, or an absolute HTTP(S) `url`".into()),
+            _ => {
+                return Err(
+                    "declare either a usable `preset` with optional `version`, or an absolute HTTP(S) `url`"
+                        .into(),
+                );
+            }
         }
         for mirror in mirrors.iter().flatten() {
             let sample = if preset.is_some() {
@@ -202,7 +198,10 @@ impl IconCollectionSource {
                 mirror.clone()
             };
             if sample.contains(['{', '}']) || !usable_url(&sample) {
-                return Err("`mirrors` must contain HTTP(S) URLs; a preset permits `{name}` and `{version}`".into());
+                return Err(
+                    "`mirrors` must contain HTTP(S) URLs; a preset permits `{name}` and `{version}`"
+                        .into(),
+                );
             }
         }
         Ok(())
@@ -210,18 +209,18 @@ impl IconCollectionSource {
 
     /// Check a partial source declaration without requiring its missing fields.
     pub fn validate_fragment(value: &toml::Value) -> Result<(), FragmentError> {
-        let fields = read_fragment::<IconFields>(value)?;
+        let fields = read_fragment::<FragmentFields>(value)?;
         if fields.sha256.is_some() {
             return Err(FragmentError::invalid(REMOVED_ICON_CHECKSUM));
         }
-        let remote = fields.preset.is_some()
+        let has_remote = fields.preset.is_some()
             || fields.version.is_some()
             || fields.url.is_some()
             || fields.mirrors.is_some();
         match fields.source_type.as_deref() {
-            Some("local-json" | "local-svg-dir") if !remote => Ok(()),
+            Some("local-json" | "local-svg-dir") if !has_remote => Ok(()),
             Some("remote-json") if fields.path.is_none() => Ok(()),
-            None if fields.path.is_none() || !remote => Ok(()),
+            None if fields.path.is_none() || !has_remote => Ok(()),
             _ => Err(FragmentError::invalid(
                 "use fields for one icon source: a local path or a remote collection",
             )),

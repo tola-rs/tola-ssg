@@ -14,7 +14,7 @@ impl TryFrom<String> for OptionPath {
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
         let keys = toml_edit::Key::parse(&value)
-            .map_err(|error| format!("invalid option path `{value}`: {}", error.message()))?;
+            .map_err(|err| format!("invalid option path `{value}`: {}", err.message()))?;
         if keys.is_empty() {
             return Err("an option path must contain a key".into());
         }
@@ -25,12 +25,12 @@ impl TryFrom<String> for OptionPath {
 }
 
 impl std::fmt::Display for OptionPath {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        for (index, key) in self.0.iter().enumerate() {
-            if index > 0 {
-                f.write_str(".")?;
+    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for (idx, key) in self.0.iter().enumerate() {
+            if idx > 0 {
+                fmt.write_str(".")?;
             }
-            write!(f, "{}", toml_edit::Key::new(key.as_str()))?;
+            write!(fmt, "{}", toml_edit::Key::new(key.as_str()))?;
         }
         Ok(())
     }
@@ -43,77 +43,76 @@ impl From<OptionPath> for String {
 }
 
 impl OptionPath {
-    pub(crate) fn read<'a>(&self, options: &'a toml::Table) -> Result<&'a toml::Value, String> {
+    pub(crate) fn read<'a>(&self, opts: &'a toml::Table) -> Result<&'a toml::Value, String> {
         let (leaf, parents) = self
             .0
             .split_last()
             .expect("a validated nonempty option path");
-        let mut table = options;
-        for (index, key) in parents.iter().enumerate() {
-            let prefix = || Self(self.0[..=index].to_vec());
-            table = table
+        let mut tbl = opts;
+        for (idx, key) in parents.iter().enumerate() {
+            let prefix = || Self(self.0[..=idx].to_vec());
+            tbl = tbl
                 .get(key)
                 .ok_or_else(|| format!("option `{}` is missing while reading `{self}`", prefix()))?
                 .as_table()
                 .ok_or_else(|| format!("option `{}` must be a table to read `{self}`", prefix()))?;
         }
-        table
-            .get(leaf)
+        tbl.get(leaf)
             .ok_or_else(|| format!("option `{self}` is missing"))
     }
 }
 
 /// Read options into the value types shared by Typst, Nu and external programs.
 pub fn deserialize_options<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
+    deser: D,
 ) -> Result<toml::Table, D::Error> {
     use serde::Deserialize;
 
-    let mut options = toml::Table::deserialize(deserializer)?;
-    normalize_options(&mut options).map_err(serde::de::Error::custom)?;
-    Ok(options)
+    let mut opts = toml::Table::deserialize(deser)?;
+    normalize_options(&mut opts).map_err(serde::de::Error::custom)?;
+    Ok(opts)
 }
 
 /// Check the option protocol while preserving the authored values for merging.
 pub fn validate_fragment(value: &toml::Value) -> Result<(), FragmentError> {
-    let Some(options) = value.as_table() else {
+    let Some(opts) = value.as_table() else {
         return Err(FragmentError::invalid("options must be a table"));
     };
-    normalize_options(&mut options.clone())
+    normalize_options(&mut opts.clone())
 }
 
-pub(crate) fn normalize_options(options: &mut toml::Table) -> Result<(), FragmentError> {
-    for (key, value) in options.iter_mut() {
-        normalize(value).map_err(|error| error.at(FragmentStep::Key(key.clone())))?;
+pub(crate) fn normalize_options(opts: &mut toml::Table) -> Result<(), FragmentError> {
+    for (key, val) in opts.iter_mut() {
+        normalize(val).map_err(|err| err.at(FragmentStep::Key(key.clone())))?;
     }
     Ok(())
 }
 
-fn normalize(value: &mut toml::Value) -> Result<(), FragmentError> {
-    match value {
-        toml::Value::Datetime(datetime) => *value = toml::Value::String(datetime.to_string()),
-        toml::Value::Float(number) if !number.is_finite() => {
+fn normalize(val: &mut toml::Value) -> Result<(), FragmentError> {
+    match val {
+        toml::Value::Datetime(dt) => *val = toml::Value::String(dt.to_string()),
+        toml::Value::Float(num) if !num.is_finite() => {
             return Err(FragmentError::invalid("options require finite numbers"));
         }
-        toml::Value::Array(values) => {
-            for (index, value) in values.iter_mut().enumerate() {
-                normalize(value).map_err(|error| error.at(FragmentStep::Index(index)))?;
+        toml::Value::Array(vals) => {
+            for (idx, item) in vals.iter_mut().enumerate() {
+                normalize(item).map_err(|err| err.at(FragmentStep::Index(idx)))?;
             }
         }
-        toml::Value::Table(values) => normalize_options(values)?,
+        toml::Value::Table(tbl) => normalize_options(tbl)?,
         _ => {}
     }
     Ok(())
 }
 
-pub(crate) fn merge(defaults: &mut toml::Table, overrides: &toml::Table) {
-    for (key, value) in overrides {
-        if let (Some(toml::Value::Table(default)), toml::Value::Table(value)) =
-            (defaults.get_mut(key), value)
+pub(crate) fn merge(dst: &mut toml::Table, src: &toml::Table) {
+    for (key, val) in src {
+        if let (Some(toml::Value::Table(dst_tbl)), toml::Value::Table(src_tbl)) =
+            (dst.get_mut(key), val)
         {
-            merge(default, value);
+            merge(dst_tbl, src_tbl);
         } else {
-            defaults.insert(key.clone(), value.clone());
+            dst.insert(key.clone(), val.clone());
         }
     }
 }
@@ -139,24 +138,20 @@ pub fn enabled_by(
 pub fn to_typst(options: &toml::Table) -> Value {
     options
         .iter()
-        .map(|(key, value)| (key.as_str().into(), typst_value(value)))
+        .map(|(key, val)| (key.as_str().into(), typst_value(val)))
         .collect::<Dict>()
         .into_value()
 }
 
-fn typst_value(value: &toml::Value) -> Value {
-    match value {
-        toml::Value::String(value) => value.as_str().into_value(),
-        toml::Value::Integer(value) => (*value).into_value(),
-        toml::Value::Float(value) => (*value).into_value(),
-        toml::Value::Boolean(value) => (*value).into_value(),
-        toml::Value::Datetime(value) => value.to_string().into_value(),
-        toml::Value::Array(values) => values
-            .iter()
-            .map(typst_value)
-            .collect::<Array>()
-            .into_value(),
-        toml::Value::Table(values) => to_typst(values),
+fn typst_value(val: &toml::Value) -> Value {
+    match val {
+        toml::Value::String(s) => s.as_str().into_value(),
+        toml::Value::Integer(n) => (*n).into_value(),
+        toml::Value::Float(n) => (*n).into_value(),
+        toml::Value::Boolean(b) => (*b).into_value(),
+        toml::Value::Datetime(dt) => dt.to_string().into_value(),
+        toml::Value::Array(vals) => vals.iter().map(typst_value).collect::<Array>().into_value(),
+        toml::Value::Table(tbl) => to_typst(tbl),
     }
 }
 
@@ -165,8 +160,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn enabled_by_reads_nested_and_quoted_keys() {
-        let options = toml::toml! {
+    fn enabled_by_nested_and_quoted() {
+        let opts = toml::toml! {
             "images.enable" = false
             [images]
             enable = true
@@ -174,7 +169,7 @@ mod tests {
         };
         for (key, expected) in [("images.enable", true), ("\"images.enable\"", false)] {
             let path = OptionPath::try_from(key.to_owned()).unwrap();
-            assert_eq!(enabled_by(true, Some(&path), &options), Ok(expected));
+            assert_eq!(enabled_by(true, Some(&path), &opts), Ok(expected));
             assert_eq!(OptionPath::try_from(path.to_string()).unwrap(), path);
         }
         for key in [
@@ -184,27 +179,27 @@ mod tests {
             "images.quality",
         ] {
             let path = OptionPath::try_from(key.to_owned()).unwrap();
-            assert!(enabled_by(true, Some(&path), &options).is_err());
-            assert_eq!(enabled_by(false, Some(&path), &options), Ok(false));
+            assert!(enabled_by(true, Some(&path), &opts).is_err());
+            assert_eq!(enabled_by(false, Some(&path), &opts), Ok(false));
         }
-        assert_eq!(enabled_by(true, None, &options), Ok(true));
+        assert_eq!(enabled_by(true, None, &opts), Ok(true));
     }
 
     #[test]
-    fn enabled_by_rejects_malformed_paths_during_deserialization() {
+    fn option_path_rejects_malformed() {
         #[derive(serde::Deserialize, serde::Serialize)]
         struct Condition {
             #[serde(rename = "enabled-by")]
             path: OptionPath,
         }
         for key in ["", " ", ".images", "images.", "images..enable", "images[0]"] {
-            let mut table = toml::Table::new();
-            table.insert("enabled-by".into(), key.into());
-            assert!(table.try_into::<Condition>().is_err(), "{key}");
+            let mut tbl = toml::Table::new();
+            tbl.insert("enabled-by".into(), key.into());
+            assert!(tbl.try_into::<Condition>().is_err(), "{key}");
         }
-        let condition: Condition = toml::from_str("enabled-by = '\"image.tools\".enable'").unwrap();
-        let encoded = toml::to_string(&condition).unwrap();
+        let cond: Condition = toml::from_str("enabled-by = '\"image.tools\".enable'").unwrap();
+        let encoded = toml::to_string(&cond).unwrap();
         let decoded: Condition = toml::from_str(&encoded).unwrap();
-        assert_eq!(decoded.path, condition.path);
+        assert_eq!(decoded.path, cond.path);
     }
 }

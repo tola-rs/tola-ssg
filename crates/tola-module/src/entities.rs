@@ -23,45 +23,42 @@ pub fn parse(value: &Value) -> Result<Vec<Entity>> {
     };
     let mut entities = Vec::with_capacity(items.len());
     let mut ids = HashSet::new();
-    for (index, item) in items.iter().enumerate() {
+    for (idx, item) in items.iter().enumerate() {
         let Value::Dict(fields) = item else {
-            bail!("entity {index} is not a dictionary")
+            bail!("entity {idx} is not a dictionary")
         };
         for (key, _) in fields.iter() {
             ensure!(
                 ["id", "name", "description", "source", "url"].contains(&key.as_str()),
-                "entity {index} has the unknown field `{key}`"
+                "entity {idx} has the unknown field `{key}`"
             );
         }
         let required = |key: &str| -> Result<String> {
             match fields.get(key) {
-                Ok(Value::Str(value)) => Ok(value.to_string()),
-                _ => bail!("entity {index} needs a string `{key}`"),
+                Ok(Value::Str(val)) => Ok(val.to_string()),
+                _ => bail!("entity {idx} needs a string `{key}`"),
             }
         };
         let optional = |key: &str| -> Result<Option<String>> {
             match fields.get(key) {
                 Err(_) | Ok(Value::None) => Ok(None),
-                Ok(Value::Str(value)) => Ok(Some(value.to_string())),
-                _ => bail!("`{key}` in entity {index} must be a string or `none`"),
+                Ok(Value::Str(val)) => Ok(Some(val.to_string())),
+                _ => bail!("`{key}` in entity {idx} must be a string or `none`"),
             }
         };
         let id = required("id")?;
-        ensure!(!id.is_empty(), "entity {index} has an empty `id`");
+        ensure!(!id.is_empty(), "entity {idx} has an empty `id`");
         ensure!(
             ids.insert(id.clone()),
-            "entity {index} repeats the `id` `{id}`"
+            "entity {idx} repeats the `id` `{id}`"
         );
         let source = match fields.get("source") {
             Err(_) | Ok(Value::None) => None,
-            Ok(value) => Some(
-                value
-                    .clone()
+            Ok(val) => Some(
+                val.clone()
                     .cast::<RootedPath>()
                     .map_err(|_| {
-                        anyhow::anyhow!(
-                            "`source` in entity {index} must be a native path or `none`"
-                        )
+                        anyhow::anyhow!("`source` in entity {idx} must be a native path or `none`")
                     })?
                     .intern(),
             ),
@@ -79,18 +76,20 @@ pub fn parse(value: &Value) -> Result<Vec<Entity>> {
 
 /// The CLI representation preserves virtual root identity instead of formatting a Typst value.
 pub fn json(entities: &[Entity]) -> Json {
-    let mut records = Vec::with_capacity(entities.len());
-    for entity in entities {
-        let source = entity.source.map(path_json);
-        records.push(json!({
-            "id": entity.id,
-            "name": entity.name,
-            "description": entity.description,
-            "source": source,
-            "url": entity.url,
-        }));
-    }
-    Json::Array(records)
+    Json::Array(
+        entities
+            .iter()
+            .map(|e| {
+                json!({
+                    "id": e.id,
+                    "name": e.name,
+                    "description": e.description,
+                    "source": e.source.map(path_json),
+                    "url": e.url,
+                })
+            })
+            .collect(),
+    )
 }
 
 /// Preserve a native path's virtual root when writing a query result as JSON.

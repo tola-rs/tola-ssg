@@ -3,16 +3,14 @@
 use chrono::{DateTime, Datelike, FixedOffset, NaiveDate, Timelike};
 use typst::foundations::{Datetime, Value};
 
-/// A date or timestamp that cannot be interpreted under the supported calendar rules.
+/// A date or timestamp that violates the supported calendar rules.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error("{0}")]
 pub struct DateError(&'static str);
 
-/// Parse a native date or a strict `YYYY-MM-DD` string, with a year from 1 through 9999.
-///
-/// The result is a pure date. Values carrying a time are rejected rather than truncated.
-pub fn parse_date(value: &Value) -> Result<Datetime, DateError> {
-    match value {
+/// Parses a native date or strict `YYYY-MM-DD` string (year 1..=9999), rejecting times.
+pub fn parse_date(val: &Value) -> Result<Datetime, DateError> {
+    match val {
         Value::Datetime(Datetime::Date(date)) if (1..=9999).contains(&date.year()) => {
             Ok(Datetime::Date(*date))
         }
@@ -28,17 +26,16 @@ pub fn parse_date(value: &Value) -> Result<Datetime, DateError> {
     }
 }
 
-/// The `YYYY-MM-DD` spelling of a calendar date, the only kind of value [`parse_date`] accepts.
-pub fn format_calendar_date(value: &Datetime) -> String {
-    let (year, month, day) = calendar_parts(value);
-    format!("{:04}-{:02}-{:02}", year, month, day)
+/// Formats a calendar date accepted by [`parse_date`] as `YYYY-MM-DD`.
+pub fn format_calendar_date(val: &Datetime) -> String {
+    let (year, month, day) = calendar_parts(val);
+    format!("{year:04}-{month:02}-{day:02}")
 }
 
-/// The year, month, and day of a value [`parse_date`] accepted; every component is present.
-fn calendar_parts(value: &Datetime) -> (i32, u8, u8) {
-    match value {
+fn calendar_parts(val: &Datetime) -> (i32, u8, u8) {
+    match val {
         Datetime::Date(date) => (date.year(), date.month() as u8, date.day()),
-        _ => unreachable!("parse_date accepts only values carrying a calendar date"),
+        _ => unreachable!("parse_date accepts only calendar dates"),
     }
 }
 
@@ -49,9 +46,9 @@ pub(super) enum PartialDate {
     Day { year: i32, month: u8, day: u8 },
 }
 
-pub(super) fn parse_partial_date(value: &Value) -> Result<PartialDate, DateError> {
+pub(super) fn parse_partial_date(val: &Value) -> Result<PartialDate, DateError> {
     let invalid = DateError("expected a valid calendar date in YYYY, YYYY-MM, or YYYY-MM-DD form");
-    if let Value::Str(text) = value {
+    if let Value::Str(text) = val {
         match text.len() {
             4 => {
                 let date = calendar_date(&format!("{text}-01-01")).map_err(|_| invalid)?;
@@ -67,11 +64,11 @@ pub(super) fn parse_partial_date(value: &Value) -> Result<PartialDate, DateError
             _ => {}
         }
     }
-    let (year, month, day) = calendar_parts(&parse_date(value).map_err(|_| invalid)?);
+    let (year, month, day) = calendar_parts(&parse_date(val).map_err(|_| invalid)?);
     Ok(PartialDate::Day { year, month, day })
 }
 
-/// A timestamp with its local spelling and exact fractional second.
+/// A timestamp with its original RFC 3339 spelling and exact fractional second.
 #[derive(Debug)]
 pub struct Timestamp {
     rfc3339: String,
@@ -80,30 +77,30 @@ pub struct Timestamp {
 }
 
 impl Timestamp {
-    /// Parse a strict RFC 3339 string or a native datetime with a complete calendar date.
-    pub fn parse(value: &Value) -> Result<Self, DateError> {
-        match value {
+    /// Parses a strict RFC 3339 string or a native datetime with a complete calendar date.
+    pub fn parse(val: &Value) -> Result<Self, DateError> {
+        match val {
             Value::Str(text) => Self::from_text(text.as_str()),
-            Value::Datetime(datetime) => {
-                let (date, time) = match datetime {
+            Value::Datetime(dt) => {
+                let (date, time) = match dt {
                     Datetime::Date(date) => (*date, None),
-                    Datetime::Datetime(datetime) => (datetime.date(), Some(datetime.time())),
+                    Datetime::Datetime(dt) => (dt.date(), Some(dt.time())),
                     Datetime::Time(_) => {
                         return Err(DateError("a timestamp needs a year, month, and day"));
                     }
                 };
-                let (hour, minute, second, nanosecond) = time
-                    .map(|time| (time.hour(), time.minute(), time.second(), time.nanosecond()))
+                let (h, m, s, ns) = time
+                    .map(|t| (t.hour(), t.minute(), t.second(), t.nanosecond()))
                     .unwrap_or((0, 0, 0, 0));
                 let mut text = format!(
-                    "{:04}-{:02}-{:02}T{hour:02}:{minute:02}:{second:02}",
+                    "{:04}-{:02}-{:02}T{h:02}:{m:02}:{s:02}",
                     date.year(),
                     date.month() as u8,
                     date.day(),
                 );
-                if nanosecond != 0 {
+                if ns != 0 {
                     text.push('.');
-                    text.push_str(format!("{nanosecond:09}").trim_end_matches('0'));
+                    text.push_str(format!("{ns:09}").trim_end_matches('0'));
                 }
                 text.push('Z');
                 Self::from_text(&text)
@@ -119,19 +116,15 @@ impl Timestamp {
             DateError("expected an RFC 3339 timestamp with timezone, such as 2026-09-01T12:00:00Z");
         let bytes = text.as_bytes();
         if bytes.len() < 20
-            || bytes[..19]
-                .iter()
-                .enumerate()
-                .any(|(index, byte)| match index {
-                    4 | 7 => *byte != b'-',
-                    10 => !matches!(byte, b'T' | b't'),
-                    13 | 16 => *byte != b':',
-                    _ => !byte.is_ascii_digit(),
-                })
+            || bytes[..19].iter().enumerate().any(|(i, b)| match i {
+                4 | 7 => *b != b'-',
+                10 => !matches!(b, b'T' | b't'),
+                13 | 16 => *b != b':',
+                _ => !b.is_ascii_digit(),
+            })
         {
             return Err(invalid);
         }
-        // The fixed-width prefix is ASCII before any string slicing.
         if decimal(&bytes[..4]) == 0 {
             return Err(DateError("the calendar year must be from 1 through 9999"));
         }
@@ -141,19 +134,19 @@ impl Timestamp {
             ));
         }
         let suffix = &text[19..];
-        let (fraction, zone) = if let Some(fraction) = suffix.strip_prefix('.') {
-            let length = fraction.bytes().take_while(u8::is_ascii_digit).count();
-            if length == 0 {
+        let (fraction, zone) = if let Some(frac) = suffix.strip_prefix('.') {
+            let len = frac.bytes().take_while(u8::is_ascii_digit).count();
+            if len == 0 {
                 return Err(invalid);
             }
-            (&fraction[..length], &fraction[length..])
+            (&frac[..len], &frac[len..])
         } else {
             ("", suffix)
         };
         if !valid_zone(zone) {
             return Err(invalid);
         }
-        // Validate the whole timestamp separately so Chrono never discards fractional digits.
+        // Validate the whole timestamp separately so Chrono preserves arbitrary fractional digits.
         let whole = DateTime::parse_from_rfc3339(&format!("{}{zone}", &text[..19]))
             .map_err(|_| DateError("expected a valid calendar date, clock time, and timezone"))?;
         Ok(Self {
@@ -163,31 +156,28 @@ impl Timestamp {
         })
     }
 
-    /// The original valid RFC 3339 text, or UTC text generated from a native datetime.
+    /// Original RFC 3339 text, or UTC text generated from a native datetime.
     pub fn rfc3339(&self) -> &str {
         &self.rfc3339
     }
 
-    /// Whole seconds since the Unix epoch, interpreted in UTC.
+    /// Whole seconds since the Unix epoch in UTC.
     pub fn unix_seconds(&self) -> i64 {
         self.whole.timestamp()
     }
 
-    /// Fractional second digits without a decimal point or trailing zeros; empty for zero.
+    /// Fractional second digits without a decimal point or trailing zeros.
     pub fn subsecond(&self) -> &str {
         &self.subsecond
     }
 
-    /// Convert for feed serializers, preserving the offset and truncating beyond nanoseconds.
-    ///
-    /// The timestamp's text and ordering digits retain their full precision.
+    /// Converts to a fixed-offset datetime, truncating beyond nanoseconds.
     pub fn to_fixed(&self) -> DateTime<FixedOffset> {
-        let length = self.subsecond.len().min(9);
-        let nanosecond =
-            decimal(&self.subsecond.as_bytes()[..length]) * 10_u32.pow(9 - length as u32);
+        let len = self.subsecond.len().min(9);
+        let ns = decimal(&self.subsecond.as_bytes()[..len]) * 10_u32.pow(9 - len as u32);
         self.whole
-            .with_nanosecond(nanosecond)
-            .expect("a fractional second is below one billion nanoseconds")
+            .with_nanosecond(ns)
+            .expect("fractional second is below one billion nanoseconds")
     }
 }
 
@@ -200,7 +190,7 @@ fn calendar_date(text: &str) -> Result<NaiveDate, DateError> {
         || bytes
             .iter()
             .enumerate()
-            .any(|(index, byte)| !matches!(index, 4 | 7) && !byte.is_ascii_digit())
+            .any(|(i, b)| !matches!(i, 4 | 7) && !b.is_ascii_digit())
     {
         return Err(invalid);
     }
@@ -215,11 +205,9 @@ fn calendar_date(text: &str) -> Result<NaiveDate, DateError> {
 fn valid_zone(zone: &str) -> bool {
     match zone.as_bytes() {
         [b'Z' | b'z'] => true,
-        [sign, hour_tens, hour_units, b':', minute_tens, minute_units] => {
+        [sign, ht, hu, b':', mt, mu] => {
             matches!(sign, b'+' | b'-')
-                && [hour_tens, hour_units, minute_tens, minute_units]
-                    .iter()
-                    .all(|byte| byte.is_ascii_digit())
+                && [ht, hu, mt, mu].iter().all(|b| b.is_ascii_digit())
                 && decimal(&zone.as_bytes()[1..3]) <= 23
                 && decimal(&zone.as_bytes()[4..6]) <= 59
         }
@@ -230,34 +218,34 @@ fn valid_zone(zone: &str) -> bool {
 fn decimal(digits: &[u8]) -> u32 {
     digits
         .iter()
-        .fold(0, |number, digit| number * 10 + u32::from(digit - b'0'))
+        .fold(0, |acc, d| acc * 10 + u32::from(d - b'0'))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn text(value: &str) -> Value {
-        Value::Str(value.into())
+    fn text(val: &str) -> Value {
+        Value::Str(val.into())
     }
 
     #[test]
-    fn dates_preserve_calendar_values() {
-        for (source, year, month, day) in [
+    fn parse_date_valid() {
+        for (src, y, m, d) in [
             ("0001-01-01", 1, 1, 1),
             ("2000-02-29", 2000, 2, 29),
             ("2024-02-29", 2024, 2, 29),
             ("9999-12-31", 9999, 12, 31),
         ] {
-            let expected = Datetime::from_ymd(year, month, day).unwrap();
-            assert_eq!(parse_date(&text(source)).unwrap(), expected);
+            let expected = Datetime::from_ymd(y, m, d).unwrap();
+            assert_eq!(parse_date(&text(src)).unwrap(), expected);
             assert_eq!(parse_date(&Value::Datetime(expected)).unwrap(), expected);
         }
     }
 
     #[test]
-    fn partial_dates_keep_declared_components() {
-        for (source, expected) in [
+    fn parse_partial_date_valid() {
+        for (src, expected) in [
             ("0001", PartialDate::Year(1)),
             ("9999", PartialDate::Year(9999)),
             (
@@ -276,7 +264,7 @@ mod tests {
                 },
             ),
         ] {
-            assert_eq!(parse_partial_date(&text(source)).unwrap(), expected);
+            assert_eq!(parse_partial_date(&text(src)).unwrap(), expected);
         }
         let date = Datetime::from_ymd(2024, 2, 29).unwrap();
         assert_eq!(
@@ -290,8 +278,8 @@ mod tests {
     }
 
     #[test]
-    fn partial_dates_reject_other_shapes() {
-        for source in [
+    fn parse_partial_date_invalid() {
+        for src in [
             "",
             "0000",
             "10000",
@@ -309,33 +297,33 @@ mod tests {
             "２０２６",
             "2026-é",
         ] {
-            assert!(parse_partial_date(&text(source)).is_err(), "{source}");
+            assert!(parse_partial_date(&text(src)).is_err(), "{src}");
         }
-        for date in [
+        for dt in [
             Datetime::from_ymd(0, 1, 1).unwrap(),
             Datetime::from_hms(8, 30, 0).unwrap(),
             Datetime::from_ymd_hms(2026, 11, 1, 8, 30, 0).unwrap(),
         ] {
-            assert!(parse_partial_date(&Value::Datetime(date)).is_err());
+            assert!(parse_partial_date(&Value::Datetime(dt)).is_err());
         }
     }
 
     #[test]
-    fn timestamps_keep_local_offsets() {
-        let source = "1970-01-01t00:30:00+01:00";
-        let timestamp = Timestamp::parse(&text(source)).unwrap();
-        assert_eq!(timestamp.rfc3339(), source);
-        assert_eq!(timestamp.unix_seconds(), -1800);
-        assert_eq!(timestamp.to_fixed().offset().local_minus_utc(), 3600);
-        for (source, seconds) in [
+    fn timestamp_offsets() {
+        let src = "1970-01-01t00:30:00+01:00";
+        let ts = Timestamp::parse(&text(src)).unwrap();
+        assert_eq!(ts.rfc3339(), src);
+        assert_eq!(ts.unix_seconds(), -1800);
+        assert_eq!(ts.to_fixed().offset().local_minus_utc(), 3600);
+        for (src, secs) in [
             ("1970-01-01T00:00:00+23:59", -86_340),
             ("1970-01-01T00:00:00-23:59", 86_340),
             ("1970-01-01t00:00:00z", 0),
             ("1970-01-01T00:00:00-00:00", 0),
         ] {
-            let timestamp = Timestamp::parse(&text(source)).unwrap();
-            assert_eq!(timestamp.rfc3339(), source);
-            assert_eq!(timestamp.unix_seconds(), seconds);
+            let ts = Timestamp::parse(&text(src)).unwrap();
+            assert_eq!(ts.rfc3339(), src);
+            assert_eq!(ts.unix_seconds(), secs);
         }
     }
 }

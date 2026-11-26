@@ -96,7 +96,7 @@ pub(in crate::cli) fn sources(
         let config = request.load_config(&overrides)?.into_config();
         report.configuration(&config);
         request.output.status("Reading site sources…")?;
-        let root = config.get_root();
+        let root = config.root();
         let files = tola_build::filesystem::owned_files(&config, &request.cancellation.token())?;
         let mut diagnostics = Vec::new();
         let mut examined = 0;
@@ -193,44 +193,41 @@ mod tests {
     }
 
     #[test]
-    fn readable_sources_pass_and_write_nothing() {
-        let (directory, config) = site(&[("content/index.typ", "#let  x =  1\n")]);
-        let output = buffered_output();
+    fn readable_sources_pass() {
+        let (dir, cfg) = site(&[("content/index.typ", "#let  x =  1\n")]);
+        let out = buffered_output();
 
-        analyse(config, &output).unwrap();
+        analyse(cfg, &out).unwrap();
 
         assert_eq!(
-            std::fs::read_to_string(directory.path().join("content/index.typ")).unwrap(),
+            std::fs::read_to_string(dir.path().join("content/index.typ")).unwrap(),
             "#let  x =  1\n"
         );
-        assert!(
-            !directory.path().join("public").exists(),
-            "nothing is built"
-        );
+        assert!(!dir.path().join("public").exists(), "nothing is built");
     }
 
     #[test]
-    fn state_site_sources_not_analysed() {
-        let (_directory, config) = site(&[
+    fn generated_dirs_skipped() {
+        let (_dir, cfg) = site(&[
             ("public/broken.typ", "#let = \n"),
             (".tola/broken.typ", "#let = \n"),
         ]);
-        let output = buffered_output();
+        let out = buffered_output();
 
-        analyse(config, &output).unwrap();
+        analyse(cfg, &out).unwrap();
     }
 
     #[test]
-    fn non_utf8_source_is_reported() {
-        let (directory, config) = site(&[]);
-        std::fs::write(directory.path().join("content/binary.typ"), [0xff, 0xfe]).unwrap();
-        let output = buffered_output();
+    fn non_utf8_source_reported() {
+        let (dir, cfg) = site(&[]);
+        std::fs::write(dir.path().join("content/binary.typ"), [0xff, 0xfe]).unwrap();
+        let out = buffered_output();
 
-        let error = analyse(config, &output).unwrap_err();
+        let err = analyse(cfg, &out).unwrap_err();
 
-        let diagnostics = tola_diagnostic::attached(&error).expect("the failure is stated");
-        assert_eq!(diagnostics[0].code, crate::codes::check::UNREADABLE);
-        let location = diagnostics[0].location.as_ref().expect("a location");
-        assert_eq!(location.path, "content/binary.typ");
+        let diags = tola_diagnostic::attached(&err).expect("the failure is stated");
+        assert_eq!(diags[0].code, crate::codes::check::UNREADABLE);
+        let loc = diags[0].location.as_ref().expect("a location");
+        assert_eq!(loc.path, "content/binary.typ");
     }
 }

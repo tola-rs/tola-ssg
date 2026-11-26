@@ -10,8 +10,8 @@ use typst::diag::{FileError, FileResult};
 use typst::foundations::Bytes;
 use typst::syntax::{FileId, Source};
 
-use super::evidence::{Loaded, ReadAttempt};
 use super::read::decode_utf8;
+use super::reads::{Loaded, ReadAttempt};
 
 /// Slots of one compilation root, keyed by file identity.
 type RootSlots = FxHashMap<FileId, Arc<SharedFileSlot>>;
@@ -71,32 +71,31 @@ impl SharedFileCache {
         });
     }
 
-    pub(crate) fn source_from_observation(
+    pub(crate) fn load_source(
         &self,
-        id: FileId,
+        fid: FileId,
         root: &Path,
-        observation: ReadAttempt<Bytes>,
+        attempt: ReadAttempt<Bytes>,
     ) -> ReadAttempt<Loaded<Source>> {
-        self.with_slot(root, id, |slot| slot.source_from_observation(observation))
+        self.with_slot(root, fid, |slot| slot.load_source(attempt))
     }
 
-    pub(crate) fn file_from_observation(
+    pub(crate) fn load_file(
         &self,
-        id: FileId,
+        fid: FileId,
         root: &Path,
-        observation: ReadAttempt<Bytes>,
+        attempt: ReadAttempt<Bytes>,
     ) -> ReadAttempt<Loaded<Bytes>> {
-        self.with_slot(root, id, |slot| slot.file_from_observation(observation))
+        self.with_slot(root, fid, |slot| slot.load_file(attempt))
     }
 
-    /// Run `use_slot` while holding this file's slot lock.
     fn with_slot<T>(
         &self,
         root: &Path,
-        id: FileId,
+        fid: FileId,
         use_slot: impl FnOnce(&mut FileSlot) -> T,
     ) -> T {
-        let slot = self.slot(root, id);
+        let slot = self.slot(root, fid);
         let mut value = slot.value.lock();
         use_slot(&mut value)
     }
@@ -108,9 +107,14 @@ impl SharedFileCache {
         self.roots.read().values().map(FxHashMap::len).sum()
     }
 
-    fn slot(&self, root: &Path, id: FileId) -> Arc<SharedFileSlot> {
+    fn slot(&self, root: &Path, fid: FileId) -> Arc<SharedFileSlot> {
         let epoch = self.epoch.load(Ordering::Relaxed);
-        if let Some(slot) = self.roots.read().get(root).and_then(|slots| slots.get(&id)) {
+        if let Some(slot) = self
+            .roots
+            .read()
+            .get(root)
+            .and_then(|slots| slots.get(&fid))
+        {
             slot.touch(epoch);
             return Arc::clone(slot);
         }
@@ -119,8 +123,8 @@ impl SharedFileCache {
         let slot = roots
             .entry(Arc::from(root))
             .or_default()
-            .entry(id)
-            .or_insert_with(|| Arc::new(SharedFileSlot::new(id, epoch)));
+            .entry(fid)
+            .or_insert_with(|| Arc::new(SharedFileSlot::new(fid, epoch)));
         slot.touch(epoch);
         Arc::clone(slot)
     }
@@ -132,10 +136,10 @@ struct SharedFileSlot {
 }
 
 impl SharedFileSlot {
-    fn new(id: FileId, epoch: u64) -> Self {
+    fn new(fid: FileId, epoch: u64) -> Self {
         Self {
             last_used: AtomicU64::new(epoch),
-            value: Mutex::new(FileSlot::new(id)),
+            value: Mutex::new(FileSlot::new(fid)),
         }
     }
 
@@ -152,7 +156,7 @@ struct SlotCell<T> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SlotFingerprint {
-    Successful(super::evidence::ReadEvidence),
+    Successful(super::reads::ReadRecord),
     Failed(FileError),
 }
 
@@ -167,34 +171,31 @@ impl<T: Clone> SlotCell<T> {
     fn get_or_init(
         &mut self,
         attempt: ReadAttempt<Bytes>,
-        process: impl FnOnce(Bytes, Option<T>) -> FileResult<T>,
+        decode: impl FnOnce(Bytes, Option<T>) -> FileResult<T>,
     ) -> ReadAttempt<Loaded<T>> {
-        let fingerprint = match &attempt.result {
+        let fp = match &attempt.result {
             Ok(_) => SlotFingerprint::Successful(
                 attempt
-                    .reads
+                    .read
                     .as_ref()
                     .expect("successful resolver read has its byte evidence")
                     .evidence()
                     .clone(),
             ),
-            Err(error) => SlotFingerprint::Failed(error.clone()),
+            Err(err) => SlotFingerprint::Failed(err.clone()),
         };
 
-        if self.fingerprint.as_ref() == Some(&fingerprint)
+        if self.fingerprint.as_ref() == Some(&fp)
             && let Some(data) = &self.data
         {
-            return attempt.with_loaded_result(data.clone());
+            return attempt.with_loaded(data.clone());
         }
-        self.fingerprint = Some(fingerprint);
+        self.fingerprint = Some(fp);
 
         let prev = self.data.take().and_then(Result::ok);
-        let value = attempt
-            .result
-            .clone()
-            .and_then(|bytes| process(bytes, prev));
+        let value = attempt.result.clone().and_then(|buf| decode(buf, prev));
         self.data = Some(value.clone());
-        attempt.with_loaded_result(value)
+        attempt.with_loaded(value)
     }
 }
 
@@ -213,27 +214,21 @@ impl FileSlot {
         }
     }
 
-    fn source_from_observation(
-        &mut self,
-        observation: ReadAttempt<Bytes>,
-    ) -> ReadAttempt<Loaded<Source>> {
-        self.source.get_or_init(observation, |data, prev| {
-            let text = decode_utf8(&data)?;
+    fn load_source(&mut self, attempt: ReadAttempt<Bytes>) -> ReadAttempt<Loaded<Source>> {
+        self.source.get_or_init(attempt, |buf, prev| {
+            let text = decode_utf8(&buf)?;
             match prev {
-                Some(mut source) => {
-                    source.replace(text);
-                    Ok(source)
+                Some(mut src) => {
+                    src.replace(text);
+                    Ok(src)
                 }
                 None => Ok(Source::new(self.id, text.into())),
             }
         })
     }
 
-    fn file_from_observation(
-        &mut self,
-        observation: ReadAttempt<Bytes>,
-    ) -> ReadAttempt<Loaded<Bytes>> {
-        self.file.get_or_init(observation, |bytes, _| Ok(bytes))
+    fn load_file(&mut self, attempt: ReadAttempt<Bytes>) -> ReadAttempt<Loaded<Bytes>> {
+        self.file.get_or_init(attempt, |buf, _| Ok(buf))
     }
 }
 
@@ -241,29 +236,28 @@ impl FileSlot {
 mod tests {
     use super::*;
 
-    use crate::world::file::{FileRead, ReadEvidence, ReadLocator, ReadOrigin};
+    use crate::world::file::{FileRead, ReadLocator, ReadOrigin, ReadRecord};
 
     use std::path::PathBuf;
 
     fn loaded_bytes(bytes: &[u8]) -> ReadAttempt<Bytes> {
-        let value = Bytes::new(bytes.to_vec());
-        let evidence = ReadEvidence::new(ReadLocator::Root(PathBuf::from("test.typ")), &value);
-        let read = FileRead::new(evidence, ReadOrigin::Provider);
+        let buf = Bytes::new(bytes.to_vec());
+        let evidence = ReadRecord::new(ReadLocator::Root(PathBuf::from("test.typ")), &buf);
         ReadAttempt {
-            result: Ok(value),
-            reads: Some(read),
+            result: Ok(buf),
+            read: Some(FileRead::new(evidence, ReadOrigin::Provider)),
             disk_reads: Vec::new(),
             package_checks: Vec::new(),
         }
     }
 
     #[test]
-    fn unchanged_read_reuses_cached_value() {
+    fn slot_reuses_unchanged_read() {
         let mut slot: SlotCell<String> = SlotCell::new();
 
         let first = slot
-            .get_or_init(loaded_bytes(b"hello"), |data, _| {
-                Ok(String::from_utf8(data.as_ref().to_vec()).unwrap())
+            .get_or_init(loaded_bytes(b"hello"), |buf, _| {
+                Ok(String::from_utf8(buf.as_ref().to_vec()).unwrap())
             })
             .result
             .unwrap();
@@ -279,61 +273,52 @@ mod tests {
         assert_eq!(repeated.read, first.read);
 
         let mut failed: SlotCell<Bytes> = SlotCell::new();
-        let error = FileError::NotFound(PathBuf::from("missing.typ"));
+        let err = FileError::NotFound(PathBuf::from("missing.typ"));
         let first = failed
-            .get_or_init(
-                ReadAttempt::without_inputs(Err(error.clone())),
-                |bytes, _| Ok(bytes),
-            )
+            .get_or_init(ReadAttempt::bare(Err(err.clone())), |buf, _| Ok(buf))
             .result
             .unwrap_err();
         let repeated = failed
-            .get_or_init(ReadAttempt::without_inputs(Err(error.clone())), |_, _| {
+            .get_or_init(ReadAttempt::bare(Err(err.clone())), |_, _| {
                 panic!("an unchanged failed read must reuse its cached failure")
             })
             .result
             .unwrap_err();
-        assert_eq!(first, error);
-        assert_eq!(repeated, error);
+        assert_eq!(first, err);
+        assert_eq!(repeated, err);
     }
 
     #[test]
-    fn cache_retention_follows_max_age() {
+    fn cache_evict_max_age() {
         let root = Path::new("/site");
         let cache = SharedFileCache::new();
 
-        for index in 0..100 {
-            let id = crate::world::file::file_id(format!("generated/{index}.typ"));
-            drop(cache.slot(root, id));
+        for idx in 0..100 {
+            let fid = crate::world::file::file_id(format!("generated/{idx}.typ"));
+            drop(cache.slot(root, fid));
             cache.evict(3);
-            assert!(cached_slot_count(&cache) <= 3);
+            assert!(cache.retained_slots() <= 3);
         }
 
-        let id = crate::world::file::file_id("template.typ");
-        drop(cache.slot(root, id));
+        let fid = crate::world::file::file_id("template.typ");
+        drop(cache.slot(root, fid));
         cache.evict(2);
         for round in 0..2 {
-            drop(cache.slot(root, id));
+            drop(cache.slot(root, fid));
             cache.evict(2);
-            assert!(is_cached(root, id, &cache), "round {round}");
+            assert!(is_cached(root, fid, &cache), "round {round}");
         }
         cache.evict(2);
-        assert!(is_cached(root, id, &cache));
+        assert!(is_cached(root, fid, &cache));
         cache.evict(2);
-        assert!(!is_cached(root, id, &cache));
+        assert!(!is_cached(root, fid, &cache));
     }
 
-    /// Number of file slots the cache currently owns for every root.
-    fn cached_slot_count(cache: &SharedFileCache) -> usize {
-        cache.roots.read().values().map(FxHashMap::len).sum()
-    }
-
-    /// Whether the cache holds a slot for `id` under `root`.
-    fn is_cached(root: &Path, id: FileId, cache: &SharedFileCache) -> bool {
+    fn is_cached(root: &Path, fid: FileId, cache: &SharedFileCache) -> bool {
         cache
             .roots
             .read()
             .get(root)
-            .is_some_and(|slots| slots.contains_key(&id))
+            .is_some_and(|slots| slots.contains_key(&fid))
     }
 }

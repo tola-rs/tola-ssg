@@ -123,91 +123,79 @@ mod tests {
     use super::*;
 
     #[test]
-    fn existing_lock_contents_survive() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("lock");
+    fn lock_preserves_contents() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lock");
         fs::write(&path, b"persistent lock contents").unwrap();
 
-        let lock = FileLock::acquire(
-            directory.path(),
-            &path,
-            &BuildCancellation::default(),
-            || panic!("uncontended lock waited"),
-        )
+        let lock = FileLock::acquire(dir.path(), &path, &BuildCancellation::default(), || {
+            panic!("uncontended lock waited")
+        })
         .unwrap();
 
-        // Windows locks the range it holds, so the contents are read once the handle is gone:
-        // the point is that acquiring a lock over an existing file never rewrites it.
+        // Windows locks the byte range; drop before reading back.
         drop(lock);
         assert_eq!(fs::read(&path).unwrap(), b"persistent lock contents");
     }
 
     #[cfg(unix)]
     #[test]
-    fn new_locks_are_private() {
+    fn lock_permissions_private() {
         use std::os::unix::fs::PermissionsExt;
 
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("state/lock");
-        let _lock = FileLock::acquire(
-            directory.path(),
-            &path,
-            &BuildCancellation::default(),
-            || panic!("new lock waited"),
-        )
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state/lock");
+        let _lock = FileLock::acquire(dir.path(), &path, &BuildCancellation::default(), || {
+            panic!("new lock waited")
+        })
         .unwrap();
 
         assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o077, 0);
     }
 
     #[test]
-    fn directory_lock_path_is_refused() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("lock");
+    fn lock_rejects_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lock");
         fs::create_dir(&path).unwrap();
 
-        let error = FileLock::acquire(
-            directory.path(),
-            &path,
-            &BuildCancellation::default(),
-            || panic!("an unusable lock path waited"),
-        )
+        let err = FileLock::acquire(dir.path(), &path, &BuildCancellation::default(), || {
+            panic!("an unusable lock path waited")
+        })
         .unwrap_err();
 
-        assert!(matches!(error, FileLockError::NotRegularFile));
+        assert!(matches!(err, FileLockError::NotRegularFile));
         assert!(path.is_dir());
     }
 
     #[cfg(unix)]
     #[test]
-    fn locks_reject_linked_paths() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().join("state");
-        let outside = directory.path().join("outside");
+    fn lock_rejects_symlinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("state");
+        let outside = dir.path().join("outside");
         fs::create_dir(&root).unwrap();
         fs::create_dir(&outside).unwrap();
         let target = outside.join("existing");
         fs::write(&target, b"unrelated contents").unwrap();
         let linked_file = root.join("lock");
         std::os::unix::fs::symlink(&target, &linked_file).unwrap();
-        let cancellation = BuildCancellation::default();
+        let cancel = BuildCancellation::default();
 
-        let error = FileLock::acquire(&root, &linked_file, &cancellation, || {
+        let err = FileLock::acquire(&root, &linked_file, &cancel, || {
             panic!("linked lock file was accepted")
         })
         .unwrap_err();
-        assert!(matches!(error, FileLockError::NotRegularFile));
+        assert!(matches!(err, FileLockError::NotRegularFile));
         assert_eq!(fs::read(&target).unwrap(), b"unrelated contents");
 
-        let linked_directory = root.join("linked");
-        std::os::unix::fs::symlink(&outside, &linked_directory).unwrap();
-        let error = FileLock::acquire(&root, &linked_directory.join("lock"), &cancellation, || {
+        let linked_dir = root.join("linked");
+        std::os::unix::fs::symlink(&outside, &linked_dir).unwrap();
+        let err = FileLock::acquire(&root, &linked_dir.join("lock"), &cancel, || {
             panic!("linked lock directory was accepted")
         })
         .unwrap_err();
-        assert!(
-            matches!(error, FileLockError::Io(error) if error.kind() == io::ErrorKind::InvalidInput)
-        );
+        assert!(matches!(err, FileLockError::Io(e) if e.kind() == io::ErrorKind::InvalidInput));
         assert!(!outside.join("lock").exists());
     }
 }

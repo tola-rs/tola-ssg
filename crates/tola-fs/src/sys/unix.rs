@@ -1,4 +1,4 @@
-//! Native filesystem operations.
+//! Native Unix filesystem operations.
 
 use std::ffi::OsStr;
 use std::fs::{self, DirEntry, File, FileType, Metadata, OpenOptions, Permissions};
@@ -7,85 +7,77 @@ use std::path::Path;
 
 use cap_std::fs::Dir;
 
-/// Open one log path for reading without following links or waiting on a FIFO.
+/// Open a log file for reading without following links or waiting on a FIFO.
 pub fn open_log_for_read(path: &Path) -> io::Result<File> {
-    let mut options = OpenOptions::new();
-    options.read(true);
-    refuse_links_and_fifos(&mut options);
-    options.open(path)
+    let mut opts = OpenOptions::new();
+    opts.read(true);
+    refuse_links_and_fifos(&mut opts);
+    opts.open(path)
 }
 
-/// Configure one log open so it neither blocks on a raced FIFO nor follows a replacement link.
-pub fn open_log_for_append(options: &mut OpenOptions) {
+/// Configure a log open with `0o600` mode, `NOFOLLOW`, and `NONBLOCK`.
+pub fn open_log_for_append(opts: &mut OpenOptions) {
     use std::os::unix::fs::OpenOptionsExt;
 
-    options.mode(0o600);
-    refuse_links_and_fifos(options);
+    opts.mode(0o600);
+    refuse_links_and_fifos(opts);
 }
 
-/// The number of paths that name one opened file.
+/// Number of directory entries pointing to `file`.
 pub fn link_count(file: &File) -> io::Result<u64> {
     use std::os::unix::fs::MetadataExt;
 
     Ok(file.metadata()?.nlink())
 }
 
-/// Create one directory link naming `target`.
+/// Create a directory symlink at `link` pointing to `target`.
 pub fn link_directory(target: &Path, link: &Path) -> io::Result<()> {
     std::os::unix::fs::symlink(target, link)
 }
 
-/// Whether this link-like entry must be removed as a directory rather than as a file.
-pub fn link_removes_as_directory(_file_type: &FileType) -> bool {
+/// Unix removes all symlinks as files, not directories.
+pub fn link_removes_as_directory(_ft: &FileType) -> bool {
     false
 }
 
-/// Open the filesystem root that begins an absolute path.
+/// Open the filesystem root beginning an absolute path.
 pub fn open_filesystem_root(path: &Path) -> io::Result<Dir> {
     Dir::open_ambient_dir(path, cap_std::ambient_authority())
 }
 
-/// Open one directory beneath an already-open parent, refusing a final link.
+/// Open a child directory beneath `parent`, refusing a final symlink.
 pub fn open_directory_nofollow(parent: &Dir, name: &OsStr) -> io::Result<Dir> {
     use cap_fs_ext::DirExt;
 
     parent.open_dir_nofollow(name)
 }
 
-/// Open one existing file beneath an already-open directory for reading.
-///
-/// A final link is refused and a FIFO is never waited on.
-pub fn open_file_for_read(directory: &Dir, name: &OsStr) -> io::Result<File> {
-    let mut options = cap_std::fs::OpenOptions::new();
-    options.read(true);
-    refuse_links_and_blocking(&mut options);
-    Ok(directory.open_with(name, &options)?.into_std())
+/// Open an existing file beneath `dir` for reading without following links or waiting on a FIFO.
+pub fn open_file_for_read(dir: &Dir, name: &OsStr) -> io::Result<File> {
+    let mut opts = cap_std::fs::OpenOptions::new();
+    opts.read(true);
+    refuse_links_and_blocking(&mut opts);
+    Ok(dir.open_with(name, &opts)?.into_std())
 }
 
-/// Create one new file beneath an already-open directory for writing.
-///
-/// A final link is refused, a FIFO is never waited on, and an existing name fails.
-pub fn create_new_file(directory: &Dir, name: &OsStr) -> io::Result<File> {
-    let mut options = cap_std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    refuse_links_and_blocking(&mut options);
-    Ok(directory.open_with(name, &options)?.into_std())
+/// Create a new file beneath `dir` for writing (`O_CREAT | O_EXCL`, no links/FIFOs).
+pub fn create_new_file(dir: &Dir, name: &OsStr) -> io::Result<File> {
+    let mut opts = cap_std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    refuse_links_and_blocking(&mut opts);
+    Ok(dir.open_with(name, &opts)?.into_std())
 }
 
-fn refuse_links_and_fifos(options: &mut OpenOptions) {
+fn refuse_links_and_fifos(opts: &mut OpenOptions) {
     use std::os::unix::fs::OpenOptionsExt;
 
-    options
-        .custom_flags((rustix::fs::OFlags::NONBLOCK | rustix::fs::OFlags::NOFOLLOW).bits() as i32);
+    opts.custom_flags((rustix::fs::OFlags::NONBLOCK | rustix::fs::OFlags::NOFOLLOW).bits() as i32);
 }
 
-/// Rename one file beneath an already-open directory, refusing to replace an existing name.
-///
-/// `directory_path` is required only by the Windows rename, which is path-based; here the
-/// directory handle alone names both sides.
+/// Rename `from` to `to` beneath `dir` without replacing an existing entry.
 pub fn rename_without_replacing(
-    directory: &Dir,
-    _directory_path: &Path,
+    dir: &Dir,
+    _dir_path: &Path,
     from: &OsStr,
     to: &OsStr,
 ) -> io::Result<()> {
@@ -95,63 +87,59 @@ pub fn rename_without_replacing(
         use rustix::io::Errno;
 
         // cap-std's rename always replaces; publication must not.
-        match renameat_with(directory, from, directory, to, RenameFlags::NOREPLACE) {
+        match renameat_with(dir, from, dir, to, RenameFlags::NOREPLACE) {
             Ok(()) => return Ok(()),
             Err(Errno::NOSYS | Errno::INVAL | Errno::OPNOTSUPP) => {}
-            Err(error) => return Err(error.into()),
+            Err(err) => return Err(err.into()),
         }
     }
-    // Older kernels retain the same no-clobber contract via linkat.
-    // The staged name remains owned by its cleanup guard.
-    directory.hard_link(from, directory, to)
+    // Older kernels retain the no-clobber contract via linkat; caller's guard cleans up `from`.
+    dir.hard_link(from, dir, to)
 }
 
-/// Configure one directory-relative open so it neither follows a final link nor waits on a FIFO.
-fn refuse_links_and_blocking(options: &mut cap_std::fs::OpenOptions) {
+fn refuse_links_and_blocking(opts: &mut cap_std::fs::OpenOptions) {
     use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt, OpenOptionsSyncExt};
     use cap_std::fs::OpenOptionsExt;
 
-    options
-        .follow(FollowSymlinks::No)
+    opts.follow(FollowSymlinks::No)
         .mode(0o666)
         .nonblock(true)
         .custom_flags((rustix::fs::OFlags::NOCTTY | rustix::fs::OFlags::CLOEXEC).bits() as i32);
 }
 
-/// Whether this metadata describes a symbolic link.
-/// Use entry metadata for path checks and handle metadata for opened-file checks.
-pub fn is_link_like(metadata: &Metadata) -> bool {
-    metadata.is_symlink()
+/// Return whether `meta` describes a symbolic link.
+pub fn is_link_like(meta: &Metadata) -> bool {
+    meta.is_symlink()
 }
 
-/// Classify a directory entry without following it; `file_type` came from this entry.
-pub fn entry_is_link_like(_entry: &DirEntry, file_type: &FileType) -> io::Result<bool> {
-    Ok(file_type.is_symlink())
+/// Classify a directory entry without following it.
+pub fn entry_is_link_like(_entry: &DirEntry, ft: &FileType) -> io::Result<bool> {
+    Ok(ft.is_symlink())
 }
 
-/// Create one file link naming `target`.
+/// Create a file symlink at `link` pointing to `target`.
 pub fn link_file(target: &Path, link: &Path) -> io::Result<()> {
     std::os::unix::fs::symlink(target, link)
 }
 
-/// Read Unix permission bits when this platform has them.
-pub fn unix_mode(metadata: &Metadata) -> Option<u32> {
+/// Return Unix permission mode bits.
+pub fn unix_mode(meta: &Metadata) -> Option<u32> {
     use std::os::unix::fs::MetadataExt;
-    Some(metadata.mode())
+    Some(meta.mode())
 }
 
-/// Set Unix permission bits; platforms without Unix modes leave permissions unchanged.
+/// Apply Unix permission mode bits to `path`.
 pub fn set_unix_mode(path: &Path, mode: u32) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(path, Permissions::from_mode(mode))
 }
 
-/// Encode a path losslessly for equality and ownership records, not display.
+/// Lossless hex encoding of `path` bytes for equality and ownership records.
 pub fn encode_path_identity(path: &Path) -> String {
     hex::encode(path.as_os_str().as_encoded_bytes())
 }
 
-/// Open the persistent lock at one path, creating it without following a final symlink.
+/// Open or create the lock file at `path` without following a final symlink.
 pub fn open_lock_file(path: &Path) -> io::Result<File> {
     use rustix::fs::{Mode, OFlags, open};
 
@@ -167,19 +155,19 @@ pub fn open_lock_file(path: &Path) -> io::Result<File> {
     )?))
 }
 
-/// Make one entry writable or read-only, keeping its other mode bits.
-pub fn set_write_permission(permissions: &mut Permissions, writable: bool, is_dir: bool) {
+/// Set or clear write bits while preserving other mode bits.
+pub fn set_write_permission(perms: &mut Permissions, writable: bool, is_dir: bool) {
     use std::os::unix::fs::PermissionsExt;
 
-    let mode = permissions.mode();
-    permissions.set_mode(if writable {
+    let mode = perms.mode();
+    perms.set_mode(if writable {
         mode | if is_dir { 0o700 } else { 0o600 }
     } else {
         mode & !0o222
     });
 }
 
-/// The permissions an ordinary file creation has here, when the platform needs them stated.
+/// Default creation permissions for ordinary files (`0o666`).
 pub fn ordinary_file_permissions() -> Option<Permissions> {
     use std::os::unix::fs::PermissionsExt;
 

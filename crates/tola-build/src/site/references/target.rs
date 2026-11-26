@@ -1,6 +1,6 @@
 //! Browser references and the site targets they require.
 
-use tola_address::{LinkKind, RequiredResourceKind, SiteReference, SiteUrlMount};
+use tola_address::{LinkKind, RequiredResourceKind, SiteRef, SiteUrlMount};
 use tola_typst::HtmlReference;
 
 use crate::output::semantics::ResponseMediaType;
@@ -22,25 +22,23 @@ pub(super) fn read_reference(
 ) -> Reference {
     let destination = reference.destination();
     let effective =
-        tola_address::resolve_browser_reference(&page.permalink, url_mount, base, destination);
+        tola_address::classify_browser_ref(&page.permalink, url_mount, base, destination);
     let expectation = expectation(reference.reference_use());
     let default_category = expectation.category;
     let resolution = match effective {
-        Ok(tola_address::ResolvedBrowserReference::External) => ReferenceResolution::External,
-        Ok(tola_address::ResolvedBrowserReference::OutsideSite(destination)) => {
-            ReferenceResolution::Unresolved {
-                reason: UnresolvedReferenceReason::OutsideSiteMount {
-                    destination,
-                    required_prefix: format!("/{}/", url_mount.as_str()),
-                },
-            }
-        }
+        Ok(tola_address::BrowserRef::External) => ReferenceResolution::External,
+        Ok(tola_address::BrowserRef::OutsideSite(destination)) => ReferenceResolution::Unresolved {
+            reason: UnresolvedReferenceReason::OutsideSiteMount {
+                destination,
+                required_prefix: format!("/{}/", url_mount.as_str()),
+            },
+        },
         Err(_) => ReferenceResolution::Unresolved {
             reason: UnresolvedReferenceReason::InvalidBrowserReference {
                 message: "is not a valid URL".to_string(),
             },
         },
-        Ok(tola_address::ResolvedBrowserReference::Site(site)) => {
+        Ok(tola_address::BrowserRef::Site(site)) => {
             match lookup_target(
                 address,
                 site,
@@ -138,7 +136,7 @@ pub(super) const fn expectation(
 
 fn lookup_target(
     address: &AddressSpace,
-    site: SiteReference,
+    site: SiteRef,
     reference: &HtmlReference,
     expectation: ReferenceExpectation,
     url_mount: &SiteUrlMount,
@@ -166,7 +164,7 @@ fn lookup_target(
         AddressResolution::NotFound => {
             let suggestion = address
                 .directory_page_suggestion(&site.route, required_kind, &mut *dependencies)
-                .map(|route| SiteReference { route, ..site }.to_browser_url(url_mount, None));
+                .map(|route| SiteRef { route, ..site }.to_browser_url(url_mount, None));
             return Err(UnresolvedReferenceReason::TargetMissing { suggestion });
         }
         AddressResolution::FragmentNotFound {

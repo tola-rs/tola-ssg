@@ -2,13 +2,13 @@
 
 use std::ops::Range;
 
-use crate::edit::Edit;
-use crate::style::{Options, ProseWrap};
 use typst_syntax::{LinkedNode, Source, ast};
 use typstyle_core::pretty::PrettyPrinter;
 use typstyle_core::{AttrStore, Config, Typstyle, WrapMode};
 
-/// The narrowest width a source may be wrapped to.
+use crate::edit::Edit;
+use crate::style::{Options, ProseWrap};
+
 const MINIMUM_PRINT_WIDTH: usize = 20;
 
 /// What formatting one source produced.
@@ -29,16 +29,16 @@ pub enum Formatting {
 
 /// What formatting `source` produced. A rejected edit leaves the author's source in place.
 pub fn format(source: &str, options: &Options) -> Formatting {
-    let source = Source::detached(source);
-    if source.root().diagnosis().errors {
+    let src = Source::detached(source);
+    if src.root().diagnosis().errors {
         return Formatting::Unparsable {
-            offset: crate::errors::first_error(&source).map(|range| range.start),
+            offset: crate::errors::first_error(&src).map(|range| range.start),
         };
     }
 
     // Typstyle's whole-source renderer trims every line, including literal text.
-    let printer = PrettyPrinter::new(config(options), AttrStore::new(source.root()));
-    let markup = source.root().cast().expect("source root is markup");
+    let printer = PrettyPrinter::new(config(options), AttrStore::new(src.root()));
+    let markup = src.root().cast().expect("source root is markup");
     let doc = printer.convert_markup(Default::default(), markup);
     let mut printed = String::new();
     if doc
@@ -48,7 +48,7 @@ pub fn format(source: &str, options: &Options) -> Formatting {
         return Formatting::Unrenderable;
     }
 
-    match checked_edit(&source, 0..source.text().len(), &printed, true) {
+    match checked_edit(&src, 0..src.text().len(), &printed, true) {
         Ok(Some(edit)) => Formatting::Reformatted(edit),
         Ok(None) => Formatting::Stands,
         Err(()) => Formatting::Unrenderable,
@@ -60,26 +60,26 @@ pub fn format_range(source: &str, range: Range<usize>, options: &Options) -> Opt
     if source.get(range.clone())?.trim().is_empty() {
         return None;
     }
-    let source = Source::detached(source);
-    if source.root().diagnosis().errors {
+    let src = Source::detached(source);
+    if src.root().diagnosis().errors {
         return None;
     }
 
     let reprinted = Typstyle::new(config(options))
-        .format_source_range(source.clone(), range)
+        .format_source_range(src.clone(), range)
         .ok()?;
-    checked_edit(&source, reprinted.source_range, &reprinted.content, false)
+    checked_edit(&src, reprinted.source_range, &reprinted.content, false)
         .ok()
         .flatten()
 }
 
 fn checked_edit(
-    source: &Source,
+    src: &Source,
     range: Range<usize>,
     printed: &str,
     whole: bool,
 ) -> Result<Option<Edit>, ()> {
-    let text = source.text();
+    let text = src.text();
     let previous = text.get(range.clone()).ok_or(())?;
     if !whole && printed == previous {
         return Ok(None);
@@ -88,21 +88,13 @@ fn checked_edit(
     if candidate.root().diagnosis().errors {
         return Err(());
     }
-    let before = protected(source);
+    let before = protected(src);
     let after = protected(&candidate);
     if before.len() != after.len() {
         return Err(());
     }
 
-    // The first physical line ending sets the convention outside protected spans.
-    let newline = text
-        .find(['\r', '\n'])
-        .map(|at| match &text.as_bytes()[at..] {
-            [b'\r', b'\n', ..] => "\r\n",
-            [b'\r', ..] => "\r",
-            _ => "\n",
-        })
-        .unwrap_or("\n");
+    let newline = line_ending(text);
     let mut replacement = String::new();
     let mut cursor = range.start;
     let end = range.start + printed.len();
@@ -131,7 +123,7 @@ fn checked_edit(
             && old_text.lines().eq(new_text.lines())
             && old_text.ends_with('\n') == new_text.ends_with('\n')
         {
-            // Keep the original spelling when the printer only changed CRLF inside the node.
+            // Preserve original CRLF inside protected nodes when line content is unchanged.
             replacement.push_str(old_text);
         } else {
             replacement.push_str(new_text);
@@ -154,37 +146,13 @@ fn checked_edit(
         return Ok(None);
     }
 
-    // Parse the complete source with the actual replacement, in its original context.
     let candidate = replaced(text, range.clone(), &replacement);
     let after = protected(&candidate);
     if candidate.root().diagnosis().errors
         || before.len() != after.len()
-        || !before
-            .iter()
-            .zip(&after)
-            .all(|((old, disabled), (new, now_disabled))| {
-                disabled == now_disabled
-                    && old.kind() == new.kind()
-                    && if *disabled {
-                        text[old.range()] == candidate.text()[new.range()]
-                    } else if let (Some(old), Some(new)) =
-                        (old.cast::<ast::Str>(), new.cast::<ast::Str>())
-                    {
-                        old.get() == new.get()
-                    } else if let (Some(old), Some(new)) =
-                        (old.cast::<ast::Raw>(), new.cast::<ast::Raw>())
-                    {
-                        old.block() == new.block()
-                            && old.lang().map(ast::RawLang::get)
-                                == new.lang().map(ast::RawLang::get)
-                            && old
-                                .lines()
-                                .map(ast::Text::get)
-                                .eq(new.lines().map(ast::Text::get))
-                    } else {
-                        false
-                    }
-            })
+        || !before.iter().zip(&after).all(|((old, d0), (new, d1))| {
+            protected_match(old, *d0, new, *d1, text, candidate.text())
+        })
     {
         return Err(());
     }
@@ -196,14 +164,51 @@ fn checked_edit(
     }))
 }
 
-fn replaced(source: &str, range: Range<usize>, text: &str) -> Source {
-    let mut candidate = source.to_owned();
+fn line_ending(text: &str) -> &'static str {
+    text.find(['\r', '\n'])
+        .map(|at| match &text.as_bytes()[at..] {
+            [b'\r', b'\n', ..] => "\r\n",
+            [b'\r', ..] => "\r",
+            _ => "\n",
+        })
+        .unwrap_or("\n")
+}
+
+fn protected_match(
+    old: &LinkedNode<'_>,
+    old_disabled: bool,
+    new: &LinkedNode<'_>,
+    new_disabled: bool,
+    old_text: &str,
+    new_text: &str,
+) -> bool {
+    if old_disabled != new_disabled || old.kind() != new.kind() {
+        return false;
+    }
+    if old_disabled {
+        return old_text[old.range()] == new_text[new.range()];
+    }
+    if let (Some(old), Some(new)) = (old.cast::<ast::Str>(), new.cast::<ast::Str>()) {
+        return old.get() == new.get();
+    }
+    if let (Some(old), Some(new)) = (old.cast::<ast::Raw>(), new.cast::<ast::Raw>()) {
+        return old.block() == new.block()
+            && old.lang().map(ast::RawLang::get) == new.lang().map(ast::RawLang::get)
+            && old
+                .lines()
+                .map(ast::Text::get)
+                .eq(new.lines().map(ast::Text::get));
+    }
+    false
+}
+
+fn replaced(src: &str, range: Range<usize>, text: &str) -> Source {
+    let mut candidate = src.to_owned();
     candidate.replace_range(range, text);
     Source::detached(candidate)
 }
 
-/// The outermost disabled nodes and literal nodes, in source order.
-fn protected(source: &Source) -> Vec<(LinkedNode<'_>, bool)> {
+fn protected(src: &Source) -> Vec<(LinkedNode<'_>, bool)> {
     fn collect<'a>(
         node: LinkedNode<'a>,
         attrs: &AttrStore,
@@ -219,9 +224,9 @@ fn protected(source: &Source) -> Vec<(LinkedNode<'_>, bool)> {
         }
     }
 
-    let attrs = AttrStore::new(source.root());
+    let attrs = AttrStore::new(src.root());
     let mut spans = Vec::new();
-    collect(LinkedNode::new(source.root()), &attrs, &mut spans);
+    collect(LinkedNode::new(src.root()), &attrs, &mut spans);
     spans
 }
 
@@ -241,7 +246,6 @@ fn append_lines(out: &mut String, text: &str, newline: &str, trim: bool) {
     }
 }
 
-/// The style a caller's options ask for, in the formatter's own terms.
 fn config(options: &Options) -> Config {
     Config {
         tab_spaces: options.tab_spaces,
@@ -260,18 +264,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn range_answers_the_construct_it_covers() {
-        let source = "= Head\n\n#let  x =  1\n";
-        let start = source.find("#let").expect("the binding");
-        let edit = format_range(source, start..source.len(), &Options::default()).expect("an edit");
-        assert_eq!(edit.range, start..source.len() - 1);
-        assert_ne!(edit.text, source[edit.range]);
+    fn format_range_construct() {
+        let src = "= Head\n\n#let  x =  1\n";
+        let start = src.find("#let").expect("the binding");
+        let edit = format_range(src, start..src.len(), &Options::default()).expect("an edit");
+        assert_eq!(edit.range, start..src.len() - 1);
+        assert_ne!(edit.text, src[edit.range]);
     }
 
     #[test]
-    fn formatting_preserves_multiline_string_and_raw_text() {
-        let source = "#let  x = \"first  \r\nsecond\"\n\n```txt\r\nexample  \r\n```\n";
-        let Formatting::Reformatted(edit) = format(source, &Options::default()) else {
+    fn format_preserves_multiline_literals() {
+        let src = "#let  x = \"first  \r\nsecond\"\n\n```txt\r\nexample  \r\n```\n";
+        let Formatting::Reformatted(edit) = format(src, &Options::default()) else {
             panic!("the declaration needs formatting");
         };
         assert!(edit.text.contains("\"first  \r\nsecond\""));
@@ -279,35 +283,27 @@ mod tests {
     }
 
     #[test]
-    fn range_cannot_edit_a_node_disabled_by_an_earlier_comment() {
-        let source = "// @typstyle off\n#let x=1\n";
-        let start = source.find("x=1").unwrap();
-        assert!(format_range(source, start..source.len(), &Options::default()).is_none());
+    fn format_range_skips_disabled() {
+        let src = "// @typstyle off\n#let x=1\n";
+        let start = src.find("x=1").unwrap();
+        assert!(format_range(src, start..src.len(), &Options::default()).is_none());
     }
 
     #[test]
-    fn invalid_ranges_and_syntax_yield_no_edit() {
-        let source = "é  \n";
-        for range in [
-            0..0,
-            1..2,
-            2..source.len(),
-            source.len()..2,
-            0..source.len() + 1,
-        ] {
-            assert!(format_range(source, range, &Options::default()).is_none());
+    fn format_range_rejects_invalid() {
+        let src = "é  \n";
+        for range in [0..0, 1..2, 2..src.len(), src.len()..2, 0..src.len() + 1] {
+            assert!(format_range(src, range, &Options::default()).is_none());
         }
         assert!(format_range("#let = ", 0..7, &Options::default()).is_none());
     }
 
     #[test]
-    fn unparsable_source_names_where_it_fails() {
-        let source = "= Title\n#let = \n";
-        let broken = source.find("#let").expect("the broken line");
-        let line_end = source[broken..]
-            .find('\n')
-            .map_or(source.len(), |at| broken + at);
-        let offset = match format(source, &Options::default()) {
+    fn format_unparsable_offset() {
+        let src = "= Title\n#let = \n";
+        let broken = src.find("#let").expect("the broken line");
+        let line_end = src[broken..].find('\n').map_or(src.len(), |at| broken + at);
+        let offset = match format(src, &Options::default()) {
             Formatting::Unparsable { offset } => offset.expect("the tree marks a place"),
             other => panic!("expected an unparsable source, got {other:?}"),
         };

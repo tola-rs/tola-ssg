@@ -262,21 +262,21 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn embedded_submission_keeps_the_first_valid_batch() {
-        let (submit, diagnostics) = collector("test".into(), ReportSources::new());
+    fn submit_keeps_first_valid_batch() {
+        let (submit, diags) = collector("test".into(), ReportSources::new());
         assert!(submit(json!([{"severity":"warning","message":" "}])).is_err());
         submit(json!([{"severity":"error","message":"missing title"}])).unwrap();
         assert!(submit(json!([])).is_err());
-        let diagnostics = diagnostics.lock().unwrap();
-        let first = diagnostics.as_ref().unwrap();
+        let diags = diags.lock().unwrap();
+        let first = diags.as_ref().unwrap();
         assert_eq!(first.len(), 1);
         assert_eq!(first[0].severity, Severity::Error);
     }
 
     #[test]
-    fn an_empty_file_submission_still_counts() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("report.json");
+    fn empty_file_submission_counts() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("report.json");
         assert!(submit_file(&path, json!([{"severity":"warning","message":" "}])).is_err());
         assert!(!path.exists());
         submit_file(&path, json!([])).unwrap();
@@ -294,7 +294,7 @@ mod tests {
     }
 
     #[test]
-    fn source_snapshot_location_is_rejected_by_rendering() {
+    fn snapshot_location_rejected_in_render() {
         let input = json!([
             {"severity":"warning","message":"missing summary"},
             {"severity":"error","message":"missing title","related":[
@@ -309,7 +309,7 @@ mod tests {
     }
 
     #[test]
-    fn render_keeps_suggestions_from_check_reports() {
+    fn render_keeps_report_help() {
         let mut issue = Diagnostic::new(
             DiagnosticCode::new("test.issue"),
             Severity::Warning,

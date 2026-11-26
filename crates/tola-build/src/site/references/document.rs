@@ -188,10 +188,10 @@ fn unchecked_base(
     world: &tola_typst::TypstWorld,
 ) -> Option<UncheckedBase> {
     let base = inventory.base_href()?;
-    (!tola_address::base_href_keeps_build_origin(&page.permalink, url_mount, base.value())).then(
-        || UncheckedBase {
+    (!tola_address::is_local_base_href(&page.permalink, url_mount, base.value())).then(|| {
+        UncheckedBase {
             value: base.value().to_owned(),
             origin: crate::compiler::source_location(world, base.span()),
-        },
-    )
+        }
+    })
 }

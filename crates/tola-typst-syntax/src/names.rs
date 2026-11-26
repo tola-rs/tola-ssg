@@ -1,10 +1,13 @@
 //! Source-bound declarations and lexical scopes from Typst's AST.
 
+#[cfg(test)]
+mod tests;
+mod walk;
+
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::Range;
 
-use typst_syntax::ast::{self, AstNode};
-use typst_syntax::{FileId, LinkedNode, Source, SyntaxKind};
+use typst_syntax::{FileId, LinkedNode, Source};
 
 /// A lexical visibility boundary; a nested body never leaks its declarations outward.
 #[derive(Clone, Debug)]
@@ -15,8 +18,7 @@ pub struct Scope {
     pub range: Range<usize>,
     /// Declaration indices in binding order, with later entries able to shadow earlier ones.
     pub declarations: Vec<usize>,
-    /// The same indices ordered by spelling, binding order kept inside one spelling, so one name
-    /// resolves without scanning every declaration the scope holds.
+    /// Same indices ordered by spelling, keeping binding order within each spelling.
     declarations_by_name: Vec<usize>,
     /// Set for a closure or named-function body, whose statements run at each call rather than
     /// during the file's own evaluation.
@@ -24,16 +26,12 @@ pub struct Scope {
 }
 
 impl Scope {
-    /// The declaration indices one spelling binds, in binding order.
-    ///
-    /// [`Self::declarations_by_name`] is ordered by spelling, so the two partitions frame the
-    /// spelling's own declarations without reading the scope's others.
-    fn declarations_named<'a>(&'a self, declarations: &[Declaration], name: &str) -> &'a [usize] {
+    fn declarations_named<'a>(&'a self, decls: &[Declaration], name: &str) -> &'a [usize] {
         let start = self
             .declarations_by_name
-            .partition_point(|&id| declarations[id].name.as_str() < name);
+            .partition_point(|&id| decls[id].name.as_str() < name);
         let rest = &self.declarations_by_name[start..];
-        let end = rest.partition_point(|&id| declarations[id].name.as_str() == name);
+        let end = rest.partition_point(|&id| decls[id].name.as_str() == name);
         &rest[..end]
     }
 }
@@ -149,6 +147,7 @@ pub struct Import {
     /// Empty when the statement selects no item: a wildcard, or an import of the module itself.
     pub items: Vec<Range<usize>>,
 }
+
 /// Grammar roles distinguish local identities from external import spellings.
 #[derive(Clone, Debug)]
 pub enum OccurrenceKind {
@@ -260,8 +259,8 @@ pub fn selected_interfaces<'a>(
     resolve: impl Fn(FileId, &str) -> Option<FileId>,
 ) -> SelectedInterfaces {
     let mut collected = SelectedInterfaces::default();
-    for source in sources {
-        for (statement, import) in source.imports().iter().enumerate() {
+    for src in sources {
+        for (stmt, import) in src.imports().iter().enumerate() {
             let path = match &import.source {
                 ImportSource::Path(path) if !path.starts_with('@') => path,
                 ImportSource::Path(_) => continue,
@@ -270,7 +269,7 @@ pub fn selected_interfaces<'a>(
                     continue;
                 }
             };
-            let Some(target) = resolve(source.source().id(), path) else {
+            let Some(target) = resolve(src.source().id(), path) else {
                 continue;
             };
             let selected = collected.selected.entry(target).or_default();
@@ -279,15 +278,17 @@ pub fn selected_interfaces<'a>(
             } else {
                 selected
                     .names
-                    .extend(source.declarations().iter().filter_map(|declaration| {
-                        match &declaration.initializer {
-                            Initializer::Import {
-                                import: owner,
-                                path,
-                            } if *owner == statement => path.first().cloned(),
-                            _ => None,
-                        }
-                    }));
+                    .extend(
+                        src.declarations()
+                            .iter()
+                            .filter_map(|decl| match &decl.initializer {
+                                Initializer::Import {
+                                    import: owner,
+                                    path,
+                                } if *owner == stmt => path.first().cloned(),
+                                _ => None,
+                            }),
+                    );
             }
         }
     }
@@ -328,22 +329,18 @@ impl SourceNames {
             declaration_starts: BTreeMap::new(),
         };
         index.walk(&LinkedNode::new(source.root()), 0);
-        index
-            .occurrences
-            .sort_by_key(|occurrence| occurrence.range.start);
+        index.occurrences.sort_by_key(|occ| occ.range.start);
         index.order_declarations_by_name();
         index
     }
 
-    /// Orders each scope's declarations by spelling; the sort is stable, so equal spellings keep
-    /// binding order.
     fn order_declarations_by_name(&mut self) {
-        let declarations = &self.declarations;
+        let decls = &self.declarations;
         for scope in &mut self.scopes {
             scope.declarations_by_name = scope.declarations.clone();
             scope
                 .declarations_by_name
-                .sort_by(|&left, &right| declarations[left].name.cmp(&declarations[right].name));
+                .sort_by(|&left, &right| decls[left].name.cmp(&decls[right].name));
         }
     }
 
@@ -367,7 +364,6 @@ impl SourceNames {
         &self.imports
     }
 
-    /// Identifier spellings in source order, including unresolved reads.
     pub(crate) fn occurrences(&self) -> &[Occurrence] {
         &self.occurrences
     }
@@ -380,10 +376,10 @@ impl SourceNames {
     pub fn occurrence(&self, cursor: usize) -> Option<&Occurrence> {
         let after = self
             .occurrences
-            .partition_point(|occurrence| occurrence.range.start <= cursor);
+            .partition_point(|occ| occ.range.start <= cursor);
         self.occurrences[..after]
             .last()
-            .filter(|occurrence| cursor <= occurrence.range.end)
+            .filter(|occ| cursor <= occ.range.end)
     }
 
     /// The unread imports of this source a report may name.
@@ -413,90 +409,74 @@ impl SourceNames {
     /// this file's module interface and another source can import them.
     pub fn unread_imports(&self) -> Vec<UnreadImport> {
         let mut read = BTreeSet::new();
-        for occurrence in &self.occurrences {
-            if matches!(occurrence.kind, OccurrenceKind::Name)
-                && let Some(declaration) = self.resolve(
-                    self.text(&occurrence.range),
-                    occurrence.scope,
-                    occurrence.range.start,
-                )
+        for occ in &self.occurrences {
+            if matches!(occ.kind, OccurrenceKind::Name)
+                && let Some(decl) = self.resolve(self.text(&occ.range), occ.scope, occ.range.start)
             {
-                read.insert(declaration);
+                read.insert(decl);
             }
         }
         let mut unread: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
-        for (declaration, spelled) in self.declarations.iter().enumerate() {
-            if !read.contains(&declaration)
+        for (decl, spelled) in self.declarations.iter().enumerate() {
+            if !read.contains(&decl)
                 && let Initializer::Import { import, .. } = &spelled.initializer
             {
-                unread.entry(*import).or_default().push(declaration);
+                unread.entry(*import).or_default().push(decl);
             }
         }
         unread
             .into_iter()
-            .map(|(import, declarations)| self.unread_import(import, &declarations))
+            .map(|(import, decls)| self.unread_import(import, &decls))
             .collect()
     }
 
-    /// The record one statement's unread declarations make.
     fn unread_import(&self, import: usize, unread: &[usize]) -> UnreadImport {
-        let statement = &self.imports[import];
-        let removal = if statement.items.is_empty() || statement.items.len() == unread.len() {
-            // Nothing the statement introduces would remain imported, and a statement that names
-            // the module itself has no item to remove, so only the whole statement can go.
+        let stmt = &self.imports[import];
+        let removal = if stmt.items.is_empty() || stmt.items.len() == unread.len() {
             ImportRemoval::Statement
         } else {
             ImportRemoval::Spans(
                 unread
                     .iter()
-                    .filter_map(|&declaration| self.item_removal(statement, declaration))
+                    .filter_map(|&decl| self.item_removal(stmt, decl))
                     .collect(),
             )
         };
         UnreadImport {
-            statement: statement.range.clone(),
-            file_scope: statement.scope == 0,
+            statement: stmt.range.clone(),
+            file_scope: stmt.scope == 0,
             names: unread
                 .iter()
-                .map(|&declaration| self.declarations[declaration].name.clone())
+                .map(|&decl| self.declarations[decl].name.clone())
                 .collect(),
             removal,
         }
     }
 
-    /// The bytes whose deletion removes exactly the item binding one declaration.
-    ///
-    /// A first item takes the separator that follows it and a later one the separator before it,
-    /// so a statement keeps every item it still imports.
-    fn item_removal(&self, statement: &Import, declaration: usize) -> Option<Range<usize>> {
-        let spelled = &self.declarations[declaration].range;
-        let index = statement
+    fn item_removal(&self, stmt: &Import, decl: usize) -> Option<Range<usize>> {
+        let spelled = &self.declarations[decl].range;
+        let idx = stmt
             .items
             .iter()
             .position(|item| item.start <= spelled.start && spelled.end <= item.end)?;
-        let item = &statement.items[index];
-        match statement.items.get(index + 1) {
+        let item = &stmt.items[idx];
+        match stmt.items.get(idx + 1) {
             Some(next) => Some(item.start..next.start),
-            None => Some(statement.items[index.checked_sub(1)?].end..item.end),
+            None => Some(stmt.items[idx.checked_sub(1)?].end..item.end),
         }
     }
 
-    /// The local declaration whose identifier begins at `at`, when one does.
     pub(crate) fn declaration_beginning_at(&self, at: usize) -> Option<usize> {
         self.declaration_starts.get(&at).copied()
     }
 
     /// Returns a local declaration index; fields and external origins need a name graph.
     pub fn declared_at(&self, cursor: usize) -> Option<usize> {
-        let occurrence = self.occurrence(cursor)?;
-        match &occurrence.kind {
-            OccurrenceKind::Declaration(declaration) => Some(*declaration),
-            OccurrenceKind::Name => self.resolve(
-                self.text(&occurrence.range),
-                occurrence.scope,
-                occurrence.range.start,
-            ),
-            OccurrenceKind::Import { .. } => self.declaration_beginning_at(occurrence.range.start),
+        let occ = self.occurrence(cursor)?;
+        match &occ.kind {
+            OccurrenceKind::Declaration(decl) => Some(*decl),
+            OccurrenceKind::Name => self.resolve(self.text(&occ.range), occ.scope, occ.range.start),
+            OccurrenceKind::Import { .. } => self.declaration_beginning_at(occ.range.start),
             _ => None,
         }
     }
@@ -552,519 +532,13 @@ impl SourceNames {
     /// file with another argument, so evaluating this file observes one call rather than all of
     /// them.
     pub fn evaluated_here(&self, scope: usize) -> bool {
-        let mut current = Some(scope);
-        while let Some(id) = current {
+        let mut cur = Some(scope);
+        while let Some(id) = cur {
             if self.scopes[id].per_call {
                 return false;
             }
-            current = self.scopes[id].parent;
+            cur = self.scopes[id].parent;
         }
         true
-    }
-
-    /// The byte range one AST node spans, searched from the node whose subtree holds it.
-    fn range<'a>(&self, anchor: &LinkedNode<'_>, node: impl AstNode<'a>) -> Range<usize> {
-        anchor.find(node.span()).map_or(0..0, |found| found.range())
-    }
-
-    fn scope(&mut self, parent: usize, range: Range<usize>, per_call: bool) -> usize {
-        let id = self.scopes.len();
-        self.scopes.push(Scope {
-            parent: Some(parent),
-            range,
-            declarations: Vec::new(),
-            declarations_by_name: Vec::new(),
-            per_call,
-        });
-        id
-    }
-
-    fn declare(
-        &mut self,
-        anchor: &LinkedNode<'_>,
-        ident: ast::Ident<'_>,
-        scope: usize,
-        visible_from: usize,
-        kind: DeclarationKind,
-        initializer: Initializer,
-    ) -> Option<usize> {
-        let range = anchor.find(ident.span())?.range();
-        Some(self.bind(
-            Declaration {
-                name: ident.get().to_string(),
-                range,
-                scope,
-                visible_from,
-                kind,
-                initializer,
-                recursive_body: None,
-            },
-            true,
-        ))
-    }
-
-    fn bind(&mut self, declaration: Declaration, spelled: bool) -> usize {
-        let id = self.declarations.len();
-        self.scopes[declaration.scope].declarations.push(id);
-        self.declaration_starts.insert(declaration.range.start, id);
-        if spelled {
-            self.occurrences.push(Occurrence {
-                range: declaration.range.clone(),
-                scope: declaration.scope,
-                math: false,
-                kind: OccurrenceKind::Declaration(id),
-            });
-        }
-        self.declarations.push(declaration);
-        id
-    }
-
-    fn path(
-        &self,
-        anchor: &LinkedNode<'_>,
-        expression: ast::Expr<'_>,
-        scope: usize,
-    ) -> Option<NamePath> {
-        fn segments(
-            names: &SourceNames,
-            anchor: &LinkedNode<'_>,
-            expression: ast::Expr<'_>,
-            found: &mut Vec<Range<usize>>,
-        ) -> Option<bool> {
-            match expression {
-                ast::Expr::Ident(ident) => {
-                    found.push(names.range(anchor, ident));
-                    Some(false)
-                }
-                ast::Expr::MathIdent(ident) => {
-                    found.push(names.range(anchor, ident));
-                    Some(true)
-                }
-                ast::Expr::FieldAccess(field) => {
-                    let math = segments(names, anchor, field.target(), found)?;
-                    found.push(names.range(anchor, field.field()));
-                    Some(math)
-                }
-                ast::Expr::MathFieldAccess(field) => {
-                    let math = segments(
-                        names,
-                        anchor,
-                        field.target().to_untyped().cast::<ast::Expr>()?,
-                        found,
-                    )?;
-                    found.push(names.range(anchor, field.field()));
-                    Some(math)
-                }
-                ast::Expr::Parenthesized(group) => segments(names, anchor, group.expr(), found),
-                _ => None,
-            }
-        }
-        let mut found = Vec::new();
-        let math = segments(self, anchor, expression, &mut found)?;
-        Some(NamePath {
-            at: found.first()?.start,
-            segments: found,
-            scope,
-            math,
-        })
-    }
-
-    fn initializer(
-        &self,
-        anchor: &LinkedNode<'_>,
-        expression: Option<ast::Expr<'_>>,
-        scope: usize,
-    ) -> Initializer {
-        match expression {
-            Some(ast::Expr::Closure(closure)) => Initializer::Function {
-                body: self.range(anchor, closure.body()),
-            },
-            Some(expression) => self
-                .path(anchor, expression, scope)
-                .map_or(Initializer::Unknown, Initializer::Alias),
-            None => Initializer::Unknown,
-        }
-    }
-
-    /// Records one field selection as an occurrence of the name path its target spells.
-    ///
-    /// A code field is an `Ident` and a math field a `MathIdent`; both name the same path step.
-    fn record_field<'a>(
-        &mut self,
-        node: &LinkedNode<'_>,
-        scope: usize,
-        field: impl AstNode<'a>,
-        target: ast::Expr<'_>,
-    ) {
-        if let Some(path) = self.path(node, target, scope) {
-            self.occurrences.push(Occurrence {
-                range: self.range(node, field),
-                scope,
-                math: path.math,
-                kind: OccurrenceKind::Field(path),
-            });
-        }
-    }
-
-    /// Walks the child node an AST accessor names, when the node holds one.
-    fn walk_child(&mut self, node: &LinkedNode<'_>, span: typst_syntax::Span, scope: usize) {
-        if let Some(child) = node.find(span) {
-            self.walk(&child, scope);
-        }
-    }
-
-    fn walk(&mut self, node: &LinkedNode<'_>, scope: usize) {
-        if let Some(binding) = node.cast::<ast::LetBinding>() {
-            let init = binding.init();
-            let recursive_body = match binding.kind() {
-                ast::LetBindingKind::Closure(_) => match init {
-                    Some(ast::Expr::Closure(closure)) => Some(self.range(node, closure.body())),
-                    _ => None,
-                },
-                _ => None,
-            };
-            let names = binding.kind().bindings();
-            let single = names.len() == 1;
-            for name in names {
-                let initializer = if single {
-                    self.initializer(node, init, scope)
-                } else {
-                    Initializer::Unknown
-                };
-                if let Some(id) = self.declare(
-                    node,
-                    name,
-                    scope,
-                    node.range().end,
-                    DeclarationKind::Let,
-                    initializer,
-                ) {
-                    self.declarations[id].recursive_body = recursive_body.clone();
-                }
-            }
-            if let Some(init) = init.and_then(|init| node.find(init.span())) {
-                self.walk(&init, scope);
-            }
-            return;
-        }
-        if let Some(closure) = node.cast::<ast::Closure>() {
-            // Defaults evaluate in the enclosing scope, not in the parameter scope.
-            for parameter in closure.params().children() {
-                if let ast::Param::Named(named) = parameter {
-                    self.walk_child(node, named.expr().span(), scope);
-                }
-            }
-            let body_range = self.range(node, closure.body());
-            let child_scope = self.scope(scope, body_range.clone(), true);
-            for parameter in closure.params().children() {
-                let named_parameter = matches!(parameter, ast::Param::Named(_));
-                let names = match parameter {
-                    ast::Param::Pos(pattern) => pattern.bindings(),
-                    ast::Param::Named(named) => vec![named.name()],
-                    ast::Param::Spread(spread) => spread.sink_ident().into_iter().collect(),
-                };
-                for name in names {
-                    if let Some(id) = self.declare(
-                        node,
-                        name,
-                        child_scope,
-                        body_range.start,
-                        DeclarationKind::Parameter,
-                        Initializer::Unknown,
-                    ) && named_parameter
-                    {
-                        self.named_parameters
-                            .entry(body_range.start)
-                            .or_default()
-                            .insert(self.declarations[id].name.clone(), id);
-                    }
-                }
-            }
-            self.walk_child(node, closure.body().span(), child_scope);
-            return;
-        }
-        if let Some(loop_) = node.cast::<ast::ForLoop>() {
-            self.walk_child(node, loop_.iterable().span(), scope);
-            let body_range = self.range(node, loop_.body());
-            let child_scope = self.scope(scope, body_range.clone(), false);
-            for name in loop_.pattern().bindings() {
-                let _ = self.declare(
-                    node,
-                    name,
-                    child_scope,
-                    body_range.start,
-                    DeclarationKind::Loop,
-                    Initializer::Unknown,
-                );
-            }
-            self.walk_child(node, loop_.body().span(), child_scope);
-            return;
-        }
-        if let Some(import) = node.cast::<ast::ModuleImport>() {
-            let source_range = self.range(node, import.source());
-            let source = match import.source() {
-                ast::Expr::Str(path) => ImportSource::Path(path.get().to_string()),
-                expression => self
-                    .path(node, expression, scope)
-                    .map_or(ImportSource::Unknown, ImportSource::Name),
-            };
-            self.walk_child(node, import.source().span(), scope);
-            let id = self.imports.len();
-            self.imports.push(Import {
-                source,
-                range: node.range(),
-                source_range: source_range.clone(),
-                scope,
-                wildcard: matches!(import.imports(), Some(ast::Imports::Wildcard)),
-                items: Vec::new(),
-            });
-            if let Some(name) = import.new_name() {
-                let _ = self.declare(
-                    node,
-                    name,
-                    scope,
-                    node.range().end,
-                    DeclarationKind::Import {
-                        explicit_alias: true,
-                        implicit: false,
-                    },
-                    Initializer::Import {
-                        import: id,
-                        path: Vec::new(),
-                    },
-                );
-            } else if import.imports().is_none()
-                && let Ok(name) = import.bare_name()
-            {
-                self.bind(
-                    Declaration {
-                        name: name.to_string(),
-                        range: source_range,
-                        scope,
-                        visible_from: node.range().end,
-                        kind: DeclarationKind::Import {
-                            explicit_alias: false,
-                            implicit: true,
-                        },
-                        initializer: Initializer::Import {
-                            import: id,
-                            path: Vec::new(),
-                        },
-                        recursive_body: None,
-                    },
-                    false,
-                );
-            }
-            if let Some(ast::Imports::Items(items)) = import.imports() {
-                for item in items.iter() {
-                    let spelling = match item {
-                        ast::ImportItem::Simple(path) => self.range(node, path),
-                        ast::ImportItem::Renamed(renamed) => self.range(node, renamed),
-                    };
-                    self.imports[id].items.push(spelling);
-                    let mut path = Vec::new();
-                    for part in item.path().iter() {
-                        path.push(part.get().to_string());
-                        self.occurrences.push(Occurrence {
-                            range: self.range(node, part),
-                            scope,
-                            math: false,
-                            kind: OccurrenceKind::Import {
-                                import: id,
-                                path: path.clone(),
-                            },
-                        });
-                    }
-                    let explicit_alias = matches!(item, ast::ImportItem::Renamed(_));
-                    let declaration = self.declare(
-                        node,
-                        item.bound_name(),
-                        scope,
-                        node.range().end,
-                        DeclarationKind::Import {
-                            explicit_alias,
-                            implicit: false,
-                        },
-                        Initializer::Import { import: id, path },
-                    );
-                    if !explicit_alias && declaration.is_some() {
-                        self.occurrences.pop();
-                    }
-                }
-            }
-            return;
-        }
-        if let Some(field) = node.cast::<ast::FieldAccess>() {
-            self.walk_child(node, field.target().span(), scope);
-            self.record_field(node, scope, field.field(), field.target());
-            return;
-        }
-        if let Some(field) = node.cast::<ast::MathFieldAccess>() {
-            self.walk_child(node, field.target().span(), scope);
-            if let Some(target) = field.target().to_untyped().cast::<ast::Expr>() {
-                self.record_field(node, scope, field.field(), target);
-            }
-            return;
-        }
-        if let Some(named) = node.cast::<ast::Named>() {
-            if let Some(call) = node.parent().and_then(|args| args.parent()) {
-                let callee = match call.cast::<ast::FuncCall>() {
-                    Some(call) => Some(call.callee()),
-                    None => call
-                        .cast::<ast::MathCall>()
-                        .and_then(|call| call.callee().to_untyped().cast::<ast::Expr>()),
-                };
-                // A label is identifier syntax in a math argument list as well, so renaming keeps
-                // the identifier rule rather than the math-variable rule.
-                if let Some(callee) = callee.and_then(|callee| self.path(call, callee, scope)) {
-                    self.occurrences.push(Occurrence {
-                        range: self.range(node, named.name()),
-                        scope,
-                        math: false,
-                        kind: OccurrenceKind::Argument(callee),
-                    });
-                }
-            }
-            self.walk_child(node, named.expr().span(), scope);
-            return;
-        }
-        if matches!(node.kind(), SyntaxKind::Ident | SyntaxKind::MathIdent) {
-            self.occurrences.push(Occurrence {
-                range: node.range(),
-                scope,
-                math: node.kind() == SyntaxKind::MathIdent,
-                kind: OccurrenceKind::Name,
-            });
-            return;
-        }
-        let scope = if matches!(
-            node.kind(),
-            SyntaxKind::CodeBlock | SyntaxKind::ContentBlock
-        ) {
-            self.scope(scope, node.range(), false)
-        } else {
-            scope
-        };
-        for child in node.children() {
-            self.walk(&child, scope);
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use typst_syntax::{RootedPath, VirtualPath, VirtualRoot};
-
-    fn declaration(marked: &str) -> (SourceNames, usize) {
-        let cursor = marked.find('|').unwrap();
-        let index = detached_index(&marked.replace('|', ""));
-        let declaration = index.declared_at(cursor).expect("bound name");
-        (index, declaration)
-    }
-
-    fn detached_index(text: &str) -> SourceNames {
-        SourceNames::new(Source::detached(text))
-    }
-
-    fn file(path: &str) -> FileId {
-        RootedPath::new(VirtualRoot::Project, VirtualPath::new(path).unwrap()).intern()
-    }
-
-    fn project(path: &str, text: &str) -> SourceNames {
-        SourceNames::new(Source::new(file(path), text.to_owned()))
-    }
-
-    #[test]
-    fn wildcard_imports_are_never_reported() {
-        let index = detached_index("#import \"lib.typ\": *\n");
-        assert!(index.unread_imports().is_empty());
-    }
-
-    #[test]
-    fn shadowed_imports_are_unread() {
-        let index = detached_index("#import \"lib.typ\": value\n#let value = 1\n#value\n");
-        let unread = index.unread_imports();
-        assert_eq!(unread.len(), 1, "{unread:?}");
-        assert_eq!(unread[0].names, ["value"]);
-    }
-
-    #[test]
-    fn selection_records_names_items_select() {
-        let target = project("lib.typ", "");
-        let page = project("page.typ", "#import \"lib.typ\": a.b as c, d\n");
-        let interfaces = selected_interfaces([&page], |_, path| {
-            (path == "lib.typ").then_some(target.source().id())
-        });
-        assert!(!interfaces.unresolved);
-        let selected = &interfaces.selected[&target.source().id()];
-        assert!(!selected.whole);
-        assert_eq!(selected.names.iter().collect::<Vec<_>>(), ["a", "d"]);
-    }
-
-    #[test]
-    fn selection_evidence_withholds_file_scope_imports() {
-        let source = project("lib.typ", "#import \"other.typ\": dropped\n");
-
-        let reported = source.reportable_unread_imports(&SelectedInterfaces::default());
-        assert_eq!(reported.len(), 1, "{reported:?}");
-        assert_eq!(reported[0].names, ["dropped"]);
-
-        let mut selected = SelectedInterfaces::default();
-        selected
-            .selected
-            .insert(source.source().id(), SelectedNames::default());
-        selected
-            .selected
-            .get_mut(&source.source().id())
-            .unwrap()
-            .names
-            .insert("dropped".to_owned());
-        assert!(
-            source.reportable_unread_imports(&selected).is_empty(),
-            "a selected name reaches the import"
-        );
-
-        let unresolved = SelectedInterfaces {
-            unresolved: true,
-            ..SelectedInterfaces::default()
-        };
-        assert!(
-            source.reportable_unread_imports(&unresolved).is_empty(),
-            "an unresolved source may reach any name"
-        );
-    }
-
-    #[test]
-    fn parameters_bind_every_pattern() {
-        for marked in [
-            "#let f(pos) = pos|",
-            "#let f(named: 1) = named|",
-            "#let f((left, (right, ..rest))) = right|",
-            "#let f(..args) = args|",
-            "#let f = ((x, y), flag: false, ..rest) => rest|",
-        ] {
-            let (index, id) = declaration(marked);
-            assert!(
-                matches!(index.declarations()[id].kind, DeclarationKind::Parameter),
-                "{marked}"
-            );
-        }
-    }
-
-    #[test]
-    fn named_functions_resolve_recursively() {
-        let marked = "#let recurse(n) = if n > 0 { recurse|(n - 1) }";
-        let (index, id) = declaration(marked);
-        let at = marked.find("recurse").unwrap();
-        assert_eq!(index.declarations()[id].range, at..at + "recurse".len());
-    }
-
-    #[test]
-    fn shadowing_ends_with_scope() {
-        let marked = "#let value = 1\n#{ let value = 2; value }\n#value|";
-        let (index, id) = declaration(marked);
-        let outer = marked.find("value").unwrap();
-        assert_eq!(index.declarations()[id].range, outer..outer + "value".len());
     }
 }

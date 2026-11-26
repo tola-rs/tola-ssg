@@ -2,9 +2,9 @@
 
 mod attr;
 mod field;
-mod field_type;
 mod serde;
 mod template;
+mod ty;
 mod value;
 
 use std::borrow::Cow;
@@ -18,21 +18,20 @@ use attr::{
 };
 use field::ConfigField;
 use serde::reject_serde_rename_all;
-use template::{generate_section_header_code, generate_template_code};
+use template::{emit_section_header, emit_template};
 
 fn is_toml_bare_key(key: &str) -> bool {
     !key.is_empty()
         && key
             .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
 }
 
-/// The generated field struct's name: the input ident in PascalCase.
 fn pascal_case(name: &syn::Ident) -> String {
     name.to_string()
         .split('_')
-        .map(|segment| {
-            let mut chars = segment.chars();
+        .map(|seg| {
+            let mut chars = seg.chars();
             chars
                 .next()
                 .map(|first| first.to_uppercase().chain(chars).collect::<String>())
@@ -41,35 +40,33 @@ fn pascal_case(name: &syn::Ident) -> String {
         .collect()
 }
 
-/// Generate Config field paths, template methods, and status validation.
 pub fn derive(input: &DeriveInput) -> TokenStream {
     match expand(input) {
         Ok(tokens) => tokens,
-        Err(error) => error.into_compile_error(),
+        Err(err) => err.into_compile_error(),
     }
 }
 
 fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
     reject_generic(input)?;
     let name = &input.ident;
-    let fields_struct_name = syn::Ident::new(&format!("{}Fields", pascal_case(name)), name.span());
+    let fields_ty = syn::Ident::new(&format!("{}Fields", pascal_case(name)), name.span());
 
-    let struct_attrs = ConfigAttrs::parse(&input.attrs, ConfigAttrScope::Struct)?;
-    let section = match struct_attrs.section {
-        Some(section) => section,
+    let attr = ConfigAttrs::parse(&input.attrs, ConfigAttrScope::Struct)?;
+    let section = match attr.section {
+        Some(sec) => sec,
         None => {
-            let section = infer_section(&name.to_string());
-            attr::validate_section_path(&section, name.span())?;
-            section
+            let sec = infer_section(&name.to_string());
+            attr::validate_section_path(&sec, name.span())?;
+            sec
         }
     };
-    let runtime_crate: syn::Path = struct_attrs
+    let rt: syn::Path = attr
         .crate_path
         .unwrap_or_else(|| syn::parse_quote!(::tola_config));
 
     let section_doc = extract_doc_comment(&input.attrs).unwrap_or_default();
-
-    let section_status = struct_attrs.status.unwrap_or(FieldStatus::Normal);
+    let section_status = attr.status.unwrap_or(FieldStatus::Normal);
 
     let fields = match &input.data {
         Data::Struct(data) => match &data.fields {
@@ -85,86 +82,77 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
 
     reject_serde_rename_all(&input.attrs)?;
 
-    let config_fields: Vec<ConfigField> = fields
+    let cfg_fields: Vec<ConfigField> = fields
         .iter()
         .map(ConfigField::from_field)
         .collect::<syn::Result<_>>()?;
 
-    let fields_for_path = config_fields.iter().filter(|f| !f.skip).collect::<Vec<_>>();
+    let path_fields: Vec<_> = cfg_fields.iter().filter(|f| !f.skip).collect();
 
-    let field_defs = fields_for_path.iter().map(|f| {
-        let name = &f.rust_ident;
-        quote! { pub #name: #runtime_crate::FieldPath, }
+    let field_defs = path_fields.iter().map(|f| {
+        let ident = &f.rust_ident;
+        quote! { pub #ident: #rt::FieldPath, }
     });
 
-    let field_paths = fields_for_path
+    let field_paths: Vec<_> = path_fields
         .iter()
         .map(|f| {
             if section.is_empty() {
                 Cow::Borrowed(f.toml_name.as_str())
             } else {
-                Cow::Owned(format!("{}.{}", section, f.toml_name))
+                Cow::Owned(format!("{section}.{}", f.toml_name))
             }
         })
-        .collect::<Vec<_>>();
+        .collect();
 
-    let field_inits = fields_for_path.iter().zip(&field_paths).map(|(f, path)| {
-        let name = &f.rust_ident;
-        quote! { #name: #runtime_crate::FieldPath::new(#path), }
+    let field_inits = path_fields.iter().zip(&field_paths).map(|(f, path)| {
+        let ident = &f.rust_ident;
+        quote! { #ident: #rt::FieldPath::new(#path), }
     });
 
-    let declared_fields = fields_for_path.iter().zip(&field_paths).map(|(f, path)| {
-        let documentation = declared_documentation_code(f, &runtime_crate);
-        quote! { (#runtime_crate::FieldPath::new(#path), #documentation) }
+    let declared_fields = path_fields.iter().zip(&field_paths).map(|(f, path)| {
+        let doc = declared_documentation_code(f, &rt);
+        quote! { (#rt::FieldPath::new(#path), #doc) }
     });
 
     // Explicit value sets are TOML literals; otherwise only booleans have a finite set.
-    let declared_values = fields_for_path
+    let declared_values = path_fields
         .iter()
         .zip(&field_paths)
         .filter_map(|(f, path)| {
-            if let Some(values) = &f.values {
-                return Some(quote! { (#runtime_crate::FieldPath::new(#path), #values) });
+            if let Some(vals) = &f.values {
+                return Some(quote! { (#rt::FieldPath::new(#path), #vals) });
             }
-            let ty = field_type::option_inner_type(&f.ty).unwrap_or(&f.ty);
-            let boolean = field_type::path_type_ident(ty).is_some_and(|name| name == "bool");
-            boolean.then(|| quote! { (#runtime_crate::FieldPath::new(#path), &["true", "false"]) })
+            let inner = ty::option_inner(&f.ty).unwrap_or(&f.ty);
+            let is_bool = ty::path_ident(inner).is_some_and(|id| id == "bool");
+            is_bool.then(|| quote! { (#rt::FieldPath::new(#path), &["true", "false"]) })
         });
 
-    let fragment_code = generate_fragment(name, &config_fields, &runtime_crate);
+    let fragment_code = generate_fragment(name, &cfg_fields, &rt);
+    let template_code = emit_template(&cfg_fields, &rt)?;
 
-    let template_code = generate_template_code(&config_fields, &runtime_crate)?;
-
-    let visible_fields = config_fields
+    let mut visible = cfg_fields
         .iter()
-        .filter(|field| !field.skip && field.status != FieldStatus::Hidden);
-    // A section whose visible fields are all nested sections leaves the header to them; a section
-    // with no visible field at all still writes its own.
-    let template_has_header = struct_attrs.collection == Some(CollectionShape::ArrayTable)
-        || visible_fields.clone().next().is_none()
-        || visible_fields.clone().any(|field| !field.sub);
+        .filter(|f| !f.skip && f.status != FieldStatus::Hidden);
+    // A section whose visible fields are all nested sections leaves the header to them; an empty
+    // section still writes its own.
+    let has_header = attr.collection == Some(CollectionShape::ArrayTable)
+        || visible.clone().next().is_none()
+        || visible.any(|f| !f.sub);
 
-    let section_header_code = template_has_header.then(|| {
-        let header = generate_section_header_code(
-            quote! { Self::TEMPLATE_SECTION },
-            struct_attrs.collection,
-        );
-        quote! {
-            #header
-        }
-    });
+    let header_code =
+        has_header.then(|| emit_section_header(quote! { Self::TEMPLATE_SECTION }, attr.collection));
 
-    // Status diagnostics depend on explicit TOML presence, not differences from defaults.
-    let status_checks: Vec<TokenStream> = config_fields
+    let status_checks: Vec<TokenStream> = cfg_fields
         .iter()
         .filter(|f| !f.skip)
         .filter_map(|f| {
-            let field_name = &f.rust_ident;
-            let status = generate_runtime_status_code(f.status, &runtime_crate)?;
+            let ident = &f.rust_ident;
+            let status = emit_field_status(f.status, &rt)?;
             Some(quote! {
-                if diag.is_present(Self::FIELDS.#field_name.as_str()) {
-                    #runtime_crate::status::check_field_status(
-                        Self::FIELDS.#field_name.as_str(),
+                if diag.is_present(Self::FIELDS.#ident.as_str()) {
+                    #rt::status::check_field_status(
+                        Self::FIELDS.#ident.as_str(),
                         #status,
                         diag,
                     );
@@ -173,43 +161,38 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
         })
         .collect();
 
-    let nested_calls: Vec<TokenStream> = config_fields
+    let nested_calls: Vec<TokenStream> = cfg_fields
         .iter()
         .filter(|f| !f.skip && f.sub)
         .map(|f| {
-            let field_name = &f.rust_ident;
+            let ident = &f.rust_ident;
             if f.collection == Some(CollectionShape::ArrayTable) {
                 quote! {
-                    for (index, value) in self.#field_name.iter().enumerate() {
-                        diag.with_array_element(Self::FIELDS.#field_name.as_str(), index, |diag| {
-                            value.validate_field_status(diag);
+                    for (idx, val) in self.#ident.iter().enumerate() {
+                        diag.with_array_element(Self::FIELDS.#ident.as_str(), idx, |diag| {
+                            val.validate_field_status(diag);
                         });
                     }
                 }
             } else {
                 quote! {
-                    self.#field_name.validate_field_status(diag);
+                    self.#ident.validate_field_status(diag);
                 }
             }
         })
         .collect();
 
-    let section_status_check =
-        generate_runtime_status_code(section_status, &runtime_crate).map(|status_token| {
-            quote! {
-                if diag.is_present(#section) {
-                    #runtime_crate::status::check_field_status(
-                        #section,
-                        #status_token,
-                        diag,
-                    );
-                }
+    let section_status_check = emit_field_status(section_status, &rt).map(|status_tok| {
+        quote! {
+            if diag.is_present(#section) {
+                #rt::status::check_field_status(#section, #status_tok, diag);
             }
-        });
+        }
+    });
 
-    let uses_diagnostics =
+    let uses_diag =
         section_status_check.is_some() || !status_checks.is_empty() || !nested_calls.is_empty();
-    let diag = if uses_diagnostics {
+    let diag = if uses_diag {
         quote!(diag)
     } else {
         quote!(_diag)
@@ -218,23 +201,22 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
     Ok(quote! {
         #fragment_code
         /// Generated field path accessors.
-        pub struct #fields_struct_name {
+        pub struct #fields_ty {
             #(#field_defs)*
         }
 
         impl #name {
             /// Field paths for diagnostic messages.
-            pub const FIELDS: #fields_struct_name = #fields_struct_name {
+            pub const FIELDS: #fields_ty = #fields_ty {
                 #(#field_inits)*
             };
 
-            /// Every field this section declares, in declaration order: its path and the
-            /// documentation its Rust declaration carries.
-            pub const DECLARED_FIELDS: &'static [(#runtime_crate::FieldPath, Option<&'static str>)] =
+            /// Declared fields in declaration order with their doc comments.
+            pub const DECLARED_FIELDS: &'static [(#rt::FieldPath, Option<&'static str>)] =
                 &[#(#declared_fields),*];
 
-            /// The values a declared field accepts, when its type states them.
-            pub const DECLARED_VALUES: &'static [(#runtime_crate::FieldPath, &'static [&'static str])] =
+            /// Accepted TOML literals for fields with finite value sets.
+            pub const DECLARED_VALUES: &'static [(#rt::FieldPath, &'static [&'static str])] =
                 &[#(#declared_values),*];
 
             /// Section name for TOML output.
@@ -244,38 +226,35 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
             pub const TEMPLATE_DOC: &'static str = #section_doc;
 
             /// Generate a TOML template from this type's default value.
-            pub fn try_template() -> Result<String, #runtime_crate::ConfigTemplateError> {
+            pub fn try_template() -> Result<String, #rt::ConfigTemplateError> {
                 let default = Self::default();
                 Self::try_template_from(&default)
             }
 
             /// Generate TOML template from an explicit configuration value.
-            pub fn try_template_from(value: &Self) -> Result<String, #runtime_crate::ConfigTemplateError> {
+            pub fn try_template_from(value: &Self) -> Result<String, #rt::ConfigTemplateError> {
                 let config_value = value;
                 let mut out = String::new();
                 #template_code
                 Ok(out)
             }
 
-            /// Generate a TOML template with its section header from this
-            /// type's default value.
-            pub fn try_template_with_header() -> Result<String, #runtime_crate::ConfigTemplateError> {
+            /// Generate a TOML template with its section header from this type's default value.
+            pub fn try_template_with_header() -> Result<String, #rt::ConfigTemplateError> {
                 let default = Self::default();
                 Self::try_template_with_header_from(&default)
             }
 
-            /// Generate TOML template with a section header from an explicit
-            /// configuration value. Nested sections use the value supplied by
-            /// their parent, so field-specific defaults are preserved.
-            pub fn try_template_with_header_from(value: &Self) -> Result<String, #runtime_crate::ConfigTemplateError> {
+            /// Generate TOML template with a section header from an explicit configuration value.
+            pub fn try_template_with_header_from(value: &Self) -> Result<String, #rt::ConfigTemplateError> {
                 let mut out = String::new();
-                #section_header_code
+                #header_code
                 out.push_str(&Self::try_template_from(value)?);
                 Ok(out)
             }
 
             /// Validate field status (experimental, deprecated, not_implemented).
-            pub fn validate_field_status(&self, #diag: &mut #runtime_crate::ConfigDiagnostics) {
+            pub fn validate_field_status(&self, #diag: &mut #rt::ConfigDiagnostics) {
                 #section_status_check
                 #(#status_checks)*
                 #(#nested_calls)*
@@ -284,45 +263,36 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
     })
 }
 
-/// The documentation one declared key carries.
-///
-/// A key that opens a section carries the documentation of the section's own declaration, so the
-/// table and its header answer with one text; every other key carries the comment its declaration
-/// wrote.
-fn declared_documentation_code(field: &ConfigField, runtime_crate: &syn::Path) -> TokenStream {
-    if let Some(section) = field.section_type() {
-        return quote! { #runtime_crate::section_documentation(<#section>::TEMPLATE_DOC) };
+fn declared_documentation_code(field: &ConfigField, rt: &syn::Path) -> TokenStream {
+    if let Some(sec) = field.section_type() {
+        return quote! { #rt::section_documentation(<#sec>::TEMPLATE_DOC) };
     }
     match field.doc.as_deref() {
-        Some(documentation) => quote! { Some(#documentation) },
+        Some(doc) => quote! { Some(#doc) },
         None => quote! { None },
     }
 }
 
-fn generate_runtime_status_code(
-    status: FieldStatus,
-    runtime_crate: &syn::Path,
-) -> Option<TokenStream> {
+fn emit_field_status(status: FieldStatus, rt: &syn::Path) -> Option<TokenStream> {
     match status {
-        FieldStatus::NotImplemented => Some(quote! { #runtime_crate::FieldStatus::NotImplemented }),
-        FieldStatus::Deprecated => Some(quote! { #runtime_crate::FieldStatus::Deprecated }),
-        FieldStatus::Experimental => Some(quote! { #runtime_crate::FieldStatus::Experimental }),
+        FieldStatus::NotImplemented => Some(quote! { #rt::FieldStatus::NotImplemented }),
+        FieldStatus::Deprecated => Some(quote! { #rt::FieldStatus::Deprecated }),
+        FieldStatus::Experimental => Some(quote! { #rt::FieldStatus::Experimental }),
         FieldStatus::Normal | FieldStatus::Hidden => None,
     }
 }
 
-/// Generate only the fragment validator, using the same field parser as Config.
 pub fn derive_fragment(input: &DeriveInput) -> TokenStream {
     match expand_fragment(input) {
         Ok(tokens) => tokens,
-        Err(error) => error.into_compile_error(),
+        Err(err) => err.into_compile_error(),
     }
 }
 
 fn expand_fragment(input: &DeriveInput) -> syn::Result<TokenStream> {
     reject_generic(input)?;
-    let attrs = ConfigAttrs::parse(&input.attrs, ConfigAttrScope::Struct)?;
-    let runtime = attrs
+    let attr = ConfigAttrs::parse(&input.attrs, ConfigAttrScope::Struct)?;
+    let rt = attr
         .crate_path
         .unwrap_or_else(|| syn::parse_quote!(::tola_config));
     reject_serde_rename_all(&input.attrs)?;
@@ -343,38 +313,31 @@ fn expand_fragment(input: &DeriveInput) -> syn::Result<TokenStream> {
         .iter()
         .map(ConfigField::from_fragment_field)
         .collect::<syn::Result<Vec<_>>>()?;
-    Ok(generate_fragment(&input.ident, &fields, &runtime))
+    Ok(generate_fragment(&input.ident, &fields, &rt))
 }
 
-fn generate_fragment(
-    name: &syn::Ident,
-    fields: &[ConfigField],
-    runtime: &syn::Path,
-) -> TokenStream {
-    let arms = fields
-        .iter()
-        .filter(|field| !field.deserialize_skip)
-        .map(|field| {
-            let key = &field.toml_name;
-            let ty = &field.ty;
-            let check = if let Some(adapter) = &field.fragment_with {
-                quote! { #adapter(value, context); }
-            } else {
-                quote! { <#ty as #runtime::ValidateFragment>::validate_fragment(value, context); }
-            };
-            quote! { #key => context.key(key, |context| { #check }), }
-        });
+fn generate_fragment(name: &syn::Ident, fields: &[ConfigField], rt: &syn::Path) -> TokenStream {
+    let arms = fields.iter().filter(|f| !f.deserialize_skip).map(|f| {
+        let key = &f.toml_name;
+        let ty = &f.ty;
+        let check = if let Some(adapter) = &f.fragment_with {
+            quote! { #adapter(val, ctx); }
+        } else {
+            quote! { <#ty as #rt::ValidateFragment>::validate_fragment(val, ctx); }
+        };
+        quote! { #key => ctx.key(key, |ctx| { #check }), }
+    });
     quote! {
-        impl #runtime::ValidateFragment for #name {
-            fn validate_fragment(value: &#runtime::toml::Value, context: &mut #runtime::FragmentContext<'_>) {
-                let #runtime::toml::Value::Table(table) = value else {
-                    #runtime::wrong_type(value, "table", context);
+        impl #rt::ValidateFragment for #name {
+            fn validate_fragment(val: &#rt::toml::Value, ctx: &mut #rt::FragmentContext<'_>) {
+                let #rt::toml::Value::Table(tbl) = val else {
+                    #rt::wrong_type(val, "table", ctx);
                     return;
                 };
-                for (key, value) in table {
+                for (key, val) in tbl {
                     match key.as_str() {
                         #(#arms)*
-                        _ => context.key(key, |context| context.issue(#runtime::FragmentIssueKind::UnknownKey)),
+                        _ => ctx.key(key, |ctx| ctx.issue(#rt::FragmentIssueKind::UnknownKey)),
                     }
                 }
             }

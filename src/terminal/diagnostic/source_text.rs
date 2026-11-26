@@ -389,39 +389,35 @@ mod tests {
     use tola_diagnostic::codes::typst::COMPILE;
     use tola_diagnostic::{Diagnostic, Help, Severity, SourceLine, SourcePosition};
 
-    /// A location's window is the source its producer read, so an edited file on disk does not
-    /// decide what a running session shows.
     #[test]
-    fn excerpts_outrank_disk_text() {
-        let directory = tempfile::tempdir().unwrap();
-        std::fs::write(directory.path().join("site.typ"), "stale disk line\n").unwrap();
-        let sources = SourceFiles::new(
-            directory.path().to_path_buf(),
+    fn excerpts_outrank_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("site.typ"), "stale disk line\n").unwrap();
+        let srcs = SourceFiles::new(
+            dir.path().to_path_buf(),
             tola_typst::PackageLocations::from_absolute_roots(None, None).unwrap(),
         );
-        let mut diagnostic = Diagnostic::at_location(
+        let mut diag = Diagnostic::at_location(
             COMPILE,
             Severity::Error,
             snippet(2, "#document(\"fresh/index.html\")[B]"),
             "path `fresh/index.html` occurs multiple times in the bundle",
         );
-        diagnostic.help.push(Help {
+        diag.help.push(Help {
             message: "path is already in use here".into(),
             location: Some(snippet(1, "#document(\"fresh/index.html\")[A]")),
         });
 
-        let rendered = render(&diagnostic, Some(&sources), false);
-        // Both labels are drawn, so both locations reached one text: the primary's window alone
-        // would leave the line above it empty.
-        assert!(rendered.contains("[A]"), "{rendered}");
-        assert!(rendered.contains("[B]"), "{rendered}");
-        assert!(!rendered.contains("stale disk line"), "{rendered}");
+        let out = render(&diag, Some(&srcs), false);
+        assert!(out.contains("[A]"), "{out}");
+        assert!(out.contains("[B]"), "{out}");
+        assert!(!out.contains("stale disk line"), "{out}");
     }
 
     #[test]
     fn range_past_window_labels() {
-        let mut location = snippet(3, "let wide = \"text");
-        location.range = Some(SourceRange {
+        let mut loc = snippet(3, "let wide = \"text");
+        loc.range = Some(SourceRange {
             start: SourcePosition {
                 line: 2,
                 character: 11,
@@ -431,25 +427,24 @@ mod tests {
                 character: 0,
             },
         });
-        let rendered = render(
-            &Diagnostic::at_location(COMPILE, Severity::Error, location, "unterminated string"),
+        let out = render(
+            &Diagnostic::at_location(COMPILE, Severity::Error, loc, "unterminated string"),
             None,
             false,
         );
-
-        assert!(rendered.contains("let wide = \"text"), "{rendered}");
-        assert!(rendered.contains('^'), "{rendered}");
-        assert!(rendered.contains("the excerpt is shortened"), "{rendered}");
+        assert!(out.contains("let wide = \"text"), "{out}");
+        assert!(out.contains('^'), "{out}");
+        assert!(out.contains("the excerpt is shortened"), "{out}");
     }
 
     #[test]
     fn missing_excerpt_keeps_location() {
-        let mut location = snippet(1, "#let value = ");
-        location.source_lines[0].ends_line = false;
-        location.column = Some(40);
-        let end = location.source_lines[0].text.len();
-        location.source_lines[0].highlight = Some((end, end));
-        location.range = Some(SourceRange {
+        let mut loc = snippet(1, "#let value = ");
+        loc.source_lines[0].ends_line = false;
+        loc.column = Some(40);
+        let end = loc.source_lines[0].text.len();
+        loc.source_lines[0].highlight = Some((end, end));
+        loc.range = Some(SourceRange {
             start: SourcePosition {
                 line: 0,
                 character: 39,
@@ -459,21 +454,22 @@ mod tests {
                 character: 43,
             },
         });
-        let rendered = render(
-            &Diagnostic::at_location(COMPILE, Severity::Error, location, "unknown name"),
+        let out = render(
+            &Diagnostic::at_location(COMPILE, Severity::Error, loc, "unknown name"),
             None,
             false,
         );
-        assert!(rendered.contains("site.typ:1:39"), "{rendered}");
-        assert!(!rendered.contains('^'), "{rendered}");
-        assert!(!rendered.contains("the excerpt is shortened"), "{rendered}");
+        assert!(out.contains("site.typ:1:39"), "{out}");
+        assert!(!out.contains('^'), "{out}");
+        assert!(!out.contains("the excerpt is shortened"), "{out}");
     }
+
     #[test]
     fn disjoint_windows_keep_endpoints() {
         for newline in [false, true] {
-            let mut location = snippet(2_000_000, "fail(\"");
-            location.column = Some(5002);
-            location.range = Some(SourceRange {
+            let mut loc = snippet(2_000_000, "fail(\"");
+            loc.column = Some(5002);
+            loc.range = Some(SourceRange {
                 start: SourcePosition {
                     line: 1_999_999,
                     character: 5002,
@@ -490,10 +486,10 @@ mod tests {
                     }
                 },
             });
-            location.source_lines[0].start_column = 5001;
-            location.source_lines[0].start_character = 5002;
-            location.source_lines[0].ends_line = false;
-            location.source_lines.push(SourceLine {
+            loc.source_lines[0].start_column = 5001;
+            loc.source_lines[0].start_character = 5002;
+            loc.source_lines[0].ends_line = false;
+            loc.source_lines.push(SourceLine {
                 line: 2_000_000,
                 start_column: 10010,
                 start_character: 10011,
@@ -501,47 +497,48 @@ mod tests {
                 text: "\")".into(),
                 highlight: Some((0, 2)),
             });
-            let diagnostic = Diagnostic::at_location(COMPILE, Severity::Error, location, "failure");
-            let escaped = DiagnosticText::of(&diagnostic, false);
-            let files = RenderedFiles::of(&escaped, None);
-            let primary = escaped.primary.as_ref().unwrap();
+            let diag = Diagnostic::at_location(COMPILE, Severity::Error, loc, "failure");
+            let esc = DiagnosticText::of(&diag, false);
+            let files = RenderedFiles::of(&esc, None);
+            let primary = esc.primary.as_ref().unwrap();
             let compact = files.compact_span(primary).unwrap();
             assert!(compact.starts_with("fail("));
             assert!(compact.ends_with("\")"));
             assert!(files.source("site.typ").unwrap().len() <= 9);
-            let rendered = render(&diagnostic, None, false);
-            assert!(rendered.contains("site.typ:2000000:5001"), "{rendered}");
-            assert!(rendered.contains("the excerpt is shortened"), "{rendered}");
+            let out = render(&diag, None, false);
+            assert!(out.contains("site.typ:2000000:5001"), "{out}");
+            assert!(out.contains("the excerpt is shortened"), "{out}");
         }
     }
 
     #[test]
-    fn overlapping_windows_share_source() {
-        let mut location = snippet(8, "abcdef");
-        location.column = Some(11);
-        location.source_lines[0].start_column = 10;
-        location.source_lines[0].start_character = 10;
-        location.source_lines[0].ends_line = false;
-        let mut diagnostic = Diagnostic::at_location(COMPILE, Severity::Error, location, "failure");
+    fn overlapping_windows_merge() {
+        let mut loc = snippet(8, "abcdef");
+        loc.column = Some(11);
+        loc.source_lines[0].start_column = 10;
+        loc.source_lines[0].start_character = 10;
+        loc.source_lines[0].ends_line = false;
+        let mut diag = Diagnostic::at_location(COMPILE, Severity::Error, loc, "failure");
         let mut help = snippet(8, "cdefgh");
         help.column = Some(13);
         help.source_lines[0].start_column = 12;
         help.source_lines[0].start_character = 12;
-        diagnostic.help.push(Help {
+        diag.help.push(Help {
             message: "inspect here".into(),
             location: Some(help),
         });
-        let escaped = DiagnosticText::of(&diagnostic, false);
-        let files = RenderedFiles::of(&escaped, None);
+        let esc = DiagnosticText::of(&diag, false);
+        let files = RenderedFiles::of(&esc, None);
         assert_eq!(files.source("site.typ").unwrap(), "abcdefgh");
-        let rendered = render(&diagnostic, None, false);
-        assert!(rendered.contains("site.typ:8:10"), "{rendered}");
-        assert!(rendered.contains("inspect here"), "{rendered}");
+        let out = render(&diag, None, false);
+        assert!(out.contains("site.typ:8:10"), "{out}");
+        assert!(out.contains("inspect here"), "{out}");
     }
+
     #[test]
     fn trailing_newline_keeps_closing_span() {
-        let mut location = snippet(1, "call[");
-        location.range = Some(SourceRange {
+        let mut loc = snippet(1, "call[");
+        loc.range = Some(SourceRange {
             start: SourcePosition {
                 line: 0,
                 character: 0,
@@ -551,7 +548,7 @@ mod tests {
                 character: 0,
             },
         });
-        location.source_lines.push(SourceLine {
+        loc.source_lines.push(SourceLine {
             line: 2,
             start_column: 0,
             start_character: 0,
@@ -559,51 +556,49 @@ mod tests {
             text: "body]".into(),
             highlight: Some((0, 5)),
         });
-        let mut diagnostic = Diagnostic::at_location(COMPILE, Severity::Error, location, "failure");
-        diagnostic.help.push(Help {
+        let mut diag = Diagnostic::at_location(COMPILE, Severity::Error, loc, "failure");
+        diag.help.push(Help {
             message: "inspect here".into(),
             location: Some(snippet(3, "next[]")),
         });
-        let escaped = DiagnosticText::of(&diagnostic, false);
-        let files = RenderedFiles::of(&escaped, None);
-        let compact = files
-            .compact_span(escaped.primary.as_ref().unwrap())
-            .unwrap();
+        let esc = DiagnosticText::of(&diag, false);
+        let files = RenderedFiles::of(&esc, None);
+        let compact = files.compact_span(esc.primary.as_ref().unwrap()).unwrap();
         assert!(compact.starts_with("call["));
         assert!(compact.ends_with(']'));
-        let rendered = render(&diagnostic, None, false);
-        assert!(rendered.contains("body]"), "{rendered}");
+        let out = render(&diag, None, false);
+        assert!(out.contains("body]"), "{out}");
     }
+
     #[test]
-    fn clipped_lines_keep_missing_suffix() {
-        for end_character in [0, 1] {
-            let mut location = snippet(1, "call[");
-            location.source_lines[0].ends_line = false;
-            location.range = Some(SourceRange {
+    fn clipped_lines_keep_suffix() {
+        for end_char in [0, 1] {
+            let mut loc = snippet(1, "call[");
+            loc.source_lines[0].ends_line = false;
+            loc.range = Some(SourceRange {
                 start: SourcePosition {
                     line: 0,
                     character: 0,
                 },
                 end: SourcePosition {
                     line: 1,
-                    character: end_character,
+                    character: end_char,
                 },
             });
-            let mut diagnostic =
-                Diagnostic::at_location(COMPILE, Severity::Error, location, "failure");
-            diagnostic.help.push(Help {
+            let mut diag = Diagnostic::at_location(COMPILE, Severity::Error, loc, "failure");
+            diag.help.push(Help {
                 message: "inspect here".into(),
                 location: Some(snippet(2, "]")),
             });
-            let escaped = DiagnosticText::of(&diagnostic, false);
-            let files = RenderedFiles::of(&escaped, None);
-            let primary = escaped.primary.as_ref().unwrap();
+            let esc = DiagnosticText::of(&diag, false);
+            let files = RenderedFiles::of(&esc, None);
+            let primary = esc.primary.as_ref().unwrap();
             assert!(files.is_span_shortened(primary));
-            if end_character == 0 {
+            if end_char == 0 {
                 assert!(files.compact_span(primary).unwrap().ends_with('…'));
             }
-            let rendered = render(&diagnostic, None, false);
-            assert!(rendered.contains("the excerpt is shortened"), "{rendered}");
+            let out = render(&diag, None, false);
+            assert!(out.contains("the excerpt is shortened"), "{out}");
         }
     }
 }

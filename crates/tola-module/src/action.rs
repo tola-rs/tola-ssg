@@ -1,6 +1,6 @@
 //! Executable actions shared by hooks, module commands and initializers.
 
-use std::path::{Component, PathBuf};
+use std::path::PathBuf;
 
 /// An embedded Nu script or an external executable with literal arguments.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -20,11 +20,7 @@ impl Action {
     ) -> Result<Self, String> {
         match (nu, argv, args) {
             (Some(path), None, args) => {
-                if !crate::is_relative_path(&path)
-                    || !path
-                        .components()
-                        .any(|part| matches!(part, Component::Normal(_)))
-                {
+                if !crate::declaration::is_nonempty_relative_path(&path) {
                     return Err("`nu` must name a script inside the declaring directory".into());
                 }
                 Ok(Self::Nu {
@@ -33,7 +29,7 @@ impl Action {
                 })
             }
             (None, Some(argv), None) => {
-                if argv.first().is_none_or(|program| program.trim().is_empty()) {
+                if argv.first().is_none_or(|prog| prog.trim().is_empty()) {
                     return Err("`argv` needs an executable as its first element".into());
                 }
                 Ok(Self::Argv(argv))

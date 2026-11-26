@@ -6,6 +6,7 @@ pub mod arguments;
 
 pub mod assets;
 mod builtin;
+pub mod bundle;
 pub mod check;
 pub mod checkout;
 pub mod declaration;
@@ -20,7 +21,6 @@ pub mod module_set;
 mod option_refs;
 pub mod options;
 pub mod pack;
-pub mod prepared;
 pub mod query;
 pub mod remote;
 pub mod watch;
@@ -28,6 +28,11 @@ pub mod watch;
 pub use action::Action;
 pub use arguments::expand_argument;
 pub use builtin::{BuiltinModule, install_builtin_modules};
+pub use bundle::{
+    Acquired, AcquiredModule, AssetContribution, Context as PrepareContext, Contribution,
+    EntrySelection, HookEntry, HooksContribution, ModuleBundle, ModuleEntry, acquire, prepare,
+    select_query, select_query_file,
+};
 pub use checkout::CheckoutError;
 pub use declaration::*;
 pub use diagnostic::error_diagnostic;
@@ -37,13 +42,8 @@ pub use hooks::{
 };
 pub use manifest::{ModuleDeclarations, NuModule};
 pub use module_set::{
-    LoadedModule, ManifestEvidence, ModuleCommands, ModuleLoadError, ModulePathError,
+    LoadedModule, ManifestStamp, ModuleCommands, ModuleLoadError, ModulePathError,
     load_modules_with_roots,
-};
-pub use prepared::{
-    Acquired, AcquiredModule, AssetContribution, Context as PrepareContext, Contribution,
-    EntrySelection, HookEntry, HooksContribution, ModuleEntry, PreparedModules, acquire, prepare,
-    select_query, select_query_file,
 };
 pub use remote::FetchError;
 pub use watch::HookWatchInputs;

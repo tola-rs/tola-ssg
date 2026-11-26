@@ -26,6 +26,12 @@ struct Pool {
     auto_limit: usize,
 }
 
+impl Pool {
+    fn lock_state(&self) -> std::sync::MutexGuard<'_, State> {
+        self.state.lock().unwrap_or_else(|err| err.into_inner())
+    }
+}
+
 /// Permit pool shared by the site's modules, build attempts, and after-publish consumers.
 /// Clones share the current limit; independent site sessions do not. Updating the limit can
 /// change overlap in an older consumer, but never its owner boundaries or order batches.
@@ -59,11 +65,7 @@ impl HookExecutor {
     /// Advance the generation allowed to install settings and return it to the new attempt.
     /// This does not cancel already running work or alter the current limit.
     pub fn begin_attempt(&self) -> u64 {
-        let mut state = self
-            .pool
-            .state
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let mut state = self.pool.lock_state();
         state.epoch = state
             .epoch
             .checked_add(1)
@@ -73,11 +75,7 @@ impl HookExecutor {
 
     /// Revoke an attempt's right to install settings before the host requests its cancellation.
     pub fn invalidate(&self, epoch: u64) {
-        let mut state = self
-            .pool
-            .state
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let mut state = self.pool.lock_state();
         if state.epoch == epoch {
             state.epoch = state
                 .epoch
@@ -96,11 +94,7 @@ impl HookExecutor {
         jobs: HookJobs,
         cancellation: &BuildCancellation,
     ) -> Result<(), BuildCancelled> {
-        let mut state = self
-            .pool
-            .state
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let mut state = self.pool.lock_state();
         if epoch != state.epoch || cancellation.is_cancelled() {
             return Err(BuildCancelled);
         }
@@ -133,11 +127,7 @@ impl HookExecutor {
         let canceller = cancellation.map_or_else(BuildCanceller::new, BuildCanceller::child);
         let signal = canceller.token();
         let id = {
-            let mut state = self
-                .pool
-                .state
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
+            let mut state = self.pool.lock_state();
             let id = state.next_batch;
             state.next_batch = state
                 .next_batch
@@ -150,26 +140,17 @@ impl HookExecutor {
         let dispatch = tracing::dispatcher::get_default(Clone::clone);
         let span = tracing::Span::current();
         std::thread::scope(|scope| {
-            let (send, receive) = mpsc::channel();
+            let (send, receive) = mpsc::channel::<(usize, std::thread::Result<R>)>();
             let mut next = 0;
             let mut running = 0;
             loop {
-                while let Ok((index, result)) = receive.try_recv() {
-                    match result {
-                        Ok(result) => results[index] = Some(Ok(result)),
-                        Err(_) => {
-                            results[index] = Some(Err(std::io::Error::other(
-                                "the hook worker stopped unexpectedly",
-                            )));
-                        }
-                    }
+                while let Ok((idx, res)) = receive.try_recv() {
+                    results[idx] = Some(res.map_err(|_| {
+                        std::io::Error::other("the hook worker stopped unexpectedly")
+                    }));
                     running -= 1;
                 }
-                let mut state = self
-                    .pool
-                    .state
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner());
+                let mut state = self.pool.lock_state();
                 if signal.is_cancelled() {
                     state.waiting.retain(|batch| *batch != id);
                     self.pool.changed.notify_all();
@@ -187,12 +168,11 @@ impl HookExecutor {
                 {
                     state.waiting.pop_front();
                     next += 1;
-                    let index = next - 1;
+                    let idx = next - 1;
                     if next < count {
                         state.waiting.push_back(id);
                     }
-                    // A grant counts before thread creation. Hot shrinking cannot revoke it;
-                    // the permit remains held through command, report, and output cleanup.
+                    // A grant counts before thread creation; hot shrinking cannot revoke it.
                     state.active += 1;
                     self.pool.changed.notify_all();
                     drop(state);
@@ -206,38 +186,34 @@ impl HookExecutor {
                     let worker_dispatch = dispatch.clone();
                     let worker_span = span.clone();
                     let stop: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
-                        let _state = pool.state.lock().unwrap_or_else(|error| error.into_inner());
+                        let _state = pool.lock_state();
                         stop_batch.cancel();
                         pool.changed.notify_all();
                     });
                     let spawned = std::thread::Builder::new().spawn_scoped(scope, move || {
                         let _permit = permit;
-                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                             tracing::dispatcher::with_default(&worker_dispatch, || {
                                 worker_span.in_scope(|| {
-                                    let result = run(index, signal, &stop);
-                                    if failed(&result) {
+                                    let res = run(idx, signal, &stop);
+                                    if failed(&res) {
                                         stop();
                                     }
-                                    result
+                                    res
                                 })
                             })
                         }));
-                        if result.is_err() {
+                        if res.is_err() {
                             stop();
                         }
-                        let _ = sender.send((index, result));
+                        let _ = sender.send((idx, res));
                     });
                     match spawned {
                         Ok(_) => running += 1,
-                        Err(error) => {
-                            let _state = self
-                                .pool
-                                .state
-                                .lock()
-                                .unwrap_or_else(|error| error.into_inner());
+                        Err(err) => {
+                            let _state = self.pool.lock_state();
                             canceller.cancel();
-                            results[index] = Some(Err(error));
+                            results[idx] = Some(Err(err));
                             self.pool.changed.notify_all();
                         }
                     }
@@ -247,7 +223,7 @@ impl HookExecutor {
                     .pool
                     .changed
                     .wait_timeout(state, Duration::from_millis(20))
-                    .unwrap_or_else(|error| error.into_inner());
+                    .unwrap_or_else(|err| err.into_inner());
             }
         });
         results
@@ -260,11 +236,7 @@ struct Permit<'a> {
 
 impl Drop for Permit<'_> {
     fn drop(&mut self) {
-        let mut state = self
-            .pool
-            .state
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let mut state = self.pool.lock_state();
         state.active -= 1;
         if state.active == 0 {
             state.draining = false;
@@ -284,7 +256,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn failure_stops_the_batch_without_cancelling_the_attempt() {
+    fn failure_stops_batch_only() {
         let executor = HookExecutor::new();
         let attempt = BuildCancellation::new();
         let epoch = executor.begin_attempt();
@@ -324,7 +296,7 @@ mod tests {
     }
 
     #[test]
-    fn worker_panic_keeps_other_batch_results() {
+    fn worker_panic_preserves_batch() {
         let executor = HookExecutor::new();
         let attempt = BuildCancellation::new();
         let epoch = executor.begin_attempt();
@@ -368,7 +340,7 @@ mod tests {
     }
 
     #[test]
-    fn invalidated_attempt_cannot_change_the_limit() {
+    fn invalidated_attempt_ignores_configure() {
         let executor = HookExecutor::new();
         let attempt = BuildCancellation::new();
         let epoch = executor.begin_attempt();

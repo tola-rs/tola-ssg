@@ -77,33 +77,19 @@ impl ConfigTemplateError {
     }
 }
 
-/// Serialize a configuration value as TOML.
-///
-/// Used by `Config` derives so callers do not need a direct `toml` dependency.
-pub fn serialize_toml_value<T: Serialize>(value: &T) -> Result<String, ConfigSerializationError> {
-    toml::Value::try_from(value)
-        .map(|value| value.to_string())
+pub fn serialize_toml_value<T: Serialize>(val: &T) -> Result<String, ConfigSerializationError> {
+    toml::Value::try_from(val)
+        .map(|v| v.to_string())
         .map_err(ConfigSerializationError)
 }
 
-/// The documentation a section's declaration wrote, or `None` when it wrote none.
-///
-/// A field that opens a section documents that key with the section's own declaration, so a
-/// section with no doc comment answers nothing rather than an empty hover.
-pub const fn section_documentation(documentation: &'static str) -> Option<&'static str> {
-    if documentation.is_empty() {
-        None
-    } else {
-        Some(documentation)
-    }
+pub const fn section_documentation(doc: &'static str) -> Option<&'static str> {
+    if doc.is_empty() { None } else { Some(doc) }
 }
 
-/// Append one documentation paragraph to TOML output, one comment line per line.
-///
-/// A blank line between paragraphs becomes `#` alone, so a generated comment never has
-/// trailing whitespace.
-pub fn push_documentation(out: &mut String, documentation: &str) {
-    for line in documentation.lines() {
+/// Append documentation lines as TOML comments, keeping blank lines free of trailing whitespace.
+pub fn push_documentation(out: &mut String, doc: &str) {
+    for line in doc.lines() {
         let line = line.trim();
         out.push('#');
         if !line.is_empty() {
@@ -124,21 +110,19 @@ mod tests {
     }
 
     #[test]
-    fn derive_binds_schema_to_runtime() {
+    fn derive_schema_runtime() {
         assert_eq!(Service::FIELDS.enabled.as_str(), "service.enabled");
         assert!(Service::try_template().unwrap().contains("enabled = false"));
-        let mut diagnostics = super::ConfigDiagnostics::new();
-        diagnostics.set_presence(
+        let mut diag = super::ConfigDiagnostics::new();
+        diag.set_presence(
             super::ConfigPresence::from_toml("[service]\nenabled = false\n").unwrap(),
         );
-        Service::default().validate_field_status(&mut diagnostics);
-        assert_eq!(
-            diagnostics.experimental_fields(),
-            &[Service::FIELDS.enabled]
-        );
+        Service::default().validate_field_status(&mut diag);
+        assert_eq!(diag.experimental_fields(), &[Service::FIELDS.enabled]);
     }
+
     #[test]
-    fn array_element_status_follows_explicit_presence() {
+    fn array_element_presence_status() {
         #[derive(Default, serde::Serialize, serde::Deserialize, super::Config)]
         #[serde(default)]
         #[config(section = "")]
@@ -165,7 +149,7 @@ mod tests {
             future: bool,
         }
 
-        let source = r#"
+        let src = r#"
 [[groups]]
 [[groups.entries]]
 [[groups.entries]]
@@ -175,28 +159,29 @@ preview = false
 [[groups.entries]]
 [[groups.entries]]
 "#;
-        let mut value: Parent = toml::from_str(source).unwrap();
+        let mut val: Parent = toml::from_str(src).unwrap();
         // Values supplied by invocation code must not become explicit.
-        value.groups.push(Group {
+        val.groups.push(Group {
             entries: vec![Entry { future: true }],
             preview: true,
         });
-        let mut diagnostics = super::ConfigDiagnostics::new();
-        diagnostics.set_presence(super::ConfigPresence::from_toml(source).unwrap());
-        value.validate_field_status(&mut diagnostics);
+        let mut diag = super::ConfigDiagnostics::new();
+        diag.set_presence(super::ConfigPresence::from_toml(src).unwrap());
+        val.validate_field_status(&mut diag);
 
-        assert_eq!(diagnostics.errors().len(), 1);
-        assert_eq!(diagnostics.errors()[0].field, Entry::FIELDS.future);
-        assert_eq!(diagnostics.warnings().len(), 2);
-        assert_eq!(diagnostics.experimental_fields(), &[Group::FIELDS.preview]);
-        assert!(diagnostics.is_present("groups.entries.future"));
-        assert!(diagnostics.into_result().is_err());
+        assert_eq!(diag.errors().len(), 1);
+        assert_eq!(diag.errors()[0].field, Entry::FIELDS.future);
+        assert_eq!(diag.warnings().len(), 2);
+        assert_eq!(diag.experimental_fields(), &[Group::FIELDS.preview]);
+        assert!(diag.is_present("groups.entries.future"));
+        assert!(diag.into_result().is_err());
     }
+
     struct Unserializable(bool);
 
     impl super::ValidateFragment for Unserializable {
-        fn validate_fragment(value: &toml::Value, context: &mut super::FragmentContext<'_>) {
-            super::validate_value::<String>(value, context);
+        fn validate_fragment(val: &toml::Value, ctx: &mut super::FragmentContext<'_>) {
+            super::validate_value::<String>(val, ctx);
         }
     }
 
@@ -207,17 +192,17 @@ preview = false
     }
 
     impl serde::Serialize for Unserializable {
-        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
             if self.0 {
                 Err(serde::ser::Error::custom("unsupported configuration value"))
             } else {
-                serializer.serialize_str("available")
+                ser.serialize_str("available")
             }
         }
     }
 
     #[test]
-    fn template_errors_keep_field_and_cause() {
+    fn template_error_cause() {
         #[derive(Default, serde::Serialize, super::Config)]
         #[config(crate = crate, section = "site.child")]
         struct Child {
@@ -231,19 +216,19 @@ preview = false
             child: Child,
         }
 
-        let value = Child::default();
-        for error in [
+        let val = Child::default();
+        for err in [
             Child::try_template().unwrap_err(),
-            Child::try_template_from(&value).unwrap_err(),
+            Child::try_template_from(&val).unwrap_err(),
             Child::try_template_with_header().unwrap_err(),
-            Child::try_template_with_header_from(&value).unwrap_err(),
+            Child::try_template_with_header_from(&val).unwrap_err(),
             Parent::try_template().unwrap_err(),
         ] {
-            assert_eq!(error.field(), "site.child.value");
-            let serialization = std::error::Error::source(&error).unwrap();
-            assert!(serialization.is::<super::ConfigSerializationError>());
+            assert_eq!(err.field(), "site.child.value");
+            let ser = std::error::Error::source(&err).unwrap();
+            assert!(ser.is::<super::ConfigSerializationError>());
             assert!(
-                std::error::Error::source(serialization)
+                std::error::Error::source(ser)
                     .unwrap()
                     .is::<toml::ser::Error>()
             );
@@ -251,7 +236,7 @@ preview = false
     }
 
     #[test]
-    fn template_errors_identify_array_elements() {
+    fn template_error_array_idx() {
         #[derive(Default, serde::Serialize, super::Config)]
         #[config(section = "")]
         struct Parent {
@@ -272,7 +257,7 @@ preview = false
             value: Unserializable,
         }
 
-        let value = Parent {
+        let val = Parent {
             groups: vec![
                 Group {
                     entries: vec![Entry {
@@ -291,13 +276,13 @@ preview = false
                 },
             ],
         };
-        for error in [
-            Parent::try_template_from(&value).unwrap_err(),
-            Parent::try_template_with_header_from(&value).unwrap_err(),
+        for err in [
+            Parent::try_template_from(&val).unwrap_err(),
+            Parent::try_template_with_header_from(&val).unwrap_err(),
         ] {
-            assert_eq!(error.field(), "groups.1.entries.1.value");
+            assert_eq!(err.field(), "groups.1.entries.1.value");
             assert!(
-                std::error::Error::source(error.serialization_error())
+                std::error::Error::source(err.serialization_error())
                     .unwrap()
                     .is::<toml::ser::Error>()
             );

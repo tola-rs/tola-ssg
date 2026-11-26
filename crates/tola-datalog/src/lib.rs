@@ -2,13 +2,6 @@
 #![warn(missing_docs)]
 //! In-memory Datalog with demand-driven evaluation and stratified negation.
 //!
-//! Every relation is declared with a fixed arity. Variables are local to one rule or query.
-//! Every variable in a rule head, negative atom, or query projection must be
-//! bound by a positive atom of the same rule or query.
-//! A negative atom reads only relations whose answers are complete. Relations
-//! without facts or deriving rules are empty. Answers are sorted by `Ord` and
-//! duplicate-free.
-//!
 //! ```
 //! use tola_datalog::{Atom, Database, Literal, Query, Relation, Term};
 //! let edge = Relation { name: "edge".into(), arity: 2 };
@@ -33,31 +26,34 @@ mod index;
 mod relation;
 mod validation;
 
-/// A named relation with a fixed number of columns.
+/// Named relation with a fixed column count.
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct Relation {
-    /// Nonempty; all uses of one name must agree on `arity`.
+    /// Non-empty relation identifier; all uses must agree on `arity`.
     pub name: String,
-    /// Number of columns; zero is a proposition.
+    /// Column count (zero denotes a proposition).
     pub arity: usize,
 }
-/// A variable local to one clause, or a ground value.
+
+/// Variable local to one clause or a ground constant value.
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum Term<C> {
-    /// Same name in one clause, same value.
+    /// Variable matched by name within the enclosing clause.
     Variable(String),
-    /// Matched exactly.
+    /// Ground constant matched by equality.
     Constant(C),
 }
-/// A relation applied to one term per column.
+
+/// Relation applied to one term per column.
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct Atom<C> {
-    /// The relation this atom refers to.
+    /// Target relation descriptor.
     pub relation: Relation,
-    /// One term per column, in the relation's column order.
+    /// Terms in column order.
     pub terms: Vec<Term<C>>,
 }
-/// A positive match or the absence of a fully bound match.
+
+/// Positive match or absence of a ground match.
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum Literal<C> {
     /// Holds when at least one tuple matches.
@@ -65,95 +61,96 @@ pub enum Literal<C> {
     /// Holds when the ground tuple is absent.
     Negative(Atom<C>),
 }
-/// A rule deriving its head from all literals in its body.
+
+/// Inference rule deriving its head from all body literals.
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct Rule<C> {
-    /// The atom this rule derives, over the variables its body binds.
+    /// Head atom derived over variables bound by the body.
     pub head: Atom<C>,
-    /// Body literals; all must hold.
-    pub body: Vec<Literal<C>>,
-}
-/// A conjunctive query with an ordered projection.
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
-pub struct Query<C> {
-    /// Output variables in column order; repetition is allowed.
-    pub select: Vec<String>,
-    /// Body literals; all must hold.
+    /// Conjunctive body literals.
     pub body: Vec<Literal<C>>,
 }
 
-/// Zero-based position in the caller's input, counted as the caller supplied it, before any
-/// canonical ordering; `Database` is the exception, recording that no single position applies.
+/// Conjunctive query with an ordered variable projection.
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub struct Query<C> {
+    /// Output variables in column order (duplicates allowed).
+    pub select: Vec<String>,
+    /// Conjunctive body literals.
+    pub body: Vec<Literal<C>>,
+}
+
+/// Zero-based caller input position where an error occurred.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Location {
-    /// Entry in the relation declarations.
+    /// Index into the relation declarations.
     Relation(usize),
-    /// Input fact, counted across all relations.
+    /// Index into the input facts across all relations.
     Fact(usize),
-    /// Clause in the `rules` argument.
+    /// Index into the `rules` argument for a rule head error.
     RuleHead(usize),
-    /// A rule body atom, counted as the rule writes it.
+    /// Rule index and body atom index for a rule body error.
     RuleBody {
-        /// Clause in the `rules` argument.
+        /// Index into the `rules` argument.
         rule: usize,
-        /// Atom in that clause's body.
+        /// Index into that rule's body.
         atom: usize,
     },
-    /// Atom of the query body.
+    /// Index into the query body.
     QueryBody(usize),
-    /// Variable of the query projection.
+    /// Index into the query `select` list.
     QuerySelect(usize),
-    /// No single input position, e.g. cancellation.
+    /// Whole-database error such as cancellation.
     Database,
 }
-/// Validation or evaluation failure, independent of its source location.
+
+/// Validation or evaluation failure cause.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ErrorKind {
-    /// A relation use supplied a different number of terms than its relation declares.
+    /// Atom or fact supplied a different term count than the relation's arity.
     Arity {
-        /// The arity the relation declares.
+        /// Declared arity.
         expected: usize,
-        /// The number of terms this use supplied.
+        /// Supplied term count.
         actual: usize,
     },
-    /// A relation use disagrees with the declaration's arity.
+    /// Relation use disagrees with the declared arity.
     RelationArity {
-        /// The relation name.
+        /// Relation name.
         name: String,
-        /// The arity the earlier use declared.
+        /// Declared arity.
         expected: usize,
-        /// The arity this use supplied.
+        /// Conflicting arity.
         actual: usize,
     },
-    /// The same relation name was declared more than once.
+    /// Relation name was declared more than once.
     DuplicateRelation(String),
-    /// No declaration matches this relation name.
+    /// Relation name has no declaration.
     UnknownRelation(String),
-    /// A rule has no body literals.
+    /// Rule has an empty body.
     EmptyBody,
-    /// Variable names must not be empty.
+    /// Variable name is empty.
     EmptyVariable,
-    /// No positive atom in the clause binds this variable.
+    /// Variable is not bound by any positive atom in the clause.
     UnboundVariable(String),
-    /// Relation names must not be empty.
+    /// Relation name is empty.
     EmptyRelation,
-    /// A relation depends negatively on itself, directly or indirectly.
+    /// Negation forms a cyclic dependency.
     NegativeCycle,
-    /// The cancellation callback returned true before the result was complete.
+    /// Cancellation predicate returned `true` during evaluation.
     Cancelled,
 }
 
-/// A failure and where in the caller's input it occurred.
+/// Validation or evaluation failure paired with its caller input location.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 #[error("{}", kind_message(.kind))]
 pub struct Error {
-    /// Where in the caller's input the failure was noticed.
+    /// Position in caller input where the error occurred.
     pub location: Location,
-    /// What failed.
+    /// Failure cause.
     pub kind: ErrorKind,
 }
 
-/// The sentence one failure kind renders; the location stays out of the message.
 fn kind_message(kind: &ErrorKind) -> String {
     match kind {
         ErrorKind::Arity { expected, actual } => {
@@ -175,13 +172,14 @@ fn kind_message(kind: &ErrorKind) -> String {
     }
 }
 
-/// An immutable snapshot of facts and rules; `Clone` shares it instead of copying.
+/// Immutable snapshot of validated facts and rules; `Clone` shares storage.
 #[derive(Debug)]
 pub struct Database<C> {
     pub(crate) snapshot: Arc<Snapshot<C>>,
 }
+
 impl<C> Clone for Database<C> {
-    // Hand-written so cloning does not require `C: Clone`.
+    // Manual impl avoids requiring `C: Clone`.
     fn clone(&self) -> Self {
         Self {
             snapshot: self.snapshot.clone(),
@@ -189,51 +187,47 @@ impl<C> Clone for Database<C> {
     }
 }
 
-/// The validated data every query reads.
 #[derive(Debug)]
 pub(crate) struct Snapshot<C> {
-    /// Canonical rule order; `rules_by_head` indexes into it.
     pub(crate) rules: Vec<evaluation::RuleProgram<C>>,
-    /// One arity per declared relation name.
     pub(crate) arities: BTreeMap<String, usize>,
-    /// Stratum of every name in `arities`.
     pub(crate) strata: BTreeMap<String, usize>,
-    /// Frozen rows of each relation that has at least one fact.
     pub(crate) relations: BTreeMap<String, relation::RelationRows<C>>,
-    /// Rule indexes deriving each relation name.
     pub(crate) rules_by_head: BTreeMap<String, Vec<usize>>,
 }
-// Strata, compiled rules, and indexes are derived from the declarations, facts, and rules.
+
 impl<C: PartialEq> PartialEq for Database<C> {
     fn eq(&self, other: &Self) -> bool {
         self.snapshot.arities == other.snapshot.arities
             && self.snapshot.relations == other.snapshot.relations
-            && self
+            && self.snapshot.rules.iter().map(|c| &c.rule).eq(other
                 .snapshot
                 .rules
                 .iter()
-                .map(|compiled| &compiled.rule)
-                .eq(other.snapshot.rules.iter().map(|compiled| &compiled.rule))
+                .map(|c| &c.rule))
     }
 }
+
 impl<C: Eq> Eq for Database<C> {}
+
 impl<C: Hash> Hash for Database<C> {
-    fn hash<H: Hasher>(&self, hasher: &mut H) {
-        self.snapshot.arities.hash(hasher);
-        self.snapshot.relations.hash(hasher);
-        self.snapshot.rules.len().hash(hasher);
-        for compiled in &self.snapshot.rules {
-            compiled.rule.hash(hasher);
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.snapshot.arities.hash(state);
+        self.snapshot.relations.hash(state);
+        self.snapshot.rules.len().hash(state);
+        for c in &self.snapshot.rules {
+            c.rule.hash(state);
         }
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::validation::{atom, variables};
     use std::collections::BTreeSet;
 
-    fn relation(name: &str, arity: usize) -> Relation {
+    fn rel(name: &str, arity: usize) -> Relation {
         Relation {
             name: name.into(),
             arity,
@@ -242,95 +236,92 @@ mod tests {
     fn var<C>(name: &str) -> Term<C> {
         Term::Variable(name.into())
     }
-    fn constant(value: i32) -> Term<i32> {
-        Term::Constant(value)
+    fn val(v: i32) -> Term<i32> {
+        Term::Constant(v)
     }
     fn atom_of<C>(name: &str, terms: Vec<Term<C>>) -> Atom<C> {
         Atom {
-            relation: relation(name, terms.len()),
+            relation: rel(name, terms.len()),
             terms,
         }
     }
-    fn positive<C>(name: &str, terms: Vec<Term<C>>) -> Literal<C> {
+    fn pos<C>(name: &str, terms: Vec<Term<C>>) -> Literal<C> {
         Literal::Positive(atom_of(name, terms))
     }
-    fn negative<C>(name: &str, terms: Vec<Term<C>>) -> Literal<C> {
+    fn neg<C>(name: &str, terms: Vec<Term<C>>) -> Literal<C> {
         Literal::Negative(atom_of(name, terms))
     }
     fn edge(from: i32, to: i32) -> (Relation, Vec<i32>) {
-        (relation("edge", 2), vec![from, to])
+        (rel("edge", 2), vec![from, to])
     }
     fn paths() -> Vec<Rule<i32>> {
         vec![
             Rule {
                 head: atom_of("path", vec![var("x"), var("y")]),
-                body: vec![positive("edge", vec![var("x"), var("y")])],
+                body: vec![pos("edge", vec![var("x"), var("y")])],
             },
             Rule {
                 head: atom_of("path", vec![var("x"), var("z")]),
                 body: vec![
-                    positive("path", vec![var("x"), var("y")]),
-                    positive("edge", vec![var("y"), var("z")]),
+                    pos("path", vec![var("x"), var("y")]),
+                    pos("edge", vec![var("y"), var("z")]),
                 ],
             },
         ]
     }
     fn query(select: &[&str], body: Vec<Literal<i32>>) -> Query<i32> {
         Query {
-            select: select.iter().map(|name| (*name).into()).collect(),
+            select: select.iter().map(|s| (*s).into()).collect(),
             body,
         }
     }
-    fn one_atom_query<C>(select: &[&str], relation: &Relation, terms: Vec<Term<C>>) -> Query<C> {
+    fn atom_query<C>(select: &[&str], r: &Relation, terms: Vec<Term<C>>) -> Query<C> {
         Query {
-            select: select.iter().map(|name| (*name).into()).collect(),
+            select: select.iter().map(|s| (*s).into()).collect(),
             body: vec![Literal::Positive(Atom {
-                relation: relation.clone(),
+                relation: r.clone(),
                 terms,
             })],
         }
     }
-    fn answer_rows(database: &Database<i32>, query: &Query<i32>) -> Vec<Vec<i32>> {
-        database.query(query, || false).unwrap()
+    fn eval(db: &Database<i32>, q: &Query<i32>) -> Vec<Vec<i32>> {
+        db.query(q, || false).unwrap()
     }
-    fn new_database<C: Ord>(facts: Vec<(Relation, Vec<C>)>, rules: Vec<Rule<C>>) -> Database<C> {
-        let relations = facts
+    fn build_db<C: Ord>(facts: Vec<(Relation, Vec<C>)>, rules: Vec<Rule<C>>) -> Database<C> {
+        let rels = facts
             .iter()
-            .map(|(relation, _)| relation)
-            .chain(rules.iter().flat_map(|rule| {
-                std::iter::once(&rule.head.relation)
-                    .chain(rule.body.iter().map(|literal| &atom(literal).relation))
+            .map(|(r, _)| r)
+            .chain(rules.iter().flat_map(|r| {
+                std::iter::once(&r.head.relation).chain(r.body.iter().map(|l| &atom(l).relation))
             }))
             .cloned()
             .collect::<BTreeSet<_>>();
-        Database::from_rows(relations, facts, rules).unwrap()
+        Database::from_rows(rels, facts, rules).unwrap()
     }
 
-    // Enumerate ground substitutions independently of the tabled evaluator.
+    // Naive bottom-up ground reference evaluator for cross-checking tabled evaluation.
     fn reference_answers(
         facts: &[(Relation, Vec<i32>)],
         rules: &[Rule<i32>],
         domain: &[i32],
     ) -> BTreeSet<(String, Vec<i32>)> {
-        let mut tuples: BTreeSet<_> = facts
+        let mut tups: BTreeSet<_> = facts
             .iter()
-            .map(|(relation, tuple)| (relation.name.clone(), tuple.clone()))
+            .map(|(r, tup)| (r.name.clone(), tup.clone()))
             .collect();
         let mut strata = BTreeMap::<String, usize>::new();
         for rule in rules {
             strata.entry(rule.head.relation.name.clone()).or_default();
-            for literal in &rule.body {
-                strata
-                    .entry(atom(literal).relation.name.clone())
-                    .or_default();
+            for lit in &rule.body {
+                strata.entry(atom(lit).relation.name.clone()).or_default();
             }
         }
         loop {
             let mut changed = false;
             for rule in rules {
-                for literal in &rule.body {
-                    let needed = strata[&atom(literal).relation.name]
-                        + usize::from(matches!(literal, Literal::Negative(_)));
+                for lit in &rule.body {
+                    let needed = strata[&atom(lit).relation.name]
+                        + usize::from(matches!(lit, Literal::Negative(_)));
                     let level = strata.get_mut(&rule.head.relation.name).unwrap();
                     if *level < needed {
                         *level = needed;
@@ -347,116 +338,105 @@ mod tests {
                 let mut added = Vec::new();
                 for rule in rules
                     .iter()
-                    .filter(|rule| strata[&rule.head.relation.name] == level)
+                    .filter(|r| strata[&r.head.relation.name] == level)
                 {
-                    let names: BTreeSet<_> = variables(&rule.head)
-                        .chain(
-                            rule.body
-                                .iter()
-                                .flat_map(|literal| variables(atom(literal))),
-                        )
+                    let vars: Vec<_> = variables(&rule.head)
+                        .chain(rule.body.iter().flat_map(|l| variables(atom(l))))
                         .cloned()
+                        .collect::<BTreeSet<_>>()
+                        .into_iter()
                         .collect();
-                    let names: Vec<_> = names.into_iter().collect();
-                    let count = domain.len().pow(names.len() as u32);
-                    for mut assignment in 0..count {
-                        let mut values = BTreeMap::new();
-                        for name in &names {
-                            values.insert(name.clone(), domain[assignment % domain.len()]);
-                            assignment /= domain.len();
+                    let count = domain.len().pow(vars.len() as u32);
+                    for mut idx in 0..count {
+                        let mut env = BTreeMap::new();
+                        for v in &vars {
+                            env.insert(v.clone(), domain[idx % domain.len()]);
+                            idx /= domain.len();
                         }
-                        let ground = |atom: &Atom<i32>| {
-                            atom.terms
+                        let ground = |a: &Atom<i32>| {
+                            a.terms
                                 .iter()
-                                .map(|term| match term {
-                                    Term::Constant(value) => *value,
-                                    Term::Variable(name) => values[name],
+                                .map(|t| match t {
+                                    Term::Constant(v) => *v,
+                                    Term::Variable(v) => env[v],
                                 })
                                 .collect::<Vec<_>>()
                         };
-                        if rule.body.iter().all(|literal| {
-                            let present = tuples.contains(&(
-                                atom(literal).relation.name.clone(),
-                                ground(atom(literal)),
-                            ));
-                            present == matches!(literal, Literal::Positive(_))
+                        if rule.body.iter().all(|lit| {
+                            let present = tups
+                                .contains(&(atom(lit).relation.name.clone(), ground(atom(lit))));
+                            present == matches!(lit, Literal::Positive(_))
                         }) {
                             added.push((rule.head.relation.name.clone(), ground(&rule.head)));
                         }
                     }
                 }
-                let before = tuples.len();
-                tuples.extend(added);
-                if before == tuples.len() {
+                let before = tups.len();
+                tups.extend(added);
+                if before == tups.len() {
                     break;
                 }
             }
         }
-        tuples
+        tups
     }
 
     #[test]
-    fn recursive_answers_match_reference_for_every_edge_subset() {
+    fn recursive_closure() {
         let mut rules = paths();
         rules.push(Rule {
             head: atom_of("indirect", vec![var("x"), var("y")]),
             body: vec![
-                negative("edge", vec![var("x"), var("y")]),
-                positive("path", vec![var("x"), var("y")]),
+                neg("edge", vec![var("x"), var("y")]),
+                pos("path", vec![var("x"), var("y")]),
             ],
         });
         for mask in 0..512 {
             let facts: Vec<_> = (0..9)
-                .filter(|bit| mask & (1 << bit) != 0)
-                .map(|bit| edge(bit / 3, bit % 3))
-                .chain((0..3).map(|node| (relation("node", 1), vec![node])))
+                .filter(|b| mask & (1 << b) != 0)
+                .map(|b| edge(b / 3, b % 3))
+                .chain((0..3).map(|n| (rel("node", 1), vec![n])))
                 .collect();
             let expected = reference_answers(&facts, &rules, &[0, 1, 2]);
-            let database = new_database(facts, rules.clone());
-            for source in 0..3 {
+            let db = build_db(facts, rules.clone());
+            for src in 0..3 {
                 let missing: Vec<_> = (0..3)
-                    .map(|target| vec![target])
-                    .filter(|target| !expected.contains(&("path".into(), vec![source, target[0]])))
+                    .map(|dst| vec![dst])
+                    .filter(|dst| !expected.contains(&("path".into(), vec![src, dst[0]])))
                     .collect();
                 assert_eq!(
-                    answer_rows(
-                        &database,
+                    eval(
+                        &db,
                         &query(
                             &["y"],
                             vec![
-                                positive("node", vec![var("y")]),
-                                negative("path", vec![constant(source), var("y")]),
+                                pos("node", vec![var("y")]),
+                                neg("path", vec![val(src), var("y")]),
                             ],
                         ),
                     ),
                     missing,
-                    "mask {mask}, missing paths from {source}"
+                    "mask {mask}, missing from {src}"
                 );
                 for name in ["path", "indirect"] {
-                    let actual = answer_rows(
-                        &database,
-                        &query(
-                            &["y"],
-                            vec![positive(name, vec![constant(source), var("y")])],
-                        ),
+                    let actual = eval(
+                        &db,
+                        &query(&["y"], vec![pos(name, vec![val(src), var("y")])]),
                     );
                     let expected_rows: Vec<_> = expected
                         .iter()
-                        .filter(|(relation, tuple)| relation == name && tuple[0] == source)
-                        .map(|(_, tuple)| vec![tuple[1]])
+                        .filter(|(r, tup)| r == name && tup[0] == src)
+                        .map(|(_, tup)| vec![tup[1]])
                         .collect();
-                    assert_eq!(
-                        actual, expected_rows,
-                        "mask {mask}, {name}, source {source}"
-                    );
+                    assert_eq!(actual, expected_rows, "mask {mask}, {name}, src {src}");
                 }
             }
         }
     }
 
     #[test]
-    fn projection_is_sorted_and_distinct() {
-        let database = new_database(
+    fn projection_sorted_distinct() {
+        let db = build_db(
             vec![
                 edge(2, 0),
                 edge(1, 2),
@@ -469,135 +449,122 @@ mod tests {
         );
         let cases = [
             (
-                query(
-                    &["x", "x"],
-                    vec![positive("edge", vec![var("x"), var("x")])],
-                ),
+                query(&["x", "x"], vec![pos("edge", vec![var("x"), var("x")])]),
                 vec![vec![1, 1], vec![2, 2]],
             ),
             (
-                query(
-                    &["y", "x"],
-                    vec![positive("edge", vec![var("x"), var("y")])],
-                ),
+                query(&["y", "x"], vec![pos("edge", vec![var("x"), var("y")])]),
                 vec![vec![0, 2], vec![1, 1], vec![2, 0], vec![2, 1], vec![2, 2]],
             ),
             (
-                query(&["y"], vec![positive("edge", vec![var("x"), var("y")])]),
+                query(&["y"], vec![pos("edge", vec![var("x"), var("y")])]),
                 vec![vec![0], vec![1], vec![2]],
             ),
             (
-                query(&[], vec![positive("edge", vec![var("x"), var("y")])]),
+                query(&[], vec![pos("edge", vec![var("x"), var("y")])]),
                 vec![vec![]],
             ),
         ];
-        for (query, expected) in cases {
-            assert_eq!(answer_rows(&database, &query), expected);
+        for (q, expected) in cases {
+            assert_eq!(eval(&db, &q), expected);
         }
     }
 
     #[test]
-    fn recursive_self_join_matches_reference_on_cyclic_edges() {
+    fn recursive_self_join_cycle() {
         let mut rules = paths();
-        rules[1].body[1] = positive("path", vec![var("y"), var("z")]);
+        rules[1].body[1] = pos("path", vec![var("y"), var("z")]);
         let facts = vec![edge(0, 1), edge(1, 2), edge(2, 0), edge(2, 3)];
         let expected = reference_answers(&facts, &rules, &[0, 1, 2, 3]);
-        let database = new_database(facts, rules);
-        let actual = answer_rows(
-            &database,
-            &query(
-                &["x", "z"],
-                vec![positive("path", vec![var("x"), var("z")])],
-            ),
+        let db = build_db(facts, rules);
+        let actual = eval(
+            &db,
+            &query(&["x", "z"], vec![pos("path", vec![var("x"), var("z")])]),
         );
         let expected: Vec<_> = expected
             .into_iter()
             .filter(|(name, _)| name == "path")
-            .map(|(_, tuple)| tuple)
+            .map(|(_, tup)| tup)
             .collect();
         assert_eq!(actual, expected);
     }
 
     #[test]
-    fn mutual_recursion_matches_reference_under_renaming_and_reordering() {
+    fn mutual_recursion_invariance() {
         let facts: Vec<_> = [[0, 1, 2], [0, 2, 1], [1, 2, 0], [2, 1, 0]]
             .into_iter()
-            .map(|tuple| (relation("triple", 3), tuple.to_vec()))
+            .map(|tup| (rel("triple", 3), tup.to_vec()))
             .collect();
         let rules = vec![
             Rule {
                 head: atom_of("p", vec![var("x"), var("y"), var("z")]),
-                body: vec![positive("triple", vec![var("x"), var("y"), var("z")])],
+                body: vec![pos("triple", vec![var("x"), var("y"), var("z")])],
             },
             Rule {
                 head: atom_of("q", vec![var("x"), var("z"), var("y")]),
-                body: vec![positive("p", vec![var("x"), var("y"), var("z")])],
+                body: vec![pos("p", vec![var("x"), var("y"), var("z")])],
             },
             Rule {
                 head: atom_of("p", vec![var("x"), var("y"), var("w")]),
                 body: vec![
-                    positive("q", vec![var("x"), var("z"), var("y")]),
-                    positive("triple", vec![var("y"), var("z"), var("w")]),
+                    pos("q", vec![var("x"), var("z"), var("y")]),
+                    pos("triple", vec![var("y"), var("z"), var("w")]),
                 ],
             },
         ];
         let all = reference_answers(&facts, &rules, &[0, 1, 2]);
-        let tuples: Vec<_> = all
+        let tups: Vec<_> = all
             .iter()
             .filter(|(name, _)| name == "p")
-            .map(|(_, tuple)| tuple)
+            .map(|(_, tup)| tup)
             .collect();
-        let expected: Vec<_> = tuples
+        let expected: Vec<_> = tups
             .iter()
-            .flat_map(|left| {
-                tuples
-                    .iter()
-                    .filter(move |right| left[0] == right[0] && left[2] == right[1])
-                    .map(move |right| vec![left[0], left[1], right[2]])
+            .flat_map(|l| {
+                tups.iter()
+                    .filter(move |r| l[0] == r[0] && l[2] == r[1])
+                    .map(move |r| vec![l[0], l[1], r[2]])
             })
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect();
         let body = vec![
-            positive("p", vec![var("x"), var("y"), var("z")]),
-            positive("p", vec![var("x"), var("z"), var("w")]),
+            pos("p", vec![var("x"), var("y"), var("z")]),
+            pos("p", vec![var("x"), var("z"), var("w")]),
         ];
-        let database = new_database(facts.clone(), rules.clone());
-        assert_eq!(
-            answer_rows(&database, &query(&["x", "y", "w"], body.clone())),
-            expected
-        );
+        let db = build_db(facts.clone(), rules.clone());
+        assert_eq!(eval(&db, &query(&["x", "y", "w"], body.clone())), expected);
 
-        fn rename_atom(atom: &mut Atom<i32>) {
-            for term in &mut atom.terms {
-                if let Term::Variable(name) = term {
-                    *name = format!("renamed_{name}");
+        fn rename_atom(a: &mut Atom<i32>) {
+            for t in &mut a.terms {
+                if let Term::Variable(v) = t {
+                    *v = format!("renamed_{v}");
                 }
             }
         }
-        fn rename_literal(literal: &mut Literal<i32>) {
-            match literal {
-                Literal::Positive(atom) | Literal::Negative(atom) => rename_atom(atom),
+        fn rename_lit(lit: &mut Literal<i32>) {
+            match lit {
+                Literal::Positive(a) | Literal::Negative(a) => rename_atom(a),
             }
         }
         let mut renamed = rules;
         for rule in &mut renamed {
             rename_atom(&mut rule.head);
-            for literal in &mut rule.body {
-                rename_literal(literal);
+            for lit in &mut rule.body {
+                rename_lit(lit);
             }
             rule.body.reverse();
         }
         renamed.reverse();
         let mut renamed_body = body;
-        for literal in &mut renamed_body {
-            rename_literal(literal);
+        for lit in &mut renamed_body {
+            rename_lit(lit);
         }
         renamed_body.reverse();
-        let renamed_database = new_database(facts, renamed);
+        let renamed_db = build_db(facts, renamed);
         assert_eq!(
-            answer_rows(
-                &renamed_database,
+            eval(
+                &renamed_db,
                 &query(&["renamed_x", "renamed_y", "renamed_w"], renamed_body)
             ),
             expected
@@ -605,50 +572,44 @@ mod tests {
     }
 
     #[test]
-    fn nullary_relations_project_empty_rows() {
+    fn nullary_relations() {
         let rules = vec![Rule {
             head: atom_of("ready", vec![]),
             body: vec![
-                positive("seed", vec![constant(7)]),
-                positive("enabled", vec![]),
-                negative("missing", vec![]),
+                pos("seed", vec![val(7)]),
+                pos("enabled", vec![]),
+                neg("missing", vec![]),
             ],
         }];
-        let database = new_database(
-            vec![
-                (relation("seed", 1), vec![7]),
-                (relation("enabled", 0), vec![]),
-            ],
+        let db = build_db(
+            vec![(rel("seed", 1), vec![7]), (rel("enabled", 0), vec![])],
             rules,
         );
         assert_eq!(
-            answer_rows(&database, &query(&[], vec![positive("ready", vec![])])),
+            eval(&db, &query(&[], vec![pos("ready", vec![])])),
             vec![vec![]]
         );
-        assert!(answer_rows(&database, &query(&[], vec![positive("missing", vec![])])).is_empty());
-        assert_eq!(answer_rows(&database, &query(&[], vec![])), vec![vec![]]);
+        assert!(eval(&db, &query(&[], vec![pos("missing", vec![])])).is_empty());
+        assert_eq!(eval(&db, &query(&[], vec![])), vec![vec![]]);
     }
 
     #[test]
-    fn deep_negation_uses_bounded_stack() {
+    fn deep_negation_stack() {
         std::thread::Builder::new()
             .stack_size(256 * 1024)
             .spawn(|| {
                 let rules: Vec<_> = (1..=1401)
-                    .map(|level| Rule {
-                        head: atom_of(&format!("level{level}"), vec![]),
-                        body: vec![negative(&format!("level{}", level - 1), vec![])],
+                    .map(|lvl| Rule {
+                        head: atom_of(&format!("level{lvl}"), vec![]),
+                        body: vec![neg(&format!("level{}", lvl - 1), vec![])],
                     })
                     .collect();
-                let database = new_database(vec![(relation("level0", 0), vec![])], rules);
+                let db = build_db(vec![(rel("level0", 0), vec![])], rules);
                 assert_eq!(
-                    answer_rows(&database, &query(&[], vec![positive("level1400", vec![])])),
+                    eval(&db, &query(&[], vec![pos("level1400", vec![])])),
                     vec![vec![]]
                 );
-                assert!(
-                    answer_rows(&database, &query(&[], vec![positive("level1401", vec![])]))
-                        .is_empty()
-                );
+                assert!(eval(&db, &query(&[], vec![pos("level1401", vec![])])).is_empty());
             })
             .unwrap()
             .join()
@@ -656,28 +617,28 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_identity_ignores_order_and_duplicates() {
+    fn snapshot_order_invariance() {
         let rules = paths();
-        let first = new_database(vec![edge(1, 2), edge(2, 3)], rules.clone());
+        let a = build_db(vec![edge(1, 2), edge(2, 3)], rules.clone());
         let mut reordered = rules;
         reordered.reverse();
         reordered.push(reordered[0].clone());
-        let second = new_database(vec![edge(2, 3), edge(1, 2), edge(1, 2)], reordered);
-        assert_eq!(first, second);
+        let b = build_db(vec![edge(2, 3), edge(1, 2), edge(1, 2)], reordered);
+        assert_eq!(a, b);
         use std::hash::DefaultHasher;
-        let mut first_hash = DefaultHasher::new();
-        let mut second_hash = DefaultHasher::new();
-        first.hash(&mut first_hash);
-        second.hash(&mut second_hash);
-        assert_eq!(first_hash.finish(), second_hash.finish());
+        let mut ha = DefaultHasher::new();
+        let mut hb = DefaultHasher::new();
+        a.hash(&mut ha);
+        b.hash(&mut hb);
+        assert_eq!(ha.finish(), hb.finish());
     }
 
     #[test]
-    fn from_rows_rejects_wrong_arity() {
-        let relation = relation("value", usize::MAX);
-        let error = Database::<i32>::from_rows([&relation], [(&relation, [])], vec![]).unwrap_err();
+    fn from_rows_arity_error() {
+        let r = rel("value", usize::MAX);
+        let err = Database::<i32>::from_rows([&r], [(&r, [])], vec![]).unwrap_err();
         assert_eq!(
-            error,
+            err,
             Error {
                 location: Location::Fact(0),
                 kind: ErrorKind::Arity {
@@ -689,46 +650,41 @@ mod tests {
     }
 
     #[test]
-    fn from_rows_dedup_keeps_first_equal_value() {
-        let relation = relation("value", 1);
+    fn from_rows_dedup_first() {
+        let r = rel("value", 1);
         let first: Arc<str> = Arc::from("same");
-        let duplicate: Arc<str> = Arc::from("same");
-        let rows = [Arc::from("later"), first.clone(), duplicate];
-        let database = Database::from_rows(
-            [&relation],
-            rows.into_iter().map(|value| (&relation, [value])),
-            vec![],
-        )
-        .unwrap();
-        let query = one_atom_query(&["x"], &relation, vec![var("x")]);
-        let rows = database.query(&query, || false).unwrap();
+        let dup: Arc<str> = Arc::from("same");
+        let rows = [Arc::from("later"), first.clone(), dup];
+        let db = Database::from_rows([&r], rows.into_iter().map(|v| (&r, [v])), vec![]).unwrap();
+        let q = atom_query(&["x"], &r, vec![var("x")]);
+        let rows = db.query(&q, || false).unwrap();
         assert_eq!(rows.len(), 2);
         assert!(Arc::ptr_eq(&rows[1][0], &first));
     }
 
     #[test]
-    fn answers_depend_only_on_their_snapshot() {
+    fn snapshot_isolation() {
         let rules = paths();
-        let old = new_database(vec![edge(1, 2), edge(2, 3)], rules.clone());
-        let new = new_database(vec![edge(1, 2)], rules);
-        let q = query(&["y"], vec![positive("path", vec![constant(1), var("y")])]);
-        assert_eq!(answer_rows(&old, &q), vec![vec![2], vec![3]]);
-        assert_eq!(answer_rows(&new, &q), vec![vec![2]]);
+        let old = build_db(vec![edge(1, 2), edge(2, 3)], rules.clone());
+        let new = build_db(vec![edge(1, 2)], rules);
+        let q = query(&["y"], vec![pos("path", vec![val(1), var("y")])]);
+        assert_eq!(eval(&old, &q), vec![vec![2], vec![3]]);
+        assert_eq!(eval(&new, &q), vec![vec![2]]);
     }
 
     #[test]
-    fn validation_errors_locate_the_invalid_input() {
-        let error = Database::new(
-            vec![relation("edge", 2)],
+    fn validation_locations() {
+        let err = Database::new(
+            vec![rel("edge", 2)],
             vec![edge(1, 2)],
             vec![Rule {
                 head: atom_of("edge", vec![var("x")]),
-                body: vec![positive("edge", vec![var("x"), constant(2)])],
+                body: vec![pos("edge", vec![var("x"), val(2)])],
             }],
         )
         .unwrap_err();
         assert_eq!(
-            error,
+            err,
             Error {
                 location: Location::RuleHead(0),
                 kind: ErrorKind::RelationArity {
@@ -738,34 +694,33 @@ mod tests {
                 }
             }
         );
-        let error = Database::<i32>::new(
-            vec![relation("p", 1), relation("q", 1)],
+        let err = Database::<i32>::new(
+            vec![rel("p", 1), rel("q", 1)],
             vec![],
             vec![Rule {
                 head: atom_of("p", vec![var("x")]),
-                body: vec![negative("q", vec![var("x")])],
+                body: vec![neg("q", vec![var("x")])],
             }],
         )
         .unwrap_err();
         assert_eq!(
-            error,
+            err,
             Error {
                 location: Location::RuleBody { rule: 0, atom: 0 },
                 kind: ErrorKind::UnboundVariable("x".into())
             }
         );
-        let error = Database::<i32>::new(vec![relation("", 0)], vec![], vec![]).unwrap_err();
+        let err = Database::<i32>::new(vec![rel("", 0)], vec![], vec![]).unwrap_err();
         assert_eq!(
-            error,
+            err,
             Error {
                 location: Location::Relation(0),
                 kind: ErrorKind::EmptyRelation
             }
         );
-        let database = new_database(vec![], vec![]);
+        let db = build_db(vec![], vec![]);
         assert_eq!(
-            database
-                .query(&query(&["x"], vec![]), || false)
+            db.query(&query(&["x"], vec![]), || false)
                 .unwrap_err()
                 .location,
             Location::QuerySelect(0)
@@ -773,58 +728,58 @@ mod tests {
     }
 
     #[test]
-    fn validation_reports_the_first_invalid_body_atom() {
-        let malformed = Literal::Positive(Atom {
-            relation: relation("wrong", 1),
+    fn validation_first_body_atom() {
+        let bad = Literal::Positive(Atom {
+            relation: rel("wrong", 1),
             terms: vec![],
         });
-        let database = Database::<i32>::new(vec![relation("q", 1)], vec![], vec![]).unwrap();
-        let query = query(&[], vec![negative("q", vec![var("x")]), malformed]);
-        let error = database.query(&query, || false).unwrap_err();
-        assert_eq!(error.location, Location::QueryBody(0));
-        assert_eq!(error.kind, ErrorKind::UnboundVariable("x".into()));
+        let db = Database::<i32>::new(vec![rel("q", 1)], vec![], vec![]).unwrap();
+        let q = query(&[], vec![neg("q", vec![var("x")]), bad]);
+        let err = db.query(&q, || false).unwrap_err();
+        assert_eq!(err.location, Location::QueryBody(0));
+        assert_eq!(err.kind, ErrorKind::UnboundVariable("x".into()));
     }
 
     #[test]
-    fn existential_join_waits_for_a_matching_tabled_answer() {
+    fn existential_tabled_join() {
         let mut facts = vec![
-            (relation("pair", 2), vec![1, 2]),
-            (relation("input", 1), vec![10]),
-            (relation("input", 1), vec![20]),
-            (relation("exclude", 1), vec![20]),
+            (rel("pair", 2), vec![1, 2]),
+            (rel("input", 1), vec![10]),
+            (rel("input", 1), vec![20]),
+            (rel("exclude", 1), vec![20]),
         ];
         let rules = vec![Rule {
             head: atom_of("pair", vec![var("y"), var("y")]),
-            body: vec![positive("diagonal", vec![var("y")])],
+            body: vec![pos("diagonal", vec![var("y")])],
         }];
-        let query = query(
+        let q = query(
             &["x"],
             vec![
-                positive("input", vec![var("x")]),
-                positive("pair", vec![var("y"), var("y")]),
-                negative("exclude", vec![var("x")]),
+                pos("input", vec![var("x")]),
+                pos("pair", vec![var("y"), var("y")]),
+                neg("exclude", vec![var("x")]),
             ],
         );
-        let before = new_database(facts.clone(), rules.clone());
-        assert!(answer_rows(&before, &query).is_empty());
-        facts.push((relation("diagonal", 1), vec![3]));
-        let after = new_database(facts, rules);
-        assert_eq!(answer_rows(&after, &query), vec![vec![10]]);
+        let before = build_db(facts.clone(), rules.clone());
+        assert!(eval(&before, &q).is_empty());
+        facts.push((rel("diagonal", 1), vec![3]));
+        let after = build_db(facts, rules);
+        assert_eq!(eval(&after, &q), vec![vec![10]]);
     }
 
     #[test]
-    fn from_rows_pulls_values_before_dropping_each_source() {
+    fn from_rows_drains_before_drop() {
         use std::borrow::Borrow;
         use std::cell::Cell;
         use std::rc::Rc;
 
         struct Source {
-            relation: Relation,
+            rel: Relation,
             dropped: Rc<Cell<bool>>,
         }
         impl Borrow<Relation> for Source {
             fn borrow(&self) -> &Relation {
-                &self.relation
+                &self.rel
             }
         }
         impl Drop for Source {
@@ -834,23 +789,23 @@ mod tests {
         }
         let dropped = Rc::new(Cell::new(false));
         let observed = dropped.clone();
-        let relation = relation("value", 1);
-        let source = Source {
-            relation: relation.clone(),
+        let r = rel("value", 1);
+        let src = Source {
+            rel: r.clone(),
             dropped: dropped.clone(),
         };
-        let values = std::iter::once_with(move || if observed.get() { 2 } else { 1 });
-        let database = Database::from_rows([&relation], [(source, values)], vec![]).unwrap();
+        let vals = std::iter::once_with(move || if observed.get() { 2 } else { 1 });
+        let db = Database::from_rows([&r], [(src, vals)], vec![]).unwrap();
         assert!(dropped.get());
-        let query = one_atom_query(&["x"], &relation, vec![var("x")]);
-        assert_eq!(answer_rows(&database, &query), vec![vec![1]]);
+        let q = atom_query(&["x"], &r, vec![var("x")]);
+        assert_eq!(eval(&db, &q), vec![vec![1]]);
     }
 
     #[test]
-    fn relation_declarations_validate_in_input_order() {
+    fn declarations_validate_in_order() {
         let cases = [
             (
-                vec![(relation("p", 2), vec![1]), (relation("", 0), vec![])],
+                vec![(rel("p", 2), vec![1]), (rel("", 0), vec![])],
                 Location::Fact(0),
                 ErrorKind::Arity {
                     expected: 2,
@@ -858,7 +813,7 @@ mod tests {
                 },
             ),
             (
-                vec![(relation("p", 2), vec![1, 2]), (relation("p", 1), vec![1])],
+                vec![(rel("p", 2), vec![1, 2]), (rel("p", 1), vec![1])],
                 Location::Fact(1),
                 ErrorKind::RelationArity {
                     name: "p".into(),
@@ -867,7 +822,7 @@ mod tests {
                 },
             ),
             (
-                vec![(relation("p", 2), vec![1, 2]), (relation("p", 1), vec![])],
+                vec![(rel("p", 2), vec![1, 2]), (rel("p", 1), vec![])],
                 Location::Fact(1),
                 ErrorKind::Arity {
                     expected: 1,
@@ -877,44 +832,41 @@ mod tests {
         ];
         for (rows, location, kind) in cases {
             assert_eq!(
-                Database::new(vec![relation("p", 2)], rows, vec![]).unwrap_err(),
+                Database::new(vec![rel("p", 2)], rows, vec![]).unwrap_err(),
                 Error { location, kind }
             );
         }
     }
 
     #[test]
-    fn negative_cycle_names_closing_atom() {
+    fn negative_cycle_location() {
         for self_cycle in [false, true] {
-            for negative_first in [false, true] {
+            for neg_first in [false, true] {
                 for reverse in [false, true] {
                     let mut rules = vec![
                         Rule {
                             head: atom_of("downstream", vec![var("x")]),
-                            body: vec![positive("p", vec![var("x")])],
+                            body: vec![pos("p", vec![var("x")])],
                         },
                         Rule {
                             head: atom_of("outside", vec![var("x")]),
-                            body: vec![
-                                positive("domain", vec![var("x")]),
-                                negative("p", vec![var("x")]),
-                            ],
+                            body: vec![pos("domain", vec![var("x")]), neg("p", vec![var("x")])],
                         },
                         Rule {
                             head: atom_of("p", vec![var("x")]),
                             body: vec![
-                                positive("domain", vec![var("x")]),
-                                negative(if self_cycle { "p" } else { "q" }, vec![var("x")]),
+                                pos("domain", vec![var("x")]),
+                                neg(if self_cycle { "p" } else { "q" }, vec![var("x")]),
                             ],
                         },
                     ];
                     if !self_cycle {
                         rules.push(Rule {
                             head: atom_of("q", vec![var("x")]),
-                            body: vec![positive("p", vec![var("x")])],
+                            body: vec![pos("p", vec![var("x")])],
                         });
                     }
-                    if negative_first {
+                    if neg_first {
                         rules.swap(0, 1);
                     }
                     if reverse {
@@ -922,14 +874,14 @@ mod tests {
                     }
                     let rule = rules
                         .iter()
-                        .position(|rule| rule.head.relation.name == "p")
+                        .position(|r| r.head.relation.name == "p")
                         .unwrap();
                     assert_eq!(
                         Database::<i32>::new(
                             rules
                                 .iter()
-                                .map(|rule| rule.head.relation.clone())
-                                .chain([relation("domain", 1)])
+                                .map(|r| r.head.relation.clone())
+                                .chain([rel("domain", 1)])
                                 .collect(),
                             vec![],
                             rules,
@@ -946,201 +898,172 @@ mod tests {
     }
 
     #[test]
-    fn negation_waits_for_recursive_answers() {
-        let mut tuples = vec![edge(0, 1), edge(1, 2)];
-        tuples.extend((0..3).map(|id| (relation("node", 1), vec![id])));
+    fn negation_waits_for_recursion() {
+        let mut tups = vec![edge(0, 1), edge(1, 2)];
+        tups.extend((0..3).map(|id| (rel("node", 1), vec![id])));
         let mut rules = paths();
         rules.extend([
             Rule {
                 head: atom_of("missing", vec![var("x")]),
                 body: vec![
-                    positive("node", vec![var("x")]),
-                    negative("path", vec![var("x"), constant(2)]),
+                    pos("node", vec![var("x")]),
+                    neg("path", vec![var("x"), val(2)]),
                 ],
             },
             Rule {
                 head: atom_of("present", vec![var("x")]),
-                body: vec![
-                    positive("node", vec![var("x")]),
-                    negative("missing", vec![var("x")]),
-                ],
+                body: vec![pos("node", vec![var("x")]), neg("missing", vec![var("x")])],
             },
         ]);
-        let database = new_database(tuples, rules);
+        let db = build_db(tups, rules);
         assert_eq!(
-            answer_rows(
-                &database,
-                &query(&["x"], vec![positive("present", vec![var("x")])]),
-            ),
+            eval(&db, &query(&["x"], vec![pos("present", vec![var("x")])])),
             vec![vec![0], vec![1]]
         );
     }
 
     #[test]
-    fn negative_lookup_handles_descending_keys() {
-        let candidates = relation("candidate", 2);
+    fn negative_descending_keys() {
+        let cand = rel("candidate", 2);
         let facts = vec![
             edge(0, 1),
             edge(1, 2),
-            (candidates.clone(), vec![0, 3]),
-            (candidates.clone(), vec![1, 2]),
-            (candidates, vec![2, 1]),
+            (cand.clone(), vec![0, 3]),
+            (cand.clone(), vec![1, 2]),
+            (cand, vec![2, 1]),
         ];
-        let database = new_database(facts, paths());
-        let query = query(
+        let db = build_db(facts, paths());
+        let q = query(
             &["id"],
             vec![
-                positive("candidate", vec![var("id"), var("target")]),
-                negative("path", vec![constant(0), var("target")]),
+                pos("candidate", vec![var("id"), var("target")]),
+                neg("path", vec![val(0), var("target")]),
             ],
         );
-        assert_eq!(answer_rows(&database, &query), vec![vec![0]]);
+        assert_eq!(eval(&db, &q), vec![vec![0]]);
     }
 
     #[test]
-    fn repeated_head_variable_matches_only_equal_columns() {
-        let database = new_database(
-            vec![
-                (relation("node", 1), vec![1]),
-                (relation("node", 1), vec![2]),
-            ],
+    fn repeated_head_var() {
+        let db = build_db(
+            vec![(rel("node", 1), vec![1]), (rel("node", 1), vec![2])],
             vec![Rule {
                 head: atom_of("same", vec![var("x"), var("x")]),
-                body: vec![positive("node", vec![var("x")])],
+                body: vec![pos("node", vec![var("x")])],
             }],
         );
         assert_eq!(
-            answer_rows(
-                &database,
-                &query(&["y"], vec![positive("same", vec![constant(1), var("y")])]),
+            eval(
+                &db,
+                &query(&["y"], vec![pos("same", vec![val(1), var("y")])])
             ),
             vec![vec![1]]
         );
-        assert!(
-            answer_rows(
-                &database,
-                &query(&[], vec![positive("same", vec![constant(1), constant(2)])]),
-            )
-            .is_empty()
-        );
+        assert!(eval(&db, &query(&[], vec![pos("same", vec![val(1), val(2)])])).is_empty());
     }
 
     #[test]
-    fn projection_dedup_retains_first_value_source() {
-        let pair = relation("pair", 2);
-        let values: Vec<Arc<str>> = (0..64)
-            .map(|index| Arc::from((index % 3).to_string()))
-            .collect();
-        let tuples = values
+    fn projection_dedup_first() {
+        let pair = rel("pair", 2);
+        let vals: Vec<Arc<str>> = (0..64).map(|i| Arc::from((i % 3).to_string())).collect();
+        let tups = vals
             .iter()
             .enumerate()
-            .map(|(index, value)| {
-                (
-                    pair.clone(),
-                    vec![Arc::from(format!("{index:02}")), value.clone()],
-                )
-            })
+            .map(|(i, v)| (pair.clone(), vec![Arc::from(format!("{i:02}")), v.clone()]))
             .collect();
-        let database = new_database(tuples, vec![]);
-        let query = one_atom_query(&["value"], &pair, vec![var("key"), var("value")]);
-        let rows = database.query(&query, || false).unwrap();
+        let db = build_db(tups, vec![]);
+        let q = atom_query(&["value"], &pair, vec![var("key"), var("value")]);
+        let rows = db.query(&q, || false).unwrap();
         assert_eq!(rows.len(), 3);
-        for (row, first) in rows.iter().zip(&values) {
+        for (row, first) in rows.iter().zip(&vals) {
             assert!(Arc::ptr_eq(&row[0], first));
         }
     }
 
     #[test]
-    fn bound_recursion_has_no_iteration_limit() {
+    fn unbounded_recursion() {
         let facts: Vec<_> = (0..10_050)
             .map(|i| edge(i, i + 1))
             .chain((20_000..30_000).map(|i| edge(i, i + 1)))
             .collect();
-        let database = new_database(facts, paths());
-        let rows = answer_rows(
-            &database,
-            &query(&["y"], vec![positive("path", vec![constant(0), var("y")])]),
+        let db = build_db(facts, paths());
+        let rows = eval(
+            &db,
+            &query(&["y"], vec![pos("path", vec![val(0), var("y")])]),
         );
         assert_eq!(rows.len(), 10_050);
         assert_eq!(rows.last(), Some(&vec![10_050]));
     }
 
     #[test]
-    fn repeated_bound_queries_remain_independent() {
+    fn repeated_bound_queries() {
         let facts = (0..500)
-            .flat_map(|component| {
-                let source = component * 3;
-                [edge(source, source + 1), edge(source + 1, source + 2)]
+            .flat_map(|c| {
+                let s = c * 3;
+                [edge(s, s + 1), edge(s + 1, s + 2)]
             })
             .collect();
-        let database = new_database(facts, paths());
-        for component in 0..500 {
-            let source = component * 3;
-            let q = query(
-                &["y"],
-                vec![positive("path", vec![constant(source), var("y")])],
-            );
-            assert_eq!(
-                answer_rows(&database, &q),
-                vec![vec![source + 1], vec![source + 2]]
-            );
+        let db = build_db(facts, paths());
+        for c in 0..500 {
+            let s = c * 3;
+            let q = query(&["y"], vec![pos("path", vec![val(s), var("y")])]);
+            assert_eq!(eval(&db, &q), vec![vec![s + 1], vec![s + 2]]);
         }
     }
 
     #[test]
-    fn cancellation_returns_error() {
-        let database = new_database(vec![edge(1, 2), edge(2, 3)], paths());
+    fn query_cancel() {
+        let db = build_db(vec![edge(1, 2), edge(2, 3)], paths());
         let mut calls = 0;
-        let error = database
+        let err = db
             .query(
-                &query(&["y"], vec![positive("path", vec![constant(1), var("y")])]),
+                &query(&["y"], vec![pos("path", vec![val(1), var("y")])]),
                 || {
                     calls += 1;
                     calls > 8
                 },
             )
             .unwrap_err();
-        assert_eq!(error.kind, ErrorKind::Cancelled);
+        assert_eq!(err.kind, ErrorKind::Cancelled);
     }
 
     #[test]
-    fn output_materialization_observes_cancellation() {
+    fn materialize_cancel() {
         use std::cell::Cell;
 
         #[derive(Debug, Eq, PartialEq, Ord, PartialOrd)]
         struct Key<'a> {
-            ordinal: u8,
+            ord: u8,
             cancelled: &'a Cell<bool>,
         }
         impl Clone for Key<'_> {
             fn clone(&self) -> Self {
                 self.cancelled.set(true);
                 Self {
-                    ordinal: self.ordinal,
+                    ord: self.ord,
                     cancelled: self.cancelled,
                 }
             }
         }
 
         for count in [1, 2] {
-            // The shared cell cannot change the keys' relative ordering.
             let cancelled = Cell::new(false);
-            let relation = relation("key", 1);
+            let r = rel("key", 1);
             let facts = (1..=count)
-                .map(|ordinal| {
+                .map(|ord| {
                     (
-                        relation.clone(),
+                        r.clone(),
                         vec![Key {
-                            ordinal,
+                            ord,
                             cancelled: &cancelled,
                         }],
                     )
                 })
                 .collect();
-            let database = new_database(facts, vec![]);
-            let query = one_atom_query(&["key"], &relation, vec![var("key")]);
-            let error = database.query(&query, || cancelled.get()).unwrap_err();
-            assert_eq!(error.kind, ErrorKind::Cancelled);
+            let db = build_db(facts, vec![]);
+            let q = atom_query(&["key"], &r, vec![var("key")]);
+            let err = db.query(&q, || cancelled.get()).unwrap_err();
+            assert_eq!(err.kind, ErrorKind::Cancelled);
         }
     }
 }

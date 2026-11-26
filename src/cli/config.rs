@@ -194,7 +194,7 @@ fn present_site(
     output.apply_diagnostic_limits(loaded.diagnostics());
     let config = loaded.config();
     output.install_source_files(
-        config.get_root().to_path_buf(),
+        config.root().to_path_buf(),
         config.package_locations().clone(),
     );
     destination::start_site(output, config, &cancellation.token())?;

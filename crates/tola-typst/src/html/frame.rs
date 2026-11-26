@@ -30,72 +30,76 @@ type FrameStyleRule<'a> = dyn FnMut(&VirtualPath, &HtmlElement, &HtmlFrame) -> S
     + 'a;
 
 pub(crate) fn style_document_frames(
-    document: &HtmlDocument,
+    doc: &HtmlDocument,
     path: &VirtualPath,
-    cancellation: &BundleCancellation,
+    cancel: &BundleCancellation,
     style: &mut FrameStyleRule<'_>,
 ) -> Result<Option<(HtmlDocument, usize)>, HtmlFrameStyleError> {
     let mut count = 0;
-    let Some(root) = style_element_frames(document.root(), path, cancellation, style, &mut count)?
-    else {
+    let Some(root) = style_element_frames(doc.root(), path, cancel, style, &mut count)? else {
         return Ok(None);
     };
-    let mut replacement = document.clone();
+    let mut replacement = doc.clone();
     *replacement.root_mut() = root;
     Ok(Some((replacement, count)))
 }
 
 fn style_element_frames(
-    element: &HtmlElement,
-    document: &VirtualPath,
-    cancellation: &BundleCancellation,
+    elem: &HtmlElement,
+    doc: &VirtualPath,
+    cancel: &BundleCancellation,
     style: &mut FrameStyleRule<'_>,
     count: &mut usize,
 ) -> Result<Option<HtmlElement>, HtmlFrameStyleError> {
-    cancellation.ensure_active_as()?;
+    cancel.ensure_active_as()?;
     let mut replacement = None;
-    for (position, child) in element.children.iter().enumerate() {
-        cancellation.ensure_active_as()?;
+    for (pos, child) in elem.children.iter().enumerate() {
+        cancel.ensure_active_as()?;
         let changed = match child {
             HtmlNode::Element(child) => {
-                style_element_frames(child, document, cancellation, style, count)?
-                    .map(HtmlNode::Element)
+                style_element_frames(child, doc, cancel, style, count)?.map(HtmlNode::Element)
             }
             HtmlNode::Frame(frame) => {
-                let declarations = style(document, element, frame);
-                cancellation.ensure_active_as()?;
-                let declarations =
-                    declarations.map_err(|diagnostics| HtmlFrameStyleError::Rejected {
-                        diagnostics: diagnostics.into_iter().map(Into::into).collect(),
-                    })?;
-                let mut css = frame.css.clone();
-                for (name, value) in declarations {
-                    if !css
-                        .iter()
-                        .any(|property| property.name == name && property.value.as_str() == value)
-                    {
-                        css.push(name, value);
-                    }
-                }
-                if css == frame.css {
-                    None
-                } else {
-                    let mut replacement = frame.clone();
-                    replacement.css = css;
-                    *count += 1;
-                    Some(HtmlNode::Frame(replacement))
-                }
+                let decls = style(doc, elem, frame);
+                cancel.ensure_active_as()?;
+                let decls = decls.map_err(|diags| HtmlFrameStyleError::Rejected {
+                    diagnostics: diags.into_iter().map(Into::into).collect(),
+                })?;
+                apply_frame_css(frame, decls, count)
             }
             HtmlNode::Text(..) | HtmlNode::Tag(_) => None,
         };
         if let Some(child) = changed {
             // Copy each changed ancestor once; untouched subtrees remain shared.
             replacement
-                .get_or_insert_with(|| element.clone())
+                .get_or_insert_with(|| elem.clone())
                 .children
-                .make_mut()[position] = child;
+                .make_mut()[pos] = child;
         }
     }
-    cancellation.ensure_active_as()?;
+    cancel.ensure_active_as()?;
     Ok(replacement)
+}
+
+fn apply_frame_css(
+    frame: &HtmlFrame,
+    decls: Vec<(&'static str, String)>,
+    count: &mut usize,
+) -> Option<HtmlNode> {
+    let mut css = frame.css.clone();
+    for (name, val) in decls {
+        if !css
+            .iter()
+            .any(|prop| prop.name == name && prop.value.as_str() == val)
+        {
+            css.push(name, val);
+        }
+    }
+    if css == frame.css {
+        return None;
+    }
+    let mut replacement = frame.clone();
+    replacement.css = css;
+    *count += 1;
+    Some(HtmlNode::Frame(replacement))
 }

@@ -90,42 +90,38 @@ struct FilterSubject<'a> {
 
 impl<'a> FilterSubject<'a> {
     fn of_native(native: &'a NativeDiagnostic) -> Self {
-        let diagnostic = native.source();
+        let diag = native.source();
         Self {
             origin: native.origin(),
-            package: diagnostic.span.id().and_then(|id| match id.root() {
-                typst::syntax::VirtualRoot::Package(package) => {
-                    Some(format!("@{}/{}", package.namespace, package.name))
+            package: diag.span.id().and_then(|fid| match fid.root() {
+                typst::syntax::VirtualRoot::Package(pkg) => {
+                    Some(format!("@{}/{}", pkg.namespace, pkg.name))
                 }
                 typst::syntax::VirtualRoot::Project => None,
             }),
-            message: &diagnostic.message,
-            detached: diagnostic.span.is_detached(),
+            message: &diag.message,
+            detached: diag.span.is_detached(),
         }
     }
 
     /// Resolution names package files as `@namespace/name:version/file`, so a
     /// package is identified by the path prefix before its file.
-    fn of_resolved(diagnostic: &'a super::message::Diagnostic) -> Self {
+    fn of_diagnostic(diag: &'a super::message::Diagnostic) -> Self {
         Self {
-            origin: &diagnostic.origin,
-            package: diagnostic
-                .location
-                .path
-                .as_deref()
-                .and_then(package_of_path),
-            message: &diagnostic.message,
-            detached: diagnostic.location.path.is_none(),
+            origin: &diag.origin,
+            package: diag.location.path.as_deref().and_then(package_of_path),
+            message: &diag.message,
+            detached: diag.location.path.is_none(),
         }
     }
 }
 
 /// Extract `@{namespace}/{name}` from a rendered package path.
 fn package_of_path(path: &str) -> Option<String> {
-    let mut segments = path.splitn(3, '/');
-    let namespace = segments.next()?;
-    let name = segments.next()?;
-    (namespace.starts_with('@') && !name.is_empty()).then(|| format!("{namespace}/{name}"))
+    let mut segs = path.splitn(3, '/');
+    let ns = segs.next()?;
+    let name = segs.next()?;
+    (ns.starts_with('@') && !name.is_empty()).then(|| format!("{ns}/{name}"))
 }
 
 impl FilterType {
@@ -134,7 +130,7 @@ impl FilterType {
             FilterType::All => true,
             FilterType::Package(kind) => subject
                 .package
-                .is_some_and(|package| kind.matches_package(&package)),
+                .is_some_and(|pkg| kind.matches_package(&pkg)),
             FilterType::MessageContains(text) => subject.message.contains(text.as_str()),
             FilterType::DetachedMessageContains(text) => {
                 subject.detached && subject.message.contains(text.as_str())
@@ -147,12 +143,12 @@ impl FilterType {
         }
     }
 
-    fn matches_native(&self, diagnostic: &NativeDiagnostic) -> bool {
-        self.matches(FilterSubject::of_native(diagnostic))
+    fn matches_native(&self, diag: &NativeDiagnostic) -> bool {
+        self.matches(FilterSubject::of_native(diag))
     }
 
-    fn matches_info(&self, diagnostic: &super::message::Diagnostic) -> bool {
-        self.matches(FilterSubject::of_resolved(diagnostic))
+    fn matches_info(&self, diag: &super::message::Diagnostic) -> bool {
+        self.matches(FilterSubject::of_diagnostic(diag))
     }
 }
 
@@ -217,8 +213,8 @@ impl DiagnosticFilter {
         diag.source().severity == self.severity && self.filter.matches_native(diag)
     }
 
-    pub(crate) fn matches_info(&self, diagnostic: &super::message::Diagnostic) -> bool {
-        diagnostic.severity == self.severity && self.filter.matches_info(diagnostic)
+    pub(crate) fn matches_info(&self, diag: &super::message::Diagnostic) -> bool {
+        diag.severity == self.severity && self.filter.matches_info(diag)
     }
 }
 
@@ -228,20 +224,20 @@ mod tests {
 
     use super::*;
     use crate::diagnostic::{Diagnostics, producer_warning, resolve_diagnostic};
-    use crate::{BundleCancellation, FileMap, FileResolver, TypstWorld, file_id};
+    use crate::{BundleCancellation, FileMap, FileStore, TypstWorld, file_id};
     use typst::diag::SourceDiagnostic;
     use typst::syntax::Span;
 
     #[test]
-    fn filter_keeps_unmatched_diagnostics() {
-        let diagnostics = [
+    fn filter_unmatched_kept() {
+        let diags = [
             SourceDiagnostic::error(Span::detached(), "error with keyword"),
             SourceDiagnostic::error(Span::detached(), "other error"),
             SourceDiagnostic::warning(Span::detached(), "warning 1"),
             SourceDiagnostic::warning(Span::detached(), "warning 2"),
         ]
         .map(NativeDiagnostic::from);
-        for (name, severity, filter, expected) in [
+        for (name, severity, kind, expected) in [
             (
                 "all warnings",
                 Severity::Warning,
@@ -255,24 +251,24 @@ mod tests {
                 &["other error", "warning 1", "warning 2"][..],
             ),
         ] {
-            let filter = DiagnosticFilter::new(severity, filter);
-            let kept: Vec<&str> = diagnostics
+            let filter = DiagnosticFilter::new(severity, kind);
+            let kept: Vec<&str> = diags
                 .iter()
-                .filter(|diagnostic| !filter.matches(diagnostic))
-                .map(|diagnostic| diagnostic.source().message.as_str())
+                .filter(|diag| !filter.matches(diag))
+                .map(|diag| diag.source().message.as_str())
                 .collect();
             assert_eq!(kept, expected, "{name}");
         }
     }
 
     #[test]
-    fn export_presets_match_upstream_warnings() {
-        let directory = tempfile::TempDir::new().unwrap();
-        let main = directory.path().join("main.typ");
+    fn export_presets_upstream_only() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let main = dir.path().join("main.typ");
         let mut files = FileMap::new();
         files.insert(file_id("main.typ"), b"authored source".to_vec());
-        let world = TypstWorld::builder(&main, directory.path())
-            .with_files(Arc::new(FileResolver::new().with_provider(files)))
+        let world = TypstWorld::builder(&main, dir.path())
+            .with_files(Arc::new(FileStore::new().with_provider(files)))
             .with_local_cache()
             .no_fonts()
             .build(&BundleCancellation::default())
@@ -281,7 +277,7 @@ mod tests {
             .root()
             .span();
 
-        for (message, preset) in [
+        for (msg, preset) in [
             (
                 HTML_EXPORT_WARNING,
                 DiagnosticFilter::html_export_warning_filter(),
@@ -291,25 +287,18 @@ mod tests {
                 DiagnosticFilter::bundle_export_warning_filter(),
             ),
         ] {
-            let upstream =
-                NativeDiagnostic::from(SourceDiagnostic::warning(Span::detached(), message));
+            let upstream = NativeDiagnostic::from(SourceDiagnostic::warning(Span::detached(), msg));
             let producer = NativeDiagnostic::from(producer_warning(
                 Span::detached(),
                 "TypstReport",
                 &[("severity", "error"), ("hints", "0")],
-                message,
+                msg,
             ));
-            let authored = NativeDiagnostic::from(SourceDiagnostic::warning(located, message));
-            for (diagnostic, expected) in
-                [(&upstream, true), (&producer, false), (&authored, false)]
-            {
-                assert_eq!(preset.matches(diagnostic), expected, "native {message}");
-                let resolved = resolve_diagnostic(&world, diagnostic);
-                assert_eq!(
-                    preset.matches_info(&resolved),
-                    expected,
-                    "resolved {message}"
-                );
+            let authored = NativeDiagnostic::from(SourceDiagnostic::warning(located, msg));
+            for (diag, expected) in [(&upstream, true), (&producer, false), (&authored, false)] {
+                assert_eq!(preset.matches(diag), expected, "native {msg}");
+                let resolved = resolve_diagnostic(&world, diag);
+                assert_eq!(preset.matches_info(&resolved), expected, "resolved {msg}");
             }
 
             let kept =
@@ -321,7 +310,7 @@ mod tests {
     }
 
     #[test]
-    fn detached_message_filter_matches_producer_warning() {
+    fn detached_filter_matches_producer() {
         let filter = DiagnosticFilter::new(
             Severity::Warning,
             FilterType::DetachedMessageContains(BUNDLE_EXPORT_WARNING.into()),

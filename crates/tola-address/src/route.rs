@@ -1,37 +1,29 @@
-//! The decoded site-root route ordered identity segments name.
-//!
-//! Each segment is transformed on its own by [`tola_slugify`], and the joined page path is
-//! validated here, where paths belong.
+//! Decoded site-root route from ordered identity segments.
 
 use tola_slugify::{NamingRules, slugify_segment};
 
 use super::{UrlPath, UrlPathError};
 
-/// Why ordered identity segments cannot name a decoded site-root route.
+/// Error turning ordered identity segments into a decoded site-root route.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum RouteSegmentError {
-    /// One segment holds nothing a name can be made from.
+    /// Segment produced no slug characters.
     #[error("segment {index} (`{text}`) has nothing that can name a path segment")]
     Empty { index: usize, text: String },
-    /// The slugged segments are not a valid decoded site-root page path.
+    /// Slugged segments failed decoded URL path validation.
     #[error("{0}")]
     Path(#[from] UrlPathError),
 }
 
-/// Slug each identity segment in order and validate the joined decoded page path.
-///
-/// Every segment is transformed on its own, so no segment can change the hierarchy
-/// or introduce a second one. Zero segments name the site root. A nonempty segment
-/// that becomes empty is an error, not a missing directory or an alternate spelling
-/// of the root.
+/// Slug each identity segment independently and validate the joined decoded page path.
 pub fn slugify_segments(
     segments: &[String],
     rules: NamingRules,
 ) -> Result<UrlPath, RouteSegmentError> {
     let mut path = String::from("/");
-    for (position, text) in segments.iter().enumerate() {
+    for (idx, text) in segments.iter().enumerate() {
         let name = slugify_segment(text, rules).ok_or_else(|| RouteSegmentError::Empty {
-            index: position + 1,
+            index: idx + 1,
             text: text.clone(),
         })?;
         path.push_str(&name);
@@ -46,49 +38,27 @@ mod tests {
 
     use super::*;
 
-    /// The rules a naming case names, with everything else conventional.
-    fn rules(mode: SlugMode, case: SlugCase, separator: SlugSeparator) -> NamingRules {
-        NamingRules {
+    fn slugged_route(segments: &[&str], mode: SlugMode) -> Result<UrlPath, RouteSegmentError> {
+        let owned: Vec<String> = segments.iter().map(|s| (*s).to_owned()).collect();
+        let rules = NamingRules {
             mode,
-            case,
-            separator,
+            case: SlugCase::Lower,
+            separator: SlugSeparator::Dash,
             ..Default::default()
-        }
-    }
-
-    fn slugged_route(
-        segments: &[&str],
-        mode: SlugMode,
-        case: SlugCase,
-        separator: SlugSeparator,
-    ) -> Result<UrlPath, RouteSegmentError> {
-        let segments = segments
-            .iter()
-            .map(|segment| (*segment).to_owned())
-            .collect::<Vec<_>>();
-        slugify_segments(&segments, rules(mode, case, separator))
+        };
+        slugify_segments(&owned, rules)
     }
 
     #[test]
-    fn no_segments_name_the_site_root() {
-        assert_eq!(
-            slugged_route(&[], SlugMode::Unicode, SlugCase::Lower, SlugSeparator::Dash)
-                .unwrap()
-                .as_str(),
-            "/"
-        );
+    fn empty_segments_root() {
+        assert_eq!(slugged_route(&[], SlugMode::Unicode).unwrap().as_str(), "/");
     }
+
     #[test]
-    fn slugged_dot_segments_are_refused() {
+    fn dot_segments_error() {
         for segments in [vec!["posts", "#.#"], vec!["posts", "#..#", "child"]] {
             assert_eq!(
-                slugged_route(
-                    &segments,
-                    SlugMode::Unicode,
-                    SlugCase::Lower,
-                    SlugSeparator::Dash
-                )
-                .unwrap_err(),
+                slugged_route(&segments, SlugMode::Unicode).unwrap_err(),
                 RouteSegmentError::Path(UrlPathError::DotSegment),
                 "{segments:?}"
             );
@@ -96,30 +66,21 @@ mod tests {
     }
 
     #[test]
-    fn route_preserves_unicode_hierarchy() {
+    fn unicode_hierarchy() {
         assert_eq!(
-            slugged_route(
-                &["北京", "ΟΣ Café"],
-                SlugMode::Unicode,
-                SlugCase::Lower,
-                SlugSeparator::Dash
-            )
-            .unwrap()
-            .as_str(),
+            slugged_route(&["北京", "ΟΣ Café"], SlugMode::Unicode)
+                .unwrap()
+                .as_str(),
             "/北京/ος-café/"
         );
     }
+
     #[test]
-    fn each_segment_keeps_its_own_name() {
+    fn ascii_segments() {
         assert_eq!(
-            slugged_route(
-                &["posts", "北京", "世界"],
-                SlugMode::Ascii,
-                SlugCase::Lower,
-                SlugSeparator::Dash
-            )
-            .unwrap()
-            .as_str(),
+            slugged_route(&["posts", "北京", "世界"], SlugMode::Ascii)
+                .unwrap()
+                .as_str(),
             "/posts/bei-jing/shi-jie/"
         );
     }

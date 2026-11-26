@@ -5,29 +5,18 @@ use std::{
     io::{self, Read},
     path::{Path, PathBuf},
     process::{Command as StdCommand, Stdio},
-    sync::mpsc,
     thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use process_wrap::std::CommandWrap;
 
-use crate::capture::{Captured, Stream};
+use crate::capture::Stream;
 use crate::child::Child;
+use crate::relay::Relay;
 use crate::{Cancellation, Error, Exit, Result, Stop, sys};
 
-/// How long draining permits further reads after the child stops.
-const PIPE_DRAIN_GRACE: Duration = Duration::from_millis(250);
-/// What a stopped reader still delivers: the bytes a stream can hold in flight, so a stream that
-/// already reached its end still reports that end, while a writer that outlived the child cannot
-/// extend the run past this much.
-const STOP_DRAIN_BYTES: usize = 1 << 20;
-/// Polling cadence when observer callbacks are not occupying the calling thread.
 const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(10);
-const OUTPUT_CHUNK_BYTES: usize = 16 * 1024;
-/// Queued relayed chunks are bounded here, so a slow observer cannot grow the
-/// relay without bound.
-const OUTPUT_RELAY_CAPACITY: usize = 2;
 
 /// Receives each stream's output while a command runs.
 ///
@@ -35,29 +24,21 @@ const OUTPUT_RELAY_CAPACITY: usize = 2;
 /// read order; ordering between streams is unspecified. Slow callbacks delay
 /// cancellation polling and drain shutdown.
 pub trait Observer {
-    /// Whether output and completion callbacks are wanted. Returning `false`
-    /// skips both; the bounded capture is unaffected. Queried once when observation
-    /// starts.
+    /// Whether output and completion callbacks are wanted. Queried once at start.
     fn observes_output(&self) -> bool {
         true
     }
 
-    /// Each chunk exactly as it was read, before any capture bound applies.
     fn output(&mut self, stream: Stream, bytes: &[u8]);
 
-    /// Report the observed child stop before waiting for captured streams to finish.
-    /// Called even if live output callbacks are disabled.
     fn stopped(&mut self, _stop: &Stop) {}
 
-    /// Called once per stream, after its last output callback, on EOF or drain stop.
+    /// Called once per stream after its last output callback on EOF or drain stop.
     ///
-    /// Completion is guaranteed when a started run returns `Ok`, including
-    /// cancellation. Errors or unwinding may leave callbacks incomplete; a run
-    /// cancelled before spawning has no streams to complete.
+    /// Completion is guaranteed when a started run returns `Ok`, including cancellation.
     fn finished(&mut self, stream: Stream);
 }
 
-/// Observes nothing: the default for a caller that wants only the captured output.
 impl Observer for () {
     fn observes_output(&self) -> bool {
         false
@@ -68,7 +49,6 @@ impl Observer for () {
     fn finished(&mut self, _: Stream) {}
 }
 
-/// One external command, described exactly as it will be executed.
 #[derive(Debug, Default, Clone)]
 pub struct Command {
     program: OsString,
@@ -85,8 +65,7 @@ impl Command {
         }
     }
 
-    /// The first item is the program; an empty iterator leaves it empty, so the
-    /// command fails to spawn.
+    /// First item is the program; an empty iterator yields an empty program that fails to spawn.
     pub fn from_args<I, S>(args: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -115,19 +94,16 @@ impl Command {
         self
     }
 
-    /// Set the child's working directory.
-    pub fn cwd(mut self, directory: impl AsRef<Path>) -> Self {
-        self.cwd = Some(directory.as_ref().to_owned());
+    pub fn cwd(mut self, dir: impl AsRef<Path>) -> Self {
+        self.cwd = Some(dir.as_ref().to_owned());
         self
     }
 
-    /// Set one environment variable for the child. The last operation on a key wins.
-    pub fn env(mut self, key: impl Into<OsString>, value: impl Into<OsString>) -> Self {
-        self.env.push((key.into(), Some(value.into())));
+    pub fn env(mut self, key: impl Into<OsString>, val: impl Into<OsString>) -> Self {
+        self.env.push((key.into(), Some(val.into())));
         self
     }
 
-    /// Remove one environment variable from the child, including a previously set value.
     pub fn env_remove(mut self, key: impl Into<OsString>) -> Self {
         self.env.push((key.into(), None));
         self
@@ -137,124 +113,100 @@ impl Command {
         &self.program
     }
 
-    /// Run a non-interactive command with null stdin and observe its output.
-    ///
-    /// Both streams are captured with a bounded head and tail. After the child
-    /// stops, reads end at EOF or are stopped after a drain grace. Already-read
-    /// bytes remain captured and queued callbacks are delivered before returning
-    /// `Ok`. Slow callbacks and OS scheduling can delay shutdown; the grace is not
-    /// a wall-clock return deadline.
-    pub fn run(
-        &self,
-        cancellation: &impl Cancellation,
-        observer: &mut impl Observer,
-    ) -> Result<Exit> {
-        if cancellation.is_cancelled() {
+    /// Run a non-interactive command with null stdin and bounded output capture.
+    pub fn run(&self, cancel: &impl Cancellation, obs: &mut impl Observer) -> Result<Exit> {
+        if cancel.is_cancelled() {
             return Ok(Exit::cancelled(None));
         }
         let child = self.spawn()?;
-        Self::observe(child, cancellation, observer)
+        Self::observe(child, cancel, obs)
     }
 
-    /// Run with the caller's stdin, stdout, and stderr, without capturing output.
+    /// Run with inherited stdio without capturing output.
     ///
-    /// The command retains the same process-tree containment and cancellation as
-    /// [`Self::run`]. On Unix, a foreground caller lends its controlling terminal
-    /// to the child's process group before the program starts and restores the
-    /// foreground group and terminal settings afterwards, including on failure
-    /// or unwinding. A background caller cannot take another job's terminal.
-    /// Only one run in this process may own a controlling terminal at a time.
-    ///
-    /// The caller must not read from or change that terminal while this call is
-    /// running. Terminal job suspension is not managed by this API; cancellation
-    /// still terminates a stopped child. No readers or observer callbacks run.
-    pub fn run_inherited(&self, cancellation: &(impl Cancellation + ?Sized)) -> Result<Stop> {
-        if cancellation.is_cancelled() {
+    /// On Unix, a foreground caller lends its controlling terminal to the child's
+    /// process group before exec and restores it on return or unwind. Only one run
+    /// in this process may own the controlling terminal at a time.
+    pub fn run_inherited(&self, cancel: &(impl Cancellation + ?Sized)) -> Result<Stop> {
+        if cancel.is_cancelled() {
             return Ok(Stop::Cancelled(None));
         }
-        let mut command = self.command();
-        command
-            .stdin(Stdio::inherit())
+        let mut cmd = self.command();
+        cmd.stdin(Stdio::inherit())
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit());
-        let mut terminal =
-            sys::InheritedTerminal::prepare(&mut command).map_err(Error::Terminal)?;
+        let mut term = sys::InheritedTerminal::prepare(&mut cmd).map_err(Error::Terminal)?;
         let outcome = (|| {
-            if cancellation.is_cancelled() {
+            if cancel.is_cancelled() {
                 return Ok(Stop::Cancelled(None));
             }
-            let wrapper = sys::wrap(CommandWrap::from(command))
+            let wrapper = sys::wrap(CommandWrap::from(cmd))
                 .spawn()
                 .map_err(Error::Spawn)?;
-            Child::new(wrapper).wait_for_stop(cancellation, || {
+            Child::new(wrapper).wait_for_stop(cancel, || {
                 thread::sleep(CHILD_POLL_INTERVAL);
                 Ok(())
             })
         })();
-        // The child has been stopped before the terminal is reclaimed, including
-        // when spawning or waiting failed. Drop repeats a failed restoration.
-        let restored = terminal.restore().map_err(Error::Terminal);
+        // Child is stopped before reclaiming the terminal; Drop retries failed restoration.
+        let restored = term.restore().map_err(Error::Terminal);
         outcome.and_then(|stop| restored.map(|()| stop))
     }
 
-    /// Capture and await a child this command already started.
     fn observe(
         mut child: Child,
-        cancellation: &impl Cancellation,
-        observer: &mut impl Observer,
+        cancel: &impl Cancellation,
+        obs: &mut impl Observer,
     ) -> Result<Exit> {
         let stdout = take_pipe(child.wrapper_mut().stdout().take())?;
         let stderr = take_pipe(child.wrapper_mut().stderr().take())?;
-        let (mut relay, events) = Relay::new(observer.observes_output());
-        relay.spawn(stdout, Stream::Stdout, &events)?;
-        relay.spawn(stderr, Stream::Stderr, &events)?;
-        drop(events);
-        capture_until_exit(&mut child, relay, cancellation, observer)
+        let (mut relay, tx) = Relay::new(obs.observes_output());
+        relay.spawn(stdout, Stream::Stdout, &tx)?;
+        relay.spawn(stderr, Stream::Stderr, &tx)?;
+        drop(tx);
+        capture_until_exit(&mut child, relay, cancel, obs)
     }
 
     fn spawn(&self) -> Result<Child> {
-        let mut command = self.command();
-        command
-            .stdin(Stdio::null())
+        let mut cmd = self.command();
+        cmd.stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let child = sys::wrap(CommandWrap::from(command))
+        let child = sys::wrap(CommandWrap::from(cmd))
             .spawn()
             .map_err(Error::Spawn)?;
         Ok(Child::new(child))
     }
 
     fn command(&self) -> StdCommand {
-        let mut command = StdCommand::new(&self.program);
-        command.args(&self.args);
-        if let Some(directory) = &self.cwd {
-            command.current_dir(directory);
+        let mut cmd = StdCommand::new(&self.program);
+        cmd.args(&self.args);
+        if let Some(dir) = &self.cwd {
+            cmd.current_dir(dir);
         }
-        for (key, value) in &self.env {
-            match value {
-                Some(value) => {
-                    command.env(key, value);
+        for (k, v) in &self.env {
+            match v {
+                Some(v) => {
+                    cmd.env(k, v);
                 }
                 None => {
-                    command.env_remove(key);
+                    cmd.env_remove(k);
                 }
             }
         }
-        command
+        cmd
     }
 }
 
 fn capture_until_exit(
     child: &mut Child,
     mut relay: Relay,
-    cancellation: &impl Cancellation,
-    observer: &mut impl Observer,
+    cancel: &impl Cancellation,
+    obs: &mut impl Observer,
 ) -> Result<Exit> {
-    let stop = child.wait_for_stop(cancellation, || {
-        relay.receive(CHILD_POLL_INTERVAL, observer)
-    })?;
-    observer.stopped(&stop);
-    let [stdout, stderr] = relay.finish(observer)?;
+    let stop = child.wait_for_stop(cancel, || relay.receive(CHILD_POLL_INTERVAL, obs))?;
+    obs.stopped(&stop);
+    let [stdout, stderr] = relay.finish(obs)?;
     Ok(Exit {
         stop,
         stdout,
@@ -266,230 +218,16 @@ fn take_pipe<T: Read + Send + 'static>(pipe: Option<T>) -> Result<T> {
     pipe.ok_or_else(|| Error::Capture(io::Error::other("a child stream is not captured")))
 }
 
-#[derive(Debug)]
-enum StreamEnd {
-    Eof,
-    Stopped,
-}
-
-struct StreamCapture {
-    captured: Captured,
-    end: io::Result<StreamEnd>,
-}
-
-enum RelayEvent {
-    Output(Stream, Box<[u8]>),
-    Finished(Stream, Result<Captured>),
-}
-
-/// The relay keeps only the receiver: the senders live in the readers, so losing
-/// the receiver releases blocked readers and both readers finishing closes the
-/// channel.
-struct Relay {
-    stop: sys::ReaderStop,
-    workers: [Option<thread::JoinHandle<()>>; 2],
-    events: Option<mpsc::Receiver<RelayEvent>>,
-    captures: [Option<Captured>; 2],
-    relay_enabled: bool,
-}
-
-impl Relay {
-    fn new(relay_enabled: bool) -> (Self, mpsc::SyncSender<RelayEvent>) {
-        let (sender, events) = mpsc::sync_channel(OUTPUT_RELAY_CAPACITY);
-        (
-            Self {
-                stop: sys::ReaderStop::default(),
-                workers: [None, None],
-                events: Some(events),
-                captures: [None, None],
-                relay_enabled,
-            },
-            sender,
-        )
-    }
-
-    fn spawn(
-        &mut self,
-        pipe: impl sys::Pipe,
-        stream: Stream,
-        events: &mpsc::SyncSender<RelayEvent>,
-    ) -> Result<()> {
-        let index = stream.index();
-        let reader = sys::Reader::new(pipe, self.stop.clone()).map_err(Error::Reader)?;
-        let stop = self.stop.clone();
-        let events = events.clone();
-        let relay_enabled = self.relay_enabled;
-        self.workers[index] = Some(
-            thread::Builder::new()
-                .name(format!("tola-subprocess-{}", stream.name()))
-                .spawn(move || {
-                    let captured =
-                        capture_from(read_stream(reader, stop, &events, stream, relay_enabled));
-                    let _ = events.send(RelayEvent::Finished(stream, captured));
-                })
-                .map_err(Error::Reader)?,
-        );
-        Ok(())
-    }
-
-    fn receive(&mut self, timeout: Duration, observer: &mut impl Observer) -> Result<()> {
-        let disconnected = match self
-            .events
-            .as_ref()
-            .expect("the relay is receiving")
-            .recv_timeout(timeout)
-        {
-            Ok(event) => {
-                self.deliver(event, observer)?;
-                false
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => false,
-            Err(mpsc::RecvTimeoutError::Disconnected) => true,
-        };
-        for worker in &mut self.workers {
-            if worker.as_ref().is_some_and(thread::JoinHandle::is_finished) {
-                join_reader(worker.take().expect("the reader finished"))?;
-            }
-        }
-        if disconnected {
-            // Closed pipes do not imply child exit; retain the cancellation polling cadence.
-            thread::sleep(timeout);
-        }
-        Ok(())
-    }
-
-    fn deliver(&mut self, event: RelayEvent, observer: &mut impl Observer) -> Result<()> {
-        match event {
-            RelayEvent::Output(stream, bytes) => observer.output(stream, &bytes),
-            RelayEvent::Finished(stream, captured) => {
-                self.captures[stream.index()] = Some(captured?);
-                if self.relay_enabled {
-                    observer.finished(stream);
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn request_stop(&mut self) {
-        self.stop.request();
-        self.events.take();
-    }
-
-    fn finish(mut self, observer: &mut impl Observer) -> Result<[Captured; 2]> {
-        let deadline = Instant::now() + PIPE_DRAIN_GRACE;
-        while !self.captures.iter().all(Option::is_some) {
-            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
-                break;
-            };
-            self.receive(remaining, observer)?;
-        }
-        self.stop.request();
-        // Keep receiving until the stopped readers release their senders. Dropping
-        // the receiver here would discard queued output and completion callbacks.
-        if let Some(events) = self.events.take() {
-            for event in events {
-                self.deliver(event, observer)?;
-            }
-        }
-        for worker in &mut self.workers {
-            if let Some(worker) = worker.take() {
-                join_reader(worker)?;
-            }
-        }
-        Ok(self
-            .captures
-            .each_mut()
-            .map(|captured| captured.take().expect("both stream captures completed")))
-    }
-}
-
-impl Drop for Relay {
-    fn drop(&mut self) {
-        self.request_stop();
-        for worker in &mut self.workers {
-            if let Some(worker) = worker.take() {
-                let _ = worker.join();
-            }
-        }
-    }
-}
-
-fn join_reader(worker: thread::JoinHandle<()>) -> Result<()> {
-    worker
-        .join()
-        .map_err(|_| Error::Read(io::Error::other("a stream reader panicked")))
-}
-
-fn capture_from(captured: StreamCapture) -> Result<Captured> {
-    match captured.end {
-        Ok(StreamEnd::Eof) => Ok(captured.captured),
-        Ok(StreamEnd::Stopped) => {
-            let mut captured = captured.captured;
-            captured.mark_stopped_early();
-            Ok(captured)
-        }
-        Err(error) => Err(Error::Read(error)),
-    }
-}
-
-fn read_stream(
-    mut pipe: impl Read,
-    stop: sys::ReaderStop,
-    events: &mpsc::SyncSender<RelayEvent>,
-    stream: Stream,
-    relay_enabled: bool,
-) -> StreamCapture {
-    let mut captured = Captured::default();
-    let mut chunk = [0u8; OUTPUT_CHUNK_BYTES];
-    // The bytes delivered since the stop request.
-    let mut drained = 0usize;
-    let end = loop {
-        match pipe.read(&mut chunk) {
-            Ok(0) => break Ok(StreamEnd::Eof),
-            Ok(read) => {
-                captured.extend(&chunk[..read]);
-                // Only relaying needs an owned chunk. Beyond the bounded queue,
-                // each reader can hold one chunk while waiting to send.
-                if relay_enabled
-                    && events
-                        .send(RelayEvent::Output(stream, chunk[..read].into()))
-                        .is_err()
-                {
-                    break Ok(StreamEnd::Stopped);
-                }
-                if stop.is_requested() {
-                    drained = drained.saturating_add(read);
-                    if drained > STOP_DRAIN_BYTES {
-                        break Ok(StreamEnd::Stopped);
-                    }
-                }
-            }
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-            Err(error)
-                if error
-                    .get_ref()
-                    .is_some_and(|inner| inner.is::<sys::Stopped>()) =>
-            {
-                break Ok(StreamEnd::Stopped);
-            }
-            Err(error) => break Err(error),
-        }
-    };
-    // This drops the pipe reader and joins its platform monitor before the owner
-    // is notified, so no reader outlives the run.
-    drop(pipe);
-    StreamCapture { captured, end }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::NO_CANCELLATION;
+    use crate::relay::{RelayEvent, capture_from, read_stream};
     use std::{
         cell::RefCell,
         io::Write,
         net::{TcpListener, TcpStream},
+        time::Instant,
     };
 
     const CHILD_MODE: &str = "TOLA_SUBPROCESS_TEST";
@@ -500,12 +238,7 @@ mod tests {
     const CHILD_STDERR: &[u8] = b"root:\0\xfestderr\n";
     const CHILD_ARGUMENT: &str = "one argument; $value with spaces\nand Unicode: 树";
     const CHILD_READY_TIMEOUT: Duration = Duration::from_secs(30);
-    /// An escaped descendant never closes its pipes, so any finite bound proves the
-    /// capture ignored it rather than waiting for end-of-file; a passing run returns
-    /// well inside it, and the bound only decides how long a regression takes to fail.
-    const CAPTURE_DEADLINE: Duration = Duration::from_secs(5);
 
-    /// A job object keeps the descendant inside the run's tree, so there is nothing to leave.
     #[cfg(windows)]
     fn escape_containment(_: &mut std::process::Command) {}
 
@@ -517,20 +250,18 @@ mod tests {
 
     impl Observer for RelayedOutput {
         fn output(&mut self, stream: Stream, bytes: &[u8]) {
-            let index = stream.index();
-            assert!(!self.finished[index], "output followed stream completion");
-            self.streams[index].extend_from_slice(bytes);
+            let idx = stream.index();
+            assert!(!self.finished[idx], "output followed stream completion");
+            self.streams[idx].extend_from_slice(bytes);
         }
 
         fn finished(&mut self, stream: Stream) {
-            let index = stream.index();
-            assert!(!self.finished[index], "stream completed twice");
-            self.finished[index] = true;
+            let idx = stream.index();
+            assert!(!self.finished[idx], "stream completed twice");
+            self.finished[idx] = true;
         }
     }
 
-    /// Every read fails with its own payload, so the caller can tell the error
-    /// apart from one the reader synthesised.
     struct BrokenPipeReader;
 
     #[derive(Debug, thiserror::Error)]
@@ -556,25 +287,21 @@ mod tests {
         Command::from_args(process_child_argv()).env(CHILD_MODE, mode)
     }
 
-    /// Leave the run's containment, so the descendant outlives the process tree it started under.
     #[cfg(unix)]
-    fn escape_containment(command: &mut std::process::Command) {
+    fn escape_containment(cmd: &mut std::process::Command) {
         use std::os::unix::process::CommandExt;
-        command.process_group(0);
+        cmd.process_group(0);
     }
 
-    /// Re-executed by process regressions; without [`CHILD_MODE`] the normal test
-    /// run must not enter the child protocol.
     #[test]
     fn process_child() {
         let Ok(mode) = std::env::var(CHILD_MODE) else {
             return;
         };
-        let result = run_child_mode(&mode);
-        match result {
+        match run_child_mode(&mode) {
             Ok(code) => std::process::exit(code),
-            Err(error) => {
-                eprintln!("subprocess child run failed: {error}");
+            Err(err) => {
+                eprintln!("subprocess child run failed: {err}");
                 std::process::exit(1);
             }
         }
@@ -591,15 +318,15 @@ mod tests {
                 return Ok(0);
             }
             "inherited-owner" => {
-                let directory = std::env::temp_dir().canonicalize()?;
+                let dir = std::env::temp_dir().canonicalize()?;
                 let stop = process_child_command("inherited-io")
                     .arg(CHILD_ARGUMENT)
-                    .cwd(&directory)
+                    .cwd(&dir)
                     .env(CHILD_ENV, "inherited environment")
-                    .env("TOLA_SUBPROCESS_CWD", &directory)
+                    .env("TOLA_SUBPROCESS_CWD", &dir)
                     .run_inherited(&NO_CANCELLATION)
                     .map_err(io::Error::other)?;
-                if !matches!(stop, Stop::Exited(status) if status.code() == Some(37)) {
+                if !matches!(stop, Stop::Exited(s) if s.code() == Some(37)) {
                     return Err(io::Error::other("the inherited exit status was lost"));
                 }
                 return Ok(0);
@@ -804,39 +531,38 @@ mod tests {
     }
 
     #[test]
-    fn command_preserves_caller_stdin() {
+    fn preserves_caller_stdin() {
         run_piped_child("stdin-owner");
     }
 
     #[test]
-    fn inherited_command_keeps_stdio() {
-        let output = run_piped_child("inherited-owner");
+    fn inherited_stdio() {
+        let out = run_piped_child("inherited-owner");
         assert!(
-            output
-                .stdout
+            out.stdout
                 .windows(CHILD_STDOUT.len())
-                .any(|bytes| bytes == CHILD_STDOUT)
+                .any(|b| b == CHILD_STDOUT)
         );
-        assert_eq!(output.stderr, CHILD_STDERR);
+        assert_eq!(out.stderr, CHILD_STDERR);
     }
 
     #[test]
-    fn inherited_cancellation_before_spawn_starts_nothing() {
+    fn inherited_cancel_before_spawn() {
         let cancelled: &dyn Cancellation = &|| true;
         let stop = Command::new("").run_inherited(cancelled).unwrap();
         assert!(matches!(stop, Stop::Cancelled(None)));
     }
 
     #[test]
-    fn inherited_cancellation_terminates_descendants() {
+    fn inherited_cancel_descendants() {
         assert_inherited_owner("inherited-cancel-tree");
     }
 
     fn inherited_cancel_tree() {
-        let (command, listener) = child_with_control("quiet-tree");
+        let (cmd, listener) = child_with_control("quiet-tree");
         let peers = RefCell::new(Vec::new());
         let deadline = Instant::now() + CHILD_READY_TIMEOUT;
-        let stop = command
+        let stop = cmd
             .run_inherited(&|| {
                 if let Some(peer) = accept_control(&listener) {
                     peers.borrow_mut().push(peer);
@@ -854,16 +580,16 @@ mod tests {
     }
 
     #[test]
-    fn inherited_exit_terminates_remaining_descendants() {
+    fn inherited_exit_descendants() {
         assert_inherited_owner("inherited-exit-tree");
     }
 
     fn inherited_exit_tree() {
-        let (command, listener) = child_with_control("quiet-tree");
+        let (cmd, listener) = child_with_control("quiet-tree");
         let peers = RefCell::new(Vec::new());
         let sent = std::cell::Cell::new(false);
         let deadline = Instant::now() + CHILD_READY_TIMEOUT;
-        let stop = command
+        let stop = cmd
             .run_inherited(&|| {
                 if let Some(peer) = accept_control(&listener) {
                     peers.borrow_mut().push(peer);
@@ -877,105 +603,46 @@ mod tests {
             })
             .unwrap();
 
-        assert!(matches!(stop, Stop::Exited(status) if status.code() == Some(37)));
+        assert!(matches!(stop, Stop::Exited(s) if s.code() == Some(37)));
         for (_, peer) in &mut peers.into_inner() {
             assert_control_closed(peer);
         }
     }
 
-    /// An isolated caller keeps tests independent of the test runner's terminal.
     fn assert_inherited_owner(mode: &str) {
         let argv = process_child_argv();
-        let output = StdCommand::new(&argv[0])
+        let out = StdCommand::new(&argv[0])
             .args(&argv[1..])
             .env(CHILD_MODE, mode)
             .stdin(Stdio::null())
             .output()
             .unwrap();
         assert!(
-            output.status.success(),
+            out.status.success(),
             "{}",
-            String::from_utf8_lossy(&output.stderr)
+            String::from_utf8_lossy(&out.stderr)
         );
     }
 
     #[test]
-    fn eof_finishes_each_stream() {
-        let mut observer = RelayedOutput::default();
+    fn eof_finishes_streams() {
+        let mut obs = RelayedOutput::default();
         let exit = process_child_command("success")
-            .run(&NO_CANCELLATION, &mut observer)
+            .run(&NO_CANCELLATION, &mut obs)
             .unwrap();
 
-        assert!(matches!(exit.stop, Stop::Exited(status) if status.success()));
-        assert_eq!(observer.finished, [true; 2]);
-        assert_eq!(observer.streams[1], CHILD_STDERR);
-        for (capture, observed) in [exit.stdout, exit.stderr].iter().zip(observer.streams) {
-            assert!(!capture.stopped_early());
-            assert_eq!(observed, capture.render(|_| String::new()));
+        assert!(matches!(exit.stop, Stop::Exited(s) if s.success()));
+        assert_eq!(obs.finished, [true; 2]);
+        assert_eq!(obs.streams[1], CHILD_STDERR);
+        for (cap, seen) in [exit.stdout, exit.stderr].iter().zip(obs.streams) {
+            assert!(!cap.stopped_early());
+            assert_eq!(seen, cap.render(|_| String::new()));
         }
     }
 
-    /// A stream that reached its end before the reader noticed is no stopped capture: the bytes
-    /// it holds and the EOF behind them belong to the run, so a stop request must not cut them.
     #[test]
-    fn stop_request_does_not_truncate_eof() {
-        let (reader, mut writer) = io::pipe().unwrap();
-        writer.write_all(b"body").unwrap();
-        drop(writer);
-        let stop = sys::ReaderStop::default();
-        stop.request();
-        let (sender, events) = mpsc::sync_channel(OUTPUT_RELAY_CAPACITY);
-        let capture = read_stream(
-            sys::Reader::new(reader, stop.clone()).unwrap(),
-            stop,
-            &sender,
-            Stream::Stdout,
-            false,
-        );
-        drop(events);
-
-        assert!(matches!(capture.end, Ok(StreamEnd::Eof)));
-        assert_eq!(capture.captured.render(|_| String::new()), b"body");
-    }
-
-    /// A writer that outlived the child cannot hold the run: a stopped reader ends after the bytes
-    /// the stream held in flight, however much the writer keeps producing.
-    #[test]
-    fn live_writer_does_not_hold_the_reader() {
-        let (reader, mut writer) = io::pipe().unwrap();
-        let stop = sys::ReaderStop::default();
-        let (sender, events) = mpsc::sync_channel(OUTPUT_RELAY_CAPACITY);
-        let reading_stop = stop.clone();
-        let worker = thread::spawn(move || {
-            read_stream(
-                sys::Reader::new(reader, reading_stop.clone()).unwrap(),
-                reading_stop,
-                &sender,
-                Stream::Stdout,
-                false,
-            )
-        });
-        drop(events);
-        stop.request();
-
-        let block = vec![b'x'; OUTPUT_CHUNK_BYTES];
-        let deadline = Instant::now() + CAPTURE_DEADLINE;
-        loop {
-            if writer.write_all(&block).is_err() {
-                break;
-            }
-            if worker.is_finished() {
-                break;
-            }
-            assert!(Instant::now() < deadline, "the reader outlived its stop");
-        }
-        let capture = worker.join().unwrap();
-
-        assert!(matches!(capture.end, Ok(StreamEnd::Stopped)));
-    }
-    #[test]
-    fn environment_uses_last_operation() {
-        for (command, expected) in [
+    fn env_last_wins() {
+        for (cmd, expected) in [
             (
                 process_child_command("environment")
                     .env(CHILD_ENV, "first")
@@ -995,35 +662,35 @@ mod tests {
                 "second",
             ),
         ] {
-            let exit = command.run(&NO_CANCELLATION, &mut ()).unwrap();
+            let exit = cmd.run(&NO_CANCELLATION, &mut ()).unwrap();
             assert!(exit.stop.status().unwrap().success());
             assert_eq!(exit.stderr.render(|_| String::new()), expected.as_bytes());
         }
     }
 
     #[test]
-    fn reader_failure_interrupts_running_child() {
-        let mut polls_before_error = Vec::new();
+    fn reader_failure_stops_child() {
+        let mut polls_before_err = Vec::new();
         for panic_reader in [false, true] {
             let (mut child, mut peer) = ready_child("held-streams");
             let deadline = Instant::now() + CHILD_READY_TIMEOUT;
             let (other, _writer) = io::pipe().unwrap();
-            let (mut relay, events) = Relay::new(false);
-            let sender = events.clone();
+            let (mut relay, tx) = Relay::new(false);
+            let worker_tx = tx.clone();
             let stop = relay.stop.clone();
             relay.workers[0] = Some(thread::spawn(move || {
                 assert!(!panic_reader, "stream reader panic");
-                let captured = capture_from(read_stream(
+                let cap = capture_from(read_stream(
                     BrokenPipeReader,
                     stop,
-                    &sender,
+                    &worker_tx,
                     Stream::Stdout,
                     false,
                 ));
-                let _ = sender.send(RelayEvent::Finished(Stream::Stdout, captured));
+                let _ = worker_tx.send(RelayEvent::Finished(Stream::Stdout, cap));
             }));
-            relay.spawn(other, Stream::Stderr, &events).unwrap();
-            drop(events);
+            relay.spawn(other, Stream::Stderr, &tx).unwrap();
+            drop(tx);
             while !relay.workers[0].as_ref().unwrap().is_finished() {
                 assert!(
                     Instant::now() < deadline,
@@ -1032,7 +699,7 @@ mod tests {
                 thread::yield_now();
             }
             let polls = std::cell::Cell::new(0);
-            let error = capture_until_exit(
+            let err = capture_until_exit(
                 &mut child,
                 relay,
                 &|| {
@@ -1042,26 +709,26 @@ mod tests {
                 &mut (),
             )
             .unwrap_err();
-            assert!(matches!(error, Error::Read(_)), "{error:?}");
+            assert!(matches!(err, Error::Read(_)), "{err:?}");
             if !panic_reader {
                 assert!(
-                    error
-                        .source_io()
+                    err.source_io()
                         .get_ref()
                         .is_some_and(|inner| inner.is::<PipeFailure>())
                 );
             }
-            polls_before_error.push(polls.get());
+            polls_before_err.push(polls.get());
             drop(child);
             assert_control_closed(&mut peer);
         }
         assert!(
-            polls_before_error.iter().all(|polls| *polls < 5),
-            "reader failure waited for cancellation: {polls_before_error:?}"
+            polls_before_err.iter().all(|p| *p < 5),
+            "reader failure waited for cancellation: {polls_before_err:?}"
         );
     }
+
     #[test]
-    fn observer_panic_releases_running_child() {
+    fn observer_panic_stops_child() {
         struct PanickingObserver;
         impl Observer for PanickingObserver {
             fn output(&mut self, _: Stream, _: &[u8]) {
@@ -1070,17 +737,18 @@ mod tests {
             fn finished(&mut self, _: Stream) {}
         }
         let (child, mut peer) = ready_child("held-streams");
-        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             Command::observe(child, &NO_CANCELLATION, &mut PanickingObserver)
         }));
-        assert!(panic.is_err());
+        assert!(panicked.is_err());
         assert_control_closed(&mut peer);
     }
+
     #[test]
-    fn cancel_terminates_the_whole_tree() {
-        let (command, listener) = child_with_control("tree");
+    fn cancel_terminates_tree() {
+        let (cmd, listener) = child_with_control("tree");
         let peers = RefCell::new(Vec::new());
-        let exit = command
+        let exit = cmd
             .run(
                 &|| {
                     if let Some(peer) = accept_control(&listener) {
@@ -1103,10 +771,10 @@ mod tests {
     }
 
     #[test]
-    fn cancelled_run_keeps_bounded_output() {
-        let (command, listener) = child_with_control("diagnostic");
+    fn cancelled_bounded_output() {
+        let (cmd, listener) = child_with_control("diagnostic");
         let peer = RefCell::new(None);
-        let exit = command
+        let exit = cmd
             .run(
                 &|| {
                     if peer.borrow().is_none() {

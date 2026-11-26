@@ -56,7 +56,7 @@ mod tests {
 
         use crate::build::BuildRequest;
         use crate::cancellation::BuildCancellation;
-        use crate::config::ResolvedSiteConfig;
+        use crate::config::SiteConfig;
         use crate::config::loading::{BuildOverrides, load_site_config};
         use crate::{BuildResources, BuildSession, modules};
         use tola_input::InputScope;
@@ -143,7 +143,7 @@ mod tests {
                     root,
                 }
             }
-            fn config(&self) -> anyhow::Result<ResolvedSiteConfig> {
+            fn config(&self) -> anyhow::Result<SiteConfig> {
                 Ok(load_site_config(
                     Some(&self.root.join("tola.toml")),
                     tola_typst::PackageLocations::default(),
@@ -228,7 +228,7 @@ mod tests {
                 command()
             );
             let site = Site::new("'generated/value.txt'", "normal", &project_hook);
-            let config = modules::prepared::prepare_site(
+            let config = modules::site::prepare_site(
                 &site.config().unwrap(),
                 tola_input::InputMode::new(InputScope::Offline, false),
                 &Default::default(),
@@ -253,7 +253,7 @@ mod tests {
             let site = disabled_site();
             let config = Arc::new(site.config().unwrap());
             let resolved = super::loaded_modules(
-                config.get_root(),
+                config.root(),
                 config.modules(),
                 tola_input::InputMode::new(InputScope::Offline, false),
             )

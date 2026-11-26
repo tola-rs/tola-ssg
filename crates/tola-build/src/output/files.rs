@@ -199,9 +199,8 @@ mod tests {
     use crate::output::semantics::OutputDeclaration;
     use crate::output::tests::{output_file, output_graph, site_lock};
 
-    /// A publication root with no protected inputs.
-    fn output_root(site: &Path, output: &Path) -> OwnedOutputRoot {
-        OwnedOutputRoot::resolve(site, output, std::iter::empty::<(&'static str, &Path)>()).unwrap()
+    fn output_root(site: &Path, out: &Path) -> OwnedOutputRoot {
+        OwnedOutputRoot::resolve(site, out, std::iter::empty::<(&'static str, &Path)>()).unwrap()
     }
 
     fn output_write<'a>(
@@ -213,15 +212,15 @@ mod tests {
 
     fn published_stylesheet(graph: &OutputGraph) -> Vec<u8> {
         let site = tempfile::TempDir::new().unwrap();
-        let output = site.path().join("public");
-        let destination = output_root(site.path(), &output);
+        let out = site.path().join("public");
+        let dst = output_root(site.path(), &out);
         let lock = site_lock(site.path());
-        let writer = output_write(&destination, &lock);
+        let writer = output_write(&dst, &lock);
         StagedBuildFiles::materialize(graph, &writer, &BuildCancellation::default())
             .unwrap()
             .commit(writer)
             .unwrap();
-        fs::read(output.join("assets/app.css")).unwrap()
+        fs::read(out.join("assets/app.css")).unwrap()
     }
 
     fn graph() -> OutputGraph {
@@ -233,7 +232,7 @@ mod tests {
     }
 
     #[test]
-    fn output_read_only_until_dropped() {
+    fn output_readonly_until_dropped() {
         let site = tempfile::tempdir().unwrap();
         let view = HookOutputFiles::materialize_candidate(site.path(), &graph(), None).unwrap();
         let root = view.root().to_path_buf();
@@ -257,36 +256,34 @@ mod tests {
     }
 
     #[test]
-    fn cancelled_view_reports_cancellation() {
+    fn cancelled_view_cancelled_err() {
         let site = tempfile::tempdir().unwrap();
-
         let canceller = crate::cancellation::BuildCanceller::default();
         canceller.cancel();
-        let error = HookOutputFiles::materialize_revision(
+        let err = HookOutputFiles::materialize_revision(
             site.path(),
             &OutputRevision::from_graph(&graph()),
             &canceller.token(),
         )
         .unwrap_err();
         assert!(
-            error
-                .downcast_ref::<crate::cancellation::BuildCancelled>()
+            err.downcast_ref::<crate::cancellation::BuildCancelled>()
                 .is_some()
         );
     }
 
     #[test]
-    fn staging_keeps_the_old_site_until_publish() {
+    fn staging_atomic_publish() {
         let site = tempfile::TempDir::new().unwrap();
-        let output = site.path().join("public");
-        let destination = output_root(site.path(), &output);
+        let out = site.path().join("public");
+        let dst = output_root(site.path(), &out);
         let lock = site_lock(site.path());
-        let published = output_write(&destination, &lock);
-        let previous = published.stage().unwrap();
-        fs::write(previous.join("index.html"), "published").unwrap();
+        let published = output_write(&dst, &lock);
+        let prev = published.stage().unwrap();
+        fs::write(prev.join("index.html"), "published").unwrap();
         published.publish().unwrap();
 
-        let writer = output_write(&destination, &lock);
+        let writer = output_write(&dst, &lock);
         let files = [
             ("posts/rust/index.html", "Rust"),
             ("posts/typst/index.html", "Typst"),
@@ -298,17 +295,13 @@ mod tests {
         let staged =
             StagedBuildFiles::materialize(&graph, &writer, &BuildCancellation::default()).unwrap();
 
-        assert_eq!(fs::read(output.join("index.html")).unwrap(), b"published");
-        assert!(!output.join("posts").exists());
+        assert_eq!(fs::read(out.join("index.html")).unwrap(), b"published");
+        assert!(!out.join("posts").exists());
 
         staged.commit(writer).unwrap();
-        assert!(!output.join("index.html").exists());
+        assert!(!out.join("index.html").exists());
         for (path, text) in files {
-            assert_eq!(
-                fs::read(output.join(path)).unwrap(),
-                text.as_bytes(),
-                "{path}"
-            );
+            assert_eq!(fs::read(out.join(path)).unwrap(), text.as_bytes(), "{path}");
         }
     }
 
@@ -316,16 +309,15 @@ mod tests {
     #[test]
     fn workspace_symlink_aborts_staging() {
         let site = tempfile::tempdir().unwrap();
-        let output = site.path().join("public");
+        let out = site.path().join("public");
         let content = site.path().join("content");
         fs::create_dir(&content).unwrap();
         fs::write(content.join("page.typ"), "source").unwrap();
-        let destination =
-            OwnedOutputRoot::resolve(site.path(), &output, [("content", content.as_path())])
-                .unwrap();
+        let dst =
+            OwnedOutputRoot::resolve(site.path(), &out, [("content", content.as_path())]).unwrap();
         let lock = site_lock(site.path());
-        let writer = output_write(&destination, &lock);
-        let workspace = crate::filesystem::swap_workspace(&output).unwrap();
+        let writer = output_write(&dst, &lock);
+        let workspace = crate::filesystem::swap_workspace(&out).unwrap();
         std::os::unix::fs::symlink(&content, &workspace).unwrap();
 
         let staged =
@@ -333,70 +325,59 @@ mod tests {
         assert!(staged.is_err());
         assert_eq!(fs::read(content.join("page.typ")).unwrap(), b"source");
         assert_eq!(fs::read_dir(&content).unwrap().count(), 1);
-        assert!(!output.exists());
+        assert!(!out.exists());
     }
 
     #[test]
-    fn bundle_stylesheet_bytes_match_its_digest_and_filesystem_views() {
+    fn bundle_stylesheet_digest_and_views() {
         let site = tempfile::TempDir::new().unwrap();
         let path = "assets/app.css";
-        let source = b"/*! License */\n.a { color: red; }";
+        let src = b"/*! License */\n.a { color: red; }";
         let entry = tola_typst::BundleEntry::new(
             typst::syntax::VirtualPath::new(path).unwrap(),
             tola_typst::BundleEntryKind::Asset,
-            source.to_vec(),
+            src.to_vec(),
         );
-        let cancellation = BuildCancellation::default();
-        let make_graph = |languages| {
+        let cancel = BuildCancellation::default();
+        let make_graph = |langs| {
             let mut graph = crate::output::graph::OutputGraphBuilder::new();
-            crate::compiler::outputs::insert_bundle(
-                &mut graph,
-                [entry.clone()],
-                languages,
-                &cancellation,
-            )
-            .unwrap();
+            crate::compiler::outputs::insert_bundle(&mut graph, [entry.clone()], langs, &cancel)
+                .unwrap();
             graph.finish()
         };
         let unminified = make_graph(tola_minify::MinifiedLanguages::default());
-        assert_eq!(unminified.outputs()[0].bytes(), source);
+        assert_eq!(unminified.outputs()[0].bytes(), src);
         let graph = make_graph(tola_minify::MinifiedLanguages::new(true, false));
-        let output = &graph.outputs()[0];
-        let bytes = std::str::from_utf8(output.bytes()).unwrap();
+        let out = &graph.outputs()[0];
+        let bytes = std::str::from_utf8(out.bytes()).unwrap();
         assert!(bytes.starts_with("/*! License */"));
         assert!(bytes.contains(".a{color:red}"));
-        assert_eq!(
-            output.digest(),
-            tola_typst::ContentDigest::of(output.bytes())
-        );
-        assert_ne!(output.digest(), unminified.outputs()[0].digest());
-        assert_eq!(published_stylesheet(&graph), output.bytes());
+        assert_eq!(out.digest(), tola_typst::ContentDigest::of(out.bytes()));
+        assert_ne!(out.digest(), unminified.outputs()[0].digest());
+        assert_eq!(published_stylesheet(&graph), out.bytes());
         let view = HookOutputFiles::materialize_revision(
             site.path(),
             &OutputRevision::from_graph(&graph),
-            &cancellation,
+            &cancel,
         )
         .unwrap();
-        assert_eq!(fs::read(view.root().join(path)).unwrap(), output.bytes());
+        assert_eq!(fs::read(view.root().join(path)).unwrap(), out.bytes());
     }
 
     #[test]
-    fn non_bundle_stylesheet_keeps_its_bytes() {
-        let source = ".a { color: red; }";
+    fn non_bundle_stylesheet_verbatim() {
+        let src = ".a { color: red; }";
         for owner in [
             OutputOwner::command(0, "stylesheets"),
             OutputOwner::configured_asset("assets/app.css"),
         ] {
-            let stylesheet = output_file(
+            let css = output_file(
                 "assets/app.css",
                 OutputDeclaration::from_filesystem_source(Path::new("assets/app.css")),
-                source.as_bytes(),
+                src.as_bytes(),
             )
             .with_owner(owner);
-            assert_eq!(
-                published_stylesheet(&output_graph([stylesheet])),
-                source.as_bytes()
-            );
+            assert_eq!(published_stylesheet(&output_graph([css])), src.as_bytes());
         }
     }
 }

@@ -101,7 +101,7 @@ pub enum HookJobs {
 
 impl HookJobs {
     /// Return the explicit limit or the host's automatic limit.
-    pub fn resolved(self, auto_limit: usize) -> usize {
+    pub fn count(self, auto_limit: usize) -> usize {
         match self {
             Self::Auto => auto_limit.max(1),
             Self::Limit(limit) => limit.get(),
@@ -198,7 +198,7 @@ impl BuildEntry {
 
 /// Build settings after path resolution.
 #[derive(Debug, Clone, Serialize)]
-pub struct ResolvedBuildConfig {
+pub struct BuildSettings {
     #[serde(rename = "par-hooks")]
     pub par_hooks: bool,
     #[serde(rename = "hook-jobs")]
@@ -301,7 +301,7 @@ mod tests {
             let config: BuildSectionConfig =
                 toml::from_str(&format!("hook-jobs = {value}")).unwrap();
             assert!(config.par_hooks);
-            assert_eq!(config.hook_jobs.resolved(8), expected);
+            assert_eq!(config.hook_jobs.count(8), expected);
         }
         for value in ["0", "-1", "1.5", "true", "\"3\"", "\"default\""] {
             assert!(toml::from_str::<BuildSectionConfig>(&format!("hook-jobs = {value}")).is_err());

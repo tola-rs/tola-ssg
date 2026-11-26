@@ -32,19 +32,15 @@ pub struct AssetUrlPrefix {
 impl AssetUrlPrefix {
     pub fn parse(raw: &str) -> Result<Self, AssetUrlError> {
         let url = UrlPath::parse(raw)?;
+        let trimmed = url.as_str().trim_matches('/');
         // A prefix names a directory, so `/assets` and `/assets/` are one prefix.
-        let url = if url.as_str().trim_matches('/').is_empty() {
-            url
+        let (url, output) = if trimmed.is_empty() {
+            (url, None)
         } else {
-            let normalized = format!("/{}/", url.as_str().trim_matches('/'));
-            UrlPath::from_decoded(&normalized)?
-        };
-        let output = if url.as_str() != "/" {
-            let output = OutputPath::parse(url.as_str().trim_matches('/'))?;
+            let url = UrlPath::from_decoded(&format!("/{trimmed}/"))?;
+            let output = OutputPath::parse(trimmed)?;
             require_asset_output(&output)?;
-            Some(output)
-        } else {
-            None
+            (url, Some(output))
         };
         Ok(Self { url, output })
     }
@@ -219,7 +215,7 @@ pub struct AssetTreeDeclaration {
 }
 
 #[derive(Default, Deserialize)]
-struct AssetTreeFields {
+struct TreeFields {
     source: Option<PathBuf>,
     #[serde(rename = "url-prefix")]
     url_prefix: Option<AssetUrlPrefix>,
@@ -234,56 +230,55 @@ struct AssetTreeFields {
 }
 
 fn serialize_tree_patterns<S: serde::Serializer>(
-    selection: &FileSelection,
-    serializer: S,
+    sel: &FileSelection,
+    ser: S,
 ) -> Result<S::Ok, S::Error> {
-    selection.patterns().serialize(serializer)
+    sel.patterns().serialize(ser)
 }
 
-impl TryFrom<AssetTreeFields> for AssetTreeDeclaration {
+impl TryFrom<TreeFields> for AssetTreeDeclaration {
     type Error = String;
 
-    fn try_from(fields: AssetTreeFields) -> Result<Self, Self::Error> {
-        let source = fields.source.ok_or("declare `source` for the asset tree")?;
+    fn try_from(fields: TreeFields) -> Result<Self, Self::Error> {
+        let src = fields.source.ok_or("declare `source` for the asset tree")?;
         let url_prefix = fields
             .url_prefix
             .ok_or("declare `url-prefix` for the asset tree")?;
-        let selection = FileSelection::new(&FilePatterns {
+        let sel = FileSelection::new(&FilePatterns {
             include: fields.include.unwrap_or_else(|| vec![".".to_owned()]),
             exclude: fields.exclude.unwrap_or_default(),
         })
-        .map_err(|error| error.at("assets.trees").to_string())?;
+        .map_err(|err| err.at("assets.trees").to_string())?;
         Ok(Self {
-            source,
+            source: src,
             url_prefix,
             follow_file_symlinks: fields.follow_file_symlinks.unwrap_or_default(),
             enable: fields.enable.unwrap_or(true),
             enabled_by: fields.enabled_by,
             minify: fields.minify.unwrap_or(true),
-            selection: Arc::new(selection),
+            selection: Arc::new(sel),
         })
     }
 }
 
 impl<'de> Deserialize<'de> for AssetTreeDeclaration {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        Self::try_from(read_fields::<AssetTreeFields, _>(deserializer)?)
-            .map_err(serde::de::Error::custom)
+    fn deserialize<D: serde::Deserializer<'de>>(deser: D) -> Result<Self, D::Error> {
+        Self::try_from(read_fields::<TreeFields, _>(deser)?).map_err(serde::de::Error::custom)
     }
 }
 
 impl AssetTreeDeclaration {
     /// Check the fields written in one asset tree declaration.
     pub fn validate_fragment(value: &toml::Value) -> Result<(), FragmentError> {
-        read_fragment::<AssetTreeFields>(value).map(|_| ())
+        read_fragment::<TreeFields>(value).map(|_| ())
     }
 
     /// Declare a source tree with an already validated URL prefix.
     pub fn new(source: impl Into<PathBuf>, url_prefix: AssetUrlPrefix) -> Self {
-        AssetTreeFields {
+        TreeFields {
             source: Some(source.into()),
             url_prefix: Some(url_prefix),
-            ..AssetTreeFields::default()
+            ..TreeFields::default()
         }
         .try_into()
         .expect("the entire asset tree is a valid selection")
@@ -327,7 +322,7 @@ pub struct AssetFileDeclaration {
 }
 
 #[derive(Deserialize)]
-struct AssetFileFields {
+struct FileFields {
     source: Option<PathBuf>,
     url: Option<AssetUrl>,
     enable: Option<bool>,
@@ -336,10 +331,10 @@ struct AssetFileFields {
     minify: Option<bool>,
 }
 
-impl TryFrom<AssetFileFields> for AssetFileDeclaration {
+impl TryFrom<FileFields> for AssetFileDeclaration {
     type Error = &'static str;
 
-    fn try_from(fields: AssetFileFields) -> Result<Self, Self::Error> {
+    fn try_from(fields: FileFields) -> Result<Self, Self::Error> {
         Ok(Self {
             source: fields.source.ok_or("declare `source` for the asset file")?,
             url: fields.url.ok_or("declare `url` for the asset file")?,
@@ -351,16 +346,15 @@ impl TryFrom<AssetFileFields> for AssetFileDeclaration {
 }
 
 impl<'de> Deserialize<'de> for AssetFileDeclaration {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        Self::try_from(read_fields::<AssetFileFields, _>(deserializer)?)
-            .map_err(serde::de::Error::custom)
+    fn deserialize<D: serde::Deserializer<'de>>(deser: D) -> Result<Self, D::Error> {
+        Self::try_from(read_fields::<FileFields, _>(deser)?).map_err(serde::de::Error::custom)
     }
 }
 
 impl AssetFileDeclaration {
     /// Check the fields written in one asset file declaration.
     pub fn validate_fragment(value: &toml::Value) -> Result<(), FragmentError> {
-        read_fragment::<AssetFileFields>(value).map(|_| ())
+        read_fragment::<FileFields>(value).map(|_| ())
     }
 
     /// Declare a source file with an already validated URL and output identity.

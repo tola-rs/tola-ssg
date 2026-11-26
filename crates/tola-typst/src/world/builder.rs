@@ -12,7 +12,7 @@ use typst::utils::LazyHash;
 use super::core::TypstWorld;
 use super::sources::ExplicitSources;
 use super::strategy::{FileCacheMode, FontMode, LibraryMode};
-use crate::world::file::{FileResolver, FileView, SharedFileCache};
+use crate::world::file::{FileStore, FileView, SharedFileCache};
 use crate::world::font::{FontLoadError, FontStore};
 
 /// Invalid configuration for a Typst world.
@@ -67,7 +67,7 @@ pub enum WorldBuildError {
 pub struct WorldBuilder {
     main: MainSource,
     root: PathBuf,
-    files: Arc<FileResolver>,
+    files: Arc<FileStore>,
     cache: Option<FileCacheMode>,
     fonts: Option<FontMode>,
     library: LibraryMode,
@@ -98,7 +98,7 @@ impl WorldBuilder {
         Self {
             main,
             root: root.to_path_buf(),
-            files: Arc::new(FileResolver::new()),
+            files: Arc::new(FileStore::new()),
             cache: None,
             fonts: None,
             library: LibraryMode::Global,
@@ -107,9 +107,9 @@ impl WorldBuilder {
     }
 
     /// Use an explicit file resolver for this world.
-    pub fn with_files(mut self, files: Arc<FileResolver>) -> Self {
+    pub fn with_files(mut self, files: Arc<FileStore>) -> Self {
         if let Some(FileCacheMode::Frozen { parsed, .. }) = &self.cache {
-            self.cache = Some(FileCacheMode::shared(Arc::clone(parsed)));
+            self.cache = Some(FileCacheMode::Shared(Arc::clone(parsed)));
         }
         self.files = files;
         self
@@ -117,7 +117,7 @@ impl WorldBuilder {
 
     /// Keep first-observed files until the world is reset.
     pub fn with_local_cache(mut self) -> Self {
-        self.cache = Some(FileCacheMode::local());
+        self.cache = Some(FileCacheMode::Local);
         self
     }
 
@@ -126,13 +126,16 @@ impl WorldBuilder {
     /// Direct world reads revalidate on access. Reads within one compilation
     /// share their first observation, including failures.
     pub fn with_shared_cache(mut self, cache: Arc<SharedFileCache>) -> Self {
-        self.cache = Some(FileCacheMode::shared(cache));
+        self.cache = Some(FileCacheMode::Shared(cache));
         self
     }
 
     /// Keep the listed sources frozen and observe other files for each compilation.
     pub fn with_sources(mut self, sources: Arc<ExplicitSources>) -> Self {
-        self.cache = Some(FileCacheMode::sources(sources));
+        self.cache = Some(FileCacheMode::Sources {
+            sources,
+            fallback: Arc::new(SharedFileCache::new()),
+        });
         self
     }
 
@@ -142,7 +145,10 @@ impl WorldBuilder {
     /// selects fresh reads through that resolver instead.
     pub fn with_file_view(mut self, view: Arc<FileView>, parsed: Arc<SharedFileCache>) -> Self {
         self.files = Arc::clone(view.resolver());
-        self.cache = Some(FileCacheMode::frozen(view, parsed));
+        self.cache = Some(FileCacheMode::Frozen {
+            files: view,
+            parsed,
+        });
         self
     }
 
@@ -268,34 +274,32 @@ mod tests {
 
     #[test]
     fn build_requires_file_cache() {
-        let (directory, main) = source_directory("Hello");
+        let (dir, main) = source_directory("Hello");
 
         assert!(matches!(
-            build_error(directory.path(), &main, |builder| builder.no_fonts()),
+            build_error(dir.path(), &main, |b| b.no_fonts()),
             WorldBuildError::MissingFileCache
         ));
     }
 
     #[test]
-    fn main_source_outside_root_fails() {
+    fn main_outside_root() {
         let (_outside, main) = source_directory("Hello");
         let root = TempDir::new().unwrap();
 
         assert!(matches!(
-            build_error(root.path(), &main, |builder| {
-                builder.with_local_cache().no_fonts()
-            }),
+            build_error(root.path(), &main, |b| b.with_local_cache().no_fonts()),
             WorldBuildError::MainOutsideRoot { .. }
         ));
     }
 
     #[test]
-    fn fixed_datetime_uses_offset_rules() {
+    fn fixed_datetime_offset() {
         use typst::World;
         use typst::foundations::{Datetime, Duration};
 
-        let (directory, main) = source_directory("Hello");
-        let world = WorldBuilder::new(&main, directory.path())
+        let (dir, main) = source_directory("Hello");
+        let world = WorldBuilder::new(&main, dir.path())
             .with_local_cache()
             .no_fonts()
             .with_fixed_datetime(Datetime::from_ymd_hms(2026, 8, 17, 23, 30, 0).unwrap())

@@ -421,30 +421,30 @@ mod tests {
     }
 
     #[test]
-    fn inherited_terminal_reads_and_restores_after_exit() {
-        let (status, output) = PtyRun::new("read").finish(Some(b"terminal input\n"), false);
-        assert!(status.success(), "{}", String::from_utf8_lossy(&output));
-        assert!(contains(&output, b"CHILD-READ-OK"));
-        assert!(contains(&output, b"TERMINAL-RESTORED"));
+    fn pty_reads_and_restores() {
+        let (status, out) = PtyRun::new("read").finish(Some(b"terminal input\n"), false);
+        assert!(status.success(), "{}", String::from_utf8_lossy(&out));
+        assert!(contains(&out, b"CHILD-READ-OK"));
+        assert!(contains(&out, b"TERMINAL-RESTORED"));
     }
 
     #[test]
-    fn inherited_terminal_restores_after_abnormal_exit() {
+    fn pty_restores_abnormal_exit() {
         for mode in ["spawn-error", "cancel", "panic"] {
-            let (status, output) = PtyRun::new(mode).finish(None, false);
+            let (status, out) = PtyRun::new(mode).finish(None, false);
             assert!(
                 status.success(),
                 "{mode}: {}",
-                String::from_utf8_lossy(&output)
+                String::from_utf8_lossy(&out)
             );
-            assert!(contains(&output, b"TERMINAL-RESTORED"));
+            assert!(contains(&out, b"TERMINAL-RESTORED"));
         }
     }
 
     #[test]
-    fn inherited_terminal_sends_interrupt_to_child() {
-        let (status, output) = PtyRun::new("interrupt").finish(None, true);
-        assert!(status.success(), "{}", String::from_utf8_lossy(&output));
-        assert!(contains(&output, b"TERMINAL-RESTORED"));
+    fn pty_delivers_interrupt() {
+        let (status, out) = PtyRun::new("interrupt").finish(None, true);
+        assert!(status.success(), "{}", String::from_utf8_lossy(&out));
+        assert!(contains(&out, b"TERMINAL-RESTORED"));
     }
 }

@@ -1,99 +1,105 @@
-//! Row storage for one evaluation stage: a flat buffer, its width, and the order proof later passes
-//! rely on.
-//!
-//! A block is a batch, not a relation: it may hold duplicates and out-of-order rows until the
-//! answer leaves, so only a normalized block may be searched or merged.
+//! Flat row batches with conservative strict-ordering proofs.
+
 use super::ensure_not_cancelled;
 use crate::Error;
 use crate::index::gallop;
 use std::ops::Range;
 
-/// Rows of one clause stage as they accumulate; `strictly_sorted` is a conservative proof that
-/// turns false whenever an append cannot show the new tail sorts above the old.
 pub(super) struct RowBlock<C> {
-    values: Vec<C>,
+    vals: Vec<C>,
     width: usize,
     len: usize,
     strictly_sorted: bool,
 }
+
 impl<C> RowBlock<C> {
-    pub(super) fn single_row(values: Vec<C>) -> Self {
+    pub(super) fn single_row(vals: Vec<C>) -> Self {
         Self {
-            width: values.len(),
-            values,
+            width: vals.len(),
+            vals,
             len: 1,
             strictly_sorted: true,
         }
     }
+
     pub(super) fn new(width: usize) -> Self {
         Self {
-            values: Vec::new(),
+            vals: Vec::new(),
             width,
             len: 0,
             strictly_sorted: true,
         }
     }
-    pub(super) fn push(&mut self, values: impl IntoIterator<Item = C>) {
-        self.values.extend(values);
+
+    pub(super) fn push(&mut self, vals: impl IntoIterator<Item = C>) {
+        self.vals.extend(vals);
         self.len += 1;
         self.strictly_sorted = self.len <= 1;
     }
+
     pub(super) fn len(&self) -> usize {
         self.len
     }
+
     pub(super) fn is_empty(&self) -> bool {
         self.len == 0
     }
+
     pub(super) fn width(&self) -> usize {
         self.width
     }
-    pub(super) fn row(&self, index: usize) -> &[C] {
-        &self.values[index * self.width..(index + 1) * self.width]
+
+    pub(super) fn row(&self, idx: usize) -> &[C] {
+        &self.vals[idx * self.width..(idx + 1) * self.width]
     }
+
     pub(super) fn iter(&self) -> impl Iterator<Item = &[C]> {
-        (0..self.len).map(|index| self.row(index))
+        (0..self.len).map(|idx| self.row(idx))
     }
+
     pub(super) fn append_block(&mut self, other: &Self)
     where
         C: Copy,
     {
-        self.values.extend_from_slice(&other.values);
+        self.vals.extend_from_slice(&other.vals);
         self.len += other.len;
         self.strictly_sorted = self.len <= 1;
     }
+
     pub(super) fn has_capacity_for(&self, other: &Self) -> bool {
-        self.values.capacity() - self.values.len() >= other.values.len()
+        self.vals.capacity() - self.vals.len() >= other.vals.len()
     }
+
     fn append_values(&mut self, other: Self) {
-        self.values.extend(other.values);
+        self.vals.extend(other.vals);
         self.len += other.len;
     }
 }
+
 impl<C: Ord + Copy> RowBlock<C> {
     pub(super) fn is_strictly_sorted(&self) -> bool {
         self.strictly_sorted
     }
-    /// Appends the rows `append` writes, which are strictly sorted among themselves when
-    /// `run_sorted`. The order proof survives only when the previous rows and the run are each
-    /// strictly sorted and the seam between them is strictly ordered.
+
     pub(super) fn append_run<E>(
         &mut self,
         run_sorted: bool,
         append: impl FnOnce(&mut Self) -> Result<(), E>,
     ) -> Result<(), E> {
         let start = self.len;
-        let previous = self.strictly_sorted;
+        let prev = self.strictly_sorted;
         self.strictly_sorted = false;
         append(self)?;
         if self.len == start {
-            self.strictly_sorted = previous;
+            self.strictly_sorted = prev;
             return Ok(());
         }
-        self.strictly_sorted = previous
+        self.strictly_sorted = prev
             && (run_sorted || self.len == start + 1)
             && (start == 0 || self.row(start - 1) < self.row(start));
         Ok(())
     }
+
     pub(super) fn extend(&mut self, other: Self) {
         if self.is_empty() {
             *self = other;
@@ -108,16 +114,14 @@ impl<C: Ord + Copy> RowBlock<C> {
         self.strictly_sorted = sorted;
     }
 
-    /// Whether the rows are strictly increasing: the stored proof, or a scan over the rows when
-    /// the proof has been invalidated.
     fn is_strictly_increasing(
         &self,
         is_cancelled: &mut impl FnMut() -> bool,
     ) -> Result<bool, Error> {
         if !self.strictly_sorted {
-            for index in 1..self.len {
+            for idx in 1..self.len {
                 ensure_not_cancelled(is_cancelled)?;
-                if self.row(index - 1) >= self.row(index) {
+                if self.row(idx - 1) >= self.row(idx) {
                     return Ok(false);
                 }
             }
@@ -125,48 +129,40 @@ impl<C: Ord + Copy> RowBlock<C> {
         Ok(true)
     }
 
-    /// Position of the first row at or after `start` that is not below `target`; the block must
-    /// be strictly increasing.
     fn lower_bound(&self, start: usize, target: &[C]) -> usize {
-        // Keys usually arrive after the whole block, which the exponential probe would scan.
         if start == self.len || self.row(start) >= target {
             return start;
         }
         if self.row(self.len - 1) < target {
             return self.len;
         }
-        gallop(self.len, start, |index| self.row(index) < target)
+        gallop(self.len, start, |idx| self.row(idx) < target)
     }
 
-    /// Whether `row` occurs in this nonempty, strictly increasing block.
     fn contains(&self, row: &[C]) -> bool {
         if self.width == 1 {
             let key = row[0];
-            let first = self.values[0].cmp(&key);
+            let first = self.vals[0].cmp(&key);
             if !first.is_lt() {
                 return first.is_eq();
             }
-            let last = self.values[self.len - 1].cmp(&key);
+            let last = self.vals[self.len - 1].cmp(&key);
             if !last.is_gt() {
                 return last.is_eq();
             }
-            // An isolated lookup has no nearby cursor to start from.
-            return self.values[1..self.len - 1].binary_search(&key).is_ok();
+            return self.vals[1..self.len - 1].binary_search(&key).is_ok();
         }
         self.contains_from(&mut 0, row)
     }
 
-    /// Removes the rows that occur in any `known` block and leaves this block strictly increasing.
-    /// Every `known` block must itself be strictly increasing.
     pub(super) fn retain_unseen(
         &mut self,
         known: &[Self],
         is_cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(), Error> {
-        // A single row is kept or dropped whole and needs no ordering work.
         if self.len == 1 {
-            if known.iter().any(|batch| batch.contains(self.row(0))) {
-                self.values.clear();
+            if known.iter().any(|b| b.contains(self.row(0))) {
+                self.vals.clear();
                 self.len = 0;
             }
             self.strictly_sorted = true;
@@ -183,11 +179,11 @@ impl<C: Ord + Copy> RowBlock<C> {
         for batch in known {
             let mut cursor = 0;
             let mut kept = 0;
-            for position in 0..order.len() {
+            for pos in 0..order.len() {
                 ensure_not_cancelled(is_cancelled)?;
-                let index = order[position];
-                if !batch.contains_from(&mut cursor, self.row(index)) {
-                    order[kept] = index;
+                let idx = order[pos];
+                if !batch.contains_from(&mut cursor, self.row(idx)) {
+                    order[kept] = idx;
                     kept += 1;
                 }
             }
@@ -196,13 +192,12 @@ impl<C: Ord + Copy> RowBlock<C> {
         self.reorder_sorted(order, is_cancelled)
     }
 
-    /// Compacts an already sorted block in place. Only overlapping key ranges need a search.
     fn remove_known_rows(
         &mut self,
         known: &[Self],
         is_cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(), Error> {
-        let original_len = self.len;
+        let orig_len = self.len;
         for batch in known {
             if self.is_empty() {
                 break;
@@ -213,43 +208,42 @@ impl<C: Ord + Copy> RowBlock<C> {
             let start = self.lower_bound(0, batch.row(0));
             let mut cursor = 0;
             let mut kept = start;
-            for index in start..self.len {
+            for idx in start..self.len {
                 ensure_not_cancelled(is_cancelled)?;
                 if cursor == batch.len {
-                    self.copy_rows(index..self.len, kept);
-                    kept += self.len - index;
+                    self.copy_rows(idx..self.len, kept);
+                    kept += self.len - idx;
                     break;
                 }
-                if !batch.contains_from(&mut cursor, self.row(index)) {
-                    self.copy_rows(index..index + 1, kept);
+                if !batch.contains_from(&mut cursor, self.row(idx)) {
+                    self.copy_rows(idx..idx + 1, kept);
                     kept += 1;
                 }
             }
             self.len = kept;
-            self.values.truncate(kept * self.width);
+            self.vals.truncate(kept * self.width);
         }
-        if self.len != 0 && self.len < original_len / 2 {
-            self.values.shrink_to_fit();
+        if self.len != 0 && self.len < orig_len / 2 {
+            self.vals.shrink_to_fit();
         }
         self.strictly_sorted = true;
         Ok(())
     }
 
-    /// Tests membership, reusing a cursor from a lookup for a smaller or equal row.
     pub(super) fn contains_from(&self, cursor: &mut usize, row: &[C]) -> bool {
         *cursor = self.lower_bound(*cursor, row);
         *cursor < self.len && self.row(*cursor) == row
     }
 
-    fn copy_rows(&mut self, rows: Range<usize>, to: usize) {
-        if rows.start != to {
-            self.values.copy_within(
+    fn copy_rows(&mut self, rows: Range<usize>, dst: usize) {
+        if rows.start != dst {
+            self.vals.copy_within(
                 rows.start * self.width..rows.end * self.width,
-                to * self.width,
+                dst * self.width,
             );
         }
     }
-    /// Sorts the rows and drops duplicates, leaving the block strictly increasing.
+
     pub(super) fn sort_distinct(
         &mut self,
         is_cancelled: &mut impl FnMut() -> bool,
@@ -272,30 +266,23 @@ impl<C: Ord + Copy> RowBlock<C> {
 
     fn sort_single_column(&mut self, is_cancelled: &mut impl FnMut() -> bool) -> Result<(), Error> {
         ensure_not_cancelled(is_cancelled)?;
-        // A stable sort keeps the first representation of equal constants.
-        self.values.sort();
-        self.values.dedup();
-        self.len = self.values.len();
+        // Stable sort preserves first arrival of equal constants.
+        self.vals.sort();
+        self.vals.dedup();
+        self.len = self.vals.len();
         self.strictly_sorted = true;
         ensure_not_cancelled(is_cancelled)
     }
 
-    /// The rows in ascending row order; equal rows keep the earliest arrival, so this is the
-    /// order a stable sort would produce.
     fn sorted_order(&self, is_cancelled: &mut impl FnMut() -> bool) -> Result<Vec<usize>, Error> {
         ensure_not_cancelled(is_cancelled)?;
         let mut order: Vec<usize> = (0..self.len).collect();
-        order.sort_unstable_by(|&left, &right| {
-            self.row(left)
-                .cmp(self.row(right))
-                .then_with(|| left.cmp(&right))
-        });
-        order.dedup_by(|left, right| self.row(*left) == self.row(*right));
+        order.sort_unstable_by(|&l, &r| self.row(l).cmp(self.row(r)).then_with(|| l.cmp(&r)));
+        order.dedup_by(|l, r| self.row(*l) == self.row(*r));
         ensure_not_cancelled(is_cancelled)?;
         Ok(order)
     }
 
-    /// Rearranges the rows into `order`, which lists them in row order.
     fn reorder_sorted(
         &mut self,
         order: Vec<usize>,
@@ -305,18 +292,17 @@ impl<C: Ord + Copy> RowBlock<C> {
             self.strictly_sorted = true;
             return Ok(());
         }
-        let mut values = Vec::with_capacity(order.len() * self.width);
-        for &index in &order {
+        let mut vals = Vec::with_capacity(order.len() * self.width);
+        for &idx in &order {
             ensure_not_cancelled(is_cancelled)?;
-            values.extend_from_slice(self.row(index));
+            vals.extend_from_slice(self.row(idx));
         }
-        self.values = values;
+        self.vals = vals;
         self.len = order.len();
         self.strictly_sorted = true;
         Ok(())
     }
-    // Both blocks are non-empty and already deduplicated against each other; zero-width rows are
-    // equal to every other row, so they never reach this merge with both sides populated.
+
     pub(super) fn merge_disjoint(
         mut self,
         mut other: Self,
@@ -334,24 +320,24 @@ impl<C: Ord + Copy> RowBlock<C> {
         }
         let width = self.width;
         let len = self.len + other.len;
-        let mut values = Vec::with_capacity(self.values.len() + other.values.len());
-        let mut left = self.values.into_iter();
-        let mut right = other.values.into_iter();
-        let (mut left_len, mut right_len) = (self.len, other.len);
-        while left_len != 0 && right_len != 0 {
+        let mut vals = Vec::with_capacity(self.vals.len() + other.vals.len());
+        let mut left = self.vals.into_iter();
+        let mut right = other.vals.into_iter();
+        let (mut l_len, mut r_len) = (self.len, other.len);
+        while l_len != 0 && r_len != 0 {
             ensure_not_cancelled(is_cancelled)?;
             if left.as_slice()[..width] <= right.as_slice()[..width] {
-                values.extend(left.by_ref().take(width));
-                left_len -= 1;
+                vals.extend(left.by_ref().take(width));
+                l_len -= 1;
             } else {
-                values.extend(right.by_ref().take(width));
-                right_len -= 1;
+                vals.extend(right.by_ref().take(width));
+                r_len -= 1;
             }
         }
-        values.extend(left);
-        values.extend(right);
+        vals.extend(left);
+        vals.extend(right);
         Ok(Self {
-            values,
+            vals,
             width,
             len,
             strictly_sorted: true,

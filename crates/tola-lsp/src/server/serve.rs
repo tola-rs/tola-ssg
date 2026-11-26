@@ -1,5 +1,4 @@
-//! Serving one connection: the public entry point a host calls, the host-declared configuration
-//! sections it passes, and what its workspace root is served as.
+//! Connection entrypoint and host-supplied workspace configuration.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -11,7 +10,7 @@ use anyhow::{Context, Result};
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
 use tola_build::BuildResources;
 use tola_build::cancellation::{BuildCancellation, BuildCanceller};
-use tola_build::config::ResolvedSiteConfig;
+use tola_build::config::SiteConfig;
 use tola_diagnostic::Diagnostic;
 
 use super::events::{Event, WAIT_INTERVAL};
@@ -22,31 +21,24 @@ use crate::connection::Connection;
 
 const STOPPED: &str = "the language server stopped; restart it from your editor";
 
-/// The configuration sections a host declares beyond the core schema, each as the field list its
-/// own `Config` derive generated.
-///
-/// A `tola.toml` key is answered from the schema that declares it, so a host hands over its
-/// sections' declarations rather than the server hard-coding a second list.
+/// Host-declared configuration sections beyond the core schema.
 pub type HostSections =
     &'static [&'static [(tola_build::config::FieldPath, Option<&'static str>)]];
 
-/// What one workspace root is served as.
-///
-/// A workspace that holds no site configuration is served as the documents it holds: each open
-/// document is checked on its own, and no answer claims what a site's program establishes.
+/// How a workspace root is served: a full site or standalone open documents.
 #[derive(Debug)]
 pub enum ServedWorkspace {
-    /// The workspace's site, which one root Bundle compiles.
-    Site(Arc<ResolvedSiteConfig>),
-    /// The workspace's documents, each compiled in the world its own imports resolve.
-    Documents(Arc<ResolvedSiteConfig>),
+    /// Full site compiled from one root Bundle.
+    Site(Arc<SiteConfig>),
+    /// Standalone documents compiled individually without a site config.
+    Documents(Arc<SiteConfig>),
 }
 
 impl ServedWorkspace {
-    /// The configuration the workspace's sources compile through.
-    pub fn configuration(&self) -> &Arc<ResolvedSiteConfig> {
+    /// Configuration the workspace's sources compile through.
+    pub fn configuration(&self) -> &Arc<SiteConfig> {
         match self {
-            Self::Site(configuration) | Self::Documents(configuration) => configuration,
+            Self::Site(cfg) | Self::Documents(cfg) => cfg,
         }
     }
 
@@ -56,8 +48,7 @@ impl ServedWorkspace {
     }
 }
 
-/// One language-server connection's inputs: its streams, the build resources it runs under, the
-/// host's configuration loader and diagnostic recorder, and the host's configuration sections.
+/// Inputs for serving one independent language-server connection.
 pub struct ServeRequest<R, W, F, D>
 where
     R: Read + Send + 'static,
@@ -67,11 +58,11 @@ where
         + 'static,
     D: Fn(&[Diagnostic]),
 {
-    /// The client's input stream; reading runs on a detached thread.
+    /// Client input stream (read on a detached thread).
     pub reader: R,
-    /// The client's output stream.
+    /// Client output stream.
     pub writer: W,
-    /// The resources the connection compiles with.
+    /// Resources the connection compiles with.
     pub resources: BuildResources,
     /// Ends the connection's work when cancelled.
     pub cancellation: BuildCancellation,
@@ -79,36 +70,20 @@ where
     pub load_configuration: F,
     /// Receives complete current diagnostics before their LSP projection.
     pub record_diagnostics: D,
-    /// The configuration file the invocation named, when it named one.
+    /// Explicit configuration file path, if provided.
     pub named_configuration: Option<PathBuf>,
-    /// The configuration sections the host declares beyond the core schema.
+    /// Host-declared configuration sections beyond the core schema.
     pub host_sections: HostSections,
 }
 
 /// Serve one independent Tola language-server connection.
 ///
 /// `load_configuration` receives the editor root, exact unsaved sources, and cancellation for
-/// each operation, and reports the workspace as the site it holds, or as the
-/// documents it holds when no site configuration exists. Keep the configuration's
-/// `Arc` identity stable while build settings are unchanged to reuse compiler
-/// resources. Load errors retain structured diagnostics. Host-only settings stay
-/// in the callback; the host's own key declarations travel
-/// in `host_sections`, so the server answers `tola.toml` keys it did not declare itself.
-/// `resources` selects network access, fonts and reusable file inputs for both
-/// source compilation and published-package completion.
-///
-/// `record_diagnostics` receives complete current diagnostics before their LSP
-/// projection. It must not write to the protocol output.
-///
-/// Compiler, source-analysis and package-index work is cancelled and joined before return.
-/// A reader still blocked on client input is detached, so an open input stream
-/// cannot delay shutdown.
-/// Source checks neither run hooks nor publish site output.
-///
-/// A job whose own work panics is answered as an internal failure and the lane keeps running. A
-/// client that stops reading blocks the connection inside its next write: reads run on the detached
-/// reader thread, and the host's token is observed between messages, so no cancellation reaches a
-/// write already in flight.
+/// each operation; keep the `Arc` identity stable across unchanged settings to reuse compiler
+/// resources. `record_diagnostics` receives diagnostics before LSP projection and must not write
+/// to the protocol output. Worker and package-index threads are cancelled and joined before return,
+/// while a blocked reader thread is detached so shutdown does not stall. Source checks neither run
+/// hooks nor publish site output, and lane panics are contained as internal errors.
 pub fn serve<R, W, F, D>(inputs: ServeRequest<R, W, F, D>) -> Result<()>
 where
     R: Read + Send + 'static,
@@ -128,38 +103,36 @@ where
         named_configuration,
         host_sections,
     } = inputs;
-    let (event_sender, events) = crossbeam_channel::bounded(0);
-    let (compiler_jobs, compiler_receiver) = crossbeam_channel::bounded(1);
-    let (analysis_jobs, analysis_receiver) = crossbeam_channel::bounded(1);
+    let (ev_tx, ev_rx) = crossbeam_channel::bounded(0);
+    let (comp_tx, comp_rx) = crossbeam_channel::bounded(1);
+    let (ana_tx, ana_rx) = crossbeam_channel::bounded(1);
     let shutdown = BuildCanceller::new();
-    let reader_events = event_sender.clone();
+    let reader_tx = ev_tx.clone();
     let reader_cancel = shutdown.token();
     let input = thread::Builder::new()
         .name("tola-lsp-reader".to_owned())
-        .spawn(move || read_messages(reader, &reader_events, &reader_cancel))
+        .spawn(move || read_messages(reader, &reader_tx, &reader_cancel))
         .context("the Tola language server could not start its input reader")?;
     thread::scope(|scope| {
-        // Both tokens are taken before the canceller moves into the connection that owns it.
-        let compiler_cancel = shutdown.token();
-        let analysis_cancel = shutdown.token();
-        let analysis_events = event_sender.clone();
-        let mut connection = Connection::new(
+        // Take worker tokens before moving `shutdown` into `Connection`.
+        let comp_cancel = shutdown.token();
+        let ana_cancel = shutdown.token();
+        let ana_tx_ev = ev_tx.clone();
+        let mut conn = Connection::new(
             writer,
             record_diagnostics,
             shutdown,
             resources.clone(),
             named_configuration,
-            // The origin this site is served at comes from the client's launch configuration and
-            // the development server's own state, not from this process.
             None,
             host_sections,
         );
         let compiler_thread = scope.spawn(move || {
             let mut compiler = SourceCompiler::new(load_configuration, resources);
             lanes::run(
-                compiler_receiver,
-                &event_sender,
-                &compiler_cancel,
+                comp_rx,
+                &ev_tx,
+                &comp_cancel,
                 JobOwner::of,
                 |job| compiler.compile(job),
                 Event::Compiled,
@@ -169,13 +142,13 @@ where
             let mut disk = crate::analysis::DiskSources::default();
             let mut graphs = crate::analysis::GraphCache::default();
             lanes::run(
-                analysis_receiver,
-                &analysis_events,
-                &analysis_cancel,
+                ana_rx,
+                &ana_tx_ev,
+                &ana_cancel,
                 JobOwner::of_analysis,
                 |job| match job {
-                    AnalysisJob::Request(request) => {
-                        crate::compiler::analyze(&mut disk, &mut graphs, *request)
+                    AnalysisJob::Request(req) => {
+                        crate::compiler::analyze(&mut disk, &mut graphs, *req)
                     }
                     AnalysisJob::ReleaseIdle => {
                         disk = Default::default();
@@ -187,19 +160,16 @@ where
             );
         });
         let mut lanes = Lanes {
-            compiler_jobs: Some(compiler_jobs),
+            compiler_jobs: Some(comp_tx),
             compiler_thread,
-            analysis_jobs: Some(analysis_jobs),
+            analysis_jobs: Some(ana_tx),
             analysis_thread,
         };
-        let outcome = drive_connection(&mut connection, &events, &mut lanes, &input, &cancellation);
-        end_connection(connection, lanes, input, outcome)
+        let outcome = drive_connection(&mut conn, &ev_rx, &mut lanes, &input, &cancellation);
+        end_connection(conn, lanes, input, outcome)
     })
 }
 
-/// The two worker lanes of one connection: each lane's queue, and the thread running its jobs.
-///
-/// A lane ends when its queue is dropped; `join` waits for the job each was running.
 struct Lanes<'scope> {
     compiler_jobs: Option<Sender<SourceJob>>,
     compiler_thread: ScopedJoinHandle<'scope, ()>,
@@ -234,19 +204,18 @@ impl Lanes<'_> {
     }
 
     fn join(self) -> Result<()> {
-        let compiler_joined = self.compiler_thread.join().map_err(|_| stopped_error());
-        let analysis_joined = self.analysis_thread.join().map_err(|_| stopped_error());
-        compiler_joined.and(analysis_joined)
+        let comp = self.compiler_thread.join().map_err(|_| stopped_error());
+        let ana = self.analysis_thread.join().map_err(|_| stopped_error());
+        comp.and(ana)
     }
 }
 
-/// Give each idle lane its next job, then act on the next event until the session ends.
 fn drive_connection<W, D>(
-    connection: &mut Connection<W, D>,
-    events: &Receiver<Event>,
+    conn: &mut Connection<W, D>,
+    ev_rx: &Receiver<Event>,
     lanes: &mut Lanes<'_>,
     input: &JoinHandle<()>,
-    cancellation: &BuildCancellation,
+    cancel: &BuildCancellation,
 ) -> Result<()>
 where
     W: Write,
@@ -255,69 +224,67 @@ where
     let mut compiling = false;
     let mut analyzing = false;
     loop {
-        cancellation.ensure_active()?;
-        if connection.is_shutdown() {
+        cancel.ensure_active()?;
+        if conn.is_shutdown() {
             lanes.close();
         } else {
             let now = Instant::now();
-            if connection.run_due_work(now, compiling || analyzing)? {
+            if conn.run_due_work(now, compiling || analyzing)? {
                 lanes.dispatch_compilation(SourceJob::ReleaseIdle)?;
                 lanes.dispatch_analysis(AnalysisJob::ReleaseIdle)?;
                 compiling = true;
                 analyzing = true;
             } else {
-                // A lane receives another job only after its preceding reply arrives.
-                if !compiling && let Some(job) = connection.next_job(now) {
+                // Only dispatch to an idle lane so bounded channels stay backpressured.
+                if !compiling && let Some(job) = conn.next_job(now) {
                     lanes.dispatch_compilation(job)?;
                     compiling = true;
                 }
-                if !analyzing && let Some(request) = connection.next_analysis() {
-                    lanes.dispatch_analysis(AnalysisJob::Request(Box::new(request)))?;
+                if !analyzing && let Some(req) = conn.next_analysis() {
+                    lanes.dispatch_analysis(AnalysisJob::Request(Box::new(req)))?;
                     analyzing = true;
                 }
             }
         }
-        let event = match events.recv_timeout(WAIT_INTERVAL) {
-            Ok(event) => event,
+        let ev = match ev_rx.recv_timeout(WAIT_INTERVAL) {
+            Ok(ev) => ev,
             Err(RecvTimeoutError::Timeout) => {
-                // A lane closed by shutdown is expected; any other ending leaves nothing to answer.
-                if input.is_finished() || (lanes.any_finished() && !connection.is_shutdown()) {
+                if input.is_finished() || (lanes.any_finished() && !conn.is_shutdown()) {
                     return Err(stopped_error());
                 }
                 continue;
             }
             Err(RecvTimeoutError::Disconnected) => return Ok(()),
         };
-        match event {
-            Event::Message(message) => {
-                if connection.receive(message)?.is_break() {
+        match ev {
+            Event::Message(msg) => {
+                if conn.receive(msg)?.is_break() {
                     return Ok(());
                 }
             }
-            Event::Compiled(completed) => {
+            Event::Compiled(done) => {
                 compiling = false;
-                connection.completed(completed)?;
+                conn.completed(done)?;
             }
-            Event::Analyzed(completed) => {
+            Event::Analyzed(done) => {
                 analyzing = false;
-                connection.completed(completed)?;
+                conn.completed(done)?;
             }
             Event::InputClosed => return Ok(()),
-            Event::InputFailed(error) => return Err(error.into()),
+            Event::InputFailed(err) => return Err(err.into()),
         }
     }
 }
 
-/// Cancel the connection's work, join the threads it ran, and report the outcome the session owes.
 fn end_connection<W, D>(
-    connection: Connection<W, D>,
+    conn: Connection<W, D>,
     mut lanes: Lanes<'_>,
     input: JoinHandle<()>,
     outcome: Result<()>,
 ) -> Result<()> {
-    connection.cancel();
+    conn.cancel();
     lanes.close();
-    // Joining a reader still blocked on the client would hold shutdown open.
+    // Joining a reader blocked on stdin would hang shutdown.
     let reader_joined = if input.is_finished() {
         input.join().map_err(|_| stopped_error())
     } else {
@@ -325,23 +292,20 @@ fn end_connection<W, D>(
     };
     let lanes_joined = lanes.join();
     match outcome {
-        Err(error) if client_disconnected(&error) => reader_joined.and(lanes_joined),
+        Err(err) if client_disconnected(&err) => reader_joined.and(lanes_joined),
         outcome => outcome.and(reader_joined).and(lanes_joined),
     }
 }
 
-/// The failure a connection reports when a thread it started ended before the client did.
 fn stopped_error() -> anyhow::Error {
     anyhow::anyhow!(STOPPED)
 }
 
-/// Whether the failure is the client's side of the connection going away, which ends the session
-/// without an error to report.
-fn client_disconnected(error: &anyhow::Error) -> bool {
-    error.chain().any(|cause| {
-        cause.downcast_ref::<std::io::Error>().is_some_and(|error| {
+fn client_disconnected(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause.downcast_ref::<std::io::Error>().is_some_and(|io| {
             matches!(
-                error.kind(),
+                io.kind(),
                 std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
             )
         })
@@ -358,30 +322,27 @@ mod tests {
 
     use crate::position;
     use crate::server::tests::{EditorSession, SiteDirectory, site_with_document, uri_string};
+
     #[test]
     fn package_sources_outlive_broken_config() {
         let site = SiteDirectory::new();
         let mut client = EditorSession::start(&site);
-        let package = client.package_source("tola-package:/tola/document/0.0.0/lib.typ");
+        let pkg = client.package_source("tola-package:/tola/document/0.0.0/lib.typ");
 
         site.write("tola.toml", "[site\n");
         client.changed_on_disk("tola.toml");
-        let diagnostics =
-            client.diagnostics_matching("tola.toml", |published| !published.is_empty());
-        assert!(
-            !diagnostics.is_empty(),
-            "the broken configuration is reported"
-        );
+        let diags = client.diagnostics_matching("tola.toml", |published| !published.is_empty());
+        assert!(!diags.is_empty());
         assert_eq!(
             client.package_source("tola-package:/tola/document/0.0.0/lib.typ"),
-            package
+            pkg
         );
 
         client.shutdown();
     }
-    /// A metadata chain offers one narrowing action per source the checked world observed.
+
     #[test]
-    fn narrowing_actions_follow_observed_sources() {
+    fn narrowing_actions_observed_sources() {
         const PROGRAM: &str = r#"#import "@tola/source:0.0.0": all-sources, parse-sources
 #import "@tola/site:0.0.0": site
 #import "@tola/address:0.0.0": join-route, output-of, slugify
@@ -421,25 +382,23 @@ mod tests {
 
         client.shutdown();
     }
+
     #[test]
-    fn unknown_variable_offers_definition() {
+    fn unknown_variable_quickfix() {
         let site = site_with_document();
         let mut client = EditorSession::start(&site);
         let text = "#let missing = absent-name\n\n#missing\n";
         client.open("content/document.typ", text);
 
-        let diagnostics = client.diagnostics_matching("content/document.typ", |diagnostics| {
-            diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.data.is_some())
+        let diags = client.diagnostics_matching("content/document.typ", |diags| {
+            diags.iter().any(|diag| diag.data.is_some())
         });
-        let diagnostic = diagnostics
+        let diag = diags
             .iter()
-            .find(|diagnostic| diagnostic.data.is_some())
+            .find(|diag| diag.data.is_some())
             .expect("the unbound name is reported");
         assert_eq!(
-            diagnostic
-                .data
+            diag.data
                 .as_ref()
                 .and_then(|cause| cause.get("name"))
                 .and_then(serde_json::Value::as_str),
@@ -449,7 +408,7 @@ mod tests {
         let actions = client.code_actions(
             "content/document.typ",
             &format!("{text}|"),
-            std::slice::from_ref(diagnostic),
+            std::slice::from_ref(diag),
             &["quickfix"],
         );
         assert_eq!(actions.len(), 1, "{actions:?}");
@@ -464,7 +423,7 @@ mod tests {
             names
                 .declarations()
                 .iter()
-                .any(|declaration| declaration.name == "absent-name")
+                .any(|decl| decl.name == "absent-name")
         );
         client.set_text("content/document.typ", names.source().text());
         assert!(client.diagnostics("content/document.typ").is_empty());
@@ -476,12 +435,12 @@ mod tests {
         let mut edit =
             lsp_types::WorkspaceEdit::deserialize(&action["edit"]).expect("an applicable edit");
         let uri: Uri = uri.parse().expect("the target document URI");
-        let documents = match edit.document_changes {
-            Some(lsp_types::DocumentChanges::Edits(documents)) => documents,
-            Some(lsp_types::DocumentChanges::Operations(operations)) => operations
+        let docs = match edit.document_changes {
+            Some(lsp_types::DocumentChanges::Edits(docs)) => docs,
+            Some(lsp_types::DocumentChanges::Operations(ops)) => ops
                 .into_iter()
-                .filter_map(|operation| match operation {
-                    lsp_types::DocumentChangeOperation::Edit(document) => Some(document),
+                .filter_map(|op| match op {
+                    lsp_types::DocumentChangeOperation::Edit(doc) => Some(doc),
                     lsp_types::DocumentChangeOperation::Op(_) => None,
                 })
                 .collect(),
@@ -493,11 +452,10 @@ mod tests {
                     .unwrap_or_default();
             }
         };
-        documents
-            .into_iter()
-            .filter(|document| document.text_document.uri == uri)
-            .flat_map(|document| {
-                document.edits.into_iter().map(|edit| match edit {
+        docs.into_iter()
+            .filter(|doc| doc.text_document.uri == uri)
+            .flat_map(|doc| {
+                doc.edits.into_iter().map(|edit| match edit {
                     lsp_types::OneOf::Left(edit) => edit,
                     lsp_types::OneOf::Right(edit) => edit.text_edit,
                 })
@@ -525,8 +483,9 @@ mod tests {
         }
         corrected
     }
+
     #[test]
-    fn rejected_request_keeps_session_usable() {
+    fn rejected_request_recovers() {
         let site = site_with_document();
         let mut client = EditorSession::start(&site);
         client.open("content/document.typ", "Document body.\n");
@@ -547,8 +506,9 @@ mod tests {
 
         client.shutdown();
     }
+
     #[test]
-    fn losing_the_client_ends_the_session() {
+    fn client_disconnect_ends_session() {
         let site = SiteDirectory::new();
         let client = EditorSession::start(&site);
         client.abort();

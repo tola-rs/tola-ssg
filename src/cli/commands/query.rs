@@ -9,7 +9,7 @@ use anyhow::{Context, Result, ensure};
 use clap::{Args, FromArgMatches};
 use serde_json::Value;
 use tola_build::BuildResources;
-use tola_build::config::ResolvedSiteConfig;
+use tola_build::config::SiteConfig;
 use tola_build::modules::query::QueryResult;
 use tola_diagnostic::{Diagnostic, DiagnosticError, Severity};
 use tola_module::{LoadedModule, Query};
@@ -25,7 +25,7 @@ pub(crate) struct QueryOptions {
 }
 
 pub(in crate::cli) fn run(
-    config: Arc<ResolvedSiteConfig>,
+    config: Arc<SiteConfig>,
     args: &QueryArgs,
     resources: BuildResources,
     output: &CommandOutput,
@@ -46,7 +46,7 @@ pub(in crate::cli) fn run(
 }
 
 pub(super) fn evaluate(
-    config: Arc<ResolvedSiteConfig>,
+    config: Arc<SiteConfig>,
     directory: &Path,
     target: &str,
     label: Option<&str>,
@@ -81,7 +81,7 @@ pub(super) fn evaluate(
             "choose a module-qualified query such as `notes.nodes`, or an explicit `./query.typ` file",
         )?;
         let modules = tola_build::modules::load_modules(
-            config.get_root(),
+            config.root(),
             config.vendor().path.as_deref(),
             config.modules(),
             resources.input_mode(),
@@ -123,7 +123,7 @@ fn query_file_hint(message: impl Into<String>) -> anyhow::Error {
 
 /// A module-declared query's inputs.
 pub(in crate::cli) struct DeclaredQuery<'a> {
-    pub(in crate::cli) config: Arc<ResolvedSiteConfig>,
+    pub(in crate::cli) config: Arc<SiteConfig>,
     pub(in crate::cli) module: &'a LoadedModule,
     pub(in crate::cli) query: &'a Query,
     pub(in crate::cli) name: &'a str,

@@ -1,19 +1,16 @@
-//! A source's logical path and the physical target it resolves to.
+//! Logical and physical path identity for filesystem sources.
 
 use std::path::{Path, PathBuf};
 
-/// A source's logical path and observed physical target.
-///
-/// Present sources retain their canonical target. A missing optional source
-/// retains its normalized spelling and is never reported as canonical.
+/// Logical path and observed physical target of a filesystem source.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct FilesystemSourceIdentity {
     logical: PathBuf,
-    physical: FilesystemSourceLocated,
+    physical: PhysicalPath,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-enum FilesystemSourceLocated {
+enum PhysicalPath {
     Canonical(PathBuf),
     Normalized(PathBuf),
 }
@@ -30,14 +27,14 @@ impl FilesystemSourceIdentity {
     pub fn canonical(logical: PathBuf, canonical: PathBuf) -> Self {
         Self {
             logical,
-            physical: FilesystemSourceLocated::Canonical(canonical),
+            physical: PhysicalPath::Canonical(canonical),
         }
     }
 
     pub fn normalized(logical: PathBuf, physical: PathBuf) -> Self {
         Self {
             logical,
-            physical: FilesystemSourceLocated::Normalized(physical),
+            physical: PhysicalPath::Normalized(physical),
         }
     }
 
@@ -47,79 +44,68 @@ impl FilesystemSourceIdentity {
 
     pub fn canonical_path(&self) -> Option<&Path> {
         match &self.physical {
-            FilesystemSourceLocated::Canonical(path) => Some(path),
-            FilesystemSourceLocated::Normalized(_) => None,
+            PhysicalPath::Canonical(path) => Some(path),
+            PhysicalPath::Normalized(_) => None,
         }
     }
 
     pub fn physical_path(&self) -> &Path {
         match &self.physical {
-            FilesystemSourceLocated::Canonical(path)
-            | FilesystemSourceLocated::Normalized(path) => path,
+            PhysicalPath::Canonical(path) | PhysicalPath::Normalized(path) => path,
         }
     }
 
-    pub fn changed_paths_intersect(&self, changed_paths: &[PathBuf]) -> bool {
-        changed_paths
-            .iter()
-            .any(|changed| self.intersects(&Self::from_path(changed)))
+    pub fn changed_paths_intersect(&self, changed: &[PathBuf]) -> bool {
+        changed.iter().any(|p| self.intersects(&Self::from_path(p)))
     }
 
-    /// Whether both logical and physical paths are within the corresponding boundary paths.
+    /// Return whether both logical and physical paths sit within `boundary`.
     pub fn is_within(&self, boundary: &Self) -> bool {
         path_is_within(self.logical_path(), boundary.logical_path())
             && path_is_within(self.physical_path(), boundary.physical_path())
     }
 
-    /// Whether an event path intersects this source's logical or physical path.
-    /// Ancestor events count because replacing an ancestor can change the source.
+    /// Return whether `path` intersects this source's logical or physical path (including ancestors).
     pub fn intersects_path(&self, path: &Path) -> bool {
-        let path = Self::from_path(path);
-        self.intersects(&path)
+        self.intersects(&Self::from_path(path))
     }
 
-    /// Whether logical or physical ownership intersects under native and
-    /// portable path identities.
+    /// Return whether logical or physical paths intersect under native or portable identities.
     pub fn intersects(&self, other: &Self) -> bool {
-        [self.logical_path(), self.physical_path()]
+        let lhs = [self.logical_path(), self.physical_path()];
+        let rhs = [other.logical_path(), other.physical_path()];
+        if lhs
             .into_iter()
-            .any(|left| {
-                [other.logical_path(), other.physical_path()]
-                    .into_iter()
-                    .any(|right| {
-                        paths_intersect(left, right)
-                            || portable_path_identities_intersect(left, right)
-                    })
-            })
+            .any(|l| rhs.into_iter().any(|r| paths_intersect(l, r)))
+        {
+            return true;
+        }
+        let lhs_keys = lhs.map(portable_path_key);
+        let rhs_keys = rhs.map(portable_path_key);
+        lhs_keys.iter().flatten().any(|l| {
+            rhs_keys
+                .iter()
+                .flatten()
+                .any(|r| l.starts_with(r) || r.starts_with(l))
+        })
     }
 }
 
-pub fn paths_intersect(left: &Path, right: &Path) -> bool {
-    left == right || left.starts_with(right) || right.starts_with(left)
-}
-
-fn portable_path_identities_intersect(left: &Path, right: &Path) -> bool {
-    let Some(left) = portable_path_key(left) else {
-        return false;
-    };
-    let Some(right) = portable_path_key(right) else {
-        return false;
-    };
-    left.starts_with(&right) || right.starts_with(&left)
+pub fn paths_intersect(lhs: &Path, rhs: &Path) -> bool {
+    lhs == rhs || lhs.starts_with(rhs) || rhs.starts_with(lhs)
 }
 
 fn path_is_within(path: &Path, boundary: &Path) -> bool {
     path.starts_with(boundary)
         || portable_path_key(path)
             .zip(portable_path_key(boundary))
-            .is_some_and(|(path, boundary)| path.starts_with(&boundary))
+            .is_some_and(|(p, b)| p.starts_with(&b))
 }
 
 fn portable_path_key(path: &Path) -> Option<Vec<String>> {
     path.components()
-        .map(|component| {
-            component
-                .as_os_str()
+        .map(|comp| {
+            comp.as_os_str()
                 .to_str()
                 .map(tola_address::portable_collision_key)
         })
@@ -133,15 +119,15 @@ mod tests {
     use std::os::unix::fs::symlink;
 
     #[test]
-    fn removed_alias_intersects_physical_tree() {
-        let directory = tempfile::tempdir().unwrap();
-        let real = directory.path().join("real");
-        let alias = directory.path().join("alias");
+    fn alias_intersects_physical() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        let alias = dir.path().join("alias");
         fs::create_dir(&real).unwrap();
         symlink(&real, &alias).unwrap();
         fs::write(real.join("member.js"), "before").unwrap();
-        let identity = FilesystemSourceIdentity::from_path(&real);
+        let id = FilesystemSourceIdentity::from_path(&real);
         fs::remove_file(alias.join("member.js")).unwrap();
-        assert!(identity.changed_paths_intersect(&[alias.join("member.js")]));
+        assert!(id.changed_paths_intersect(&[alias.join("member.js")]));
     }
 }

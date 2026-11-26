@@ -1,10 +1,7 @@
-//! Tola's typed adapter over Typst's synthesized code highlighting.
+//! Typed adapter over Typst's synthesized code highlighting.
 //!
-//! The adapter reads the `raw` element Typst already synthesized and replaces each line's body
-//! with runs carrying the resolved styles of up to two appearances as local CSS custom
-//! properties. Text, line numbers, and line spans stay exactly as Typst synthesized them, and the
-//! optional dark appearance is a clone of the same element synthesized through the public
-//! `Synthesize` capability, never a second classification.
+//! Replaces each synthesized `RawLine` body with runs carrying primary and optional dark styles as
+//! local CSS custom properties, preserving text, line numbers, and `span_offset` invariants.
 
 use std::collections::BTreeMap;
 
@@ -21,26 +18,21 @@ use typst::syntax::Span;
 use typst::text::{LinebreakElem, RawElem, RawLine, TextElem, UnderlineElem};
 use typst_html::{HtmlAttr, HtmlAttrs, HtmlElem, attr, tag};
 
-/// The class every rendered code element carries.
 const CODE_CLASS: &str = "tola-code";
+const LANG_ATTR: &str = "data-lang";
 
-/// The attribute carrying the author's language tag.
-const LANG_ATTRIBUTE: &str = "data-lang";
+const COLOR_PROP: &str = "--tola-code-color";
+const WEIGHT_PROP: &str = "--tola-code-weight";
+const STYLE_PROP: &str = "--tola-code-style";
+const DECORATION_PROP: &str = "--tola-code-decoration";
+const DARK_COLOR_PROP: &str = "--tola-code-dark-color";
+const DARK_WEIGHT_PROP: &str = "--tola-code-dark-weight";
+const DARK_STYLE_PROP: &str = "--tola-code-dark-style";
+const DARK_DECORATION_PROP: &str = "--tola-code-dark-decoration";
 
-/// The custom properties one run carries, primary appearance first.
-const COLOR_PROPERTY: &str = "--tola-code-color";
-const WEIGHT_PROPERTY: &str = "--tola-code-weight";
-const STYLE_PROPERTY: &str = "--tola-code-style";
-const DECORATION_PROPERTY: &str = "--tola-code-decoration";
-const DARK_COLOR_PROPERTY: &str = "--tola-code-dark-color";
-const DARK_WEIGHT_PROPERTY: &str = "--tola-code-dark-weight";
-const DARK_STYLE_PROPERTY: &str = "--tola-code-dark-style";
-const DARK_DECORATION_PROPERTY: &str = "--tola-code-dark-decoration";
-
-/// The token an unresolved style declares; a CSS-wide keyword would act on the custom property.
+/// Clears an inherited primary custom property without triggering CSS-wide keyword behavior.
 const OFF_TOKEN: &str = "none";
 
-/// The `render-code` host binding: render one synthesized `raw` element as Tola's code markup.
 #[func(contextual)]
 pub(super) fn tola_render_code(
     engine: &mut Engine,
@@ -54,67 +46,63 @@ pub(super) fn tola_render_code(
 ) -> SourceResult<Content> {
     let span = raw.span();
     let styles = context.styles().at(span)?;
-    let element = raw
+    let elem = raw
         .to_packed::<RawElem>()
         .ok_or("`render-code` needs the raw element the show rule replaced")
         .at(span)?;
 
-    // `raw.theme: none` disables highlighting entirely, the dark appearance included, so the
-    // element goes back to Typst's own display rule unchanged.
-    if matches!(element.theme.get_ref(styles), Smart::Custom(None)) {
+    // `raw.theme: none` disables highlighting entirely, including the dark appearance.
+    if matches!(elem.theme.get_ref(styles), Smart::Custom(None)) {
         return Ok(raw);
     }
 
-    let raw = super::code_syntaxes::with_bundled_syntax(element, engine, styles)?
+    let raw = super::code_syntaxes::with_bundled_syntax(elem, engine, styles)?
         .map(Packed::pack)
         .unwrap_or(raw);
-    let element = raw.to_packed::<RawElem>().expect("a raw element");
-    let lines = element.lines.as_deref().unwrap_or_default();
-    let dark = match dark {
-        Some(dark_element) => Some(synthesize_dark(engine, &raw, &dark_element, styles, span)?),
-        None => None,
-    };
+    let elem = raw.to_packed::<RawElem>().expect("a raw element");
+    let lines = elem.lines.as_deref().unwrap_or_default();
+    let dark = dark
+        .as_ref()
+        .map(|el| synthesize_dark(engine, &raw, el, styles, span))
+        .transpose()?;
     let dark_lines = dark
         .as_ref()
-        .and_then(|content| content.to_packed::<RawElem>())
-        .and_then(|element| element.lines.as_deref());
+        .and_then(|c| c.to_packed::<RawElem>())
+        .and_then(|el| el.lines.as_deref());
 
-    let mut rendered = Vec::with_capacity(2 * lines.len());
-    for (index, line) in lines.iter().enumerate() {
-        if index != 0 {
-            rendered.push(LinebreakElem::shared().clone());
+    let mut out = Vec::with_capacity(2 * lines.len());
+    for (idx, line) in lines.iter().enumerate() {
+        if idx != 0 {
+            out.push(LinebreakElem::shared().clone());
         }
-        rendered.push(render_line(
+        out.push(render_line(
             line,
-            dark_lines.and_then(|lines| lines.get(index)),
+            dark_lines.and_then(|ls| ls.get(idx)),
             span,
         )?);
     }
 
     container(
-        element.block.get(styles),
-        element.lang.get_cloned(styles),
-        code_attributes(attrs, span)?,
-        Content::sequence(rendered),
+        elem.block.get(styles),
+        elem.lang.get_cloned(styles),
+        code_attrs(attrs, span)?,
+        Content::sequence(out),
         span,
     )
 }
 
-/// Synthesize the dark appearance from a clone of `raw` that takes `dark_element`'s loaded theme.
-///
-/// Every other field stays the primary's, so both appearances describe the same text.
 fn synthesize_dark(
     engine: &mut Engine,
     raw: &Content,
-    dark_element: &Content,
+    dark_el: &Content,
     styles: StyleChain,
     span: Span,
 ) -> SourceResult<Content> {
-    let dark_element = dark_element
+    let dark_el = dark_el
         .to_packed::<RawElem>()
         .ok_or("`dark-theme` must name a theme file")
         .at(span)?;
-    let theme = dark_element.theme.get_cloned(styles);
+    let theme = dark_el.theme.get_cloned(styles);
     if !matches!(theme, Smart::Custom(Some(_))) {
         bail!(
             span,
@@ -125,44 +113,33 @@ fn synthesize_dark(
 
     let mut dark = raw.clone();
     dark.to_packed_mut::<RawElem>()
-        .expect("the clone of a raw element is a raw element")
+        .expect("cloned raw element")
         .theme
         .set(theme);
     dark.with_mut::<dyn Synthesize>()
-        .expect("a raw element is synthesized through the public capability")
+        .expect("raw element implements Synthesize")
         .synthesize(engine, styles)?;
     Ok(dark)
 }
 
-/// One line as Typst's own `RawLine`, with the merged runs as its body.
-///
-/// The rebuilt line keeps the synthesized line's span, and each run the offset of its first byte
-/// within the line, so a span inside the new body still names the same source text.
 fn render_line(
     line: &Packed<RawLine>,
     dark_line: Option<&Packed<RawLine>>,
-    element_span: Span,
+    elem_span: Span,
 ) -> SourceResult<Content> {
-    let mut primary = Vec::new();
-    if collect_ranges(&line.body, ResolvedStyle::default(), &mut primary).is_err() {
-        return unrenderable(element_span);
-    }
+    let Ok(primary) = collect_line_ranges(&line.body) else {
+        return unrenderable(elem_span);
+    };
     let dark = match dark_line {
-        Some(dark_line) => {
-            if dark_line.text != line.text {
-                return unrenderable(element_span);
-            }
-            let mut ranges = Vec::new();
-            if collect_ranges(&dark_line.body, ResolvedStyle::default(), &mut ranges).is_err() {
-                return unrenderable(element_span);
-            }
-            Some(ranges)
-        }
+        Some(dl) if dl.text == line.text => match collect_line_ranges(&dl.body) {
+            Ok(ranges) => Some(ranges),
+            Err(UnexpectedBody) => return unrenderable(elem_span),
+        },
+        Some(_) => return unrenderable(elem_span),
         None => None,
     };
-    let merged = match merge_ranges(&primary, dark.as_deref(), line.text.len()) {
-        Ok(merged) => merged,
-        Err(AppearanceMismatch) => return unrenderable(element_span),
+    let Ok(merged) = merge_ranges(&primary, dark.as_deref(), line.text.len()) else {
+        return unrenderable(elem_span);
     };
 
     let span = line.span();
@@ -177,8 +154,8 @@ fn render_line(
         }
         start = end;
         runs.push(match style_declarations(range) {
-            Some(declarations) => HtmlElem::new(tag::span)
-                .with_attr(attr::style, declarations)
+            Some(decls) => HtmlElem::new(tag::span)
+                .with_attr(attr::style, decls)
                 .with_body(Some(piece))
                 .pack()
                 .spanned(span),
@@ -196,24 +173,27 @@ fn render_line(
     .pack())
 }
 
-/// Collect one synthesized line body's ranges, in order, as byte lengths of the line's text.
-///
-/// Collect one line body's ranges; a body shape beyond the known styles refuses the block.
+fn collect_line_ranges(body: &Content) -> Result<Vec<StyledRange>, UnexpectedBody> {
+    let mut ranges = Vec::new();
+    collect_ranges(body, TextStyle::default(), &mut ranges)?;
+    Ok(ranges)
+}
+
 fn collect_ranges(
     body: &Content,
-    style: ResolvedStyle,
+    style: TextStyle,
     ranges: &mut Vec<StyledRange>,
 ) -> Result<(), UnexpectedBody> {
-    if let Some(sequence) = body.to_packed::<SequenceElem>() {
-        for child in &sequence.children {
+    if let Some(seq) = body.to_packed::<SequenceElem>() {
+        for child in &seq.children {
             collect_ranges(child, style.clone(), ranges)?;
         }
     } else if let Some(html) = body.to_packed::<HtmlElem>() {
         let mut style = style;
-        if let Some(properties) = html.css.as_option() {
-            for property in properties.iter() {
-                if property.name == "color" {
-                    style.color = Some(property.value.to_string());
+        if let Some(props) = html.css.as_option() {
+            for prop in props.iter() {
+                if prop.name == "color" {
+                    style.color = Some(prop.value.to_string());
                 } else {
                     return Err(UnexpectedBody);
                 }
@@ -247,166 +227,153 @@ fn collect_ranges(
     Ok(())
 }
 
-/// Pair two appearances' ranges; a coverage disagreement is refused, never padded or truncated.
 fn merge_ranges(
     primary: &[StyledRange],
     dark: Option<&[StyledRange]>,
     total: usize,
 ) -> Result<Vec<MergedRange>, AppearanceMismatch> {
-    let covered = |ranges: &[StyledRange]| ranges.iter().map(|range| range.len).sum::<usize>();
-    if covered(primary) != total || dark.is_some_and(|ranges| covered(ranges) != total) {
+    let covered = |rs: &[StyledRange]| rs.iter().map(|r| r.len).sum::<usize>();
+    if covered(primary) != total || dark.is_some_and(|rs| covered(rs) != total) {
         return Err(AppearanceMismatch);
     }
 
     let mut merged = Vec::new();
-    let (mut primary_index, mut dark_index) = (0, 0);
-    let (mut primary_start, mut dark_start) = (0, 0);
-    let mut position = 0;
-    while position < total {
-        let primary_end = primary_start + primary[primary_index].len;
-        let dark_end = match dark {
-            Some(ranges) => dark_start + ranges[dark_index].len,
-            None => total,
-        };
-        let end = primary_end.min(dark_end);
-        if end > position {
+    let (mut p_idx, mut d_idx) = (0, 0);
+    let (mut p_start, mut d_start) = (0, 0);
+    let mut pos = 0;
+    while pos < total {
+        let p_end = p_start + primary[p_idx].len;
+        let d_end = dark.map_or(total, |rs| d_start + rs[d_idx].len);
+        let end = p_end.min(d_end);
+        if end > pos {
             merged.push(MergedRange {
-                len: end - position,
-                primary: primary[primary_index].style.clone(),
-                dark: dark.map(|ranges| ranges[dark_index].style.clone()),
+                len: end - pos,
+                primary: primary[p_idx].style.clone(),
+                dark: dark.map(|rs| rs[d_idx].style.clone()),
             });
         }
-        position = end;
-        if position == primary_end {
-            primary_index += 1;
-            primary_start = primary_end;
+        pos = end;
+        if pos == p_end {
+            p_idx += 1;
+            p_start = p_end;
         }
-        if position == dark_end && dark.is_some() {
-            dark_index += 1;
-            dark_start = dark_end;
+        if pos == d_end && dark.is_some() {
+            d_idx += 1;
+            d_start = d_end;
         }
     }
     Ok(merged)
 }
 
-/// The custom properties one merged range declares, or `None` when it renders as plain text.
-///
-/// A dark declaration is emitted only where it differs from the primary fallback: the stylesheet
-/// consumes a missing dark property as the primary one, so equal appearances share declarations. A
-/// style the dark appearance does not resolve is declared as [`OFF_TOKEN`], which clears the
-/// primary's declaration instead of inheriting it.
 fn style_declarations(range: &MergedRange) -> Option<String> {
-    let mut declarations = String::new();
-    let mut declare = |property: &str, value: &str| {
-        declarations.push_str(property);
-        declarations.push(':');
-        declarations.push_str(value);
-        declarations.push(';');
+    let mut out = String::new();
+    let mut push = |prop: &str, val: &str| {
+        out.push_str(prop);
+        out.push(':');
+        out.push_str(val);
+        out.push(';');
     };
 
     if let Some(color) = &range.primary.color {
-        declare(COLOR_PROPERTY, color);
+        push(COLOR_PROP, color);
     }
-    if range.primary.bold {
-        declare(WEIGHT_PROPERTY, "bold");
+    let flags = [
+        (
+            WEIGHT_PROP,
+            DARK_WEIGHT_PROP,
+            "bold",
+            range.primary.bold,
+            range.dark.as_ref().map(|d| d.bold),
+        ),
+        (
+            STYLE_PROP,
+            DARK_STYLE_PROP,
+            "italic",
+            range.primary.italic,
+            range.dark.as_ref().map(|d| d.italic),
+        ),
+        (
+            DECORATION_PROP,
+            DARK_DECORATION_PROP,
+            "underline",
+            range.primary.underline,
+            range.dark.as_ref().map(|d| d.underline),
+        ),
+    ];
+    for (prop, _, token, p_on, _) in flags {
+        if p_on {
+            push(prop, token);
+        }
     }
-    if range.primary.italic {
-        declare(STYLE_PROPERTY, "italic");
-    }
-    if range.primary.underline {
-        declare(DECORATION_PROPERTY, "underline");
-    }
-
     if let Some(dark) = &range.dark {
         if dark.color != range.primary.color {
-            declare(
-                DARK_COLOR_PROPERTY,
-                dark.color.as_deref().unwrap_or(OFF_TOKEN),
-            );
+            push(DARK_COLOR_PROP, dark.color.as_deref().unwrap_or(OFF_TOKEN));
         }
-        if dark.bold != range.primary.bold {
-            declare(
-                DARK_WEIGHT_PROPERTY,
-                if dark.bold { "bold" } else { OFF_TOKEN },
-            );
-        }
-        if dark.italic != range.primary.italic {
-            declare(
-                DARK_STYLE_PROPERTY,
-                if dark.italic { "italic" } else { OFF_TOKEN },
-            );
-        }
-        if dark.underline != range.primary.underline {
-            declare(
-                DARK_DECORATION_PROPERTY,
-                if dark.underline {
-                    "underline"
-                } else {
-                    OFF_TOKEN
-                },
-            );
+        for (_, dark_prop, token, p_on, d_on) in flags {
+            if let Some(d_on) = d_on
+                && d_on != p_on
+            {
+                push(dark_prop, if d_on { token } else { OFF_TOKEN });
+            }
         }
     }
 
-    (!declarations.is_empty()).then_some(declarations)
+    (!out.is_empty()).then_some(out)
 }
 
-/// The container's HTML attributes: `tola-code` extended by the author's.
-fn code_attributes(attrs: Dict, span: Span) -> SourceResult<BTreeMap<String, String>> {
-    let mut attributes = BTreeMap::new();
-    attributes.insert("class".to_owned(), CODE_CLASS.to_owned());
-    for (name, value) in attrs {
-        let name = crate::attribute_key(&name);
-        if name.eq_ignore_ascii_case(LANG_ATTRIBUTE) {
+fn code_attrs(attrs: Dict, span: Span) -> SourceResult<BTreeMap<String, String>> {
+    let mut out = BTreeMap::new();
+    out.insert("class".to_owned(), CODE_CLASS.to_owned());
+    for (name, val) in attrs {
+        let name = crate::attr_key(&name);
+        if name.eq_ignore_ascii_case(LANG_ATTR) {
             bail!(
                 span,
                 "`{name}` belongs to the rendered code";
                 hint: "set the language tag on the raw element"
             );
         }
-        let value = value.cast::<Str>().at(span)?;
-        crate::merge_attribute(&mut attributes, name, value.as_str());
+        let val = val.cast::<Str>().at(span)?;
+        crate::merge_attr(&mut out, name, val.as_str());
     }
-    Ok(attributes)
+    Ok(out)
 }
 
-/// The element Tola renders code into, around the rendered lines.
 fn container(
     block: bool,
     lang: Option<EcoString>,
-    attributes: BTreeMap<String, String>,
+    attrs: BTreeMap<String, String>,
     body: Content,
     span: Span,
 ) -> SourceResult<Content> {
-    let mut html_attributes = HtmlAttrs::new();
-    for (name, value) in attributes {
-        html_attributes.push(HtmlAttr::intern(&name).at(span)?, value);
+    let mut html_attrs = HtmlAttrs::new();
+    for (name, val) in attrs {
+        html_attrs.push(HtmlAttr::intern(&name).at(span)?, val);
     }
-    let language = HtmlAttr::constant(LANG_ATTRIBUTE);
+    let lang_attr = HtmlAttr::constant(LANG_ATTR);
     Ok(if block {
         let code = HtmlElem::new(tag::code)
-            .with_optional_attr(language, lang)
+            .with_optional_attr(lang_attr, lang)
             .with_body(Some(body))
             .pack()
             .spanned(span);
         BlockElem::packed(
             HtmlElem::new(tag::pre)
-                .with_attrs(html_attributes)
+                .with_attrs(html_attrs)
                 .with_body(Some(code))
                 .pack()
                 .spanned(span),
         )
     } else {
         HtmlElem::new(tag::code)
-            .with_attrs(html_attributes)
-            .with_optional_attr(language, lang)
+            .with_attrs(html_attrs)
+            .with_optional_attr(lang_attr, lang)
             .with_body(Some(body))
             .pack()
             .spanned(span)
     })
 }
 
-/// The refusal for a block whose synthesized appearances Tola cannot reproduce.
 fn unrenderable<T>(span: Span) -> SourceResult<T> {
     bail!(
         span,
@@ -415,36 +382,30 @@ fn unrenderable<T>(span: Span) -> SourceResult<T> {
     )
 }
 
-/// The style one appearance resolves for a byte range.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct ResolvedStyle {
+struct TextStyle {
     color: Option<String>,
     bold: bool,
     italic: bool,
     underline: bool,
 }
 
-/// One byte range of one appearance's resolved style.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct StyledRange {
     len: usize,
-    style: ResolvedStyle,
+    style: TextStyle,
 }
 
-/// One byte range with both appearances' resolved styles.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct MergedRange {
     len: usize,
-    primary: ResolvedStyle,
-    dark: Option<ResolvedStyle>,
+    primary: TextStyle,
+    dark: Option<TextStyle>,
 }
 
-/// The two appearances disagreed about the text of one line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct AppearanceMismatch;
 
-/// A line body held something other than the text, the style elements, and the color the adapter
-/// reproduces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct UnexpectedBody;
 
@@ -455,15 +416,13 @@ mod tests {
 
     use super::*;
 
-    /// One appearance range of `len` bytes carrying `style`.
-    fn range(len: usize, style: ResolvedStyle) -> StyledRange {
+    fn range(len: usize, style: TextStyle) -> StyledRange {
         StyledRange { len, style }
     }
 
-    /// Every text piece one body carries, in order.
     fn text_pieces(body: &Content) -> Vec<String> {
-        if let Some(sequence) = body.to_packed::<SequenceElem>() {
-            sequence.children.iter().flat_map(text_pieces).collect()
+        if let Some(seq) = body.to_packed::<SequenceElem>() {
+            seq.children.iter().flat_map(text_pieces).collect()
         } else if let Some(html) = body.to_packed::<HtmlElem>() {
             match html.body.as_option() {
                 Some(Some(child)) => text_pieces(child),
@@ -483,10 +442,11 @@ mod tests {
             Vec::new()
         }
     }
+
     #[test]
-    fn merge_refuses_disagreeing_ranges() {
-        let line = [range(5, ResolvedStyle::default())];
-        let short = [range(4, ResolvedStyle::default())];
+    fn merge_ranges_mismatch() {
+        let line = [range(5, TextStyle::default())];
+        let short = [range(4, TextStyle::default())];
 
         assert_eq!(
             merge_ranges(&line, Some(&short), 5),
@@ -494,8 +454,9 @@ mod tests {
         );
         assert_eq!(merge_ranges(&line, None, 4), Err(AppearanceMismatch));
     }
+
     #[test]
-    fn rendered_line_keeps_the_synthesized_text() {
+    fn render_line_utf8_text() {
         let body = Content::sequence(vec![
             html_span_filled(TextElem::packed("日本"), Color::from_u8(0xaa, 0, 0, 255)),
             TextElem::packed("語"),

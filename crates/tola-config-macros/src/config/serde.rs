@@ -181,7 +181,7 @@ mod tests {
     use syn::parse_quote;
 
     #[test]
-    fn rename_all_is_rejected() {
+    fn rename_all_rejected() {
         let attrs = vec![parse_quote!(#[serde(rename_all = "kebab-case")])];
         assert!(reject_serde_rename_all(&attrs).is_err());
     }

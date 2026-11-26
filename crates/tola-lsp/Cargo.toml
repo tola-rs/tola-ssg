@@ -3,7 +3,7 @@ name = "tola-lsp"
 version.workspace = true
 edition = "2024"
 rust-version.workspace = true
-description = "LSP server for Tola sites: completion, diagnostics, formatting, and tola/* requests"
+description = "Language server for Tola sites"
 license = "Apache-2.0"
 repository = "https://github.com/tola-rs/tola-ssg"
 

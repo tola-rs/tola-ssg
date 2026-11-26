@@ -8,7 +8,7 @@ use lsp_types::{
     CompletionItem, CompletionItemKind, CompletionTextEdit, InsertTextFormat, Range, TextEdit,
 };
 use tola_build::cancellation::BuildCancellation;
-use tola_build::config::ResolvedSiteConfig;
+use tola_build::config::SiteConfig;
 use tola_typst::TypstWorld;
 use tola_typst::typst::World;
 use tola_typst::typst::diag::EcoString;
@@ -34,7 +34,7 @@ struct IdeView<'w, 'p> {
 }
 
 struct IdeInventories<'w, 'p> {
-    config: &'w ResolvedSiteConfig,
+    config: &'w SiteConfig,
     boundary: &'w tola_typst::SourceBoundary,
     cancellation: &'w BuildCancellation,
     package_access: &'p PackageAccess<'p>,
@@ -115,7 +115,7 @@ impl IdeWorld for IdeView<'_, '_> {
 
 pub(super) fn completion(
     world: &TypstWorld,
-    config: &ResolvedSiteConfig,
+    config: &SiteConfig,
     package_access: &PackageAccess<'_>,
     source: &Source,
     cursor: usize,

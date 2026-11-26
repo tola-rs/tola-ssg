@@ -5,7 +5,7 @@ use std::sync::Arc;
 use typst::foundations::{Array, Dict, IntoValue};
 use typst::utils::LazyHash;
 
-use crate::config::ResolvedSiteConfig;
+use crate::config::SiteConfig;
 use crate::config::section::site::SiteLanguage;
 use crate::content::SourceRecords;
 use crate::mode::BuildMode;
@@ -24,7 +24,7 @@ impl SiteBindings {
     /// `mode` is the build's mode, or `None` for a compilation outside a build, such as editor
     /// diagnostics or `tola inspect`.
     pub(crate) fn from_config(
-        config: &ResolvedSiteConfig,
+        config: &SiteConfig,
         asset_urls: crate::asset::AssetUrls,
         mode: Option<BuildMode>,
     ) -> Self {
@@ -60,14 +60,14 @@ impl SiteBindings {
 
     pub(crate) fn prepare_modules(
         mut self,
-        prepared: &tola_module::prepared::PreparedModules,
+        prepared: &tola_module::bundle::ModuleBundle,
     ) -> anyhow::Result<Self> {
         self.modules = crate::build::module_inputs::contexts(prepared, &self.asset_urls)?;
         Ok(self)
     }
 }
 
-fn asset_origins(config: &ResolvedSiteConfig, assets: &crate::asset::AssetUrls) -> Dict {
+fn asset_origins(config: &SiteConfig, assets: &crate::asset::AssetUrls) -> Dict {
     assets
         .origins()
         .filter_map(|(declared, origin)| {
@@ -76,13 +76,13 @@ fn asset_origins(config: &ResolvedSiteConfig, assets: &crate::asset::AssetUrls) 
             };
             Some((
                 declared.trim_start_matches('/').into(),
-                tola_diagnostic::display_path(source, config.get_root()).into_value(),
+                tola_diagnostic::display_path(source, config.root()).into_value(),
             ))
         })
         .collect()
 }
 
-fn site_values(config: &ResolvedSiteConfig, mode: Option<BuildMode>) -> Dict {
+fn site_values(config: &SiteConfig, mode: Option<BuildMode>) -> Dict {
     let site_config = &config.site;
     let mut site = Dict::new();
     site.insert("origin".into(), site_config.origin.as_deref().into_value());

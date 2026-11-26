@@ -1,18 +1,18 @@
-//! The icon identity grammar: the namespace and name every icon is mounted and named by.
+//! Icon identity grammar for collection namespaces and icon names.
 
 use std::{borrow::Borrow, fmt, str::FromStr};
 
 pub(crate) const MAX_ICON_NAME_BYTES: usize = 512;
 
-/// An icon collection namespace chosen by the caller.
+/// Caller-chosen icon collection namespace.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct IconCollectionName(String);
 
-/// An icon name within a collection, independent of its resource filename.
+/// Icon name within a collection, independent of its source filename.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct IconName(String);
 
-/// A name cannot be represented by the icon identity grammar.
+/// Error returned when an icon or collection name violates the identity grammar.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 #[error(
     "an icon name must be 1–{} ASCII letters, digits, hyphens, or underscores, start with a letter or digit, and not end with a hyphen",
@@ -20,14 +20,14 @@ pub struct IconName(String);
 )]
 pub struct InvalidIconName;
 
-pub(crate) fn validate_name(value: &str) -> Result<(), InvalidIconName> {
-    if value.is_empty()
-        || value.len() > MAX_ICON_NAME_BYTES
-        || !value.as_bytes()[0].is_ascii_alphanumeric()
-        || value.ends_with('-')
-        || !value
+pub(crate) fn validate_name(val: &str) -> Result<(), InvalidIconName> {
+    if val.is_empty()
+        || val.len() > MAX_ICON_NAME_BYTES
+        || !val.as_bytes()[0].is_ascii_alphanumeric()
+        || val.ends_with('-')
+        || !val
             .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
     {
         return Err(InvalidIconName);
     }
@@ -37,7 +37,7 @@ pub(crate) fn validate_name(value: &str) -> Result<(), InvalidIconName> {
 macro_rules! icon_name {
     ($name:ident) => {
         impl $name {
-            /// The name, which always satisfies the identity grammar.
+            /// Return the validated name slice.
             pub fn as_str(&self) -> &str {
                 &self.0
             }
@@ -46,15 +46,15 @@ macro_rules! icon_name {
         impl FromStr for $name {
             type Err = InvalidIconName;
 
-            fn from_str(value: &str) -> Result<Self, Self::Err> {
-                validate_name(value)?;
-                Ok(Self(value.to_owned()))
+            fn from_str(val: &str) -> Result<Self, Self::Err> {
+                validate_name(val)?;
+                Ok(Self(val.to_owned()))
             }
         }
 
         impl fmt::Display for $name {
-            fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter.write_str(self.as_str())
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str(self.as_str())
             }
         }
 
@@ -75,7 +75,7 @@ macro_rules! icon_name {
 icon_name!(IconCollectionName);
 icon_name!(IconName);
 
-/// A site collection or a collection belonging to a configured module instance.
+/// Site collection key or a collection belonging to a configured module instance.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct IconCollectionKey(String);
 
@@ -92,12 +92,12 @@ impl IconCollectionKey {
         }
     }
 
-    /// Unambiguous spelling used in virtual reads, lock entries, and vendored paths.
+    /// Return the canonical key string used in virtual reads, lock entries, and vendored paths.
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
-    /// The collection's module alias, or none for a site collection.
+    /// Return the owning module alias, or `None` for a site collection.
     pub fn module(&self) -> Option<&str> {
         self.0
             .strip_prefix("modules/")
@@ -105,7 +105,7 @@ impl IconCollectionKey {
             .map(|(module, _)| module)
     }
 
-    /// The collection name within its owner.
+    /// Return the collection name within its owner.
     pub fn name(&self) -> &str {
         self.0.rsplit('/').next().expect("a collection has a name")
     }
@@ -113,19 +113,20 @@ impl IconCollectionKey {
 
 impl FromStr for IconCollectionKey {
     type Err = InvalidIconName;
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        if let Some(path) = value.strip_prefix("modules/") {
-            let (module, collection) = path.split_once('/').ok_or(InvalidIconName)?;
-            Self::new(Some(module), collection)
+
+    fn from_str(val: &str) -> Result<Self, Self::Err> {
+        if let Some(path) = val.strip_prefix("modules/") {
+            let (module, col) = path.split_once('/').ok_or(InvalidIconName)?;
+            Self::new(Some(module), col)
         } else {
-            Self::new(None, value)
+            Self::new(None, val)
         }
     }
 }
 
 impl fmt::Display for IconCollectionKey {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.0)
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
     }
 }
 
@@ -135,9 +136,7 @@ impl Borrow<str> for IconCollectionKey {
     }
 }
 
-/// An unambiguous collection and icon identity, written as `collection:name`.
-///
-/// Consumers that map this pair into another spelling must detect collisions in that mapping.
+/// Unambiguous collection and icon identity formatted as `collection:name`.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct IconId {
     collection: IconCollectionKey,
@@ -145,7 +144,7 @@ pub struct IconId {
 }
 
 impl IconId {
-    /// Validate both parts of an icon identity.
+    /// Validate and construct an icon identity from collection and name parts.
     pub fn new(collection: &str, name: &str) -> Result<Self, InvalidIconName> {
         Ok(Self {
             collection: collection.parse()?,
@@ -158,7 +157,7 @@ impl IconId {
         self.collection.as_str()
     }
 
-    /// Return the icon's name within its collection.
+    /// Return the icon name within its collection.
     pub fn name(&self) -> &str {
         self.name.as_str()
     }
@@ -167,15 +166,15 @@ impl IconId {
 impl FromStr for IconId {
     type Err = InvalidIconName;
 
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        let (collection, name) = value.split_once(':').ok_or(InvalidIconName)?;
-        Self::new(collection, name)
+    fn from_str(val: &str) -> Result<Self, Self::Err> {
+        let (col, name) = val.split_once(':').ok_or(InvalidIconName)?;
+        Self::new(col, name)
     }
 }
 
 impl fmt::Display for IconId {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "{}:{}", self.collection, self.name)
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}:{}", self.collection, self.name)
     }
 }
 
@@ -184,13 +183,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn identity_separates_collection_from_name() {
-        let first: IconId = "a-b:c".parse().unwrap();
-        let second: IconId = "a:b-c".parse().unwrap();
-        assert_ne!(first, second);
-        assert_eq!(first.collection(), "a-b");
-        assert_eq!(first.name(), "c");
-        assert_eq!(first.to_string(), "a-b:c");
+    fn id_splits_collection_and_name() {
+        let a: IconId = "a-b:c".parse().unwrap();
+        let b: IconId = "a:b-c".parse().unwrap();
+        assert_ne!(a, b);
+        assert_eq!(a.collection(), "a-b");
+        assert_eq!(a.name(), "c");
+        assert_eq!(a.to_string(), "a-b:c");
     }
 
     #[test]

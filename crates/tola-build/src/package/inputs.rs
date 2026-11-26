@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 
-use crate::config::ResolvedSiteConfig;
+use crate::config::SiteConfig;
 use crate::filesystem::SourceOverrides;
 use crate::icon::IconInventory;
 
@@ -10,7 +10,7 @@ use crate::cancellation::BuildCancellation;
 use crate::resources::BuildResources;
 
 pub(crate) fn prepare_icons(
-    config: &ResolvedSiteConfig,
+    config: &SiteConfig,
     resources: &BuildResources,
     cancellation: &BuildCancellation,
     retained_icons: &mut Option<IconInventory>,

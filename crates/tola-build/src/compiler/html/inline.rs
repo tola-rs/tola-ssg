@@ -1,0 +1,330 @@
+//! CSS and JavaScript payloads inside generated HTML documents.
+
+use tola_minify::{CssMinifyError, JsKind, JsMinifyError, MinifiedLanguages};
+use tola_typst::{
+    BundleCancellation, BundleCompilation, HtmlRawText, HtmlRawTextError, TypstWorld,
+};
+use typst::syntax::{Span, VirtualPath};
+
+use tola_diagnostic::{Diagnostic, Location, Severity};
+
+/// Minify the stylesheet and script payloads of one compiled Bundle.
+pub(crate) fn minify_generated_payloads(
+    compilation: &mut BundleCompilation,
+    world: &TypstWorld,
+    minified: MinifiedLanguages,
+    diagnostics: &mut Vec<Diagnostic>,
+    cancellation: &BundleCancellation,
+) -> Result<usize, HtmlRawTextError> {
+    let mut unminified = Vec::new();
+    let rewritten =
+        compilation.rewrite_html_raw_text(cancellation, |document, kind, span, text| {
+            let enabled = match kind {
+                HtmlRawText::Stylesheet => minified.css,
+                HtmlRawText::Script | HtmlRawText::Module => minified.javascript,
+            };
+            if !enabled {
+                return None;
+            }
+            let minified_payload = match kind {
+                HtmlRawText::Stylesheet => {
+                    tola_minify::minify_css(text).map_err(InlineMinifyError::css)
+                }
+                HtmlRawText::Script => tola_minify::minify_js(text, JsKind::Classic)
+                    .map_err(InlineMinifyError::javascript),
+                HtmlRawText::Module => tola_minify::minify_js(text, JsKind::Module)
+                    .map_err(InlineMinifyError::javascript),
+            };
+            match minified_payload {
+                Ok(minified) => Some(minified),
+                Err(failure) => {
+                    unminified.push(unminified_payload(world, document, span, kind, failure));
+                    None
+                }
+            }
+        })?;
+    diagnostics.extend(tola_diagnostic::collapse_repeated(unminified));
+    Ok(rewritten)
+}
+
+/// The identity of one payload written in source: its kind and the location that wrote it.
+#[derive(PartialEq, Eq, Hash)]
+struct InlineAssetKey {
+    kind: HtmlRawText,
+    path: String,
+    line: Option<usize>,
+    column: Option<usize>,
+}
+
+/// The warning one unminified payload is reported with, its identity, and the document it reached.
+fn unminified_payload(
+    world: &TypstWorld,
+    document: &VirtualPath,
+    span: Span,
+    kind: HtmlRawText,
+    failure: InlineMinifyError,
+) -> (InlineAssetKey, Diagnostic, String) {
+    let location = payload_location(world, document, span);
+    let identity = InlineAssetKey {
+        kind,
+        path: location.path.clone(),
+        line: location.line,
+        column: location.column,
+    };
+    let (payload, switch) = match kind {
+        HtmlRawText::Stylesheet => ("stylesheet", "build.minify.css"),
+        HtmlRawText::Script | HtmlRawText::Module => ("script", "build.minify.javascript"),
+    };
+    let (reason, parser_position) = match failure {
+        InlineMinifyError::Syntax {
+            reason,
+            line,
+            column,
+        } => (reason, Some((line, column))),
+        InlineMinifyError::Unexpected { reason } => (reason, None),
+    };
+    let mut diagnostic = Diagnostic::at_location(
+        tola_diagnostic::codes::build::MINIFY,
+        Severity::Warning,
+        location,
+        format!("cannot minify the {payload} this document writes"),
+    )
+    .with_note(reason);
+    if let Some((line, column)) = parser_position {
+        diagnostic = diagnostic.with_note(format!(
+            "the parser stopped at line {line}, column {column} of the {payload}"
+        ));
+    }
+    let diagnostic = diagnostic
+        .with_note(format!("the {payload} is kept unchanged"))
+        .with_help(format!("Fix the {payload}, or turn off `{switch}`"));
+    (
+        identity,
+        diagnostic,
+        document.get_without_slash().to_owned(),
+    )
+}
+
+/// Where one payload came from: the source that wrote it, or the document that has it.
+fn payload_location(world: &TypstWorld, document: &VirtualPath, span: Span) -> Location {
+    match crate::compiler::source_location(world, span) {
+        Some(location) => location,
+        None => Location {
+            file: None,
+            path: document.get_without_slash().to_owned(),
+            line: None,
+            column: None,
+            range: None,
+            source_lines: Vec::new(),
+        },
+    }
+}
+
+/// What one payload's minification could not do, as the site author reads it.
+enum InlineMinifyError {
+    /// The parser's own reason and one-based position inside the payload.
+    Syntax {
+        reason: String,
+        line: u32,
+        column: u32,
+    },
+    Unexpected {
+        reason: String,
+    },
+}
+
+impl InlineMinifyError {
+    fn css(error: CssMinifyError) -> Self {
+        match error {
+            CssMinifyError::Syntax {
+                reason,
+                line,
+                column,
+            } => Self::Syntax {
+                reason,
+                line,
+                column,
+            },
+            // Minifier failures Tola's options cannot produce still report honestly.
+            other => Self::Unexpected {
+                reason: other.to_string(),
+            },
+        }
+    }
+
+    fn javascript(error: JsMinifyError) -> Self {
+        match error {
+            JsMinifyError::Syntax {
+                reason,
+                line,
+                column,
+            } => Self::Syntax {
+                reason,
+                line,
+                column,
+            },
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    use tola_typst::BundleOptions;
+
+    const SITE: &str = r#"
+#document("index.html")[
+  #html.style(".a { color: red; } .b { color: red; }")
+  #html.script("function answer() { return 6 * 7; }")
+  #html.elem("script", attrs: (type: "module"))[export const answer = 6 + 6]
+  #html.elem("script", attrs: (type: "application/json"))[#("{\"a\": 1, \"b\": 2}")]
+  #html.elem("p", attrs: (style: "color: red;"))[Body]
+]
+"#;
+
+    fn payloads(
+        compilation: &mut BundleCompilation,
+        cancellation: &BundleCancellation,
+    ) -> BTreeMap<&'static str, String> {
+        let mut found = BTreeMap::new();
+        compilation
+            .rewrite_html_raw_text(cancellation, |_, kind, _, text| {
+                let key = match kind {
+                    HtmlRawText::Stylesheet => "stylesheet",
+                    HtmlRawText::Script => "script",
+                    HtmlRawText::Module => "module",
+                };
+                found.insert(key, text.to_owned());
+                None
+            })
+            .unwrap();
+        found
+    }
+
+    fn exported_html(compilation: &BundleCompilation, cancellation: &BundleCancellation) -> String {
+        let entries = compilation
+            .export_entries(&BundleOptions::default(), cancellation, None)
+            .unwrap();
+        let entry = entries
+            .iter()
+            .find(|entry| entry.path().get_with_slash().ends_with("index.html"))
+            .expect("the site publishes index.html");
+        String::from_utf8(entry.bytes().to_vec()).unwrap()
+    }
+
+    #[test]
+    fn payloads_minified_in_place() {
+        let (_dir, mut realized, cancel) = crate::compiler::tests::realized_site(SITE);
+        let before = payloads(&mut realized.compilation, &cancel);
+        let mut diags = Vec::new();
+
+        let rewritten = minify_generated_payloads(
+            &mut realized.compilation,
+            &realized.world,
+            MinifiedLanguages::new(true, true),
+            &mut diags,
+            &cancel,
+        )
+        .unwrap();
+
+        assert_eq!(rewritten, 3);
+        assert!(diags.is_empty(), "{diags:?}");
+        let html = exported_html(&realized.compilation, &cancel);
+        assert!(
+            html.contains(&tola_minify::minify_css(&before["stylesheet"]).unwrap()),
+            "{html}"
+        );
+        assert!(
+            html.contains(&tola_minify::minify_js(&before["script"], JsKind::Classic).unwrap()),
+            "{html}"
+        );
+        assert!(
+            html.contains(&tola_minify::minify_js(&before["module"], JsKind::Module).unwrap()),
+            "{html}"
+        );
+        assert!(html.contains(r#"{"a": 1, "b": 2}"#), "{html}");
+        assert!(html.contains(r#"style="color: red;""#), "{html}");
+    }
+
+    #[test]
+    fn disabled_language_preserved() {
+        let (_dir, mut realized, cancel) = crate::compiler::tests::realized_site(SITE);
+        let before = payloads(&mut realized.compilation, &cancel);
+        let mut diags = Vec::new();
+
+        let rewritten = minify_generated_payloads(
+            &mut realized.compilation,
+            &realized.world,
+            MinifiedLanguages::new(true, false),
+            &mut diags,
+            &cancel,
+        )
+        .unwrap();
+
+        assert_eq!(rewritten, 1);
+        assert!(diags.is_empty(), "{diags:?}");
+        let html = exported_html(&realized.compilation, &cancel);
+        assert!(html.contains(&before["script"]), "{html}");
+        assert!(html.contains(&before["module"]), "{html}");
+    }
+
+    #[test]
+    fn unparsable_payload_warned_once() {
+        let site = r#"
+#let page(name) = document(name)[#html.style("@media (")]
+#page("index.html")
+#page("about.html")
+"#;
+        let (_dir, mut realized, cancel) = crate::compiler::tests::realized_site(site);
+        let before = payloads(&mut realized.compilation, &cancel);
+        let mut diags = Vec::new();
+
+        let rewritten = minify_generated_payloads(
+            &mut realized.compilation,
+            &realized.world,
+            MinifiedLanguages::new(true, true),
+            &mut diags,
+            &cancel,
+        )
+        .unwrap();
+
+        assert_eq!(rewritten, 0);
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        let diag = &diags[0];
+        assert_eq!(diag.code, tola_diagnostic::codes::build::MINIFY);
+        assert_eq!(diag.severity, Severity::Warning);
+        let loc = diag.location.as_ref().expect("a located warning");
+        assert_eq!(loc.path, "site.typ");
+        assert_eq!((loc.line, loc.column), (Some(2), Some(46)));
+        assert!(
+            !diag.message.contains("index.html") && !diag.message.contains("about.html"),
+            "{diag:?}"
+        );
+        let CssMinifyError::Syntax { reason, .. } =
+            tola_minify::minify_css("@media (").unwrap_err()
+        else {
+            panic!("the test stylesheet is unparsable");
+        };
+        assert!(diag.notes.iter().any(|n| n == &reason), "{diag:?}");
+        assert!(
+            diag.notes.iter().any(|n| n.contains("line 1, column 9")),
+            "{diag:?}"
+        );
+        assert!(
+            diag.notes
+                .iter()
+                .any(|n| n.contains("`index.html`") && n.contains("`about.html`")),
+            "{diag:?}"
+        );
+        assert!(
+            diag.help
+                .iter()
+                .any(|h| h.message.contains("build.minify.css")),
+            "{diag:?}"
+        );
+        let html = exported_html(&realized.compilation, &cancel);
+        assert!(html.contains(&before["stylesheet"]), "{html}");
+    }
+}

@@ -43,7 +43,7 @@ pub mod dev {
             "__TOLA_DEV_STATUS_CSS__",
             &escape_template_literal(&status_css),
         );
-        tola_minify::minify_javascript(&composed, tola_minify::JavaScriptKind::Classic)
+        tola_minify::minify_js(&composed, tola_minify::JsKind::Classic)
             .map_err(|error| RuntimeMinifyError::RuntimeSource(error.to_string()))
     }
 

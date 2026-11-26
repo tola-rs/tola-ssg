@@ -7,7 +7,7 @@ use thiserror::Error;
 
 use super::{BuildFailure, BuildRequest, BuildSession, SiteBuild};
 use crate::cancellation::BuildCancellation;
-use crate::config::ResolvedSiteConfig;
+use crate::config::SiteConfig;
 
 /// Why this site's build lock could not be taken.
 #[derive(Debug, Error)]
@@ -64,11 +64,11 @@ impl SiteBuildLock {
     /// `on_wait` is called once, only if another build holds the lock.
     /// Filesystem errors are returned immediately rather than treated as contention.
     pub fn acquire(
-        config: &ResolvedSiteConfig,
+        config: &SiteConfig,
         cancellation: &BuildCancellation,
         on_wait: impl FnOnce(),
     ) -> Result<Self, SiteBuildLockError> {
-        Self::acquire_at_root(config.get_root(), cancellation, on_wait)
+        Self::acquire_at_root(config.root(), cancellation, on_wait)
     }
 
     pub(crate) fn acquire_at_root(
@@ -122,7 +122,7 @@ impl SiteBuildLock {
     /// Acquiring the lock alone never changes the published tree.
     pub fn recover_output(
         &self,
-        config: &ResolvedSiteConfig,
+        config: &SiteConfig,
         cancellation: &BuildCancellation,
     ) -> Result<()> {
         let recover = || -> Result<()> {
@@ -131,11 +131,11 @@ impl SiteBuildLock {
             destination.write(self, cancellation)?;
             Ok(())
         };
-        recover().map_err(|error| super::diagnostic::with_write(error, config.get_root()))
+        recover().map_err(|error| super::diagnostic::with_write(error, config.root()))
     }
 
     /// Publish using this held authority; consumers must run after releasing it.
-    pub fn write_site(&self, build: &SiteBuild) -> Result<super::WriteOutcome> {
+    pub fn write_site(&self, build: &SiteBuild) -> Result<super::PublishSummary> {
         super::revision::write_site_locked(build, self)
     }
 }
@@ -156,7 +156,7 @@ impl SiteBuildGuard {
     /// `on_wait` runs once, and only if another coordinated build holds the lock.
     pub fn build(
         session: &mut BuildSession,
-        config: Arc<ResolvedSiteConfig>,
+        config: Arc<SiteConfig>,
         request: BuildRequest,
         on_wait: impl FnOnce(),
     ) -> Result<Self, BuildFailure> {
@@ -166,7 +166,7 @@ impl SiteBuildGuard {
     /// Restore interrupted output before compiling a disk-publishing attempt.
     pub fn build_for_publication(
         session: &mut BuildSession,
-        config: Arc<ResolvedSiteConfig>,
+        config: Arc<SiteConfig>,
         request: BuildRequest,
         on_wait: impl FnOnce(),
     ) -> Result<Self, BuildFailure> {
@@ -176,23 +176,23 @@ impl SiteBuildGuard {
     /// Hold the site lock through one attempt, recovering interrupted output first when writing.
     fn lock_and_build(
         session: &mut BuildSession,
-        config: Arc<ResolvedSiteConfig>,
+        config: Arc<SiteConfig>,
         request: BuildRequest,
         on_wait: impl FnOnce(),
         recover_output: bool,
     ) -> Result<Self, BuildFailure> {
         let lock = SiteBuildLock::acquire(&config, &request.cancellation, on_wait)
-            .map_err(|error| BuildFailure::before_attempt(error.into(), config.get_root()))?;
+            .map_err(|error| BuildFailure::before_attempt(error.into(), config.root()))?;
         if recover_output {
             lock.recover_output(&config, &request.cancellation)
-                .map_err(|error| BuildFailure::before_attempt(error, config.get_root()))?;
+                .map_err(|error| BuildFailure::before_attempt(error, config.root()))?;
         }
         let build = session.prepare(config, request).run()?;
         Ok(Self { build, lock })
     }
 
     /// Borrow this attempt's site lock rather than acquiring it recursively.
-    pub fn write_site(&self) -> Result<super::WriteOutcome> {
+    pub fn write_site(&self) -> Result<super::PublishSummary> {
         self.lock.write_site(&self.build)
     }
 
@@ -223,55 +223,55 @@ mod tests {
     use crate::resources::BuildResources;
 
     #[test]
-    fn hook_cannot_reenter_a_site_write() {
-        let directory = tempfile::tempdir().unwrap();
-        let config = load_test_config(directory.path(), "");
+    fn hook_reentry_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = load_test_config(dir.path(), "");
         let token = BuildCancellation::new();
-        let owner = SiteBuildLock::acquire(&config, &token, || {}).unwrap();
+        let owner = SiteBuildLock::acquire(&cfg, &token, || {}).unwrap();
         let canceller = crate::cancellation::BuildCanceller::new();
         let active = crate::hooks::active::enter(
             crate::config::section::build::hooks::HookStage::BeforeBuild,
         );
-        let refused = SiteBuildLock::acquire(&config, &canceller.token(), || canceller.cancel());
+        let refused = SiteBuildLock::acquire(&cfg, &canceller.token(), || canceller.cancel());
         assert!(matches!(
             refused,
             Err(SiteBuildLockError::NestedHook { .. })
         ));
         drop(active);
         drop(owner);
-        SiteBuildLock::acquire(&config, &token, || {}).unwrap();
+        SiteBuildLock::acquire(&cfg, &token, || {}).unwrap();
     }
 
     #[test]
-    fn cancelled_wait_leaves_the_lock_held() {
-        let directory = tempfile::tempdir().unwrap();
-        let config = crate::config::tests::load_test_config(directory.path(), "");
-        let owner = SiteBuildLock::acquire(&config, &BuildCancellation::default(), || {
+    fn cancelled_wait_preserves_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = crate::config::tests::load_test_config(dir.path(), "");
+        let owner = SiteBuildLock::acquire(&cfg, &BuildCancellation::default(), || {
             panic!("uncontended build waited")
         })
         .unwrap();
         let canceller = crate::cancellation::BuildCanceller::default();
-        let blocked = SiteBuildLock::acquire(&config, &canceller.token(), || canceller.cancel());
+        let blocked = SiteBuildLock::acquire(&cfg, &canceller.token(), || canceller.cancel());
         assert!(matches!(
             blocked.unwrap_err(),
             SiteBuildLockError::Cancelled(_)
         ));
         drop(owner);
-        SiteBuildLock::acquire(&config, &BuildCancellation::default(), || {
+        SiteBuildLock::acquire(&cfg, &BuildCancellation::default(), || {
             panic!("released build lock remained held")
         })
         .unwrap();
     }
 
     #[test]
-    fn live_attempt_holds_the_build_lock() {
-        let directory = tempfile::tempdir().unwrap();
-        std::fs::create_dir(directory.path().join("content")).unwrap();
-        std::fs::write(directory.path().join("site.typ"), "").unwrap();
-        let config = Arc::new(load_test_config(directory.path(), ""));
+    fn live_attempt_holds_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("content")).unwrap();
+        std::fs::write(dir.path().join("site.typ"), "").unwrap();
+        let cfg = Arc::new(load_test_config(dir.path(), ""));
         let holding = SiteBuildGuard::build(
             &mut BuildSession::with_resources(BuildResources::default()),
-            Arc::clone(&config),
+            Arc::clone(&cfg),
             BuildRequest::new(BuildMode::Production),
             || panic!("uncontended build waited"),
         )
@@ -283,7 +283,7 @@ mod tests {
                 let mut session = BuildSession::with_resources(BuildResources::default());
                 SiteBuildGuard::build(
                     &mut session,
-                    Arc::clone(&config),
+                    Arc::clone(&cfg),
                     BuildRequest::new(BuildMode::Production),
                     || started.send(()).unwrap(),
                 )

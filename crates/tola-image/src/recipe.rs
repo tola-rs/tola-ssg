@@ -1,8 +1,7 @@
-use std::hash::{Hash, Hasher};
-
 use serde::{Deserialize, Serialize};
 
 use super::{ImageFormat, ImageMetadata, check_dimensions};
+pub use crate::vector::{SvgRender, VectorGeometry};
 
 /// Why one resize request cannot become a recipe.
 #[derive(Debug, thiserror::Error)]
@@ -146,7 +145,7 @@ impl CropAnchor {
     ];
 
     /// The horizontal and vertical placement this anchor asks for.
-    fn alignments(self) -> (Placement, Placement) {
+    pub(super) fn alignments(self) -> (Placement, Placement) {
         use CropAnchor::*;
         match self {
             Center => (Placement::Center, Placement::Center),
@@ -164,7 +163,7 @@ impl CropAnchor {
 
 /// One axis of a crop anchor.
 #[derive(Clone, Copy)]
-enum Placement {
+pub(super) enum Placement {
     Start,
     Center,
     End,
@@ -172,7 +171,7 @@ enum Placement {
 
 impl Placement {
     /// Where the crop starts along an axis of length `span`, leaving `extent` for itself.
-    fn offset(self, span: f64, extent: f64) -> f64 {
+    pub(super) fn offset(self, span: f64, extent: f64) -> f64 {
         match self {
             Self::Start => 0.0,
             Self::Center => (span - extent) / 2.0,
@@ -276,203 +275,35 @@ pub(super) struct Crop {
 }
 
 impl Crop {
-    fn full(metadata: &ImageMetadata) -> Self {
+    fn full(meta: &ImageMetadata) -> Self {
         Self {
             x: 0,
             y: 0,
-            width: metadata.width,
-            height: metadata.height,
+            width: meta.width,
+            height: meta.height,
         }
     }
 
-    fn anchored(metadata: &ImageMetadata, width: u32, height: u32, anchor: CropAnchor) -> Self {
-        let (crop_width, crop_height) = if u64::from(metadata.width) * u64::from(height)
-            > u64::from(metadata.height) * u64::from(width)
-        {
-            (
-                ((u64::from(metadata.height) * u64::from(width)) / u64::from(height)).max(1) as u32,
-                metadata.height,
-            )
-        } else {
-            (
-                metadata.width,
-                ((u64::from(metadata.width) * u64::from(height)) / u64::from(width)).max(1) as u32,
-            )
-        };
-        let (horizontal, vertical) = anchor.alignments();
+    fn anchored(meta: &ImageMetadata, w: u32, h: u32, anchor: CropAnchor) -> Self {
+        let (crop_w, crop_h) =
+            if u64::from(meta.width) * u64::from(h) > u64::from(meta.height) * u64::from(w) {
+                (
+                    ((u64::from(meta.height) * u64::from(w)) / u64::from(h)).max(1) as u32,
+                    meta.height,
+                )
+            } else {
+                (
+                    meta.width,
+                    ((u64::from(meta.width) * u64::from(h)) / u64::from(w)).max(1) as u32,
+                )
+            };
+        let (horiz, vert) = anchor.alignments();
         Self {
-            x: horizontal.offset(f64::from(metadata.width), f64::from(crop_width)) as u32,
-            y: vertical.offset(f64::from(metadata.height), f64::from(crop_height)) as u32,
-            width: crop_width,
-            height: crop_height,
+            x: horiz.offset(f64::from(meta.width), f64::from(crop_w)) as u32,
+            y: vert.offset(f64::from(meta.height), f64::from(crop_h)) as u32,
+            width: crop_w,
+            height: crop_h,
         }
-    }
-}
-
-/// One exact coordinate or extent, compared by its bits so recipes stay `Eq` and `Hash`.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
-#[serde(into = "u64", try_from = "u64")]
-struct Exact(f64);
-
-impl Exact {
-    fn checked(value: f64) -> Result<Self, ImageRequestError> {
-        if !value.is_finite() {
-            return Err(ImageRequestError::SvgGeometryNotFinite);
-        }
-        Ok(Self(if value == 0.0 { 0.0 } else { value }))
-    }
-
-    const fn get(self) -> f64 {
-        self.0
-    }
-}
-
-impl From<Exact> for u64 {
-    fn from(value: Exact) -> Self {
-        value.0.to_bits()
-    }
-}
-
-impl TryFrom<u64> for Exact {
-    type Error = ImageRequestError;
-
-    fn try_from(bits: u64) -> Result<Self, Self::Error> {
-        Self::checked(f64::from_bits(bits))
-    }
-}
-
-impl PartialEq for Exact {
-    fn eq(&self, other: &Self) -> bool {
-        self.0.to_bits() == other.0.to_bits()
-    }
-}
-
-impl Eq for Exact {}
-
-impl Hash for Exact {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.0.to_bits().hash(state);
-    }
-}
-
-/// The source rectangle a vector recipe renders, in the SVG's own pixel coordinates.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct VectorGeometry {
-    source: (Exact, Exact),
-    crop: (Exact, Exact, Exact, Exact),
-}
-
-impl VectorGeometry {
-    fn new(source: (f64, f64), crop: (f64, f64, f64, f64)) -> Result<Self, ImageRequestError> {
-        let geometry = Self {
-            source: (Exact::checked(source.0)?, Exact::checked(source.1)?),
-            crop: (
-                Exact::checked(crop.0)?,
-                Exact::checked(crop.1)?,
-                Exact::checked(crop.2)?,
-                Exact::checked(crop.3)?,
-            ),
-        };
-        geometry.validate()?;
-        Ok(geometry)
-    }
-
-    /// The source's exact pixel size.
-    pub fn source(self) -> (f64, f64) {
-        (self.source.0.get(), self.source.1.get())
-    }
-
-    /// The rendered source rectangle: left, top, width, height.
-    pub fn crop(self) -> (f64, f64, f64, f64) {
-        (
-            self.crop.0.get(),
-            self.crop.1.get(),
-            self.crop.2.get(),
-            self.crop.3.get(),
-        )
-    }
-
-    fn validate(self) -> Result<(), ImageRequestError> {
-        let (source_width, source_height) = self.source();
-        let (x, y, width, height) = self.crop();
-        if !(source_width > 0.0
-            && source_height > 0.0
-            && x >= 0.0
-            && y >= 0.0
-            && width > 0.0
-            && height > 0.0)
-        {
-            return Err(ImageRequestError::SvgGeometryInvalid);
-        }
-        let slack_x = 1e-9 * source_width.max(1.0);
-        let slack_y = 1e-9 * source_height.max(1.0);
-        if !(x + width <= source_width + slack_x && y + height <= source_height + slack_y) {
-            return Err(ImageRequestError::SvgCropOutsideSource);
-        }
-        Ok(())
-    }
-}
-
-/// The SVG renderer identity: renderer revision plus the parsed source hash.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SvgRender {
-    revision: u16,
-    #[serde(with = "hash_hex")]
-    hash: u128,
-}
-
-impl SvgRender {
-    /// The identity for a source parsed by the current renderer.
-    pub fn new(hash: u128) -> Self {
-        Self {
-            revision: SVG_RENDERER_REVISION,
-            hash,
-        }
-    }
-
-    /// The renderer revision this identity was recorded with.
-    pub const fn revision(self) -> u16 {
-        self.revision
-    }
-
-    /// The parsed source hash: bytes plus the fonts the parse used.
-    pub const fn hash(self) -> u128 {
-        self.hash
-    }
-
-    fn validate(self) -> Result<(), ImageRequestError> {
-        if self.revision != SVG_RENDERER_REVISION {
-            return Err(ImageRequestError::SvgRendererUnsupported);
-        }
-        Ok(())
-    }
-}
-
-/// Bump when the SVG renderer stack changes pixels for the same source and recipe.
-pub const SVG_RENDERER_REVISION: u16 = 1;
-
-mod hash_hex {
-    use serde::de::Error;
-    use serde::{Deserialize, Deserializer, Serializer};
-
-    pub fn serialize<S: Serializer>(value: &u128, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(&format!("{value:032x}"))
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u128, D::Error> {
-        let text = String::deserialize(deserializer)?;
-        if text.len() != 32
-            || !text
-                .bytes()
-                .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
-        {
-            return Err(D::Error::custom(
-                "the SVG renderer hash must be 32 lowercase hexadecimal digits",
-            ));
-        }
-        u128::from_str_radix(&text, 16).map_err(D::Error::custom)
     }
 }
 
@@ -523,7 +354,7 @@ impl PixelRecipe {
         self.crop
     }
 
-    fn normalize_filter(&mut self) {
+    pub(super) fn normalize_filter(&mut self) {
         match (self.crop, self.vector) {
             // Copying an unchanged crop bypasses convolution, regardless of the requested filter.
             (Some(crop), _) if (self.width, self.height) == (crop.width, crop.height) => {
@@ -555,19 +386,19 @@ impl PixelRecipe {
     }
 
     /// Whether these pixels can be resampled from an image with this metadata.
-    pub fn validate(self, metadata: &ImageMetadata) -> Result<(), ImageRequestError> {
+    pub fn validate(self, meta: &ImageMetadata) -> Result<(), ImageRequestError> {
         let Some(crop) = self.raster_crop() else {
             return Err(ImageRequestError::VectorRecipeNotResampled);
         };
-        check_dimensions(metadata.width, metadata.height)
+        check_dimensions(meta.width, meta.height)
             .map_err(|_| ImageRequestError::InvalidDimensions)?;
-        if crop.x + crop.width > metadata.width || crop.y + crop.height > metadata.height {
+        if crop.x + crop.width > meta.width || crop.y + crop.height > meta.height {
             return Err(ImageRequestError::CropOutsideSource);
         }
-        if crop != Crop::full(metadata)
+        if crop != Crop::full(meta)
             && !CropAnchor::ALL
                 .into_iter()
-                .any(|anchor| crop == Crop::anchored(metadata, self.width, self.height, anchor))
+                .any(|anchor| crop == Crop::anchored(meta, self.width, self.height, anchor))
         {
             return Err(ImageRequestError::CropNotAnchoredFill);
         }
@@ -580,9 +411,9 @@ impl PixelRecipe {
 #[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "RecipeFields", into = "RecipeFields")]
 pub struct ImageRecipe {
-    pixels: PixelRecipe,
+    pub(super) pixels: PixelRecipe,
     pub(super) encoding: Encoding,
-    svg: Option<SvgRender>,
+    pub(super) svg: Option<SvgRender>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -644,159 +475,58 @@ impl ImageRecipe {
     ///
     /// The resolved recipe carries the encoding the request settled on, which is never
     /// [`OutputFormat::Auto`].
-    pub fn resolve(
-        metadata: &ImageMetadata,
-        options: ResizeOptions,
-    ) -> Result<Self, ImageRequestError> {
-        check_dimensions(metadata.width, metadata.height)
+    pub fn resolve(meta: &ImageMetadata, opts: ResizeOptions) -> Result<Self, ImageRequestError> {
+        check_dimensions(meta.width, meta.height)
             .map_err(|_| ImageRequestError::InvalidDimensions)?;
-        validate_request(options)?;
-        let mut crop = Crop::full(metadata);
-        let (width, height) = match options.operation {
-            ResizeOperation::Scale => (requested_width(&options)?, requested_height(&options)?),
+        validate_request(opts)?;
+        let mut crop = Crop::full(meta);
+        let (w, h) = match opts.operation {
+            ResizeOperation::Scale => (requested_width(&opts)?, requested_height(&opts)?),
             ResizeOperation::FitWidth => {
-                let width = requested_width(&options)?;
-                (
-                    width,
-                    scaled_dimension(metadata.height, width, metadata.width)?,
-                )
+                let w = requested_width(&opts)?;
+                (w, scaled_dimension(meta.height, w, meta.width)?)
             }
             ResizeOperation::FitHeight => {
-                let height = requested_height(&options)?;
-                (
-                    scaled_dimension(metadata.width, height, metadata.height)?,
-                    height,
-                )
+                let h = requested_height(&opts)?;
+                (scaled_dimension(meta.width, h, meta.height)?, h)
             }
             ResizeOperation::Fit => {
-                let width = requested_width(&options)?;
-                let height = requested_height(&options)?;
-                if metadata.width <= width && metadata.height <= height {
-                    (metadata.width, metadata.height)
-                } else if u64::from(width) * u64::from(metadata.height)
-                    <= u64::from(height) * u64::from(metadata.width)
+                let w = requested_width(&opts)?;
+                let h = requested_height(&opts)?;
+                if meta.width <= w && meta.height <= h {
+                    (meta.width, meta.height)
+                } else if u64::from(w) * u64::from(meta.height)
+                    <= u64::from(h) * u64::from(meta.width)
                 {
-                    (
-                        width,
-                        scaled_dimension(metadata.height, width, metadata.width)?.min(height),
-                    )
+                    (w, scaled_dimension(meta.height, w, meta.width)?.min(h))
                 } else {
-                    (
-                        scaled_dimension(metadata.width, height, metadata.height)?.min(width),
-                        height,
-                    )
+                    (scaled_dimension(meta.width, h, meta.height)?.min(w), h)
                 }
             }
             ResizeOperation::Fill => {
-                let width = requested_width(&options)?;
-                let height = requested_height(&options)?;
-                crop = Crop::anchored(metadata, width, height, options.anchor);
-                (width, height)
+                let w = requested_width(&opts)?;
+                let h = requested_height(&opts)?;
+                crop = Crop::anchored(meta, w, h, opts.anchor);
+                (w, h)
             }
         };
-        let format = resolved_format(options.format, metadata.is_lossy, metadata.has_alpha);
-        let encoding = encoding_for(format, options.quality);
+        let format = select_format(opts.format, meta.is_lossy, meta.has_alpha);
+        let encoding = encoding_for(format, opts.quality);
         let mut recipe = Self {
             pixels: PixelRecipe {
-                width,
-                height,
+                width: w,
+                height: h,
                 crop: Some(crop),
                 vector: None,
-                filter: options.filter,
-                background: options.background.filter(|_| metadata.has_alpha),
+                filter: opts.filter,
+                background: opts.background.filter(|_| meta.has_alpha),
             },
             encoding,
             svg: None,
         };
         recipe.pixels.normalize_filter();
         recipe.validate_structure()?;
-        recipe.validate(metadata)?;
-        Ok(recipe)
-    }
-
-    /// Resolve one SVG request against the source's exact pixel size and the renderer identity.
-    ///
-    /// The format must be explicit: an SVG has no source pixel format to infer from, and a raster
-    /// derivative is never the silent default.
-    pub fn resolve_svg(
-        source: (f64, f64),
-        options: ResizeOptions,
-        render: SvgRender,
-    ) -> Result<Self, ImageRequestError> {
-        if !(source.0.is_finite() && source.1.is_finite() && source.0 > 0.0 && source.1 > 0.0) {
-            return Err(ImageRequestError::SvgIntrinsicSize);
-        }
-        if options.format == OutputFormat::Auto {
-            return Err(ImageRequestError::SvgFormatRequired);
-        }
-        validate_request(options)?;
-        let mut crop = (0.0, 0.0, source.0, source.1);
-        let (width, height) = match options.operation {
-            ResizeOperation::Scale => (requested_width(&options)?, requested_height(&options)?),
-            ResizeOperation::FitWidth => {
-                let width = requested_width(&options)?;
-                (
-                    width,
-                    scaled_pixels_f64(source.1, f64::from(width), source.0)?,
-                )
-            }
-            ResizeOperation::FitHeight => {
-                let height = requested_height(&options)?;
-                (
-                    scaled_pixels_f64(source.0, f64::from(height), source.1)?,
-                    height,
-                )
-            }
-            ResizeOperation::Fit => {
-                let width = requested_width(&options)?;
-                let height = requested_height(&options)?;
-                if source.0 <= f64::from(width) && source.1 <= f64::from(height) {
-                    (rounded_pixel(source.0)?, rounded_pixel(source.1)?)
-                } else if f64::from(width) * source.1 <= f64::from(height) * source.0 {
-                    (
-                        width,
-                        scaled_pixels_f64(source.1, f64::from(width), source.0)?.min(height),
-                    )
-                } else {
-                    (
-                        scaled_pixels_f64(source.0, f64::from(height), source.1)?.min(width),
-                        height,
-                    )
-                }
-            }
-            ResizeOperation::Fill => {
-                let width = requested_width(&options)?;
-                let height = requested_height(&options)?;
-                let scale = (f64::from(width) / source.0).max(f64::from(height) / source.1);
-                let crop_width = f64::from(width) / scale;
-                let crop_height = f64::from(height) / scale;
-                let (horizontal, vertical) = options.anchor.alignments();
-                crop = (
-                    horizontal.offset(source.0, crop_width),
-                    vertical.offset(source.1, crop_height),
-                    crop_width,
-                    crop_height,
-                );
-                (width, height)
-            }
-        };
-        let geometry = VectorGeometry::new(source, crop)?;
-        let encoding = encoding_for(options.format, options.quality);
-        let mut recipe = Self {
-            pixels: PixelRecipe {
-                width,
-                height,
-                crop: None,
-                vector: Some(geometry),
-                filter: options.filter,
-                background: options.background,
-            },
-            encoding,
-            svg: Some(render),
-        };
-        recipe.pixels.normalize_filter();
-        recipe.validate_structure()?;
-        recipe.validate_colors(true)?;
+        recipe.validate(meta)?;
         Ok(recipe)
     }
 
@@ -834,7 +564,7 @@ impl ImageRecipe {
         self.pixels.vector
     }
 
-    fn validate_structure(&self) -> Result<(), ImageRequestError> {
+    pub(super) fn validate_structure(&self) -> Result<(), ImageRequestError> {
         self.pixels.validate_structure()?;
         match (self.pixels.crop, self.pixels.vector, self.svg) {
             (Some(_), None, None) | (None, Some(_), Some(_)) => {}
@@ -853,7 +583,7 @@ impl ImageRecipe {
                 }
             }
             Encoding::WebP { quality } => {
-                if !quality.is_none_or(|quality| quality <= 100) {
+                if !quality.is_none_or(|q| q <= 100) {
                     return Err(ImageRequestError::WebpQuality);
                 }
                 if self.width() > 16_383 || self.height() > 16_383 {
@@ -866,36 +596,12 @@ impl ImageRecipe {
     }
 
     /// Whether a source with this metadata can be rendered by this raster recipe.
-    pub fn validate(&self, metadata: &ImageMetadata) -> Result<(), ImageRequestError> {
-        self.pixels.validate(metadata)?;
-        self.validate_colors(metadata.has_alpha)
+    pub fn validate(&self, meta: &ImageMetadata) -> Result<(), ImageRequestError> {
+        self.pixels.validate(meta)?;
+        self.validate_colors(meta.has_alpha)
     }
 
-    /// Whether the parsed SVG with this size and hash can be rendered by this recipe.
-    pub fn validate_svg(
-        &self,
-        width: f64,
-        height: f64,
-        hash: u128,
-    ) -> Result<(), ImageRequestError> {
-        let Some(vector) = self.pixels.vector else {
-            return Err(ImageRequestError::NotAVectorRecipe);
-        };
-        let Some(svg) = self.svg else {
-            return Err(ImageRequestError::NoSvgRendererIdentity);
-        };
-        let (source_width, source_height) = vector.source();
-        let tolerance = 1e-6 * width.abs().max(1.0);
-        if svg.hash() != hash
-            || (source_width - width).abs() > tolerance
-            || (source_height - height).abs() > tolerance
-        {
-            return Err(ImageRequestError::SourceChanged);
-        }
-        self.validate_colors(true)
-    }
-
-    fn validate_colors(&self, has_alpha: bool) -> Result<(), ImageRequestError> {
+    pub(super) fn validate_colors(&self, has_alpha: bool) -> Result<(), ImageRequestError> {
         if self.format() == ImageFormat::Jpeg && has_alpha && self.pixels.background.is_none() {
             return Err(ImageRequestError::JpegTransparency);
         }
@@ -904,14 +610,14 @@ impl ImageRecipe {
 }
 
 /// The shape every request must have, whatever source it names.
-fn validate_request(options: ResizeOptions) -> Result<(), ImageRequestError> {
-    if options.operation != ResizeOperation::Fill && options.anchor != CropAnchor::Center {
+pub(super) fn validate_request(opts: ResizeOptions) -> Result<(), ImageRequestError> {
+    if opts.operation != ResizeOperation::Fill && opts.anchor != CropAnchor::Center {
         return Err(ImageRequestError::AnchorWithoutFill);
     }
-    if [options.width, options.height]
+    if [opts.width, opts.height]
         .into_iter()
         .flatten()
-        .any(|dimension| dimension == 0)
+        .any(|dim| dim == 0)
     {
         return Err(ImageRequestError::NonPositiveDimensions);
     }
@@ -919,49 +625,25 @@ fn validate_request(options: ResizeOptions) -> Result<(), ImageRequestError> {
 }
 
 /// The width a request must carry for its operation.
-fn requested_width(options: &ResizeOptions) -> Result<u32, ImageRequestError> {
-    options
-        .width
+pub(super) fn requested_width(opts: &ResizeOptions) -> Result<u32, ImageRequestError> {
+    opts.width
         .ok_or(ImageRequestError::MissingDimension { dimension: "width" })
 }
 
 /// The height a request must carry for its operation.
-fn requested_height(options: &ResizeOptions) -> Result<u32, ImageRequestError> {
-    options.height.ok_or(ImageRequestError::MissingDimension {
+pub(super) fn requested_height(opts: &ResizeOptions) -> Result<u32, ImageRequestError> {
+    opts.height.ok_or(ImageRequestError::MissingDimension {
         dimension: "height",
     })
 }
 
 /// Nearest integer, with ties upward, and at least one pixel for extremely thin images.
-fn scaled_dimension(
-    dimension: u32,
-    numerator: u32,
-    denominator: u32,
-) -> Result<u32, ImageRequestError> {
-    let scaled = ((u64::from(dimension) * u64::from(numerator) + u64::from(denominator) / 2)
-        / u64::from(denominator))
-    .max(1);
+fn scaled_dimension(dim: u32, num: u32, den: u32) -> Result<u32, ImageRequestError> {
+    let scaled = ((u64::from(dim) * u64::from(num) + u64::from(den) / 2) / u64::from(den)).max(1);
     u32::try_from(scaled).map_err(|_| ImageRequestError::ResizedTooLarge)
 }
 
-/// Nearest integer at least one pixel, refusing values that cannot be a pixel count.
-fn rounded_pixel(value: f64) -> Result<u32, ImageRequestError> {
-    let rounded = value.round().max(1.0);
-    if rounded > f64::from(u32::MAX) {
-        return Err(ImageRequestError::ResizedTooLarge);
-    }
-    Ok(rounded as u32)
-}
-
-fn scaled_pixels_f64(
-    dimension: f64,
-    numerator: f64,
-    denominator: f64,
-) -> Result<u32, ImageRequestError> {
-    rounded_pixel(dimension * numerator / denominator)
-}
-
-fn resolved_format(format: OutputFormat, is_lossy: bool, has_alpha: bool) -> OutputFormat {
+fn select_format(format: OutputFormat, is_lossy: bool, has_alpha: bool) -> OutputFormat {
     match format {
         OutputFormat::Auto if is_lossy && !has_alpha => OutputFormat::Jpeg,
         OutputFormat::Auto => OutputFormat::Png,
@@ -969,7 +651,7 @@ fn resolved_format(format: OutputFormat, is_lossy: bool, has_alpha: bool) -> Out
     }
 }
 
-fn encoding_for(format: OutputFormat, quality: Option<u8>) -> Encoding {
+pub(super) fn encoding_for(format: OutputFormat, quality: Option<u8>) -> Encoding {
     match format {
         OutputFormat::Jpeg => Encoding::Jpeg {
             quality: quality.unwrap_or(75),
@@ -985,24 +667,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn oversized_scaled_dimension_is_rejected() {
+    fn reject_oversized_scaled_dim() {
         assert!(scaled_dimension(u32::MAX, 2, 1).is_err());
         assert_eq!(scaled_dimension(u32::MAX, 1, 1).unwrap(), u32::MAX);
     }
-    fn metadata(width: u32, height: u32) -> ImageMetadata {
+
+    fn metadata(w: u32, h: u32) -> ImageMetadata {
         ImageMetadata {
-            width,
-            height,
+            width: w,
+            height: h,
             format: ImageFormat::Png,
             has_alpha: false,
             is_lossy: false,
         }
     }
 
-    /// One operation's request and the display geometry it resolves.
     type GeometryCase = (ResizeOperation, Option<u32>, Option<u32>, (u32, u32));
 
-    /// The display geometry every operation resolves for the 300 × 380 test sources.
     const GEOMETRY_CASES: [GeometryCase; 5] = [
         (ResizeOperation::Scale, Some(150), Some(150), (150, 150)),
         (ResizeOperation::FitWidth, Some(100), None, (100, 127)),
@@ -1011,15 +692,11 @@ mod tests {
         (ResizeOperation::Fill, Some(150), Some(150), (150, 150)),
     ];
 
-    fn options(
-        operation: ResizeOperation,
-        width: Option<u32>,
-        height: Option<u32>,
-    ) -> ResizeOptions {
+    fn options(op: ResizeOperation, w: Option<u32>, h: Option<u32>) -> ResizeOptions {
         ResizeOptions {
-            width,
-            height,
-            operation,
+            width: w,
+            height: h,
+            operation: op,
             anchor: CropAnchor::Center,
             format: OutputFormat::Auto,
             quality: None,
@@ -1029,33 +706,29 @@ mod tests {
     }
 
     #[test]
-    fn default_requests_resolve_fill() {
-        for has_alpha in [false, true] {
-            let source = ImageMetadata {
+    fn default_resolves_fill() {
+        for alpha in [false, true] {
+            let src = ImageMetadata {
                 format: ImageFormat::WebP,
-                has_alpha,
+                has_alpha: alpha,
                 is_lossy: true,
                 ..metadata(300, 200)
             };
-            let request = ResizeOptions {
+            let req = ResizeOptions {
                 width: Some(100),
                 height: Some(100),
                 ..ResizeOptions::default()
             };
             assert_eq!(
-                ImageRecipe::resolve(&source, request).unwrap(),
-                ImageRecipe::resolve(
-                    &source,
-                    options(ResizeOperation::Fill, Some(100), Some(100)),
-                )
-                .unwrap(),
+                ImageRecipe::resolve(&src, req).unwrap(),
+                ImageRecipe::resolve(&src, options(ResizeOperation::Fill, Some(100), Some(100)))
+                    .unwrap(),
             );
         }
     }
 
-    /// `fill` keeps the corner or edge its anchor names; the other axis stays centered.
     #[test]
-    fn fill_keeps_the_anchored_part() {
+    fn fill_keeps_anchor() {
         let wide = metadata(100, 50);
         let tall = metadata(50, 100);
         for (anchor, wide_x, tall_y) in [
@@ -1069,15 +742,15 @@ mod tests {
             (CropAnchor::BottomLeft, 0, 50),
             (CropAnchor::BottomRight, 50, 50),
         ] {
-            let mut request = options(ResizeOperation::Fill, Some(50), Some(50));
-            request.anchor = anchor;
-            let crop = ImageRecipe::resolve(&wide, request)
+            let mut req = options(ResizeOperation::Fill, Some(50), Some(50));
+            req.anchor = anchor;
+            let crop = ImageRecipe::resolve(&wide, req)
                 .unwrap()
                 .pixels()
                 .raster_crop()
                 .unwrap();
             assert_eq!((crop.x, crop.y), (wide_x, 0), "wide {anchor:?}");
-            let crop = ImageRecipe::resolve(&tall, request)
+            let crop = ImageRecipe::resolve(&tall, req)
                 .unwrap()
                 .pixels()
                 .raster_crop()
@@ -1086,62 +759,44 @@ mod tests {
         }
     }
 
-    /// Only `fill` crops, so every other operation refuses an anchor that asks for one.
     #[test]
-    fn anchor_is_refused_without_fill() {
-        for operation in [
+    fn reject_non_fill_anchor() {
+        for op in [
             ResizeOperation::Scale,
             ResizeOperation::FitWidth,
             ResizeOperation::FitHeight,
             ResizeOperation::Fit,
         ] {
-            let mut request = options(operation, Some(50), Some(50));
-            request.anchor = CropAnchor::Top;
+            let mut req = options(op, Some(50), Some(50));
+            req.anchor = CropAnchor::Top;
             assert!(
-                ImageRecipe::resolve(&metadata(100, 50), request).is_err(),
-                "{operation:?}"
+                ImageRecipe::resolve(&metadata(100, 50), req).is_err(),
+                "{op:?}"
             );
         }
     }
 
     #[test]
-    fn svg_fill_keeps_the_anchored_part() {
-        let mut request = vector_options(ResizeOperation::Fill, Some(50), Some(50));
-        request.anchor = CropAnchor::BottomRight;
-        let recipe = ImageRecipe::resolve_svg((100.0, 50.0), request, SvgRender::new(9)).unwrap();
-        let (x, y, width, height) = recipe.vector_geometry().unwrap().crop();
-        assert_eq!((x, y), (50.0, 0.0));
-        assert_eq!((width, height), (50.0, 50.0));
-
-        let mut request = vector_options(ResizeOperation::Fit, Some(50), Some(50));
-        request.anchor = CropAnchor::BottomRight;
-        assert!(ImageRecipe::resolve_svg((100.0, 50.0), request, SvgRender::new(9)).is_err());
-    }
-
-    #[test]
-    fn default_fill_requires_dimensions() {
-        for (width, height) in [(None, None), (Some(100), None), (None, Some(100))] {
-            let request = ResizeOptions {
-                width,
-                height,
+    fn fill_requires_dims() {
+        for (w, h) in [(None, None), (Some(100), None), (None, Some(100))] {
+            let req = ResizeOptions {
+                width: w,
+                height: h,
                 ..ResizeOptions::default()
             };
-            assert!(ImageRecipe::resolve(&metadata(300, 200), request).is_err());
+            assert!(ImageRecipe::resolve(&metadata(300, 200), req).is_err());
         }
     }
 
     #[test]
-    fn operations_resolve_display_geometry() {
-        let source = metadata(300, 380);
-        for (operation, width, height, expected) in GEOMETRY_CASES {
-            let recipe = ImageRecipe::resolve(&source, options(operation, width, height)).unwrap();
+    fn raster_display_geometry() {
+        let src = metadata(300, 380);
+        for (op, w, h, expected) in GEOMETRY_CASES {
+            let recipe = ImageRecipe::resolve(&src, options(op, w, h)).unwrap();
             assert_eq!((recipe.width(), recipe.height()), expected);
         }
-        let fill = ImageRecipe::resolve(
-            &source,
-            options(ResizeOperation::Fill, Some(150), Some(150)),
-        )
-        .unwrap();
+        let fill = ImageRecipe::resolve(&src, options(ResizeOperation::Fill, Some(150), Some(150)))
+            .unwrap();
         assert_eq!(
             fill.pixels.raster_crop().unwrap(),
             Crop {
@@ -1154,14 +809,13 @@ mod tests {
     }
 
     #[test]
-    fn fit_operations_differ_on_upscaling() {
-        let source = metadata(3, 2);
-        let fit = ImageRecipe::resolve(&source, options(ResizeOperation::Fit, Some(20), Some(20)))
-            .unwrap();
+    fn fit_upscale_behavior() {
+        let src = metadata(3, 2);
+        let fit =
+            ImageRecipe::resolve(&src, options(ResizeOperation::Fit, Some(20), Some(20))).unwrap();
         assert_eq!((fit.width(), fit.height()), (3, 2));
         let wide =
-            ImageRecipe::resolve(&source, options(ResizeOperation::FitWidth, Some(12), None))
-                .unwrap();
+            ImageRecipe::resolve(&src, options(ResizeOperation::FitWidth, Some(12), None)).unwrap();
         assert_eq!((wide.width(), wide.height()), (12, 8));
         let thin = ImageRecipe::resolve(
             &metadata(16_384, 1),
@@ -1172,128 +826,105 @@ mod tests {
     }
 
     #[test]
-    fn jpeg_dimensions_stop_at_limit() {
-        let source = ImageMetadata {
+    fn jpeg_dim_limit() {
+        let src = ImageMetadata {
             format: ImageFormat::Jpeg,
             is_lossy: true,
             ..metadata(1, 1)
         };
-        for format in [OutputFormat::Jpeg, OutputFormat::Auto] {
-            for (width, height) in [(65_535, 1), (1, 65_535)] {
-                let mut request = options(ResizeOperation::Scale, Some(width), Some(height));
-                request.format = format;
-                let recipe = ImageRecipe::resolve(&source, request).unwrap();
-                assert_eq!((recipe.width(), recipe.height()), (width, height));
+        for fmt in [OutputFormat::Jpeg, OutputFormat::Auto] {
+            for (w, h) in [(65_535, 1), (1, 65_535)] {
+                let mut req = options(ResizeOperation::Scale, Some(w), Some(h));
+                req.format = fmt;
+                let recipe = ImageRecipe::resolve(&src, req).unwrap();
+                assert_eq!((recipe.width(), recipe.height()), (w, h));
                 assert_eq!(recipe.format(), ImageFormat::Jpeg);
             }
-            for (width, height) in [(65_536, 1), (1, 65_536)] {
-                let mut request = options(ResizeOperation::Scale, Some(width), Some(height));
-                request.format = format;
-                assert!(ImageRecipe::resolve(&source, request).is_err());
+            for (w, h) in [(65_536, 1), (1, 65_536)] {
+                let mut req = options(ResizeOperation::Scale, Some(w), Some(h));
+                req.format = fmt;
+                assert!(ImageRecipe::resolve(&src, req).is_err());
             }
         }
     }
 
     #[test]
-    fn jpeg_limit_uses_resolved_dimensions() {
-        let source = metadata(3, 2);
-        let mut request = options(ResizeOperation::Fit, Some(65_536), Some(65_536));
-        request.format = OutputFormat::Jpeg;
-        let recipe = ImageRecipe::resolve(&source, request).unwrap();
+    fn jpeg_limit_uses_resolved_dims() {
+        let src = metadata(3, 2);
+        let mut req = options(ResizeOperation::Fit, Some(65_536), Some(65_536));
+        req.format = OutputFormat::Jpeg;
+        let recipe = ImageRecipe::resolve(&src, req).unwrap();
         assert_eq!((recipe.width(), recipe.height()), (3, 2));
     }
 
     #[test]
-    fn equivalent_requests_share_one_recipe() {
-        let source = metadata(300, 200);
+    fn equivalent_recipes_dedup() {
+        let src = metadata(300, 200);
         let lanczos =
-            ImageRecipe::resolve(&source, options(ResizeOperation::FitWidth, Some(150), None))
+            ImageRecipe::resolve(&src, options(ResizeOperation::FitWidth, Some(150), None))
                 .unwrap();
         let mut scaled = options(ResizeOperation::Scale, Some(150), Some(100));
         scaled.quality = Some(91);
         scaled.format = OutputFormat::Png;
-        assert_eq!(lanczos, ImageRecipe::resolve(&source, scaled).unwrap());
-        let mut triangle = options(ResizeOperation::FitWidth, Some(150), None);
-        triangle.filter = ResizeFilter::Triangle;
-        assert_ne!(lanczos, ImageRecipe::resolve(&source, triangle).unwrap());
-        triangle.filter = ResizeFilter::Lanczos3;
-        assert_eq!(lanczos, ImageRecipe::resolve(&source, triangle).unwrap());
+        assert_eq!(lanczos, ImageRecipe::resolve(&src, scaled).unwrap());
+        let mut tri = options(ResizeOperation::FitWidth, Some(150), None);
+        tri.filter = ResizeFilter::Triangle;
+        assert_ne!(lanczos, ImageRecipe::resolve(&src, tri).unwrap());
+        tri.filter = ResizeFilter::Lanczos3;
+        assert_eq!(lanczos, ImageRecipe::resolve(&src, tri).unwrap());
     }
 
-    /// A recipe whose resize reads no filter answers the same whichever one the caller names.
     #[test]
-    fn unused_filters_leave_recipes_unchanged() {
-        for (operation, width, height) in [
+    fn unused_filter_ignored() {
+        for (op, w, h) in [
             (ResizeOperation::Fit, 12, 12),
             (ResizeOperation::Fill, 6, 6),
         ] {
-            let mut request = options(operation, Some(width), Some(height));
-            let recipe = ImageRecipe::resolve(&metadata(9, 6), request).unwrap();
-            request.filter = ResizeFilter::Triangle;
-            assert_eq!(
-                recipe,
-                ImageRecipe::resolve(&metadata(9, 6), request).unwrap()
-            );
+            let mut req = options(op, Some(w), Some(h));
+            let recipe = ImageRecipe::resolve(&metadata(9, 6), req).unwrap();
+            req.filter = ResizeFilter::Triangle;
+            assert_eq!(recipe, ImageRecipe::resolve(&metadata(9, 6), req).unwrap());
         }
-
-        let render = SvgRender::new(1);
-        let mut triangle = vector_options(ResizeOperation::FitWidth, Some(100), None);
-        triangle.filter = ResizeFilter::Triangle;
-        let lanczos = ImageRecipe::resolve_svg(
-            (300.0, 380.0),
-            vector_options(ResizeOperation::FitWidth, Some(100), None),
-            render,
-        )
-        .unwrap();
-        assert_eq!(
-            lanczos,
-            ImageRecipe::resolve_svg((300.0, 380.0), triangle, render).unwrap()
-        );
     }
 
     #[test]
-    fn wire_recipes_ignore_unused_filters() {
-        let source = metadata(9, 6);
+    fn serde_ignores_unused_filter() {
+        let src = metadata(9, 6);
         let recipe =
-            ImageRecipe::resolve(&source, options(ResizeOperation::Fill, Some(6), Some(6)))
-                .unwrap();
-        let mut serialized = serde_json::to_value(&recipe).unwrap();
-        serialized["filter"] = "triangle".into();
-        assert_eq!(
-            recipe,
-            serde_json::from_value::<ImageRecipe>(serialized).unwrap()
-        );
+            ImageRecipe::resolve(&src, options(ResizeOperation::Fill, Some(6), Some(6))).unwrap();
+        let mut val = serde_json::to_value(&recipe).unwrap();
+        val["filter"] = "triangle".into();
+        assert_eq!(recipe, serde_json::from_value::<ImageRecipe>(val).unwrap());
     }
 
     #[test]
-    fn background_identity_follows_alpha() {
-        for has_alpha in [false, true] {
-            let source = ImageMetadata {
-                has_alpha,
+    fn background_follows_alpha() {
+        for alpha in [false, true] {
+            let src = ImageMetadata {
+                has_alpha: alpha,
                 ..metadata(300, 200)
             };
-            let mut request = options(ResizeOperation::FitWidth, Some(150), None);
-            let recipe = ImageRecipe::resolve(&source, request).unwrap();
-            request.background = Some(Background {
+            let mut req = options(ResizeOperation::FitWidth, Some(150), None);
+            let recipe = ImageRecipe::resolve(&src, req).unwrap();
+            req.background = Some(Background {
                 red: 0,
                 green: 0,
                 blue: 0,
             });
-            let flattened = ImageRecipe::resolve(&source, request).unwrap();
-            if has_alpha {
-                assert_ne!(recipe, flattened);
+            let flat = ImageRecipe::resolve(&src, req).unwrap();
+            if alpha {
+                assert_ne!(recipe, flat);
             } else {
-                assert_eq!(recipe, flattened);
+                assert_eq!(recipe, flat);
             }
         }
     }
 
     #[test]
-    fn fill_crop_keeps_the_target_ratio() {
-        let source = metadata(9, 6);
+    fn fill_crop_target_ratio() {
+        let src = metadata(9, 6);
         let recipe =
-            ImageRecipe::resolve(&source, options(ResizeOperation::Fill, Some(4), Some(4)))
-                .unwrap();
+            ImageRecipe::resolve(&src, options(ResizeOperation::Fill, Some(4), Some(4))).unwrap();
         assert_eq!(
             recipe.pixels.raster_crop().unwrap(),
             Crop {
@@ -1306,11 +937,11 @@ mod tests {
         assert!(recipe.validate(&metadata(4, 4)).is_err());
         let mut forged = recipe;
         forged.pixels.crop.as_mut().unwrap().x = 2;
-        assert!(forged.validate(&source).is_err());
+        assert!(forged.validate(&src).is_err());
     }
 
     #[test]
-    fn wire_recipes_reject_invalid_bounds() {
+    fn serde_rejects_invalid_bounds() {
         for json in [
             r#"{"width":0,"height":1,"crop":{"x":0,"y":0,"width":1,"height":1},"filter":"lanczos3","background":null,"encoding":"png"}"#,
             r#"{"width":1,"height":1,"crop":{"x":4294967295,"y":0,"width":1,"height":1},"filter":"triangle","background":null,"encoding":"png"}"#,
@@ -1324,8 +955,8 @@ mod tests {
     }
 
     #[test]
-    fn transparency_forces_png_or_background() {
-        let source = ImageMetadata {
+    fn alpha_forces_png_or_bg() {
+        let src = ImageMetadata {
             format: ImageFormat::WebP,
             has_alpha: true,
             is_lossy: true,
@@ -1333,27 +964,24 @@ mod tests {
         };
         let mut args = options(ResizeOperation::Scale, Some(1), Some(1));
         assert_eq!(
-            ImageRecipe::resolve(&source, args).unwrap().format(),
+            ImageRecipe::resolve(&src, args).unwrap().format(),
             ImageFormat::Png
         );
         args.format = OutputFormat::Jpeg;
-        assert!(ImageRecipe::resolve(&source, args).is_err());
+        assert!(ImageRecipe::resolve(&src, args).is_err());
         args.background = Some(Background {
             red: 255,
             green: 255,
             blue: 255,
         });
         assert_eq!(
-            ImageRecipe::resolve(&source, args).unwrap().format(),
+            ImageRecipe::resolve(&src, args).unwrap().format(),
             ImageFormat::Jpeg
         );
     }
 
-    /// An unstated output format follows the source: a lossy photograph stays lossy, and an image
-    /// that is neither lossy nor transparent stays a PNG. Resolving the wrong way re-encodes a
-    /// photograph as a far larger PNG, and does so without any error.
     #[test]
-    fn auto_encoding_follows_the_source() {
+    fn auto_encoding_follows_src() {
         let lossy = ImageMetadata {
             is_lossy: true,
             ..metadata(40, 30)
@@ -1370,58 +998,12 @@ mod tests {
         assert_eq!(resolved.encoding, Encoding::Png);
     }
 
-    fn vector_options(
-        operation: ResizeOperation,
-        width: Option<u32>,
-        height: Option<u32>,
-    ) -> ResizeOptions {
-        ResizeOptions {
+    #[test]
+    fn serde_roundtrip_geometry() {
+        let vec_opts = ResizeOptions {
             format: OutputFormat::Png,
-            ..options(operation, width, height)
-        }
-    }
-
-    #[test]
-    fn vector_operations_resolve_display_geometry() {
-        let source = (300.0, 380.0);
-        let render = SvgRender::new(7);
-        for (operation, width, height, expected) in GEOMETRY_CASES {
-            let recipe =
-                ImageRecipe::resolve_svg(source, vector_options(operation, width, height), render)
-                    .unwrap();
-            assert_eq!((recipe.width(), recipe.height()), expected);
-            assert!(recipe.vector_geometry().is_some());
-            assert_eq!(recipe.svg_render(), Some(render));
-        }
-        let fill = ImageRecipe::resolve_svg(
-            source,
-            vector_options(ResizeOperation::Fill, Some(150), Some(150)),
-            render,
-        )
-        .unwrap();
-        let (x, y, width, height) = fill.vector_geometry().unwrap().crop();
-        assert_eq!((x, y), (0.0, 40.0));
-        assert!((width - 300.0).abs() < 1e-9 && (height - 300.0).abs() < 1e-9);
-    }
-
-    #[test]
-    fn vector_rejects_auto_format() {
-        let mut request = vector_options(ResizeOperation::Scale, Some(10), Some(10));
-        request.format = OutputFormat::Auto;
-        let refused =
-            ImageRecipe::resolve_svg((10.0, 10.0), request, SvgRender::new(1)).unwrap_err();
-        assert!(
-            refused
-                .to_string()
-                .contains("cannot choose a format for an SVG"),
-            "{refused}"
-        );
-    }
-
-    /// A recipe serializes the geometry it resizes by — a raster's crop or a vector's own — and
-    /// reads back as the recipe it was.
-    #[test]
-    fn recipes_serialize_their_own_geometry() {
+            ..options(ResizeOperation::Scale, Some(5), Some(5))
+        };
         for (recipe, present, absent) in [
             (
                 ImageRecipe::resolve(
@@ -1433,40 +1015,19 @@ mod tests {
                 &["vector", "svg"][..],
             ),
             (
-                ImageRecipe::resolve_svg(
-                    (10.0, 10.0),
-                    vector_options(ResizeOperation::Scale, Some(5), Some(5)),
-                    SvgRender::new(9),
-                )
-                .unwrap(),
+                ImageRecipe::resolve_svg((10.0, 10.0), vec_opts, SvgRender::new(9)).unwrap(),
                 &["vector", "svg"][..],
                 &["crop"][..],
             ),
         ] {
-            let value = serde_json::to_value(&recipe).unwrap();
+            let val = serde_json::to_value(&recipe).unwrap();
             for field in present {
-                assert!(value.get(field).is_some(), "{field}: {value}");
+                assert!(val.get(field).is_some(), "{field}: {val}");
             }
             for field in absent {
-                assert!(value.get(field).is_none(), "{field}: {value}");
+                assert!(val.get(field).is_none(), "{field}: {val}");
             }
-            assert_eq!(
-                serde_json::from_value::<ImageRecipe>(value).unwrap(),
-                recipe
-            );
+            assert_eq!(serde_json::from_value::<ImageRecipe>(val).unwrap(), recipe);
         }
-    }
-
-    #[test]
-    fn vector_validation_matches_source() {
-        let recipe = ImageRecipe::resolve_svg(
-            (10.0, 10.0),
-            vector_options(ResizeOperation::Scale, Some(5), Some(5)),
-            SvgRender::new(9),
-        )
-        .unwrap();
-        recipe.validate_svg(10.0, 10.0, 9).unwrap();
-        assert!(recipe.validate_svg(11.0, 10.0, 9).is_err());
-        assert!(recipe.validate_svg(10.0, 10.0, 8).is_err());
     }
 }

@@ -1,19 +1,25 @@
 //! Compiler reads and their invalidation from changed paths; every reuse revalidates.
 
 mod path_index;
+mod reads;
+#[cfg(test)]
+mod tests;
 
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use rayon::prelude::*;
-use tola_typst::{FileRead, ReadEvidence, ReadLocator, ReadOrigin};
+use tola_typst::{FileRead, ReadOrigin, ReadRecord, sort_package_checks};
 
 use crate::cancellation::{BuildCancellation, BuildCancelled};
 use path_index::DependencyPathIndex;
-use tola_typst::sort_package_checks;
+use reads::{
+    DepRead, DepReader, ReuseProtocolError, package_check_is_fresh, physical_read_is_fresh,
+};
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 /// Compilation unit whose reads determine dependency invalidation.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum TypstDependencyReader {
     ContentSource(PathBuf),
     SiteProgram,
@@ -22,7 +28,7 @@ pub(crate) enum TypstDependencyReader {
 impl TypstDependencyReader {
     fn content_source(&self) -> Option<&Path> {
         match self {
-            Self::ContentSource(source) => Some(source.as_path()),
+            Self::ContentSource(src) => Some(src.as_path()),
             Self::SiteProgram => None,
         }
     }
@@ -54,29 +60,26 @@ impl RebuildDecision {
 
     pub(crate) fn for_paths(
         evidence: Option<&CompilationDependencies>,
-        changed_paths: &[PathBuf],
+        changed: &[PathBuf],
         inventory_may_change: bool,
     ) -> Self {
         let Some(evidence) = evidence else {
             return Self::classify(Vec::new(), Vec::new(), inventory_may_change);
         };
-        let mut affected_readers = evidence.readers_of_paths(changed_paths);
-        affected_readers.extend(evidence.readers_requiring_each_build());
+        let mut affected = evidence.readers_of_paths(changed);
+        affected.extend(evidence.readers_requiring_each_build());
         Self::classify(
-            evidence.direct_readers_for_paths(changed_paths),
-            affected_readers,
+            evidence.direct_readers_for_paths(changed),
+            affected,
             inventory_may_change,
         )
     }
 
     /// Classify changes verified against captured reads and unsaved source versions.
-    pub(crate) fn for_observed_paths(
-        dependencies: &CompilationDependencies,
-        changed_paths: &[PathBuf],
-    ) -> Self {
+    pub(crate) fn for_observed_paths(deps: &CompilationDependencies, changed: &[PathBuf]) -> Self {
         Self::classify(
-            dependencies.direct_readers_for_paths(changed_paths),
-            dependencies.readers_of_paths(changed_paths),
+            deps.direct_readers_for_paths(changed),
+            deps.readers_of_paths(changed),
             false,
         )
     }
@@ -86,29 +89,29 @@ impl RebuildDecision {
         mut affected_readers: Vec<TypstDependencyReader>,
         inventory_may_change: bool,
     ) -> Self {
-        let source_direct = inventory_may_change
+        let src_direct = inventory_may_change
             || direct_readers
                 .iter()
-                .any(|reader| matches!(reader, TypstDependencyReader::ContentSource(_)));
+                .any(|r| matches!(r, TypstDependencyReader::ContentSource(_)));
         let site_direct = direct_readers
             .binary_search(&TypstDependencyReader::SiteProgram)
             .is_ok();
-        affected_readers.retain(|reader| direct_readers.binary_search(reader).is_err());
+        affected_readers.retain(|r| direct_readers.binary_search(r).is_err());
 
-        let source_state_may_change = direct_readers
+        let src_state_may_change = direct_readers
             .iter()
             .chain(&affected_readers)
-            .any(|reader| matches!(reader, TypstDependencyReader::ContentSource(_)));
-        if source_state_may_change && !site_direct {
+            .any(|r| matches!(r, TypstDependencyReader::ContentSource(_)));
+        if src_state_may_change && !site_direct {
             affected_readers.push(TypstDependencyReader::SiteProgram);
         }
         normalize_readers(&mut affected_readers);
 
-        let source_analysis = if source_direct {
+        let source_analysis = if src_direct {
             RebuildPriority::Direct
         } else if affected_readers
             .iter()
-            .any(|reader| matches!(reader, TypstDependencyReader::ContentSource(_)))
+            .any(|r| matches!(r, TypstDependencyReader::ContentSource(_)))
         {
             RebuildPriority::Affected
         } else {
@@ -148,119 +151,17 @@ impl RebuildDecision {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
-enum ReuseProtocolError {
-    #[error("Tola could not reuse the files the previous build read; run the build again")]
-    MissingReaderEvidence,
-    #[error("Tola could not reuse the packages the previous build read; run the build again")]
-    ChangedReaderPackages,
-    #[error("Tola could not tell which part of the build read a package; run the build again")]
-    UnattributedPackageCheck,
-    #[error(
-        "Tola could not read `{path}`, which this build uses; restore it or remove the reference"
-    )]
-    UnreadableRead {
-        path: String,
-        #[source]
-        source: std::io::Error,
-    },
-}
-
-#[derive(Debug, Clone)]
-enum DependencyReadEvidence {
-    Physical {
-        evidence: ReadEvidence,
-        /// Absolute path named by the read, before resolving symlinks.
-        logical_path: PathBuf,
-        /// The target the candidate observed, so a retarget is noticed even with identical bytes.
-        canonical_target: PathBuf,
-        watch_paths: Vec<PathBuf>,
-    },
-    Virtual {
-        evidence: ReadEvidence,
-        process_stable: bool,
-    },
-}
-
-impl DependencyReadEvidence {
-    fn freeze(
-        read: FileRead,
-        host: &crate::compiler::SiteHost,
-    ) -> Result<Self, ReuseProtocolError> {
-        let (evidence, origin) = read.into_evidence_and_origin();
-        match origin {
-            ReadOrigin::Disk(path) => {
-                let logical_path = path.into_path();
-                let canonical_target = std::fs::canonicalize(&logical_path).map_err(|error| {
-                    ReuseProtocolError::UnreadableRead {
-                        path: read_locator_display(evidence.locator()),
-                        source: error,
-                    }
-                })?;
-                let watch_paths = physical_watch_paths(&logical_path, &canonical_target);
-                Ok(Self::Physical {
-                    evidence,
-                    logical_path,
-                    canonical_target,
-                    watch_paths,
-                })
-            }
-            ReadOrigin::Provider | ReadOrigin::NonPersistent => Ok(Self::Virtual {
-                process_stable: matches!(origin, ReadOrigin::Provider)
-                    && host.read_is_process_stable(evidence.locator()),
-                evidence,
-            }),
-        }
-    }
-
-    fn requires_each_build(&self) -> bool {
-        match self {
-            Self::Virtual {
-                evidence,
-                process_stable: false,
-            } => {
-                // Icon files are compared with the current collections before any reuse.
-                !matches!(
-                    evidence.locator(),
-                    tola_typst::ReadLocator::ProvidedPackage { package, path }
-                        if tola_packages::is_icon_file(package, path)
-                )
-            }
-            _ => false,
-        }
-    }
-
-    fn watch_paths(&self) -> &[PathBuf] {
-        match self {
-            Self::Physical { watch_paths, .. } => watch_paths,
-            Self::Virtual { .. } => &[],
-        }
-    }
-
-    fn evidence(&self) -> &ReadEvidence {
-        match self {
-            Self::Physical { evidence, .. } | Self::Virtual { evidence, .. } => evidence,
-        }
-    }
-}
-
 /// Exact reads observed by source analysis and Bundle compilation.
 #[derive(Debug, Clone)]
 pub(crate) struct CompilationDependencies(Arc<DependencyReads>);
 
 #[derive(Debug, Clone)]
 pub(crate) struct DependencyReads {
-    content_sources: std::collections::BTreeSet<PathBuf>,
-    bundle_entries: std::collections::BTreeSet<PathBuf>,
-    reader_evidence: std::collections::BTreeMap<TypstDependencyReader, DependencyReaderEvidence>,
+    content_sources: BTreeSet<PathBuf>,
+    bundle_entries: BTreeSet<PathBuf>,
+    reader_evidence: BTreeMap<TypstDependencyReader, DepReader>,
     package_checks: Vec<tola_typst::PackageCheck>,
     path_index: DependencyPathIndex,
-}
-
-#[derive(Debug, Clone)]
-struct DependencyReaderEvidence {
-    reads: Vec<DependencyReadEvidence>,
-    package_checks: Vec<tola_typst::PackageCheck>,
 }
 
 impl std::ops::Deref for CompilationDependencies {
@@ -305,60 +206,58 @@ impl CompilationDependencies {
         reused: Option<ReusedDependencyReaders<'_>>,
     ) -> anyhow::Result<Self> {
         let root = tola_input::normalize_path(root);
-        let reused_readers = reused
+        let reused_readers: BTreeSet<_> = reused
             .as_ref()
-            .map_or(&[][..], |reused| reused.readers)
+            .map_or(&[][..], |r| r.readers)
             .iter()
-            .collect::<std::collections::BTreeSet<_>>();
-        let observed_package_checks = package_checks
-            .into_iter()
-            .collect::<std::collections::HashSet<_>>();
-        let mut frozen_readers = std::collections::BTreeMap::new();
-        for (reader, reads, mut reader_package_checks) in reader_evidence {
-            sort_package_checks(&mut reader_package_checks);
+            .collect();
+        let observed_checks: HashSet<_> = package_checks.into_iter().collect();
+        let mut frozen_readers = BTreeMap::new();
+        for (reader, reads, mut reader_checks) in reader_evidence {
+            sort_package_checks(&mut reader_checks);
             let frozen = if reused_readers.contains(&reader) {
                 let frozen = reused
                     .as_ref()
-                    .and_then(|reused| reused.dependencies.reader_evidence.get(&reader))
+                    .and_then(|r| r.dependencies.reader_evidence.get(&reader))
                     .cloned()
                     .ok_or(ReuseProtocolError::MissingReaderEvidence)?;
-                if frozen.package_checks != reader_package_checks {
+                if frozen.package_checks != reader_checks {
                     return Err(ReuseProtocolError::ChangedReaderPackages.into());
                 }
                 frozen
             } else {
                 let reads = reads
                     .into_iter()
-                    .map(|read| DependencyReadEvidence::freeze(read, host))
+                    .map(|read| DepRead::freeze(read, host))
                     .collect::<Result<Vec<_>, ReuseProtocolError>>()?;
-                DependencyReaderEvidence {
+                DepReader {
                     reads,
-                    package_checks: reader_package_checks,
+                    package_checks: reader_checks,
                 }
             };
             frozen_readers.insert(reader, frozen);
         }
-        let frozen_package_check_set = frozen_readers
+        let frozen_check_set: HashSet<_> = frozen_readers
             .values()
-            .flat_map(|reader| reader.package_checks.iter().cloned())
-            .collect::<std::collections::HashSet<_>>();
-        if frozen_package_check_set != observed_package_checks {
+            .flat_map(|r| r.package_checks.iter().cloned())
+            .collect();
+        if frozen_check_set != observed_checks {
             return Err(ReuseProtocolError::UnattributedPackageCheck.into());
         }
-        let mut frozen_package_checks = frozen_package_check_set.into_iter().collect::<Vec<_>>();
-        sort_package_checks(&mut frozen_package_checks);
-        let path_index = DependencyPathIndex::build(&root, &frozen_readers, &frozen_package_checks);
+        let mut frozen_checks: Vec<_> = frozen_check_set.into_iter().collect();
+        sort_package_checks(&mut frozen_checks);
+        let path_index = DependencyPathIndex::build(&root, &frozen_readers, &frozen_checks);
         Ok(Self(Arc::new(DependencyReads {
             content_sources: content_sources
                 .into_iter()
-                .map(|path| tola_input::normalize_path(&path))
+                .map(|p| tola_input::normalize_path(&p))
                 .collect(),
             bundle_entries: bundle_entries
                 .into_iter()
-                .map(|path| tola_input::normalize_path(&path))
+                .map(|p| tola_input::normalize_path(&p))
                 .collect(),
             reader_evidence: frozen_readers,
-            package_checks: frozen_package_checks,
+            package_checks: frozen_checks,
             path_index,
         })))
     }
@@ -371,24 +270,22 @@ impl CompilationDependencies {
         package_checks: impl IntoIterator<Item = tola_typst::PackageCheck>,
         host: &crate::compiler::SiteHost,
     ) -> anyhow::Result<Self> {
-        let previous = self
+        let prev = self
             .reader_evidence
             .get(&TypstDependencyReader::SiteProgram);
-        let observed = previous
+        let observed: HashSet<_> = prev
             .into_iter()
-            .flat_map(|reader| {
-                reader.reads.iter().map(|read| {
+            .flat_map(|r| {
+                r.reads.iter().map(|read| {
                     let path = match read {
-                        DependencyReadEvidence::Physical { logical_path, .. } => {
-                            Some(logical_path.as_path())
-                        }
-                        DependencyReadEvidence::Virtual { .. } => None,
+                        DepRead::Physical { logical_path, .. } => Some(logical_path.as_path()),
+                        DepRead::Virtual { .. } => None,
                     };
                     (read.evidence(), path)
                 })
             })
-            .collect::<std::collections::HashSet<_>>();
-        let mut added = std::collections::HashSet::new();
+            .collect();
+        let mut added = HashSet::new();
         let added_reads = reads
             .into_iter()
             .filter(|read| {
@@ -398,15 +295,12 @@ impl CompilationDependencies {
                 };
                 !observed.contains(&(read.evidence(), path)) && added.insert(read.clone())
             })
-            .map(|read| DependencyReadEvidence::freeze(read, host))
+            .map(|read| DepRead::freeze(read, host))
             .collect::<Result<Vec<_>, ReuseProtocolError>>()?;
-        let mut checks = previous
-            .map(|reader| reader.package_checks.clone())
-            .unwrap_or_default();
+        let mut checks = prev.map(|r| r.package_checks.clone()).unwrap_or_default();
         checks.extend(package_checks);
         sort_package_checks(&mut checks);
-        if added_reads.is_empty() && previous.is_some_and(|reader| reader.package_checks == checks)
-        {
+        if added_reads.is_empty() && prev.is_some_and(|r| r.package_checks == checks) {
             return Ok(self.clone());
         }
         let mut updated = self.clone();
@@ -414,7 +308,7 @@ impl CompilationDependencies {
         let program = inner
             .reader_evidence
             .entry(TypstDependencyReader::SiteProgram)
-            .or_insert_with(|| DependencyReaderEvidence {
+            .or_insert_with(|| DepReader {
                 reads: Vec::new(),
                 package_checks: Vec::new(),
             });
@@ -423,7 +317,7 @@ impl CompilationDependencies {
         inner.package_checks = inner
             .reader_evidence
             .values()
-            .flat_map(|reader| reader.package_checks.iter().cloned())
+            .flat_map(|r| r.package_checks.iter().cloned())
             .collect();
         sort_package_checks(&mut inner.package_checks);
         inner.path_index =
@@ -431,22 +325,20 @@ impl CompilationDependencies {
         Ok(updated)
     }
 
-    /// Borrow every successful observation, including memoized native resource requests.
-    pub(crate) fn read_evidence(&self) -> impl Iterator<Item = &ReadEvidence> {
-        self.all_reads().map(DependencyReadEvidence::evidence)
+    pub(crate) fn read_evidence(&self) -> impl Iterator<Item = &ReadRecord> {
+        self.all_reads().map(DepRead::evidence)
     }
 
-    /// Whether every reusable virtual read still matches; process-stable reads are skipped.
     pub(crate) fn virtual_reads_match(
         &self,
-        matches: impl Fn(&ReadEvidence) -> bool,
+        matches: impl Fn(&ReadRecord) -> bool,
         cancellation: &BuildCancellation,
     ) -> Result<bool, BuildCancelled> {
         cancellation.ensure_active()?;
-        let mut checked = std::collections::HashSet::new();
+        let mut checked = HashSet::new();
         for read in self.all_reads() {
             cancellation.ensure_active()?;
-            if let DependencyReadEvidence::Virtual {
+            if let DepRead::Virtual {
                 evidence,
                 process_stable: false,
             } = read
@@ -460,28 +352,28 @@ impl CompilationDependencies {
         Ok(true)
     }
 
-    fn direct_readers_for_paths(&self, changed_paths: &[PathBuf]) -> Vec<TypstDependencyReader> {
-        let mut readers = std::collections::BTreeSet::new();
-        let changed_paths = changed_paths
+    fn direct_readers_for_paths(&self, changed: &[PathBuf]) -> Vec<TypstDependencyReader> {
+        let mut readers = BTreeSet::new();
+        let changed: BTreeSet<_> = changed
             .iter()
-            .flat_map(|path| path_index::path_aliases(path))
-            .collect::<std::collections::BTreeSet<_>>();
+            .flat_map(|p| path_index::path_aliases(p))
+            .collect();
         let mut covered: Option<&Path> = None;
-        for changed in &changed_paths {
-            if covered.is_some_and(|ancestor| changed.starts_with(ancestor)) {
+        for path in &changed {
+            if covered.is_some_and(|ancestor| path.starts_with(ancestor)) {
                 continue;
             }
-            covered = Some(changed.as_path());
+            covered = Some(path.as_path());
             let range = || {
                 (
-                    std::ops::Bound::Included(changed.as_path()),
+                    std::ops::Bound::Included(path.as_path()),
                     std::ops::Bound::Unbounded,
                 )
             };
             readers.extend(
                 self.content_sources
                     .range::<Path, _>(range())
-                    .take_while(|source| source.starts_with(changed))
+                    .take_while(|src| src.starts_with(path))
                     .cloned()
                     .map(TypstDependencyReader::ContentSource),
             );
@@ -489,7 +381,7 @@ impl CompilationDependencies {
                 .bundle_entries
                 .range::<Path, _>(range())
                 .next()
-                .is_some_and(|entry| entry.starts_with(changed))
+                .is_some_and(|entry| entry.starts_with(path))
             {
                 readers.insert(TypstDependencyReader::SiteProgram);
             }
@@ -497,31 +389,22 @@ impl CompilationDependencies {
         readers.into_iter().collect()
     }
 
-    pub(crate) fn readers_of_paths(&self, changed_paths: &[PathBuf]) -> Vec<TypstDependencyReader> {
-        self.path_index
-            .readers_for(changed_paths, &self.reader_evidence)
+    pub(crate) fn readers_of_paths(&self, changed: &[PathBuf]) -> Vec<TypstDependencyReader> {
+        self.path_index.readers_for(changed, &self.reader_evidence)
     }
 
     fn readers_requiring_each_build(&self) -> Vec<TypstDependencyReader> {
         self.reader_evidence
             .iter()
-            .filter(|(_, reader)| {
-                reader
-                    .reads
-                    .iter()
-                    .any(DependencyReadEvidence::requires_each_build)
-            })
-            .map(|(reader, _)| reader.clone())
+            .filter(|(_, r)| r.reads.iter().any(DepRead::requires_each_build))
+            .map(|(r, _)| r.clone())
             .collect()
     }
 
-    fn all_reads(&self) -> impl Iterator<Item = &DependencyReadEvidence> {
-        self.reader_evidence
-            .values()
-            .flat_map(|reader| &reader.reads)
+    fn all_reads(&self) -> impl Iterator<Item = &DepRead> {
+        self.reader_evidence.values().flat_map(|r| &r.reads)
     }
 
-    /// Revalidate physical reads after the watcher has the candidate paths.
     pub(crate) fn physical_reads_are_fresh(
         &self,
         boundary: &tola_typst::SourceBoundary,
@@ -531,7 +414,7 @@ impl CompilationDependencies {
             .map(|paths| paths.is_empty())
     }
 
-    /// Paths whose current bytes or targets differ from the compilation's observations.
+    /// Paths whose current bytes or symlink targets differ from captured observations.
     pub(crate) fn changed_physical_paths(
         &self,
         boundary: &tola_typst::SourceBoundary,
@@ -539,12 +422,12 @@ impl CompilationDependencies {
     ) -> Result<Vec<PathBuf>, BuildCancelled> {
         cancellation.ensure_active()?;
         let started = std::time::Instant::now();
-        let mut reads_by_logical_path = std::collections::HashMap::new();
-        let mut distinct_reads = Vec::new();
-        let mut changed = std::collections::BTreeSet::new();
+        let mut by_logical = HashMap::new();
+        let mut distinct = Vec::new();
+        let mut changed = BTreeSet::new();
         for read in self.all_reads() {
             cancellation.ensure_active()?;
-            let DependencyReadEvidence::Physical {
+            let DepRead::Physical {
                 evidence,
                 logical_path,
                 canonical_target,
@@ -554,10 +437,10 @@ impl CompilationDependencies {
                 continue;
             };
             let identity = (evidence.digest(), canonical_target);
-            match reads_by_logical_path.entry(logical_path.as_path()) {
+            match by_logical.entry(logical_path.as_path()) {
                 std::collections::hash_map::Entry::Vacant(entry) => {
                     entry.insert(identity);
-                    distinct_reads.push(read);
+                    distinct.push(read);
                 }
                 std::collections::hash_map::Entry::Occupied(entry) if entry.get() == &identity => {}
                 std::collections::hash_map::Entry::Occupied(_) => {
@@ -567,17 +450,18 @@ impl CompilationDependencies {
             }
         }
         let collected = started.elapsed();
-        // Verification reads and hashes each file on the CPU pool, not the watcher thread.
-        let verified = distinct_reads
+        let verified: Vec<_> = distinct
             .par_iter()
             .map(|read| physical_read_is_fresh(read, boundary, cancellation))
-            .collect::<Vec<_>>();
-        tracing::debug!(target: "tola::compile",
-            fence_reads = distinct_reads.len(),
+            .collect();
+        tracing::debug!(
+            target: "tola::compile",
+            fence_reads = distinct.len(),
             fence_collect_ms = collected.as_secs_f64() * 1000.0,
             fence_verify_ms = (started.elapsed() - collected).as_secs_f64() * 1000.0,
-            "revalidated physical reads");
-        for (read, fresh) in distinct_reads.into_iter().zip(verified) {
+            "revalidated physical reads"
+        );
+        for (read, fresh) in distinct.into_iter().zip(verified) {
             if !fresh? {
                 changed.extend(read.watch_paths().iter().cloned());
             }
@@ -586,7 +470,6 @@ impl CompilationDependencies {
         Ok(changed.into_iter().collect())
     }
 
-    /// Package candidates whose availability or selected directory changed.
     pub(crate) fn changed_package_paths(
         &self,
         cancellation: &BuildCancellation,
@@ -613,10 +496,10 @@ impl CompilationDependencies {
     }
 
     pub(crate) fn physical_read_paths(&self) -> Vec<PathBuf> {
-        let mut paths = self
+        let mut paths: Vec<_> = self
             .all_reads()
             .flat_map(|read| read.watch_paths().iter().cloned())
-            .collect::<Vec<_>>();
+            .collect();
         paths.sort_unstable();
         paths.dedup();
         paths
@@ -639,7 +522,6 @@ impl CompilationDependencies {
         inputs.record_package_checks(observed.package_checks.iter().cloned());
     }
 
-    /// Record every retained reader's reads; `new` already proved their package checks.
     pub(crate) fn record_all_reads(&self, inputs: &mut crate::compiler::BuildInputs) {
         for reader in self.reader_evidence.keys() {
             self.record_reader_reads(inputs, reader);
@@ -654,758 +536,4 @@ impl CompilationDependencies {
 fn normalize_readers(readers: &mut Vec<TypstDependencyReader>) {
     readers.sort_unstable();
     readers.dedup();
-}
-
-fn physical_read_is_fresh(
-    read: &DependencyReadEvidence,
-    boundary: &tola_typst::SourceBoundary,
-    cancellation: &BuildCancellation,
-) -> Result<bool, BuildCancelled> {
-    cancellation.ensure_active()?;
-    let DependencyReadEvidence::Physical {
-        evidence,
-        logical_path,
-        canonical_target,
-        ..
-    } = read
-    else {
-        return Ok(true);
-    };
-    if boundary.check(logical_path).is_err() {
-        return Ok(false);
-    }
-    if !std::fs::canonicalize(logical_path)
-        .is_ok_and(|current_target| current_target == *canonical_target)
-    {
-        cancellation.ensure_active()?;
-        return Ok(false);
-    }
-    if !std::fs::read(logical_path)
-        .is_ok_and(|bytes| tola_typst::ContentDigest::of(&bytes) == evidence.digest())
-    {
-        cancellation.ensure_active()?;
-        return Ok(false);
-    }
-    cancellation.ensure_active()?;
-    let matches = std::fs::canonicalize(logical_path)
-        .is_ok_and(|current_target| current_target == *canonical_target);
-    cancellation.ensure_active()?;
-    Ok(matches)
-}
-
-fn package_check_is_fresh(check: &tola_typst::PackageCheck) -> bool {
-    match check.availability() {
-        tola_typst::PackageAvailability::Missing => std::fs::metadata(check.candidate())
-            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound),
-        tola_typst::PackageAvailability::Present => {
-            std::fs::metadata(check.candidate()).is_ok_and(|metadata| metadata.is_dir())
-                && check.canonical_target().is_some_and(|expected| {
-                    std::fs::canonicalize(check.candidate())
-                        .is_ok_and(|current| current == expected)
-                })
-        }
-        tola_typst::PackageAvailability::NotDirectory => false,
-        tola_typst::PackageAvailability::Unreadable => false,
-    }
-}
-
-fn physical_watch_paths(logical_path: &Path, canonical_target: &Path) -> Vec<PathBuf> {
-    let mut paths = vec![logical_path.to_path_buf(), canonical_target.to_path_buf()];
-    paths.sort_unstable();
-    paths.dedup();
-    paths
-}
-
-/// A read as the author wrote it; no host directory reaches a rendered message.
-fn read_locator_display(locator: &ReadLocator) -> String {
-    match locator {
-        ReadLocator::Root(path) | ReadLocator::ProvidedRoot(path) => path.display().to_string(),
-        ReadLocator::Package { package, path } | ReadLocator::ProvidedPackage { package, path } => {
-            format!("{package}/{}", path.display())
-        }
-        ReadLocator::NonPersistent(_) => "a generated file".to_owned(),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-
-    use std::collections::BTreeMap;
-
-    use super::*;
-    use crate::compiler::tests::compiler_host;
-    use tola_typst::ReadLocator;
-
-    fn retained_dependencies(
-        root: &Path,
-        content_sources: impl IntoIterator<Item = PathBuf>,
-        bundle_entries: impl IntoIterator<Item = PathBuf>,
-        reader_evidence: BTreeMap<TypstDependencyReader, DependencyReaderEvidence>,
-    ) -> CompilationDependencies {
-        let root = tola_input::normalize_path(root);
-        CompilationDependencies(Arc::new(DependencyReads {
-            path_index: DependencyPathIndex::build(&root, &reader_evidence, &[]),
-            content_sources: content_sources
-                .into_iter()
-                .map(|path| tola_input::normalize_path(&path))
-                .collect(),
-            bundle_entries: bundle_entries
-                .into_iter()
-                .map(|path| tola_input::normalize_path(&path))
-                .collect(),
-            reader_evidence,
-            package_checks: Vec::new(),
-        }))
-    }
-
-    fn evidence(path: &str) -> ReadEvidence {
-        ReadEvidence::new(ReadLocator::Root(path.into()), path.as_bytes())
-    }
-
-    fn physical_evidence(
-        logical_path: PathBuf,
-        canonical_target: PathBuf,
-        evidence: ReadEvidence,
-    ) -> DependencyReadEvidence {
-        DependencyReadEvidence::Physical {
-            watch_paths: physical_watch_paths(&logical_path, &canonical_target),
-            logical_path,
-            canonical_target,
-            evidence,
-        }
-    }
-
-    fn producer_read(root: &Path, evidence: ReadEvidence) -> DependencyReadEvidence {
-        if let ReadLocator::Root(relative) = evidence.locator() {
-            let logical_path = logical_read_path(&root.join(relative));
-            if let Ok(canonical_target) = std::fs::canonicalize(&logical_path) {
-                return physical_evidence(logical_path, canonical_target, evidence);
-            }
-        }
-        DependencyReadEvidence::Virtual {
-            process_stable: false,
-            evidence,
-        }
-    }
-
-    fn physical_read(path: &Path, evidence: ReadEvidence) -> DependencyReadEvidence {
-        let logical_path = logical_read_path(path);
-        let canonical_target = std::fs::canonicalize(&logical_path).unwrap();
-        physical_evidence(logical_path, canonical_target, evidence)
-    }
-
-    fn logical_read_path(path: &Path) -> PathBuf {
-        let absolute = std::path::absolute(path).unwrap();
-        let Some(name) = absolute.file_name() else {
-            return absolute;
-        };
-        absolute
-            .parent()
-            .and_then(|parent| std::fs::canonicalize(parent).ok())
-            .map_or(absolute.clone(), |parent| parent.join(name))
-    }
-
-    fn dependencies(
-        root: &Path,
-        content_sources: impl IntoIterator<Item = PathBuf>,
-        site_program: &Path,
-        reader_evidence: impl IntoIterator<Item = (TypstDependencyReader, Vec<ReadEvidence>)>,
-    ) -> CompilationDependencies {
-        let root = tola_input::normalize_path(root);
-        let reader_evidence = reader_evidence
-            .into_iter()
-            .map(|(reader, reads)| {
-                (
-                    reader,
-                    DependencyReaderEvidence {
-                        reads: reads
-                            .into_iter()
-                            .map(|read| producer_read(&root, read))
-                            .collect(),
-                        package_checks: Vec::new(),
-                    },
-                )
-            })
-            .collect::<BTreeMap<_, _>>();
-        retained_dependencies(
-            &root,
-            content_sources,
-            [site_program.to_path_buf()],
-            reader_evidence,
-        )
-    }
-
-    /// A reader's path as the decision reports it: a reader carries what the filesystem resolves
-    /// its read to, which gains the current drive on Windows.
-    fn reader_path(path: &str) -> PathBuf {
-        tola_input::normalize_path(Path::new(path))
-    }
-
-    fn captured_dependencies(
-        root: &Path,
-        content_sources: impl IntoIterator<Item = PathBuf>,
-        site_program: &Path,
-        source_evidence: Vec<ReadEvidence>,
-        site_evidence: Vec<ReadEvidence>,
-    ) -> CompilationDependencies {
-        let content_sources = content_sources.into_iter().collect::<Vec<_>>();
-        let source = content_sources
-            .first()
-            .cloned()
-            .unwrap_or_else(|| root.join("content/source.typ"));
-        dependencies(
-            root,
-            content_sources,
-            site_program,
-            [
-                (
-                    TypstDependencyReader::ContentSource(source),
-                    source_evidence,
-                ),
-                (TypstDependencyReader::SiteProgram, site_evidence),
-            ],
-        )
-    }
-
-    /// One row per read shape: a path two readers share, an asset only the site program reads,
-    /// a package file beneath its directory, and a source that is itself an input.
-    #[test]
-    fn changed_paths_select_their_readers() {
-        let root = Path::new("/site");
-        let evidence = captured_dependencies(
-            root,
-            [PathBuf::from("/site/content/post.typ")],
-            Path::new("/site/site.typ"),
-            vec![
-                evidence("content/post.typ"),
-                evidence("templates/document.typ"),
-            ],
-            vec![evidence("site.typ"), evidence("templates/document.typ")],
-        );
-
-        let shared_readers = || {
-            vec![
-                TypstDependencyReader::ContentSource(PathBuf::from("/site/content/post.typ")),
-                TypstDependencyReader::SiteProgram,
-            ]
-        };
-        for (changed, readers) in [
-            ("/site/templates/document.typ", shared_readers()),
-            ("/site/site.typ", vec![TypstDependencyReader::SiteProgram]),
-            ("/site/assets/unread.svg", Vec::new()),
-            ("/site/templates", shared_readers()),
-            ("/site/templates-old", Vec::new()),
-        ] {
-            assert_eq!(
-                evidence.readers_of_paths(&[PathBuf::from(changed)]),
-                readers,
-                "{changed}"
-            );
-        }
-    }
-
-    /// A changed path's priority follows what read it: an input rebuilds the analysis directly,
-    /// a read it depends on marks it affected, and a source's own change is direct.
-    #[test]
-    fn changed_paths_set_rebuild_priority() {
-        let source = reader_path("/site/content/post.typ");
-        let evidence = captured_dependencies(
-            Path::new("/site"),
-            [source.clone()],
-            Path::new("/site/program.typ"),
-            vec![evidence("templates/document.typ")],
-            vec![evidence("site.typ")],
-        );
-
-        for (changed, source_analysis, site_program, affected) in [
-            (
-                "/site/content/post.typ",
-                RebuildPriority::Direct,
-                RebuildPriority::Affected,
-                vec![TypstDependencyReader::SiteProgram],
-            ),
-            (
-                "/site/templates/document.typ",
-                RebuildPriority::Affected,
-                RebuildPriority::Affected,
-                vec![
-                    TypstDependencyReader::ContentSource(source.clone()),
-                    TypstDependencyReader::SiteProgram,
-                ],
-            ),
-        ] {
-            let decision =
-                RebuildDecision::for_paths(Some(&evidence), &[PathBuf::from(changed)], false);
-            assert_eq!(decision.source_analysis, source_analysis, "{changed}");
-            assert_eq!(decision.site_program, site_program, "{changed}");
-            assert_eq!(decision.affected_readers, affected, "{changed}");
-        }
-
-        // A parent directory rebuilds the sources beneath it, while a sibling prefix does not.
-        let parent =
-            RebuildDecision::for_paths(Some(&evidence), &[PathBuf::from("/site/content")], false);
-        assert_eq!(parent.source_analysis, RebuildPriority::Direct);
-        assert_eq!(
-            parent.direct_readers,
-            vec![TypstDependencyReader::ContentSource(source)]
-        );
-
-        // An inventory change rebuilds the analysis without naming any reader of a changed path.
-        let inventory = RebuildDecision::for_paths(
-            Some(&evidence),
-            &[PathBuf::from("/site/content/added.typ")],
-            true,
-        );
-        assert_eq!(inventory.source_analysis, RebuildPriority::Direct);
-        assert!(inventory.direct_readers.is_empty());
-    }
-
-    /// Physical reads are fresh while their bytes and targets are unchanged, and stale as soon as
-    /// either moves: an edit, a removal, or a symlink retarget with the same bytes.
-    #[test]
-    fn physical_reads_turn_stale() {
-        let directory = tempfile::TempDir::new().unwrap();
-        let root = directory.path();
-        let template = root.join("template.typ");
-        std::fs::write(&template, "#let helper = 1").unwrap();
-        let evidence = captured_dependencies(
-            root,
-            std::iter::empty(),
-            &root.join("site.typ"),
-            Vec::new(),
-            vec![ReadEvidence::new(
-                ReadLocator::Root("template.typ".into()),
-                b"#let helper = 1",
-            )],
-        );
-        let boundary = tola_typst::SourceBoundary::default();
-        let cancellation = BuildCancellation::default();
-        let fresh = || {
-            evidence
-                .physical_reads_are_fresh(&boundary, &cancellation)
-                .unwrap()
-        };
-
-        assert!(fresh());
-        assert!(RebuildDecision::for_paths(Some(&evidence), &[], false).reuses_site_program());
-
-        std::fs::write(&template, "#let helper = 2").unwrap();
-        assert!(!fresh(), "an edited read is stale");
-
-        std::fs::remove_file(&template).unwrap();
-        assert!(!fresh(), "a removed read is stale");
-    }
-
-    /// The same bytes reached through a different target are still stale: identity is the target,
-    /// not the content.
-    #[cfg(unix)]
-    #[test]
-    fn retargeted_read_is_stale() {
-        use std::os::unix::fs::symlink;
-
-        let directory = tempfile::TempDir::new().unwrap();
-        let root = directory.path();
-        let first = root.join("first.typ");
-        let second = root.join("second.typ");
-        let logical = root.join("template.typ");
-        std::fs::write(&first, b"same bytes").unwrap();
-        std::fs::write(&second, b"same bytes").unwrap();
-        symlink(&first, &logical).unwrap();
-        let evidence = captured_dependencies(
-            root,
-            std::iter::empty(),
-            &root.join("site.typ"),
-            Vec::new(),
-            vec![ReadEvidence::new(
-                ReadLocator::Root("template.typ".into()),
-                b"same bytes",
-            )],
-        );
-        let boundary = tola_typst::SourceBoundary::default();
-        let cancellation = BuildCancellation::default();
-
-        assert!(
-            evidence
-                .physical_reads_are_fresh(&boundary, &cancellation)
-                .unwrap()
-        );
-        // A read is watched at both its logical path and the target it resolves to.
-        let watched = evidence.physical_read_paths();
-        assert!(watched.contains(&tola_input::normalize_path(root).join("template.typ")));
-        assert!(watched.contains(&std::fs::canonicalize(&first).unwrap()));
-
-        std::fs::remove_file(&logical).unwrap();
-        symlink(&second, &logical).unwrap();
-        assert!(
-            !evidence
-                .physical_reads_are_fresh(&boundary, &cancellation)
-                .unwrap(),
-            "a retargeted read is stale even when the bytes match"
-        );
-    }
-
-    #[test]
-    fn conflicting_reads_are_stale() {
-        let directory = tempfile::TempDir::new().unwrap();
-        let root = directory.path();
-        let template = root.join("template.typ");
-        std::fs::write(&template, "first").unwrap();
-        let boundary = tola_typst::SourceBoundary::default();
-        let cancellation = BuildCancellation::default();
-
-        let conflicting = captured_dependencies(
-            root,
-            [root.join("content/post.typ")],
-            &root.join("site.typ"),
-            vec![ReadEvidence::new(
-                ReadLocator::Root("template.typ".into()),
-                b"first",
-            )],
-            vec![ReadEvidence::new(
-                ReadLocator::Root("template.typ".into()),
-                b"second",
-            )],
-        );
-        assert!(
-            !conflicting
-                .physical_reads_are_fresh(&boundary, &cancellation)
-                .unwrap(),
-            "readers that saw different bytes are stale"
-        );
-    }
-
-    #[test]
-    fn shared_read_is_watched_once() {
-        let directory = tempfile::TempDir::new().unwrap();
-        let root = directory.path();
-        let template = root.join("template.typ");
-        std::fs::write(&template, "first").unwrap();
-        let boundary = tola_typst::SourceBoundary::default();
-        let cancellation = BuildCancellation::default();
-
-        let read = || ReadEvidence::new(ReadLocator::Root("template.typ".into()), b"first");
-        let shared = captured_dependencies(
-            root,
-            std::iter::empty(),
-            &root.join("site.typ"),
-            vec![read()],
-            vec![read()],
-        );
-        assert_eq!(
-            shared.physical_read_paths(),
-            vec![tola_input::normalize_path(&template)]
-        );
-        assert!(
-            shared
-                .physical_reads_are_fresh(&boundary, &cancellation)
-                .unwrap()
-        );
-    }
-
-    /// A package file is watched through the physical file it resolves to, so a change inside
-    /// the package directory reaches the reader that read it.
-    #[test]
-    fn package_read_matches_file() {
-        let directory = tempfile::TempDir::new().unwrap();
-        let root = directory.path();
-        let package_root = root.join("packages");
-        let package_file = package_root.join("preview/demo/1.2.3/lib.typ");
-        std::fs::create_dir_all(package_file.parent().unwrap()).unwrap();
-        std::fs::write(&package_file, "#let helper = 1").unwrap();
-
-        let package_read = ReadEvidence::new(
-            ReadLocator::Package {
-                package: "@preview/demo:1.2.3".parse().unwrap(),
-                path: PathBuf::from("lib.typ"),
-            },
-            b"#let helper = 1",
-        );
-        let reader = TypstDependencyReader::ContentSource(root.join("content/source.typ"));
-        let evidence = retained_dependencies(
-            root,
-            std::iter::empty::<PathBuf>(),
-            [root.join("site.typ")],
-            BTreeMap::from([(
-                reader.clone(),
-                DependencyReaderEvidence {
-                    reads: vec![physical_read(&package_file, package_read)],
-                    package_checks: Vec::new(),
-                },
-            )]),
-        );
-
-        assert_eq!(
-            evidence.readers_of_paths(&[package_root.join("preview/demo")]),
-            vec![reader]
-        );
-        assert_eq!(
-            RebuildDecision::for_paths(Some(&evidence), &[package_file], false).source_analysis,
-            RebuildPriority::Affected
-        );
-    }
-
-    #[test]
-    fn same_bytes_agree() {
-        let directory = tempfile::TempDir::new().unwrap();
-        let root = directory.path();
-        let file = root.join("shared.typ");
-        std::fs::write(&file, "Shared").unwrap();
-        let boundary = tola_typst::SourceBoundary::default();
-        let cancellation = BuildCancellation::default();
-
-        let reads = [
-            ReadLocator::Root("shared.typ".into()),
-            ReadLocator::ProvidedRoot("mapped.typ".into()),
-        ]
-        .into_iter()
-        .map(|locator| physical_read(&file, ReadEvidence::new(locator, b"Shared")))
-        .collect();
-        let shared = retained_dependencies(
-            root,
-            [],
-            [],
-            BTreeMap::from([(
-                TypstDependencyReader::SiteProgram,
-                DependencyReaderEvidence {
-                    reads,
-                    package_checks: Vec::new(),
-                },
-            )]),
-        );
-        assert!(
-            shared
-                .physical_reads_are_fresh(&boundary, &cancellation)
-                .unwrap(),
-            "distinct locators over the same bytes agree"
-        );
-    }
-
-    #[test]
-    fn asset_read_skips_source_analysis() {
-        let directory = tempfile::TempDir::new().unwrap();
-        let root = directory.path();
-        for path in [
-            "templates/document.typ",
-            "site.typ",
-            "assets/a.svg",
-            "content/a.typ",
-        ] {
-            let file = root.join(path);
-            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
-            std::fs::write(&file, path).unwrap();
-        }
-        let asset_evidence = dependencies(
-            root,
-            [root.join("content/a.typ")],
-            &root.join("site.typ"),
-            [
-                (
-                    TypstDependencyReader::ContentSource(root.join("content/a.typ")),
-                    vec![evidence("templates/document.typ")],
-                ),
-                (
-                    TypstDependencyReader::SiteProgram,
-                    vec![evidence("site.typ"), evidence("assets/a.svg")],
-                ),
-            ],
-        );
-        let decision =
-            RebuildDecision::for_paths(Some(&asset_evidence), &[root.join("assets/a.svg")], false);
-        assert_eq!(decision.source_analysis, RebuildPriority::Unchanged);
-        assert_eq!(decision.site_program, RebuildPriority::Affected);
-        assert!(decision.direct_readers.is_empty());
-        assert_eq!(
-            decision.affected_readers,
-            vec![TypstDependencyReader::SiteProgram]
-        );
-    }
-
-    #[test]
-    fn package_checks_follow_their_selection() {
-        let directory = tempfile::TempDir::new().unwrap();
-        let root = directory.path();
-        let data = root.join("package-data");
-        let cache = root.join("package-cache");
-        std::fs::create_dir_all(cache.join("preview/demo/1.0.0")).unwrap();
-        let locations =
-            tola_typst::PackageLocations::from_absolute_roots(Some(data.clone()), Some(cache))
-                .unwrap();
-        let store =
-            tola_typst::PackageStore::new(locations, tola_typst::PackageFetchPolicy::LocalOnly);
-        let package = "@preview/demo:1.0.0".parse().unwrap();
-        let checks = store.prepare(&package).unwrap().checks().to_vec();
-
-        assert!(checks.iter().all(package_check_is_fresh));
-        // A site package root that now holds the package is a better answer than the cache.
-        std::fs::create_dir_all(data.join("preview/demo/1.0.0")).unwrap();
-        assert!(!checks.iter().all(package_check_is_fresh));
-    }
-
-    /// A read the process cannot reproduce makes its producer rebuild; an owned observation
-    /// descriptor does not.
-    ///
-    /// That ownership is the whole classification, so one row per locator kind decides it.
-    #[test]
-    fn virtual_reads_classify_by_ownership() {
-        let directory = tempfile::TempDir::new().unwrap();
-        let root = directory.path();
-        let config = crate::config::tests::load_test_config(root, "");
-        let host = compiler_host(&config).unwrap();
-        let evidence = |locator: ReadLocator| {
-            let process_stable = host.read_is_process_stable(&locator);
-            let reader_evidence = [(
-                TypstDependencyReader::SiteProgram,
-                DependencyReaderEvidence {
-                    reads: vec![DependencyReadEvidence::Virtual {
-                        evidence: ReadEvidence::new(locator, b"virtual"),
-                        process_stable,
-                    }],
-                    package_checks: Vec::new(),
-                },
-            )]
-            .into_iter()
-            .collect::<BTreeMap<_, _>>();
-            retained_dependencies(
-                config.get_root(),
-                std::iter::empty::<PathBuf>(),
-                [config.get_root().join("site.typ")],
-                reader_evidence,
-            )
-        };
-        let priority = |locator: ReadLocator| {
-            RebuildDecision::for_paths(Some(&evidence(locator)), &[], false).site_program
-        };
-
-        for (locator, expected) in [
-            // A package file is immutable for the process.
-            (
-                ReadLocator::ProvidedPackage {
-                    package: "@tola/document:0.0.0".parse().unwrap(),
-                    path: "lib.typ".into(),
-                },
-                RebuildPriority::Unchanged,
-            ),
-            // Both source observations belong to `@tola/source`: the package-wide capability
-            // read and the per-file lexical identity read are immutable descriptors.
-            (
-                ReadLocator::ProvidedPackage {
-                    package: tola_packages::TolaPackage::Source.spec(),
-                    path: ".tola-capability".into(),
-                },
-                RebuildPriority::Unchanged,
-            ),
-            (
-                ReadLocator::ProvidedPackage {
-                    package: tola_packages::TolaPackage::Source.spec(),
-                    path: ".tola-source/content/document.typ".into(),
-                },
-                RebuildPriority::Unchanged,
-            ),
-            // The same path under another package is an ordinary unstable virtual read.
-            (
-                ReadLocator::ProvidedPackage {
-                    package: tola_packages::TolaPackage::Document.spec(),
-                    path: ".tola-source/content/document.typ".into(),
-                },
-                RebuildPriority::Affected,
-            ),
-            (
-                ReadLocator::ProvidedRoot("internal.typ".into()),
-                RebuildPriority::Affected,
-            ),
-            (
-                ReadLocator::NonPersistent("<generated>".into()),
-                RebuildPriority::Affected,
-            ),
-        ] {
-            assert_eq!(priority(locator.clone()), expected, "{locator:?}");
-        }
-    }
-
-    /// An icon read is matched against the bytes the host currently holds, and its membership
-    /// list against the names the collection carries.
-    #[test]
-    fn icon_reads_follow_bytes() {
-        let directory = tempfile::TempDir::new().unwrap();
-        let config = crate::config::tests::load_test_config(directory.path(), "");
-        let host = compiler_host(&config).unwrap();
-        let collections = |mark: &str, unused: &str| {
-            let wrap = |paint: &str| {
-                format!("<svg viewBox='0 0 1 1'><path fill='{paint}' d='M0 0h1v1H0z'/></svg>")
-            };
-            crate::compiler::tests::brand_icons(&wrap(mark), &wrap(unused))
-        };
-        let original = collections("red", "blue");
-        let original_host = host.with_icons(Arc::clone(&original));
-        let read = ReadEvidence::new(
-            ReadLocator::ProvidedPackage {
-                package: tola_packages::TolaPackage::Icon.spec(),
-                path: ".tola-icon/brand/mark.svg".into(),
-            },
-            original.get("brand", "mark").unwrap().svg().as_bytes(),
-        );
-        assert!(!original_host.read_is_process_stable(read.locator()));
-        let dependencies = captured_dependencies(
-            config.get_root(),
-            std::iter::empty(),
-            &config.build.entry,
-            Vec::new(),
-            vec![read],
-        );
-        let cancellation = BuildCancellation::default();
-        let matches = |host: &crate::compiler::SiteHost| {
-            dependencies
-                .virtual_reads_match(
-                    |evidence| host.virtual_read_matches(evidence),
-                    &cancellation,
-                )
-                .unwrap()
-        };
-        assert!(matches(&original_host));
-        // An unused icon changing does not invalidate the reader.
-        assert!(matches(&host.with_icons(collections("red", "green"))));
-        assert!(!matches(&host.with_icons(collections("tan", "blue"))));
-        assert!(!matches(&host.with_icons(Arc::default())));
-
-        // The name list is its own observation: a changed membership invalidates, as does none.
-        let named = |names: &[&str]| {
-            let mut collection = tola_icons::IconCollection::new();
-            for name in names {
-                collection
-                    .insert_svg(name, "<svg viewBox='0 0 1 1'><path/></svg>")
-                    .unwrap();
-            }
-            let mut collections = tola_icons::IconCollections::new();
-            collections.mount("brand", collection).unwrap();
-            Arc::new(collections)
-        };
-        let package = tola_packages::TolaPackage::Icon.spec();
-        let path = std::path::Path::new(".tola-icon/brand/.names");
-        let bytes = tola_packages::icon_collection_names_bytes(&original, &package, path).unwrap();
-        let dependencies = captured_dependencies(
-            config.get_root(),
-            std::iter::empty(),
-            &config.build.entry,
-            Vec::new(),
-            vec![ReadEvidence::new(
-                ReadLocator::ProvidedPackage {
-                    package,
-                    path: path.into(),
-                },
-                &bytes,
-            )],
-        );
-        let matches = |collections| {
-            let current = host.with_icons(collections);
-            dependencies
-                .virtual_reads_match(
-                    |evidence| current.virtual_read_matches(evidence),
-                    &cancellation,
-                )
-                .unwrap()
-        };
-        assert!(matches(Arc::clone(&original)));
-        assert!(!matches(named(&["palette", "paints"])));
-        assert!(!matches(named(&[])));
-    }
 }

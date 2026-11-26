@@ -29,7 +29,6 @@ pub enum FoldKind {
     Comment,
 }
 
-/// The constructs whose own span folds when it covers more than one line.
 const FOLDED: &[SyntaxKind] = &[
     SyntaxKind::CodeBlock,
     SyntaxKind::ContentBlock,
@@ -47,15 +46,10 @@ const FOLDED: &[SyntaxKind] = &[
 ];
 
 /// Every folding range of the source, or `None` when there is nothing to fold.
-///
-/// A heading folds its section, a construct of a foldable kind folds its whole span, and comments
-/// on consecutive lines fold as one region. Each range spans at least two lines and ends on the
-/// last line that carries text, so a folded range never hides only blank lines. Ranges come in
-/// document order.
-pub fn folds(source: &Source) -> Option<Vec<Fold>> {
-    let lines = source.lines();
+pub fn folds(src: &Source) -> Option<Vec<Fold>> {
+    let lines = src.lines();
     let mut ranges = Vec::new();
-    for section in sections::sections(source) {
+    for section in sections::sections(src) {
         push_range(
             &mut ranges,
             lines,
@@ -64,10 +58,9 @@ pub fn folds(source: &Source) -> Option<Vec<Fold>> {
             Some(section.name),
         );
     }
-    fold_regions(&LinkedNode::new(source.root()), lines, &mut ranges);
+    fold_regions(&LinkedNode::new(src.root()), lines, &mut ranges);
     ranges.sort_by_key(|range| (range.start_line, range.end_line));
-    // A call's argument list and the content block it carries open the same brackets, so two
-    // constructs can describe one fold.
+    // Call args and content block can share brackets, producing duplicate line pairs.
     ranges.dedup_by_key(|range| (range.start_line, range.end_line));
     (!ranges.is_empty()).then_some(ranges)
 }
@@ -87,7 +80,7 @@ fn fold_regions(node: &LinkedNode<'_>, lines: &Lines<String>, ranges: &mut Vec<F
                     None => range,
                 });
             }
-            // One newline between comments keeps the run; a blank line is a paragraph break.
+            // Single newline (`Space`) continues a comment run; `Parbreak` ends it.
             SyntaxKind::Space => {}
             _ => {
                 if let Some(run) = comments.take() {
@@ -107,8 +100,6 @@ fn fold_regions(node: &LinkedNode<'_>, lines: &Lines<String>, ranges: &mut Vec<F
     }
 }
 
-/// Record the range `bytes` spans, when it covers more than one line of text.
-/// The UTF-16 column one byte sits at, which a client that folds part of a line asks for.
 fn utf16_column(lines: &Lines<String>, byte: usize) -> Option<u32> {
     Some(
         crate::position::utf16_range(lines, byte..byte)?
@@ -138,7 +129,6 @@ fn push_range(
         return;
     };
     if end_line > start_line {
-        // Both ends are reported, so the fold hides exactly what it covers.
         let (start_character, end_character) =
             (utf16_column(lines, bytes.start), utf16_column(lines, end));
         ranges.push(Fold {
@@ -165,15 +155,14 @@ mod tests {
     }
 
     #[test]
-    fn section_fold_reports_trimmed_body_end() {
+    fn fold_section_body_end() {
         let ranges =
             super::folds(&Source::detached("= One\nbody\n\n= Two\nmore\n")).expect("section folds");
         assert_eq!((ranges[0].end_line, ranges[0].end_character), (1, Some(4)));
     }
 
-    /// A trailing blank line is not part of the folded text, and a fold never spans one line.
     #[test]
-    fn folds_end_at_the_last_text_line() {
+    fn fold_trims_trailing_blank_lines() {
         assert_eq!(
             folded("= One\nfirst\n\n\n"),
             [(0, 1, Some("One".to_owned()))]
@@ -182,7 +171,7 @@ mod tests {
     }
 
     #[test]
-    fn list_items_fold_their_own_lines() {
+    fn fold_list_items() {
         assert_eq!(folded("- first\n  continued\n- second\n"), [(0, 1, None)]);
     }
 }

@@ -50,18 +50,17 @@ pub(crate) fn indexed_field_path(
     elements: &[(&'static str, usize)],
 ) -> Option<String> {
     let mut key = Cow::Borrowed(field);
-    let mut inside_element = false;
-    for (array, index) in elements.iter().rev() {
+    let mut in_elem = false;
+    for (array, idx) in elements.iter().rev() {
         let Some(rest) = key.strip_prefix(*array) else {
             continue;
         };
         key = match rest.strip_prefix('.') {
-            Some(rest) => Cow::Owned(format!("{array}.{index}.{rest}")),
-            None if rest.is_empty() => Cow::Owned(format!("{array}.{index}")),
-            // A shared text prefix does not put a field inside the array.
+            Some(rest) => Cow::Owned(format!("{array}.{idx}.{rest}")),
+            None if rest.is_empty() => Cow::Owned(format!("{array}.{idx}")),
             None => continue,
         };
-        inside_element = true;
+        in_elem = true;
     }
-    inside_element.then(|| key.into_owned())
+    in_elem.then(|| key.into_owned())
 }

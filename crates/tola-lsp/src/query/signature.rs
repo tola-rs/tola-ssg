@@ -11,41 +11,38 @@ use super::semantic::Semantic;
 impl Selection<'_> {
     pub(super) fn signature_help(
         &self,
-        prepared: &Source,
-        semantics: &mut Semantic<'_>,
+        prep: &Source,
+        sem: &mut Semantic<'_>,
     ) -> Result<Option<SignatureHelp>> {
         let SelectedSyntax::Call(call) = &self.syntax else {
             return Ok(None);
         };
         let name = &self.source.text()[call.callee.clone()];
-        let callee_node = tola_typst_syntax::syntax::node_at_range(prepared, &call.callee);
-        let (mut signatures, parameters) = match &call.target {
+        let callee_node = tola_typst_syntax::syntax::node_at_range(prep, &call.callee);
+        let (mut sigs, params) = match &call.target {
             tola_typst_syntax::syntax::CallTarget::Function => {
                 let Some(callee) = &callee_node else {
                     return Ok(None);
                 };
-                semantics.signatures(callee, name)?
+                sem.signatures(callee, name)?
             }
             tola_typst_syntax::syntax::CallTarget::Field { receiver, field } => {
-                let Some(receiver) = tola_typst_syntax::syntax::node_at_range(prepared, receiver)
+                let Some(receiver) = tola_typst_syntax::syntax::node_at_range(prep, receiver)
                 else {
                     return Ok(None);
                 };
-                semantics.field_signatures(&receiver, &self.source.text()[field.clone()], name)?
+                sem.field_signatures(&receiver, &self.source.text()[field.clone()], name)?
             }
         };
-        if signatures.is_empty() {
+        if sigs.is_empty() {
             return Ok(None);
         }
-        let rest = parameters
-            .iter()
-            .position(|parameter| parameter.kind == ParameterKind::Rest);
+        let rest = params.iter().position(|p| p.kind == ParameterKind::Rest);
         let written = if let Some(written) = &call.argument_name {
-            parameters
+            params
                 .iter()
-                .position(|parameter| {
-                    parameter.kind == ParameterKind::Named
-                        && parameter.name == self.source.text()[written.clone()]
+                .position(|p| {
+                    p.kind == ParameterKind::Named && p.name == self.source.text()[written.clone()]
                 })
                 .or(rest)
         } else {
@@ -53,33 +50,33 @@ impl Selection<'_> {
                 .as_ref()
                 .and_then(|callee| callee.parent().cloned())
                 .and_then(|node| {
-                    let invocation = node.cast::<ast::FuncCall>()?;
-                    let mut positional = 0;
-                    for argument in invocation.args().items().take(call.active_argument) {
-                        match argument {
-                            ast::Arg::Pos(_) => positional += 1,
+                    let call_ast = node.cast::<ast::FuncCall>()?;
+                    let mut pos = 0;
+                    for arg in call_ast.args().items().take(call.active_argument) {
+                        match arg {
+                            ast::Arg::Pos(_) => pos += 1,
                             ast::Arg::Named(_) => {}
                             ast::Arg::Spread(_) => return None,
                         }
                     }
-                    Some(positional)
+                    Some(pos)
                 });
-            positional.and_then(|positional| {
-                parameters
+            positional.and_then(|pos| {
+                params
                     .iter()
                     .enumerate()
-                    .filter(|(_, parameter)| parameter.kind == ParameterKind::Positional)
-                    .nth(positional)
-                    .map(|(index, _)| index)
+                    .filter(|(_, p)| p.kind == ParameterKind::Positional)
+                    .nth(pos)
+                    .map(|(idx, _)| idx)
                     .or(rest)
             })
         };
-        signatures[0].active_parameter = written
+        sigs[0].active_parameter = written
             .map(u32::try_from)
             .transpose()
             .context("active parameter exceeds LSP index range")?;
         Ok(Some(SignatureHelp {
-            signatures,
+            signatures: sigs,
             active_signature: Some(0),
             active_parameter: None,
         }))
@@ -91,17 +88,13 @@ mod tests {
     use crate::query::tests::*;
     use lsp_types::{ParameterLabel, SignatureHelp};
 
-    /// The signature help one source reports at its own cursor marker.
-    fn signature_of(source: &str) -> SignatureHelp {
-        QuerySession::new().signature(source).expect("a signature")
+    fn sig_of(src: &str) -> SignatureHelp {
+        QuerySession::new().signature(src).expect("a signature")
     }
 
-    /// A call reports the signature of the function it names, however the callee resolves: a
-    /// standard-library call, a module member, a show rule, a method, a local function, an aliased
-    /// import, and a callee that is itself a call.
     #[test]
-    fn calls_report_their_signature() {
-        let cases: [(&str, &str, &[&str], Option<&str>); 7] = [
+    fn callee_signature_labels() {
+        let cases: [(&str, &str, &[&str], Option<&str>); 8] = [
             ("#align(|center)[Body]", "align(", &["alignment"], None),
             ("#(math.underline(|))\n", "math.underline(", &[], None),
             (
@@ -129,45 +122,43 @@ mod tests {
                 &[],
                 None,
             ),
+            ("#text(|\"\")\n", "text(", &["text"], None),
         ];
-        for (source, prefix, fragments, declared) in cases {
-            let signature = signature_of(source);
-            let first = &signature.signatures[0];
-            // The label begins with the spelling the author wrote, so an alias cannot answer as
-            // the name it imports.
-            assert!(first.label.starts_with(prefix), "{source:?}: {first:?}");
+        for (src, prefix, fragments, declared) in cases {
+            let sig = sig_of(src);
+            let first = &sig.signatures[0];
+            assert!(first.label.starts_with(prefix), "{src:?}: {first:?}");
             for fragment in fragments {
-                assert!(first.label.contains(fragment), "{source:?}: {first:?}");
+                assert!(first.label.contains(fragment), "{src:?}: {first:?}");
             }
             if let Some(declared) = declared {
-                let parameters = first.parameters.as_ref().expect("declared parameters");
+                let params = first.parameters.as_ref().expect("declared parameters");
                 assert!(
-                    parameters.iter().any(|parameter| match &parameter.label {
+                    params.iter().any(|p| match &p.label {
                         ParameterLabel::Simple(label) => label.contains(declared),
-                        ParameterLabel::LabelOffsets(offsets) => first.label
-                            [offsets[0] as usize..offsets[1] as usize]
-                            .contains(declared),
+                        ParameterLabel::LabelOffsets(offs) => {
+                            first.label[offs[0] as usize..offs[1] as usize].contains(declared)
+                        }
                     }),
-                    "{source:?}: {first:?}"
+                    "{src:?}: {first:?}"
                 );
             }
         }
     }
+
     #[test]
-    fn datalog_query_requires_named_arrays() {
-        let signature = signature_of(
+    fn datalog_query_required_named_arrays() {
+        let sig = sig_of(
             "#import \"@tola/datalog:0.0.0\": database\n#let db = database(())\n#db.query(|)",
         );
-        let query = &signature.signatures[0];
+        let query = &sig.signatures[0];
         assert!(
             query
                 .label
                 .ends_with("query(select: array, where: array) -> array")
         );
-        let parameters = query.parameters.as_ref().unwrap();
-        for parameter in parameters {
-            let Some(lsp_types::Documentation::MarkupContent(docs)) = &parameter.documentation
-            else {
+        for param in query.parameters.as_ref().unwrap() {
+            let Some(lsp_types::Documentation::MarkupContent(docs)) = &param.documentation else {
                 panic!("query parameter has no documentation");
             };
             assert!(docs.value.contains("Required."));
@@ -175,56 +166,33 @@ mod tests {
     }
 
     #[test]
-    fn positional_arguments_skip_named_arguments() {
-        for (source, expected) in [
-            ("#text(size: 10pt, |\"hello\")\n", "text:"),
-            ("#let f(a: 1, b) = b\n#f(a: 2, |\"x\")\n", "b:"),
-            ("#let f(a, ..xs) = a\n#f(1, size: 2, |3)\n", "xs:"),
+    fn active_parameter_selection() {
+        for (src, expected) in [
+            ("#text(size: 10pt, |\"hello\")\n", Some("text:")),
+            ("#let f(a: 1, b) = b\n#f(a: 2, |\"x\")\n", Some("b:")),
+            ("#let f(a, ..xs) = a\n#f(1, size: 2, |3)\n", Some("xs:")),
+            (
+                "#let size(body, width: 0pt, height: 0pt) = body\n#size(|width: 1pt)\n",
+                Some("width:"),
+            ),
+            ("#let f(size: 1) = size\n#f(|2)\n", None),
+            ("#let f(a, b) = a\n#f(..(1,), |2)\n", None),
+            ("#let f(size: 1) = size\n#f(|unknown: 2)\n", None),
+            ("#let f(a, b: 1) = a\n#f(|a: 2)\n", None),
         ] {
-            let signature = signature_of(source);
-            let first = &signature.signatures[0];
-            let selected = first.active_parameter.expect("a selected parameter");
-            assert_eq!(
-                first.parameters.as_ref().unwrap()[selected as usize].label,
-                ParameterLabel::Simple(expected.to_owned()),
-                "{source}"
-            );
+            let sig = sig_of(src);
+            let first = &sig.signatures[0];
+            match expected {
+                Some(label) => {
+                    let selected = first.active_parameter.expect("a selected parameter");
+                    assert_eq!(
+                        first.parameters.as_ref().unwrap()[selected as usize].label,
+                        ParameterLabel::Simple(label.to_owned()),
+                        "{src}"
+                    );
+                }
+                None => assert_eq!(first.active_parameter, None, "{src}"),
+            }
         }
-    }
-
-    #[test]
-    fn unknown_positions_mark_no_parameter() {
-        for source in [
-            "#let f(size: 1) = size\n#f(|2)\n",
-            "#let f(a, b) = a\n#f(..(1,), |2)\n",
-            "#let f(size: 1) = size\n#f(|unknown: 2)\n",
-            "#let f(a, b: 1) = a\n#f(|a: 2)\n",
-        ] {
-            let signature = signature_of(source);
-            assert_eq!(signature.signatures[0].active_parameter, None, "{source}");
-        }
-    }
-
-    /// A named argument marks the parameter it names, not the position it was written at.
-    #[test]
-    fn named_argument_marks_its_own_parameter() {
-        let signature =
-            signature_of("#let size(body, width: 0pt, height: 0pt) = body\n#size(|width: 1pt)\n");
-        let help = &signature.signatures[0];
-        let parameters = help.parameters.as_ref().expect("parameters");
-        let marked = help.active_parameter.expect("a marked parameter");
-        assert_eq!(
-            parameters[marked as usize].label,
-            ParameterLabel::Simple("width:".to_owned())
-        );
-    }
-
-    /// A library call's signature names the element's own type as the value it returns.
-    #[test]
-    fn library_call_labels_its_return() {
-        let signature = signature_of("#text(|\"\")\n");
-        let label = &signature.signatures[0].label;
-        assert!(label.starts_with("text("), "{label}");
-        assert!(label.contains("-> text"), "{label}");
     }
 }

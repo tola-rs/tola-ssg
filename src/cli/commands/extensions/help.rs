@@ -95,6 +95,14 @@ pub(super) fn render_help(mut command: clap::Command, use_color: bool, long: boo
     }
 }
 
+fn named_command(module: &ModuleCommands, name: &str) -> clap::Command {
+    clap::Command::new(name.to_owned()).bin_name(format!("tola {} {name}", module.name))
+}
+
+fn default_str(val: Option<tola_nu::Value>) -> Option<String> {
+    val.and_then(|v| v.coerce_string().ok())
+}
+
 pub(super) fn command_help(
     module: &ModuleCommands,
     name: &str,
@@ -102,89 +110,71 @@ pub(super) fn command_help(
     use_color: bool,
     long: bool,
 ) -> String {
-    let command = clap::Command::new(name.to_owned())
-        .bin_name(format!("tola {} {name}", module.name))
+    let cmd = named_command(module, name)
         .about(declared.help.lines().next().unwrap_or("").to_owned())
         .long_about(declared.help.clone());
     let action = declared
         .action()
         .expect("module command actions are validated");
-    let command = match &action {
-        CommandAction::Query { .. } => super::super::query::QueryOptions::augment_args(command),
-        CommandAction::Execute(_) => command.arg(
+    let cmd = match &action {
+        CommandAction::Query { .. } => super::super::query::QueryOptions::augment_args(cmd),
+        CommandAction::Execute(_) => cmd.arg(
             clap::Arg::new("ARGS")
                 .num_args(0..)
                 .allow_hyphen_values(true)
                 .help("Arguments passed to the command"),
         ),
-        CommandAction::Skill { .. } => SkillArgs::augment_args(command),
+        CommandAction::Skill { .. } => SkillArgs::augment_args(cmd),
     };
-    render_help(command, use_color, long)
+    render_help(cmd, use_color, long)
 }
 
 pub(super) fn skill_command(module: &ModuleCommands, name: &str) -> clap::Command {
-    let command =
-        clap::Command::new(name.to_owned()).bin_name(format!("tola {} {name}", module.name));
-    SkillArgs::augment_args(command)
+    SkillArgs::augment_args(named_command(module, name))
 }
 
 pub(super) fn signature_command(
     module: &ModuleCommands,
     name: &str,
-    signature: tola_nu::Signature,
+    sig: tola_nu::Signature,
 ) -> clap::Command {
-    let long_about = if signature.extra_description.is_empty() {
-        signature.description.clone()
+    let long_about = if sig.extra_description.is_empty() {
+        sig.description.clone()
     } else {
-        format!(
-            "{}\n\n{}",
-            signature.description, signature.extra_description
-        )
+        format!("{}\n\n{}", sig.description, sig.extra_description)
     };
-    let mut command = clap::Command::new(name.to_owned())
-        .bin_name(format!("tola {} {name}", module.name))
-        .about(signature.description)
+    let mut cmd = named_command(module, name)
+        .about(sig.description)
         .long_about(long_about);
-    for (positional, required, rest) in signature
+    let pos = sig
         .required_positional
         .into_iter()
         .map(|arg| (arg, true, false))
         .chain(
-            signature
-                .optional_positional
+            sig.optional_positional
                 .into_iter()
-                .map(|arg| (arg, false, false)),
+                .map(|a| (a, false, false)),
         )
-        .chain(
-            signature
-                .rest_positional
-                .into_iter()
-                .map(|arg| (arg, false, true)),
-        )
-    {
-        let mut arg = clap::Arg::new(positional.name.clone())
-            .value_name(positional.name.to_uppercase())
-            .help(positional.desc)
-            .required(required);
+        .chain(sig.rest_positional.into_iter().map(|a| (a, false, true)));
+    for (p, req, rest) in pos {
+        let mut arg = clap::Arg::new(p.name.clone())
+            .value_name(p.name.to_uppercase())
+            .help(p.desc)
+            .required(req);
         if rest {
             arg = arg.num_args(0..);
         }
-        if let Some(default) = positional
-            .default_value
-            .and_then(|value| value.coerce_string().ok())
-        {
-            arg = arg.default_value(default);
+        if let Some(def) = default_str(p.default_value) {
+            arg = arg.default_value(def);
         }
-        command = command.arg(arg);
+        cmd = cmd.arg(arg);
     }
-    for flag in signature.named {
+    for flag in sig.named {
         if flag.long == "help" || flag.short == Some('h') {
             continue;
         }
         let id = if flag.long.is_empty() {
-            flag.short
-                .map(|short| short.to_string())
-                .unwrap_or_default()
+            flag.short.map(|s| s.to_string()).unwrap_or_default()
         } else {
             flag.long.clone()
         };
@@ -199,17 +189,14 @@ pub(super) fn signature_command(
         }
         arg = if flag.arg.is_some() {
             let mut arg = arg.value_name(id.to_uppercase());
-            if let Some(default) = flag
-                .default_value
-                .and_then(|value| value.coerce_string().ok())
-            {
-                arg = arg.default_value(default);
+            if let Some(def) = default_str(flag.default_value) {
+                arg = arg.default_value(def);
             }
             arg
         } else {
             arg.action(clap::ArgAction::SetTrue)
         };
-        command = command.arg(arg);
+        cmd = cmd.arg(arg);
     }
-    command
+    cmd
 }

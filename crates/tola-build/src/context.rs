@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use tola_input::InputScope;
 use tola_subprocess::Command;
 
-use crate::config::ResolvedSiteConfig;
+use crate::config::SiteConfig;
 
 pub const PATH_ENV: &str = "_TOLA_CONTEXT_PATH";
 
@@ -37,10 +37,10 @@ pub struct Site {
     pub content_root: PathBuf,
 }
 
-impl From<&ResolvedSiteConfig> for Site {
-    fn from(config: &ResolvedSiteConfig) -> Self {
+impl From<&SiteConfig> for Site {
+    fn from(config: &SiteConfig) -> Self {
         Self {
-            root: config.get_root().to_owned(),
+            root: config.root().to_owned(),
             config_path: config.config_path().to_owned(),
             content_root: config.build().content_dir.clone(),
         }

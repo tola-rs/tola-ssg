@@ -12,48 +12,47 @@ pub(in crate::codec) fn scan_bmp(bytes: &[u8]) -> ImageResult<ContainerMetadata<
     if bytes.len() < 18 {
         return Err(ImageError::unreadable(DAMAGED));
     }
-    let header_length = le32(&bytes[14..18]) as usize;
+    let hdr_len = le32(&bytes[14..18]) as usize;
     if 14usize
-        .checked_add(header_length)
+        .checked_add(hdr_len)
         .is_none_or(|end| end > bytes.len())
     {
         return Err(ImageError::unreadable(DAMAGED));
     }
-    let mut metadata = ContainerMetadata::default();
-    if header_length >= 108 {
-        // LCS_sRGB and LCS_WINDOWS_COLOR_SPACE both describe sRGB samples; LCS_PROFILE_EMBEDDED
-        // points at an ICC profile the file itself carries.
-        let color_space = le32(&bytes[70..74]);
-        match color_space {
+    let mut meta = ContainerMetadata::default();
+    if hdr_len >= 108 {
+        // LCS_sRGB and LCS_WINDOWS_COLOR_SPACE both describe sRGB; LCS_PROFILE_EMBEDDED points at an ICC profile.
+        let cs = le32(&bytes[70..74]);
+        match cs {
             0x7352_4742 | 0x5769_6e20 => {}
-            0x4d42_4544 if header_length >= 124 => {
-                let offset = le32(&bytes[126..130]) as usize;
-                let length = le32(&bytes[130..134]) as usize;
-                if length == 0 {
+            0x4d42_4544 if hdr_len >= 124 => {
+                let off = le32(&bytes[126..130]) as usize;
+                let len = le32(&bytes[130..134]) as usize;
+                if len == 0 {
                     return Err(ImageError::unreadable(
                         "the BMP image has an empty color profile; re-export it with sRGB colors",
                     ));
                 }
                 let start = 14usize
-                    .checked_add(offset)
+                    .checked_add(off)
                     .ok_or_else(|| ImageError::unreadable(DAMAGED))?;
                 let end = start
-                    .checked_add(length)
+                    .checked_add(len)
                     .ok_or_else(|| ImageError::unreadable(DAMAGED))?;
-                metadata.color = SampleColor::StoredIcc(Cow::Borrowed(
+                meta.color = SampleColor::StoredIcc(Cow::Borrowed(
                     bytes
                         .get(start..end)
                         .ok_or_else(|| ImageError::unreadable(DAMAGED))?,
                 ));
             }
             _ => {
-                metadata.color = SampleColor::Unsupported(
+                meta.color = SampleColor::Unsupported(
                     "the BMP image uses a color profile Tola cannot read; convert the image to sRGB",
                 )
             }
         }
     }
-    Ok(metadata)
+    Ok(meta)
 }
 
 #[cfg(test)]
@@ -67,100 +66,83 @@ mod tests {
     use image::ExtendedColorType;
 
     #[test]
-    fn bmp_pixels_remain_rgb_when_re_encoded() {
-        let mut source = Vec::new();
-        image::codecs::bmp::BmpEncoder::new(&mut source)
+    fn bmp_rgb_roundtrip() {
+        let mut src = Vec::new();
+        image::codecs::bmp::BmpEncoder::new(&mut src)
             .encode(&[255, 0, 0, 0, 0, 255], 2, 1, ExtendedColorType::Rgb8)
             .unwrap();
-        let metadata = inspect(&source).unwrap();
+        let meta = inspect(&src).unwrap();
         assert_eq!(
-            (metadata.width, metadata.height, metadata.format),
+            (meta.width, meta.height, meta.format),
             (2, 1, ImageFormat::Bmp)
         );
-        let output = render_png(&source, 2, 1);
-        assert_eq!(rgba(&output), [255, 0, 0, 255, 0, 0, 255, 255]);
-        assert!(!inspect(&output).unwrap().has_alpha);
+        let out = render_png(&src, 2, 1);
+        assert_eq!(rgba(&out), [255, 0, 0, 255, 0, 0, 255, 255]);
+        assert!(!inspect(&out).unwrap().has_alpha);
     }
-    /// One 24-bit BMP with a V5 header, laid out the way Windows writes one: the file header, the
-    /// 124-byte header, then any embedded profile, then bottom-up rows padded to four bytes.
-    fn bmp_v5(pixels: &[u8], width: u32, height: u32, color_space: u32, profile: &[u8]) -> Vec<u8> {
-        let header = 14 + 124;
-        let stride = (width as usize * 3).div_ceil(4) * 4;
+
+    fn bmp_v5(px: &[u8], w: u32, h: u32, cs: u32, icc: &[u8]) -> Vec<u8> {
+        let hdr = 14 + 124;
+        let stride = (w as usize * 3).div_ceil(4) * 4;
         let mut bytes = Vec::new();
         bytes.extend_from_slice(b"BM");
-        bytes.extend_from_slice(
-            &((header + profile.len() + stride * height as usize) as u32).to_le_bytes(),
-        );
+        bytes.extend_from_slice(&((hdr + icc.len() + stride * h as usize) as u32).to_le_bytes());
         bytes.extend_from_slice(&0u32.to_le_bytes());
-        bytes.extend_from_slice(&((header + profile.len()) as u32).to_le_bytes());
+        bytes.extend_from_slice(&((hdr + icc.len()) as u32).to_le_bytes());
         bytes.extend_from_slice(&124u32.to_le_bytes()); // bV5Size
-        bytes.extend_from_slice(&width.to_le_bytes()); // bV5Width
-        bytes.extend_from_slice(&height.to_le_bytes()); // bV5Height
+        bytes.extend_from_slice(&w.to_le_bytes()); // bV5Width
+        bytes.extend_from_slice(&h.to_le_bytes()); // bV5Height
         bytes.extend_from_slice(&1u16.to_le_bytes()); // bV5Planes
         bytes.extend_from_slice(&24u16.to_le_bytes()); // bV5BitCount
         bytes.extend_from_slice(&[0u8; 16]); // compression, image size, resolutions
         bytes.extend_from_slice(&[0u8; 8]); // colors used and important
         bytes.extend_from_slice(&[0u8; 16]); // channel masks
-        bytes.extend_from_slice(&color_space.to_le_bytes());
+        bytes.extend_from_slice(&cs.to_le_bytes());
         bytes.extend_from_slice(&[0u8; 36]); // endpoints
         bytes.extend_from_slice(&[0u8; 12]); // gamma
         bytes.extend_from_slice(&0u32.to_le_bytes()); // intent
-        let data_offset = if profile.is_empty() { 0u32 } else { 124 };
-        bytes.extend_from_slice(&data_offset.to_le_bytes()); // bV5ProfileData
-        bytes.extend_from_slice(&(profile.len() as u32).to_le_bytes()); // bV5ProfileSize
+        let data_off = if icc.is_empty() { 0u32 } else { 124 };
+        bytes.extend_from_slice(&data_off.to_le_bytes()); // bV5ProfileData
+        bytes.extend_from_slice(&(icc.len() as u32).to_le_bytes()); // bV5ProfileSize
         bytes.extend_from_slice(&0u32.to_le_bytes()); // bV5Reserved
-        bytes.extend_from_slice(profile);
-        for row in (0..height as usize).rev() {
-            bytes.extend_from_slice(&pixels[row * width as usize * 3..][..width as usize * 3]);
-            bytes.extend_from_slice(&vec![0u8; stride - width as usize * 3]);
+        bytes.extend_from_slice(icc);
+        for row in (0..h as usize).rev() {
+            bytes.extend_from_slice(&px[row * w as usize * 3..][..w as usize * 3]);
+            bytes.extend_from_slice(&vec![0u8; stride - w as usize * 3]);
         }
         bytes
     }
 
-    /// A V5 header names its color space the way Windows writes it: sRGB, an embedded profile, or
-    /// a space Tola cannot read.
     #[test]
-    fn v5_colour_space_is_classified() {
-        // Red, green, blue, and mid grey: the linear profile below moves the mid grey only.
-        let pixels: Vec<u8> = vec![255, 0, 0, 0, 255, 0, 0, 0, 255, 128, 128, 128];
+    fn bmp_v5_color_space() {
+        let px: Vec<u8> = vec![255, 0, 0, 0, 255, 0, 0, 0, 255, 128, 128, 128];
 
-        let srgb_bytes = bmp_v5(&pixels, 2, 2, 0x7352_4742, &[]);
+        let srgb_bytes = bmp_v5(&px, 2, 2, 0x7352_4742, &[]);
         let srgb = scan_bmp(&srgb_bytes).unwrap();
-        assert!(
-            matches!(srgb.color, SampleColor::Srgb),
-            "sRGB needs no conversion"
-        );
+        assert!(matches!(srgb.color, SampleColor::Srgb));
 
-        let profile = linear_profile();
-        let embedded_bytes = bmp_v5(&pixels, 2, 2, 0x4d42_4544, &profile);
+        let icc = linear_profile();
+        let embedded_bytes = bmp_v5(&px, 2, 2, 0x4d42_4544, &icc);
         let embedded = scan_bmp(&embedded_bytes).unwrap();
         assert!(
-            matches!(&embedded.color, SampleColor::StoredIcc(bytes) if bytes.as_ref() == profile.as_slice()),
-            "the profile the header points at is handed on whole"
+            matches!(&embedded.color, SampleColor::StoredIcc(b) if b.as_ref() == icc.as_slice())
         );
 
-        let unreadable_bytes = bmp_v5(&pixels, 2, 2, 0, &[]);
+        let unreadable_bytes = bmp_v5(&px, 2, 2, 0, &[]);
         let unreadable = scan_bmp(&unreadable_bytes).unwrap();
-        assert!(
-            matches!(unreadable.color, SampleColor::Unsupported(_)),
-            "a color space Tola cannot read is reported, not guessed"
-        );
+        assert!(matches!(unreadable.color, SampleColor::Unsupported(_)));
     }
 
-    /// A Windows-saved V5 file reaches the resampler rather than being refused: its own pixels
-    /// come back unchanged under sRGB, its embedded profile moves them, and a space Tola cannot
-    /// read is refused.
     #[test]
-    fn v5_profiled_bitmap_reaches_the_resampler() {
-        // Red, green, blue, and mid grey: the linear profile below moves the mid grey only.
-        let pixels: Vec<u8> = vec![255, 0, 0, 0, 255, 0, 0, 0, 255, 128, 128, 128];
-        let srgb_bytes = bmp_v5(&pixels, 2, 2, 0x7352_4742, &[]);
-        let embedded_bytes = bmp_v5(&pixels, 2, 2, 0x4d42_4544, &linear_profile());
-        let unreadable_bytes = bmp_v5(&pixels, 2, 2, 0, &[]);
-        let resized = |source: &[u8]| {
+    fn bmp_v5_icc() {
+        let px: Vec<u8> = vec![255, 0, 0, 0, 255, 0, 0, 0, 255, 128, 128, 128];
+        let srgb_bytes = bmp_v5(&px, 2, 2, 0x7352_4742, &[]);
+        let embedded_bytes = bmp_v5(&px, 2, 2, 0x4d42_4544, &linear_profile());
+        let unreadable_bytes = bmp_v5(&px, 2, 2, 0, &[]);
+        let resized = |src: &[u8]| {
             render(
-                source,
-                &recipe(source, 2, 2, OutputFormat::Png, None),
+                src,
+                &recipe(src, 2, 2, OutputFormat::Png, None),
                 &NO_CANCELLATION,
             )
         };

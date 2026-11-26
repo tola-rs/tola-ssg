@@ -255,7 +255,7 @@ impl Unpacker<'_> {
     fn member(
         &mut self,
         name: &str,
-        directory: bool,
+        dir: bool,
         size: u64,
         mode: u32,
         reader: &mut impl Read,
@@ -266,72 +266,49 @@ impl Unpacker<'_> {
             self.entries <= MAX_ENTRIES,
             "module archive contains more than 10000 members"
         );
-        ensure!(
-            name.len() <= 4096
-                && !name.starts_with('/')
-                && !name.contains('\\')
-                && !name.chars().any(char::is_control),
-            "archive member `{}` needs a portable relative path",
-            name.escape_debug()
-        );
-        let parts = name
-            .split('/')
-            .filter(|part| !part.is_empty() && *part != ".")
-            .collect::<Vec<_>>();
-        ensure!(
-            !parts.contains(&".."),
-            "archive member `{}` must stay inside the module",
-            name.escape_debug()
-        );
-        let Some(wrapper) = parts.first() else {
-            ensure!(directory, "module archive needs a single outer directory");
+        let Some(parts) = validate_member_parts(name, dir)? else {
             return Ok(());
         };
-        for (index, part) in parts.iter().enumerate() {
-            tola_address::validate_portable_segment(part, index == 0).with_context(|| {
-                format!("archive member `{}` is not portable", name.escape_debug())
-            })?;
-        }
-        if let Some(previous) = &self.wrapper {
+        if let Some(prev) = &self.wrapper {
             ensure!(
-                previous == wrapper,
+                prev == parts[0],
                 "module archive must contain exactly one outer directory"
             );
         } else {
-            self.wrapper = Some((*wrapper).to_owned());
+            self.wrapper = Some(parts[0].to_owned());
         }
         if parts.len() == 1 {
             ensure!(
-                directory,
+                dir,
                 "module archive needs a single outer directory containing `tola-module.toml`"
             );
             return Ok(());
         }
-        let mut relative = PathBuf::new();
-        for (index, part) in parts[1..].iter().enumerate() {
-            relative.push(part);
-            self.record(&relative)?;
-            if index < parts.len() - 2 || directory {
-                let target = self.root.join(&relative);
-                fs::create_dir_all(&target)?;
-                tola_fs::set_unix_mode(&target, 0o755)?;
+        let mut rel = PathBuf::new();
+        for (idx, part) in parts[1..].iter().enumerate() {
+            rel.push(part);
+            self.record(&rel)?;
+            if idx < parts.len() - 2 || dir {
+                let dst = self.root.join(&rel);
+                fs::create_dir_all(&dst)?;
+                tola_fs::set_unix_mode(&dst, 0o755)?;
             }
         }
-        let target = self.root.join(&relative);
-        if !directory {
+        if !dir {
+            let dst = self.root.join(&rel);
             ensure!(
                 size <= MAX_EXPANDED - self.bytes,
                 "module archive expands beyond 512 MiB"
             );
-            let mut output = File::create_new(&target)?;
+            let mut out = File::create_new(&dst)?;
             self.bytes += copy_bounded(
                 reader,
-                &mut output,
+                &mut out,
                 MAX_EXPANDED - self.bytes,
                 self.cancellation,
             )
-            .with_context(|| format!("could not extract `{}`", relative.display()))?;
-            tola_fs::set_unix_mode(&target, if mode & 0o111 == 0 { 0o644 } else { 0o755 })?;
+            .with_context(|| format!("could not extract `{}`", rel.display()))?;
+            tola_fs::set_unix_mode(&dst, if mode & 0o111 == 0 { 0o644 } else { 0o755 })?;
         }
         Ok(())
     }
@@ -344,9 +321,9 @@ impl Unpacker<'_> {
             })
             .collect::<Vec<_>>()
             .join("/");
-        if let Some(previous) = self.paths.get(&key) {
+        if let Some(prev) = self.paths.get(&key) {
             ensure!(
-                previous == path,
+                prev == path,
                 "archive member `{}` conflicts with another path",
                 path.display()
             );
@@ -355,6 +332,35 @@ impl Unpacker<'_> {
         }
         Ok(())
     }
+}
+
+fn validate_member_parts(name: &str, dir: bool) -> Result<Option<Vec<&str>>> {
+    ensure!(
+        name.len() <= 4096
+            && !name.starts_with('/')
+            && !name.contains('\\')
+            && !name.chars().any(char::is_control),
+        "archive member `{}` needs a portable relative path",
+        name.escape_debug()
+    );
+    let parts = name
+        .split('/')
+        .filter(|part| !part.is_empty() && *part != ".")
+        .collect::<Vec<_>>();
+    ensure!(
+        !parts.contains(&".."),
+        "archive member `{}` must stay inside the module",
+        name.escape_debug()
+    );
+    if parts.is_empty() {
+        ensure!(dir, "module archive needs a single outer directory");
+        return Ok(None);
+    }
+    for (idx, part) in parts.iter().enumerate() {
+        tola_address::validate_portable_segment(part, idx == 0)
+            .with_context(|| format!("archive member `{}` is not portable", name.escape_debug()))?;
+    }
+    Ok(Some(parts))
 }
 
 fn copy_bounded(
@@ -530,25 +536,25 @@ mod tests {
     }
 
     #[test]
-    fn supported_formats_have_the_same_module_contents() {
+    fn archive_formats_match_tree_digest() {
         let tar = tar_bytes(false);
-        let middle = tar.len() / 2;
+        let mid = tar.len() / 2;
         let mut zstd = ruzstd::encoding::compress_to_vec(
-            &tar[..middle],
+            &tar[..mid],
             ruzstd::encoding::CompressionLevel::Fastest,
         );
         zstd.extend_from_slice(&[0x50, 0x2a, 0x4d, 0x18, 3, 0, 0, 0, 1, 2, 3]);
         zstd.extend(ruzstd::encoding::compress_to_vec(
-            &tar[middle..],
+            &tar[mid..],
             ruzstd::encoding::CompressionLevel::Fastest,
         ));
-        let workspace = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let mut digests = Vec::new();
-        for (index, bytes) in [gzip(&tar), zstd, zip_bytes(&[], false)]
+        for (idx, bytes) in [gzip(&tar), zstd, zip_bytes(&[], false)]
             .into_iter()
             .enumerate()
         {
-            let root = workspace.path().join(index.to_string());
+            let root = dir.path().join(idx.to_string());
             unpack(&bytes, &root).unwrap();
             crate::check::check(&root).unwrap();
             digests.push(tola_input::tree_sha256(&root).unwrap());
@@ -557,9 +563,9 @@ mod tests {
     }
 
     #[test]
-    fn untrusted_members_cannot_escape_or_create_links() {
-        let workspace = tempfile::tempdir().unwrap();
-        for (index, bytes) in [
+    fn archive_rejects_escape_and_links() {
+        let dir = tempfile::tempdir().unwrap();
+        for (idx, bytes) in [
             zip_bytes(&["module/../escaped"], false),
             zip_bytes(&[], true),
             gzip(&tar_bytes(true)),
@@ -567,10 +573,10 @@ mod tests {
         .into_iter()
         .enumerate()
         {
-            let root = workspace.path().join(index.to_string());
+            let root = dir.path().join(idx.to_string());
             assert!(unpack(&bytes, &root).is_err());
             assert!(fs::symlink_metadata(root.join("link")).is_err());
-            assert!(!workspace.path().join("escaped").exists());
+            assert!(!dir.path().join("escaped").exists());
         }
     }
 }

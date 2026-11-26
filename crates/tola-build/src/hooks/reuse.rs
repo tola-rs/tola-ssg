@@ -8,9 +8,9 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 
-use super::HookOutputEvidence;
+use super::HookOutput;
 use crate::cancellation::BuildCancellation;
-use crate::config::ResolvedSiteConfig;
+use crate::config::SiteConfig;
 use crate::config::section::build::hooks::{
     BeforeBuildHookConfig, CommandOutput, ModuleHookOrigin, OutputCommandConfig,
 };
@@ -44,7 +44,7 @@ struct CommandInputs {
 
 impl CommandInputs {
     fn observe(
-        config: &ResolvedSiteConfig,
+        config: &SiteConfig,
         scope: tola_input::InputScope,
         action: tola_module::Action,
         origin: Option<&ModuleHookOrigin>,
@@ -58,7 +58,7 @@ impl CommandInputs {
         Ok(Self {
             site: config.into(),
             scope,
-            paths: observe_paths(config.get_root(), origin, rerun_on, script, cancellation)?,
+            paths: observe_paths(config.root(), origin, rerun_on, script, cancellation)?,
             nu: script.map(|_| NuInputs::observe(config)).transpose()?,
             action,
             origin: origin.cloned(),
@@ -76,7 +76,7 @@ pub(super) struct BeforeBuildInputs {
 
 impl BeforeBuildInputs {
     pub(super) fn observe(
-        config: &ResolvedSiteConfig,
+        config: &SiteConfig,
         hook: &BeforeBuildHookConfig,
         scope: tola_input::InputScope,
         cancellation: &BuildCancellation,
@@ -106,25 +106,25 @@ impl BeforeBuildInputs {
 }
 
 #[derive(Debug)]
-pub(super) struct PreparedHook {
+pub(super) struct ReadyHook {
     pub(super) inputs: BeforeBuildInputs,
-    pub(super) outputs: Vec<HookOutputEvidence>,
+    pub(super) outputs: Vec<HookOutput>,
     pub(super) diagnostics: Vec<tola_diagnostic::Diagnostic>,
 }
 
 /// The accepted revision's successful input generators, indexed within their module.
 #[derive(Clone, Debug, Default)]
-pub(crate) struct PreparedHooks {
-    pub(super) entries: BTreeMap<HookId, Arc<PreparedHook>>,
+pub(crate) struct ReadyHooks {
+    pub(super) entries: BTreeMap<HookId, Arc<ReadyHook>>,
 }
 
-impl PreparedHooks {
+impl ReadyHooks {
     pub(super) fn matching(
         &self,
         id: &HookId,
         inputs: &BeforeBuildInputs,
         cancellation: &BuildCancellation,
-    ) -> Result<Option<Arc<PreparedHook>>> {
+    ) -> Result<Option<Arc<ReadyHook>>> {
         let Some(entry) = self.entries.get(id).filter(|entry| entry.inputs == *inputs) else {
             return Ok(None);
         };
@@ -145,7 +145,7 @@ struct NuInputs {
 }
 
 impl NuInputs {
-    fn observe(config: &ResolvedSiteConfig) -> Result<Self> {
+    fn observe(config: &SiteConfig) -> Result<Self> {
         let runner = config.hook_runner.as_ref();
         let modules = runner.and_then(|runner| runner.modules()).map(|prepared| {
             let instances = prepared
@@ -259,7 +259,7 @@ impl ReusableHookOutputs {
 
 /// Observe the inputs a pure `generate-outputs` command may depend on.
 pub(crate) fn observe(
-    config: &ResolvedSiteConfig,
+    config: &SiteConfig,
     command: &OutputCommandConfig,
     upstream: &[OutputFile],
     scope: tola_input::InputScope,
@@ -315,7 +315,7 @@ struct AfterPublishInputs {
 }
 
 pub(crate) fn observe_after_publish(
-    config: &ResolvedSiteConfig,
+    config: &SiteConfig,
     mode: BuildMode,
     revision: &RevisionId,
     cancellation: &BuildCancellation,
@@ -331,7 +331,7 @@ pub(crate) fn observe_after_publish(
                 let hook = &hooks[index];
                 uses_nu |= hook.nu.is_some();
                 let paths = observe_paths(
-                    config.get_root(),
+                    config.root(),
                     hook.origin.as_ref(),
                     &hook.rerun_on,
                     hook.nu.as_deref(),
@@ -525,7 +525,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn literal_rerun_link_observes_the_regular_file_through_it() {
+    fn literal_rerun_link_tracks_file() {
         use std::os::unix::fs::symlink;
         use tola_module::hooks::RerunPath;
 
@@ -569,7 +569,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn literal_rerun_link_cannot_read_a_target_outside_its_selection() {
+    fn literal_rerun_link_enforces_scope() {
         use std::os::unix::fs::symlink;
         use tola_module::hooks::RerunPath;
 
@@ -595,7 +595,7 @@ mod tests {
     }
 
     #[test]
-    fn after_publish_reuse_depends_on_batches_not_order_numbers() {
+    fn after_publish_reuse_uses_batches() {
         use crate::config::section::build::hooks::{AfterPublishHookConfig, DevParticipation};
         use crate::output::graph::OutputGraphBuilder;
         use crate::output::manifest::SiteManifest;

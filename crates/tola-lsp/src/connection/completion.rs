@@ -1,5 +1,4 @@
-//! What a finished lane job leaves behind: the check's published diagnostics and announcements, the
-//! replies its completion maps to, and the refresh a pull client is asked for.
+//! Lane job completion handling: publishing diagnostics, status updates, and request replies.
 
 use std::io::Write;
 use std::sync::Arc;
@@ -8,7 +7,7 @@ use anyhow::Result;
 use lsp_types::MessageType;
 use lsp_types::notification::{self, Notification as LspNotification};
 use lsp_types::request::{self, Request as LspRequest};
-use tola_build::config::ResolvedSiteConfig;
+use tola_build::config::SiteConfig;
 use tola_diagnostic::Diagnostic;
 
 use crate::compiler::{
@@ -20,13 +19,12 @@ use crate::protocol::{CheckProgress, SourceReply};
 use super::replies::{REVISION_CHANGED_ERROR, error_response, failed_response, merge_code_actions};
 use super::{Connection, PendingRequest, Phase};
 
-/// What the author hears when a check's own work failed rather than the site.
 const PANICKED_CHECK_ANNOUNCEMENT: &str =
     "Tola could not check this site; restart the language server";
 
 impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
-    pub(crate) fn completed(&mut self, compilation: SourceCompilation) -> Result<()> {
-        match compilation {
+    pub(crate) fn completed(&mut self, comp: SourceCompilation) -> Result<()> {
+        match comp {
             SourceCompilation::Checked {
                 checked_revision,
                 checked,
@@ -40,14 +38,14 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
             } => {
                 // Client IDs may be reused while an older cancelled job finishes.
                 if self.accepts_reply(&id, serial)? {
-                    let request = self.requests.remove(&id).expect("matching source request");
-                    let Phase::Ready(_) = &self.phase else {
+                    let req = self.requests.remove(&id).expect("matching source request");
+                    if !matches!(self.phase, Phase::Ready(_)) {
                         return Ok(());
-                    };
-                    let mut response = honour_cancellation(&request, response);
-                    merge_code_actions(&request, &mut response);
-                    // A rejected query still depends on the files that made it fail.
-                    if !matches!(&response, Err(SourceFailure::Cancelled)) {
+                    }
+                    let mut resp = honour_cancellation(&req, response);
+                    merge_code_actions(&req, &mut resp);
+                    // A rejected query still depends on the files it read.
+                    if !matches!(&resp, Err(SourceFailure::Cancelled)) {
                         self.query_read_paths
                             .extend(read_paths.into_iter().flat_map(|path| {
                                 let physical = tola_input::normalize_existing_prefix(&path);
@@ -55,9 +53,9 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
                             }));
                         self.watch_sources()?;
                     }
-                    match response {
+                    match resp {
                         Ok(reply) => self.accept_answer(id, configuration, reply)?,
-                        Err(failure) => self.reply_failure(id, failure)?,
+                        Err(err) => self.reply(failed_response(id, err))?,
                     }
                 }
             }
@@ -68,29 +66,26 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
                 response,
             } => {
                 if self.accepts_reply(&id, serial)? {
-                    let request = self.requests.remove(&id).expect("matching tokens request");
-                    match honour_cancellation(&request, response) {
-                        Ok(tokens) => self.commit_tokens(id, read, tokens)?,
-                        Err(failure) => self.reply_failure(id, failure)?,
+                    let req = self.requests.remove(&id).expect("matching tokens request");
+                    match honour_cancellation(&req, response) {
+                        Ok(tok) => self.commit_tokens(id, read, tok)?,
+                        Err(err) => self.reply(failed_response(id, err))?,
                     }
                 }
             }
-            SourceCompilation::Continued(continued) => {
-                // The request keeps its id, serial, cancellation, and view: the compiler lane
-                // answers it exactly once, while a superseded or cancelled analysis enqueues
-                // nothing and replies nothing.
-                if self.accepts_reply(&continued.id, continued.serial)? {
-                    let Phase::Ready(workspace) = &self.phase else {
+            SourceCompilation::Continued(cont) => {
+                if self.accepts_reply(&cont.id, cont.serial)? {
+                    let Phase::Ready(ws) = &self.phase else {
                         return Ok(());
                     };
                     self.queries.push_back(SourceJob::Query(QueryRequest {
-                        id: continued.id,
-                        serial: continued.serial,
-                        sources: continued.sources,
-                        view: continued.view,
-                        routes_as_hints: workspace.routes_as_hints,
+                        id: cont.id,
+                        serial: cont.serial,
+                        sources: cont.sources,
+                        view: cont.view,
+                        routes_as_hints: ws.routes_as_hints,
                         check_progress: self.check_progress(),
-                        query: continued.query,
+                        query: cont.query,
                     }));
                 }
             }
@@ -109,16 +104,11 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
                 }
                 self.cancel_selection();
                 match selected {
-                    // A build a source change cancelled describes a revision the author has left:
-                    // its waiting requests were superseded with it, and no later one may read its
-                    // index.
                     Ok(selected) if revision == self.revision => {
-                        let Phase::Ready(workspace) = &mut self.phase else {
+                        let Phase::Ready(ws) = &mut self.phase else {
                             return Ok(());
                         };
-                        workspace
-                            .diagnostics
-                            .keep_selection(revision, &root, selected);
+                        ws.diagnostics.keep_selection(revision, &root, selected);
                         self.complete_waiting_code_actions(revision)?;
                     }
                     Ok(_) | Err(SourceFailure::Cancelled) => {}
@@ -131,62 +121,51 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
                     }
                 }
             }
-            // A release answers nothing: the next read of a revision re-derives what it needs.
             SourceCompilation::Released => {}
         }
         Ok(())
     }
 
-    /// Take one finished site check: the lane's own failure, or the outcome this revision answers
-    /// from.
-    ///
-    /// A run a newer revision superseded, a cancelled one, and a panicked one all publish nothing
-    /// as this revision's result, and every one of them ends its progress report here.
     fn accept_check(
         &mut self,
-        checked_revision: u64,
+        checked_rev: u64,
         checked: Result<CheckedSources, SourceFailure>,
     ) -> Result<()> {
-        if self.running_check == Some(checked_revision) {
+        if self.running_check == Some(checked_rev) {
             self.running_check = None;
         }
-        // A check that finished is the one the author was waiting for, so the next check is one of
-        // their own edits rather than the site's first.
         self.warm = true;
-        if checked_revision == self.revision
+        if checked_rev == self.revision
             && !self.checking.token().is_cancelled()
             && !matches!(checked, Err(SourceFailure::Cancelled))
         {
             match checked {
                 Err(SourceFailure::Panicked) => {
-                    // The check's own lane failed, so no outcome exists for this revision: the
-                    // author is told the check failed rather than that the site does not compile.
                     self.report_source_check(CheckProgress::NotChecked)?;
                     self.announce_panic()?;
                 }
-                checked => self.apply_check(checked_revision, checked)?,
+                checked => self.apply_check(checked_rev, checked)?,
             }
         }
-        self.finish_progress(checked_revision)
+        self.finish_progress(checked_rev)
     }
 
-    /// Record one site check's outcome, answer from it, and report the progress it established.
     fn apply_check(
         &mut self,
-        checked_revision: u64,
+        checked_rev: u64,
         checked: Result<CheckedSources, SourceFailure>,
     ) -> Result<()> {
         self.announced_panic = false;
         let Ok(checked) = checked else {
             self.checked = Some(super::CompletedCheck {
-                revision: checked_revision,
+                revision: checked_rev,
                 usable_world: false,
             });
             return self.report_source_check(CheckProgress::Failed);
         };
         let compiled = checked.compiled;
         self.checked = Some(super::CompletedCheck {
-            revision: checked_revision,
+            revision: checked_rev,
             usable_world: compiled,
         });
         let progress = if compiled {
@@ -194,73 +173,57 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
         } else {
             CheckProgress::Failed
         };
-        let configuration = checked.configuration.clone();
+        let cfg = checked.configuration.clone();
         if let Some(paths) = checked.read_paths.as_ref() {
             self.read_paths = paths.iter().cloned().collect();
         }
-        self.publish(checked, checked_revision)?;
+        self.publish(checked, checked_rev)?;
         self.watch_sources()?;
-        self.refresh_semantic_tokens(checked_revision)?;
-        // The check built this revision's index itself, so a correction waiting for one reads it
-        // now instead of paying for a second walk.
+        self.refresh_semantic_tokens(checked_rev)?;
+        // Reuse the check's selection index so waiting code actions avoid a second walk.
         if self
             .selection_build
             .as_ref()
-            .is_some_and(|build| build.revision == checked_revision)
+            .is_some_and(|build| build.revision == checked_rev)
         {
             self.cancel_selection();
         }
-        self.complete_waiting_code_actions(checked_revision)?;
+        self.complete_waiting_code_actions(checked_rev)?;
         self.refresh_diagnostics()?;
-        match configuration {
-            Some(configuration) => self.report_prepared_site(progress, &configuration),
+        match cfg {
+            Some(cfg) => self.report_prepared_site(progress, &cfg),
             None => self.report_source_check(progress),
         }
     }
 
-    /// Answer one source failure in the protocol's own shape.
-    fn reply_failure(&mut self, id: lsp_server::RequestId, failure: SourceFailure) -> Result<()> {
-        self.reply(failed_response(id, failure))
-    }
-
-    /// Answer one query from the reply its job produced.
-    ///
-    /// A configuration this connection has not accepted yet is reported first, so the client reads
-    /// the package roots before a location inside them.
     fn accept_answer(
         &mut self,
         id: lsp_server::RequestId,
-        configuration: Option<Arc<ResolvedSiteConfig>>,
+        cfg: Option<Arc<SiteConfig>>,
         reply: SourceReply,
     ) -> Result<()> {
-        if let Some(configuration) = configuration
+        // Announce newly resolved package roots before sending locations inside them.
+        if let Some(cfg) = cfg
             && !self
                 .configuration
                 .as_ref()
-                .is_some_and(|accepted| Arc::ptr_eq(accepted, &configuration))
+                .is_some_and(|accepted| Arc::ptr_eq(accepted, &cfg))
         {
-            self.report_prepared_site(self.check_progress(), &configuration)?;
+            self.report_prepared_site(self.check_progress(), &cfg)?;
         }
         self.source_reply(id, reply)
     }
 
     fn accepts_reply(&mut self, id: &lsp_server::RequestId, serial: u64) -> Result<bool> {
-        let Some(request) = self
-            .requests
-            .get(id)
-            .filter(|request| request.serial == serial)
-        else {
+        let Some(req) = self.requests.get(id).filter(|req| req.serial == serial) else {
             return Ok(false);
         };
-        let current = request
-            .document_revision
-            .as_ref()
-            .is_none_or(|(uri, revision)| {
-                self.open
-                    .view()
-                    .get(uri)
-                    .is_some_and(|parsed| parsed.revision == *revision)
-            });
+        let current = req.document_revision.as_ref().is_none_or(|(uri, rev)| {
+            self.open
+                .view()
+                .get(uri)
+                .is_some_and(|p| p.revision == *rev)
+        });
         if current {
             return Ok(true);
         }
@@ -274,60 +237,47 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
         Ok(false)
     }
 
-    fn publish(&mut self, checked: CheckedSources, checked_revision: u64) -> Result<()> {
-        let Phase::Ready(workspace) = &mut self.phase else {
+    fn publish(&mut self, checked: CheckedSources, checked_rev: u64) -> Result<()> {
+        let Phase::Ready(ws) = &mut self.phase else {
             return Ok(());
         };
         (self.record_diagnostics)(&checked.diagnostics);
-        let mut diagnostics = checked.diagnostics;
-        // A check that resolved no world has nothing to say about any page, so what the author
-        // reads is what that costs them, and the reason Typst wrote stays below it.
+        let mut diags = checked.diagnostics;
         if checked.configuration.is_none() {
-            refine_unread_configuration(&mut diagnostics);
+            refine_unread_configuration(&mut diags);
         }
-        if let Some(config) = &checked.configuration {
-            self.configuration = Some(Arc::clone(config));
-            self.open.rebase(config.get_root());
-            // A file-change notification refuses what this configuration's own writing produces;
-            // Tola's own state directory and the build lock are the connection's own set, applied
-            // whether or not a check has resolved a configuration. A vendor candidate is refused
-            // here too: it is written by a preparation, not by the author.
-            let mut generated = tola_typst::SourceBoundary::new(config.get_root(), false);
-            for exclusion in config.generated_exclusions() {
-                generated = generated.excluding(exclusion.directory);
+        if let Some(cfg) = &checked.configuration {
+            self.configuration = Some(Arc::clone(cfg));
+            self.open.rebase(cfg.root());
+            let mut generated = tola_typst::SourceBoundary::new(cfg.root(), false);
+            for ex in cfg.generated_exclusions() {
+                generated = generated.excluding(ex.directory);
             }
             self.open.exclude_generated(generated);
         }
-        let root = checked_root(checked.configuration.as_ref(), &workspace.root);
-        // The index answers for the revision this check checked: the report below reads it now,
-        // and a correction requested while that revision is still the checked one reads it too.
-        workspace
-            .diagnostics
-            .keep_selection(checked_revision, root, Arc::clone(&checked.selected));
-        workspace.diagnostics.publish(PublishInputs {
+        let root = checked_root(checked.configuration.as_ref(), &ws.root);
+        ws.diagnostics
+            .keep_selection(checked_rev, root, Arc::clone(&checked.selected));
+        ws.diagnostics.publish(PublishInputs {
             output: &mut self.writer,
             root,
             open: &self.open,
-            features: &workspace.features,
+            features: &ws.features,
             selected: &checked.selected,
-            diagnostics,
+            diagnostics: diags,
         })
     }
 
-    /// Ask a client that pulls to read the diagnostics the check just produced.
-    ///
-    /// The request is global, so one refresh makes the client re-read every document it pulls.
     fn refresh_diagnostics(&mut self) -> Result<()> {
-        let Phase::Ready(workspace) = &self.phase else {
+        let Phase::Ready(ws) = &self.phase else {
             return Ok(());
         };
-        if workspace.features.pull_diagnostics && workspace.features.diagnostic_refresh {
+        if ws.features.pull_diagnostics && ws.features.diagnostic_refresh {
             self.send_request(request::WorkspaceDiagnosticRefresh::METHOD, ())?;
         }
         Ok(())
     }
 
-    /// Show the author one message the client puts in front of them.
     pub(super) fn show_message(&mut self, typ: MessageType, message: String) -> Result<()> {
         self.notify(
             notification::ShowMessage::METHOD,
@@ -335,8 +285,6 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
         )
     }
 
-    /// Tell the author about a check whose own work failed, once per run of failures: the flag
-    /// stands until a check completes again.
     fn announce_panic(&mut self) -> Result<()> {
         if self.announced_panic {
             return Ok(());
@@ -346,16 +294,14 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
     }
 }
 
-/// The answer a finished job leaves for its client: a request that client cancelled answers as
-/// cancelled, whatever the job produced.
 fn honour_cancellation<T>(
-    request: &PendingRequest,
-    response: Result<T, SourceFailure>,
+    req: &PendingRequest,
+    resp: Result<T, SourceFailure>,
 ) -> Result<T, SourceFailure> {
-    if request.canceller.token().is_cancelled() {
+    if req.canceller.token().is_cancelled() {
         Err(SourceFailure::Cancelled)
     } else {
-        response
+        resp
     }
 }
 

@@ -6,7 +6,7 @@ use typst::World;
 use typst::foundations::Value;
 
 /// The model value and entity facts one compiled query produced.
-pub struct QueryOutcome {
+pub struct QueryOutput {
     /// The projected model value, when the request asked to materialize it.
     pub data: Option<Json>,
     pub entities: Vec<super::entities::Entity>,
@@ -28,85 +28,76 @@ pub struct QueryRequest<'a> {
 }
 
 /// Read one compiled model's value or entities, with the evidence its reads produced.
-pub fn run_query(request: QueryRequest<'_>) -> Result<QueryOutcome> {
-    let declarations = request.bundle.metadata_declarations(request.label);
-    if declarations.len() != 1 {
-        return Ok(QueryOutcome {
+pub fn run_query(req: QueryRequest<'_>) -> Result<QueryOutput> {
+    let decls = req.bundle.metadata_declarations(req.label);
+    if decls.len() != 1 {
+        return Ok(QueryOutput {
             data: None,
             entities: Vec::new(),
             source_reads: Vec::new(),
             accessed: tola_typst::AccessedDeps::default(),
             failure: Some(format!(
                 "query {} requires one <{}> metadata declaration, found {}",
-                request.name,
-                request.label,
-                declarations.len(),
+                req.name,
+                req.label,
+                decls.len(),
             )),
         });
     }
-    let mut outcome = QueryOutcome {
+    let mut out = QueryOutput {
         data: None,
         entities: Vec::new(),
         source_reads: Vec::new(),
         accessed: tola_typst::AccessedDeps::default(),
         failure: None,
     };
-    let query_value = if request.entities {
-        super::entities::parse(declarations[0].value()).and_then(|parsed| {
-            outcome.source_reads = read_entity_sources(
-                &parsed,
-                request.world,
-                request.cancellation,
-                &mut outcome.accessed,
-            )?;
-            let entities_json = if request.materialize {
+    let val = if req.entities {
+        super::entities::parse(decls[0].value()).and_then(|parsed| {
+            out.source_reads =
+                read_entity_sources(&parsed, req.world, req.cancellation, &mut out.accessed)?;
+            let json = if req.materialize {
                 super::entities::json(&parsed)
             } else {
                 Json::Null
             };
-            outcome.entities = parsed;
-            Ok(entities_json)
+            out.entities = parsed;
+            Ok(json)
         })
     } else {
-        json_value(declarations[0].value(), "data")
+        json_value(decls[0].value(), "data")
     };
-    match query_value {
-        Ok(query_json) => {
-            outcome.data = request.materialize.then_some(query_json);
-        }
-        Err(error) => outcome.failure = Some(format!("query {}: {error}", request.name)),
+    match val {
+        Ok(json) => out.data = req.materialize.then_some(json),
+        Err(err) => out.failure = Some(format!("query {}: {err}", req.name)),
     }
-    Ok(outcome)
+    Ok(out)
 }
 
-/// Read each entity's declared source in this query's world and keep that evidence.
-///
-/// An entity names a source the model compiled, so the bytes read here must be the ones that
-/// compile saw; a mismatch means the source changed while the query ran.
+/// Read each entity's declared source and verify its bytes match what compile saw.
 fn read_entity_sources(
     entities: &[super::entities::Entity],
     world: &tola_typst::TypstWorld,
-    cancellation: &tola_typst::BundleCancellation,
+    cancel: &tola_typst::BundleCancellation,
     accessed: &mut tola_typst::AccessedDeps,
 ) -> Result<Vec<typst::syntax::Source>> {
     let mut reads = Vec::new();
     for entity in entities {
-        cancellation.ensure_active()?;
-        let Some(source) = entity.source else {
+        cancel.ensure_active()?;
+        let Some(src) = entity.source else {
             continue;
         };
-        let (bytes, mut read_accessed) = world.read_file_with_evidence(source);
-        accessed.reads.append(&mut read_accessed.reads);
-        accessed.disk_reads.append(&mut read_accessed.disk_reads);
+        let (bytes, mut read_deps) = world.read_file_with_evidence(src);
+        accessed.reads.append(&mut read_deps.reads);
+        accessed.disk_reads.append(&mut read_deps.disk_reads);
         accessed
             .package_checks
-            .append(&mut read_accessed.package_checks);
+            .append(&mut read_deps.package_checks);
         let id = &entity.id;
         let unreadable = || format!("Tola could not read the source named by entity `{id}`");
-        let bytes = bytes.map_err(|error| anyhow::Error::new(error).context(unreadable()))?;
+        let bytes = bytes.map_err(|err| anyhow::Error::new(err).context(unreadable()))?;
         let read = world
-            .source(source)
-            .map_err(|error| anyhow::Error::new(error).context(unreadable()))?;
+            .source(src)
+            .map_err(|err| anyhow::Error::new(err).context(unreadable()))?;
         ensure!(
             bytes.as_slice() == read.text().as_bytes(),
             "the source named by entity `{id}` changed while the query ran"
@@ -122,26 +113,24 @@ pub fn json_value(value: &Value, at: &str) -> Result<Json> {
     }
     Ok(match value {
         Value::None => Json::Null,
-        Value::Bool(value) => Json::Bool(*value),
-        Value::Int(value) => Json::Number((*value).into()),
-        Value::Float(value) => Json::Number(
-            Number::from_f64(*value)
-                .with_context(|| format!("{at} must contain a finite number"))?,
+        Value::Bool(val) => Json::Bool(*val),
+        Value::Int(val) => Json::Number((*val).into()),
+        Value::Float(val) => Json::Number(
+            Number::from_f64(*val).with_context(|| format!("{at} must contain a finite number"))?,
         ),
-        Value::Str(value) => Json::String(value.to_string()),
-        Value::Array(values) => Json::Array(
-            values
-                .iter()
+        Value::Str(val) => Json::String(val.to_string()),
+        Value::Array(vals) => Json::Array(
+            vals.iter()
                 .enumerate()
-                .map(|(index, value)| json_value(value, &format!("{at}[{index}]")))
+                .map(|(idx, val)| json_value(val, &format!("{at}[{idx}]")))
                 .collect::<Result<_>>()?,
         ),
-        Value::Dict(values) => {
-            let mut object = Map::new();
-            for (key, value) in values {
-                object.insert(key.to_string(), json_value(value, &format!("{at}.{key}"))?);
+        Value::Dict(vals) => {
+            let mut obj = Map::new();
+            for (key, val) in vals {
+                obj.insert(key.to_string(), json_value(val, &format!("{at}.{key}"))?);
             }
-            Json::Object(object)
+            Json::Object(obj)
         }
         other => bail!(
             "{at} contains {}; project it to a JSON value explicitly",

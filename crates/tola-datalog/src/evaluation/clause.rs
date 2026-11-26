@@ -1,15 +1,10 @@
-//! The clause one compiled program is evaluated for, kept beside the rule or query it came from.
-//!
-//! The two must be built from the same clause: a program's stage and literal indexes mean nothing
-//! against another clause's body.
+//! Clause view pairing a compiled program with its source literals and head constants.
+
 use super::ConstantRef;
 use super::program::{Argument, Column, Constraint, Program, RuleProgram, Stage};
 use crate::validation::atom;
 use crate::{Literal, Query, Term};
 
-/// A program together with the rule or query it was compiled from: the program stores positions,
-/// this type lends them the body literals and head terms, so constants stay borrowed for the whole
-/// evaluation.
 pub(super) struct Clause<'a, C> {
     program: &'a Program,
     body: &'a [Literal<C>],
@@ -24,7 +19,7 @@ impl<'a, C> Clause<'a, C> {
             head: &compiled.rule.head.terms,
         }
     }
-    /// The clause of one query; queries project variables and have no head.
+
     pub(super) fn query(query: &'a Query<C>, program: &'a Program) -> Self {
         Self {
             program,
@@ -32,237 +27,214 @@ impl<'a, C> Clause<'a, C> {
             head: &[],
         }
     }
-    /// Number of body atoms, one stage each.
+
     pub(super) fn len(&self) -> usize {
         self.program.stages.len()
     }
-    /// The stage compiled for the body atom at `position`.
-    pub(super) fn stage(&self, position: usize) -> &Stage {
-        &self.program.stages[position]
+
+    pub(super) fn stage(&self, pos: usize) -> &Stage {
+        &self.program.stages[pos]
     }
+
     pub(super) fn relation(&self, stage: &Stage) -> &'a str {
         &atom(&self.body[stage.literal]).relation.name
     }
-    fn constant(&self, stage: &Stage, column: usize) -> &'a C {
-        match &atom(&self.body[stage.literal]).terms[column] {
-            Term::Constant(value) => value,
-            _ => unreachable!("the program marks a column constant only where the atom writes one"),
+
+    fn constant(&self, stage: &Stage, col: usize) -> &'a C {
+        match &atom(&self.body[stage.literal]).terms[col] {
+            Term::Constant(v) => v,
+            _ => unreachable!("program marks constant only where term is constant"),
         }
     }
-    fn head_constant(&self, column: usize) -> &'a C {
-        match &self.head[column] {
-            Term::Constant(value) => value,
-            _ => unreachable!("the program records a head constant only where the term is one"),
+
+    fn head_constant(&self, col: usize) -> &'a C {
+        match &self.head[col] {
+            Term::Constant(v) => v,
+            _ => unreachable!("program records head constant only where term is constant"),
         }
     }
 }
+
 impl<'a, C: Ord> Clause<'a, C> {
-    /// Turns the demand's bound head columns into per-slot parameters.
-    ///
-    /// `None` means no answer of this rule can satisfy the demand: it pins a head constant to a
-    /// different value, or pins one slot to two different values.
+    /// Bind demand columns into rule parameter slots, returning `None` on mismatch.
     pub(super) fn parameters(
         &self,
-        values: impl IntoIterator<Item = Option<ConstantRef<'a, C>>>,
+        vals: impl IntoIterator<Item = Option<ConstantRef<'a, C>>>,
     ) -> Option<Vec<Option<ConstantRef<'a, C>>>> {
-        let mut parameters = vec![None; self.program.slots];
-        for (argument, value) in self.program.head.iter().zip(values) {
-            let Some(value) = value else { continue };
-            match argument {
-                Argument::Constant(column) => {
-                    if ConstantRef(self.head_constant(*column)) != value {
+        let mut params = vec![None; self.program.slots];
+        for (arg, val) in self.program.head.iter().zip(vals) {
+            let Some(val) = val else { continue };
+            match arg {
+                Argument::Constant(col) => {
+                    if ConstantRef(self.head_constant(*col)) != val {
                         return None;
                     }
                 }
-                Argument::Slot(slot) => match parameters[*slot] {
-                    Some(bound) if bound != value => return None,
+                Argument::Slot(slot) => match params[*slot] {
+                    Some(bound) if bound != val => return None,
                     Some(_) => {}
-                    None => parameters[*slot] = Some(value),
+                    None => params[*slot] = Some(val),
                 },
             }
         }
-        Some(parameters)
+        Some(params)
     }
 }
 
-/// Which columns of a candidate row are already known to equal the wanted value, so
-/// `Stage::matches` can skip comparing them.
+/// Columns of a candidate row already proven equal by index or demand selection.
 #[derive(Clone, Copy)]
-pub(super) enum MatchEvidence {
-    /// Nothing is known; every bound column is compared.
+pub(super) enum ClauseMatch {
     None,
-    /// The rows were selected by this column's index.
     Column(usize),
-    /// The rows were selected by all the columns before this position.
     Prefix(usize),
-    /// Table answers satisfy every bound column of their demand.
     Demand,
 }
 
-impl MatchEvidence {
-    /// Whether an index selected rows using this column.
-    pub(super) fn includes(self, column: usize) -> bool {
+impl ClauseMatch {
+    pub(super) fn includes(self, col: usize) -> bool {
         match self {
-            Self::Column(proven) => proven == column,
-            Self::Prefix(end) => column < end,
+            Self::Column(c) => c == col,
+            Self::Prefix(end) => col < end,
             Self::None | Self::Demand => false,
         }
     }
 
     fn covers<C>(
         self,
-        column: usize,
+        col: usize,
         constraint: &Constraint,
-        parameters: &[Option<ConstantRef<'_, C>>],
+        params: &[Option<ConstantRef<'_, C>>],
     ) -> bool {
         match self {
             Self::Demand => match constraint {
                 Constraint::Repeated { parameter, .. } => {
-                    parameter.is_some_and(|slot| parameters[slot].is_some())
+                    parameter.is_some_and(|slot| params[slot].is_some())
                 }
                 _ => true,
             },
-            _ => self.includes(column),
+            _ => self.includes(col),
         }
     }
 }
 
 impl Stage {
-    /// Number of columns of the body atom.
     pub(super) fn arity(&self) -> usize {
         self.arguments.len()
     }
-    /// Number of values in one output row.
+
     pub(super) fn width(&self) -> usize {
         self.output.len()
     }
 
-    /// The input slot this column repeats, when an earlier stage bound it.
-    pub(super) fn input_column(&self, column: usize) -> Option<usize> {
-        match self.arguments[column] {
-            Constraint::Input(index) => Some(index),
+    pub(super) fn input_column(&self, col: usize) -> Option<usize> {
+        match self.arguments[col] {
+            Constraint::Input(idx) => Some(idx),
             _ => None,
         }
     }
-    /// Whether changing the binding can change the demand's key.
+
     pub(super) fn reads_input(&self) -> bool {
         self.arguments
             .iter()
-            .any(|argument| matches!(argument, Constraint::Input(_)))
+            .any(|arg| matches!(arg, Constraint::Input(_)))
     }
-    /// Whether the column is a constant of the clause.
-    pub(super) fn is_constant_column(&self, column: usize) -> bool {
-        matches!(self.arguments[column], Constraint::Constant)
+
+    pub(super) fn is_constant_column(&self, col: usize) -> bool {
+        matches!(self.arguments[col], Constraint::Constant)
     }
-    /// The value bound to the column before the tuple is read, if the constraint does not read it.
+
     pub(super) fn bound<'a, C>(
         &self,
         clause: &Clause<'a, C>,
         input: &[ConstantRef<'a, C>],
-        parameters: &[Option<ConstantRef<'a, C>>],
-        column: usize,
+        params: &[Option<ConstantRef<'a, C>>],
+        col: usize,
     ) -> Option<ConstantRef<'a, C>> {
-        match self.arguments[column] {
-            Constraint::Input(index) => Some(input[index]),
+        match self.arguments[col] {
+            Constraint::Input(idx) => Some(input[idx]),
             Constraint::Parameter(slot)
             | Constraint::Repeated {
                 parameter: Some(slot),
                 ..
-            } => parameters[slot],
-            Constraint::Constant => Some(ConstantRef(clause.constant(self, column))),
+            } => params[slot],
+            Constraint::Constant => Some(ConstantRef(clause.constant(self, col))),
             _ => None,
         }
     }
 
-    /// Whether every column matches without reading the tuple, so the scan can skip `matches`.
     pub(super) fn matches_all<C>(
         &self,
-        parameters: &[Option<ConstantRef<'_, C>>],
-        evidence: MatchEvidence,
+        params: &[Option<ConstantRef<'_, C>>],
+        ev: ClauseMatch,
     ) -> bool {
-        self.arguments
-            .iter()
-            .enumerate()
-            .all(|(column, constraint)| {
-                evidence.covers(column, constraint, parameters)
-                    || match constraint {
-                        Constraint::Bind => true,
-                        Constraint::Parameter(slot) => parameters[*slot].is_none(),
-                        _ => false,
-                    }
-            })
+        self.arguments.iter().enumerate().all(|(col, constraint)| {
+            ev.covers(col, constraint, params)
+                || match constraint {
+                    Constraint::Bind => true,
+                    Constraint::Parameter(slot) => params[*slot].is_none(),
+                    _ => false,
+                }
+        })
     }
-    /// Whether the candidate tuple satisfies every constraint the evidence does not cover.
+
     pub(super) fn matches<'a, C: Ord>(
         &self,
         clause: &Clause<'a, C>,
         input: &[ConstantRef<'a, C>],
-        parameters: &[Option<ConstantRef<'a, C>>],
-        evidence: MatchEvidence,
-        tuple: &impl Fn(usize) -> ConstantRef<'a, C>,
+        params: &[Option<ConstantRef<'a, C>>],
+        ev: ClauseMatch,
+        tup: &impl Fn(usize) -> ConstantRef<'a, C>,
     ) -> bool {
-        self.arguments
-            .iter()
-            .enumerate()
-            .all(|(column, constraint)| {
-                if evidence.covers(column, constraint, parameters) {
-                    return true;
+        self.arguments.iter().enumerate().all(|(col, constraint)| {
+            if ev.covers(col, constraint, params) {
+                return true;
+            }
+            let expected = match constraint {
+                Constraint::Repeated { first, parameter } => Some(
+                    parameter
+                        .and_then(|s| params[s])
+                        .unwrap_or_else(|| tup(*first)),
+                ),
+                Constraint::Bind => None,
+                _ => self.bound(clause, input, params, col),
+            };
+            expected.is_none_or(|exp| exp == tup(col))
+        })
+    }
+
+    pub(super) fn identity<C>(&self, params: &[Option<ConstantRef<'_, C>>]) -> bool {
+        self.output.len() == self.arguments.len()
+            && self.output.iter().enumerate().all(|(col, val)| match val {
+                Column::Tuple(idx) => *idx == col,
+                Column::ParameterOrTuple { slot, column } => {
+                    *column == col && params[*slot].is_none()
                 }
-                let expected = match constraint {
-                    Constraint::Repeated { first, parameter } => Some(
-                        parameter
-                            .and_then(|slot| parameters[slot])
-                            .unwrap_or_else(|| tuple(*first)),
-                    ),
-                    Constraint::Bind => None,
-                    _ => self.bound(clause, input, parameters, column),
-                };
-                expected.is_none_or(|expected| expected == tuple(column))
+                _ => false,
             })
     }
 
-    /// Whether the output row is the input row itself, so rows can be appended as they are.
-    pub(super) fn identity<C>(&self, parameters: &[Option<ConstantRef<'_, C>>]) -> bool {
-        self.output.len() == self.arguments.len()
-            && self
-                .output
-                .iter()
-                .enumerate()
-                .all(|(column, value)| match value {
-                    Column::Tuple(index) => *index == column,
-                    Column::ParameterOrTuple {
-                        slot,
-                        column: index,
-                    } => *index == column && parameters[*slot].is_none(),
-                    _ => false,
-                })
-    }
-
-    /// Whether the output can distinguish two matching tuples for the same input row.
-    pub(super) fn reads_tuple<C>(&self, parameters: &[Option<ConstantRef<'_, C>>]) -> bool {
-        self.output.iter().any(|column| match *column {
+    pub(super) fn reads_tuple<C>(&self, params: &[Option<ConstantRef<'_, C>>]) -> bool {
+        self.output.iter().any(|col| match *col {
             Column::Tuple(_) => true,
-            Column::ParameterOrTuple { slot, .. } => parameters[slot].is_none(),
+            Column::ParameterOrTuple { slot, .. } => params[slot].is_none(),
             Column::Input(_) | Column::HeadConstant(_) => false,
         })
     }
 
-    /// The output row for one candidate tuple, reading the input, tuple, parameters or head
-    /// constants.
     pub(super) fn values<'a, 'b, C>(
         &'b self,
         clause: &'b Clause<'a, C>,
         input: &'b [ConstantRef<'a, C>],
-        parameters: &'b [Option<ConstantRef<'a, C>>],
-        tuple: &'b impl Fn(usize) -> ConstantRef<'a, C>,
+        params: &'b [Option<ConstantRef<'a, C>>],
+        tup: &'b impl Fn(usize) -> ConstantRef<'a, C>,
     ) -> impl Iterator<Item = ConstantRef<'a, C>> + 'b {
-        self.output.iter().map(move |column| match *column {
-            Column::Input(index) => input[index],
-            Column::Tuple(column) => tuple(column),
+        self.output.iter().map(move |col| match *col {
+            Column::Input(idx) => input[idx],
+            Column::Tuple(c) => tup(c),
             Column::ParameterOrTuple { slot, column } => {
-                parameters[slot].unwrap_or_else(|| tuple(column))
+                params[slot].unwrap_or_else(|| tup(column))
             }
-            Column::HeadConstant(index) => ConstantRef(clause.head_constant(index)),
+            Column::HeadConstant(idx) => ConstantRef(clause.head_constant(idx)),
         })
     }
 }

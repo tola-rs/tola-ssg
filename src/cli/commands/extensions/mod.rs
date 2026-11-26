@@ -114,7 +114,7 @@ pub(in crate::cli) fn run(
         return Err(unrecognized_subcommand(&args.namespace));
     }
     let modules = tola_build::modules::select_command_modules(
-        config.get_root(),
+        config.root(),
         config.vendor().path.as_deref(),
         config.modules(),
         mode,
@@ -157,7 +157,7 @@ pub(in crate::cli) fn run(
             match command_signature(
                 module,
                 name,
-                config.get_root(),
+                config.root(),
                 config.config_path(),
                 mode.scope(),
             )
@@ -179,7 +179,7 @@ pub(in crate::cli) fn run(
     match &action {
         CommandAction::Execute(Action::Nu { path, args }) => {
             let path = tola_module::module_set::validate_module_path(
-                config.get_root(),
+                config.root(),
                 &module.name,
                 &module.root,
                 path,
@@ -220,7 +220,7 @@ pub(in crate::cli) fn run(
         }
         CommandAction::Query { query, projection } => {
             let modules = tola_build::modules::load_modules(
-                config.get_root(),
+                config.root(),
                 config.vendor().path.as_deref(),
                 config.modules(),
                 mode,
@@ -306,4 +306,45 @@ pub(in crate::cli) fn check_namespaces<T>(modules: &BTreeMap<String, T>) -> Resu
 }
 
 #[cfg(test)]
-mod tests;
+mod tests {
+    use super::*;
+    use std::path::Path;
+    use tola_input::InputScope;
+    use tola_module::ModuleCommands;
+
+    #[test]
+    fn builtins_reject_module_namespace() {
+        let module = ModuleCommands {
+            name: "build".into(),
+            root: "/module".into(),
+            manifest: "/module/tola-module.toml".into(),
+            commands: BTreeMap::new(),
+            initializer: None,
+            options: Default::default(),
+        };
+        assert!(check_namespaces(&BTreeMap::from([("build".into(), module)])).is_err());
+    }
+
+    #[test]
+    fn namespace_options_stop_at_command() {
+        let argv = [
+            "-Csite.toml",
+            "--offline",
+            "-qv",
+            "scan",
+            "--help",
+            "--color",
+            "never",
+            "--",
+            "--pure",
+        ]
+        .map(OsString::from);
+        let (args, proc_args) = ExtensionArgs::parse("notes", &argv).unwrap();
+        assert_eq!(args.config.path.as_deref(), Some(Path::new("site.toml")));
+        assert_eq!(args.input.mode().scope(), InputScope::Offline);
+        assert!(proc_args.quiet);
+        assert_eq!(proc_args.verbose, 1);
+        assert!(args.help.is_none());
+        assert_eq!(args.command_args, argv[3..]);
+    }
+}

@@ -1,7 +1,4 @@
-//! Validated SVG icons shared by CSS generation and document producers.
-//!
-//! Parses caller-supplied bytes into immutable, self-contained SVG values without I/O or caching.
-//! An Iconify source prefix is metadata; the caller chooses the collection namespace.
+//! Validated, self-contained SVG icon collections shared by CSS generation and document producers.
 //!
 //! ```
 //! use tola_icons::{IconCollections, IconCollection, IconPaint};

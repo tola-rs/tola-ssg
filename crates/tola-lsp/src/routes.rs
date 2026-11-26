@@ -9,7 +9,7 @@ use lsp_types::request::Request as LspRequest;
 use serde::{Deserialize, Serialize};
 use tola_build::cancellation::BuildCancellation;
 use tola_build::check::{RealizedDocument, SourceCompilation, SourceDiagnosticSession};
-use tola_build::config::ResolvedSiteConfig;
+use tola_build::config::SiteConfig;
 use tola_typst::typst::syntax::{FileId, Source, VirtualRoot};
 
 use crate::compiler::RevisionCompilations;
@@ -42,7 +42,7 @@ pub(super) fn named_pages(routes: &[Route]) -> NamedPages<'_> {
 pub(super) fn respond(
     session: &mut SourceDiagnosticSession,
     compilations: &mut RevisionCompilations,
-    config: &Arc<ResolvedSiteConfig>,
+    config: &Arc<SiteConfig>,
     source_revision: u64,
     overrides: &[(PathBuf, Arc<str>)],
     source: &Source,
@@ -71,7 +71,7 @@ pub(super) fn respond(
 /// The address of every realized document whose body has `source`, in document order.
 pub(super) fn site_routes(
     compilation: &SourceCompilation,
-    config: &ResolvedSiteConfig,
+    config: &SiteConfig,
     source: FileId,
     cancellation: &BuildCancellation,
 ) -> Result<Vec<Route>> {
@@ -91,12 +91,12 @@ fn carries_source(document: &RealizedDocument, source: FileId) -> bool {
 /// The site's origin derives from the configuration on every read, so it is read once for a whole
 /// list of pages rather than once per page.
 struct Addresses<'a> {
-    config: &'a ResolvedSiteConfig,
+    config: &'a SiteConfig,
     has_origin: bool,
 }
 
 impl<'a> Addresses<'a> {
-    fn new(config: &'a ResolvedSiteConfig) -> Self {
+    fn new(config: &'a SiteConfig) -> Self {
         Self {
             config,
             has_origin: config.site_url().is_some(),
@@ -160,7 +160,7 @@ pub(super) struct Page {
 /// Every page the check realizes, in document order.
 pub(super) fn pages(
     compilation: &SourceCompilation,
-    config: &ResolvedSiteConfig,
+    config: &SiteConfig,
     cancellation: &BuildCancellation,
 ) -> Result<Vec<Page>> {
     realized_pages(compilation, config, None, cancellation)
@@ -171,7 +171,7 @@ pub(super) fn pages(
 /// A template included by many pages answers with all of them; a page answers with itself.
 pub(super) fn pages_carrying(
     compilation: &SourceCompilation,
-    config: &ResolvedSiteConfig,
+    config: &SiteConfig,
     source: FileId,
     cancellation: &BuildCancellation,
 ) -> Result<Vec<Page>> {
@@ -181,7 +181,7 @@ pub(super) fn pages_carrying(
 /// The realized pages whose body has `carried`, or every realized page when it is `None`.
 fn realized_pages(
     compilation: &SourceCompilation,
-    config: &ResolvedSiteConfig,
+    config: &SiteConfig,
     carried: Option<FileId>,
     cancellation: &BuildCancellation,
 ) -> Result<Vec<Page>> {
@@ -204,7 +204,7 @@ fn realized_pages(
 /// Every page the compilation realizes, in route order.
 pub(super) fn index(
     compilation: &SourceCompilation,
-    config: &ResolvedSiteConfig,
+    config: &SiteConfig,
     cancellation: &BuildCancellation,
 ) -> Result<RouteIndexReply> {
     let mut routes: Vec<SiteRoute> = pages(compilation, config, cancellation)?
@@ -234,7 +234,7 @@ mod tests {
     use crate::server::tests::rendering_site;
 
     /// The index of one site's pages, asserted to come from a site that compiled.
-    fn indexed_routes(configuration: &Arc<ResolvedSiteConfig>) -> Vec<SiteRoute> {
+    fn indexed_routes(configuration: &Arc<SiteConfig>) -> Vec<SiteRoute> {
         let cancellation = BuildCancellation::new();
         let mut session = SourceDiagnosticSession::new(Arc::clone(configuration));
         let revision = session.inspect(Vec::new(), &cancellation).unwrap();

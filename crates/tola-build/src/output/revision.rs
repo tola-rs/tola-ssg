@@ -76,7 +76,7 @@ mod tests {
     use crate::output::tests::{insert_output, output_file, output_graph};
 
     #[test]
-    fn unchanged_outputs_keep_their_storage() {
+    fn reuse_shares_unchanged_storage() {
         fn graph(stable: &[u8], changed: &[u8]) -> OutputGraph {
             output_graph([
                 output_file(
@@ -105,7 +105,7 @@ mod tests {
     }
 
     #[test]
-    fn candidate_ownership_replaces_previous() {
+    fn reuse_replaces_ownership() {
         fn owned_graph(owner: OutputOwner) -> OutputGraph {
             let mut graph = OutputGraphBuilder::new();
             for root in ["search", "empty"] {
@@ -129,33 +129,33 @@ mod tests {
 
         let first = OutputRevision::from_graph(&owned_graph(OutputOwner::command(0, "first")));
         let owner = OutputOwner::command(1, "current");
-        let candidate = owned_graph(owner.clone());
-        let next = OutputRevision::from_graph_reusing(&first, &candidate);
+        let cand = owned_graph(owner.clone());
+        let next = OutputRevision::from_graph_reusing(&first, &cand);
 
         assert_eq!(next.outputs()[0].owner(), &owner);
-        assert_eq!(next.root_ownerships(), candidate.root_ownerships());
-        assert_eq!(next.manifest(), &SiteManifest::from_graph(&candidate));
+        assert_eq!(next.root_ownerships(), cand.root_ownerships());
+        assert_eq!(next.manifest(), &SiteManifest::from_graph(&cand));
     }
 
     #[test]
-    fn reuse_drops_outputs_the_candidate_omits() {
-        let mut first_graph = OutputGraphBuilder::new();
+    fn reuse_drops_omitted_outputs() {
+        let mut g1 = OutputGraphBuilder::new();
         insert_output(
-            &mut first_graph,
+            &mut g1,
             "old.css",
             OutputDeclaration::opaque(ResponseMediaType::CSS),
             b"old",
         );
-        let first = OutputRevision::from_graph(&first_graph.finish());
+        let first = OutputRevision::from_graph(&g1.finish());
 
-        let mut next_graph = OutputGraphBuilder::new();
+        let mut g2 = OutputGraphBuilder::new();
         insert_output(
-            &mut next_graph,
+            &mut g2,
             "new.css",
             OutputDeclaration::opaque(ResponseMediaType::CSS),
             b"new",
         );
-        let next = OutputRevision::from_graph_reusing(&first, &next_graph.finish());
+        let next = OutputRevision::from_graph_reusing(&first, &g2.finish());
 
         assert!(
             next.output(&OutputPath::parse("old.css").unwrap())

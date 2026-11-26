@@ -1,22 +1,21 @@
 # tola-typst
 
-`tola-typst` is the reusable Typst layer: worlds, file views, official compilation and export, retainable read evidence, and transport for native diagnostics. Site rules belong to `tola-build`; this crate knows no route, page, or configuration.
+Typst compiler and exporter wrapper: worlds, file views, compilation/export, read tracking, and diagnostics transport. Knows nothing about site routes, pages, or config (`tola-build` owns those).
 
 ## Modules
 
-- `world/` — `FileView` and `WorldBuilder`: explicit and observed bytes, package selections, fonts, resources.
-- `compile/`, `bundle/`, `session.rs` — official compilation and export of the root Bundle, plus the per-compilation state.
-- `diagnostic/` — opaque producer names and ordered evidence beside the original upstream diagnostic; meaning stays with the producer.
-- `html/` — HTML URL-use rules and escaping.
-- `reference_occurrence.rs` — records the references Typst's own output rules observed, for introspection queries.
-- `introspection.rs` — the introspection sink a query reads.
-- `spelling.rs` — name suggestions shared by diagnostics and the language service.
-- `download.rs`, `extract.rs`, `svg.rs`, `prelude.rs` — feature-gated network and archive support, SVG handling, and shared prelude types.
+- `world/` — `FileView` and `WorldBuilder` (files, packages, fonts, `sys.inputs`).
+- `compile/`, `bundle/`, `session.rs` — official Typst compilation, Bundle export, and per-compile state.
+- `diagnostic/` — attaches producer tags and source excerpts beside upstream Typst diagnostics.
+- `html/` — HTML URL rules and escaping.
+- `reference_occurrence.rs`, `introspection.rs` — records exported references for document queries.
+- `spelling.rs` — name suggestions shared by diagnostics and LSP.
+- `download.rs`, `extract.rs`, `svg.rs`, `prelude.rs` — feature-gated package downloads, extraction, SVG helpers, and prelude.
 
 ## Invariants
 
-- The official Typst compiler and exporter are the semantic authority; do not re-implement or approximate their meaning.
-- `FileView` lifetimes are input semantics, not interchangeable performance settings: local worlds keep observations, shared worlds observe fresh files per compilation, external views stay fixed.
-- Cancellation passed to `WorldBuilder::build` covers font preparation and file access. Package downloads can stop while waiting for HTTP. A cancelled observation never fills a shared file-view cell. System-font discovery and synchronous Typst computation remain indivisible boundaries.
-- Native diagnostics transport producer identity and ordered evidence without interpreting it.
-- Feature boundaries (`embed-fonts`, `network`, `scan`, `parallel`) stay valid for library consumers; keep `forbid(unsafe_code)`.
+- The official Typst compiler and exporter decide Typst semantics; never approximate them.
+- `FileView` modes define input semantics: local caches pin observations until reset, shared caches re-read per compile, external views stay fixed until replaced.
+- `BundleCancellation` covers font loading, file reads, and HTTP package downloads; cancelled reads never populate a shared cache cell. System-font discovery and synchronous Typst evaluation are indivisible.
+- Diagnostics transport producer identity and excerpts without reinterpreting upstream meaning.
+- Keep feature boundaries (`embed-fonts`, `network`, `scan`, `parallel`) valid and `forbid(unsafe_code)`.

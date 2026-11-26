@@ -486,7 +486,7 @@ mod tests {
     }
 
     #[test]
-    fn srcset_retains_commas_inside_urls() {
+    fn srcset_commas_in_urls() {
         assert_eq!(
             srcset_urls("data:image/svg+xml,%3Csvg%3E 1x, /image.png 2x"),
             ["data:image/svg+xml,%3Csvg%3E", "/image.png"]

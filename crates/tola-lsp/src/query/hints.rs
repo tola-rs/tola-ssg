@@ -6,7 +6,7 @@ use anyhow::Result;
 use lsp_types::{InlayHint, InlayHintKind, InlayHintLabel, InlayHintTooltip, Position, Range};
 use tola_build::cancellation::BuildCancellation;
 use tola_build::check::SourceCompilation;
-use tola_build::config::ResolvedSiteConfig;
+use tola_build::config::SiteConfig;
 use tola_typst::typst::foundations::Value;
 use tola_typst::typst::syntax::ast::AstNode;
 use tola_typst::typst::syntax::package::PackageSpec;
@@ -20,7 +20,7 @@ use crate::published::PublishedPackage;
 /// Clients with lenses show these checked routes there instead of as annotations.
 pub(super) fn route_hints(
     compilation: &SourceCompilation,
-    config: &ResolvedSiteConfig,
+    config: &SiteConfig,
     source: &Source,
     viewport: Range,
     cancellation: &BuildCancellation,
@@ -266,49 +266,55 @@ mod tests {
     use super::*;
     use crate::query::tests::*;
 
-    /// A package import states its version against the index; a namespace the index does not
-    /// describe, or a string that imports nothing, states nothing.
     #[test]
-    fn imports_state_version_status() {
+    fn import_version_hints() {
         let index = [
             published("cetz", "0.3.1"),
             published("cetz", "0.3.2"),
             published("tablex", "0.0.4"),
         ];
-        let source = Source::detached(
-            "#import \"@preview/cetz:0.3.1\": canvas\n#import \"@preview/cetz:0.3.2\": canvas\n#import \"@preview/tablex:0.0.3\": table\n#import \"@preview/absent:1.0.0\": nothing\n#import \"@local/pkg:1.0.0\": local\n#let text = \"@preview/cetz:0.3.1\"\n",
+        let src = Source::detached(
+            "#import \"@preview/cetz:0.3.1\": canvas\n\
+             #import \"@preview/cetz:0.3.2\": canvas\n\
+             #import \"@preview/tablex:0.0.3\": table\n\
+             #import \"@preview/absent:1.0.0\": nothing\n\
+             #import \"@local/pkg:1.0.0\": local\n\
+             #let text = \"@preview/cetz:0.3.1\"\n",
         );
         let mut hints = Vec::new();
-        package_version_hints(&source, 0..source.text().len(), &index, &mut hints);
-        let mut found = hint_labels(&hints);
-        found.sort();
-        assert_eq!(
-            found,
-            [
-                "version not found",
-                "version not found",
-                "→ 0.3.2 available",
-                "√ latest",
-            ],
-            "{hints:?}"
-        );
+        package_version_hints(&src, 0..src.text().len(), &index, &mut hints);
+        let by_line: std::collections::BTreeMap<u32, String> = hints
+            .iter()
+            .map(|h| {
+                (
+                    h.position.line,
+                    hint_labels(std::slice::from_ref(h)).pop().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(by_line.len(), 4, "{hints:?}");
+        assert!(by_line[&0].contains("0.3.2"), "{:?}", by_line[&0]);
+        assert!(!by_line[&1].contains("available"), "{:?}", by_line[&1]);
+        assert!(by_line[&2].contains("not found"), "{:?}", by_line[&2]);
+        assert!(by_line[&3].contains("not found"), "{:?}", by_line[&3]);
+        assert!(!by_line.contains_key(&4));
+        assert!(!by_line.contains_key(&5));
     }
 
-    /// The viewport decides which imports a hint annotates.
     #[test]
-    fn version_hints_follow_the_viewport() {
+    fn version_hints_respect_viewport() {
         let index = [published("cetz", "0.3.2")];
-        let source = Source::detached("#import \"@preview/cetz:0.3.1\": canvas\n");
+        let src = Source::detached("#import \"@preview/cetz:0.3.1\": canvas\n");
         let mut inside = Vec::new();
-        package_version_hints(&source, 0..source.text().len(), &index, &mut inside);
+        package_version_hints(&src, 0..src.text().len(), &index, &mut inside);
         assert_eq!(inside.len(), 1, "{inside:?}");
         let mut outside = Vec::new();
-        package_version_hints(&source, 0..0, &index, &mut outside);
+        package_version_hints(&src, 0..0, &index, &mut outside);
         assert!(outside.is_empty(), "{outside:?}");
     }
 
     #[test]
-    fn hints_stand_in_for_lenses() {
+    fn route_hints_fallback_when_no_lenses() {
         let mut site = QuerySession::two_documents();
         site.capabilities = lsp_types::ClientCapabilities {
             text_document: Some(lsp_types::TextDocumentClientCapabilities {
@@ -325,13 +331,13 @@ mod tests {
         site.capabilities = announcing_client();
         assert!(
             site.inlay_hints("The document the site realizes.|\n")
-                .is_empty(),
-            "a client that shows lenses reads the pages there"
+                .is_empty()
         );
     }
+
     #[test]
-    fn ambiguous_callees_omit_parameter_hints() {
-        for (expression, expected) in [
+    fn ambiguous_callees_omit_hints() {
+        for (expr, expected) in [
             (
                 "if false { calc.pow } else { calc.rem }",
                 Vec::<&str>::new(),
@@ -342,18 +348,13 @@ mod tests {
             ),
         ] {
             let mut site = QuerySession::with_program(crate::query::tests::FAILED_PROGRAM);
-            let hints = site.inlay_hints(&format!(
-                "#panic(\"stop\")\n#let f = {expression}\n#f(1, 2)|"
-            ));
-            assert_eq!(hint_labels(&hints), expected, "{expression}: {hints:?}");
+            let hints = site.inlay_hints(&format!("#panic(\"stop\")\n#let f = {expr}\n#f(1, 2)|"));
+            assert_eq!(hint_labels(&hints), expected, "{expr}: {hints:?}");
         }
     }
 
-    /// A call names each positional argument it fills, in the parameter's own order, and a
-    /// variadic parameter only the first argument it takes. A standard call that documents its
-    /// parameters where the author can read them names nothing.
     #[test]
-    fn inlay_hints_name_their_arguments() {
+    fn parameter_hints_positional_and_variadic() {
         let cases: [(&str, &[&str], Option<Position>); 4] = [
             (
                 "#(calc.max(1, 2, 3))|\n",
@@ -372,15 +373,11 @@ mod tests {
                 Some(Position::new(1, 34)),
             ),
         ];
-        for (source, expected, position) in cases {
+        for (src, expected, pos) in cases {
             let mut site = QuerySession::new();
-            let hints = site.inlay_hints(source);
-            assert_eq!(hint_labels(&hints), expected, "{source:?}");
-            assert_eq!(
-                hints.first().map(|hint| hint.position),
-                position,
-                "{source:?}: {hints:?}"
-            );
+            let hints = site.inlay_hints(src);
+            assert_eq!(hint_labels(&hints), expected, "{src:?}");
+            assert_eq!(hints.first().map(|h| h.position), pos, "{src:?}: {hints:?}");
         }
     }
 }

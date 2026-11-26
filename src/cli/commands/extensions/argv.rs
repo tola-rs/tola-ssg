@@ -103,3 +103,124 @@ pub(super) fn complete_report(
     output.diagnostics(&diagnostics)?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[cfg(unix)]
+    use crate::cli::external::{CommandExit, run as run_process};
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+    use tola_build::report::ReportSources;
+
+    fn report_channel(severity: &str) -> ReportChannel {
+        let reports = ReportChannel::new("command:catalog.scan", ReportSources::new()).unwrap();
+        std::fs::write(
+            reports.path(),
+            serde_json::to_vec(&serde_json::json!({
+                "schemaVersion": 1,
+                "diagnostics": [{"severity": severity, "message": "catalog issue", "code": "rule"}],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        reports
+    }
+
+    #[test]
+    fn report_severity_controls_success() {
+        let out = super::super::super::testing::buffered_output();
+        complete_report(Ok(()), report_channel("warning"), &out).unwrap();
+        let err = complete_report(Ok(()), report_channel("error"), &out).unwrap_err();
+        let diags = tola_diagnostic::attached(&err).unwrap();
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].severity, Severity::Error);
+        assert_eq!(
+            diags[0].producer.as_ref().unwrap().name.as_deref(),
+            Some("command:catalog.scan"),
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_exit_survives_reports() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let out = super::super::super::testing::buffered_output();
+        for invalid in [false, true] {
+            let reports = report_channel("warning");
+            if invalid {
+                std::fs::write(reports.path(), b"partial report").unwrap();
+            }
+            let done = Err(CommandExit(std::process::ExitStatus::from_raw(37 << 8)).into());
+            let err = complete_report(done, reports, &out).unwrap_err();
+            assert_eq!(
+                err.downcast_ref::<CommandExit>().unwrap().0.code(),
+                Some(37)
+            );
+            let diags = tola_diagnostic::attached(&err).unwrap();
+            assert_eq!(diags.len(), 1);
+            assert_eq!(
+                diags[0].severity,
+                if invalid {
+                    Severity::Error
+                } else {
+                    Severity::Warning
+                }
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn expanded_argv_reaches_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mod_dir = root.join("module with spaces");
+        std::fs::create_dir(&mod_dir).unwrap();
+        let mod_cmds = ModuleCommands {
+            name: "notes".into(),
+            root: mod_dir.clone(),
+            manifest: PathBuf::from("/module with spaces/tola-module.toml"),
+            commands: BTreeMap::new(),
+            initializer: None,
+            options: Default::default(),
+        };
+        let record = root.join("arguments.txt");
+        let script = mod_dir.join("record.sh");
+        std::fs::write(
+            &script,
+            "record=\"$1\"\nshift\nprintf '%s\\n' \"$@\" > \"$record\"\nexit 37\n",
+        )
+        .unwrap();
+        let argv = vec![
+            "sh".into(),
+            "{module}/record.sh".into(),
+            "{project}/arguments.txt".into(),
+        ];
+        let reports = ReportChannel::new("command:notes.record", ReportSources::new()).unwrap();
+        let cmd = process_command(
+            &argv,
+            &["a title".into(), "--".into(), "$(literal)".into()],
+            Site {
+                root: root.to_owned(),
+                config_path: root.join("tola.toml"),
+                content_root: root.join("content"),
+            },
+            &mod_cmds,
+            InputScope::Offline,
+            &reports,
+        )
+        .unwrap();
+        let err = run_process(cmd, &crate::cancellation::Cancellation::default()).unwrap_err();
+        assert_eq!(
+            err.downcast_ref::<CommandExit>().unwrap().0.code(),
+            Some(37)
+        );
+        let recorded = std::fs::read_to_string(&record).unwrap();
+        assert_eq!(
+            recorded.lines().collect::<Vec<_>>(),
+            ["a title", "--", "$(literal)"]
+        );
+    }
+}

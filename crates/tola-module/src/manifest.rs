@@ -14,7 +14,7 @@ use crate::declaration::{
     ModuleSource, Parameter, Query, valid_name,
 };
 use crate::hooks;
-use crate::module_set::ManifestEvidence;
+use crate::module_set::ManifestStamp;
 
 /// Declarations in a module's `tola-module.toml`.
 #[derive(Debug, Deserialize)]
@@ -116,7 +116,7 @@ pub struct InitializerSource {
 pub struct ReadManifest {
     pub root: PathBuf,
     pub path: PathBuf,
-    pub evidence: ManifestEvidence,
+    pub evidence: ManifestStamp,
     pub manifest: Manifest,
     pub options: toml::Table,
 }
@@ -268,6 +268,8 @@ pub fn read_with_options(
     read_manifest(site, name, declared_root, mode, sources, Some(options))
 }
 
+type ManifestDiag<'a> = &'a dyn Fn(String) -> tola_diagnostic::Diagnostic;
+
 fn read_manifest(
     site: &Path,
     name: &str,
@@ -281,24 +283,77 @@ fn read_manifest(
             name: name.to_owned(),
         });
     }
-
-    // Every path this error names reads the way the author wrote it under the site root.
     let shown = |path: &Path| tola_diagnostic::display_path(path, site);
-    let root_identity = tola_input::FilesystemSourceIdentity::from_path(&declared_root);
+    let verified = read_verified_manifest_bytes(site, name, &declared_root, mode, &shown)?;
+    let diag = |msg| {
+        tola_diagnostic::Diagnostic::at_path(
+            tola_diagnostic::codes::module::MANIFEST,
+            tola_diagnostic::Severity::Error,
+            shown(&verified.manifest_path),
+            msg,
+        )
+        .with_file(verified.canonical_manifest.clone())
+    };
+    let content = resolve_manifest_text(
+        &verified.bytes,
+        &verified.canonical_manifest,
+        &verified.manifest_path,
+        sources,
+        &shown,
+        &diag,
+    )?;
+    let digest = blake3::hash(content.as_bytes());
+    let mut tbl = parse_manifest_table(&content, &diag)?;
+    let (opts, bindings) = bind_manifest_options(&mut tbl, name, overrides, &content, &diag)?;
+    let manifest = deserialize_manifest(tbl, &bindings, &content, &diag)?;
+    validate_manifest_with_diag(name, &manifest, &diag)?;
+    Ok(ReadManifest {
+        root: verified.root,
+        path: verified.canonical_manifest,
+        evidence: ManifestStamp {
+            root: verified.root_id,
+            manifest: verified.manifest_id,
+            digest,
+            source: content,
+        },
+        options: opts,
+        manifest,
+    })
+}
+
+struct VerifiedManifest {
+    root: PathBuf,
+    canonical_manifest: PathBuf,
+    manifest_path: PathBuf,
+    root_id: tola_input::FilesystemSourceIdentity,
+    manifest_id: tola_input::FilesystemSourceIdentity,
+    bytes: Vec<u8>,
+}
+
+fn read_verified_manifest_bytes(
+    site: &Path,
+    name: &str,
+    declared_root: &Path,
+    mode: InputMode,
+    shown: &dyn Fn(&Path) -> String,
+) -> Result<VerifiedManifest, ManifestError> {
+    use tola_input::FilesystemSourceIdentity;
+
+    let root_id = FilesystemSourceIdentity::from_path(declared_root);
     let root = declared_root
         .canonicalize()
         .map_err(|source| ManifestError::RootPath {
-            path: shown(&declared_root),
+            path: shown(declared_root),
             source,
         })?;
     if !root.is_dir() {
         return Err(ManifestError::RootNotDirectory {
-            path: shown(&declared_root),
+            path: shown(declared_root),
         });
     }
-    if root_identity.canonical_path() != Some(root.as_path()) {
+    if root_id.canonical_path() != Some(root.as_path()) {
         return Err(ManifestError::RootChanged {
-            path: shown(&declared_root),
+            path: shown(declared_root),
         });
     }
     if mode.scope() == InputScope::Pure && !root.starts_with(site) {
@@ -307,22 +362,21 @@ fn read_manifest(
         });
     }
     let manifest_path = declared_root.join("tola-module.toml");
-    let manifest_identity = tola_input::FilesystemSourceIdentity::from_path(&manifest_path);
-    let canonical_manifest =
-        manifest_path
-            .canonicalize()
-            .map_err(|source| ManifestError::ManifestPath {
-                file: manifest_path.clone(),
-                path: shown(&manifest_path),
-                source,
-            })?;
-    if manifest_identity.canonical_path() != Some(canonical_manifest.as_path()) {
+    let manifest_id = FilesystemSourceIdentity::from_path(&manifest_path);
+    let canonical = manifest_path
+        .canonicalize()
+        .map_err(|source| ManifestError::ManifestPath {
+            file: manifest_path.clone(),
+            path: shown(&manifest_path),
+            source,
+        })?;
+    if manifest_id.canonical_path() != Some(canonical.as_path()) {
         return Err(ManifestError::ManifestChanged {
             file: manifest_path.clone(),
             path: shown(&manifest_path),
         });
     }
-    if !canonical_manifest.starts_with(&root) {
+    if !canonical.starts_with(&root) {
         return Err(ManifestError::ManifestEscapesRoot {
             file: manifest_path.clone(),
             module: name.to_owned(),
@@ -337,190 +391,207 @@ fn read_manifest(
             path: shown(&manifest_path),
             source,
         })?;
-    if root_identity != tola_input::FilesystemSourceIdentity::from_path(&declared_root)
-        || manifest_identity != tola_input::FilesystemSourceIdentity::from_path(&manifest_path)
+    if root_id != FilesystemSourceIdentity::from_path(declared_root)
+        || manifest_id != FilesystemSourceIdentity::from_path(&manifest_path)
     {
         return Err(ManifestError::ManifestMoved {
-            file: manifest_path.clone(),
-            path: shown(&manifest_path),
+            file: manifest_path,
+            path: shown(&declared_root.join("tola-module.toml")),
         });
     }
-    let diagnostic = |message| {
-        tola_diagnostic::Diagnostic::at_path(
-            tola_diagnostic::codes::module::MANIFEST,
-            tola_diagnostic::Severity::Error,
-            shown(&manifest_path),
-            message,
-        )
-        .with_file(canonical_manifest.clone())
-    };
-    let overlay = || {
-        let mut buffers = sources
-            .iter()
-            .filter(|(path, _)| path == &canonical_manifest);
-        let Some((_, first)) = buffers.next() else {
-            return Ok(None);
-        };
-        if buffers.any(|(_, text)| text != first) {
-            let message = "two open copies of `tola-module.toml` contain different text";
+    Ok(VerifiedManifest {
+        root,
+        canonical_manifest: canonical,
+        manifest_path,
+        root_id,
+        manifest_id,
+        bytes,
+    })
+}
+
+fn resolve_manifest_text(
+    bytes: &[u8],
+    canonical_manifest: &Path,
+    manifest_path: &Path,
+    sources: &[(PathBuf, Arc<str>)],
+    shown: &dyn Fn(&Path) -> String,
+    diag: ManifestDiag<'_>,
+) -> Result<Arc<str>, ManifestError> {
+    let mut bufs = sources
+        .iter()
+        .filter(|(path, _)| path == canonical_manifest);
+    if let Some((_, first)) = bufs.next() {
+        if bufs.any(|(_, text)| text != first) {
+            let msg = "two open copies of `tola-module.toml` contain different text";
             return Err(ManifestError::Rejected {
                 diagnostic: Box::new(
-                    diagnostic(message.to_owned())
+                    diag(msg.to_owned())
                         .with_help("Save the version you want to keep, then close the other copy"),
                 ),
-                source: anyhow::anyhow!(message),
+                source: anyhow::anyhow!(msg),
             });
         }
-        Ok(Some(first.as_ref()))
-    };
-    let content = match overlay()? {
-        Some(text) => text,
-        None => std::str::from_utf8(&bytes).map_err(|source| ManifestError::ManifestEncoding {
-            file: manifest_path.clone(),
-            path: shown(&manifest_path),
-            source,
-        })?,
-    };
-    let content: Arc<str> = Arc::from(content);
-    let digest = blake3::hash(content.as_bytes());
-    let mut table: toml::Table = toml::from_str(&content).map_err(|source: toml::de::Error| {
+        return Ok(Arc::clone(first));
+    }
+    let text = std::str::from_utf8(bytes).map_err(|source| ManifestError::ManifestEncoding {
+        file: manifest_path.to_owned(),
+        path: shown(manifest_path),
+        source,
+    })?;
+    Ok(Arc::from(text))
+}
+
+fn parse_manifest_table(
+    content: &Arc<str>,
+    diag: ManifestDiag<'_>,
+) -> Result<toml::Table, ManifestError> {
+    toml::from_str(content).map_err(|err: toml::de::Error| {
         let tola_diagnostic::toml::TomlMessage { message, help } =
-            tola_diagnostic::toml::TomlMessage::from_error(source.message());
-        let mut diagnostic = diagnostic(message.into_owned());
+            tola_diagnostic::toml::TomlMessage::from_error(err.message());
+        let mut d = diag(message.into_owned());
         if let Some(help) = help {
-            diagnostic = diagnostic.with_help(help);
+            d = d.with_help(help);
         }
-        if let Some(span) = source.span() {
-            diagnostic = diagnostic.with_source_span(&content, span);
+        if let Some(span) = err.span() {
+            d = d.with_source_span(content, span);
         }
         ManifestError::Rejected {
-            diagnostic: Box::new(diagnostic),
-            source: source.into(),
+            diagnostic: Box::new(d),
+            source: err.into(),
         }
-    })?;
-    let mut options = table
+    })
+}
+
+fn reject_field(
+    diag: ManifestDiag<'_>,
+    content: &Arc<str>,
+    msg: String,
+    pointer: &str,
+    source: anyhow::Error,
+) -> ManifestError {
+    ManifestError::Rejected {
+        diagnostic: Box::new(locate_field(diag(msg), content, pointer)),
+        source,
+    }
+}
+
+fn bind_manifest_options(
+    tbl: &mut toml::Table,
+    name: &str,
+    overrides: Option<&toml::Table>,
+    content: &Arc<str>,
+    diag: ManifestDiag<'_>,
+) -> Result<(toml::Table, BTreeMap<String, String>), ManifestError> {
+    let mut opts = tbl
         .get("options")
         .and_then(toml::Value::as_table)
         .cloned()
         .unwrap_or_default();
-    let option_root = if let Some(overrides) = overrides {
-        crate::options::merge(&mut options, overrides);
+    let opt_root = if let Some(overrides) = overrides {
+        crate::options::merge(&mut opts, overrides);
         format!("modules.{name}.options")
     } else {
         "options".to_owned()
     };
-    let reject_field = |message: String, pointer: &str, source: anyhow::Error| {
-        let diagnostic = locate_field(diagnostic(message), &content, pointer);
-        ManifestError::Rejected {
-            diagnostic: Box::new(diagnostic),
-            source,
-        }
-    };
-    crate::options::normalize_options(&mut options).map_err(|error| {
-        let mut pointer = "/options".to_owned();
-        for step in &error.path {
-            match step {
-                crate::fragment::FragmentStep::Key(key) => {
-                    tola_diagnostic::push_pointer(&mut pointer, key);
-                }
-                crate::fragment::FragmentStep::Index(index) => {
-                    tola_diagnostic::push_pointer(&mut pointer, &index.to_string());
-                }
-            }
-        }
+    crate::options::normalize_options(&mut opts).map_err(|err| {
+        let mut ptr = "/options".to_owned();
+        crate::fragment::push_pointer_steps(&mut ptr, &err.path);
         reject_field(
-            error.to_string(),
-            &pointer,
-            anyhow::anyhow!(error.to_string()),
+            diag,
+            content,
+            err.to_string(),
+            &ptr,
+            anyhow::anyhow!(err.to_string()),
         )
     })?;
-    let bindings =
-        crate::option_refs::bind(&mut table, &options, &option_root).map_err(|invalid| {
-            let source = anyhow::anyhow!(invalid.reason.clone());
-            reject_field(invalid.reason, &invalid.field_pointer, source)
-        })?;
-    let manifest: Manifest =
-        serde_path_to_error::deserialize(toml::Value::Table(table)).map_err(|error| {
-            let mut pointer = String::new();
-            for segment in error.path() {
-                use serde_path_to_error::Segment;
-                match segment {
-                    Segment::Map { key } => tola_diagnostic::push_pointer(&mut pointer, key),
-                    Segment::Seq { index } => {
-                        tola_diagnostic::push_pointer(&mut pointer, &index.to_string());
-                    }
-                    Segment::Enum { .. } | Segment::Unknown => {}
+    let bindings = crate::option_refs::bind(tbl, &opts, &opt_root).map_err(|invalid| {
+        let src = anyhow::anyhow!(invalid.reason.clone());
+        reject_field(diag, content, invalid.reason, &invalid.pointer, src)
+    })?;
+    Ok((opts, bindings))
+}
+
+fn deserialize_manifest(
+    tbl: toml::Table,
+    bindings: &BTreeMap<String, String>,
+    content: &Arc<str>,
+    diag: ManifestDiag<'_>,
+) -> Result<Manifest, ManifestError> {
+    serde_path_to_error::deserialize(toml::Value::Table(tbl)).map_err(|err| {
+        let mut ptr = String::new();
+        for seg in err.path() {
+            use serde_path_to_error::Segment;
+            match seg {
+                Segment::Map { key } => tola_diagnostic::push_pointer(&mut ptr, key),
+                Segment::Seq { index } => {
+                    tola_diagnostic::push_pointer(&mut ptr, &index.to_string())
                 }
+                Segment::Enum { .. } | Segment::Unknown => {}
             }
-            let reason = error.inner().message();
-            if let Some(field) = reason
-                .strip_prefix("unknown field `")
-                .and_then(|reason| reason.split('`').next())
-                && pointer.rsplit('/').next() != Some(field)
-            {
-                tola_diagnostic::push_pointer(&mut pointer, field);
-            }
-            let tola_diagnostic::toml::TomlMessage { message, help } =
-                tola_diagnostic::toml::TomlMessage::from_error(reason);
-            let message = if let Some((_, option)) = bindings.iter().find(|(field, _)| {
-                pointer
-                    .strip_prefix(field.as_str())
-                    .is_some_and(|suffix| suffix.is_empty() || suffix.starts_with('/'))
-            }) {
-                format!("`{option}`: {message}")
-            } else if message.starts_with("expected ") && !pointer.is_empty() {
-                format!("`{}` {message}", error.path())
-            } else {
-                message.into_owned()
-            };
-            let mut diagnostic = locate_field(diagnostic(message), &content, &pointer);
-            if let Some(help) = help {
-                diagnostic = diagnostic.with_help(help);
-            }
-            ManifestError::Rejected {
-                diagnostic: Box::new(diagnostic),
-                source: error.into(),
-            }
-        })?;
-    validate_manifest(name, &manifest).map_err(|source| {
-        let mut diagnostic = diagnostic(source.to_string());
+        }
+        let reason = err.inner().message();
+        if let Some(field) = reason
+            .strip_prefix("unknown field `")
+            .and_then(|s| s.split('`').next())
+            && ptr.rsplit('/').next() != Some(field)
+        {
+            tola_diagnostic::push_pointer(&mut ptr, field);
+        }
+        let tola_diagnostic::toml::TomlMessage { message, help } =
+            tola_diagnostic::toml::TomlMessage::from_error(reason);
+        let msg = if let Some((_, opt)) = bindings.iter().find(|(field, _)| {
+            ptr.strip_prefix(field.as_str())
+                .is_some_and(|suffix| suffix.is_empty() || suffix.starts_with('/'))
+        }) {
+            format!("`{opt}`: {message}")
+        } else if message.starts_with("expected ") && !ptr.is_empty() {
+            format!("`{}` {message}", err.path())
+        } else {
+            message.into_owned()
+        };
+        let mut d = locate_field(diag(msg), content, &ptr);
+        if let Some(help) = help {
+            d = d.with_help(help);
+        }
+        ManifestError::Rejected {
+            diagnostic: Box::new(d),
+            source: err.into(),
+        }
+    })
+}
+
+fn validate_manifest_with_diag(
+    name: &str,
+    manifest: &Manifest,
+    diag: ManifestDiag<'_>,
+) -> Result<(), ManifestError> {
+    validate_manifest(name, manifest).map_err(|source| {
+        let mut d = diag(source.to_string());
         if let ManifestError::CommandUnknownQuery { replacement, .. } = &source {
-            diagnostic = diagnostic.with_help(replacement.as_ref().map_or_else(
+            d = d.with_help(replacement.as_ref().map_or_else(
                 || "Use the name of a query declared in `[queries]`".to_owned(),
                 |query| format!("Check whether you meant the query `{query}`"),
             ));
         }
         ManifestError::Rejected {
-            diagnostic: Box::new(diagnostic),
+            diagnostic: Box::new(d),
             source: source.into(),
         }
-    })?;
-    Ok(ReadManifest {
-        root,
-        path: canonical_manifest,
-        evidence: ManifestEvidence {
-            root: root_identity,
-            manifest: manifest_identity,
-            digest,
-            source: content,
-        },
-        options,
-        manifest,
     })
 }
 
 fn locate_field(
-    mut diagnostic: tola_diagnostic::Diagnostic,
+    mut diag: tola_diagnostic::Diagnostic,
     content: &Arc<str>,
-    mut pointer: &str,
+    mut ptr: &str,
 ) -> tola_diagnostic::Diagnostic {
-    if let Ok(document) = toml_edit::Document::parse(Arc::clone(content)) {
-        let positions = tola_diagnostic::SourcePositions::of(&document, Arc::clone(content));
-        while !pointer.is_empty() {
-            if let Some(position) = positions.at_pointer(pointer) {
-                diagnostic = diagnostic.with_source_range(position.range());
-                if let Some(excerpt) = position.excerpt() {
-                    diagnostic = diagnostic.with_source_excerpt(
+    if let Ok(doc) = toml_edit::Document::parse(Arc::clone(content)) {
+        let pos = tola_diagnostic::SourcePositions::of(&doc, Arc::clone(content));
+        while !ptr.is_empty() {
+            if let Some(found) = pos.at_pointer(ptr) {
+                diag = diag.with_source_range(found.range());
+                if let Some(excerpt) = found.excerpt() {
+                    diag = diag.with_source_excerpt(
                         excerpt.line,
                         excerpt.column,
                         excerpt.text,
@@ -529,18 +600,18 @@ fn locate_field(
                 }
                 break;
             }
-            pointer = pointer.rsplit_once('/').map_or("", |(parent, _)| parent);
+            ptr = ptr.rsplit_once('/').map_or("", |(parent, _)| parent);
         }
     }
-    diagnostic
+    diag
 }
 
 fn validate_manifest(name: &str, manifest: &Manifest) -> Result<(), ManifestError> {
     manifest
         .icons
         .validate()
-        .map_err(|message| ManifestError::Source {
-            message: format!("module `{name}`: {message}"),
+        .map_err(|msg| ManifestError::Source {
+            message: format!("module `{name}`: {msg}"),
         })?;
     hooks::validate_declarations(&manifest.hooks).map_err(|source| ManifestError::Hooks {
         module: name.to_owned(),
@@ -572,15 +643,26 @@ fn validate_manifest(name: &str, manifest: &Manifest) -> Result<(), ManifestErro
         }
     }
     if let Some(typst) = &manifest.typst {
-        for (index, directory) in typst.fonts.iter().enumerate() {
-            relative(directory, format!("typst.fonts[{index}]"))?;
+        for (idx, dir) in typst.fonts.iter().enumerate() {
+            relative(dir, format!("typst.fonts[{idx}]"))?;
         }
     }
-    for (name, source) in &manifest.icons.collections {
-        if let Some(path) = source.path() {
-            relative(path, format!("icons.collections.{name}.path"))?;
+    for (icon_name, src) in &manifest.icons.collections {
+        if let Some(path) = src.path() {
+            relative(path, format!("icons.collections.{icon_name}.path"))?;
         }
     }
+    validate_queries(name, manifest, &relative)?;
+    validate_query_parameters(name, manifest)?;
+    validate_commands(name, manifest, &relative)?;
+    Ok(())
+}
+
+fn validate_queries(
+    name: &str,
+    manifest: &Manifest,
+    relative: &dyn Fn(&Path, String) -> Result<(), ManifestError>,
+) -> Result<(), ManifestError> {
     for (query_name, query) in &manifest.queries {
         if !valid_name(query_name) {
             return Err(ManifestError::QueryName {
@@ -588,30 +670,37 @@ fn validate_manifest(name: &str, manifest: &Manifest) -> Result<(), ManifestErro
                 query: query_name.clone(),
             });
         }
-        let query_label = format!("{name}.{query_name}");
+        let label = format!("{name}.{query_name}");
         if query.label.is_empty() {
-            return Err(ManifestError::QueryLabel { query: query_label });
+            return Err(ManifestError::QueryLabel { query: label });
         }
-        relative(&query.entry, format!("query {query_label} entry"))?;
+        relative(&query.entry, format!("query {label} entry"))?;
     }
-    validate_query_parameters(name, manifest)?;
+    Ok(())
+}
+
+fn validate_commands(
+    name: &str,
+    manifest: &Manifest,
+    relative: &dyn Fn(&Path, String) -> Result<(), ManifestError>,
+) -> Result<(), ManifestError> {
     if manifest.init.is_some() && manifest.commands.contains_key("init") {
         return Err(ManifestError::InitializerDeclaredTwice {
             module: name.to_owned(),
         });
     }
-    for (command_name, command) in &manifest.commands {
-        if !valid_name(command_name) {
+    for (cmd_name, cmd) in &manifest.commands {
+        if !valid_name(cmd_name) {
             return Err(ManifestError::CommandName {
                 module: name.to_owned(),
-                command: command_name.clone(),
+                command: cmd_name.clone(),
             });
         }
-        let command_label = format!("{name}.{command_name}");
-        let action = command
+        let label = format!("{name}.{cmd_name}");
+        let action = cmd
             .action()
             .map_err(|source| ManifestError::CommandAction {
-                command: command_label.clone(),
+                command: label.clone(),
                 source,
             })?;
         match action {
@@ -624,20 +713,16 @@ fn validate_manifest(name: &str, manifest: &Manifest) -> Result<(), ManifestErro
                     )
                     .map(str::to_owned);
                     return Err(ManifestError::CommandUnknownQuery {
-                        command: command_label,
+                        command: label,
                         query,
                         replacement,
                     });
                 }
                 if !projection.iter().all(|field| !field.is_empty()) {
-                    return Err(ManifestError::CommandProjection {
-                        command: command_label,
-                    });
+                    return Err(ManifestError::CommandProjection { command: label });
                 }
             }
-            CommandAction::Skill { path } => {
-                relative(&path, format!("command {command_label} skill"))?;
-            }
+            CommandAction::Skill { path } => relative(&path, format!("command {label} skill"))?,
         }
     }
     Ok(())
@@ -646,16 +731,16 @@ fn validate_manifest(name: &str, manifest: &Manifest) -> Result<(), ManifestErro
 fn validate_query_parameters(module: &str, manifest: &Manifest) -> Result<(), ManifestError> {
     let mut declared = BTreeMap::new();
     for (query_name, query) in &manifest.queries {
-        for (kind, parameters) in [
+        for (kind, params) in [
             ("references", &query.references),
             ("definitions", &query.definitions),
         ] {
-            for (index, parameter) in parameters.iter().enumerate() {
-                let key = format!("queries.{query_name}.{kind}[{index}]");
-                let invalid = |message: String| ManifestError::QueryParameter {
+            for (idx, param) in params.iter().enumerate() {
+                let key = format!("queries.{query_name}.{kind}[{idx}]");
+                let invalid = |msg: String| ManifestError::QueryParameter {
                     module: module.to_owned(),
                     key: key.clone(),
-                    message,
+                    message: msg,
                 };
                 if manifest
                     .typst
@@ -665,21 +750,20 @@ fn validate_query_parameters(module: &str, manifest: &Manifest) -> Result<(), Ma
                 {
                     return Err(invalid("requires a public `typst.entry`".into()));
                 }
-                if !parameter.export.split('.').all(typst::syntax::is_ident) {
+                if !param.export.split('.').all(typst::syntax::is_ident) {
                     return Err(invalid("`export` must name a public function".into()));
                 }
-                if let Parameter::Named { named } = &parameter.parameter
+                if let Parameter::Named { named } = &param.parameter
                     && !typst::syntax::is_ident(named)
                 {
                     return Err(invalid(
                         "`parameter.named` must be a Typst identifier".into(),
                     ));
                 }
-                if let Some(previous) =
-                    declared.insert((&parameter.export, &parameter.parameter), key.clone())
+                if let Some(prev) = declared.insert((&param.export, &param.parameter), key.clone())
                 {
                     return Err(invalid(format!(
-                        "the same function parameter is already declared in `{previous}`"
+                        "the same function parameter is already declared in `{prev}`"
                     )));
                 }
             }
@@ -693,52 +777,48 @@ mod tests {
     use super::*;
 
     #[test]
-    fn manifest_positions_use_the_loaded_snapshot() {
-        let module = tempfile::tempdir().unwrap();
-        let path = module.path().join("tola-module.toml");
-        let source = "[[hooks.before-build]]\nname = 'prepare'\nargv = ['tool']\n";
-        std::fs::write(&path, source).unwrap();
+    fn manifest_positions_use_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tola-module.toml");
+        let src = "[[hooks.before-build]]\nname = 'prepare'\nargv = ['tool']\n";
+        std::fs::write(&path, src).unwrap();
         let loaded = read_one(
-            module.path(),
+            dir.path(),
             "module",
-            module.path().to_owned(),
+            dir.path().to_owned(),
             InputMode::new(InputScope::Online, false),
             &[],
         )
         .unwrap();
         std::fs::write(&path, "\n\n[[hooks.before-build]]\nname = 'changed'\n").unwrap();
-        assert_eq!(loaded.evidence.source(), source);
-        let positions = loaded.evidence.positions().unwrap();
+        assert_eq!(loaded.evidence.source(), src);
+        let pos = loaded.evidence.positions().unwrap();
         assert_eq!(
-            positions
-                .written("hooks.before-build.0.name")
-                .unwrap()
-                .start
-                .line,
+            pos.written("hooks.before-build.0.name").unwrap().start.line,
             1
         );
         assert!(!loaded.evidence.is_current(&Default::default()).unwrap());
     }
 
     #[test]
-    fn fifo_manifest_does_not_block() {
-        let module = tempfile::tempdir().unwrap();
+    fn manifest_fifo_nonblocking() {
+        let dir = tempfile::tempdir().unwrap();
         assert!(
             std::process::Command::new("mkfifo")
-                .arg(module.path().join("tola-module.toml"))
+                .arg(dir.path().join("tola-module.toml"))
                 .status()
                 .unwrap()
                 .success()
         );
-        let result = read_one(
-            module.path(),
+        let res = read_one(
+            dir.path(),
             "module",
-            module.path().to_owned(),
+            dir.path().to_owned(),
             InputMode::new(InputScope::Online, false),
             &[],
         );
         assert!(matches!(
-            result,
+            res,
             Err(ManifestError::ManifestRead { source, .. })
                 if source.kind() == std::io::ErrorKind::InvalidData
         ));

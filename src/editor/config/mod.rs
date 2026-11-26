@@ -137,14 +137,12 @@ pub(super) fn setup(
             vscode::stage_nu_launcher(writes, directory)?;
         }
         match prepare_settings(writes, directory, editor, nu)? {
-            PreparedSettings::File { relative, settings } => {
+            EditorSettings::File { relative, settings } => {
                 if !settings.is_current() {
                     writes.replace_file_if_unchanged(relative, settings.read, settings.publish)?;
                 }
             }
-            PreparedSettings::Manual(configuration) => {
-                manual_settings.push((editor, configuration))
-            }
+            EditorSettings::Manual(configuration) => manual_settings.push((editor, configuration)),
         }
     }
     Ok(manual_settings)
@@ -160,7 +158,7 @@ pub(super) enum ConfigurationIssue {
     Merge,
 }
 
-pub(super) enum PreparedSettings {
+pub(super) enum EditorSettings {
     /// Merge the required settings into `relative`, replacing it only when it changed.
     File {
         relative: &'static Path,
@@ -187,9 +185,9 @@ pub(super) fn prepare_settings(
     directory: &EditorDirectory,
     editor: Editor,
     nu: bool,
-) -> Result<PreparedSettings> {
+) -> Result<EditorSettings> {
     let Some(relative) = editor.settings_file() else {
-        return Ok(PreparedSettings::Manual(
+        return Ok(EditorSettings::Manual(
             editor.required_settings(None, directory, nu)?,
         ));
     };
@@ -230,7 +228,7 @@ pub(super) fn prepare_settings(
         })
         .context(ConfigurationIssue::Merge)
         .with_context(|| format!("Tola could not update `{relative_path}`"))?;
-    Ok(PreparedSettings::File {
+    Ok(EditorSettings::File {
         relative,
         settings: MergedSettings { read, publish },
     })
@@ -329,27 +327,26 @@ mod tests {
     }
 
     #[test]
-    fn editor_commands_use_selected_config() {
+    fn editor_cmds_use_selected_config() {
         use clap::Parser;
 
         let root = tempfile::tempdir().unwrap();
         let selected = root.path().join("custom config.toml");
         std::fs::write(&selected, "[site]\ntitle = 'Selected'\n").unwrap();
         let loaded = loaded_config(Some(&selected));
-        let directory = EditorDirectory::from_config(loaded.config()).unwrap();
-        let helix: toml::Value =
-            toml::from_str(&helix::merge(None, &directory, false).unwrap()).unwrap();
+        let dir = EditorDirectory::from_config(loaded.config()).unwrap();
+        let helix: toml::Value = toml::from_str(&helix::merge(None, &dir, false).unwrap()).unwrap();
         let helix = &helix["language-server"]["tola-lsp"];
-        let helix_command = std::iter::once(helix["command"].as_str().unwrap().to_owned())
+        let helix_cmd: Vec<_> = std::iter::once(helix["command"].as_str().unwrap().to_owned())
             .chain(
                 helix["args"]
                     .as_array()
                     .unwrap()
                     .iter()
-                    .map(|argument| argument.as_str().unwrap().to_owned()),
+                    .map(|arg| arg.as_str().unwrap().to_owned()),
             )
-            .collect::<Vec<_>>();
-        let neovim_command = lua_command(&neovim::snippet(&directory));
+            .collect();
+        let nvim_cmd = lua_command(&neovim::snippet(&dir));
 
         for has_default in [false, true] {
             if has_default {
@@ -359,41 +356,40 @@ mod tests {
                 )
                 .unwrap();
             }
-            for command in [&helix_command, &neovim_command] {
-                let cli = crate::cli::Cli::try_parse_from(command).unwrap();
+            for cmd in [&helix_cmd, &nvim_cmd] {
+                let cli = crate::cli::Cli::try_parse_from(cmd).unwrap();
                 let crate::cli::Commands::Lsp { site, .. } = cli.command else {
                     panic!("editor command must start the language server");
                 };
-                let loaded = loaded_config(site.config.path.as_deref());
-                assert_eq!(loaded.config().site().title, "Selected");
+                assert_eq!(
+                    loaded_config(site.config.path.as_deref())
+                        .config()
+                        .site()
+                        .title,
+                    "Selected"
+                );
             }
         }
     }
 
     #[test]
-    fn conflict_leaves_editor_files_untouched() {
+    fn conflict_leaves_files_untouched() {
         let root = tempfile::tempdir().unwrap();
         let selected = root.path().join("custom.toml");
         std::fs::write(&selected, "").unwrap();
         let settings_path = root.path().join(".vscode/settings.json");
         std::fs::create_dir(settings_path.parent().unwrap()).unwrap();
-        let original = "{\n \"tola.configPath\":\"other.toml\" // keep\n}\n";
-        std::fs::write(&settings_path, original).unwrap();
+        let orig = "{\n \"tola.configPath\":\"other.toml\" // keep\n}\n";
+        std::fs::write(&settings_path, orig).unwrap();
         let loaded = loaded_config(Some(&selected));
 
-        let directory = crate::editor::EditorDirectory::from_config(loaded.config()).unwrap();
-        let package_inputs =
+        let dir = crate::editor::EditorDirectory::from_config(loaded.config()).unwrap();
+        let inputs =
             crate::editor::prepare_package_inputs(loaded.config(), &Default::default()).unwrap();
         assert!(
-            crate::editor::setup(
-                &directory,
-                &[Editor::Helix, Editor::Vscode],
-                package_inputs,
-                false
-            )
-            .is_err()
+            crate::editor::setup(&dir, &[Editor::Helix, Editor::Vscode], inputs, false).is_err()
         );
-        assert_eq!(std::fs::read_to_string(settings_path).unwrap(), original);
+        assert_eq!(std::fs::read_to_string(settings_path).unwrap(), orig);
         assert!(!root.path().join(".helix").exists());
         assert!(!root.path().join(".tola").exists());
     }

@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use tola_typst::BundleOptions;
 
 use crate::compiler::SiteHost;
-use crate::config::ResolvedSiteConfig;
+use crate::config::SiteConfig;
 use crate::content::{ContentUnit, SourceSet};
 
 pub(crate) struct EvaluatedSiteProgram {
@@ -60,7 +60,7 @@ pub(crate) struct CompiledSiteProgram {
 }
 
 pub(crate) fn evaluate(
-    config: &ResolvedSiteConfig,
+    config: &SiteConfig,
     host: &SiteHost,
     content: &[ContentUnit],
     package_bindings: crate::package::SiteBindings,
@@ -91,7 +91,7 @@ pub(crate) fn evaluate(
 
 /// Export one fully bound native Bundle and derive inventories from that same DOM.
 pub(crate) fn export(
-    config: &ResolvedSiteConfig,
+    config: &SiteConfig,
     compilation: &Arc<tola_typst::BundleCompilation>,
     world: &Arc<tola_typst::TypstWorld>,
     cancellation: &tola_typst::BundleCancellation,
@@ -121,7 +121,7 @@ pub(crate) fn export(
     cancellation.ensure_active()?;
     let documents = documents?;
     let bundle_entries = bundle_entries.map_err(|error| {
-        super::diagnostic::with_export_diagnostics(error, world, compilation, config.get_root())
+        super::diagnostic::with_export_diagnostics(error, world, compilation, config.root())
     })?;
     tracing::debug!(target: "tola::compile",
         bundle_outputs_ms = started.elapsed().as_secs_f64() * 1000.0,
@@ -137,7 +137,7 @@ pub(crate) fn export(
 
 /// Compile the root Bundle without exporting files or collecting other producers.
 pub(crate) fn realize(
-    config: &ResolvedSiteConfig,
+    config: &SiteConfig,
     host: &SiteHost,
     cancellation: &tola_typst::BundleCancellation,
     evaluated: &EvaluatedSiteProgram,
@@ -183,10 +183,7 @@ pub(crate) fn realize(
             })
             .context("Tola could not align the inline frames the site renders")?;
         cancellation.ensure_active()?;
-        super::diagnostic::ensure_native_reports_succeed(
-            config.get_root(),
-            compilation.diagnostics(),
-        )?;
+        super::diagnostic::ensure_native_reports_succeed(config.root(), compilation.diagnostics())?;
         Ok(RealizedBundle {
             compilation,
             world: Arc::clone(&world),
@@ -195,7 +192,7 @@ pub(crate) fn realize(
     realized.map_err(|error| RealizeFailure {
         error: super::diagnostic::with_diagnostics(
             error,
-            config.get_root(),
+            config.root(),
             tola_diagnostic::codes::typst::SITE_PROGRAM,
         ),
         world: Some(world),
@@ -254,7 +251,7 @@ impl EvaluatedSiteProgram {
     }
 }
 
-fn export_options(config: &ResolvedSiteConfig) -> BundleOptions {
+fn export_options(config: &SiteConfig) -> BundleOptions {
     let mut options = BundleOptions::default();
     options.html.pretty = !config.build.minify.html;
     options
@@ -328,8 +325,8 @@ mod tests {
     }
 
     #[test]
-    fn current_document_scopes_heading_queries() {
-        let (_directory, compiled) = compiled(
+    fn current_document_scopes_queries() {
+        let (_dir, comp) = compiled(
             r#"#import "@tola/document:0.0.0": current-document
 #document("guide/index.html")[
 = Guide
@@ -344,15 +341,15 @@ mod tests {
 #context [#current-document().route]
 ]"#,
         );
-        let guide = html(&compiled, "/guide/index.html");
+        let guide = html(&comp, "/guide/index.html");
         assert!(guide.contains("guide/index.html /guide/ 1"), "{guide}");
-        let about = html(&compiled, "/about/index.html");
+        let about = html(&comp, "/about/index.html");
         assert!(about.contains("/about/"), "{about}");
     }
 
     #[test]
-    fn composed_document_keeps_its_properties() {
-        let (_directory, compiled) = compiled(
+    fn composed_document_properties() {
+        let (_dir, comp) = compiled(
             r#"#document("index.html", title: [Outer])[
 #set document(title: [Combined])
 #import "@tola/source:0.0.0": tola-meta
@@ -363,34 +360,34 @@ Second
 ]"#,
         );
         assert_eq!(
-            compiled.documents[0].page.properties.title.as_deref(),
+            comp.documents[0].page.properties.title.as_deref(),
             Some("Combined")
         );
-        let body = html(&compiled, "/index.html");
+        let body = html(&comp, "/index.html");
         assert!(body.contains("<title>Combined</title>"), "{body}");
         assert!(body.contains("First") && body.contains("Second"), "{body}");
     }
 
     #[test]
-    fn computed_reads_are_recorded() {
-        let (_directory, compiled) = compiled(
+    fn computed_reads_recorded() {
+        let (_dir, comp) = compiled(
             r#"#let stem = "value"
 #document("index.html")[#read(stem + ".txt")]"#,
         );
-        assert!(html(&compiled, "/index.html").contains("payload"));
-        assert!(compiled.compilation.file_reads().iter().any(|read| {
+        assert!(html(&comp, "/index.html").contains("payload"));
+        assert!(comp.compilation.file_reads().iter().any(|read| {
             matches!(
                 read.evidence().locator(),
-                tola_typst::ReadLocator::Root(path)
-                    if path == std::path::Path::new("value.txt")
+                tola_typst::ReadLocator::Root(path) if path == std::path::Path::new("value.txt")
             )
         }));
     }
+
     #[test]
     fn explicit_permalinks_bypass_routing() {
-        let directory = TempDir::new().unwrap();
-        let compiled = compile_sources(
-            &directory,
+        let dir = TempDir::new().unwrap();
+        let comp = compile_sources(
+            &dir,
             r#"#import "@tola/source:0.0.0": all-sources
 #import "@tola/address:0.0.0": output-of
 #for source in all-sources().filter(source => not source.meta.at("draft", default: false)) {
@@ -410,59 +407,53 @@ Second
         )
         .unwrap();
         assert_eq!(
-            compiled
-                .bundle_entries
+            comp.bundle_entries
                 .iter()
-                .map(|output| output.path().get_without_slash())
+                .map(|out| out.path().get_without_slash())
                 .collect::<BTreeSet<_>>(),
             BTreeSet::from(["chosen/index.html"])
         );
-        assert!(html(&compiled, "/chosen/index.html").contains("Chosen body"));
+        assert!(html(&comp, "/chosen/index.html").contains("Chosen body"));
     }
 
-    /// A source whose layout segment cannot name a published route fails the build, and the
-    /// diagnostic is anchored at that source's own file.
     #[test]
-    fn routeless_source_is_named() {
-        let directory = TempDir::new().unwrap();
-        let error = compile_sources(
-            &directory,
+    fn routeless_source_named() {
+        let dir = TempDir::new().unwrap();
+        let err = compile_sources(
+            &dir,
             r#"#document("index.html", format: "html")[Home]"#,
             &[(
                 "a..typ",
                 r#"#import "@tola/address:0.0.0": join-route
-#import "@tola/source:0.0.0": current-source
+#import "@tola/source:0.0.0": current-source, tola-meta
 #let route = join-route(current-source().route-segments)
-#import "@tola/source:0.0.0": tola-meta
 #tola-meta((permalink: route))"#,
             )],
             "",
         )
         .err()
         .expect("a layout segment that cannot name a route fails the build");
-        let diagnostics = tola_diagnostic::attached(&error).unwrap();
-        let diagnostic = diagnostics
+        let diags = tola_diagnostic::attached(&err).unwrap();
+        let diag = diags
             .iter()
-            .find(|diagnostic| {
-                diagnostic
-                    .location
+            .find(|d| {
+                d.location
                     .as_ref()
-                    .is_some_and(|location| location.path.ends_with("a..typ"))
+                    .is_some_and(|l| l.path.ends_with("a..typ"))
             })
-            .expect("the diagnostic is anchored at the source");
+            .expect("diagnostic anchored at source");
         assert!(
-            diagnostic
-                .message
+            diag.message
                 .contains("a URL segment must not end with a dot or space"),
             "{}",
-            diagnostic.message
+            diag.message
         );
     }
 
     #[test]
-    fn shared_recommended_output_is_rejected() {
-        let directory = TempDir::new().unwrap();
-        let sources = [
+    fn shared_output_rejected() {
+        let dir = TempDir::new().unwrap();
+        let srcs = [
             (
                 "about.typ",
                 "#import \"@tola/source:0.0.0\": tola-meta\n#tola-meta((permalink: \"/flat/\"))\nFlat",
@@ -476,27 +467,27 @@ Second
                 "#import \"@tola/source:0.0.0\": tola-meta\n#tola-meta((permalink: \"/\"))\nHome",
             ),
         ];
-        let error = compile_sources(
-            &directory,
+        let err = compile_sources(
+            &dir,
             r#"#import "@tola/source:0.0.0": all-sources
 #import "@tola/address:0.0.0": join-route, output-of
 #for source in all-sources() {
   document(output-of(join-route(source.route-segments)), format: "html")[#include source.file]
 }"#,
-            &sources,
+            &srcs,
             "",
         )
         .err()
         .expect("emitted documents cannot share one recommended output");
         assert!(
-            tola_diagnostic::attached(&error)
+            tola_diagnostic::attached(&err)
                 .unwrap()
                 .iter()
-                .any(|diagnostic| { diagnostic.message.contains("about/index.html") }),
-            "{error:#}"
+                .any(|d| d.message.contains("about/index.html")),
+            "{err:#}"
         );
-        let compiled = compile_sources(
-            &directory,
+        let comp = compile_sources(
+            &dir,
             r#"#import "@tola/source:0.0.0": all-sources
 #import "@tola/address:0.0.0": join-route, output-of
 #for source in all-sources() {
@@ -506,32 +497,31 @@ Second
     #include source.file
   ]
 }"#,
-            &sources,
+            &srcs,
             "",
         )
         .unwrap();
         assert_eq!(
-            compiled
-                .bundle_entries
+            comp.bundle_entries
                 .iter()
-                .map(|output| output.path().get_without_slash())
+                .map(|out| out.path().get_without_slash())
                 .collect::<BTreeSet<_>>(),
-            BTreeSet::from(["flat/index.html", "directory/index.html", "index.html",])
+            BTreeSet::from(["flat/index.html", "directory/index.html", "index.html"])
         );
-        for (output, identity) in [
+        for (out, id) in [
             ("/flat/index.html", "about.typ"),
             ("/directory/index.html", "about/index.typ"),
             ("/index.html", "index.typ"),
         ] {
-            assert!(html(&compiled, output).contains(identity), "{output}");
+            assert!(html(&comp, out).contains(id), "{out}");
         }
     }
 
     #[test]
-    fn content_entry_keeps_helpers_visible() {
-        let directory = TempDir::new().unwrap();
-        let compiled = compile_sources(
-            &directory,
+    fn content_entry_helpers_visible() {
+        let dir = TempDir::new().unwrap();
+        let comp = compile_sources(
+            &dir,
             r#"#import "@tola/source:0.0.0": all-sources
 #import "helpers/card.typ": card
 #let sources = all-sources()
@@ -548,14 +538,14 @@ Second
             "[build]\nentry = \"content/site.typ\"",
         )
         .unwrap();
-        assert!(html(&compiled, "/index.html").contains("<strong>Document</strong>"));
+        assert!(html(&comp, "/index.html").contains("<strong>Document</strong>"));
     }
 
     #[test]
-    fn slugified_source_names_reach_outputs() {
-        let directory = TempDir::new().unwrap();
-        let compiled = compile_sources(
-            &directory,
+    fn slugified_names_outputs() {
+        let dir = TempDir::new().unwrap();
+        let comp = compile_sources(
+            &dir,
             r#"#import "@tola/source:0.0.0": all-sources
 #import "@tola/address:0.0.0": slugify
 #for source in all-sources() {
@@ -569,19 +559,16 @@ Second
         )
         .unwrap();
         assert_eq!(
-            compiled
-                .bundle_entries
+            comp.bundle_entries
                 .iter()
-                .map(|output| output.path().get_without_slash())
+                .map(|out| out.path().get_without_slash())
                 .collect::<BTreeSet<_>>(),
             BTreeSet::from([
                 "pages/fractions-1-2-price.typ/index.html",
                 "pages/root-escape.typ/index.html",
             ])
         );
-        assert!(
-            html(&compiled, "/pages/fractions-1-2-price.typ/index.html").contains("Fraction body")
-        );
-        assert!(html(&compiled, "/pages/root-escape.typ/index.html").contains("Root body"));
+        assert!(html(&comp, "/pages/fractions-1-2-price.typ/index.html").contains("Fraction body"));
+        assert!(html(&comp, "/pages/root-escape.typ/index.html").contains("Root body"));
     }
 }

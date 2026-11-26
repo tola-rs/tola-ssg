@@ -69,7 +69,7 @@ pub(crate) enum SourceCompilation {
     Answered {
         id: lsp_server::RequestId,
         serial: u64,
-        configuration: Option<Arc<tola_build::config::ResolvedSiteConfig>>,
+        configuration: Option<Arc<tola_build::config::SiteConfig>>,
         read_paths: Vec<PathBuf>,
         response: Result<SourceReply, SourceFailure>,
     },

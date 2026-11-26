@@ -2,8 +2,8 @@
 
 use anyhow::Result;
 
-use crate::config::ResolvedSiteConfig;
-use crate::observation::{InputKind, InputObservation};
+use crate::config::SiteConfig;
+use crate::observation::{InputKind, InputObservation, InputPathScope};
 
 /// A build that produced no complete site, with the inputs it observed before it
 /// stopped. A failure before any attempt ran, such as an unavailable build lock,
@@ -19,49 +19,48 @@ pub struct BuildFailure {
 }
 
 struct FailedAttemptInputs {
-    observation: InputObservation,
+    obs: InputObservation,
     source_hooks: crate::hooks::SourceHookOutputs,
     failed_hook_outputs: Option<crate::hooks::FailedHookOutputs>,
     report: Option<super::BuildReport>,
 }
 
 impl BuildFailure {
-    /// A coordinated build that stopped before any attempt ran.
-    pub(super) fn before_attempt(error: anyhow::Error, root: &std::path::Path) -> Self {
-        Self::new(error, BuildAttemptInputs::default(), root)
+    pub(super) fn before_attempt(err: anyhow::Error, root: &std::path::Path) -> Self {
+        Self::new(err, BuildAttemptInputs::default(), root)
     }
 
     pub(super) fn new(
-        error: anyhow::Error,
+        err: anyhow::Error,
         inputs: BuildAttemptInputs,
         root: &std::path::Path,
     ) -> Self {
         let source_hooks = inputs.source_hooks;
-        let (physical_reads, package_checks) = inputs.compiler.into_parts();
-        let mut observation = input_observation(
+        let (physical_reads, pkg_checks) = inputs.compiler.into_parts();
+        let mut obs = input_observation(
             physical_reads,
-            package_checks,
+            pkg_checks,
             None,
             None,
             source_hooks.outputs(),
             inputs.font_read_paths,
         );
-        if let Some(path) = error
+        if let Some(path) = err
             .chain()
             .find_map(|cause| cause.downcast_ref::<tola_typst::FontLoadError>())
             .and_then(tola_typst::FontLoadError::path)
         {
-            observation.exact_paths(InputKind::FontInventory, false, [path.to_path_buf()]);
+            obs.exact_paths(InputKind::FontInventory, false, [path.to_path_buf()]);
         }
-        observation.normalize_paths();
+        obs.normalize_paths();
         Self {
-            cancelled: crate::cancellation::is_cancelled(&error),
-            source_hooks_failed: error
+            cancelled: crate::cancellation::is_cancelled(&err),
+            source_hooks_failed: err
                 .chain()
                 .any(|cause| cause.is::<crate::hooks::SourceHookFailure>()),
-            error: super::diagnostic::with_site(error, root),
+            error: super::diagnostic::with_site(err, root),
             inputs: Box::new(FailedAttemptInputs {
-                observation,
+                obs,
                 source_hooks,
                 failed_hook_outputs: inputs.failed_hook_outputs,
                 report: inputs.report,
@@ -84,9 +83,9 @@ impl BuildFailure {
         self.cancelled
     }
     pub fn input_observation(&self) -> &InputObservation {
-        &self.inputs.observation
+        &self.inputs.obs
     }
-    pub fn hook_outputs(&self) -> &[crate::hooks::HookOutputEvidence] {
+    pub fn hook_outputs(&self) -> &[crate::hooks::HookOutput] {
         self.inputs.source_hooks.outputs()
     }
     pub fn source_hooks(&self) -> &crate::hooks::SourceHookOutputs {
@@ -106,66 +105,68 @@ impl BuildFailure {
 }
 
 impl std::fmt::Debug for BuildFailure {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("BuildFailure")
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BuildFailure")
             .field("error", &self.error)
-            .field("observation", &self.inputs.observation)
+            .field("observation", &self.inputs.obs)
             .finish()
     }
 }
 
+fn observe_path_identity(
+    obs: &mut InputObservation,
+    kind: InputKind,
+    scope: InputPathScope,
+    path: &std::path::Path,
+) {
+    let id = tola_input::FilesystemSourceIdentity::from_path(path);
+    obs.path_pair(kind, scope, false, id.logical_path(), id.physical_path());
+}
+
 /// Configuration-derived recovery inputs needed before the first build runs.
-pub fn configured_input_observation(config: &ResolvedSiteConfig) -> InputObservation {
-    let mut observation = InputObservation::default();
-    observation.filesystem_sources(
+pub fn configured_input_observation(config: &SiteConfig) -> InputObservation {
+    let mut obs = InputObservation::default();
+    obs.filesystem_sources(
         InputKind::Icons,
         &crate::icon::configured_collection_watch_evidence(config),
         false,
     );
-    for directory in &config.module_font_directories {
-        let identity = tola_input::FilesystemSourceIdentity::from_path(&directory.path);
-        observation.path_pair(
+    for dir in &config.module_font_directories {
+        observe_path_identity(
+            &mut obs,
             InputKind::FontInventory,
-            crate::observation::InputPathScope::Recursive,
-            false,
-            identity.logical_path(),
-            identity.physical_path(),
+            InputPathScope::Recursive,
+            &dir.path,
         );
     }
-    let lock = config.get_root().join("tola.lock");
-    let identity = tola_input::FilesystemSourceIdentity::from_path(&lock);
-    observation.path_pair(
+    let lock = config.root().join("tola.lock");
+    observe_path_identity(
+        &mut obs,
         InputKind::ModuleManifests,
-        crate::observation::InputPathScope::Exact,
-        false,
-        identity.logical_path(),
-        identity.physical_path(),
+        InputPathScope::Exact,
+        &lock,
     );
-    for (name, declaration) in config.modules() {
-        if let tola_module::ModuleSource::Tarball { tarball } = &declaration.source
+    for (name, decl) in config.modules() {
+        if let tola_module::ModuleSource::Tarball { tarball } = &decl.source
             && let tola_input::TarballLocation::File { path } = &tarball.location
         {
-            let identity =
-                tola_input::FilesystemSourceIdentity::from_path(&config.get_root().join(path));
-            observation.path_pair(
+            observe_path_identity(
+                &mut obs,
                 InputKind::ModuleManifests,
-                crate::observation::InputPathScope::Exact,
-                false,
-                identity.logical_path(),
-                identity.physical_path(),
+                InputPathScope::Exact,
+                &config.root().join(path),
             );
         }
-        let root = match &declaration.source {
-            tola_module::declaration::ModuleSource::Local { path } => config.get_root().join(path),
+        let root = match &decl.source {
+            tola_module::declaration::ModuleSource::Local { path } => config.root().join(path),
             tola_module::declaration::ModuleSource::Git { .. }
             | tola_module::declaration::ModuleSource::Tarball { .. }
             | tola_module::declaration::ModuleSource::Builtin { .. } => {
                 match crate::inputs::declaration_root(
-                    config.get_root(),
+                    config.root(),
                     config.vendor().path.as_deref(),
                     name,
-                    &declaration.source,
+                    &decl.source,
                 ) {
                     Ok(root) => root,
                     Err(_) => continue,
@@ -173,46 +174,44 @@ pub fn configured_input_observation(config: &ResolvedSiteConfig) -> InputObserva
             }
         };
         for path in [root.clone(), root.join("tola-module.toml")] {
-            let identity = tola_input::FilesystemSourceIdentity::from_path(&path);
-            observation.path_pair(
+            observe_path_identity(
+                &mut obs,
                 InputKind::ModuleManifests,
-                crate::observation::InputPathScope::Exact,
-                false,
-                identity.logical_path(),
-                identity.physical_path(),
+                InputPathScope::Exact,
+                &path,
             );
         }
     }
-    observation.normalize_paths();
-    observation
+    obs.normalize_paths();
+    obs
 }
 
 pub(super) fn input_observation(
     physical_reads: Vec<std::path::PathBuf>,
     package_checks: Vec<tola_typst::PackageCheck>,
-    configured_assets: Option<&crate::asset::ConfiguredAssets>,
-    icons: Option<&crate::icon::IconInventoryEvidence>,
-    hook_outputs: &[crate::hooks::HookOutputEvidence],
+    configured_assets: Option<&crate::asset::SiteAssets>,
+    icons: Option<&crate::icon::IconSnapshot>,
+    hook_outputs: &[crate::hooks::HookOutput],
     font_read_paths: Vec<std::path::PathBuf>,
 ) -> InputObservation {
-    let mut observation = InputObservation {
+    let mut obs = InputObservation {
         physical_reads,
         package_checks,
         paths: Vec::new(),
     };
-    observation.exact_paths(InputKind::FontInventory, true, font_read_paths);
+    obs.exact_paths(InputKind::FontInventory, true, font_read_paths);
     if let Some(assets) = configured_assets {
-        assets.record_watch_inputs(&mut observation);
+        assets.record_watch_inputs(&mut obs);
     }
     if let Some(icons) = icons {
-        observation.filesystem_sources(InputKind::Icons, &icons.watch_evidence(), true);
+        obs.filesystem_sources(InputKind::Icons, &icons.watch_evidence(), true);
     }
-    observation.filesystem_sources(
+    obs.filesystem_sources(
         InputKind::BeforeBuildHookOutputs,
-        &crate::hooks::HookOutputEvidence::watch_evidence(hook_outputs),
+        &crate::hooks::HookOutput::watch_evidence(hook_outputs),
         true,
     );
-    observation
+    obs
 }
 
 /// Stale filesystem-backed inputs. Callers may use these to choose a retry
@@ -261,64 +260,59 @@ fn joined_inputs(names: &[&str]) -> String {
     }
 }
 
-/// Revalidate this candidate's evidence before either write policy commits it.
+/// Revalidate this candidate's evidence before either write boundary commits it.
 pub(super) fn input_freshness(
-    config: &ResolvedSiteConfig,
-    modules: &tola_module::prepared::PreparedModules,
-    producer_caches: &crate::build::RetainedProducerCaches,
+    cfg: &SiteConfig,
+    mods: &tola_module::bundle::ModuleBundle,
+    caches: &crate::build::RetainedProducerCaches,
     content: &[crate::content::ContentUnit],
-    hook_outputs: &[crate::hooks::HookOutputEvidence],
-    cancellation: &crate::cancellation::BuildCancellation,
+    hook_outputs: &[crate::hooks::HookOutput],
+    cancel: &crate::cancellation::BuildCancellation,
 ) -> Result<InputFreshness> {
-    cancellation.ensure_active()?;
+    cancel.ensure_active()?;
     let started = std::time::Instant::now();
-    let icons_started = started.elapsed();
-    let icons_fresh = producer_caches
-        .icons
-        .evidence()
-        .is_fresh_for(config, cancellation)?;
-    let icons_elapsed = started.elapsed();
+    let icons_fresh = caches.icons.evidence().is_fresh_for(cfg, cancel)?;
+    let icons_at = started.elapsed();
     let mut hooks_fresh = true;
     for evidence in hook_outputs {
-        if !evidence.is_current_with_cancellation(cancellation)? {
+        if !evidence.is_current_with_cancellation(cancel)? {
             hooks_fresh = false;
             break;
         }
     }
-    let hooks_elapsed = started.elapsed();
-    let manifests_fresh = modules.manifests_are_fresh(&cancellation.bundle_cancellation())?;
-    let physical_reads_fresh = producer_caches
+    let hooks_at = started.elapsed();
+    let manifests_fresh = mods.manifests_are_fresh(&cancel.bundle_cancellation())?;
+    let physical_reads_fresh = caches
         .dependencies
-        .physical_reads_are_fresh(producer_caches.host.source_boundary(), cancellation)?;
-    let reads_elapsed = started.elapsed();
-    let package_checks_fresh = producer_caches
-        .dependencies
-        .package_checks_are_fresh(cancellation)?;
-    let packages_elapsed = started.elapsed();
-    let content_inventory_fresh = content_inventory_is_fresh(config, content, cancellation)?;
-    let content_elapsed = started.elapsed();
-    let configured_assets_fresh = producer_caches.configured_assets.is_fresh_for(
-        config,
-        crate::modules::prepared::AppliedAssets {
-            modules: &modules.assets,
+        .physical_reads_are_fresh(caches.host.source_boundary(), cancel)?;
+    let reads_at = started.elapsed();
+    let package_checks_fresh = caches.dependencies.package_checks_are_fresh(cancel)?;
+    let packages_at = started.elapsed();
+    let content_inventory_fresh = content_inventory_is_fresh(cfg, content, cancel)?;
+    let content_at = started.elapsed();
+    let configured_assets_fresh = caches.configured_assets.is_fresh_for(
+        cfg,
+        crate::modules::site::AppliedAssets {
+            modules: &mods.assets,
         },
-        cancellation,
+        cancel,
     )?;
-    let assets_elapsed = started.elapsed();
-    let font_inventory_fresh = producer_caches.host.font_inventory_is_fresh(cancellation)?;
-    let total_elapsed = started.elapsed();
+    let assets_at = started.elapsed();
+    let font_inventory_fresh = caches.host.font_inventory_is_fresh(cancel)?;
+    let total_at = started.elapsed();
+    let ms = |span: std::time::Duration| span.as_secs_f64() * 1000.0;
     tracing::debug!(target: "tola::compile",
-        icons_freshness_ms = (icons_elapsed - icons_started).as_secs_f64() * 1000.0,
-        hooks_freshness_ms = (hooks_elapsed - icons_elapsed).as_secs_f64() * 1000.0,
-        reads_freshness_ms = (reads_elapsed - hooks_elapsed).as_secs_f64() * 1000.0,
-        packages_freshness_ms = (packages_elapsed - reads_elapsed).as_secs_f64() * 1000.0,
-        content_freshness_ms = (content_elapsed - packages_elapsed).as_secs_f64() * 1000.0,
-        assets_freshness_ms = (assets_elapsed - content_elapsed).as_secs_f64() * 1000.0,
-        fonts_freshness_ms = (total_elapsed - assets_elapsed).as_secs_f64() * 1000.0,
-        freshness_ms = total_elapsed.as_secs_f64() * 1000.0,
+        icons_freshness_ms = ms(icons_at),
+        hooks_freshness_ms = ms(hooks_at - icons_at),
+        reads_freshness_ms = ms(reads_at - hooks_at),
+        packages_freshness_ms = ms(packages_at - reads_at),
+        content_freshness_ms = ms(content_at - packages_at),
+        assets_freshness_ms = ms(assets_at - content_at),
+        fonts_freshness_ms = ms(total_at - assets_at),
+        freshness_ms = ms(total_at),
         "verified complete candidate inputs");
-    let config_fresh = match config.source() {
-        Some(source) => source.is_current(Some(cancellation))?,
+    let config_fresh = match cfg.source() {
+        Some(src) => src.is_current(Some(cancel))?,
         None => true,
     };
     let freshness = InputFreshness::from_checks([
@@ -327,12 +321,12 @@ pub(super) fn input_freshness(
         (InputKind::ModuleManifests, manifests_fresh),
         (InputKind::TypstPackageSelection, package_checks_fresh),
         (InputKind::ContentInventory, content_inventory_fresh),
-        (InputKind::ConfiguredAssets, configured_assets_fresh),
+        (InputKind::SiteAssets, configured_assets_fresh),
         (InputKind::Icons, icons_fresh),
         (InputKind::FontInventory, font_inventory_fresh),
         (InputKind::BeforeBuildHookOutputs, hooks_fresh),
     ]);
-    cancellation.ensure_active()?;
+    cancel.ensure_active()?;
     Ok(freshness)
 }
 
@@ -356,18 +350,17 @@ pub(super) fn stale_input_error(freshness: &InputFreshness) -> anyhow::Error {
 }
 
 fn content_inventory_is_fresh(
-    config: &ResolvedSiteConfig,
+    cfg: &SiteConfig,
     candidate: &[crate::content::ContentUnit],
-    cancellation: &crate::cancellation::BuildCancellation,
+    cancel: &crate::cancellation::BuildCancellation,
 ) -> Result<bool> {
-    cancellation.ensure_active()?;
-    let current =
-        crate::content::discover_content_units_for_config_with_cancellation(config, cancellation);
-    cancellation.ensure_active()?;
+    cancel.ensure_active()?;
+    let current = crate::content::discover_content_units_for_config_with_cancellation(cfg, cancel);
+    cancel.ensure_active()?;
     let Ok(current) = current else {
         return Ok(false);
     };
-    cancellation.ensure_active()?;
+    cancel.ensure_active()?;
     Ok(current == candidate)
 }
 

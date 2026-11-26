@@ -239,7 +239,7 @@ impl AddressSpace {
     /// Resolve one decoded site-root route and its serialized fragment.
     ///
     /// Resolve relative URLs, document bases, deployment mounts, and external schemes with
-    /// [`tola_address::resolve_browser_reference`] before lookup: it decodes the escapes an
+    /// [`tola_address::classify_browser_ref`] before lookup: it decodes the escapes an
     /// address spells, so a literal `%` or `#` in an output filename reaches this method as the
     /// name character it is. `/x` addresses the file `x` and `/x/` addresses `x/index.html`, and
     /// the exact address is tried first, then the alias table an output shares with its other
@@ -382,40 +382,34 @@ mod tests {
 
     use super::*;
 
-    fn html_page(permalink: &str, output: &str) -> HtmlPage {
+    fn html_page(permalink: &str, out: &str) -> HtmlPage {
         HtmlPage {
             permalink: UrlPath::from_decoded(permalink).unwrap(),
-            output: OutputPath::parse(output).unwrap(),
+            output: OutputPath::parse(out).unwrap(),
             properties: typst::model::DocumentInfo::default(),
             sources: Vec::new(),
         }
     }
 
-    /// Resolve one reference the way final HTML reaches this index: an address decodes
-    /// its escapes once, and the decoded route is looked up as written.
-    fn resolve(
-        space: &AddressSpace,
-        reference: &str,
-        target: RequiredResourceKind,
-    ) -> AddressResolution {
-        let reference = tola_address::SiteReference::parse(reference).unwrap();
+    fn resolve(space: &AddressSpace, raw: &str, target: RequiredResourceKind) -> AddressResolution {
+        let ref_ = tola_address::SiteRef::parse(raw).unwrap();
         space.resolve_route(
-            &reference.route,
-            reference.fragment.as_deref().unwrap_or_default(),
+            &ref_.route,
+            ref_.fragment.as_deref().unwrap_or_default(),
             target,
             &mut AddressDependencies::default(),
         )
     }
 
     #[test]
-    fn registered_routes_resolve_by_url() {
+    fn routes_resolve_by_url() {
         let mut space = AddressSpace::default();
         let mut expected = Vec::new();
-        for (permalink, output) in [
+        for (route, out) in [
             ("/hello/", "hello/index.html"),
             ("/world/", "world/index.html"),
         ] {
-            let page = html_page(permalink, output);
+            let page = html_page(route, out);
             expected.push((page.permalink.clone(), "page"));
             space.register_page(page, std::iter::empty()).unwrap();
         }
@@ -423,21 +417,21 @@ mod tests {
         expected.push((asset.url.clone(), "asset"));
         space.register_asset_route(asset).unwrap();
 
-        for (url, expected) in expected {
-            let resource = space.get_by_url(&url).expect("registered route resolves");
+        for (url, kind) in expected {
+            let res = space.get_by_url(&url).expect("registered route resolves");
             assert_eq!(
-                match resource {
+                match res {
                     Resource::Page { .. } => "page",
                     Resource::Asset { .. } => "asset",
                 },
-                expected,
+                kind,
                 "{url}"
             );
         }
     }
 
     #[test]
-    fn published_fragments_scoped_exact_page() {
+    fn fragments_scoped_by_page() {
         let mut space = AddressSpace::default();
         space
             .register_page(
@@ -462,20 +456,18 @@ mod tests {
         );
     }
 
-    fn site_asset_route(source: &str, url: &str) -> SiteAssetRoute {
+    fn site_asset_route(src: &str, url: &str) -> SiteAssetRoute {
         SiteAssetRoute {
-            source: Some(PathBuf::from(source)),
+            source: Some(PathBuf::from(src)),
             url: UrlPath::from_decoded(url).unwrap(),
             declaration: crate::output::semantics::OutputDeclaration::from_filesystem_source(
-                std::path::Path::new(source),
+                std::path::Path::new(src),
             ),
         }
     }
 
-    // Reference validation and the development server must agree on which addresses a build
-    // serves, so the exact file URL stays canonical.
     #[test]
-    fn directory_index_aliases_resolve() {
+    fn directory_index_aliases() {
         let mut space = AddressSpace::default();
         let route = site_asset_route("external/index.html", "/external/index.html");
         let exact = route.url.clone();
@@ -485,13 +477,13 @@ mod tests {
             exact.clone(),
         )]);
 
-        for reference in ["/external/", "/external/index.html"] {
+        for raw in ["/external/", "/external/index.html"] {
             assert!(
                 matches!(
-                    resolve(&space, reference, RequiredResourceKind::DocumentOrResource),
+                    resolve(&space, raw, RequiredResourceKind::DocumentOrResource),
                     AddressResolution::Found { url } if url == exact
                 ),
-                "{reference}"
+                "{raw}"
             );
         }
         assert!(matches!(
@@ -505,19 +497,19 @@ mod tests {
     }
 
     #[test]
-    fn explicit_route_beats_directory_alias() {
+    fn explicit_route_beats_alias() {
         let mut space = AddressSpace::default();
         let page = html_page("/deep/", "elsewhere/deep.html");
-        let permalink = page.permalink.clone();
+        let route = page.permalink.clone();
         space.register_page(page, std::iter::empty()).unwrap();
         let asset = site_asset_route("deep/index.html", "/deep/index.html");
         let exact = asset.url.clone();
         space.register_asset_route(asset).unwrap();
-        space.register_asset_directory_indexes([(permalink.clone(), exact)]);
+        space.register_asset_directory_indexes([(route.clone(), exact)]);
 
         assert!(matches!(
             resolve(&space, "/deep/", RequiredResourceKind::DocumentOrResource),
-            AddressResolution::Found { url } if url == permalink
+            AddressResolution::Found { url } if url == route
         ));
         assert!(matches!(
             resolve(&space, "/deep/index.html", RequiredResourceKind::DocumentOrResource),
@@ -526,10 +518,10 @@ mod tests {
     }
 
     #[test]
-    fn slashless_route_names_the_file() {
+    fn slashless_route_names_file() {
         let mut space = AddressSpace::default();
         let page = html_page("/guide/", "guide/index.html");
-        let permalink = page.permalink.clone();
+        let route = page.permalink.clone();
         space.register_page(page, std::iter::empty()).unwrap();
         space
             .register_asset_route(site_asset_route("guide", "/guide"))
@@ -541,12 +533,12 @@ mod tests {
         ));
         assert!(matches!(
             resolve(&space, "/guide/", RequiredResourceKind::DocumentOrResource),
-            AddressResolution::Found { url } if url == permalink
+            AddressResolution::Found { url } if url == route
         ));
     }
 
     #[test]
-    fn escaped_names_resolve_from_their_address() {
+    fn escaped_names_resolve() {
         let mut space = AddressSpace::default();
         space
             .register_page(
@@ -558,7 +550,7 @@ mod tests {
             .register_page(html_page("/a#b/", "a#b/index.html"), std::iter::empty())
             .unwrap();
 
-        for (reference, permalink) in [
+        for (raw, route) in [
             ("/100%25-ready/", "/100%-ready/"),
             ("/100%25-ready/#intro", "/100%-ready/"),
             ("/100%25-ready/index.html", "/100%-ready/"),
@@ -566,10 +558,10 @@ mod tests {
         ] {
             assert!(
                 matches!(
-                    resolve(&space, reference, RequiredResourceKind::DocumentOrResource),
-                    AddressResolution::Found { url } if url.as_str() == permalink
+                    resolve(&space, raw, RequiredResourceKind::DocumentOrResource),
+                    AddressResolution::Found { url } if url.as_str() == route
                 ),
-                "{reference}"
+                "{raw}"
             );
         }
 
@@ -588,21 +580,21 @@ mod tests {
     }
 
     #[test]
-    fn repeated_fragment_target_is_indexed_once() {
+    fn repeated_fragment_deduped() {
         let mut space = AddressSpace::default();
         let route = html_page("/hello/", "hello/index.html");
-        let permalink = route.permalink.clone();
+        let url = route.permalink.clone();
         space
             .register_page(route, ["same".to_owned(), "same".to_owned()])
             .unwrap();
         assert_eq!(
-            space.fragments.get(&permalink).map(|f| f.as_ref()),
+            space.fragments.get(&url).map(|f| f.as_ref()),
             Some(["same".to_owned()].as_slice())
         );
     }
 
     #[test]
-    fn duplicate_registration_changes_nothing() {
+    fn duplicate_registration_noop() {
         let mut space = AddressSpace::default();
         space
             .register_page(html_page("/same/", "first/index.html"), std::iter::empty())
@@ -615,11 +607,11 @@ mod tests {
             space.register_page(html_page("/third/", "first/index.html"), std::iter::empty()),
             Err(AddressRegistrationError::DocumentOutputAlreadyRegistered { .. })
         ));
-        let resource = space
+        let res = space
             .get_by_url(&UrlPath::parse("/same/").unwrap())
-            .expect("the first page keeps its route");
-        let Resource::Page { document } = resource else {
-            panic!("/same/ must still serve the first page");
+            .expect("first page keeps route");
+        let Resource::Page { document } = res else {
+            panic!("/same/ must serve first page");
         };
         assert_eq!(document.output.as_str(), "first/index.html");
         assert!(
@@ -630,8 +622,8 @@ mod tests {
     }
 
     #[test]
-    fn every_document_alias_form_resolves() {
-        for (permalink, output, fragments, reference) in [
+    fn document_alias_forms_resolve() {
+        for (route, out, frags, raw) in [
             (
                 "/hello/",
                 "hello/index.html",
@@ -654,24 +646,21 @@ mod tests {
         ] {
             let mut space = AddressSpace::default();
             space
-                .register_page(
-                    html_page(permalink, output),
-                    fragments.into_iter().map(str::to_owned),
-                )
+                .register_page(html_page(route, out), frags.into_iter().map(str::to_owned))
                 .unwrap();
 
             assert!(
                 matches!(
-                    resolve(&space, reference, RequiredResourceKind::DocumentOrResource),
+                    resolve(&space, raw, RequiredResourceKind::DocumentOrResource),
                     AddressResolution::Found { .. }
                 ),
-                "{reference}"
+                "{raw}"
             );
         }
     }
 
     #[test]
-    fn html_fragments_follow_browser_targets() {
+    fn html_fragments_browser_targets() {
         let mut space = AddressSpace::default();
         space
             .register_page(
@@ -680,7 +669,7 @@ mod tests {
             )
             .unwrap();
 
-        for fragment in [
+        for frag in [
             "",
             "top",
             "TOP",
@@ -696,31 +685,31 @@ mod tests {
                 matches!(
                     resolve(
                         &space,
-                        &format!("/#{fragment}"),
+                        &format!("/#{frag}"),
                         RequiredResourceKind::DocumentOrResource
                     ),
                     AddressResolution::Found { .. }
                 ),
-                "{fragment}"
+                "{frag}"
             );
         }
-        for fragment in ["missing", "hello%2520world", "%3A~%3Atext=Hello"] {
+        for frag in ["missing", "hello%2520world", "%3A~%3Atext=Hello"] {
             assert!(
                 matches!(
                     resolve(
                         &space,
-                        &format!("/#{fragment}"),
+                        &format!("/#{frag}"),
                         RequiredResourceKind::DocumentOrResource
                     ),
                     AddressResolution::FragmentNotFound { .. }
                 ),
-                "{fragment}"
+                "{frag}"
             );
         }
     }
 
     #[test]
-    fn url_cannot_be_claimed_twice() {
+    fn url_claimed_once() {
         let mut space = AddressSpace::default();
         space
             .register_page(
@@ -752,12 +741,10 @@ mod tests {
     }
 
     #[test]
-    fn realized_urls_resolve_verbatim() {
+    fn realized_urls_verbatim() {
         let mut space = AddressSpace::default();
         let page = html_page("/Mixed/", "Mixed/index.html");
-        space
-            .register_page(page.clone(), std::iter::empty())
-            .unwrap();
+        space.register_page(page, std::iter::empty()).unwrap();
         space
             .register_asset_route(SiteAssetRoute {
                 source: None,
@@ -789,7 +776,6 @@ mod tests {
             ),
             AddressResolution::Found { .. }
         ));
-
         assert!(matches!(
             resolve(
                 &space,

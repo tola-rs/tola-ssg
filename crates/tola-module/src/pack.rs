@@ -35,7 +35,7 @@ pub fn pack(
         .pack
         .as_ref()
         .context("`tola-module.toml` needs `[pack]` with an `include` list")?;
-    let selection = selection::compile(pack)?;
+    let sel = selection::compile(pack)?;
     let cwd = std::env::current_dir().context("could not read the current directory")?;
     let shown = tola_diagnostic::display_path(destination, &cwd);
     let target = target_path(destination, &shown)?;
@@ -43,49 +43,15 @@ pub fn pack(
         !FilesystemSourceIdentity::from_path(&root.join(MANIFEST)).intersects_path(&target)
             && !target
                 .strip_prefix(root)
-                .is_ok_and(|path| selection.could_match_below(path)),
+                .is_ok_and(|path| sel.could_match_below(path)),
         "pack target `{shown}` overlaps the selected source"
     );
 
-    let mut bytes = Vec::new();
-    open_member(root, Path::new(MANIFEST))?
-        .read_to_end(&mut bytes)
-        .context("could not read `tola-module.toml`")?;
-    ensure!(
-        blake3::hash(&bytes) == loaded.evidence.digest,
-        "`tola-module.toml` changed while Tola was reading it"
-    );
-    let mut manifest: toml::Table = toml::from_str(std::str::from_utf8(&bytes)?)?;
-    manifest.remove("pack");
-    if let Some(hooks) = manifest
-        .get_mut("hooks")
-        .and_then(toml::Value::as_table_mut)
-    {
-        hooks.remove("before-pack");
-        if hooks.is_empty() {
-            manifest.remove("hooks");
-        }
-    }
-    let manifest = toml::to_string(&manifest).context("could not write the release manifest")?;
-
+    let manifest = prepare_release_manifest(root, loaded.evidence.digest)?;
     let stage = DirectoryReplacement::new(&target)
         .with_context(|| format!("could not prepare pack target `{shown}`"))?;
 
-    for hook in loaded
-        .manifest
-        .hooks
-        .before_pack
-        .iter()
-        .filter(|hook| hook.enable)
-    {
-        cancellation.ensure_active()?;
-        let key = format!("hooks.before-pack ({}).nu", hook.name);
-        let action = hook.action().map_err(anyhow::Error::msg)?;
-        check::check_action(root, &key, &action)?;
-        let temp =
-            tempfile::tempdir().context("could not prepare the before-pack temporary directory")?;
-        run_hook(&hook.name, &action, root, temp.path())?;
-    }
+    run_before_pack_hooks(&loaded, root, cancellation, &mut run_hook)?;
     cancellation.ensure_active()?;
     ensure!(
         loaded.evidence.is_current(cancellation)?,
@@ -96,25 +62,10 @@ pub fn pack(
         "pack target `{shown}` moved while packing"
     );
 
-    let mut members = selection::collect(&selection, root, stage.workspace(), cancellation)?;
+    let mut members = selection::collect(&sel, root, stage.workspace(), cancellation)?;
     // The author's manifest is replaced even when it was explicitly selected.
     members.insert(PathBuf::from(MANIFEST), Member::File(0o644));
-    let target_key = target.strip_prefix(root).ok().map(portable_key);
-    let mut portable_paths = BTreeMap::new();
-    for path in members.keys() {
-        let name = tola_diagnostic::render_relative(path);
-        let key = portable_key(path);
-        ensure!(
-            target_key.as_ref() != Some(&key),
-            "pack target `{shown}` overlaps selected member `{name}`"
-        );
-        if let Some(other) = portable_paths.insert(key, path) {
-            bail!(
-                "selected paths `{}` and `{name}` overlap on another filesystem",
-                other.display()
-            );
-        }
-    }
+    verify_no_collisions(root, &target, &shown, &members)?;
 
     let release = stage.staged();
     fs::create_dir(&release).context("could not create the release directory")?;
@@ -132,6 +83,78 @@ pub fn pack(
     );
     cancellation.ensure_active()?;
     publish_directory(stage, &shown)?;
+    Ok(())
+}
+
+fn prepare_release_manifest(root: &Path, expected_digest: blake3::Hash) -> Result<String> {
+    let mut bytes = Vec::new();
+    open_member(root, Path::new(MANIFEST))?
+        .read_to_end(&mut bytes)
+        .context("could not read `tola-module.toml`")?;
+    ensure!(
+        blake3::hash(&bytes) == expected_digest,
+        "`tola-module.toml` changed while Tola was reading it"
+    );
+    let mut manifest: toml::Table = toml::from_str(std::str::from_utf8(&bytes)?)?;
+    manifest.remove("pack");
+    if let Some(hooks) = manifest
+        .get_mut("hooks")
+        .and_then(toml::Value::as_table_mut)
+    {
+        hooks.remove("before-pack");
+        if hooks.is_empty() {
+            manifest.remove("hooks");
+        }
+    }
+    toml::to_string(&manifest).context("could not write the release manifest")
+}
+
+fn run_before_pack_hooks(
+    loaded: &crate::manifest::ReadManifest,
+    root: &Path,
+    cancel: &BundleCancellation,
+    run_hook: &mut impl FnMut(&str, &Action, &Path, &Path) -> Result<()>,
+) -> Result<()> {
+    for hook in loaded
+        .manifest
+        .hooks
+        .before_pack
+        .iter()
+        .filter(|h| h.enable)
+    {
+        cancel.ensure_active()?;
+        let key = format!("hooks.before-pack ({}).nu", hook.name);
+        let action = hook.action().map_err(anyhow::Error::msg)?;
+        check::check_action(root, &key, &action)?;
+        let temp =
+            tempfile::tempdir().context("could not prepare the before-pack temporary directory")?;
+        run_hook(&hook.name, &action, root, temp.path())?;
+    }
+    Ok(())
+}
+
+fn verify_no_collisions(
+    root: &Path,
+    target: &Path,
+    shown: &str,
+    members: &BTreeMap<PathBuf, Member>,
+) -> Result<()> {
+    let target_key = target.strip_prefix(root).ok().map(portable_key);
+    let mut portable_paths = BTreeMap::new();
+    for path in members.keys() {
+        let name = tola_diagnostic::render_relative(path);
+        let key = portable_key(path);
+        ensure!(
+            target_key.as_ref() != Some(&key),
+            "pack target `{shown}` overlaps selected member `{name}`"
+        );
+        if let Some(other) = portable_paths.insert(key, path) {
+            bail!(
+                "selected paths `{}` and `{name}` overlap on another filesystem",
+                other.display()
+            );
+        }
+    }
     Ok(())
 }
 
@@ -269,44 +292,52 @@ mod tests {
     use super::*;
 
     #[test]
-    fn replacement_removes_stale_files_and_keeps_the_last_valid_release() {
-        let workspace = tempfile::tempdir().unwrap();
-        let source = workspace.path().join("source");
-        let target = workspace.path().join("release");
-        fs::create_dir(&source).unwrap();
-        fs::write(source.join(MANIFEST), "[typst]\nentry = 'lib.typ'\n[pack]\ninclude = ['lib.typ']\n[[hooks.before-pack]]\nname = 'generate'\nargv = ['generate']\n").unwrap();
-        let cancellation = BundleCancellation::default();
+    fn pack_replaces_stale_and_preserves_on_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("source");
+        let dst = dir.path().join("release");
+        fs::create_dir(&src).unwrap();
+        fs::write(
+            src.join(MANIFEST),
+            "[typst]\nentry = 'lib.typ'\n[pack]\ninclude = ['lib.typ']\n[[hooks.before-pack]]\nname = 'generate'\nargv = ['generate']\n",
+        )
+        .unwrap();
+        let cancel = BundleCancellation::default();
         let generate = |_: &str, _: &Action, root: &Path, _: &Path| {
             fs::write(root.join("lib.typ"), "#let value = 1")?;
             Ok(())
         };
-        pack(&source, &target, &cancellation, generate).unwrap();
+        pack(&src, &dst, &cancel, generate).unwrap();
         let manifest: toml::Table =
-            toml::from_str(&fs::read_to_string(target.join(MANIFEST)).unwrap()).unwrap();
+            toml::from_str(&fs::read_to_string(dst.join(MANIFEST)).unwrap()).unwrap();
         assert!(!manifest.contains_key("pack"));
         assert!(!manifest.contains_key("hooks"));
-        fs::write(target.join("stale.txt"), "old release").unwrap();
-        pack(&source, &target, &cancellation, generate).unwrap();
-        assert!(!target.join("stale.txt").exists());
-        let digest = tola_input::tree_sha256(&target).unwrap();
-        fs::remove_file(source.join("lib.typ")).unwrap();
-        assert!(pack(&source, &target, &cancellation, |_, _, _, _| Ok(())).is_err());
-        assert_eq!(tola_input::tree_sha256(&target).unwrap(), digest);
-        check::check(&target).unwrap();
+        fs::write(dst.join("stale.txt"), "old release").unwrap();
+        pack(&src, &dst, &cancel, generate).unwrap();
+        assert!(!dst.join("stale.txt").exists());
+        let digest = tola_input::tree_sha256(&dst).unwrap();
+        fs::remove_file(src.join("lib.typ")).unwrap();
+        assert!(pack(&src, &dst, &cancel, |_, _, _, _| Ok(())).is_err());
+        assert_eq!(tola_input::tree_sha256(&dst).unwrap(), digest);
+        check::check(&dst).unwrap();
     }
 
     #[test]
-    fn selected_target_is_refused_before_author_hooks() {
-        let source = tempfile::tempdir().unwrap();
-        fs::write(source.path().join(MANIFEST), "[pack]\ninclude = ['**/*.css']\n[[hooks.before-pack]]\nname = 'compile'\nargv = ['compile']\n").unwrap();
-        let target = source.path().join("release");
-        let cancellation = BundleCancellation::default();
+    fn pack_rejects_overlapping_target_before_hooks() {
+        let src = tempfile::tempdir().unwrap();
+        fs::write(
+            src.path().join(MANIFEST),
+            "[pack]\ninclude = ['**/*.css']\n[[hooks.before-pack]]\nname = 'compile'\nargv = ['compile']\n",
+        )
+        .unwrap();
+        let dst = src.path().join("release");
+        let cancel = BundleCancellation::default();
         assert!(
-            pack(source.path(), &target, &cancellation, |_, _, _, _| {
+            pack(src.path(), &dst, &cancel, |_, _, _, _| {
                 panic!("an overlapping target must be refused before hooks run")
             })
             .is_err()
         );
-        assert!(!target.exists());
+        assert!(!dst.exists());
     }
 }

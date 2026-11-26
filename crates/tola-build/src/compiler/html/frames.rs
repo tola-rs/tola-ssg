@@ -35,9 +35,7 @@ fn is_inline_level(frame: &typst_html::HtmlFrame) -> bool {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn baseline_changes_only_inline_styles() {
-        // The multiline equation is from https://github.com/typst/typst/issues/8516.
-        // Its internal layout belongs to Typst; alignment must preserve that layout.
+    fn baseline_inline_only() {
         let site = r#"
 #document("native.html")[Plain *text*, $x^2$, and #link("https://example.test")[a link].]
 #document("blocks.html")[
@@ -58,14 +56,14 @@ mod tests {
   $))$))
 ]
 "#;
-        let (_directory, realized, cancellation) = crate::compiler::tests::realized_site(site);
-        let native = tola_typst::compile_bundle_world(&realized.world, &cancellation).unwrap();
+        let (_dir, realized, cancel) = crate::compiler::tests::realized_site(site);
+        let native = tola_typst::compile_bundle_world(&realized.world, &cancel).unwrap();
         let before = native
-            .export_entries(&Default::default(), &cancellation, None)
+            .export_entries(&Default::default(), &cancel, None)
             .unwrap();
         let after = realized
             .compilation
-            .export_entries(&Default::default(), &cancellation, None)
+            .export_entries(&Default::default(), &cancel, None)
             .unwrap();
         for file in ["native.html", "blocks.html", "paged.pdf"] {
             let path = typst::syntax::VirtualPath::new(file).unwrap();
@@ -78,11 +76,11 @@ mod tests {
         let before = std::str::from_utf8(before.get(&path).unwrap().bytes().as_slice()).unwrap();
         let after = std::str::from_utf8(after.get(&path).unwrap().bytes().as_slice()).unwrap();
         assert!(after.contains("vertical-align:"));
-        let svgs = |html: &str| {
+        let svgs = |html: &str| -> Vec<_> {
             html.split("<svg ")
                 .skip(1)
                 .map(|svg| format!("<svg {}</svg>", svg.split_once("</svg>").unwrap().0))
-                .collect::<Vec<_>>()
+                .collect()
         };
         let before = svgs(before);
         let after = svgs(after);
@@ -95,21 +93,18 @@ mod tests {
             );
             let before = roxmltree::Document::parse(before).unwrap();
             let after = roxmltree::Document::parse(after).unwrap();
-            let attributes = |svg: roxmltree::Node<'_, '_>| {
+            let attrs = |svg: roxmltree::Node<'_, '_>| -> Vec<_> {
                 svg.attributes()
-                    .filter(|attribute| attribute.name() != "style")
-                    .map(|attribute| (attribute.name().to_owned(), attribute.value().to_owned()))
-                    .collect::<Vec<_>>()
+                    .filter(|a| a.name() != "style")
+                    .map(|a| (a.name().to_owned(), a.value().to_owned()))
+                    .collect()
             };
-            assert_eq!(
-                attributes(before.root_element()),
-                attributes(after.root_element())
-            );
+            assert_eq!(attrs(before.root_element()), attrs(after.root_element()));
         }
     }
 
     #[test]
-    fn framed_math_keeps_equation_references() {
+    fn framed_math_equation_refs() {
         let site = r#"
 #show math.equation: it => html.frame(it)
 #set text(size: 18pt)
@@ -121,24 +116,19 @@ mod tests {
   #context [Count: #counter(math.equation).final().first()]
 ]
 "#;
-        let (_directory, realized, cancellation) = crate::compiler::tests::realized_site(site);
+        let (_dir, realized, cancel) = crate::compiler::tests::realized_site(site);
         let path = typst::syntax::VirtualPath::new("index.html").unwrap();
-        let inventory = realized
+        let inv = realized
             .compilation
             .document(&path)
             .unwrap()
-            .html_inventory(&cancellation)
+            .html_inventory(&cancel)
             .unwrap()
             .unwrap();
-        assert!(
-            inventory
-                .fragments()
-                .iter()
-                .any(|fragment| fragment.value() == "numbered")
-        );
+        assert!(inv.fragments().iter().any(|f| f.value() == "numbered"));
         let outputs = realized
             .compilation
-            .export_entries(&tola_typst::BundleOptions::default(), &cancellation, None)
+            .export_entries(&tola_typst::BundleOptions::default(), &cancel, None)
             .unwrap();
         let html = std::str::from_utf8(outputs.get(&path).unwrap().bytes().as_slice()).unwrap();
         assert!(html.contains("href=\"#numbered\""), "{html}");

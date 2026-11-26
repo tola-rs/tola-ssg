@@ -1,4 +1,4 @@
-//! The builtin `@tola/*` packages: their identity, their files, and the set a site imports.
+//! Builtin `@tola/*` packages, their embedded files, and generated manifests.
 
 use std::borrow::Cow;
 use std::path::Path;
@@ -10,78 +10,61 @@ use typst::syntax::{LinkedNode, Source, ast};
 
 use crate::protocol::{CAPABILITY_OBSERVATION_PATH, SOURCE_OBSERVATION_DIRECTORY};
 
-/// The namespace every builtin package belongs to; only the packages this crate lists exist in it.
+/// Namespace owning all builtin packages.
 pub const TOLA_NAMESPACE: &str = "tola";
-/// The fixed import version; the implementation version is this crate's own.
+
 const TOLA_PACKAGE_VERSION: PackageVersion = PackageVersion {
     major: 0,
     minor: 0,
     patch: 0,
 };
 
-/// Where a builtin package's generated manifest lives.
 const MANIFEST_PATH: &str = "typst.toml";
-
-/// Where every builtin package's entrypoint lives.
 const ENTRYPOINT_PATH: &str = "lib.typ";
 
-/// One source file a builtin package carries.
-#[derive(Clone, Copy)]
-struct PackageSource {
-    path: &'static str,
-    contents: &'static str,
-}
+type StaticFile = (&'static str, &'static str);
 
-impl PackageSource {
-    const fn new(path: &'static str, contents: &'static str) -> Self {
-        Self { path, contents }
-    }
-}
-
-/// The sources one builtin package carries.
 enum PackageSources {
-    /// A fixed list, written out with the package definition.
-    Fixed(&'static [PackageSource]),
-    /// The package's own files, then one file per theme of the code theme catalog.
-    FixedThenThemes(&'static [PackageSource]),
+    Fixed(&'static [StaticFile]),
+    FixedThenThemes(&'static [StaticFile]),
 }
 
 impl PackageSources {
     fn len(&self) -> usize {
         match self {
-            Self::Fixed(sources) => sources.len(),
+            Self::Fixed(files) => files.len(),
             Self::FixedThenThemes(fixed) => fixed.len() + crate::code_themes::themes().len(),
         }
     }
 
-    /// The file carried at `index`.
-    fn at(&self, index: usize) -> Option<PackageSource> {
+    fn at(&self, idx: usize) -> Option<StaticFile> {
         match self {
-            Self::Fixed(sources) => sources.get(index).copied(),
-            Self::FixedThenThemes(fixed) => fixed.get(index).copied().or_else(|| {
-                let theme = crate::code_themes::themes().get(index - fixed.len())?;
-                Some(PackageSource::new(
-                    theme.file,
-                    crate::code_themes::file_contents(theme.file),
-                ))
+            Self::Fixed(files) => files.get(idx).copied(),
+            Self::FixedThenThemes(fixed) => fixed.get(idx).copied().or_else(|| {
+                let theme = crate::code_themes::themes().get(idx - fixed.len())?;
+                Some((theme.file, crate::code_themes::file_contents(theme.file)))
             }),
         }
     }
 
-    fn iter(&self) -> impl Iterator<Item = PackageSource> + '_ {
-        (0..self.len()).filter_map(|index| self.at(index))
+    fn iter(&self) -> impl Iterator<Item = StaticFile> + '_ {
+        (0..self.len()).filter_map(|i| self.at(i))
     }
 }
 
-/// One builtin package: its name, and the sources it carries beside its generated manifest.
-struct PackageDefinition {
+struct PackageDef {
     name: &'static str,
     sources: PackageSources,
 }
 
-impl PackageDefinition {
-    /// The manifest Typst reads: the name and fixed import version are the only inputs, so a
-    /// package cannot carry a manifest that disagrees with the identity it is resolved by.
+const fn pkg_def(name: &'static str, files: &'static [StaticFile]) -> PackageDef {
+    PackageDef {
+        name,
+        sources: PackageSources::Fixed(files),
+    }
+}
+
+impl PackageDef {
     fn manifest(&self) -> String {
         format!(
             "[package]\nname = \"{}\"\nversion = \"{}\"\nentrypoint = \"{ENTRYPOINT_PATH}\"\n",
@@ -89,231 +72,137 @@ impl PackageDefinition {
         )
     }
 
-    /// Every file this package carries, manifest first.
     fn files(&self) -> impl Iterator<Item = (&'static str, Cow<'static, str>)> + '_ {
-        std::iter::once((MANIFEST_PATH, Cow::Owned(self.manifest()))).chain(
-            self.sources
-                .iter()
-                .map(|file| (file.path, Cow::Borrowed(file.contents))),
-        )
+        std::iter::once((MANIFEST_PATH, Cow::Owned(self.manifest())))
+            .chain(self.sources.iter().map(|(p, s)| (p, Cow::Borrowed(s))))
     }
 
-    /// The builtin file at the package-relative `path`, without a leading `/`.
     fn file(&self, path: &Path) -> Option<Cow<'static, str>> {
         if path == Path::new(MANIFEST_PATH) {
             return Some(Cow::Owned(self.manifest()));
         }
         self.sources
             .iter()
-            .find(|file| path == Path::new(file.path))
-            .map(|file| Cow::Borrowed(file.contents))
+            .find(|(p, _)| path == Path::new(p))
+            .map(|(_, s)| Cow::Borrowed(s))
     }
 
     fn entrypoint(&self) -> &'static str {
         self.sources
             .iter()
-            .find(|file| file.path == ENTRYPOINT_PATH)
+            .find(|(p, _)| *p == ENTRYPOINT_PATH)
             .expect("every package carries its entrypoint")
-            .contents
+            .1
     }
 }
 
-/// The names each entrypoint publishes, discovered once from its own syntax tree.
 static PACKAGE_EXPORTS: LazyLock<Vec<Vec<&'static str>>> = LazyLock::new(|| {
     PACKAGE_DEFINITIONS
         .iter()
-        .map(|definition| export_names(definition.entrypoint()))
+        .map(|def| export_names(def.entrypoint()))
         .collect()
 });
 
-/// The names a module source publishes; a wildcard or a body statement leaks no name.
 fn export_names(module: &'static str) -> Vec<&'static str> {
-    let source = Source::detached(module);
-    let root = LinkedNode::new(source.root());
+    let src = Source::detached(module);
+    let root = LinkedNode::new(src.root());
     let mut names = Vec::new();
-    for statement in root.children() {
-        if let Some(binding) = statement.cast::<ast::LetBinding>() {
+    for stmt in root.children() {
+        if let Some(binding) = stmt.cast::<ast::LetBinding>() {
             for name in binding.kind().bindings() {
-                publish(&mut names, module, &statement, name);
+                publish(&mut names, module, &stmt, name);
             }
-        } else if let Some(import) = statement.cast::<ast::ModuleImport>()
+        } else if let Some(import) = stmt.cast::<ast::ModuleImport>()
             && let Some(ast::Imports::Items(items)) = import.imports()
         {
             for item in items.iter() {
-                publish(&mut names, module, &statement, item.bound_name());
+                publish(&mut names, module, &stmt, item.bound_name());
             }
         }
     }
     names
 }
 
-/// Add one bound name once, keeping the position of its first binding.
 fn publish(
     names: &mut Vec<&'static str>,
     module: &'static str,
-    statement: &LinkedNode<'_>,
+    stmt: &LinkedNode<'_>,
     name: ast::Ident<'_>,
 ) {
-    if let Some(spelling) = spelling(module, statement, name)
+    if let Some(node) = stmt.find(name.span())
+        && let Some(spelling) = module.get(node.range())
         && !names.contains(&spelling)
     {
         names.push(spelling);
     }
 }
 
-/// How one statement spells an identifier it binds.
-fn spelling(
-    module: &'static str,
-    statement: &LinkedNode<'_>,
-    name: ast::Ident<'_>,
-) -> Option<&'static str> {
-    module.get(statement.find(name.span())?.range())
-}
-
-/// Holds exactly one row per variant, in the order [`TolaPackage::all`] lists them.
-const PACKAGE_DEFINITIONS: [PackageDefinition; TolaPackage::all().len()] = [
-    PackageDefinition {
-        name: "host",
-        sources: PackageSources::Fixed(&[PackageSource::new(
-            "lib.typ",
-            include_str!("embed/host.typ"),
-        )]),
-    },
-    PackageDefinition {
-        name: "site",
-        sources: PackageSources::Fixed(&[PackageSource::new(
-            "lib.typ",
-            include_str!("embed/site.typ"),
-        )]),
-    },
-    PackageDefinition {
-        name: "module",
-        sources: PackageSources::Fixed(&[PackageSource::new(
-            "lib.typ",
-            include_str!("embed/module.typ"),
-        )]),
-    },
-    PackageDefinition {
-        name: "address",
-        sources: PackageSources::Fixed(&[PackageSource::new(
-            "lib.typ",
-            include_str!("embed/address.typ"),
-        )]),
-    },
-    PackageDefinition {
-        name: "icon",
-        sources: PackageSources::Fixed(&[PackageSource::new(
-            "lib.typ",
-            include_str!("embed/icon.typ"),
-        )]),
-    },
-    PackageDefinition {
-        name: "image",
-        sources: PackageSources::Fixed(&[PackageSource::new(
-            "lib.typ",
-            include_str!("embed/image.typ"),
-        )]),
-    },
-    PackageDefinition {
-        name: "source",
-        sources: PackageSources::Fixed(&[PackageSource::new(
-            "lib.typ",
-            include_str!("embed/source.typ"),
-        )]),
-    },
-    PackageDefinition {
-        name: "collection",
-        sources: PackageSources::Fixed(&[
-            PackageSource::new("lib.typ", include_str!("embed/collection.typ")),
-            PackageSource::new("keys.typ", include_str!("embed/keys.typ")),
-        ]),
-    },
-    PackageDefinition {
-        name: "datalog",
-        sources: PackageSources::Fixed(&[PackageSource::new(
-            "lib.typ",
-            include_str!("embed/datalog.typ"),
-        )]),
-    },
-    PackageDefinition {
-        name: "schema",
-        sources: PackageSources::Fixed(&[
-            PackageSource::new("lib.typ", include_str!("embed/schema.typ")),
-            PackageSource::new("requirements.typ", include_str!("embed/requirements.typ")),
-            PackageSource::new("schema-rules.typ", include_str!("embed/schema-rules.typ")),
-        ]),
-    },
-    PackageDefinition {
-        name: "document",
-        sources: PackageSources::Fixed(&[PackageSource::new(
-            "lib.typ",
-            include_str!("embed/document.typ"),
-        )]),
-    },
-    PackageDefinition {
+/// One row per `TolaPackage` variant in `TolaPackage::all()` order.
+const PACKAGE_DEFINITIONS: [PackageDef; TolaPackage::all().len()] = [
+    pkg_def("host", &[("lib.typ", include_str!("embed/host.typ"))]),
+    pkg_def("site", &[("lib.typ", include_str!("embed/site.typ"))]),
+    pkg_def("module", &[("lib.typ", include_str!("embed/module.typ"))]),
+    pkg_def("address", &[("lib.typ", include_str!("embed/address.typ"))]),
+    pkg_def("icon", &[("lib.typ", include_str!("embed/icon.typ"))]),
+    pkg_def("image", &[("lib.typ", include_str!("embed/image.typ"))]),
+    pkg_def("source", &[("lib.typ", include_str!("embed/source.typ"))]),
+    pkg_def(
+        "collection",
+        &[
+            ("lib.typ", include_str!("embed/collection.typ")),
+            ("keys.typ", include_str!("embed/keys.typ")),
+        ],
+    ),
+    pkg_def("datalog", &[("lib.typ", include_str!("embed/datalog.typ"))]),
+    pkg_def(
+        "schema",
+        &[
+            ("lib.typ", include_str!("embed/schema.typ")),
+            ("requirements.typ", include_str!("embed/requirements.typ")),
+            ("schema-rules.typ", include_str!("embed/schema-rules.typ")),
+        ],
+    ),
+    pkg_def(
+        "document",
+        &[("lib.typ", include_str!("embed/document.typ"))],
+    ),
+    PackageDef {
         name: "code",
         sources: PackageSources::FixedThenThemes(&[
-            PackageSource::new("lib.typ", include_str!("embed/code.typ")),
-            PackageSource::new(
+            ("lib.typ", include_str!("embed/code.typ")),
+            (
                 crate::CODE_STYLESHEET_FILE,
                 include_str!("embed/code-stylesheet.css"),
             ),
         ]),
     },
-    PackageDefinition {
-        name: "head",
-        sources: PackageSources::Fixed(&[
-            PackageSource::new("lib.typ", include_str!("embed/head.typ")),
-            PackageSource::new("head-fields.typ", include_str!("embed/head-fields.typ")),
-        ]),
-    },
-    PackageDefinition {
-        name: "feed",
-        sources: PackageSources::Fixed(&[PackageSource::new(
-            "lib.typ",
-            include_str!("embed/feed.typ"),
-        )]),
-    },
-    PackageDefinition {
-        name: "sitemap",
-        sources: PackageSources::Fixed(&[PackageSource::new(
-            "lib.typ",
-            include_str!("embed/sitemap.typ"),
-        )]),
-    },
-    PackageDefinition {
-        name: "hash",
-        sources: PackageSources::Fixed(&[PackageSource::new(
-            "lib.typ",
-            include_str!("embed/hash.typ"),
-        )]),
-    },
-    PackageDefinition {
-        name: "uuid",
-        sources: PackageSources::Fixed(&[PackageSource::new(
-            "lib.typ",
-            include_str!("embed/uuid.typ"),
-        )]),
-    },
-    PackageDefinition {
-        name: "diagnostic",
-        sources: PackageSources::Fixed(&[PackageSource::new(
-            "lib.typ",
-            include_str!("embed/diagnostic.typ"),
-        )]),
-    },
+    pkg_def(
+        "head",
+        &[
+            ("lib.typ", include_str!("embed/head.typ")),
+            ("head-fields.typ", include_str!("embed/head-fields.typ")),
+        ],
+    ),
+    pkg_def("feed", &[("lib.typ", include_str!("embed/feed.typ"))]),
+    pkg_def("sitemap", &[("lib.typ", include_str!("embed/sitemap.typ"))]),
+    pkg_def("hash", &[("lib.typ", include_str!("embed/hash.typ"))]),
+    pkg_def("uuid", &[("lib.typ", include_str!("embed/uuid.typ"))]),
+    pkg_def(
+        "diagnostic",
+        &[("lib.typ", include_str!("embed/diagnostic.typ"))],
+    ),
 ];
 
 const _: () = {
     assert!(PACKAGE_DEFINITIONS.len() == TolaPackage::all().len());
-    let mut index = 0;
-    while index < PACKAGE_DEFINITIONS.len() {
-        assert!(TolaPackage::all()[index] as usize == index);
-        index += 1;
+    let mut i = 0;
+    while i < PACKAGE_DEFINITIONS.len() {
+        assert!(TolaPackage::all()[i] as usize == i);
+        i += 1;
     }
 };
 
-/// One builtin `@tola/*` package.
+/// Builtin `@tola/*` package.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TolaPackage {
     Host,
@@ -336,12 +225,10 @@ pub enum TolaPackage {
     Diagnostic,
 }
 
-/// The name of the `@tola/source` package: the one spelling the engine and the language server
-/// both match against.
+/// Package name for `@tola/source`.
 pub const SOURCE_PACKAGE: &str = "source";
 
-/// The `parse-sources` export of `@tola/source`, the package's Typst-level metadata resolver: the
-/// one spelling the engine and the language server both match against.
+/// Export name for `parse-sources` in `@tola/source`.
 pub const PARSE_SOURCES: &str = "parse-sources";
 
 impl TolaPackage {
@@ -349,11 +236,10 @@ impl TolaPackage {
         self.definition().name
     }
 
-    const fn definition(self) -> &'static PackageDefinition {
+    const fn definition(self) -> &'static PackageDef {
         &PACKAGE_DEFINITIONS[self as usize]
     }
 
-    /// Every builtin package, in declaration order.
     pub const fn all() -> &'static [Self] {
         &[
             Self::Host,
@@ -377,19 +263,16 @@ impl TolaPackage {
         ]
     }
 
-    /// Match from a Typst package specification.
     pub fn from_spec(spec: &PackageSpec) -> Option<Self> {
         if spec.namespace.as_str() != TOLA_NAMESPACE || spec.version != TOLA_PACKAGE_VERSION {
             return None;
         }
-
         Self::all()
             .iter()
             .copied()
-            .find(|package| package.name() == spec.name.as_str())
+            .find(|pkg| pkg.name() == spec.name.as_str())
     }
 
-    /// The specification every read of this package's virtual files is rooted at.
     pub fn spec(self) -> PackageSpec {
         PackageSpec {
             namespace: TOLA_NAMESPACE.into(),
@@ -398,9 +281,6 @@ impl TolaPackage {
         }
     }
 
-    /// Whether this package exists for Tola's own packages rather than for a site author.
-    ///
-    /// The match is exhaustive so a new package cannot become public by accident.
     pub(crate) const fn is_engine_only(self) -> bool {
         match self {
             Self::Host => true,
@@ -424,25 +304,18 @@ impl TolaPackage {
         }
     }
 
-    /// Every file this package carries, manifest first.
     pub fn files(self) -> impl Iterator<Item = (&'static str, Cow<'static, str>)> {
         self.definition().files()
     }
 
-    /// The builtin file at the package-relative `path`, without a leading `/`.
     pub fn file(self, path: &Path) -> Option<Cow<'static, str>> {
         self.definition().file(path)
     }
 
-    /// The names this package's entrypoint publishes.
-    ///
-    /// Read from the entrypoint's own syntax tree rather than a list, so an export cannot go
-    /// missing from the code that defines it.
     pub fn exports(self) -> impl Iterator<Item = &'static str> {
         PACKAGE_EXPORTS[self as usize].iter().copied()
     }
 
-    /// Whether `locator` reads this package's capability observation.
     pub fn owns_capability_read(self, locator: &ReadLocator) -> bool {
         matches!(
             locator,
@@ -453,7 +326,6 @@ impl TolaPackage {
         )
     }
 
-    /// The lexical source path encoded by a `source` package observation read.
     pub fn observed_source_path(self, path: &Path) -> Option<&Path> {
         if self != Self::Source {
             return None;
@@ -463,10 +335,6 @@ impl TolaPackage {
             .filter(|file| !file.as_os_str().is_empty())
     }
 
-    /// Whether `path` names an immutable observation descriptor rather than builtin bytes.
-    ///
-    /// `source` owns every source observation: the package-wide capability read and the
-    /// per-file lexical identity reads.
     pub fn is_observation_descriptor(self, path: &Path) -> bool {
         self == Self::Source
             && (path == Path::new(CAPABILITY_OBSERVATION_PATH)
@@ -474,86 +342,72 @@ impl TolaPackage {
     }
 }
 
-/// One builtin package as a site author imports it.
+/// Builtin package as imported by a site author.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BuiltinPackage {
-    package: TolaPackage,
+    pkg: TolaPackage,
 }
 
 impl BuiltinPackage {
-    /// The specification an author imports.
     pub fn spec(&self) -> PackageSpec {
-        self.package.spec()
+        self.pkg.spec()
     }
 
-    /// Version of the crate that supplies this package's implementation.
-    ///
-    /// The fixed `0.0.0` import version is not the implementation version. Pair
-    /// this identity with the embedded Typst version when describing the API.
     pub fn host_version(&self) -> &'static str {
         env!("CARGO_PKG_VERSION")
     }
 
-    /// Package-relative paths and the exact source consumed by the compiler.
     pub fn files(&self) -> impl Iterator<Item = (&'static str, Cow<'static, str>)> {
-        self.package.files()
+        self.pkg.files()
     }
 
-    /// The names this package's entrypoint publishes.
     pub fn exports(&self) -> impl Iterator<Item = &'static str> {
-        self.package.exports()
+        self.pkg.exports()
     }
 }
 
-/// Every builtin package the compiler resolves, including the ones that exist only for Tola's
-/// own packages.
+/// All builtin packages resolved by the compiler, including engine-only packages.
 pub fn resolvable_packages() -> impl Iterator<Item = BuiltinPackage> {
     TolaPackage::all()
         .iter()
         .copied()
-        .map(|package| BuiltinPackage { package })
+        .map(|pkg| BuiltinPackage { pkg })
 }
 
-/// The packages a site author imports.
-///
-/// Omits the ones that exist for Tola's own packages, which the compiler still resolves.
+/// Builtin packages intended for direct import by site authors.
 pub fn builtin_packages() -> impl Iterator<Item = BuiltinPackage> {
-    resolvable_packages().filter(|package| !package.package.is_engine_only())
+    resolvable_packages().filter(|b| !b.pkg.is_engine_only())
 }
 
-/// The builtin package a specification names, whether or not a site author imports it.
 pub fn builtin_package(spec: &PackageSpec) -> Option<BuiltinPackage> {
-    TolaPackage::from_spec(spec).map(|package| BuiltinPackage { package })
+    TolaPackage::from_spec(spec).map(|pkg| BuiltinPackage { pkg })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Tola's own Typst surface: lowercase words joined by `-`, never `_`.
     #[test]
-    fn typst_names_use_hyphenated_spelling() {
-        for package in TolaPackage::all().iter().copied() {
-            let builtin = builtin_package(&package.spec()).expect("every builtin package resolves");
+    fn exports_and_fields_are_hyphenated() {
+        for pkg in TolaPackage::all().iter().copied() {
+            let builtin = builtin_package(&pkg.spec()).expect("every builtin package resolves");
             for name in builtin.exports() {
                 assert!(
                     hyphenated(name),
                     "@tola/{} publishes `{name}` without hyphenated spelling",
-                    package.name()
+                    pkg.name()
                 );
-                let documentation = builtin
+                let docs = builtin
                     .export_documentation(&[name.to_owned()])
-                    .unwrap_or_else(|error| {
-                        panic!("@tola/{} documents `{name}`: {error}", package.name())
-                    });
-                for export in documentation {
-                    if let crate::docs::ExportDeclaration::Function(function) = export.declaration {
-                        for parameter in function.parameters {
+                    .unwrap_or_else(|err| panic!("@tola/{} documents `{name}`: {err}", pkg.name()));
+                for export in docs {
+                    if let crate::docs::ExportDeclaration::Function(sig) = export.declaration {
+                        for param in sig.parameters {
                             assert!(
-                                hyphenated(&parameter.name),
+                                hyphenated(&param.name),
                                 "@tola/{} `{name}` parameter `{}` is not hyphenated",
-                                package.name(),
-                                parameter.name
+                                pkg.name(),
+                                param.name
                             );
                         }
                     }
@@ -578,17 +432,15 @@ mod tests {
         }
     }
 
-    /// Whether `name` is lowercase words joined by single hyphens.
     fn hyphenated(name: &str) -> bool {
         let mut words = name.split('-');
         let Some(first) = words.next() else {
             return false;
         };
-        let word = |word: &str| {
-            !word.is_empty()
-                && word
-                    .chars()
-                    .all(|character| character.is_ascii_lowercase() || character.is_ascii_digit())
+        let word = |w: &str| {
+            !w.is_empty()
+                && w.chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
         };
         word(first) && words.all(word)
     }

@@ -128,19 +128,33 @@ impl BundleCompilation {
     }
 }
 
+fn digest_bytes(
+    buf: &[u8],
+    cancel: &BundleCancellation,
+) -> Result<crate::world::file::ContentDigest, CompileError> {
+    let mut hasher = blake3::Hasher::new();
+    for chunk in buf.chunks(BUNDLE_DIGEST_CHUNK_BYTES) {
+        cancel.ensure_active()?;
+        hasher.update(chunk);
+    }
+    Ok(crate::world::file::ContentDigest::from_bytes(
+        *hasher.finalize().as_bytes(),
+    ))
+}
+
 fn export_bundle(
     bundle: &Bundle,
     options: &BundleOptions,
-    cancellation: &BundleCancellation,
+    cancel: &BundleCancellation,
     previous: Option<&BundleEntries>,
 ) -> Result<BundleEntries, CompileError> {
-    cancellation.ensure_active()?;
+    cancel.ensure_active()?;
 
     let exported = typst_bundle::export(bundle, options);
-    cancellation.ensure_active()?;
-    let exported = exported.map_err(|diagnostics| {
+    cancel.ensure_active()?;
+    let exported = exported.map_err(|diags| {
         CompileError::bundle_export(
-            diagnostics
+            diags
                 .into_iter()
                 .map(crate::diagnostic::NativeDiagnostic::from),
         )
@@ -149,24 +163,19 @@ fn export_bundle(
     let mut previous_by_path = HashMap::new();
     if let Some(previous) = previous {
         for entry in previous.as_slice() {
-            cancellation.ensure_active()?;
+            cancel.ensure_active()?;
             previous_by_path.insert(entry.path(), entry);
         }
     }
     let mut entries = Vec::with_capacity(bundle.files.len());
     for (path, file) in bundle.files.iter() {
-        cancellation.ensure_active()?;
+        cancel.ensure_active()?;
         let kind = bundle_file_kind(file);
-        let bytes = exported
+        let buf = exported
             .get(path)
             .expect("official Bundle export preserves every source file identity")
             .clone();
-        let mut hasher = blake3::Hasher::new();
-        for chunk in bytes.as_slice().chunks(BUNDLE_DIGEST_CHUNK_BYTES) {
-            cancellation.ensure_active()?;
-            hasher.update(chunk);
-        }
-        let digest = crate::world::file::ContentDigest::from_bytes(*hasher.finalize().as_bytes());
+        let digest = digest_bytes(buf.as_slice(), cancel)?;
         if let Some(entry) = previous_by_path.get(path)
             && entry.kind() == kind
             && entry.digest() == digest
@@ -177,12 +186,12 @@ fn export_bundle(
                 path: path.clone(),
                 kind,
                 digest,
-                bytes: BundleBytes::new(bytes),
+                bytes: BundleBytes::new(buf),
             });
         }
     }
     let entries = BundleEntries(entries.into());
-    cancellation.ensure_active()?;
+    cancel.ensure_active()?;
     Ok(entries)
 }
 
@@ -192,7 +201,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn exported_entry_digest_matches_its_bytes() {
+    fn export_entry_digest() {
         let result = compile(
             r#"
             #document("page.bin", format: "html")[HTML]
@@ -219,7 +228,7 @@ mod tests {
         }
     }
     #[test]
-    fn export_error_keeps_hints_in_diagnostics() {
+    fn export_error_hints() {
         use typst::diag::SourceDiagnostic;
         use typst::syntax::Span;
 

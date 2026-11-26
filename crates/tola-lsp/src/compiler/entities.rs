@@ -7,7 +7,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use tola_build::BuildResources;
 use tola_build::cancellation::BuildCancellation;
-use tola_build::config::ResolvedSiteConfig;
+use tola_build::config::SiteConfig;
 use tola_build::modules::query::{QueryCompilation, QueryEvaluation, QuerySession};
 use tola_input::InputScope;
 use tola_module::module_set::LoadedModule;
@@ -20,7 +20,7 @@ struct QueryEntry {
 
 #[derive(Default)]
 pub(crate) struct EntityQueries {
-    configuration: Option<Arc<ResolvedSiteConfig>>,
+    configuration: Option<Arc<SiteConfig>>,
     revision: u64,
     scope: Option<InputScope>,
     overlays: Vec<(PathBuf, Arc<str>)>,
@@ -33,7 +33,7 @@ pub(crate) struct EntityQueries {
 impl EntityQueries {
     pub(crate) fn prepare(
         &mut self,
-        configuration: &Arc<ResolvedSiteConfig>,
+        configuration: &Arc<SiteConfig>,
         revision: u64,
         scope: InputScope,
         overlays: &[(PathBuf, Arc<str>)],
@@ -76,7 +76,7 @@ impl EntityQueries {
         }
         let declaration = &module.queries[query_name];
         let entry_id =
-            tola_module::prepared::package_path(&module.name, &declaration.entry)?.intern();
+            tola_module::bundle::package_path(&module.name, &declaration.entry)?.intern();
         if let std::collections::hash_map::Entry::Vacant(slot) = self.entries.entry(entry_id) {
             let session = QuerySession::new(
                 Arc::clone(
@@ -125,7 +125,7 @@ impl EntityQueries {
 
     pub(crate) fn observed_paths(
         &self,
-        configuration: &Arc<ResolvedSiteConfig>,
+        configuration: &Arc<SiteConfig>,
         revision: u64,
         overlays: &[(PathBuf, Arc<str>)],
     ) -> Vec<PathBuf> {
@@ -135,7 +135,7 @@ impl EntityQueries {
         let mut paths = self.observed.iter().cloned().collect::<Vec<_>>();
         for (alias, module) in &self.modules {
             let declared = tola_build::inputs::declaration_root(
-                configuration.get_root(),
+                configuration.root(),
                 configuration.vendor().path.as_deref(),
                 alias,
                 &configuration.modules()[alias].source,
@@ -182,7 +182,7 @@ impl EntityQueries {
 
     fn matches(
         &self,
-        configuration: &Arc<ResolvedSiteConfig>,
+        configuration: &Arc<SiteConfig>,
         revision: u64,
         overlays: &[(PathBuf, Arc<str>)],
     ) -> bool {
@@ -222,7 +222,7 @@ mod tests {
         std::fs::write(&model, first_model).unwrap();
         let configuration = site_configuration(root, "[modules.notes]\npath='theme'\n");
         let modules = tola_build::modules::load_modules(
-            configuration.get_root(),
+            configuration.root(),
             configuration.vendor().path.as_deref(),
             configuration.modules(),
             tola_input::InputMode::new(InputScope::Offline, true),
@@ -264,7 +264,7 @@ mod tests {
             std::fs::read_to_string(&manifest).unwrap() + "\n# manifest snapshot changed\n";
         std::fs::write(&manifest, changed).unwrap();
         let updated = tola_build::modules::load_modules(
-            configuration.get_root(),
+            configuration.root(),
             configuration.vendor().path.as_deref(),
             configuration.modules(),
             tola_input::InputMode::new(InputScope::Offline, true),
@@ -325,7 +325,7 @@ mod tests {
         .unwrap();
         let configuration = site_configuration(root, "[modules.notes]\npath='theme'\n");
         let modules = tola_build::modules::load_modules(
-            configuration.get_root(),
+            configuration.root(),
             configuration.vendor().path.as_deref(),
             configuration.modules(),
             tola_input::InputMode::new(InputScope::Offline, true),
@@ -342,7 +342,7 @@ mod tests {
             .get(&modules["notes"], "nodes", resources.clone(), &cancellation)
             .unwrap();
         assert!(!failure.result.success);
-        let missing = configuration.get_root().join("theme/missing.json");
+        let missing = configuration.root().join("theme/missing.json");
         assert!(
             failure
                 .revision

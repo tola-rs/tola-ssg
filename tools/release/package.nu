@@ -34,10 +34,10 @@ def "main build" [target?: string, --output: directory = 'release'] {
     let plain = (without-build-metadata $version)
     let archive = ($output | path join (archive-name $name $plain))
     let environment = if ($name | str ends-with '-musl') {
-        # A Linux archive is the static one; a dynamic input fails the link here.
-        {OPENSSL_STATIC: '1', RUSTFLAGS: '-C target-feature=+crt-static'}
+        # Static Linux archive: link CRT and zlib statically.
+        {LIBZ_SYS_STATIC: '1', RUSTFLAGS: '-C target-feature=+crt-static'}
     } else {
-        {}
+        {LIBZ_SYS_STATIC: '1'}
     }
     print $"Building ($name)"
     cd $root

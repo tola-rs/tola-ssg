@@ -1,129 +1,91 @@
-//! Kana read as Hepburn: the syllabary, the sokuon, the long-vowel mark, and the marks
-//! that repeat a syllable.
+//! Hepburn romanization of kana runs (syllabary, sokuon, chōonpu, iteration marks).
 //!
-//! A syllable is one or two kana. The ASCII spellings are Hepburn-style: `し` is `shi`,
-//! `ち` is `chi`, `つ` is `tsu`, and ん is `n`. Sokuon doubles the next consonant,
-//! with traditional `tch` before `ch` (`まっちゃ` is `matcha`); ー repeats the
-//! preceding vowel. This `tch` convention is not the 2025 Cabinet notification's `cch`.
-//!
-//! An iteration mark repeats the syllable before it, which is what the mark says: ゝ reads
-//! as that syllable and ゞ reads it with its first kana voiced, so いすゞ is `isuzu` and
-//! すゞめ is `suzume`. ヽ and ヾ are the same two marks in katakana.
-//!
-//! What a rule cannot know stays as it is: a particle is read as the kana it is written
-//! with (`は` is `ha`), because a name has no sentence to place it in. Halfwidth
-//! katakana is read after compatibility normalization, which the caller applies.
+//! Sokuon uses traditional `tch` before `ch` (not 2025 Cabinet `cch`). Particles stay literal
+//! (`は` -> `ha`), and callers must apply NFKC before passing halfwidth katakana.
 
-/// Append the romanization of the kana at the start of `text`, and report the bytes it read.
-///
-/// Answers `None` when `text` does not start with kana, and appends nothing in that case. A
-/// mark with no syllable to hold back, lengthen, or repeat — the text starts with it — has
-/// no pronunciation: the bytes it read are still reported, and the caller decides what that
-/// means for a name.
-pub(super) fn romanize(text: &str, out: &mut String) -> Option<usize> {
-    let mut consumed = 0;
+pub(super) fn romanize(src: &str, out: &mut String) -> Option<usize> {
+    let mut off = 0;
     let mut doubled = false;
-    // The syllable before, which the marks around this one are read against.
     let mut last: Option<Syllable> = None;
-    while let Some(character) = text[consumed..].chars().next() {
-        let Some(kana) = to_hiragana(character) else {
+    while let Some(ch) = src[off..].chars().next() {
+        let Some(kana) = to_hiragana(ch) else {
             break;
         };
         match kana {
-            // っ says nothing of its own: the next syllable's consonant doubles.
             'っ' => {
-                consumed += character.len_utf8();
+                off += ch.len_utf8();
                 doubled = true;
                 continue;
             }
-            // ー repeats the vowel of the syllable it follows.
             'ー' => {
-                consumed += character.len_utf8();
-                if let Some(vowel) = last.and_then(Syllable::last_vowel) {
-                    out.push(vowel);
+                off += ch.len_utf8();
+                if let Some(v) = last.and_then(Syllable::last_vowel) {
+                    out.push(v);
                 }
                 continue;
             }
-            // ゝ repeats the syllable before it, which ゞ repeats with its first kana voiced.
             'ゝ' | 'ゞ' => {
-                consumed += character.len_utf8();
-                let repeated = last.map(|syllable| match kana {
-                    'ゞ' => syllable.voiced(),
-                    _ => syllable,
-                });
-                if let Some(repeated) = repeated {
-                    out.push_str(repeated.romanization);
-                    last = Some(repeated);
+                off += ch.len_utf8();
+                let repeated = last.map(|syl| if kana == 'ゞ' { syl.voiced() } else { syl });
+                if let Some(syl) = repeated {
+                    out.push_str(syl.rom);
+                    last = Some(syl);
                 }
                 continue;
             }
             _ => {}
         }
-        let Some((syllable, length)) = syllable_at(&text[consumed..]) else {
+        let Some((syl, len)) = syllable_at(&src[off..]) else {
             break;
         };
-        if syllable.first == 'ん' {
-            // ん before a vowel or a y-syllable needs its own boundary: しんいち is
-            // Shin'ichi, not Shinichi.
-            match syllable_at(&text[consumed + length..]) {
-                Some((next, _))
-                    if starts_with_vowel(next.romanization) || starts_with_y(next.romanization) =>
-                {
+        if syl.first == 'ん' {
+            // Separate syllabic `ん` from following vowel or y-glide (`しんいち` -> `shin'ichi`).
+            match syllable_at(&src[off + len..]) {
+                Some((next, _)) if starts_with_vowel(next.rom) || next.rom.starts_with('y') => {
                     out.push_str("n'");
                 }
                 _ => out.push('n'),
             }
         } else if doubled {
-            match syllable.romanization.chars().next() {
+            match syl.rom.chars().next() {
                 Some('c') => out.push('t'),
-                Some(consonant) if !is_vowel(consonant) => out.push(consonant),
+                Some(c) if !is_vowel(c) => out.push(c),
                 _ => {}
             }
-            out.push_str(syllable.romanization);
+            out.push_str(syl.rom);
         } else {
-            out.push_str(syllable.romanization);
+            out.push_str(syl.rom);
         }
         doubled = false;
-        last = Some(syllable);
-        consumed += length;
+        last = Some(syl);
+        off += len;
     }
-    // Read nothing, answer nothing: the caller's own policy still owns that character.
-    (consumed > 0).then_some(consumed)
+    (off > 0).then_some(off)
 }
 
-/// One kana syllable: the romanization it carries, and the kana it is written with.
 #[derive(Clone, Copy)]
 struct Syllable {
-    romanization: &'static str,
-    /// The kana the syllable is spelled with, in hiragana; the second one is a small kana.
+    rom: &'static str,
     first: char,
     second: Option<char>,
 }
 
 impl Syllable {
-    /// The vowel the syllable ends with, which the long-vowel mark repeats.
     fn last_vowel(self) -> Option<char> {
-        self.romanization
-            .chars()
-            .last()
-            .filter(|character| is_vowel(*character))
+        self.rom.chars().last().filter(|ch| is_vowel(*ch))
     }
 
-    /// The syllable as ゞ repeats it: the same syllable with its first kana voiced.
-    ///
-    /// A syllable whose first kana has no voiced form — あ, ん, ら — comes back as it is,
-    /// because the mark says no more than the kana it repeats.
     fn voiced(self) -> Self {
         let Some(first) = voiced_kana(self.first) else {
             return self;
         };
-        let romanization = match self.second {
+        let rom = match self.second {
             Some(second) => digraph(first, second),
             None => syllable(first),
         };
-        match romanization {
-            Some(romanization) => Self {
-                romanization,
+        match rom {
+            Some(rom) => Self {
+                rom,
                 first,
                 second: self.second,
             },
@@ -132,7 +94,6 @@ impl Syllable {
     }
 }
 
-/// The kana a dakuten voices one syllable with: す is written ず, は is written ば.
 fn voiced_kana(kana: char) -> Option<char> {
     Some(match kana {
         'か' => 'が',
@@ -160,29 +121,28 @@ fn voiced_kana(kana: char) -> Option<char> {
     })
 }
 
-/// The syllable the kana at the start of `text` spells, and how many bytes it is.
-fn syllable_at(text: &str) -> Option<(Syllable, usize)> {
-    let first = text.chars().next()?;
+fn syllable_at(src: &str) -> Option<(Syllable, usize)> {
+    let first = src.chars().next()?;
     let kana = to_hiragana(first)?;
-    let pair = text[first.len_utf8()..]
+    let pair = src[first.len_utf8()..]
         .chars()
         .next()
         .and_then(to_hiragana)
-        .and_then(|second| digraph(kana, second).map(|romanization| (romanization, second)));
-    if let Some((romanization, second)) = pair {
+        .and_then(|second| digraph(kana, second).map(|rom| (rom, second)));
+    if let Some((rom, second)) = pair {
         return Some((
             Syllable {
-                romanization,
+                rom,
                 first: kana,
                 second: Some(second),
             },
             first.len_utf8() + second.len_utf8(),
         ));
     }
-    syllable(kana).map(|romanization| {
+    syllable(kana).map(|rom| {
         (
             Syllable {
-                romanization,
+                rom,
                 first: kana,
                 second: None,
             },
@@ -191,20 +151,17 @@ fn syllable_at(text: &str) -> Option<(Syllable, usize)> {
     })
 }
 
-/// The kana the caller writes, read as the hiragana this module's tables name.
-///
-/// Katakana is the same syllabary shifted by 0x60; ー and the iteration marks belong to both.
-fn to_hiragana(character: char) -> Option<char> {
-    match character {
-        '\u{3041}'..='\u{3096}' | '\u{30fc}' => Some(character),
-        '\u{30a1}'..='\u{30f6}' => char::from_u32(character as u32 - 0x60),
+/// Normalize katakana to hiragana (shifted by `-0x60`), preserving `ー` and iteration marks.
+fn to_hiragana(ch: char) -> Option<char> {
+    match ch {
+        '\u{3041}'..='\u{3096}' | '\u{30fc}' => Some(ch),
+        '\u{30a1}'..='\u{30f6}' => char::from_u32(ch as u32 - 0x60),
         '\u{309d}' | '\u{30fd}' => Some('\u{309d}'),
         '\u{309e}' | '\u{30fe}' => Some('\u{309e}'),
         _ => None,
     }
 }
 
-/// The romanization of one kana.
 fn syllable(kana: char) -> Option<&'static str> {
     Some(match kana {
         'あ' | 'ぁ' => "a",
@@ -285,7 +242,6 @@ fn syllable(kana: char) -> Option<&'static str> {
     })
 }
 
-/// The romanization of two kana that spell one syllable.
 fn digraph(first: char, second: char) -> Option<&'static str> {
     Some(match (first, second) {
         ('き', 'ゃ') => "kya",
@@ -376,35 +332,27 @@ fn digraph(first: char, second: char) -> Option<&'static str> {
     })
 }
 
-fn is_vowel(character: char) -> bool {
-    matches!(character, 'a' | 'i' | 'u' | 'e' | 'o')
+fn is_vowel(ch: char) -> bool {
+    matches!(ch, 'a' | 'i' | 'u' | 'e' | 'o')
 }
 
-fn starts_with_vowel(romanization: &str) -> bool {
-    romanization.chars().next().is_some_and(is_vowel)
-}
-
-fn starts_with_y(romanization: &str) -> bool {
-    romanization.starts_with('y')
+fn starts_with_vowel(rom: &str) -> bool {
+    rom.chars().next().is_some_and(is_vowel)
 }
 
 #[cfg(test)]
 mod tests {
     use super::romanize;
 
-    fn read(text: &str) -> String {
+    fn read(src: &str) -> String {
         let mut out = String::new();
-        assert_eq!(
-            romanize(text, &mut out),
-            Some(text.len()),
-            "{text:?} reads whole"
-        );
+        assert_eq!(romanize(src, &mut out), Some(src.len()), "{src:?}");
         out
     }
 
     #[test]
-    fn syllables_follow_hepburn() {
-        for (text, expected) in [
+    fn hepburn_syllables() {
+        for (src, expected) in [
             ("しんぶん", "shinbun"),
             ("ぎんざ", "ginza"),
             ("かんぱい", "kanpai"),
@@ -416,25 +364,25 @@ mod tests {
             ("にほんご", "nihongo"),
             ("を", "o"),
         ] {
-            assert_eq!(read(text), expected, "{text:?}");
+            assert_eq!(read(src), expected, "{src:?}");
         }
     }
 
     #[test]
-    fn katakana_reads_as_the_same_syllabary() {
-        for (text, expected) in [
+    fn katakana_syllabary() {
+        for (src, expected) in [
             ("コンピュータ", "konpyuuta"),
             ("コーヒー", "koohii"),
             ("ファン", "fan"),
             ("ヴァイオリン", "vaiorin"),
         ] {
-            assert_eq!(read(text), expected, "{text:?}");
+            assert_eq!(read(src), expected, "{src:?}");
         }
     }
 
     #[test]
-    fn loanword_combinations_keep_one_syllable() {
-        for (text, expected) in [
+    fn loanword_digraphs() {
+        for (src, expected) in [
             ("クォーツ", "kwootsu"),
             ("クァルテット", "kwarutetto"),
             ("グァテマラ", "gwatemara"),
@@ -445,35 +393,34 @@ mod tests {
             ("フョ", "fyo"),
             ("ウァ", "wa"),
         ] {
-            assert_eq!(read(text), expected, "{text:?}");
+            assert_eq!(read(src), expected, "{src:?}");
         }
     }
 
     #[test]
-    fn iteration_marks_repeat_syllable() {
-        for (text, expected) in [
+    fn iteration_marks() {
+        for (src, expected) in [
             ("いすゞ", "isuzu"),
             ("すゞめ", "suzume"),
             ("みすゞ", "misuzu"),
             ("たゞ", "tada"),
             ("バナヽ", "banana"),
             ("ハヽ", "haha"),
-            // A mark with no syllable before it is read as nothing.
             ("ヾ", ""),
         ] {
-            assert_eq!(read(text), expected, "{text:?}");
+            assert_eq!(read(src), expected, "{src:?}");
         }
     }
 
     #[test]
-    fn doubled_consonants_close_the_syllable() {
-        for (text, expected) in [
+    fn sokuon_doubling() {
+        for (src, expected) in [
             ("まっちゃ", "matcha"),
             ("てんぷら", "tenpura"),
             ("がっこう", "gakkou"),
             ("にっぽん", "nippon"),
         ] {
-            assert_eq!(read(text), expected, "{text:?}");
+            assert_eq!(read(src), expected, "{src:?}");
         }
     }
 }

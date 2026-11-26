@@ -1,7 +1,6 @@
 # tola-image
 
-Deterministic image processing: decoding, colour management, resampling, and encoding. Bytes
-in, encoded variants out.
+Decodes, resizes, and encodes images from in-memory bytes.
 
 ```rust
 let metadata = tola_image::inspect(&source)?;
@@ -11,9 +10,6 @@ let recipe = ImageRecipe::resolve(&metadata, ResizeOptions {
 let encoded = tola_image::render(&source, &recipe, &NO_CANCELLATION)?;
 ```
 
-Reads JPEG, PNG, WebP, GIF, BMP, and SVG (measured, not resized); AVIF is unsupported.
-Operations: `Scale`, `FitWidth`, `FitHeight`, `Fit`, `Fill`. Filters: `Nearest`, `Triangle`,
-`CatmullRom`, `Gaussian`, `Lanczos3`. Formats: `Auto`, `Jpeg`, `Png`, `WebP`. `DecodedSource`
-decodes once for several recipes. `Cancellation` is checked between stages and during resampling
-and lossy WebP encoding. Lossy WebP uses the pure Rust `tola-webp` encoder. Lossless WebP preserves
-all RGBA samples.
+- Inputs: JPEG, PNG, WebP, GIF, BMP, and SVG (rasterized on explicit raster format; AVIF unsupported).
+- Outputs: JPEG, PNG, and WebP (lossy via `tola-webp`, lossless RGBA).
+- Supports `Scale`, `FitWidth`, `FitHeight`, `Fit`, and `Fill` with `Nearest`, `Triangle`, `CatmullRom`, `Gaussian`, and `Lanczos3` filters, plus `DecodedSource` reuse and cancellation.

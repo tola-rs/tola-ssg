@@ -1,4 +1,4 @@
-//! VP8L entropy groups for alpha residuals with different local distributions.
+//! VP8L entropy groups for alpha residuals with varying local distributions.
 
 #[cfg(test)]
 use super::Stream;
@@ -12,48 +12,48 @@ const TILE: usize = 16;
 const GROUPS: usize = 5;
 
 pub(super) struct Tiles {
-    groups: Vec<u8>,
-    group_count: usize,
-    counts: [u32; GREEN_SYMBOLS],
+    map: Vec<u8>,
+    ngroups: usize,
+    hist: [u32; GREEN_SYMBOLS],
     side: usize,
 }
 
 impl Tiles {
-    pub(super) fn single(samples: usize, width: usize) -> Self {
-        let count = width.div_ceil(TILE) * (samples / width).div_ceil(TILE);
-        let mut counts = [0; GREEN_SYMBOLS];
-        counts[0] = count as u32;
+    pub(super) fn single(len: usize, w: usize) -> Self {
+        let count = w.div_ceil(TILE) * (len / w).div_ceil(TILE);
+        let mut hist = [0; GREEN_SYMBOLS];
+        hist[0] = count as u32;
         Self {
-            groups: vec![0; count],
-            group_count: 1,
-            counts,
+            map: vec![0; count],
+            ngroups: 1,
+            hist,
             side: TILE,
         }
     }
 }
 
 pub(super) fn classify(
-    samples: &[u8],
-    width: usize,
-    cancelled: &(dyn Fn() -> bool + Sync),
+    src: &[u8],
+    w: usize,
+    cancel: &(dyn Fn() -> bool + Sync),
 ) -> Result<Option<Tiles>, Error> {
-    let height = samples.len() / width;
-    let columns = width.div_ceil(TILE);
-    let rows = height.div_ceil(TILE);
-    let mut groups = vec![0u8; columns * rows];
+    let h = src.len() / w;
+    let cols = w.div_ceil(TILE);
+    let rows = h.div_ceil(TILE);
+    let mut map = vec![0u8; cols * rows];
     let mut sizes = [0usize; 3];
-    for (ty, tiles) in groups.chunks_exact_mut(columns).enumerate() {
-        check_cancelled(cancelled)?;
+    for (ty, tiles) in map.chunks_exact_mut(cols).enumerate() {
+        check_cancelled(cancel)?;
         for (tx, group) in tiles.iter_mut().enumerate() {
-            let y = ty * TILE;
-            let x = tx * TILE;
+            let y0 = ty * TILE;
+            let x0 = tx * TILE;
             let mut total = 0;
             let mut irregular = 0;
-            for y in (y..(y + TILE).min(height)).step_by(4) {
-                let row = &samples[y * width..][..width];
-                for &value in row[x..(x + TILE).min(width)].iter().step_by(4) {
+            for y in (y0..(y0 + TILE).min(h)).step_by(4) {
+                let row = &src[y * w..][..w];
+                for &v in row[x0..(x0 + TILE).min(w)].iter().step_by(4) {
                     total += 1;
-                    irregular += usize::from(value.min(value.wrapping_neg()) > 2);
+                    irregular += usize::from(v.min(v.wrapping_neg()) > 2);
                 }
             }
             *group = if irregular * 8 <= total {
@@ -68,24 +68,24 @@ pub(super) fn classify(
     }
     let mut ranked = sizes;
     ranked.sort_unstable();
-    if ranked[1] * 32 < groups.len() {
+    if ranked[1] * 32 < map.len() {
         return Ok(None);
     }
-    let mut count = 0;
-    let map = sizes.map(|size| {
-        let group = count;
-        count += u8::from(size != 0);
-        group
+    let mut ngroups = 0;
+    let remap = sizes.map(|n| {
+        let g = ngroups;
+        ngroups += u8::from(n != 0);
+        g
     });
-    let mut counts = [0; GREEN_SYMBOLS];
-    for group in &mut groups {
-        *group = map[*group as usize];
-        counts[*group as usize] += 1;
+    let mut hist = [0; GREEN_SYMBOLS];
+    for g in &mut map {
+        *g = remap[*g as usize];
+        hist[*g as usize] += 1;
     }
     Ok(Some(Tiles {
-        groups,
-        group_count: count as usize,
-        counts,
+        map,
+        ngroups: ngroups as usize,
+        hist,
         side: TILE,
     }))
 }
@@ -93,78 +93,69 @@ pub(super) fn classify(
 pub(super) struct Codes {
     bits: Bits,
     green: [[(u32, u32); GREEN_SYMBOLS]; GROUPS],
-    distance: [[(u32, u32); DISTANCE_SYMBOLS]; GROUPS],
+    dist: [[(u32, u32); DISTANCE_SYMBOLS]; GROUPS],
     pub(super) len: usize,
 }
 
 pub(super) fn codes_for(
     tiles: &Tiles,
-    samples: &[u8],
-    width: usize,
+    src: &[u8],
+    w: usize,
     mut bits: Bits,
     alpha: u32,
     copies: &[(u32, u16)],
-    cancelled: &(dyn Fn() -> bool + Sync),
+    cancel: &(dyn Fn() -> bool + Sync),
 ) -> Result<Codes, Error> {
     let Tiles {
-        groups,
-        group_count,
-        counts,
+        map,
+        ngroups,
+        hist,
         side,
     } = tiles;
     let mut green = [[0; GREEN_SYMBOLS]; GROUPS];
     let mut dist = [[0; DISTANCE_SYMBOLS]; GROUPS];
     let mut extra = 0;
-    visit(
-        samples,
-        width,
-        copies,
-        groups,
-        *side,
-        cancelled,
-        |group, token| {
-            match token {
-                Token::Literals(values) => {
-                    for &v in values {
-                        green[group][v as usize] += 1;
-                    }
-                }
-                Token::Copy(packed) => {
-                    let (length, distance) = copy_prefixes(packed);
-                    green[group][256 + length.0 as usize] += 1;
-                    dist[group][distance.0 as usize] += 1;
-                    extra += (length.1 + distance.1) as usize;
+    visit(src, w, copies, map, *side, cancel, |g, tok| {
+        match tok {
+            Token::Literals(vals) => {
+                for &v in vals {
+                    green[g][v as usize] += 1;
                 }
             }
-            Ok(())
-        },
-    )?;
-    bits.write(if *group_count == 1 { 0 } else { 2 }, 2);
-    if *group_count != 1 {
+            Token::Copy(packed) => {
+                let (l, d) = copy_prefixes(packed);
+                green[g][256 + l.0 as usize] += 1;
+                dist[g][d.0 as usize] += 1;
+                extra += (l.1 + d.1) as usize;
+            }
+        }
+        Ok(())
+    })?;
+    bits.write(if *ngroups == 1 { 0 } else { 2 }, 2);
+    if *ngroups != 1 {
         bits.write(side.ilog2() - 2, 3);
-        bits.write(0, 1); // no colour cache in the entropy image
-        let map_codes = bits.write_green_codes(counts);
+        bits.write(0, 1); // no color cache
+        let map_codes = bits.write_green_codes(hist);
         for _ in 0..4 {
             bits.write_single_tree(0);
         }
-        bits.write_literals(groups, &map_codes, cancelled)?;
+        bits.write_literals(map, &map_codes, cancel)?;
     }
     let mut green_codes = [[(0, 0); GREEN_SYMBOLS]; GROUPS];
-    let mut distance_codes = [[(0, 0); DISTANCE_SYMBOLS]; GROUPS];
-    for g in 0..*group_count {
+    let mut dist_codes = [[(0, 0); DISTANCE_SYMBOLS]; GROUPS];
+    for g in 0..*ngroups {
         green_codes[g] = bits.write_green_codes(&green[g]);
-        for value in [0, 0, alpha] {
-            bits.write_single_tree(value);
+        for v in [0, 0, alpha] {
+            bits.write_single_tree(v);
         }
-        distance_codes[g] = bits.write_distance_tree(&dist[g]);
-        extra +=
-            symbol_bits(&green_codes[g], &green[g]) + symbol_bits(&distance_codes[g], &dist[g]);
+        dist_codes[g] = bits.write_distance_tree(&dist[g]);
+        extra += symbol_bits(&green_codes[g], &green[g]) + symbol_bits(&dist_codes[g], &dist[g]);
     }
     let len = padded_len(bits.len() + extra);
     Ok(Codes {
         bits,
         green: green_codes,
-        distance: distance_codes,
+        dist: dist_codes,
         len,
     })
 }
@@ -173,50 +164,34 @@ impl Codes {
     pub(super) fn write(
         self,
         tiles: &Tiles,
-        samples: &[u8],
-        width: usize,
+        src: &[u8],
+        w: usize,
         copies: &[(u32, u16)],
-        cancelled: &(dyn Fn() -> bool + Sync),
+        cancel: &(dyn Fn() -> bool + Sync),
     ) -> Result<Vec<u8>, Error> {
         let Self {
             mut bits,
             green: green_codes,
-            distance: distance_codes,
+            dist: dist_codes,
             len,
         } = self;
         bits.reserve_bytes(len);
-        visit(
-            samples,
-            width,
-            copies,
-            &tiles.groups,
-            tiles.side,
-            cancelled,
-            |group, token| {
-                match token {
-                    Token::Literals(values) => {
-                        for &value in values {
-                            let (code, len) = green_codes[group][value as usize];
-                            bits.write(code, len);
-                        }
-                    }
-                    Token::Copy(packed) => {
-                        let (length, distance) = copy_prefixes(packed);
-                        bits.write_token(
-                            green_codes[group][256 + length.0 as usize],
-                            length.2,
-                            length.1,
-                        );
-                        bits.write_token(
-                            distance_codes[group][distance.0 as usize],
-                            distance.2,
-                            distance.1,
-                        );
+        visit(src, w, copies, &tiles.map, tiles.side, cancel, |g, tok| {
+            match tok {
+                Token::Literals(vals) => {
+                    for &v in vals {
+                        let (code, len) = green_codes[g][v as usize];
+                        bits.write(code, len);
                     }
                 }
-                Ok(())
-            },
-        )?;
+                Token::Copy(packed) => {
+                    let (l, d) = copy_prefixes(packed);
+                    bits.write_token(green_codes[g][256 + l.0 as usize], l.2, l.1);
+                    bits.write_token(dist_codes[g][d.0 as usize], d.2, d.1);
+                }
+            }
+            Ok(())
+        })?;
         Ok(bits.finish())
     }
 }
@@ -224,19 +199,19 @@ impl Codes {
 impl Bits {
     pub(super) fn write_green_codes(
         &mut self,
-        counts: &[u32; GREEN_SYMBOLS],
+        hist: &[u32; GREEN_SYMBOLS],
     ) -> [(u32, u32); GREEN_SYMBOLS] {
-        if let Some(lengths) = code_lengths(counts, 15) {
-            self.write_green_tree(&lengths);
-            codes(&lengths)
+        if let Some(lens) = code_lengths(hist, 15) {
+            self.write_green_tree(&lens);
+            codes(&lens)
         } else {
-            let symbol = counts.iter().position(|&n| n != 0).unwrap_or(0);
-            if symbol < 256 {
-                self.write_single_tree(symbol as u32);
+            let sym = hist.iter().position(|&n| n != 0).unwrap_or(0);
+            if sym < 256 {
+                self.write_single_tree(sym as u32);
             } else {
-                let mut lengths = [0; GREEN_SYMBOLS];
-                lengths[symbol] = 1;
-                self.write_green_tree(&lengths);
+                let mut lens = [0; GREEN_SYMBOLS];
+                lens[sym] = 1;
+                self.write_green_tree(&lens);
             }
             [(0, 0); GREEN_SYMBOLS]
         }
@@ -249,39 +224,39 @@ enum Token<'a> {
 }
 
 fn visit(
-    samples: &[u8],
-    width: usize,
+    src: &[u8],
+    w: usize,
     mut copies: &[(u32, u16)],
-    groups: &[u8],
+    map: &[u8],
     side: usize,
-    cancelled: &(dyn Fn() -> bool + Sync),
+    cancel: &(dyn Fn() -> bool + Sync),
     mut write: impl FnMut(usize, Token<'_>) -> Result<(), Error>,
 ) -> Result<(), Error> {
-    let columns = width.div_ceil(side);
+    let cols = w.div_ceil(side);
     let mut at = 0;
     let mut check_at = 0;
-    while at < samples.len() {
+    while at < src.len() {
         if at >= check_at {
-            check_cancelled(cancelled)?;
+            check_cancelled(cancel)?;
             check_at = at + 4096;
         }
-        let y = at / width;
-        let x = at % width;
-        let group = groups[(y / side) * columns + x / side] as usize;
+        let y = at / w;
+        let x = at % w;
+        let g = map[(y / side) * cols + x / side] as usize;
         if let Some((&copy, rest)) = copies.split_first()
             && at == copy.0 as usize
         {
-            // A spanning copy uses the group at its starting pixel.
-            write(group, Token::Copy(copy.1))?;
+            // Spanning copies belong to the group of their starting pixel.
+            write(g, Token::Copy(copy.1))?;
             at += usize::from(copy.1 & 4095) + 1;
             copies = rest;
             continue;
         }
-        let end = at + (side - x % side).min(width - x);
+        let end = at + (side - x % side).min(w - x);
         let end = copies
             .first()
             .map_or(end, |&(start, _)| end.min(start as usize));
-        write(group, Token::Literals(&samples[at..end]))?;
+        write(g, Token::Literals(&src[at..end]))?;
         at = end;
     }
     Ok(())
@@ -295,70 +270,70 @@ fn copy_prefixes(packed: u16) -> ((u32, u32, u32), (u32, u32, u32)) {
 }
 
 pub(super) fn squared_residuals(
-    samples: &[u8],
-    width: usize,
-    cancelled: &(dyn Fn() -> bool + Sync),
+    src: &[u8],
+    w: usize,
+    cancel: &(dyn Fn() -> bool + Sync),
 ) -> Result<Tiles, Error> {
-    let height = samples.len() / width;
-    let mut groups = Vec::with_capacity(width.div_ceil(TILE) * height.div_ceil(TILE));
+    let h = src.len() / w;
+    let mut map = Vec::with_capacity(w.div_ceil(TILE) * h.div_ceil(TILE));
     let mut sizes = [0; 5];
-    for y in (0..height).step_by(TILE) {
-        check_cancelled(cancelled)?;
-        for x in (0..width).step_by(TILE) {
+    for y0 in (0..h).step_by(TILE) {
+        check_cancelled(cancel)?;
+        for x0 in (0..w).step_by(TILE) {
             let mut total = 0;
             let mut count = 0;
-            for y in (y..(y + TILE).min(height)).step_by(2) {
-                for &v in samples[y * width + x..y * width + (x + TILE).min(width)]
+            for y in (y0..(y0 + TILE).min(h)).step_by(2) {
+                for &v in src[y * w + x0..y * w + (x0 + TILE).min(w)]
                     .iter()
                     .step_by(2)
                 {
-                    let value = u32::from(v.min(v.wrapping_neg()));
-                    total += value * value;
+                    let a = u32::from(v.min(v.wrapping_neg()));
+                    total += a * a;
                     count += 1;
                 }
             }
-            let group = [2, 10, 30, 100].partition_point(|&bound| total > bound * count);
-            groups.push(group as u8);
-            sizes[group] += 1;
+            let g = [2, 10, 30, 100].partition_point(|&bound| total > bound * count);
+            map.push(g as u8);
+            sizes[g] += 1;
         }
     }
-    let mut count = 0u8;
-    let mut counts = [0; GREEN_SYMBOLS];
-    let map = sizes.map(|n| {
-        let group = count;
+    let mut ngroups = 0u8;
+    let mut hist = [0; GREEN_SYMBOLS];
+    let remap = sizes.map(|n| {
+        let g = ngroups;
         if n != 0 {
-            counts[group as usize] = n;
-            count += 1;
+            hist[g as usize] = n;
+            ngroups += 1;
         }
-        group
+        g
     });
-    for g in &mut groups {
-        *g = map[*g as usize];
+    for g in &mut map {
+        *g = remap[*g as usize];
     }
     Ok(Tiles {
-        groups,
-        group_count: usize::from(count),
-        counts,
+        map,
+        ngroups: usize::from(ngroups),
+        hist,
         side: TILE,
     })
 }
 
 pub(super) fn clustered(
-    samples: &[u8],
-    width: usize,
+    src: &[u8],
+    w: usize,
     copies: &[(u32, u16)],
     side: usize,
     count: usize,
     rounds: usize,
-    cancelled: &(dyn Fn() -> bool + Sync),
+    cancel: &(dyn Fn() -> bool + Sync),
 ) -> Result<Tiles, Error> {
     const BINS: usize = 17;
     const BOUNDS: [u8; 15] = [1, 2, 3, 4, 5, 6, 8, 10, 12, 16, 24, 32, 48, 64, 96];
-    let columns = width.div_ceil(side);
-    let tile_count = columns * (samples.len() / width).div_ceil(side);
-    let mut hist = vec![[0u16; BINS]; tile_count];
-    let mut average = vec![(0u32, 0u32); tile_count];
-    let tile = |at: usize| (at / width / side) * columns + (at % width / side);
+    let cols = w.div_ceil(side);
+    let ntiles = cols * (src.len() / w).div_ceil(side);
+    let mut hist = vec![[0u16; BINS]; ntiles];
+    let mut avg = vec![(0u32, 0u32); ntiles];
+    let tile_of = |at: usize| (at / w / side) * cols + (at % w / side);
     let signed = side == TILE;
     let bins: [usize; 256] = std::array::from_fn(|x| {
         let v = x as u8;
@@ -370,55 +345,55 @@ pub(super) fn clustered(
         }
     });
     let mut from = 0;
-    for (start, packed) in copies.iter().copied().chain([(samples.len() as u32, 0)]) {
+    for (start, packed) in copies.iter().copied().chain([(src.len() as u32, 0)]) {
         let start = start as usize;
         while from < start {
-            let y = from / width;
-            let x = from % width;
-            let length = (width - x).min(start - from);
+            let y = from / w;
+            let x = from % w;
+            let len = (w - x).min(start - from);
             if !signed || y.is_multiple_of(2) {
-                check_cancelled(cancelled)?;
-                let row = (y / side) * columns;
-                let mut column = x;
-                let end = x + length;
-                while column < end {
-                    let tile = column / side;
-                    let end_of_tile = end.min((tile + 1) * side);
-                    let begin = from + column - x;
-                    let span = &samples[begin..begin + end_of_tile - column];
-                    let (stride, skip) = if signed { (2, column % 2) } else { (1, 0) };
+                check_cancelled(cancel)?;
+                let row = (y / side) * cols;
+                let mut col = x;
+                let end = x + len;
+                while col < end {
+                    let tile = col / side;
+                    let end_tile = end.min((tile + 1) * side);
+                    let begin = from + col - x;
+                    let span = &src[begin..begin + end_tile - col];
+                    let (stride, skip) = if signed { (2, col % 2) } else { (1, 0) };
                     let bucket = &mut hist[row + tile];
-                    let (sum, count) = &mut average[row + tile];
-                    for &value in span.iter().skip(skip).step_by(stride) {
-                        bucket[bins[value as usize]] += 1;
-                        *sum += u32::from(value.min(value.wrapping_neg()));
-                        *count += 1;
+                    let (sum, n) = &mut avg[row + tile];
+                    for &v in span.iter().skip(skip).step_by(stride) {
+                        bucket[bins[v as usize]] += 1;
+                        *sum += u32::from(v.min(v.wrapping_neg()));
+                        *n += 1;
                     }
-                    column = end_of_tile;
+                    col = end_tile;
                 }
             }
-            from += length;
+            from += len;
         }
-        if start < samples.len() {
+        if start < src.len() {
             if !signed || start.is_multiple_of(4) {
-                hist[tile(start)][16] += 2;
+                hist[tile_of(start)][16] += 2;
             }
             from = start + usize::from(packed & 4095) + 1;
         }
     }
-    let mut order: Vec<_> = average
+    let mut order: Vec<_> = avg
         .into_iter()
         .enumerate()
         .map(|(tile, (total, n))| ((u64::from(total) << 16) / u64::from(n.max(1)), tile))
         .collect();
     order.sort_unstable();
-    let mut groups = vec![0u8; tile_count];
+    let mut map = vec![0u8; ntiles];
     for (rank, (_, tile)) in order.into_iter().enumerate() {
-        groups[tile] = (rank * count / tile_count) as u8;
+        map[tile] = (rank * count / ntiles) as u8;
     }
     for _ in 0..rounds {
         let mut tables = [[1u32; BINS]; GROUPS];
-        for (&g, h) in groups.iter().zip(&hist) {
+        for (&g, h) in map.iter().zip(&hist) {
             for (a, &n) in tables[g as usize].iter_mut().zip(h) {
                 *a += 2 * u32::from(n);
             }
@@ -427,8 +402,8 @@ pub(super) fn clustered(
             let log = log_cost(table.iter().sum());
             table.map(|n| log - log_cost(n))
         });
-        for (group, h) in groups.iter_mut().zip(&hist) {
-            *group = (0..count)
+        for (g, h) in map.iter_mut().zip(&hist) {
+            *g = (0..count)
                 .min_by_key(|&g| {
                     costs[g]
                         .iter()
@@ -438,29 +413,29 @@ pub(super) fn clustered(
                 })
                 .unwrap() as u8;
         }
-        check_cancelled(cancelled)?;
+        check_cancelled(cancel)?;
     }
     let mut sizes = [0u32; GROUPS];
-    for &g in &groups {
+    for &g in &map {
         sizes[g as usize] += 1;
     }
-    let mut group_count = 0u8;
-    let mut counts = [0; GREEN_SYMBOLS];
-    let map = sizes.map(|n| {
-        let g = group_count;
+    let mut ngroups = 0u8;
+    let mut green_hist = [0; GREEN_SYMBOLS];
+    let remap = sizes.map(|n| {
+        let g = ngroups;
         if n > 0 {
-            counts[g as usize] = n;
-            group_count += 1;
+            green_hist[g as usize] = n;
+            ngroups += 1;
         }
         g
     });
-    for g in &mut groups {
-        *g = map[*g as usize];
+    for g in &mut map {
+        *g = remap[*g as usize];
     }
     Ok(Tiles {
-        groups,
-        group_count: usize::from(group_count),
-        counts,
+        map,
+        ngroups: usize::from(ngroups),
+        hist: green_hist,
         side,
     })
 }
@@ -475,8 +450,8 @@ fn log_cost(n: u32) -> u32 {
         115, 115, 116, 117, 118, 118, 119, 120, 121, 121, 122, 123, 124, 124, 125, 126, 127, 127,
     ];
     let log = n.ilog2();
-    let fraction = ((n << (31 - log)) >> 24) & 127;
-    log * 128 + u32::from(FRACTION[fraction as usize])
+    let frac = ((n << (31 - log)) >> 24) & 127;
+    log * 128 + u32::from(FRACTION[frac as usize])
 }
 
 #[cfg(test)]
@@ -484,44 +459,39 @@ mod tests {
     use super::*;
 
     #[test]
-    fn grouped_alpha_decodes_a_copy_across_entropy_groups() {
-        let (width, height) = (51, 3);
-        let mut samples = vec![0; width * height];
-        let copies: Vec<_> = samples
-            .chunks_exact_mut(width)
+    fn copy_across_groups() {
+        let (w, h) = (51, 3);
+        let mut src = vec![0; w * h];
+        let copies: Vec<_> = src
+            .chunks_exact_mut(w)
             .enumerate()
             .map(|(y, row)| {
                 row[15..33].fill(3);
-                // This copy begins in the middle tile and ends in the next.
-                // Its length is the only green symbol in its entropy group.
-                ((y * width + 16) as u32, 16 | (1 << 12))
+                // Copy starts in middle tile and ends in the next.
+                ((y * w + 16) as u32, 16 | (1 << 12))
             })
             .collect();
-        let tiles = classify(&samples, width, &|| false).unwrap().unwrap();
+        let tiles = classify(&src, w, &|| false).unwrap().unwrap();
         let alpha = codes_for(
             &tiles,
-            &samples,
-            width,
+            &src,
+            w,
             Bits::bare(Stream::Filtered(1)),
             255,
             &copies,
             &|| false,
         )
         .unwrap()
-        .write(&tiles, &samples, width, &copies, &|| false)
+        .write(&tiles, &src, w, &copies, &|| false)
         .unwrap();
-        let rgba: Vec<_> = samples
-            .iter()
-            .flat_map(|&alpha| [12, 93, 160, alpha])
-            .collect();
-        let mut options = crate::EncodeOptions::with_workers(80, 1);
-        options.has_transparency = Some(false);
-        let mut frame =
-            crate::encoder::encode(&rgba, width as u32, height as u32, options, &|| false).unwrap();
+        let rgba: Vec<_> = src.iter().flat_map(|&a| [12, 93, 160, a]).collect();
+        let mut opts = crate::EncodeOptions::with_workers(80, 1);
+        opts.has_transparency = Some(false);
+        let mut frame = crate::encoder::encode(&rgba, w as u32, h as u32, opts, &|| false).unwrap();
         frame.alpha = Some(alpha);
         let decoded = image::load_from_memory(&frame.into_bytes())
             .unwrap()
             .into_rgba8();
-        assert!(decoded.as_raw().iter().skip(3).step_by(4).eq(&samples));
+        assert!(decoded.as_raw().iter().skip(3).step_by(4).eq(&src));
     }
 }

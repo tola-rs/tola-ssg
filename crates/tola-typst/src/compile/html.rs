@@ -198,7 +198,7 @@ fn with_session(
 mod tests {
     use super::*;
 
-    use crate::world::file::{FileMap, FileResolver, file_id};
+    use crate::world::file::{FileMap, FileStore, file_id};
     use std::fs;
     use std::path::Path;
     use std::sync::Arc;
@@ -212,18 +212,18 @@ mod tests {
     }
 
     #[test]
-    fn missing_package_names_every_directory() {
+    fn missing_pkg_lists_searched() {
         let dir = TempDir::new().unwrap();
         let main = dir.path().join("main.typ");
         fs::write(&main, "#import \"@preview/absent:1.0.0\": value\n#value").unwrap();
-        let declared_packages = dir.path().join("packages");
-        fs::create_dir_all(&declared_packages).unwrap();
+        let declared_pkgs = dir.path().join("packages");
+        fs::create_dir_all(&declared_pkgs).unwrap();
         let locations = crate::world::package::PackageLocations::default()
-            .with_declared_root(declared_packages.clone())
+            .with_declared_root(declared_pkgs.clone())
             .unwrap();
-        let files = FileResolver::from_package_locations(
+        let files = FileStore::from_package_locations(
             locations,
-            crate::world::package::PackageFetchPolicy::LocalOnly,
+            crate::world::package::PackageFetchMode::LocalOnly,
         );
         let world = world(dir.path(), &main)
             .with_files(Arc::new(files))
@@ -231,32 +231,32 @@ mod tests {
             .unwrap();
 
         let failure = compile_world_with_evidence(&world).unwrap_err();
-        let diagnostics = failure.error().diagnostics().unwrap();
-        let failure = diagnostics
+        let diags = failure.error().diagnostics().unwrap();
+        let pkg_failure = diags
             .iter()
-            .find_map(|diagnostic| diagnostic.package_failure.as_ref())
+            .find_map(|diag| diag.package_failure.as_ref())
             .expect("the import reports a package that could not be provided");
 
-        assert_eq!(failure.package, "@preview/absent:1.0.0");
+        assert_eq!(pkg_failure.package, "@preview/absent:1.0.0");
         assert_eq!(
-            failure.reason,
-            crate::diagnostic::ResolvedPackageFailureReason::NotInstalled
+            pkg_failure.reason,
+            crate::diagnostic::PackageFailureReason::NotInstalled
         );
-        assert_eq!(failure.searched.len(), 1);
-        assert_eq!(failure.searched[0].root, declared_packages);
+        assert_eq!(pkg_failure.searched.len(), 1);
+        assert_eq!(pkg_failure.searched[0].root, declared_pkgs);
         assert_eq!(
-            failure.searched[0].candidate,
-            declared_packages.join("preview/absent/1.0.0")
+            pkg_failure.searched[0].candidate,
+            declared_pkgs.join("preview/absent/1.0.0")
         );
     }
 
     #[test]
-    fn compiler_uses_its_own_resolver() {
+    fn compile_uses_resolver() {
         let dir = TempDir::new().unwrap();
         let file = dir.path().join("test.typ");
         fs::write(&file, r#"#read("/provided.txt")"#).unwrap();
 
-        let compile = |files: FileResolver| -> String {
+        let compile = |files: FileStore| -> String {
             let built = world(dir.path(), &file)
                 .with_files(Arc::new(files))
                 .build(&crate::BundleCancellation::default())
@@ -267,11 +267,11 @@ mod tests {
 
         let mut first = FileMap::new();
         first.insert(file_id("/provided.txt"), b"first".to_vec());
-        let first = compile(FileResolver::new().with_provider(first));
+        let first = compile(FileStore::new().with_provider(first));
 
         let mut second = FileMap::new();
         second.insert(file_id("/provided.txt"), b"second".to_vec());
-        let second = compile(FileResolver::new().with_provider(second));
+        let second = compile(FileStore::new().with_provider(second));
 
         assert!(first.contains("first"), "{first}");
         assert!(second.contains("second"), "{second}");

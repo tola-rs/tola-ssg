@@ -9,7 +9,7 @@ use anyhow::Result;
 use lsp_types::{DocumentLink, Hover};
 use tola_build::cancellation::BuildCancellation;
 use tola_build::check::SourceCompilation;
-use tola_build::config::ResolvedSiteConfig;
+use tola_build::config::SiteConfig;
 use tola_typst::typst::foundations::{PathOrStr, Value};
 use tola_typst::typst::loading::DataSource;
 use tola_typst::typst::model::CslSource;
@@ -53,12 +53,12 @@ impl Link {
 /// build cannot read it either.
 pub(super) fn hover(
     compilation: &SourceCompilation,
-    config: &ResolvedSiteConfig,
+    config: &SiteConfig,
     source: &Source,
     cursor: usize,
     cancellation: &BuildCancellation,
 ) -> Result<Option<Hover>> {
-    let root = tola_input::normalize_existing_prefix(config.get_root());
+    let root = tola_input::normalize_existing_prefix(config.root());
     let links = declared(source);
     let Some(link) = holding(&links, cursor) else {
         return Ok(None);

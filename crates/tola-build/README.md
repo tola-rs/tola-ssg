@@ -1,14 +1,10 @@
 # tola-build
 
-Builds a Tola site: analyzes the sources, compiles the root Typst Bundle through `tola-typst`,
-and converges documents, assets, icons, feeds, sitemaps, and hook output into one output graph.
-Every attempt produces one candidate: its output graph and diagnostics. A validated candidate
-is published whole, or installed whole as the next revision; there is no partial publication.
+Builds, validates, and publishes Tola sites.
 
-Hooks run in three stages: `before-build` prepares declared inputs, `generate-outputs` adds
-outputs to the candidate graph, and `after-publish` reads the committed output.
+Compiles the root Typst Bundle through `tola-typst`, merges documents, assets, icons, feeds, sitemaps, and hook outputs into one output graph, and publishes validated builds atomically.
 
-## Build and write
+## Usage
 
 ```rust,no_run
 use std::path::Path;
@@ -31,21 +27,6 @@ if let Err(error) = written.run_after_publish(&Default::default()) {
 # Ok::<(), anyhow::Error>(())
 ```
 
-Keep the session and call `build_and_write` after edits. It recovers an interrupted publish, runs
-the before-build hooks, builds, rechecks inputs, replaces the output directory, and reuses caches.
-A failure or cancellation before installation leaves the previous output untouched.
-
-After-publish hooks run as a separate step: `WriteOutcome` keeps the committed graph,
-configuration, and mode, and `run_after_publish` executes its consumers. For a build without
-publishing, `build_site` returns a `SiteBuild` with its graph and diagnostics.
-
-Diagnostics keep their messages and call traces; `Diagnostic::display_message()` provides the
-site's panic sentence for presentation without changing the stored message. Source excerpts carry
-their starting columns, so clients can locate clipped text within the original UTF-16 range.
-
-## Custom scheduling
-
-`BuildSession::prepare` with a `BuildRequest` produces a `BuildAttempt` to run on your own
-worker; `BuildResources` sets the invocation's input scope. With your own revision store, check
-candidates with `UncheckedRevision::check` and install them through
-`BuildSession::install_revision`.
+- Reuse `BuildSession` across rebuilds to keep caches and recover interrupted publishes.
+- Use `build_site` to validate without writing to disk, or `BuildSession::prepare` / `install_revision` for custom scheduling.
+- See [`CONTEXT.md`](CONTEXT.md) for module layout and invariants.

@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 use typst::foundations::Value;
 
 use crate::cancellation::BuildCancellation;
-use crate::config::ResolvedSiteConfig;
+use crate::config::SiteConfig;
 use crate::seo::RenderError;
 use crate::seo::declaration::{SeoDeclaration, TargetAnchor, index_path, resolve_document};
 
@@ -14,7 +14,7 @@ use crate::seo::declaration::{SeoDeclaration, TargetAnchor, index_path, resolve_
 const NOT_FOUND_OUTPUT: &str = "404.html";
 
 pub(super) fn render_outputs(
-    config: &ResolvedSiteConfig,
+    config: &SiteConfig,
     compilation: &tola_typst::BundleCompilation,
     cancellation: &BuildCancellation,
 ) -> Result<super::RenderedOutputs, RenderError> {

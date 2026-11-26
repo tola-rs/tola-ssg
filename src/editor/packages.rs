@@ -12,7 +12,7 @@ use crate::terminal::{display_path_as_given, display_path_within};
 use crate::writes::FileWrites;
 
 use tola_build::cancellation::BuildCancellation;
-use tola_build::config::ResolvedSiteConfig;
+use tola_build::config::SiteConfig;
 use tola_input::{FilesystemSourceIdentity, layout};
 use tola_typst::{PackageLocations, SourceBoundary};
 
@@ -502,11 +502,11 @@ pub(crate) fn initial_package_inputs(
 }
 
 pub(crate) fn prepare_package_inputs(
-    config: &ResolvedSiteConfig,
+    config: &SiteConfig,
     resources: &tola_build::BuildResources,
 ) -> Result<EditorPackageInputs> {
     package_inputs(
-        config.get_root(),
+        config.root(),
         &resources.package_locations(config),
         &resources.source_boundary(config),
         &Default::default(),
@@ -816,7 +816,6 @@ mod tests {
     use tola_fs::link_directory;
 
     #[cfg(unix)]
-    /// The site configuration `path` selects under `packages`, with no overrides.
     fn loaded_config(
         path: &Path,
         packages: tola_typst::PackageLocations,
@@ -831,104 +830,100 @@ mod tests {
     }
 
     #[test]
-    fn cancelled_initial_inputs_stop_preparation() {
-        let directory = tempfile::tempdir().unwrap();
-        let canceller = tola_build::cancellation::BuildCanceller::new();
-        canceller.cancel();
-        let error = initial_package_inputs(
-            directory.path(),
+    fn cancelled_inputs_stop_prepare() {
+        let dir = tempfile::tempdir().unwrap();
+        let cancel = tola_build::cancellation::BuildCanceller::new();
+        cancel.cancel();
+        let err = initial_package_inputs(
+            dir.path(),
             &tola_typst::PackageLocations::default(),
-            &canceller.token(),
+            &cancel.token(),
         )
         .err()
         .expect("cancelled preparation must stop");
-
-        assert!(error.is::<tola_build::cancellation::BuildCancelled>());
+        assert!(err.is::<tola_build::cancellation::BuildCancelled>());
     }
 
     #[test]
-    fn obsolete_package_versions_are_removed() {
-        let directory = tempfile::tempdir().unwrap();
-        let obsolete = layout::builtin_packages(directory.path()).join("tola/source/9.9.9");
-        std::fs::create_dir_all(&obsolete).unwrap();
-        std::fs::write(obsolete.join("lib.typ"), "old").unwrap();
-        let unrelated = directory.path().join("keep.txt");
-        std::fs::write(&unrelated, "keep").unwrap();
+    fn obsolete_versions_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let obsolete = layout::builtin_packages(dir.path()).join("tola/source/9.9.9");
+        fs::create_dir_all(&obsolete).unwrap();
+        fs::write(obsolete.join("lib.typ"), "old").unwrap();
+        let keep = dir.path().join("keep.txt");
+        fs::write(&keep, "keep").unwrap();
 
-        assert!(remove_obsolete_package_paths(directory.path()).unwrap() >= 1);
+        assert!(remove_obsolete_package_paths(dir.path()).unwrap() >= 1);
         assert!(!obsolete.exists());
-        assert_eq!(std::fs::read_to_string(unrelated).unwrap(), "keep");
+        assert_eq!(fs::read_to_string(keep).unwrap(), "keep");
     }
 
     #[test]
     #[cfg(any(unix, windows))]
-    fn obsolete_link_removal_spares_its_target() {
-        let directory = tempfile::tempdir().unwrap();
-        let external = tempfile::tempdir().unwrap();
-        let target_file = external.path().join("lib.typ");
-        fs::write(&target_file, "external package").unwrap();
-        let obsolete = layout::builtin_packages(directory.path()).join("tola/source/9.9.9");
+    fn obsolete_link_spares_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let ext = tempfile::tempdir().unwrap();
+        let target = ext.path().join("lib.typ");
+        fs::write(&target, "external package").unwrap();
+        let obsolete = layout::builtin_packages(dir.path()).join("tola/source/9.9.9");
         fs::create_dir_all(obsolete.parent().unwrap()).unwrap();
-        link_directory(external.path(), &obsolete).unwrap();
+        link_directory(ext.path(), &obsolete).unwrap();
 
-        remove_obsolete_package_paths(directory.path()).unwrap();
+        remove_obsolete_package_paths(dir.path()).unwrap();
 
         assert_eq!(
             fs::symlink_metadata(&obsolete).unwrap_err().kind(),
-            std::io::ErrorKind::NotFound
+            io::ErrorKind::NotFound
         );
-        assert!(external.path().is_dir());
-        assert_eq!(fs::read_to_string(target_file).unwrap(), "external package");
+        assert!(ext.path().is_dir());
+        assert_eq!(fs::read_to_string(target).unwrap(), "external package");
     }
 
     #[test]
     #[cfg(unix)]
-    fn expected_package_symlink_is_rejected() {
-        let external = tempfile::tempdir().unwrap();
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("tola.toml");
-        std::fs::write(&path, "").unwrap();
+    fn package_symlink_rejected() {
+        let ext = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tola.toml");
+        fs::write(&path, "").unwrap();
         let loaded = loaded_config(&path, tola_typst::PackageLocations::default());
-        let config = loaded.config();
-        let package = layout::builtin_packages(config.get_root()).join("tola/source/0.0.0");
-        std::fs::create_dir_all(package.parent().unwrap()).unwrap();
-        std::os::unix::fs::symlink(external.path(), &package).unwrap();
-        let directory = crate::editor::EditorDirectory::from_config(config).unwrap();
-        let package_inputs = prepare_package_inputs(config, &Default::default()).unwrap();
-        let error = crate::editor::setup(&directory, &[], package_inputs, false)
+        let cfg = loaded.config();
+        let pkg = layout::builtin_packages(cfg.root()).join("tola/source/0.0.0");
+        fs::create_dir_all(pkg.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(ext.path(), &pkg).unwrap();
+        let editor_dir = crate::editor::EditorDirectory::from_config(cfg).unwrap();
+        let inputs = prepare_package_inputs(cfg, &Default::default()).unwrap();
+        let err = crate::editor::setup(&editor_dir, &[], inputs, false)
             .err()
             .expect("symlinked generated package path unexpectedly accepted");
 
-        assert!(error.to_string().contains("symbolic link"));
-        assert!(std::fs::read_dir(external.path()).unwrap().next().is_none());
+        assert!(err.to_string().contains("symbolic link"));
+        assert!(fs::read_dir(ext.path()).unwrap().next().is_none());
     }
 
     #[test]
-    fn extra_package_files_are_obsolete() {
-        let directory = tempfile::tempdir().unwrap();
-        let version = layout::builtin_packages(directory.path()).join("tola/source/0.0.0");
-        std::fs::create_dir_all(&version).unwrap();
-        std::fs::write(version.join("lib.typ"), "current").unwrap();
-        std::fs::write(version.join("typst.toml"), "current").unwrap();
-        let extra = version.join("extra.typ");
-        std::fs::write(&extra, "extra").unwrap();
+    fn extra_files_marked_obsolete() {
+        let dir = tempfile::tempdir().unwrap();
+        let ver = layout::builtin_packages(dir.path()).join("tola/source/0.0.0");
+        fs::create_dir_all(&ver).unwrap();
+        fs::write(ver.join("lib.typ"), "current").unwrap();
+        fs::write(ver.join("typst.toml"), "current").unwrap();
+        let extra = ver.join("extra.typ");
+        fs::write(&extra, "extra").unwrap();
 
-        let obsolete = obsolete_package_paths(directory.path()).unwrap();
-
+        let obsolete = obsolete_package_paths(dir.path()).unwrap();
         assert!(obsolete.contains(&extra));
-        assert!(!obsolete.contains(&version));
+        assert!(!obsolete.contains(&ver));
     }
 
-    /// A generated directory below a version stays: only paths the generated files do not name
-    /// are removed.
     #[test]
-    fn nested_generated_files_are_current() {
-        let directory = tempfile::tempdir().unwrap();
-        let version = layout::builtin_packages(directory.path()).join("tola/code/0.0.0");
-        let theme = version.join("code-themes/zenburn.tmTheme");
-        std::fs::create_dir_all(theme.parent().unwrap()).unwrap();
-        std::fs::write(version.join("lib.typ"), "code").unwrap();
-        std::fs::write(&theme, "theme").unwrap();
+    fn nested_generated_files_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let ver = layout::builtin_packages(dir.path()).join("tola/code/0.0.0");
+        let theme = ver.join("code-themes/zenburn.tmTheme");
+        fs::create_dir_all(theme.parent().unwrap()).unwrap();
+        fs::write(ver.join("lib.typ"), "code").unwrap();
+        fs::write(&theme, "theme").unwrap();
         let mirror = layout::builtin_packages_relative().join("tola/code/0.0.0");
         let generated = vec![
             (mirror.join("lib.typ"), Cow::Borrowed("code")),
@@ -938,22 +933,17 @@ mod tests {
             ),
         ];
 
-        let obsolete =
-            collect_obsolete_package_paths(directory.path(), &generated, &Default::default())
-                .unwrap()
-                .paths;
-
+        let obsolete = collect_obsolete_package_paths(dir.path(), &generated, &Default::default())
+            .unwrap()
+            .paths;
         assert!(obsolete.is_empty(), "{obsolete:?}");
     }
 
-    /// The generated views hold every package the compiler resolves, so a definition into any
-    /// builtin package has a file an editor can open.
     #[test]
     fn generated_files_cover_packages() {
         let files = generated_package_files();
-
-        for package in tola_packages::resolvable_packages() {
-            let spec = package.spec();
+        for pkg in tola_packages::resolvable_packages() {
+            let spec = pkg.spec();
             let root = layout::builtin_packages_relative()
                 .join(spec.namespace.as_str())
                 .join(spec.name.as_str())
@@ -967,52 +957,47 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn editor_inputs_prefer_embedded_versions() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("tola.toml");
+    fn editor_inputs_prefer_embedded() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tola.toml");
         fs::write(&path, "").unwrap();
         let local = tempfile::tempdir().unwrap();
-        for relative in [
+        for rel in [
             "local/example/0.1.0",
             "tola/site/0.0.0",
             "tola/site/4.0.0",
             "tola/custom/0.1.0",
         ] {
-            let directory = local.path().join(relative);
-            fs::create_dir_all(&directory).unwrap();
-            fs::write(directory.join("lib.typ"), relative).unwrap();
+            let sub = local.path().join(rel);
+            fs::create_dir_all(&sub).unwrap();
+            fs::write(sub.join("lib.typ"), rel).unwrap();
         }
-        let packages = tola_typst::PackageLocations::from_absolute_roots(
+        let pkgs = tola_typst::PackageLocations::from_absolute_roots(
             Some(local.path().to_path_buf()),
             None,
         )
         .unwrap();
-        let loaded = loaded_config(&path, packages);
-        let config = loaded.config();
-        let inputs = prepare_package_inputs(config, &Default::default()).unwrap();
-        assert!(!layout::editor_packages(directory.path()).exists());
-        let mut writes = FileWrites::new(config.get_root()).unwrap();
+        let loaded = loaded_config(&path, pkgs);
+        let cfg = loaded.config();
+        let inputs = prepare_package_inputs(cfg, &Default::default()).unwrap();
+        assert!(!layout::editor_packages(dir.path()).exists());
+        let mut writes = FileWrites::new(cfg.root()).unwrap();
         add_editor_package_replacements(&mut writes).unwrap();
         writes.apply(&Default::default()).unwrap();
         inputs.apply(&Default::default()).unwrap();
 
-        assert_eq!(
-            fs::read_to_string(inputs.view.join("local/example/0.1.0/lib.typ")).unwrap(),
-            "local/example/0.1.0"
-        );
-        assert_eq!(
-            fs::read_to_string(inputs.view.join("tola/site/4.0.0/lib.typ")).unwrap(),
-            "tola/site/4.0.0"
-        );
-        assert_eq!(
-            fs::read_to_string(inputs.view.join("tola/custom/0.1.0/lib.typ")).unwrap(),
-            "tola/custom/0.1.0"
-        );
+        for rel in [
+            "local/example/0.1.0",
+            "tola/site/4.0.0",
+            "tola/custom/0.1.0",
+        ] {
+            assert_eq!(
+                fs::read_to_string(inputs.view.join(rel).join("lib.typ")).unwrap(),
+                rel
+            );
+        }
         let mirrored = fs::read_to_string(inputs.view.join("tola/site/0.0.0/lib.typ")).unwrap();
-        assert_ne!(
-            mirrored, "tola/site/0.0.0",
-            "the local copy must not answer for a builtin version"
-        );
+        assert_ne!(mirrored, "tola/site/0.0.0");
         assert_eq!(
             mirrored,
             tola_packages::TolaPackage::Site
@@ -1030,7 +1015,7 @@ mod tests {
             "edited on disk"
         );
         fs::remove_dir_all(local.path().join("local")).unwrap();
-        let refreshed = prepare_package_inputs(config, &Default::default()).unwrap();
+        let refreshed = prepare_package_inputs(cfg, &Default::default()).unwrap();
         refreshed.apply(&Default::default()).unwrap();
         assert!(fs::symlink_metadata(inputs.view.join("local")).is_err());
         assert!(local.path().join("tola/site/0.0.0/lib.typ").is_file());
@@ -1038,19 +1023,19 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn unsafe_package_root_aborts_setup() {
-        let directory = tempfile::tempdir().unwrap();
-        let external = tempfile::tempdir().unwrap();
-        let config_path = directory.path().join("tola.toml");
-        fs::write(&config_path, "").unwrap();
-        let view = layout::editor_packages(directory.path());
+    fn symlinked_package_view_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let ext = tempfile::tempdir().unwrap();
+        let cfg_path = dir.path().join("tola.toml");
+        fs::write(&cfg_path, "").unwrap();
+        let view = layout::editor_packages(dir.path());
         fs::create_dir_all(view.parent().unwrap()).unwrap();
-        link_directory(external.path(), &view).unwrap();
-        let config = loaded_config(&config_path, tola_typst::PackageLocations::default());
-        let error = prepare_package_inputs(config.config(), &Default::default())
+        link_directory(ext.path(), &view).unwrap();
+        let cfg = loaded_config(&cfg_path, tola_typst::PackageLocations::default());
+        let err = prepare_package_inputs(cfg.config(), &Default::default())
             .err()
             .expect("symlinked package view unexpectedly accepted");
 
-        assert!(error.to_string().contains("is not a directory"), "{error}");
+        assert!(err.to_string().contains("is not a directory"), "{err}");
     }
 }

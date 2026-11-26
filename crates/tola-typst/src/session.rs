@@ -368,7 +368,7 @@ impl<'a> CompileSession<'a> {
         self.cancellation
             .ensure_active()
             .err()
-            .unwrap_or_else(|| CompileError::from_resolved(diagnostics))
+            .unwrap_or_else(|| CompileError::from_diagnostics(diagnostics))
     }
 
     /// The site files that import each package this session read.
@@ -420,7 +420,7 @@ impl<'a> CompileSession<'a> {
     ///
     /// Reads are recorded once per file, so a failed package read appears once even
     /// when several diagnostics report it.
-    fn package_failures(&self) -> Vec<crate::diagnostic::ResolvedPackageFailure> {
+    fn package_failures(&self) -> Vec<crate::diagnostic::PackageFailure> {
         let mut failures = Vec::new();
         for slot in self.files.slots.read().values() {
             let typst::syntax::VirtualRoot::Package(package) = slot.id.root() else {
@@ -433,12 +433,12 @@ impl<'a> CompileSession<'a> {
             };
             let searched = checks
                 .iter()
-                .map(|check| crate::diagnostic::ResolvedPackageSearch {
+                .map(|check| crate::diagnostic::PackageSearch {
                     root: check.root().to_path_buf(),
                     candidate: check.candidate().to_path_buf(),
                 })
                 .collect::<Vec<_>>();
-            failures.push(crate::diagnostic::ResolvedPackageFailure {
+            failures.push(crate::diagnostic::PackageFailure {
                 package: package.to_string(),
                 reason,
                 searched,
@@ -458,51 +458,40 @@ impl<'a> CompileSession<'a> {
         crate::diagnostic::package_imports::imported_package(&loaded.value, diagnostic.span)
     }
 
-    fn read_source(&self, id: FileId) -> FileResult<Source> {
-        self.files.slot(id).source(self)
+    fn read_source(&self, fid: FileId) -> FileResult<Source> {
+        self.files.slot(fid).source(self)
     }
 
-    fn read_file(&self, id: FileId) -> FileResult<Bytes> {
-        self.files.slot(id).file(self)
+    fn read_file(&self, fid: FileId) -> FileResult<Bytes> {
+        self.files.slot(fid).file(self)
     }
 }
 
 /// What a read that never reached an installed package observed.
 fn unresolved_package<T>(
     attempt: Option<&ReadAttempt<T>>,
-) -> Option<(
-    &[PackageCheck],
-    crate::diagnostic::ResolvedPackageFailureReason,
-)> {
+) -> Option<(&[PackageCheck], crate::diagnostic::PackageFailureReason)> {
     let attempt = attempt?;
     let reason = unresolved_package_reason(attempt.result.as_ref().err()?)?;
     Some((&attempt.package_checks, reason))
 }
 
 /// Why a package could not be provided, when a read never reached one.
-///
-/// A package that is present but missing a file inside it fails differently, and a
-/// version Typst itself names fails differently again, so neither answers here.
-fn unresolved_package_reason(
-    error: &FileError,
-) -> Option<crate::diagnostic::ResolvedPackageFailureReason> {
-    use crate::diagnostic::ResolvedPackageFailureReason;
+fn unresolved_package_reason(err: &FileError) -> Option<crate::diagnostic::PackageFailureReason> {
+    use crate::diagnostic::PackageFailureReason;
     use typst::diag::PackageError;
 
-    match error {
-        FileError::Package(PackageError::NotFound(_)) => {
-            Some(ResolvedPackageFailureReason::NotInstalled)
-        }
+    match err {
+        FileError::Package(PackageError::NotFound(_)) => Some(PackageFailureReason::NotInstalled),
         FileError::Package(
             PackageError::NetworkFailed(_)
             | PackageError::MalformedArchive(_)
             | PackageError::Other(_),
-        ) => Some(ResolvedPackageFailureReason::Unavailable),
+        ) => Some(PackageFailureReason::Unavailable),
         _ => None,
     }
 }
 
-/// The compilation-relative path of a site file, when a read locator names one.
 fn site_path(locator: &ReadLocator) -> Option<String> {
     match locator {
         ReadLocator::Root(path) | ReadLocator::ProvidedRoot(path) => {
@@ -533,15 +522,15 @@ impl World for CompileSession<'_> {
         self.main
     }
 
-    fn source(&self, id: FileId) -> FileResult<Source> {
-        self.read_source(id)
+    fn source(&self, fid: FileId) -> FileResult<Source> {
+        self.read_source(fid)
     }
 
-    fn file(&self, id: FileId) -> FileResult<Bytes> {
-        if id == *SOURCE_CAPTURE_FILE {
+    fn file(&self, fid: FileId) -> FileResult<Bytes> {
+        if fid == *SOURCE_CAPTURE_FILE {
             return Ok(self.source_capture.read());
         }
-        self.read_file(id)
+        self.read_file(fid)
     }
 
     fn font(&self, index: usize) -> Option<Font> {
@@ -563,10 +552,10 @@ impl SessionFile {
     fn source(&self, session: &CompileSession<'_>) -> FileResult<Source> {
         self.source
             .get_or_init(|| {
-                let read = session
-                    .view
-                    .read_with_cancellation(self.id, session.cancellation);
-                session.world.source_from_read(&session.view, self.id, read)
+                let attempt = session.view.read_cancellable(self.id, session.cancellation);
+                session
+                    .world
+                    .source_from_read(&session.view, self.id, attempt)
             })
             .result
             .as_ref()
@@ -577,10 +566,10 @@ impl SessionFile {
     fn file(&self, session: &CompileSession<'_>) -> FileResult<Bytes> {
         self.bytes
             .get_or_init(|| {
-                let read = session
-                    .view
-                    .read_with_cancellation(self.id, session.cancellation);
-                session.world.file_from_read(&session.view, self.id, read)
+                let attempt = session.view.read_cancellable(self.id, session.cancellation);
+                session
+                    .world
+                    .file_from_read(&session.view, self.id, attempt)
             })
             .result
             .as_ref()
@@ -602,14 +591,14 @@ impl Default for SessionFiles {
 }
 
 impl SessionFiles {
-    fn slot(&self, id: FileId) -> Arc<SessionFile> {
-        if let Some(slot) = self.slots.read().get(&id) {
+    fn slot(&self, fid: FileId) -> Arc<SessionFile> {
+        if let Some(slot) = self.slots.read().get(&fid) {
             return Arc::clone(slot);
         }
 
-        Arc::clone(self.slots.write().entry(id).or_insert_with(|| {
+        Arc::clone(self.slots.write().entry(fid).or_insert_with(|| {
             Arc::new(SessionFile {
-                id,
+                id: fid,
                 source: OnceLock::new(),
                 bytes: OnceLock::new(),
             })
@@ -639,12 +628,11 @@ impl SessionFiles {
     }
 }
 
-/// Add every input one initialized slot attempt observed to the frozen evidence.
 fn extend_observed_inputs<T>(deps: &mut AccessedDeps, attempt: Option<&ReadAttempt<T>>) {
     let Some(attempt) = attempt else {
         return;
     };
-    deps.reads.extend(attempt.reads.iter().cloned());
+    deps.reads.extend(attempt.read.iter().cloned());
     deps.disk_reads.extend(attempt.disk_reads.iter().cloned());
     deps.package_checks
         .extend(attempt.package_checks.iter().cloned());
@@ -665,11 +653,11 @@ mod tests {
     fn world_with(
         dir: &TempDir,
         main: &str,
-        source: &str,
+        src: &str,
         configure: impl FnOnce(crate::world::WorldBuilder) -> crate::world::WorldBuilder,
     ) -> TypstWorld {
         let path = dir.path().join(main);
-        fs::write(&path, source).unwrap();
+        fs::write(&path, src).unwrap();
         configure(
             TypstWorld::builder(&path, dir.path())
                 .with_local_cache()
@@ -684,7 +672,7 @@ mod tests {
     }
 
     #[test]
-    fn each_session_observes_one_file_version() {
+    fn session_pins_file_version() {
         let dir = TempDir::new().unwrap();
         let main = dir.path().join("main.typ");
         let cache = Arc::new(SharedFileCache::new());

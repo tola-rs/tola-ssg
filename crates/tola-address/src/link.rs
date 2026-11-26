@@ -4,13 +4,9 @@
 fn is_external_link(link: &str) -> bool {
     link.starts_with("//")
         || link.split_once(':').is_some_and(|(scheme, _)| {
-            let mut characters = scheme.chars();
-            characters
-                .next()
-                .is_some_and(|first| first.is_ascii_alphabetic())
-                && characters.all(|character| {
-                    character.is_ascii_alphanumeric() || matches!(character, '+' | '-' | '.')
-                })
+            let mut chars = scheme.chars();
+            chars.next().is_some_and(|ch| ch.is_ascii_alphabetic())
+                && chars.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '+' | '-' | '.'))
         })
 }
 
@@ -18,22 +14,20 @@ fn is_external_link(link: &str) -> bool {
 pub struct DestinationParts<'a> {
     /// Destination path with the query and fragment removed.
     pub path: &'a str,
-    /// Query without the leading question mark.
+    /// Query without the leading `?`.
     pub query: Option<&'a str>,
-    /// Fragment without the leading hash sign, with escapes preserved.
+    /// Fragment without the leading `#`, with escapes preserved.
     pub fragment: Option<&'a str>,
 }
 
 #[inline]
-pub fn split_destination(destination: &str) -> DestinationParts<'_> {
-    let (path_and_query, fragment) = destination
+pub fn split_destination(dst: &str) -> DestinationParts<'_> {
+    let (path_query, fragment) = dst
         .split_once('#')
-        .map_or((destination, None), |(path, fragment)| {
-            (path, Some(fragment))
-        });
-    let (path, query) = path_and_query
+        .map_or((dst, None), |(p, f)| (p, Some(f)));
+    let (path, query) = path_query
         .split_once('?')
-        .map_or((path_and_query, None), |(path, query)| (path, Some(query)));
+        .map_or((path_query, None), |(p, q)| (p, Some(q)));
     DestinationParts {
         path,
         query,
@@ -53,12 +47,12 @@ pub enum LinkKind<'a> {
     FileRelative(&'a str),
 }
 
-/// The resource kind a reference must resolve to.
+/// Resource kind a reference must resolve to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RequiredResourceKind {
-    /// The destination may be an HTML document or a non-document resource.
+    /// Destination may be an HTML document or a non-document resource.
     DocumentOrResource,
-    /// The destination must be a non-document resource.
+    /// Destination must be a non-document resource.
     NonDocumentResource,
 }
 
@@ -84,7 +78,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn link_spellings_get_their_kind() {
+    fn link_kind_parse() {
         for (link, expected) in [
             (
                 "https://example.com",
@@ -117,9 +111,8 @@ mod tests {
     }
 
     #[test]
-    fn browser_destination_splits() {
+    fn split_destination_parts() {
         let parts = split_destination("/search/?q=rust#res%20ults");
-
         assert_eq!(parts.path, "/search/");
         assert_eq!(parts.query, Some("q=rust"));
         assert_eq!(parts.fragment, Some("res%20ults"));

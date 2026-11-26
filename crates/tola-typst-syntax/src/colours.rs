@@ -1,8 +1,4 @@
 //! The colours one source writes.
-//!
-//! A colour is `rgb` called with a spelling Typst itself reads, so a caller can paint the swatch
-//! without compiling the site. A form the reader cannot decide is left unanswered rather than
-//! guessed at.
 
 use std::ops::Range;
 use std::str::FromStr;
@@ -20,63 +16,57 @@ pub struct Colour {
 }
 
 /// Every colour the source writes, in document order.
-pub fn colours(source: &Source) -> Vec<Colour> {
-    let mut colours = Vec::new();
-    let mut stack = vec![LinkedNode::new(source.root())];
+pub fn colours(src: &Source) -> Vec<Colour> {
+    let mut found = Vec::new();
+    let mut stack = vec![LinkedNode::new(src.root())];
     while let Some(node) = stack.pop() {
         if node.kind() == SyntaxKind::FuncCall
             && let Some(colour) = call_colour(&node)
         {
-            colours.push(colour);
+            found.push(colour);
             continue;
         }
         stack.extend(node.children());
     }
-    colours.sort_by_key(|colour| colour.range.start);
-    colours
+    found.sort_by_key(|colour| colour.range.start);
+    found
 }
 
 /// The forms the author can paste back for one colour, as red, green, blue, and alpha.
-///
-/// `rgb` accepts both spellings: the hexadecimal notation, which carries alpha as its fourth pair
-/// of digits, and whole components out of 255 with a ratio for alpha.
 pub fn spellings(components: [f32; 4]) -> Vec<String> {
-    let [red, green, blue, alpha] = components;
-    let components = format!("{}, {}, {}", whole(red), whole(green), whole(blue));
-    // Alpha is the fourth component of the same call, never a second one.
-    let ratio = if alpha < 1.0 {
-        format!(", {alpha:.3}")
+    let [r, g, b, a] = components;
+    let rgb = format!("{}, {}, {}", whole(r), whole(g), whole(b));
+    let ratio = if a < 1.0 {
+        format!(", {a:.3}")
     } else {
         String::new()
     };
     vec![
-        format!("rgb(\"{}\")", hex([red, green, blue, alpha])),
-        format!("rgb({components}{ratio})"),
+        format!("rgb(\"{}\")", hex([r, g, b, a])),
+        format!("rgb({rgb}{ratio})"),
     ]
 }
 
 /// The hexadecimal notation of one colour, with alpha when it is not opaque.
 pub fn hex(components: [f32; 4]) -> String {
-    let [red, green, blue, alpha] = components;
-    if alpha < 1.0 {
+    let [r, g, b, a] = components;
+    if a < 1.0 {
         format!(
             "#{:02x}{:02x}{:02x}{:02x}",
-            whole(red),
-            whole(green),
-            whole(blue),
-            whole(alpha)
+            whole(r),
+            whole(g),
+            whole(b),
+            whole(a)
         )
     } else {
-        format!("#{:02x}{:02x}{:02x}", whole(red), whole(green), whole(blue))
+        format!("#{:02x}{:02x}{:02x}", whole(r), whole(g), whole(b))
     }
 }
 
-/// One colour component as the 0–255 whole number both spellings write.
 fn whole(component: f32) -> u8 {
     (component.clamp(0.0, 1.0) * 255.0).round() as u8
 }
 
-/// The colour one call writes, with the bytes of the spelling that names it.
 fn call_colour(node: &LinkedNode<'_>) -> Option<Colour> {
     let call = node.cast::<ast::FuncCall>()?;
     let rgb = match call.callee() {
@@ -90,16 +80,15 @@ fn call_colour(node: &LinkedNode<'_>) -> Option<Colour> {
     if !rgb {
         return None;
     }
-    let mut arguments = call.args().items();
-    let (Some(ast::Arg::Pos(ast::Expr::Str(text))), None) = (arguments.next(), arguments.next())
-    else {
+    let mut args = call.args().items();
+    let (Some(ast::Arg::Pos(ast::Expr::Str(text))), None) = (args.next(), args.next()) else {
         return None;
     };
-    let value = Color::from_str(text.get().as_str()).ok()?;
+    let val = Color::from_str(text.get().as_str()).ok()?;
     let span = node.find(text.span())?;
     Some(Colour {
         range: span.range(),
-        value,
+        value: val,
     })
 }
 
@@ -108,7 +97,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn hexadecimal_spelling_yields_colour() {
+    fn colour_hex_rgb() {
         let text = "#rgb(\"nonsense\") #other.rgb(\"#777\") #color.rgb(\"#ff000080\")";
         let found = colours(&Source::detached(text));
         assert_eq!(found.len(), 1);

@@ -1,32 +1,33 @@
-use super::*;
 use std::collections::BTreeMap;
 
-fn source_world(program: &str, sources: &[(&str, &str)]) -> (TempDir, tola_typst::TypstWorld) {
-    source_world_with_files(program, sources, &[])
+use super::*;
+
+fn source_world(program: &str, srcs: &[(&str, &str)]) -> (TempDir, tola_typst::TypstWorld) {
+    source_world_with_files(program, srcs, &[])
 }
 
 fn source_world_with_files(
     program: &str,
-    sources: &[(&str, &str)],
+    srcs: &[(&str, &str)],
     files: &[(&str, &str)],
 ) -> (TempDir, tola_typst::TypstWorld) {
-    let directory = TempDir::new().unwrap();
-    let config = crate::config::tests::load_test_config(directory.path(), "");
-    let root = config.get_root();
+    let dir = TempDir::new().unwrap();
+    let cfg = crate::config::tests::load_test_config(dir.path(), "");
+    let root = cfg.root();
     for (path, body) in files {
         let path = root.join(path);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, body).unwrap();
     }
     let content = root.join("content");
-    let files = Arc::new(tola_typst::FileResolver::new().with_provider(IconFiles::default()));
+    let files = Arc::new(tola_typst::FileStore::new().with_provider(IconFiles::default()));
     let mut units = Vec::new();
-    let mut declarations = BTreeMap::new();
-    for (id, body) in sources {
+    let mut decls = BTreeMap::new();
+    for (id, body) in srcs {
         let path = content.join(id);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, body).unwrap();
-        declarations.insert(path.clone(), super::declared_metadata(&path, root));
+        decls.insert(path.clone(), super::declared_metadata(&path, root));
         units.push(ContentUnit {
             root: content.clone(),
             id: ContentId::new((*id).into()),
@@ -34,30 +35,26 @@ fn source_world_with_files(
             layout: ContentSourceLayout::from_entry_path(Path::new(id)),
         });
     }
-    let records = SourceSet::without_metadata(&units, &config)
+    let records = SourceSet::without_metadata(&units, &cfg)
         .unwrap()
-        .with_metadata(&declarations)
+        .with_metadata(&decls)
         .inputs()
         .to_source_records();
-    let bindings = SiteBindings::from_config(&config, Default::default(), None);
-    let library = bindings.library(records);
+    let lib = SiteBindings::from_config(&cfg, Default::default(), None).library(records);
     let main = root.join("site.typ");
     fs::write(&main, program).unwrap();
     let world = TypstWorld::builder(&main, root)
         .with_files(files)
         .with_local_cache()
         .no_fonts()
-        .with_shared_library(library.shared())
+        .with_shared_library(lib.shared())
         .build(&tola_typst::BundleCancellation::default())
         .expect("valid source world");
-    (directory, world)
+    (dir, world)
 }
 
-fn source_errors(
-    program: &str,
-    sources: &[(&str, &str)],
-) -> Vec<tola_typst::diagnostic::Diagnostic> {
-    let (_directory, world) = source_world(program, sources);
+fn source_errors(program: &str, srcs: &[(&str, &str)]) -> Vec<tola_typst::diagnostic::Diagnostic> {
+    let (_dir, world) = source_world(program, srcs);
     tola_typst::compile_bundle_world(&world, &Default::default())
         .expect_err("invalid source metadata must fail compilation")
         .diagnostics()
@@ -68,8 +65,8 @@ fn source_errors(
 }
 
 #[test]
-fn shared_declarations_reach_sources() {
-    let (_directory, world) = source_world_with_files(
+fn shared_declarations_propagate() {
+    let (_dir, world) = source_world_with_files(
         r#"
 #import "@tola/source:0.0.0": all-sources, parse-sources
 #import "@tola/schema:0.0.0": schema
@@ -91,9 +88,9 @@ fn shared_declarations_reach_sources() {
 }
 
 #[test]
-fn shared_declaration_issues_name_owner() {
+fn shared_declaration_errors_owner() {
     let helper = "#import \"@tola/source:0.0.0\": tola-meta\n#let note(..fields) = tola-meta(fields.named())";
-    let (_directory, world) = source_world_with_files(
+    let (_dir, world) = source_world_with_files(
         r#"
 #import "@tola/source:0.0.0": all-sources, parse-sources
 #import "@tola/schema:0.0.0": schema
@@ -107,12 +104,12 @@ fn shared_declaration_issues_name_owner() {
         &[("theme.typ", helper)],
     );
     let failure = tola_typst::compile_bundle_world(&world, &Default::default()).unwrap_err();
-    let errors = failure.diagnostics().unwrap().errors().collect::<Vec<_>>();
-    assert_eq!(errors.len(), 1);
-    let error = errors[0];
-    assert!(error.message.contains("content/note.typ"), "{error:?}");
-    assert_eq!(error.location.path.as_deref(), Some("theme.typ"));
-    let range = error.location.range.as_ref().unwrap();
+    let errs: Vec<_> = failure.diagnostics().unwrap().errors().collect();
+    assert_eq!(errs.len(), 1);
+    let err = errs[0];
+    assert!(err.message.contains("content/note.typ"), "{err:?}");
+    assert_eq!(err.location.path.as_deref(), Some("theme.typ"));
+    let range = err.location.range.as_ref().unwrap();
     assert_eq!(range.start.line, range.end.line);
     let line = helper.lines().nth(range.start.line).unwrap();
     assert_eq!(
@@ -122,8 +119,8 @@ fn shared_declaration_issues_name_owner() {
 }
 
 #[test]
-fn parsed_metadata_leaves_sources_unchanged() {
-    let (_directory, world) = source_world(
+fn parsed_metadata_immutable() {
+    let (_dir, world) = source_world(
         r#"
 #import "@tola/source:0.0.0": all-sources, parse-sources
 #import "@tola/schema:0.0.0": schema, map, trim
@@ -157,8 +154,8 @@ fn parsed_metadata_leaves_sources_unchanged() {
 }
 
 #[test]
-fn source_schemas_preserve_selected_order() {
-    let (_directory, world) = source_world(
+fn source_schemas_order() {
+    let (_dir, world) = source_world(
         r#"
 #import "@tola/source:0.0.0": all-sources, parse-sources
 #import "@tola/schema:0.0.0": schema, map, trim
@@ -192,8 +189,8 @@ fn source_schemas_preserve_selected_order() {
 }
 
 #[test]
-fn mixed_issues_keep_source_locations() {
-    let errors = source_errors(
+fn mixed_issues_source_locations() {
+    let errs = source_errors(
         r#"
 #import "@tola/source:0.0.0": all-sources, parse-sources
 #import "@tola/schema:0.0.0": schema
@@ -218,9 +215,8 @@ fn mixed_issues_keep_source_locations() {
         ],
     );
     assert_eq!(
-        errors
-            .iter()
-            .map(|error| (error.location.path.as_deref(), error.location.line))
+        errs.iter()
+            .map(|e| (e.location.path.as_deref(), e.location.line))
             .collect::<Vec<_>>(),
         [
             (Some("content/about.typ"), Some(3)),
@@ -228,15 +224,15 @@ fn mixed_issues_keep_source_locations() {
             (Some("content/posts/note.typ"), Some(4)),
         ]
     );
-    assert!(errors[0].message.contains("$.title"));
-    assert!(errors[1].message.contains("$.title"));
-    assert!(errors[2].message.contains("$.rank"));
+    assert!(errs[0].message.contains("$.title"));
+    assert!(errs[1].message.contains("$.title"));
+    assert!(errs[2].message.contains("$.rank"));
 }
 
 #[test]
-fn converted_field_failure_does_not_point_to_an_unrelated_input_field() {
-    let metadata = "#import \"@tola/source:0.0.0\": tola-meta\n#tola-meta((raw: \"\", slug: \"already-valid\"))";
-    let errors = source_errors(
+fn converted_field_error_span() {
+    let meta = "#import \"@tola/source:0.0.0\": tola-meta\n#tola-meta((raw: \"\", slug: \"already-valid\"))";
+    let errs = source_errors(
         r#"
 #import "@tola/source:0.0.0": all-sources, parse-sources
 #import "@tola/schema:0.0.0": check, issue, map, schema
@@ -252,16 +248,16 @@ fn converted_field_failure_does_not_point_to_an_unrelated_input_field() {
 #let parsed = parse-sources(all-sources(), checked)
 #document("index.html")[]
 "#,
-        &[("note.typ", metadata)],
+        &[("note.typ", meta)],
     );
-    assert_eq!(errors.len(), 1);
-    let error = &errors[0];
-    assert_eq!(error.location.path.as_deref(), Some("content/note.typ"));
-    assert!(error.message.contains("$.slug"), "{error:?}");
-    assert!(error.message.contains("must not be empty"), "{error:?}");
-    let range = error.location.range.as_ref().unwrap();
+    assert_eq!(errs.len(), 1);
+    let err = &errs[0];
+    assert_eq!(err.location.path.as_deref(), Some("content/note.typ"));
+    assert!(err.message.contains("$.slug"), "{err:?}");
+    assert!(err.message.contains("must not be empty"), "{err:?}");
+    let range = err.location.range.as_ref().unwrap();
     assert_eq!(range.start.line, range.end.line);
-    let line = metadata.lines().nth(range.start.line).unwrap();
+    let line = meta.lines().nth(range.start.line).unwrap();
     assert_eq!(
         &line[range.start.character..range.end.character],
         "tola-meta"
@@ -269,86 +265,80 @@ fn converted_field_failure_does_not_point_to_an_unrelated_input_field() {
 }
 
 #[test]
-fn schema_failures_name_source_types() {
-    for (declaration, expected, actual) in [
+fn schema_failures_type_names() {
+    for (decl, expected, actual) in [
         ("none", "parse-sources schema", "none"),
         ("(title: str)", "parse-sources schema", "dictionary"),
         ("source => none", "schema function", "none"),
         ("source => () => none", "schema function", "function"),
     ] {
-        let errors = source_errors(
+        let errs = source_errors(
             &format!(
                 r#"#import "@tola/source:0.0.0": all-sources, parse-sources
-#let parsed = parse-sources(all-sources(), {declaration})
+#let parsed = parse-sources(all-sources(), {decl})
 #document("index.html")[]"#
             ),
             &[("note.typ", "")],
         );
-        assert_eq!(errors.len(), 1, "{errors:?}");
-        let error = &errors[0];
-        assert_eq!(error.location.path.as_deref(), Some("site.typ"));
-        assert_eq!(error.location.line, Some(2));
-        assert!(error.message.contains(expected), "{error:?}");
-        assert!(error.message.contains("content/note.typ"), "{error:?}");
-        assert!(error.message.contains(&format!("`{actual}`")), "{error:?}");
+        assert_eq!(errs.len(), 1, "{errs:?}");
+        let err = &errs[0];
+        assert_eq!(err.location.path.as_deref(), Some("site.typ"));
+        assert_eq!(err.location.line, Some(2));
+        assert!(err.message.contains(expected), "{err:?}");
+        assert!(err.message.contains("content/note.typ"), "{err:?}");
+        assert!(err.message.contains(&format!("`{actual}`")), "{err:?}");
         assert!(
-            error
-                .message
+            err.message
                 .contains("expected a Typst type or schema declaration"),
-            "{error:?}"
+            "{err:?}"
         );
         if actual == "dictionary" {
             assert!(
-                error
-                    .hints
-                    .iter()
-                    .any(|hint| hint.message.contains("schema(...)")),
-                "{error:?}"
+                err.hints.iter().any(|h| h.message.contains("schema(...)")),
+                "{err:?}"
             );
         }
     }
 }
 
 #[test]
-fn callback_failures_keep_authored_locations() {
-    for declaration in ["source => fail()", "source => { try-parse(none, none) }"] {
-        let errors = source_errors(
+fn callback_failures_locations() {
+    for decl in ["source => fail()", "source => { try-parse(none, none) }"] {
+        let errs = source_errors(
             &format!(
                 r#"#import "@tola/source:0.0.0": all-sources, parse-sources
 #import "@tola/schema:0.0.0": try-parse
 #let fail() = panic("schema unavailable")
-#let parsed = parse-sources(all-sources(), {declaration})
+#let parsed = parse-sources(all-sources(), {decl})
 #document("index.html")[]"#
             ),
             &[("note.typ", "")],
         );
-        let error = &errors[0];
-        assert_eq!(error.location.path.as_deref(), Some("site.typ"));
-        assert!(!error.message.contains("function for"), "{error:?}");
+        let err = &errs[0];
+        assert_eq!(err.location.path.as_deref(), Some("site.typ"));
+        assert!(!err.message.contains("function for"), "{err:?}");
         assert!(
-            error
-                .hints
+            err.hints
                 .iter()
-                .any(|hint| hint.message.contains("content/note.typ")),
-            "{error:?}"
+                .any(|h| h.message.contains("content/note.typ")),
+            "{err:?}"
         );
-        if declaration.contains("fail()") {
-            assert_eq!(error.location.line, Some(3));
-            assert!(error.message.contains("schema unavailable"));
+        if decl.contains("fail()") {
+            assert_eq!(err.location.line, Some(3));
+            assert!(err.message.contains("schema unavailable"));
             assert!(
-                error
-                    .traces
+                err.traces
                     .iter()
-                    .any(|trace| trace.location.path.as_deref() == Some("site.typ")),
-                "{error:?}"
+                    .any(|t| t.location.path.as_deref() == Some("site.typ")),
+                "{err:?}"
             );
         }
     }
 }
 
 #[test]
-fn absent_metadata_uses_source_defaults() {
-    let (_directory, world) = source_world(
+fn absent_metadata_defaults() {
+    let (_dir, world) = source_world(
         r#"
 #import "@tola/source:0.0.0": all-sources, parse-sources
 #import "@tola/schema:0.0.0": schema, optional, nullable, try-parse
@@ -372,8 +362,8 @@ fn absent_metadata_uses_source_defaults() {
 }
 
 #[test]
-fn batch_issues_split_by_source() {
-    let errors = source_errors(
+fn batch_issues_per_source() {
+    let errs = source_errors(
         r#"
 #import "@tola/source:0.0.0": all-sources, parse-sources
 #import "@tola/schema:0.0.0": schema
@@ -392,12 +382,12 @@ fn batch_issues_split_by_source() {
             ("absent.typ", ""),
         ],
     );
-    let locations = errors
+    let locs: Vec<_> = errs
         .iter()
-        .map(|error| (error.location.path.as_deref(), error.location.line))
-        .collect::<Vec<_>>();
+        .map(|e| (e.location.path.as_deref(), e.location.line))
+        .collect();
     assert_eq!(
-        locations,
+        locs,
         [
             (Some("content/about.typ"), Some(4)),
             (Some("content/about.typ"), Some(4)),
@@ -407,14 +397,14 @@ fn batch_issues_split_by_source() {
             (Some("content/absent.typ"), Some(1)),
         ]
     );
-    for error in &errors[4..] {
-        assert_eq!(error.location.column, Some(1));
+    for err in &errs[4..] {
+        assert_eq!(err.location.column, Some(1));
     }
 }
 
 #[test]
-fn metadata_failure_carries_its_code() {
-    let (directory, world) = source_world(
+fn metadata_failure_code() {
+    let (dir, world) = source_world(
         r#"
 #import "@tola/source:0.0.0": all-sources, parse-sources
 #import "@tola/schema:0.0.0": check, issue, nullable, optional, schema, timestamp
@@ -436,20 +426,16 @@ fn metadata_failure_carries_its_code() {
             "#import \"@tola/source:0.0.0\": tola-meta\n#tola-meta((:))",
         )],
     );
-    let error: anyhow::Error = tola_typst::compile_bundle_world(&world, &Default::default())
+    let err: anyhow::Error = tola_typst::compile_bundle_world(&world, &Default::default())
         .expect_err("the schema default must fail")
         .into();
-    let diagnostics = crate::compiler::diagnostic::error_diagnostics(&error, directory.path())
+    let diags = crate::compiler::diagnostic::error_diagnostics(&err, dir.path())
         .expect("a compile failure has diagnostics");
-    assert_eq!(
-        diagnostics[0].code,
-        tola_diagnostic::codes::source::METADATA
-    );
+    assert_eq!(diags[0].code, tola_diagnostic::codes::source::METADATA);
     assert!(
-        diagnostics[0].message.starts_with("`content/note.typ`: "),
+        diags[0].message.starts_with("`content/note.typ`: "),
         "{}",
-        diagnostics[0].message
+        diags[0].message
     );
-    // The record keeps the evidence; presentation decides whether to show it.
-    assert!(!diagnostics[0].trace.is_empty());
+    assert!(!diags[0].trace.is_empty());
 }

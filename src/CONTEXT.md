@@ -28,7 +28,7 @@
 ## Presentation
 
 - `terminal/` renders diagnostics, progress, the development view, help documents, and pagers. Libraries never write to it directly.
-- `help/` composes `tola help` pages from configuration, package, and bundled Nu script declarations without loading a site. `i18n/` holds Markdown prose keyed by configuration table, package, and script. The interactive browser searches the same pages as direct requests.
+- `help/` composes typed `tola help` pages and the `--all` reference catalog from configuration, package, and bundled Nu script declarations merged with declarative `.typ` docs under `help/docs/{en,zh-Hans}/` (parsed statically via `typst::syntax` without loading a site). Terminal text, Markdown, JSON, and interactive search all project directly from `HelpPage`.
 - `terminal/path.rs` layers invocation-relative display over `tola_diagnostic::display_path`, the one site-path renderer.
 
 ## Configuration and writes

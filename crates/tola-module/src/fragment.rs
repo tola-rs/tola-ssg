@@ -44,23 +44,32 @@ impl FragmentError {
 }
 
 impl fmt::Display for FragmentError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if let FragmentErrorKind::InvalidValue(message) = &self.kind {
-            return formatter.write_str(message);
+    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let FragmentErrorKind::InvalidValue(msg) = &self.kind {
+            return fmt.write_str(msg);
         }
-        formatter.write_str("unknown field `")?;
-        for (index, step) in self.path.iter().enumerate() {
+        fmt.write_str("unknown field `")?;
+        for (idx, step) in self.path.iter().enumerate() {
             match step {
                 FragmentStep::Key(name) => {
-                    if index != 0 {
-                        formatter.write_char('.')?;
+                    if idx != 0 {
+                        fmt.write_char('.')?;
                     }
-                    write!(formatter, "{}", toml_edit::Key::new(name.as_str()))?;
+                    write!(fmt, "{}", toml_edit::Key::new(name.as_str()))?;
                 }
-                FragmentStep::Index(index) => write!(formatter, "[{index}]")?,
+                FragmentStep::Index(idx) => write!(fmt, "[{idx}]")?,
             }
         }
-        formatter.write_char('`')
+        fmt.write_char('`')
+    }
+}
+
+pub(crate) fn push_pointer_steps(pointer: &mut String, steps: &[FragmentStep]) {
+    for step in steps {
+        match step {
+            FragmentStep::Key(key) => tola_diagnostic::push_pointer(pointer, key),
+            FragmentStep::Index(idx) => tola_diagnostic::push_pointer(pointer, &idx.to_string()),
+        }
     }
 }
 
@@ -72,14 +81,14 @@ enum ReadError<E> {
 struct TableFields<T>(T);
 
 impl<'de, T: Deserialize<'de>> Deserialize<'de> for TableFields<T> {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+    fn deserialize<D: Deserializer<'de>>(deser: D) -> Result<Self, D::Error> {
         struct TableVisitor<T>(PhantomData<T>);
 
         impl<'de, T: Deserialize<'de>> Visitor<'de> for TableVisitor<T> {
             type Value = TableFields<T>;
 
-            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter.write_str("a table")
+            fn expecting(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
+                fmt.write_str("a table")
             }
 
             fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<Self::Value, A::Error> {
@@ -87,22 +96,22 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for TableFields<T> {
             }
         }
 
-        deserializer.deserialize_map(TableVisitor(PhantomData))
+        deser.deserialize_map(TableVisitor(PhantomData))
     }
 }
 
 pub(crate) fn optional_table<'de, T: Deserialize<'de>, D: Deserializer<'de>>(
-    deserializer: D,
+    deser: D,
 ) -> Result<Option<T>, D::Error> {
-    Option::<TableFields<T>>::deserialize(deserializer).map(|fields| fields.map(|fields| fields.0))
+    Option::<TableFields<T>>::deserialize(deser).map(|fields| fields.map(|fields| fields.0))
 }
 
 fn read<'de, T: Deserialize<'de>, D: Deserializer<'de>>(
-    deserializer: D,
+    deser: D,
 ) -> Result<T, ReadError<D::Error>> {
     let mut unknown = None;
-    let read_fields = serde_path_to_error::deserialize::<_, TableFields<T>>(
-        serde_ignored::Deserializer::new(deserializer, &mut |path| {
+    let parsed = serde_path_to_error::deserialize::<_, TableFields<T>>(
+        serde_ignored::Deserializer::new(deser, &mut |path| {
             unknown.get_or_insert_with(|| {
                 let mut steps = Vec::new();
                 ignored_steps(&path, &mut steps);
@@ -113,21 +122,21 @@ fn read<'de, T: Deserialize<'de>, D: Deserializer<'de>>(
     if let Some(path) = unknown {
         return Err(ReadError::UnknownKey(path));
     }
-    read_fields
+    parsed
         .map(|fields| fields.0)
         .map_err(ReadError::InvalidValue)
 }
 
 pub(crate) fn read_fields<'de, T: Deserialize<'de>, D: Deserializer<'de>>(
-    deserializer: D,
+    deser: D,
 ) -> Result<T, D::Error> {
-    match read(deserializer) {
+    match read(deser) {
         Ok(fields) => Ok(fields),
         Err(ReadError::UnknownKey(path)) => Err(D::Error::custom(FragmentError {
             path,
             kind: FragmentErrorKind::UnknownKey,
         })),
-        Err(ReadError::InvalidValue(error)) => Err(error.into_inner()),
+        Err(ReadError::InvalidValue(err)) => Err(err.into_inner()),
     }
 }
 
@@ -141,14 +150,14 @@ pub(crate) fn read_fragment<T: DeserializeOwned>(value: &toml::Value) -> Result<
     // A toml::Value used as a Serde deserializer presents dates as strings.
     let fields = value
         .serialize(toml_edit::ser::ValueSerializer::new())
-        .map_err(|error| FragmentError::invalid(error.to_string()))?;
-    read(fields.into_deserializer()).map_err(|error| match error {
+        .map_err(|err| FragmentError::invalid(err.to_string()))?;
+    read(fields.into_deserializer()).map_err(|err| match err {
         ReadError::UnknownKey(path) => FragmentError {
             path,
             kind: FragmentErrorKind::UnknownKey,
         },
-        ReadError::InvalidValue(error) => FragmentError {
-            path: error
+        ReadError::InvalidValue(err) => FragmentError {
+            path: err
                 .path()
                 .iter()
                 .filter_map(|step| match step {
@@ -164,7 +173,7 @@ pub(crate) fn read_fragment<T: DeserializeOwned>(value: &toml::Value) -> Result<
                     serde_path_to_error::Segment::Unknown => None,
                 })
                 .collect(),
-            kind: FragmentErrorKind::InvalidValue(error.inner().message().to_owned()),
+            kind: FragmentErrorKind::InvalidValue(err.inner().message().to_owned()),
         },
     })
 }

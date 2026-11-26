@@ -1,4 +1,4 @@
-//! Native filesystem operations.
+//! Native Windows filesystem operations.
 
 use std::ffi::OsStr;
 use std::fs::{DirEntry, File, FileType, Metadata, OpenOptions, Permissions};
@@ -7,177 +7,161 @@ use std::path::Path;
 
 use cap_std::fs::Dir;
 
-/// Open one log path for reading.
+/// Open a log file for reading.
 pub fn open_log_for_read(path: &Path) -> io::Result<File> {
     OpenOptions::new().read(true).open(path)
 }
 
-/// Configure one log open so it shares the file as a log reader and a further appending sink do.
-///
-/// Windows locks are mandatory: this sharing mode refuses deletion of a log this command writes,
-/// while readers and further appending sinks stay compatible with it.
-pub fn open_log_for_append(options: &mut OpenOptions) {
+/// Share read/write access on a log file while refusing deletion (mandatory Windows locking).
+pub fn open_log_for_append(opts: &mut OpenOptions) {
     use std::os::windows::fs::OpenOptionsExt;
     use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
 
-    options.share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
+    opts.share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
 }
 
-/// The number of paths that name one opened file.
+/// Number of directory entries pointing to `file`.
 pub fn link_count(file: &File) -> io::Result<u64> {
     Ok(winapi_util::file::information(file)?.number_of_links())
 }
 
-/// Create one directory link naming `target`.
+/// Create a directory symlink at `link` pointing to `target`.
 pub fn link_directory(target: &Path, link: &Path) -> io::Result<()> {
     std::os::windows::fs::symlink_dir(target, link)
 }
 
-/// Whether this link-like entry must be removed as a directory rather than as a file.
-pub fn link_removes_as_directory(file_type: &FileType) -> bool {
+/// Return whether this link-like entry must be removed as a directory.
+pub fn link_removes_as_directory(ft: &FileType) -> bool {
     use std::os::windows::fs::FileTypeExt;
 
-    file_type.is_symlink_dir()
+    ft.is_symlink_dir()
 }
 
-/// Open the filesystem root that begins an absolute path, refusing a reparse point.
+/// Open the filesystem root beginning an absolute path, refusing any reparse point.
 pub fn open_filesystem_root(path: &Path) -> io::Result<Dir> {
     use std::os::windows::fs::OpenOptionsExt;
     use windows_sys::Win32::Storage::FileSystem::{
         FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, FILE_SHARE_WRITE,
     };
 
-    // Ambient cap-std opens follow symlinks. Only the filesystem root may use an
-    // ambient path, and even it must reject every reparse tag.
+    // Ambient cap-std opens follow symlinks; open the root handle directly and reject reparse tags.
     let file = OpenOptions::new()
         .read(true)
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
         .open(path)?;
-    let directory = Dir::from_std_file(file);
-    let metadata = directory.dir_metadata()?;
-    reject_reparse(&metadata)?;
-    if !metadata.is_dir() {
+    let dir = Dir::from_std_file(file);
+    let meta = dir.dir_metadata()?;
+    reject_reparse(&meta)?;
+    if !meta.is_dir() {
         return Err(io::Error::other("parent is not a directory"));
     }
-    Ok(directory)
+    Ok(dir)
 }
 
-/// Open one directory beneath an already-open parent, refusing a final reparse point.
+/// Open a child directory beneath `parent`, refusing a final reparse point.
 pub fn open_directory_nofollow(parent: &Dir, name: &OsStr) -> io::Result<Dir> {
     use cap_fs_ext::DirExt;
 
-    let directory = parent.open_dir_nofollow(name)?;
-    reject_reparse(&directory.dir_metadata()?)?;
-    Ok(directory)
+    let dir = parent.open_dir_nofollow(name)?;
+    reject_reparse(&dir.dir_metadata()?)?;
+    Ok(dir)
 }
 
-/// Open one existing file beneath an already-open directory for reading.
-///
-/// A final reparse point is refused.
-pub fn open_file_for_read(directory: &Dir, name: &OsStr) -> io::Result<File> {
+/// Open an existing file beneath `dir` for reading, refusing a final reparse point.
+pub fn open_file_for_read(dir: &Dir, name: &OsStr) -> io::Result<File> {
     use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
     use cap_std::fs::OpenOptions;
 
-    let mut options = OpenOptions::new();
-    options.read(true).follow(FollowSymlinks::No);
-    open_refusing_reparse(directory, name, &options)
+    let mut opts = OpenOptions::new();
+    opts.read(true).follow(FollowSymlinks::No);
+    open_refusing_reparse(dir, name, &opts)
 }
 
-/// Create one new file beneath an already-open directory for writing.
-///
-/// A final reparse point is refused and an existing name fails.
-pub fn create_new_file(directory: &Dir, name: &OsStr) -> io::Result<File> {
+/// Create a new file beneath `dir` for writing, refusing a final reparse point.
+pub fn create_new_file(dir: &Dir, name: &OsStr) -> io::Result<File> {
     use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
     use cap_std::fs::OpenOptions;
 
-    let mut options = OpenOptions::new();
-    options
-        .write(true)
-        .create_new(true)
-        .follow(FollowSymlinks::No);
-    open_refusing_reparse(directory, name, &options)
+    let mut opts = OpenOptions::new();
+    opts.write(true).create_new(true).follow(FollowSymlinks::No);
+    open_refusing_reparse(dir, name, &opts)
 }
 
-/// Open one file beneath an already-open directory, refusing a reparse-point handle.
 fn open_refusing_reparse(
-    directory: &Dir,
+    dir: &Dir,
     name: &OsStr,
-    options: &cap_std::fs::OpenOptions,
+    opts: &cap_std::fs::OpenOptions,
 ) -> io::Result<File> {
-    let file = directory.open_with(name, options)?;
+    let file = dir.open_with(name, opts)?;
     reject_reparse(&file.metadata()?)?;
     Ok(file.into_std())
 }
 
-/// Refuse a handle whose attributes name a reparse point, the shape every Windows link takes.
-fn reject_reparse(metadata: &cap_std::fs::Metadata) -> io::Result<()> {
+fn reject_reparse(meta: &cap_std::fs::Metadata) -> io::Result<()> {
     use cap_std::fs::MetadataExt;
 
-    if attributes_are_link_like(metadata.file_attributes()) {
+    if attrs_are_link_like(meta.file_attributes()) {
         return Err(io::Error::other("write path contains a reparse point"));
     }
     Ok(())
 }
 
-/// Publish a file without replacing a competing name.
+/// Rename `from` to `to` beneath `dir_path` without replacing an existing entry.
 ///
-/// The caller must keep every ancestor of `directory_path` open without delete sharing.
-/// The directory handle alone cannot anchor the Windows path-based rename.
+/// Caller must keep every ancestor of `dir_path` open without delete sharing because the Windows
+/// rename API is path-based.
 pub fn rename_without_replacing(
-    _directory: &Dir,
-    directory_path: &Path,
+    _dir: &Dir,
+    dir_path: &Path,
     from: &OsStr,
     to: &OsStr,
 ) -> io::Result<()> {
-    renamore::rename_exclusive(directory_path.join(from), directory_path.join(to))
+    renamore::rename_exclusive(dir_path.join(from), dir_path.join(to))
 }
 
-/// Whether this metadata describes a symbolic link or any reparse point.
-/// Use entry metadata for path checks and handle metadata for opened-file checks.
-pub fn is_link_like(metadata: &Metadata) -> bool {
+/// Return whether `meta` describes a symbolic link or reparse point.
+pub fn is_link_like(meta: &Metadata) -> bool {
     use std::os::windows::fs::MetadataExt;
-    attributes_are_link_like(metadata.file_attributes())
+    attrs_are_link_like(meta.file_attributes())
 }
 
-fn attributes_are_link_like(attributes: u32) -> bool {
+fn attrs_are_link_like(attrs: u32) -> bool {
     use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
-    attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    attrs & FILE_ATTRIBUTE_REPARSE_POINT != 0
 }
 
-/// Classify a directory entry without following it; `file_type` came from this entry.
-pub fn entry_is_link_like(entry: &DirEntry, file_type: &FileType) -> io::Result<bool> {
-    Ok(file_type.is_symlink() || is_link_like(&std::fs::symlink_metadata(entry.path())?))
+/// Classify a directory entry without following it.
+pub fn entry_is_link_like(entry: &DirEntry, ft: &FileType) -> io::Result<bool> {
+    Ok(ft.is_symlink() || is_link_like(&std::fs::symlink_metadata(entry.path())?))
 }
 
-/// Create one file link naming `target`.
+/// Create a file symlink at `link` pointing to `target`.
 pub fn link_file(target: &Path, link: &Path) -> io::Result<()> {
     std::os::windows::fs::symlink_file(target, link)
 }
 
-/// Read Unix permission bits when this platform has them.
+/// No Unix permission bits on Windows.
 pub fn unix_mode(_: &Metadata) -> Option<u32> {
     None
 }
 
-/// Set Unix permission bits; platforms without Unix modes leave permissions unchanged.
+/// No-op on Windows.
 pub fn set_unix_mode(_: &Path, _: u32) -> io::Result<()> {
     Ok(())
 }
 
-/// Make one entry writable or read-only, keeping its other permissions.
-pub fn set_write_permission(permissions: &mut Permissions, writable: bool, _is_dir: bool) {
-    permissions.set_readonly(!writable);
+/// Toggle the read-only attribute while preserving other attributes.
+pub fn set_write_permission(perms: &mut Permissions, writable: bool, _is_dir: bool) {
+    perms.set_readonly(!writable);
 }
 
-/// Explicit ordinary creation permissions, when the platform requires them.
+/// No explicit creation permissions required on Windows.
 pub fn ordinary_file_permissions() -> Option<Permissions> {
     None
 }
 
-/// Encode a filesystem path as a lossless, platform-native hexadecimal identity.
-///
-/// For equality and ownership markers, not display. Preserves Windows UTF-16 code units.
+/// Lossless hex encoding of `path` UTF-16 code units for equality and ownership records.
 pub fn encode_path_identity(path: &Path) -> String {
     use std::os::windows::ffi::OsStrExt;
 
@@ -189,7 +173,7 @@ pub fn encode_path_identity(path: &Path) -> String {
     hex::encode(bytes)
 }
 
-/// Open the persistent lock at one path, creating it without following a final reparse point.
+/// Open or create the lock file at `path` without following a final reparse point.
 pub fn open_lock_file(path: &Path) -> io::Result<File> {
     use std::os::windows::fs::OpenOptionsExt;
     use windows_sys::Win32::Storage::FileSystem::{
@@ -212,14 +196,12 @@ pub(crate) fn open_regular_file(path: &Path, follow_symlink: bool) -> io::Result
         FILE_FLAG_OPEN_REPARSE_POINT, SECURITY_IDENTIFICATION,
     };
 
-    let mut options = File::options();
-    options
-        .read(true)
-        .security_qos_flags(SECURITY_IDENTIFICATION);
+    let mut opts = File::options();
+    opts.read(true).security_qos_flags(SECURITY_IDENTIFICATION);
     if !follow_symlink {
-        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+        opts.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
     }
-    let file = options.open(path)?;
+    let file = opts.open(path)?;
     if !winapi_util::file::typ(&file)?.is_disk() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,

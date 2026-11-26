@@ -60,12 +60,12 @@ pub fn read_nu_modules(
 
 /// Select the same fonts as the compiler using the manifests already read for Nu.
 pub fn nu_font_options(
-    config: &crate::config::ResolvedSiteConfig,
+    config: &crate::config::SiteConfig,
     resources: &crate::BuildResources,
     modules: &BTreeMap<String, NuModule>,
 ) -> anyhow::Result<tola_typst::FontOptions> {
     let mut config = config.clone();
-    super::prepared::select_module_fonts(
+    super::site::select_module_fonts(
         &mut config,
         resources.input_scope(),
         modules.iter().map(|(alias, module)| {

@@ -9,22 +9,22 @@ use crate::declaration::{Assets, Command, Entry, Initializer, ModuleDeclaration,
 
 /// The paths and exact bytes from which a module manifest was parsed.
 #[derive(Debug, Clone)]
-pub struct ManifestEvidence {
+pub struct ManifestStamp {
     pub(crate) root: tola_input::FilesystemSourceIdentity,
     pub(crate) manifest: tola_input::FilesystemSourceIdentity,
     pub(crate) digest: blake3::Hash,
     pub(crate) source: std::sync::Arc<str>,
 }
 
-impl PartialEq for ManifestEvidence {
+impl PartialEq for ManifestStamp {
     fn eq(&self, other: &Self) -> bool {
         self.root == other.root && self.manifest == other.manifest && self.digest == other.digest
     }
 }
 
-impl Eq for ManifestEvidence {}
+impl Eq for ManifestStamp {}
 
-impl ManifestEvidence {
+impl ManifestStamp {
     /// The exact text used to parse this manifest.
     pub fn source(&self) -> &str {
         &self.source
@@ -89,7 +89,7 @@ pub struct LoadedModule {
     pub root: PathBuf,
     pub manifest: PathBuf,
     /// Evidence captured from the exact manifest bytes parsed for this module.
-    pub manifest_evidence: Option<ManifestEvidence>,
+    pub manifest_evidence: Option<ManifestStamp>,
     pub typst: Option<crate::manifest::TypstInputs>,
     pub nu: Option<Entry>,
     pub build: Option<Entry>,
@@ -218,33 +218,29 @@ pub fn load_modules_with_roots(
     mode: InputMode,
     sources: &[(PathBuf, std::sync::Arc<str>)],
 ) -> std::result::Result<BTreeMap<String, LoadedModule>, ModuleLoadError> {
-    let mut result = BTreeMap::new();
-    for (name, loaded) in
-        crate::manifest::read_selected(site_root, declarations, roots, mode, sources)?
-    {
-        let root = loaded.root;
-        let canonical_manifest = loaded.path;
-        let evidence = loaded.evidence;
-        let manifest = loaded.manifest;
-        result.insert(
-            name.clone(),
-            LoadedModule {
-                name: name.clone(),
-                root,
-                manifest: canonical_manifest,
-                manifest_evidence: Some(evidence),
-                typst: manifest.typst,
-                nu: manifest.nu,
-                build: manifest.build,
-                assets: manifest.assets,
-                icons: manifest.icons,
-                queries: manifest.queries,
-                commands: manifest.commands,
-                initializer: manifest.init,
-                hooks: manifest.hooks,
-                options: loaded.options,
-            },
-        );
-    }
-    Ok(result)
+    crate::manifest::read_selected(site_root, declarations, roots, mode, sources)?
+        .into_iter()
+        .map(|(name, loaded)| {
+            let manifest = loaded.manifest;
+            Ok((
+                name.clone(),
+                LoadedModule {
+                    name,
+                    root: loaded.root,
+                    manifest: loaded.path,
+                    manifest_evidence: Some(loaded.evidence),
+                    typst: manifest.typst,
+                    nu: manifest.nu,
+                    build: manifest.build,
+                    assets: manifest.assets,
+                    icons: manifest.icons,
+                    queries: manifest.queries,
+                    commands: manifest.commands,
+                    initializer: manifest.init,
+                    hooks: manifest.hooks,
+                    options: loaded.options,
+                },
+            ))
+        })
+        .collect()
 }

@@ -50,9 +50,5 @@ pub fn hook_limit(
     jobs: crate::config::section::build::HookJobs,
     auto_limit: usize,
 ) -> usize {
-    if par_hooks {
-        jobs.resolved(auto_limit)
-    } else {
-        1
-    }
+    if par_hooks { jobs.count(auto_limit) } else { 1 }
 }

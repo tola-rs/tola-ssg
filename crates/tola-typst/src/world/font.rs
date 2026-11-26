@@ -575,45 +575,45 @@ struct FontFileSource {
     face: FaceIdentity,
 }
 
+impl FontFile {
+    fn fail_changed(&self) -> Option<Font> {
+        let _ = self.failure.set(FontLoadError::Changed {
+            path: self.path.clone(),
+        });
+        None
+    }
+}
+
 impl FontSource for FontFileSource {
     fn load(&self) -> Option<Font> {
         let observed = self.file.bytes.get_or_init(|| {
             check_font_source(&self.file.boundary, &self.file.path)?;
-            let bytes = read_font_bytes_with_identity(&self.file.path, None)?;
+            let buf = read_font_bytes_with_identity(&self.file.path, None)?;
             if self
                 .file
                 .expected
-                .is_some_and(|expected| expected != bytes.digest)
+                .is_some_and(|expected| expected != buf.digest)
             {
                 return Err(FontLoadError::Changed {
                     path: self.file.path.clone(),
                 });
             }
-            Ok(bytes)
+            Ok(buf)
         });
-        let bytes = match observed {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                let _ = self.file.failure.set(error.clone());
+        let buf = match observed {
+            Ok(buf) => buf,
+            Err(err) => {
+                let _ = self.file.failure.set(err.clone());
                 return None;
             }
         };
-        let parsed_face = FontInfo::new(bytes.bytes.as_slice(), self.index)
+        let parsed_face = FontInfo::new(buf.bytes.as_slice(), self.index)
             .as_ref()
             .map(FaceIdentity::of);
         if parsed_face != Some(self.face) {
-            let _ = self.file.failure.set(FontLoadError::Changed {
-                path: self.file.path.clone(),
-            });
-            return None;
+            return self.file.fail_changed();
         }
-        let font = Font::new(bytes.bytes.clone(), self.index);
-        if font.is_none() {
-            let _ = self.file.failure.set(FontLoadError::Changed {
-                path: self.file.path.clone(),
-            });
-        }
-        font
+        Font::new(buf.bytes.clone(), self.index).or_else(|| self.file.fail_changed())
     }
 }
 
@@ -912,9 +912,9 @@ mod tests {
     }
 
     #[test]
-    fn configured_font_file_is_refused() {
-        let directory = tempfile::TempDir::new().unwrap();
-        let path = directory.path().join("font.ttf");
+    fn font_dir_file_rejected() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("font.ttf");
         fs::write(&path, b"not a font").unwrap();
         let store = FontStore::with_options(isolated_options().with_custom_paths(&[&path]));
 
@@ -925,9 +925,9 @@ mod tests {
     }
 
     #[test]
-    fn renamed_face_loads_from_the_original_file() {
-        let directory = tempfile::TempDir::new().unwrap();
-        let root = directory.path().canonicalize().unwrap();
+    fn font_face_rename() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().canonicalize().unwrap();
         let path = root.join("font.ttf");
         let (font, info) = embedded::fonts().next().unwrap();
         fs::write(&path, font.data().as_slice()).unwrap();
@@ -953,16 +953,15 @@ mod tests {
     }
 
     #[test]
-    fn changed_font_bytes_fail_lazy_read() {
-        let directory = tempfile::TempDir::new().unwrap();
-        let path = directory.path().join("font.ttf");
+    fn lazy_font_changed_rejected() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("font.ttf");
         let (font, _) = embedded::fonts().next().unwrap();
         let original = font.data().as_slice();
         fs::write(&path, original).unwrap();
-        let store =
-            FontStore::with_options(isolated_options().with_custom_paths(&[directory.path()]));
-        let cancellation = BundleCancellation::new();
-        store.load(&cancellation).unwrap();
+        let store = FontStore::with_options(isolated_options().with_custom_paths(&[dir.path()]));
+        let cancel = BundleCancellation::new();
+        store.load(&cancel).unwrap();
         let fonts = store.fonts.get().unwrap();
         assert!(fonts.files.values().all(|file| file.bytes.get().is_none()));
         let mut changed = original.to_vec();
@@ -975,12 +974,12 @@ mod tests {
             store.read_failure(),
             Some(FontLoadError::Changed { .. })
         ));
-        assert!(!store.is_current(&cancellation).unwrap());
+        assert!(!store.is_current(&cancel).unwrap());
     }
 
     #[cfg(unix)]
     #[test]
-    fn narrowed_coverage_changes_face_identity() {
+    fn face_identity_coverage() {
         use typst::text::Coverage;
 
         let (_, info) = embedded::fonts().next().unwrap();

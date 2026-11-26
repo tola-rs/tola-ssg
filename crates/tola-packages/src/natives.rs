@@ -1,4 +1,4 @@
-//! The native functions the builtin packages import from `@tola/host`.
+//! Native functions imported by builtin packages from `@tola/host`.
 
 use std::sync::LazyLock;
 
@@ -14,16 +14,15 @@ use typst::syntax::{FileId, RootedPath, Span, Spanned, VirtualPath, VirtualRoot}
 use crate::TolaPackage;
 use crate::protocol::{CAPABILITY_OBSERVATION_PATH, SOURCE_OBSERVATION_DIRECTORY};
 
-/// One argument failure `@tola/address` reports at the author's call to `function`.
-fn address_error(
+fn address_err(
     span: Span,
-    function: &str,
-    message: impl std::fmt::Display,
+    func: &str,
+    msg: impl std::fmt::Display,
 ) -> typst::ecow::EcoVec<SourceDiagnostic> {
     eco_vec![crate::diagnostic::package_error(
         span,
         TolaPackage::Address,
-        format!("`{function}`: {message}"),
+        format!("`{func}`: {msg}"),
     )]
 }
 
@@ -33,10 +32,10 @@ pub(super) fn project_path(
     /// A path relative to the site's root directory.
     path: Str,
 ) -> SourceResult<RootedPath> {
-    let path = VirtualPath::new(path.as_str())
-        .map_err(|error| error.to_string())
+    let vpath = VirtualPath::new(path.as_str())
+        .map_err(|err| err.to_string())
         .at(span)?;
-    Ok(RootedPath::new(VirtualRoot::Project, path))
+    Ok(RootedPath::new(VirtualRoot::Project, vpath))
 }
 
 static SOURCES_CAPABILITY_FILE_ID: LazyLock<FileId> = LazyLock::new(|| {
@@ -49,13 +48,12 @@ static SOURCES_CAPABILITY_FILE_ID: LazyLock<FileId> = LazyLock::new(|| {
 
 #[func]
 pub(super) fn tola_sources(engine: &mut Engine, span: Span) -> SourceResult<Array> {
-    // Typst keys evaluation by the current library. This read also records the
-    // sources dependency for Tola's retained source-analysis entries.
+    // Reading this observation records the sources dependency for retained source-analysis entries.
     engine.world.source(*SOURCES_CAPABILITY_FILE_ID).at(span)?;
-    let Some(sources) = super::library::source_records(engine) else {
+    let Some(srcs) = super::library::source_records(engine) else {
         bail!(span, "Tola could not read the site's content sources");
     };
-    Ok(sources.clone())
+    Ok(srcs.clone())
 }
 
 #[func(contextual)]
@@ -64,34 +62,28 @@ pub(super) fn tola_current(
     context: Tracked<Context>,
     span: Span,
 ) -> SourceResult<Dict> {
-    let location = here(context).at(span)?;
-    let document = engine.introspect(DocumentIntrospection(location, span));
-    let path = engine.introspect(PathIntrospection(location, span));
-    let (Some(document), Some(path)) = (document, path) else {
+    let loc = here(context).at(span)?;
+    let doc = engine.introspect(DocumentIntrospection(loc, span));
+    let path = engine.introspect(PathIntrospection(loc, span));
+    let (Some(doc), Some(path)) = (doc, path) else {
         bail!(
             span,
             "`current-document()` is called outside a `document(…)` body";
             hint: "call it in `context` inside a `document(…)` body"
         );
     };
-    let path = path.get_with_slash();
-    let output = tola_address::OutputPath::parse(path.trim_start_matches('/'))
-        .map_err(|error| error.to_string())
+    let out = tola_address::OutputPath::parse(path.get_with_slash().trim_start_matches('/'))
+        .map_err(|err| err.to_string())
         .at(span)?;
-    let route = tola_address::route_for_output(&output);
-    let values = [
-        output.as_str().into_value(),
-        route.as_str().into_value(),
-        document.into_value(),
-    ];
-    let mut current = Dict::new();
-    for (name, value) in CURRENT_DOCUMENT_FIELDS.into_iter().zip(values) {
-        current.insert(name.into(), value);
-    }
-    Ok(current)
+    let route = tola_address::route_for_output(&out);
+    Ok(crate::dict([
+        (CURRENT_DOCUMENT_FIELDS[0], out.as_str().into_value()),
+        (CURRENT_DOCUMENT_FIELDS[1], route.as_str().into_value()),
+        (CURRENT_DOCUMENT_FIELDS[2], doc.into_value()),
+    ]))
 }
 
-/// The fields `current-document()` publishes, in the order it inserts them.
+/// Fields published by `current-document()`, in insertion order.
 pub(crate) const CURRENT_DOCUMENT_FIELDS: [&str; 3] = ["output", "route", "location"];
 
 #[func]
@@ -105,29 +97,26 @@ pub(super) fn tola_source(engine: &mut Engine, span: Span) -> SourceResult<Dict>
     };
     match id.root() {
         VirtualRoot::Project => {}
-        VirtualRoot::Package(package) => bail!(
+        VirtualRoot::Package(pkg) => bail!(
             span,
-            "`current-source()` is written in the package `{package}`";
+            "`current-source()` is written in the package `{pkg}`";
             hint: "call it in the site's own content source and pass the value on"
         ),
     }
-    let observation = FileId::new(RootedPath::new(
+    let rel = id.vpath().get_with_slash();
+    let obs = FileId::new(RootedPath::new(
         VirtualRoot::Package(TolaPackage::Source.spec()),
-        VirtualPath::new(format!(
-            "{SOURCE_OBSERVATION_DIRECTORY}{}",
-            id.vpath().get_with_slash()
-        ))
-        .expect("a source observation extends a validated virtual path"),
+        VirtualPath::new(format!("{SOURCE_OBSERVATION_DIRECTORY}{rel}"))
+            .expect("source observation extends a validated virtual path"),
     ));
-    engine.world.source(observation).at(span)?;
+    engine.world.source(obs).at(span)?;
     let Some(by_file) = super::library::source_records_by_file(engine) else {
         bail!(span, "Tola could not read the site's content sources");
     };
-    let Ok(record) = by_file.get(id.vpath().get_with_slash()).cloned() else {
+    let Ok(record) = by_file.get(rel).cloned() else {
         bail!(
             span,
-            "`{}` is not a content source",
-            id.vpath().get_with_slash();
+            "`{rel}` is not a content source";
             hint: "call `current-source()` in a source under `build.content-dir`"
         );
     };
@@ -138,9 +127,9 @@ fn naming_rules(
     mode: Spanned<Str>,
     case: Spanned<Str>,
     separator: Spanned<Str>,
-    language: &Str,
+    lang: &Str,
 ) -> SourceResult<tola_slugify::NamingRules> {
-    use tola_slugify::{NamingRules, SlugCase, SlugMode, SlugSeparator};
+    use tola_slugify::{HanPronunciations, NamingRules, SlugCase, SlugMode, SlugSeparator};
 
     let mode = match mode.v.as_str() {
         "unicode" => SlugMode::Unicode,
@@ -172,7 +161,7 @@ fn naming_rules(
         mode,
         case,
         separator,
-        pronunciations: tola_slugify::HanPronunciations::for_language(language.as_str()),
+        pronunciations: HanPronunciations::for_language(lang.as_str()),
     })
 }
 
@@ -199,10 +188,8 @@ pub(super) fn tola_slug(
     #[default("zh".into())]
     language: Str,
 ) -> SourceResult<Str> {
-    use tola_slugify::slugify_segment;
-
     let rules = naming_rules(mode, case, separator, &language)?;
-    let slug = slugify_segment(text.v.as_str(), rules)
+    let slug = tola_slugify::slugify_segment(text.v.as_str(), rules)
         .ok_or("nothing in this text can name a segment")
         .at(text.span)?;
     Ok(slug.into())
@@ -210,53 +197,45 @@ pub(super) fn tola_slug(
 
 #[func]
 pub(super) fn tola_join_route(span: Span, segments: Array) -> SourceResult<Str> {
-    let segments = route_segments_from_array(&segments).at(span)?;
     let mut route = String::from("/");
-    for (position, segment) in segments.iter().enumerate() {
-        if segment.contains(['/', '\\']) {
+    for (idx, val) in segments.iter().enumerate() {
+        let Value::Str(seg) = val else {
             bail!(
                 span,
-                "route segment {} (`{segment}`) names more than one directory",
-                position + 1;
+                "route segment {} must be a string, found {}",
+                idx + 1,
+                val.ty().short_name()
+            );
+        };
+        if seg.as_str().contains(['/', '\\']) {
+            bail!(
+                span,
+                "route segment {} (`{seg}`) names more than one directory",
+                idx + 1;
                 hint: "pass one segment per element"
             );
         }
-        if position > 0 {
+        if idx > 0 {
             route.push('/');
         }
-        route.push_str(segment);
+        route.push_str(seg);
     }
     if !segments.is_empty() {
         route.push('/');
     }
     let route = tola_address::UrlPath::from_decoded(&route)
-        .map_err(|error| error.to_string())
+        .map_err(|err| err.to_string())
         .at(span)?;
     Ok(route.as_str().into())
 }
 
-fn route_segments_from_array(segments: &Array) -> Result<Vec<String>, String> {
-    segments
-        .iter()
-        .enumerate()
-        .map(|(position, segment)| match segment {
-            Value::Str(text) => Ok(text.as_str().to_owned()),
-            other => Err(format!(
-                "route segment {} must be a string, found {}",
-                position + 1,
-                other.ty().short_name()
-            )),
-        })
-        .collect()
-}
-
 #[func]
 pub(super) fn tola_output_of(route: Spanned<Str>) -> SourceResult<Str> {
-    let route = tola_address::UrlPath::from_decoded(route.v.as_str()).map_err(|error| {
-        address_error(
+    let route = tola_address::UrlPath::from_decoded(route.v.as_str()).map_err(|err| {
+        address_err(
             route.span,
             "output-of",
-            format!("`route` is invalid: {error}"),
+            format!("`route` is invalid: {err}"),
         )
     })?;
     Ok(tola_address::OutputPath::from_route(&route).as_str().into())
@@ -264,10 +243,10 @@ pub(super) fn tola_output_of(route: Spanned<Str>) -> SourceResult<Str> {
 
 #[func]
 pub(super) fn tola_route_of(output: Spanned<Str>) -> SourceResult<Str> {
-    let output = tola_address::OutputPath::parse(output.v.as_str())
-        .map_err(|error| error.to_string())
+    let out = tola_address::OutputPath::parse(output.v.as_str())
+        .map_err(|err| err.to_string())
         .at(output.span)?;
-    Ok(tola_address::route_for_output(&output).as_str().into())
+    Ok(tola_address::route_for_output(&out).as_str().into())
 }
 
 #[func]
@@ -281,47 +260,53 @@ pub(super) fn tola_output_url(
     #[default]
     origin: Option<Str>,
 ) -> SourceResult<Str> {
-    let output = tola_address::OutputPath::parse(output.v.as_str()).map_err(|error| {
-        address_error(
+    let out = tola_address::OutputPath::parse(output.v.as_str()).map_err(|err| {
+        address_err(
             output.span,
             "output-url",
-            format!("`output` is invalid: {error}"),
+            format!("`output` is invalid: {err}"),
         )
     })?;
-    let mount =
-        tola_address::SiteUrlMount::from_base_path(base_path.as_str()).map_err(|error| {
-            use tola_address::SiteUrlMountError;
-            let reason = match error {
-                SiteUrlMountError::InvalidBasePath(reason) => {
-                    format!("is not a valid URL path: {reason}")
-                }
-                SiteUrlMountError::MissingTrailingSlash => "must end with `/`".to_owned(),
-                SiteUrlMountError::ReservedRoot => {
-                    "must stay outside `_tola`, the namespace Tola reserves".to_owned()
-                }
-            };
-            address_error(span, "output-url", format!("`base-path` {reason}"))
-        })?;
+    let mount = parse_mount(base_path.as_str(), span)?;
     let origin = origin
-        .as_ref()
-        .map(|origin| {
-            let origin = tola_address::SiteOrigin::parse(origin.as_str())
-                .map_err(|error| format!("`origin` {error}"))?;
-            if origin.base_path().is_some() {
-                return Err("`origin` must name only an http/https origin; pass the deployment path with `base-path`".to_owned());
-            }
-            Ok(origin)
-        })
-        .transpose()
-        .map_err(|message| address_error(span, "output-url", message))?;
-    let route = tola_address::route_for_output(&output);
+        .as_deref()
+        .map(|raw| parse_origin(raw, span))
+        .transpose()?;
+    let route = tola_address::route_for_output(&out);
     Ok(tola_address::browser_url(&route, &mount, origin.as_ref()).into())
+}
+
+fn parse_mount(base_path: &str, span: Span) -> SourceResult<tola_address::SiteUrlMount> {
+    use tola_address::SiteUrlMountError;
+    tola_address::SiteUrlMount::from_base_path(base_path).map_err(|err| {
+        let reason = match err {
+            SiteUrlMountError::InvalidBasePath(r) => format!("is not a valid URL path: {r}"),
+            SiteUrlMountError::MissingTrailingSlash => "must end with `/`".to_owned(),
+            SiteUrlMountError::ReservedRoot => {
+                "must stay outside `_tola`, the namespace Tola reserves".to_owned()
+            }
+        };
+        address_err(span, "output-url", format!("`base-path` {reason}"))
+    })
+}
+
+fn parse_origin(raw: &str, span: Span) -> SourceResult<tola_address::SiteOrigin> {
+    let origin = tola_address::SiteOrigin::parse(raw)
+        .map_err(|err| address_err(span, "output-url", format!("`origin` {err}")))?;
+    if origin.base_path().is_some() {
+        return Err(address_err(
+            span,
+            "output-url",
+            "`origin` must name only an http/https origin; pass the deployment path with `base-path`",
+        ));
+    }
+    Ok(origin)
 }
 
 #[func]
 pub(super) fn tola_decode_url_path(url_path: Spanned<Str>) -> SourceResult<Str> {
     let path = tola_address::UrlPath::parse(url_path.v.as_str())
-        .map_err(|error| error.to_string())
+        .map_err(|err| err.to_string())
         .at(url_path.span)?;
     Ok(path.as_str().into())
 }
@@ -329,7 +314,7 @@ pub(super) fn tola_decode_url_path(url_path: Spanned<Str>) -> SourceResult<Str> 
 #[func]
 pub(super) fn tola_parse_url_path(url_path: Str) -> Dict {
     schema_conversion(
-        tola_address::UrlPath::parse(url_path.as_str()).map(|path| path.as_str().to_owned()),
+        tola_address::UrlPath::parse(url_path.as_str()).map(|p| p.as_str().to_owned()),
         "schema.url-path",
     )
 }
@@ -369,45 +354,43 @@ pub(super) fn tola_parse_partial_date(value: Value) -> Dict {
 #[func]
 pub(super) fn tola_parse_timestamp(value: Value) -> Dict {
     schema_conversion(
-        crate::date::Timestamp::parse(&value).map(|timestamp| {
-            let mut fields = Dict::new();
-            fields.insert("rfc3339".into(), timestamp.rfc3339().into_value());
-            fields.insert("unix-seconds".into(), timestamp.unix_seconds().into_value());
-            fields.insert("subsecond".into(), timestamp.subsecond().into_value());
-            fields
+        crate::date::Timestamp::parse(&value).map(|ts| {
+            crate::dict([
+                ("rfc3339", ts.rfc3339().into_value()),
+                ("unix-seconds", ts.unix_seconds().into_value()),
+                ("subsecond", ts.subsecond().into_value()),
+            ])
         }),
         "schema.timestamp",
     )
 }
 
-// A conversion failure stays an Issue until its schema supplies the field and source.
+// Conversion errors become an Issue until the schema supplies the field path and source.
 fn schema_conversion<T: IntoValue, E: std::fmt::Display>(
     converted: Result<T, E>,
     code: &str,
 ) -> Dict {
-    let mut parsed = Dict::new();
     match converted {
-        Ok(value) => {
-            parsed.insert("ok".into(), true.into_value());
-            parsed.insert("value".into(), value.into_value());
-        }
-        Err(error) => {
-            let mut issue = Dict::new();
-            issue.insert("code".into(), code.into_value());
-            issue.insert("path".into(), Array::new().into_value());
-            issue.insert("message".into(), error.to_string().into_value());
-            issue.insert("notes".into(), Array::new().into_value());
-            issue.insert("children".into(), Array::new().into_value());
-            parsed.insert("ok".into(), false.into_value());
-            parsed.insert(
-                "issues".into(),
-                std::iter::once(issue.into_value())
-                    .collect::<Array>()
-                    .into_value(),
-            );
+        Ok(val) => crate::dict([("ok", true.into_value()), ("value", val.into_value())]),
+        Err(err) => {
+            let issue = crate::dict([
+                ("code", code.into_value()),
+                ("path", Array::new().into_value()),
+                ("message", err.to_string().into_value()),
+                ("notes", Array::new().into_value()),
+                ("children", Array::new().into_value()),
+            ]);
+            crate::dict([
+                ("ok", false.into_value()),
+                (
+                    "issues",
+                    std::iter::once(issue.into_value())
+                        .collect::<Array>()
+                        .into_value(),
+                ),
+            ])
         }
     }
-    parsed
 }
 
 #[cfg(test)]
@@ -416,9 +399,8 @@ mod tests {
 
     use super::*;
 
-    /// The host ABI the packages import: these three read the compilation they run in.
     #[test]
-    fn capability_reads_take_no_arguments() {
+    fn capability_reads_take_no_args() {
         assert_eq!(Func::from(tola_sources::data()).params().count(), 0);
         assert_eq!(Func::from(tola_current::data()).params().count(), 0);
         assert_eq!(Func::from(tola_source::data()).params().count(), 0);

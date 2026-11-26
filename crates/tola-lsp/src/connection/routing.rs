@@ -1,4 +1,4 @@
-//! Client message dispatch: request admission and refusal, notifications, and cancellations.
+//! Client message dispatch: request admission/refusal, notifications, and cancellations.
 
 use std::io::Write;
 use std::ops::ControlFlow;
@@ -20,7 +20,6 @@ const MAX_SOURCE_REQUESTS: usize = 64;
 
 const SERVER_BUSY_ERROR_CODE: i32 = -32000;
 
-/// Why the connection had to stop.
 #[derive(Debug, thiserror::Error)]
 pub(super) enum ConnectionError {
     #[error("LSP exit received before shutdown")]
@@ -29,7 +28,6 @@ pub(super) enum ConnectionError {
     Other(#[from] anyhow::Error),
 }
 
-/// One notification the connection could not read, named in the editor's log.
 pub(super) enum InvalidNotification {
     FileChange,
     CancelRequest,
@@ -37,8 +35,6 @@ pub(super) enum InvalidNotification {
 }
 
 impl InvalidNotification {
-    /// One sentence naming the notification and what the author does next; an editor log entry
-    /// has no separate help field for the action.
     fn message(self) -> &'static str {
         match self {
             Self::FileChange => {
@@ -54,33 +50,30 @@ impl InvalidNotification {
     }
 }
 
-/// One source request this connection admitted: the serial its reply must carry, and the token
-/// that cancels the job answering it.
 pub(super) struct SourceAdmission {
     pub(super) serial: u64,
     pub(super) cancellation: BuildCancellation,
 }
 
 impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
-    pub(super) fn request(&mut self, request: Request) -> Result<()> {
-        if let Some((code, message)) = self.phase.request_error(&request.method) {
-            return self.reject(request.id, code, message);
+    pub(super) fn request(&mut self, req: Request) -> Result<()> {
+        if let Some((code, msg)) = self.phase.request_error(&req.method) {
+            return self.reject(req.id, code, msg);
         }
-        // Two replies for one identifier would leave the client matching the wrong one, so an id a
-        // pending request holds is refused here, before any handler answers.
-        if self.requests.contains_key(&request.id) {
+        // Reject duplicate pending IDs before any handler runs so replies stay unambiguous.
+        if self.requests.contains_key(&req.id) {
             return self.reject(
-                request.id,
+                req.id,
                 ErrorCode::InvalidRequest,
                 "request id is already pending",
             );
         }
-        let (id, request) = match ClientRequest::decode(request) {
-            Ok(request) => request,
-            Err(response) => return self.reply(*response),
+        let (id, req) = match ClientRequest::decode(req) {
+            Ok(req) => req,
+            Err(resp) => return self.reply(*resp),
         };
-        match request {
-            ClientRequest::Initialize(parameters) => self.initialize(id, *parameters),
+        match req {
+            ClientRequest::Initialize(params) => self.initialize(id, *params),
             ClientRequest::Shutdown => {
                 self.cancel_pending_work(SHUTDOWN_ERROR)?;
                 self.running_check = None;
@@ -89,36 +82,31 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
                 self.reply(Response::new_ok(id, ()))
             }
             ClientRequest::Query(query) => self.query(id, query),
-            ClientRequest::Formatting(parameters) => self.formatting(id, parameters),
-            ClientRequest::RangeFormatting(parameters) => self.range_formatting(id, parameters),
-            ClientRequest::Folding(parameters) => self.folding(id, parameters),
-            ClientRequest::Symbols(parameters) => self.symbols(id, parameters),
-            ClientRequest::Links(parameters) => self.links(id, parameters),
-            ClientRequest::Selection(parameters) => self.selection(id, parameters),
-            ClientRequest::Tokens(parameters) => self.tokens(id, parameters),
-            ClientRequest::Route(parameters) => self.route(id, parameters),
-            ClientRequest::CodeLenses(parameters) => self.code_lens(id, parameters),
-            ClientRequest::Rename(parameters) => self.rename(id, parameters),
-            ClientRequest::WorkspaceSymbols(parameters) => self.workspace_symbols(id, parameters),
-            ClientRequest::Enter(parameters) => self.enter(id, parameters),
-            ClientRequest::TokensDelta(parameters) => self.tokens_delta(id, parameters),
-            ClientRequest::TokensRange(parameters) => self.tokens_range(id, parameters),
-            ClientRequest::ExecuteCommand(parameters) => self.command(id, parameters),
-            ClientRequest::Diagnostic(parameters) => self.diagnostic(id, parameters),
-            ClientRequest::WorkspaceDiagnostic(parameters) => {
-                self.workspace_diagnostic(id, parameters)
-            }
-            ClientRequest::PackageSource(parameters) => self.package_source(id, parameters),
+            ClientRequest::Formatting(params) => self.formatting(id, params),
+            ClientRequest::RangeFormatting(params) => self.range_formatting(id, params),
+            ClientRequest::Folding(params) => self.folding(id, params),
+            ClientRequest::Symbols(params) => self.symbols(id, params),
+            ClientRequest::Links(params) => self.links(id, params),
+            ClientRequest::Selection(params) => self.selection(id, params),
+            ClientRequest::Tokens(params) => self.tokens(id, params),
+            ClientRequest::Route(params) => self.route(id, params),
+            ClientRequest::CodeLenses(params) => self.code_lens(id, params),
+            ClientRequest::Rename(params) => self.rename(id, params),
+            ClientRequest::WorkspaceSymbols(params) => self.workspace_symbols(id, params),
+            ClientRequest::Enter(params) => self.enter(id, params),
+            ClientRequest::TokensDelta(params) => self.tokens_delta(id, params),
+            ClientRequest::TokensRange(params) => self.tokens_range(id, params),
+            ClientRequest::ExecuteCommand(params) => self.command(id, params),
+            ClientRequest::Diagnostic(params) => self.diagnostic(id, params),
+            ClientRequest::WorkspaceDiagnostic(params) => self.workspace_diagnostic(id, params),
+            ClientRequest::PackageSource(params) => self.package_source(id, params),
             ClientRequest::RouteIndex => self.route_index(id),
-            ClientRequest::PrepareCallHierarchy(parameters) => {
-                self.prepare_call_hierarchy(id, parameters)
-            }
-            ClientRequest::IncomingCalls(parameters) => self.incoming_calls(id, parameters),
-            ClientRequest::OutgoingCalls(parameters) => self.outgoing_calls(id, parameters),
+            ClientRequest::PrepareCallHierarchy(params) => self.prepare_call_hierarchy(id, params),
+            ClientRequest::IncomingCalls(params) => self.incoming_calls(id, params),
+            ClientRequest::OutgoingCalls(params) => self.outgoing_calls(id, params),
         }
     }
 
-    /// Register one source request, or reply with its rejection and return `None`.
     pub(super) fn admit(&mut self, id: &RequestId) -> Result<Option<SourceAdmission>> {
         if self.requests.len() >= MAX_SOURCE_REQUESTS {
             self.reply(Response::new_err(
@@ -130,7 +118,7 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
         }
         self.serial += 1;
         let canceller = BuildCanceller::new();
-        let cancellation = canceller.token();
+        let cancel = canceller.token();
         self.requests.insert(
             id.clone(),
             PendingRequest {
@@ -143,15 +131,15 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
         );
         Ok(Some(SourceAdmission {
             serial: self.serial,
-            cancellation,
+            cancellation: cancel,
         }))
     }
 
     pub(super) fn notification(
         &mut self,
-        message: Notification,
+        msg: Notification,
     ) -> std::result::Result<ControlFlow<()>, ConnectionError> {
-        if message.method == notification::Exit::METHOD {
+        if msg.method == notification::Exit::METHOD {
             if !self.is_shutdown() {
                 return Err(ConnectionError::ExitBeforeShutdown);
             }
@@ -160,16 +148,18 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
         if matches!(self.phase, Phase::Uninitialized | Phase::Shutdown) {
             return Ok(ControlFlow::Continue(()));
         }
-        if message.method == notification::Cancel::METHOD {
-            self.cancel_request(message)?;
+        if msg.method == notification::Cancel::METHOD {
+            self.cancel_request(msg)?;
             return Ok(ControlFlow::Continue(()));
         }
-        if message.method == notification::WorkDoneProgressCancel::METHOD {
-            if let Ok(parameters) = message.extract::<lsp_types::WorkDoneProgressCancelParams>(
+        if msg.method == notification::WorkDoneProgressCancel::METHOD {
+            if let Ok(params) = msg.extract::<lsp_types::WorkDoneProgressCancelParams>(
                 notification::WorkDoneProgressCancel::METHOD,
-            ) && self.progress.as_ref().is_some_and(|progress| {
-                progress.token == parameters.token && progress.revision == self.revision
-            }) {
+            ) && self
+                .progress
+                .as_ref()
+                .is_some_and(|p| p.token == params.token && p.revision == self.revision)
+            {
                 self.checking.cancel();
                 self.check = None;
                 self.running_check = None;
@@ -178,51 +168,39 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
             }
             return Ok(ControlFlow::Continue(()));
         }
-        if message.method == notification::Initialized::METHOD {
+        if msg.method == notification::Initialized::METHOD {
             self.initialized()?;
             return Ok(ControlFlow::Continue(()));
         }
-        // A source notification between the `initialize` reply and `initialized` has no ready
-        // workspace to change, so it is dropped like one that arrives before `initialize`; only
-        // `initialized`, called above, ends the window.
+        // Drop document notifications arriving between `initialize` reply and `initialized`.
         if matches!(self.phase, Phase::Initializing(_)) {
             return Ok(ControlFlow::Continue(()));
         }
-        // A settings change is not a source change: it re-reads what the client says about this
-        // connection — when a check runs, where the site is served — and leaves the site's
-        // revision, its requests, and its held compilation as they are.
-        if message.method == notification::DidChangeConfiguration::METHOD {
-            self.configured(message)?;
+        if msg.method == notification::DidChangeConfiguration::METHOD {
+            self.configured(msg)?;
             return Ok(ControlFlow::Continue(()));
         }
-        // A changed file no check read, and no later check can read as a source, a configuration,
-        // or a bibliography with its style sheet, changes nothing this connection answers;
-        // dropping the notification here keeps it from costing a revision and a site-wide check.
-        if message.method == notification::DidChangeWatchedFiles::METHOD
-            && !self.watched_change_matters(&message)
+        if msg.method == notification::DidChangeWatchedFiles::METHOD
+            && !self.watched_change_matters(&msg)
         {
             return Ok(ControlFlow::Continue(()));
         }
-        self.apply_document_notification(message)?;
+        self.apply_document_notification(msg)?;
         Ok(ControlFlow::Continue(()))
     }
 
-    /// Apply one document notification: the buffer it changes, and what that change costs.
-    ///
-    /// A change to a document no check reads answers from that buffer alone, so its own requests
-    /// are refused and the revision every other answer was computed in stands.
-    fn apply_document_notification(&mut self, message: Notification) -> Result<()> {
-        let uri = message
+    fn apply_document_notification(&mut self, msg: Notification) -> Result<()> {
+        let uri = msg
             .params
             .get("textDocument")
-            .and_then(|document| document.get("uri"))
+            .and_then(|doc| doc.get("uri"))
             .and_then(serde_json::Value::as_str)
             .and_then(|uri| uri.parse::<Uri>().ok());
         let unnamed = uri.as_ref().is_some_and(is_untitled);
-        let opened = message.method == notification::DidOpenTextDocument::METHOD;
-        let closed = message.method == notification::DidCloseTextDocument::METHOD;
-        let typing = message.method == notification::DidChangeTextDocument::METHOD;
-        match self.open.apply(message) {
+        let opened = msg.method == notification::DidOpenTextDocument::METHOD;
+        let closed = msg.method == notification::DidCloseTextDocument::METHOD;
+        let typing = msg.method == notification::DidChangeTextDocument::METHOD;
+        match self.open.apply(msg) {
             Ok(changed) => {
                 if let Some(uri) = &uri {
                     if closed {
@@ -230,9 +208,9 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
                     }
                     if opened
                         && changed
-                        && let Phase::Ready(workspace) = &mut self.phase
+                        && let Phase::Ready(ws) = &mut self.phase
                     {
-                        workspace.diagnostics.invalidate_version(uri);
+                        ws.diagnostics.invalidate_version(uri);
                     }
                 }
                 if changed && !unnamed {
@@ -246,19 +224,18 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
         Ok(())
     }
 
-    fn cancel_request(&mut self, message: Notification) -> Result<()> {
-        let parameters =
-            match message.extract::<lsp_types::CancelParams>(notification::Cancel::METHOD) {
-                Ok(parameters) => parameters,
-                Err(_) => return self.log_invalid_notification(InvalidNotification::CancelRequest),
-            };
-        let id = match parameters.id {
+    fn cancel_request(&mut self, msg: Notification) -> Result<()> {
+        let params = match msg.extract::<lsp_types::CancelParams>(notification::Cancel::METHOD) {
+            Ok(params) => params,
+            Err(_) => return self.log_invalid_notification(InvalidNotification::CancelRequest),
+        };
+        let id = match params.id {
             NumberOrString::Number(id) => RequestId::from(id),
             NumberOrString::String(id) => RequestId::from(id),
         };
-        if let Some(request) = self.requests.remove(&id) {
-            request.canceller.cancel();
-            if let Some(waiting) = request.waiting
+        if let Some(req) = self.requests.remove(&id) {
+            req.canceller.cancel();
+            if let Some(waiting) = req.waiting
                 && self.waiting_code_actions(waiting.revision).is_empty()
             {
                 self.cancel_selection();
@@ -270,10 +247,9 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
     }
 
     pub(super) fn cancel_requests(&mut self, refusal: (ErrorCode, &str)) -> Result<()> {
-        // Cancel every job before writing: a disconnected client must not leave
-        // a compiler running after response delivery fails partway through.
-        for request in self.requests.values() {
-            request.canceller.cancel();
+        // Cancel all jobs before sending replies in case response delivery fails.
+        for req in self.requests.values() {
+            req.canceller.cancel();
         }
         self.discard_cancelled_jobs();
         for id in std::mem::take(&mut self.requests).into_keys() {
@@ -286,11 +262,10 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
         let ids = self
             .requests
             .iter()
-            .filter_map(|(id, request)| {
-                request
-                    .document_revision
+            .filter_map(|(id, req)| {
+                req.document_revision
                     .as_ref()
-                    .filter(|(document, _)| document == uri)
+                    .filter(|(doc, _)| doc == uri)
                     .map(|_| id.clone())
             })
             .collect::<Vec<_>>();
@@ -310,24 +285,16 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
 
     pub(super) fn discard_cancelled_jobs(&mut self) {
         self.analyses
-            .retain(|request| !request.sources.cancellation.is_cancelled());
+            .retain(|req| !req.sources.cancellation.is_cancelled());
         self.queries.retain(|job| !job.is_cancelled());
     }
 
-    /// Report one notification Tola could not apply to the author, through the editor's log.
-    ///
-    /// A notification has no reply, so this message is the only report the editor receives. The
-    /// protocol error stays unnamed here: what the author acts on is the notification their editor
-    /// sent, not the wording of the parse failure.
-    pub(super) fn log_invalid_notification(
-        &mut self,
-        notification: InvalidNotification,
-    ) -> Result<()> {
+    pub(super) fn log_invalid_notification(&mut self, kind: InvalidNotification) -> Result<()> {
         self.notify(
             notification::LogMessage::METHOD,
             LogMessageParams {
                 typ: MessageType::ERROR,
-                message: notification.message().to_owned(),
+                message: kind.message().to_owned(),
             },
         )
     }
@@ -341,110 +308,98 @@ mod tests {
     use serde_json::json;
 
     fn completion_request(id: i32, uri: &Uri, marked: &str) -> Request {
-        let source = tola_typst::typst::syntax::Source::detached(marked.replace('|', ""));
+        let src = tola_typst::typst::syntax::Source::detached(marked.replace('|', ""));
         let cursor = marked.find('|').unwrap();
-        let position = crate::position::utf16_range(source.lines(), cursor..cursor)
+        let pos = crate::position::utf16_range(src.lines(), cursor..cursor)
             .unwrap()
             .start;
         Request::new(
             id.into(),
             request::Completion::METHOD.into(),
-            json!({"textDocument":{"uri":uri.as_str()},"position":position}),
+            json!({"textDocument":{"uri":uri.as_str()},"position":pos}),
         )
     }
 
     #[test]
-    fn completion_leaves_control_requests_free() {
+    fn control_requests_unblocked_by_completion() {
         use crate::connection::tests::{open_document, response};
-        let mut connection = ready(Vec::new());
+        let mut conn = ready(Vec::new());
         let uri =
             crate::uri::from_file_path(&std::env::current_dir().unwrap().join("completion.typ"))
                 .unwrap();
         let marked = "#let value = (available: 1)\n#value.|";
-        open_document(&mut connection, &uri, 1, &marked.replace('|', ""));
-        connection
-            .request(completion_request(8, &uri, marked))
-            .unwrap();
-        let previous = connection.next_analysis().unwrap();
-        let cancellation = previous.sources.cancellation.clone();
-        assert!(connection.writer.is_empty());
-        connection
-            .request(Request::new(
-                9.into(),
-                "textDocument/foldingRange".into(),
-                json!({"textDocument":{"uri":uri.as_str()}}),
-            ))
-            .unwrap();
-        let folding = response(&mut connection);
+        open_document(&mut conn, &uri, 1, &marked.replace('|', ""));
+        conn.request(completion_request(8, &uri, marked)).unwrap();
+        let prev = conn.next_analysis().unwrap();
+        let cancel = prev.sources.cancellation.clone();
+        assert!(conn.writer.is_empty());
+        conn.request(Request::new(
+            9.into(),
+            "textDocument/foldingRange".into(),
+            json!({"textDocument":{"uri":uri.as_str()}}),
+        ))
+        .unwrap();
+        let folding = response(&mut conn);
         assert_eq!(folding.id, 9.into());
         assert!(folding.response_result.is_ok());
-        let _ = connection
+        let _ = conn
             .notification(Notification::new("$/cancelRequest".into(), json!({"id":8})))
             .unwrap();
         assert_eq!(
-            response(&mut connection).response_result.unwrap_err().code,
+            response(&mut conn).response_result.unwrap_err().code,
             ErrorCode::RequestCanceled as i32
         );
-        assert!(cancellation.is_cancelled());
-        connection
-            .request(completion_request(8, &uri, marked))
-            .unwrap();
-        let current = connection.next_analysis().unwrap();
+        assert!(cancel.is_cancelled());
+        conn.request(completion_request(8, &uri, marked)).unwrap();
+        let curr = conn.next_analysis().unwrap();
         let mut disk = crate::analysis::DiskSources::default();
         let mut graphs = crate::analysis::GraphCache::default();
-        connection
-            .completed(crate::compiler::analyze(&mut disk, &mut graphs, previous))
+        conn.completed(crate::compiler::analyze(&mut disk, &mut graphs, prev))
             .unwrap();
-        assert!(connection.writer.is_empty());
-        connection
-            .completed(crate::compiler::analyze(&mut disk, &mut graphs, current))
+        assert!(conn.writer.is_empty());
+        conn.completed(crate::compiler::analyze(&mut disk, &mut graphs, curr))
             .unwrap();
-        let completion = response(&mut connection).response_result.unwrap();
+        let items = response(&mut conn).response_result.unwrap();
         assert!(
-            completion
+            items
                 .as_array()
                 .unwrap()
                 .iter()
                 .any(|item| item["label"] == "available")
         );
     }
-    /// A second request reusing an identifier whose request is still pending would give the client
-    /// two replies for one id, so the dispatch boundary refuses it before any lane answers.
+
     #[test]
-    fn duplicate_request_ids_are_rejected() {
-        let mut connection = ready(Vec::new());
+    fn duplicate_request_id_rejected() {
+        let mut conn = ready(Vec::new());
         let pending = RequestId::from(1);
-        connection.query(pending.clone(), hover_query()).unwrap();
-        assert!(connection.requests.contains_key(&pending));
-        connection
-            .request(Request::new(
-                pending.clone(),
-                request::Formatting::METHOD.into(),
-                json!({
-                    "textDocument": {"uri": "file:///site/document.typ"},
-                    "options": {"tabSize": 2, "insertSpaces": true},
-                }),
-            ))
-            .unwrap();
+        conn.query(pending.clone(), hover_query()).unwrap();
+        assert!(conn.requests.contains_key(&pending));
+        conn.request(Request::new(
+            pending.clone(),
+            request::Formatting::METHOD.into(),
+            json!({
+                "textDocument": {"uri": "file:///site/document.typ"},
+                "options": {"tabSize": 2, "insertSpaces": true},
+            }),
+        ))
+        .unwrap();
         assert_eq!(
-            rejection(&mut connection, &pending),
+            rejection(&mut conn, &pending),
             ErrorCode::InvalidRequest as i32
         );
-        assert!(
-            connection.requests.contains_key(&pending),
-            "the admitted request stands"
-        );
+        assert!(conn.requests.contains_key(&pending));
     }
+
     #[test]
     fn exit_requires_shutdown() {
-        let mut connection = uninitialized();
+        let mut conn = uninitialized();
         assert!(
-            connection
-                .notification(Notification::new(
-                    notification::Exit::METHOD.into(),
-                    json!({}),
-                ))
-                .is_err()
+            conn.notification(Notification::new(
+                notification::Exit::METHOD.into(),
+                json!({}),
+            ))
+            .is_err()
         );
     }
 }

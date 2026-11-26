@@ -50,8 +50,9 @@ impl Command for Highlight {
         call: &Call,
         input: PipelineData,
     ) -> Result<PipelineData, ShellError> {
-        engine.signals().check(&call.head)?;
-        let language: String = call.req(engine, stack, 0)?;
+        let span = call.head;
+        engine.signals().check(&span)?;
+        let lang: String = call.req(engine, stack, 0)?;
         let mut theme = call
             .get_flag::<String>(engine, stack, "theme")?
             .as_deref()
@@ -68,9 +69,9 @@ impl Command for Highlight {
             PipelineData::Value(Value::Binary { val, .. }, _) => {
                 String::from_utf8_lossy(&val).into_owned()
             }
-            other => other.into_value(call.head)?.coerce_string()?,
+            other => other.into_value(span)?.coerce_string()?,
         };
-        engine.signals().check(&call.head)?;
-        Ok(Value::string(render(&text, &language, theme), call.head).into_pipeline_data())
+        engine.signals().check(&span)?;
+        Ok(Value::string(render(&text, &lang, theme), span).into_pipeline_data())
     }
 }

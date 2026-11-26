@@ -6,11 +6,10 @@ use typst_syntax::{LinkedNode, Side, Source, SyntaxKind};
 
 /// The control-flow keywords one cursor's loop owns, as byte ranges.
 ///
-/// The loop's own keyword and every `break` or `continue` inside it, in document order; a nested
-/// loop, closure, or `context` keeps its own. A cursor outside a loop owns none, and a keyword in
-/// markup keeps the `#` the author wrote.
-pub fn keywords(source: &Source, cursor: usize) -> Vec<Range<usize>> {
-    let root = LinkedNode::new(source.root());
+/// Includes the loop keyword and its `break`/`continue` sites, excluding nested loops,
+/// closures, and `context` blocks. Preserves a leading `#` in markup.
+pub fn keywords(src: &Source, cursor: usize) -> Vec<Range<usize>> {
+    let root = LinkedNode::new(src.root());
     let Some(leaf) = [Side::Before, Side::After]
         .into_iter()
         .find_map(|side| root.leaf_at(cursor, side))
@@ -20,20 +19,15 @@ pub fn keywords(source: &Source, cursor: usize) -> Vec<Range<usize>> {
     let Some(loop_node) = enclosing_loop(leaf) else {
         return Vec::new();
     };
-    let mut keywords = Vec::new();
-    if let Some(keyword) = loop_node.children().find(|child| child.kind().is_keyword()) {
-        keywords.push(written(source, keyword.range()));
+    let mut found = Vec::new();
+    if let Some(kw) = loop_node.children().find(|child| child.kind().is_keyword()) {
+        found.push(written(src, kw.range()));
     }
-    collect_breaks(&loop_node, source, &mut keywords);
-    keywords.sort_by_key(|range| range.start);
-    keywords
+    collect_breaks(&loop_node, src, &mut found);
+    found.sort_by_key(|range| range.start);
+    found
 }
 
-/// The loop the cursor's own control flow belongs to.
-///
-/// Walking out from the cursor's leaf, the first control keyword decides: the nearest loop above
-/// it is the one it belongs to, and a closure or `context` between the two keeps it out of any
-/// loop.
 fn enclosing_loop(mut node: LinkedNode<'_>) -> Option<LinkedNode<'_>> {
     let mut control = false;
     loop {
@@ -52,9 +46,7 @@ fn enclosing_loop(mut node: LinkedNode<'_>) -> Option<LinkedNode<'_>> {
     }
 }
 
-/// Every `break` or `continue` the loop holds, without descending into the loops, closures, and
-/// contexts that keep their own.
-fn collect_breaks(node: &LinkedNode<'_>, source: &Source, keywords: &mut Vec<Range<usize>>) {
+fn collect_breaks(node: &LinkedNode<'_>, src: &Source, found: &mut Vec<Range<usize>>) {
     for child in node.children() {
         match child.kind() {
             SyntaxKind::ForLoop
@@ -62,17 +54,16 @@ fn collect_breaks(node: &LinkedNode<'_>, source: &Source, keywords: &mut Vec<Ran
             | SyntaxKind::Closure
             | SyntaxKind::Contextual => {}
             SyntaxKind::LoopBreak | SyntaxKind::LoopContinue => {
-                keywords.push(written(source, child.range()));
+                found.push(written(src, child.range()));
             }
-            _ => collect_breaks(&child, source, keywords),
+            _ => collect_breaks(&child, src, found),
         }
     }
 }
 
-/// The range the author wrote for one keyword, including a leading `#` in markup.
-fn written(source: &Source, range: Range<usize>) -> Range<usize> {
+fn written(src: &Source, range: Range<usize>) -> Range<usize> {
     match range.start.checked_sub(1) {
-        Some(start) if source.text().as_bytes().get(start) == Some(&b'#') => start..range.end,
+        Some(start) if src.text().as_bytes().get(start) == Some(&b'#') => start..range.end,
         _ => range,
     }
 }
@@ -81,18 +72,17 @@ fn written(source: &Source, range: Range<usize>) -> Range<usize> {
 mod tests {
     use super::*;
 
-    /// The keywords one marked cursor answers, as the text it covers.
     fn keywords_of(marked: &str) -> Vec<String> {
         let cursor = marked.find('|').expect("a cursor marker");
-        let source = Source::detached(marked.replace('|', ""));
-        keywords(&source, cursor)
+        let src = Source::detached(marked.replace('|', ""));
+        keywords(&src, cursor)
             .into_iter()
-            .map(|range| source.text()[range].to_owned())
+            .map(|range| src.text()[range].to_owned())
             .collect()
     }
 
     #[test]
-    fn loop_keyword_owns_its_breaks() {
+    fn loop_owns_breaks() {
         assert_eq!(
             keywords_of("#f|or x in (1, 2) {\n  if x == 1 { break }\n  continue\n}\n"),
             ["#for", "break", "continue"]
@@ -100,7 +90,7 @@ mod tests {
     }
 
     #[test]
-    fn closure_keeps_its_own_control_flow() {
+    fn loop_closure_isolates_breaks() {
         assert_eq!(
             keywords_of("#for x in (1,) {\n  let f = () => { br|eak }\n}\n"),
             Vec::<String>::new()

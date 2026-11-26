@@ -8,7 +8,7 @@ use anyhow::Result;
 use tola_input::{FileSelection, FilesystemSourceIdentity};
 
 use crate::asset::output::{self, AssetOutputError};
-use crate::config::ResolvedSiteConfig;
+use crate::config::SiteConfig;
 use crate::filesystem::{FilesystemSourceKind, FilesystemSourceObservation};
 
 use super::AssetSourceError;
@@ -71,12 +71,12 @@ impl ObservationKey {
 }
 
 #[derive(Clone, Debug)]
-pub(super) struct ResolvedSource {
+pub(super) struct LocatedAsset {
     pub(super) id: AssetSource,
     pub(super) source_identity: FilesystemSourceIdentity,
 }
 
-impl ResolvedSource {
+impl LocatedAsset {
     pub(super) fn observation_key(&self) -> ObservationKey {
         ObservationKey::for_source(&self.id, &self.source_identity)
     }
@@ -122,12 +122,12 @@ impl DeclaredFileSources {
 }
 
 pub(super) fn read_source(
-    config: &ResolvedSiteConfig,
+    config: &SiteConfig,
     id: &AssetSource,
     cancellation: &crate::cancellation::BuildCancellation,
-) -> Result<ResolvedSource> {
+) -> Result<LocatedAsset> {
     cancellation.ensure_active()?;
-    let source = tola_diagnostic::display_path(&id.logical_source, config.get_root());
+    let source = tola_diagnostic::display_path(&id.logical_source, config.root());
     let key = declaration_key(id.kind);
     let display_source = source.clone();
     let unreadable = move |error: &std::io::Error| AssetSourceError::SourceUnreadable {
@@ -159,14 +159,14 @@ pub(super) fn read_source(
         std::fs::canonicalize(&id.logical_source).map_err(|error| unreadable(&error))?,
     );
     check_source_boundary(config, id, &source_identity)?;
-    Ok(ResolvedSource {
+    Ok(LocatedAsset {
         id: id.clone(),
         source_identity,
     })
 }
 
 pub(super) fn check_source_boundary(
-    config: &ResolvedSiteConfig,
+    config: &SiteConfig,
     id: &AssetSource,
     source: &FilesystemSourceIdentity,
 ) -> Result<()> {
@@ -176,8 +176,8 @@ pub(super) fn check_source_boundary(
             .starts_with(tola_input::normalize_existing_prefix(root))
     {
         return Err(AssetSourceError::SourceEscapes {
-            path: tola_diagnostic::display_path(source.logical_path(), config.get_root()),
-            owner: if root == config.get_root() {
+            path: tola_diagnostic::display_path(source.logical_path(), config.root()),
+            owner: if root == config.root() {
                 "site"
             } else {
                 "module"
@@ -185,8 +185,8 @@ pub(super) fn check_source_boundary(
         }
         .into());
     }
-    let internal = config.get_root().join(tola_input::INTERNAL_DIR);
-    let module_cache = tola_input::layout::modules(config.get_root());
+    let internal = config.root().join(tola_input::INTERNAL_DIR);
+    let module_cache = tola_input::layout::modules(config.root());
     let from_acquired_module = id.owner.is_some()
         && id
             .within
@@ -213,7 +213,7 @@ pub(super) fn check_source_boundary(
         );
         if source.intersects(&protected) {
             return Err(AssetSourceError::OverlapsProtected {
-                path: tola_diagnostic::display_path(source.logical_path(), config.get_root()),
+                path: tola_diagnostic::display_path(source.logical_path(), config.root()),
                 owner,
             }
             .into());
@@ -225,7 +225,7 @@ pub(super) fn check_source_boundary(
 }
 
 pub(super) fn observe_source(
-    config: &ResolvedSiteConfig,
+    config: &SiteConfig,
     boundary: &tola_typst::SourceBoundary,
     id: &AssetSource,
     source_identity: &FilesystemSourceIdentity,
@@ -234,7 +234,7 @@ pub(super) fn observe_source(
     changed_paths: &[PathBuf],
 ) -> Result<FilesystemSourceObservation> {
     cancellation.ensure_active()?;
-    let display_root = config.get_root();
+    let display_root = config.root();
     match id.kind {
         FilesystemSourceKind::Tree => {
             let validate = |relative: &Path, logical_source: &Path, target: Option<&Path>| {
@@ -266,14 +266,14 @@ pub(super) fn observe_source(
 }
 
 pub(super) fn validate_tree_member(
-    config: &ResolvedSiteConfig,
+    config: &SiteConfig,
     boundary: &tola_typst::SourceBoundary,
     id: &AssetSource,
     relative: &Path,
     logical_source: &Path,
     target: Option<&Path>,
 ) -> Result<()> {
-    let member = tola_diagnostic::display_path(logical_source, config.get_root());
+    let member = tola_diagnostic::display_path(logical_source, config.root());
     if let Some(target) = target {
         let identity =
             FilesystemSourceIdentity::canonical(logical_source.to_path_buf(), target.to_path_buf());
@@ -297,10 +297,7 @@ pub(super) fn validate_tree_member(
         })
 }
 
-pub(super) fn check_tree_overlap(
-    config: &ResolvedSiteConfig,
-    sources: &[ResolvedSource],
-) -> Result<()> {
+pub(super) fn check_tree_overlap(config: &SiteConfig, sources: &[LocatedAsset]) -> Result<()> {
     for (index, left) in sources.iter().enumerate() {
         for right in sources.iter().skip(index + 1) {
             if left.id.owner != right.id.owner {
@@ -321,12 +318,12 @@ pub(super) fn check_tree_overlap(
                 return Err(AssetSourceError::TreeSourcesOverlap {
                     left: tola_diagnostic::display_path(
                         left.id.logical_source.as_path(),
-                        config.get_root(),
+                        config.root(),
                     ),
                     left_key: declaration_key(left.id.kind),
                     right: tola_diagnostic::display_path(
                         right.id.logical_source.as_path(),
-                        config.get_root(),
+                        config.root(),
                     ),
                     right_key: declaration_key(right.id.kind),
                 }

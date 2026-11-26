@@ -2,14 +2,14 @@
 
 use crate::options::OptionPath;
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, ensure};
 use serde::{Deserialize, Serialize};
 use tola_input::{FilePatterns, FileSelection};
 
+use crate::bundle::{HookEntry, HookParticipation, HooksContribution};
 use crate::module_set::LoadedModule;
-use crate::prepared::{HookEntry, HookParticipation, HooksContribution};
 use crate::watch::HookWatchInputs;
 
 /// Hooks grouped by the event that runs them.
@@ -153,33 +153,37 @@ pub enum RerunPath {
     Project { project: String },
 }
 
+fn has_forbidden_marker(text: &str) -> bool {
+    ["{module}", "{project}", "{tola}"]
+        .iter()
+        .any(|marker| text.contains(marker))
+}
+
 impl RerunPath {
     fn pattern(&self) -> &str {
         match self {
-            Self::Relative(pattern) | Self::Project { project: pattern } => pattern,
+            Self::Relative(pat) | Self::Project { project: pat } => pat,
         }
     }
 
     fn validate(&self, module: bool, include: bool) -> Result<()> {
-        let pattern = self.pattern();
-        let pattern = if module {
+        let raw = self.pattern();
+        let pat = if module {
             ensure!(
-                !["{module}", "{project}", "{tola}"]
-                    .iter()
-                    .any(|&name| pattern.contains(name)),
-                "the pattern `{pattern}` only accepts the `{{name}}` substitution"
+                !has_forbidden_marker(raw),
+                "the pattern `{raw}` only accepts the `{{name}}` substitution"
             );
-            pattern.replace("{name}", "module")
+            raw.replace("{name}", "module")
         } else {
-            pattern.to_owned()
+            raw.to_owned()
         };
-        let mut patterns = FilePatterns::default();
+        let mut pats = FilePatterns::default();
         if include {
-            patterns.include.push(pattern);
+            pats.include.push(pat);
         } else {
-            patterns.exclude.push(pattern);
+            pats.exclude.push(pat);
         }
-        FileSelection::new(&patterns).map_err(|error| error.at("rerun-on"))?;
+        FileSelection::new(&pats).map_err(|err| err.at("rerun-on"))?;
         Ok(())
     }
 }
@@ -192,23 +196,19 @@ impl RerunOn {
     ) -> impl Iterator<Item = (&'static str, usize, anyhow::Error)> + '_ {
         [(true, &self.include), (false, &self.exclude)]
             .into_iter()
-            .flat_map(move |(include, patterns)| {
+            .flat_map(move |(include, pats)| {
                 let key = if include { "include" } else { "exclude" };
-                patterns
-                    .iter()
-                    .enumerate()
-                    .filter_map(move |(index, pattern)| {
-                        pattern
-                            .validate(module, include)
-                            .err()
-                            .map(|error| (key, index, error))
-                    })
+                pats.iter().enumerate().filter_map(move |(idx, pat)| {
+                    pat.validate(module, include)
+                        .err()
+                        .map(|err| (key, idx, err))
+                })
             })
     }
 
     fn expand(&self, alias: &str) -> Self {
         let expand = |entry: &RerunPath| match entry {
-            RerunPath::Relative(pattern) => RerunPath::Relative(pattern.replace("{name}", alias)),
+            RerunPath::Relative(pat) => RerunPath::Relative(pat.replace("{name}", alias)),
             RerunPath::Project { project } => RerunPath::Project {
                 project: project.replace("{name}", alias),
             },
@@ -227,8 +227,8 @@ impl RerunOn {
         site_root: &Path,
         origin: Option<&ModuleHookOrigin>,
     ) -> Result<RerunSelection> {
-        let module = origin.map(|origin| (origin.name.as_str(), origin.root.as_path()));
-        self.compile_at(site_root, module)
+        let mod_origin = origin.map(|o| (o.name.as_str(), o.root.as_path()));
+        self.compile_at(site_root, mod_origin)
     }
 
     fn compile_at(
@@ -236,60 +236,60 @@ impl RerunOn {
         site_root: &Path,
         module: Option<(&str, &Path)>,
     ) -> Result<RerunSelection> {
-        let mut site_patterns = FilePatterns::default();
-        let mut module_patterns = FilePatterns::default();
-        for (patterns, site, local) in [
-            (
-                &self.include,
-                &mut site_patterns.include,
-                &mut module_patterns.include,
-            ),
-            (
-                &self.exclude,
-                &mut site_patterns.exclude,
-                &mut module_patterns.exclude,
-            ),
+        let mut site_pats = FilePatterns::default();
+        let mut mod_pats = FilePatterns::default();
+        for (pats, site, local) in [
+            (&self.include, &mut site_pats.include, &mut mod_pats.include),
+            (&self.exclude, &mut site_pats.exclude, &mut mod_pats.exclude),
         ] {
-            for pattern in patterns {
-                if module.is_some() && matches!(pattern, RerunPath::Relative(_)) {
-                    local.push(pattern.pattern().to_owned());
+            for pat in pats {
+                if module.is_some() && matches!(pat, RerunPath::Relative(_)) {
+                    local.push(pat.pattern().to_owned());
                 } else {
-                    site.push(pattern.pattern().to_owned());
+                    site.push(pat.pattern().to_owned());
                 }
             }
         }
         let mut scopes = Vec::new();
-        let roots = std::iter::once((site_root, site_patterns, None))
-            .chain(module.map(|(alias, root)| (root, module_patterns, Some(alias))));
-        for (root, patterns, alias) in roots {
-            if patterns.include.is_empty() {
-                if !patterns.exclude.is_empty() {
-                    scopes.push((root.to_owned(), FileSelection::new(&patterns)?));
-                }
-                continue;
-            }
-            // Each include decides whether it explicitly names a VCS directory. A `.git/HEAD`
-            // dependency must not admit unrelated Git files through another, broad pattern.
-            for include in patterns.include {
-                let selection = FileSelection::new(&FilePatterns {
-                    include: vec![include],
-                    exclude: patterns.exclude.clone(),
-                })?;
-                if let Some(alias) = alias {
-                    for path in selection.roots() {
-                        ensure!(
-                            tola_input::normalize_existing_prefix(&root.join(&path))
-                                .starts_with(root),
-                            "the `rerun-on` path `{}` leaves module `{alias}`",
-                            path.display()
-                        );
-                    }
-                }
-                scopes.push((root.to_owned(), selection));
-            }
+        compile_scope(site_root, site_pats, None, &mut scopes)?;
+        if let Some((alias, root)) = module {
+            compile_scope(root, mod_pats, Some(alias), &mut scopes)?;
         }
         Ok(RerunSelection { scopes })
     }
+}
+
+fn compile_scope(
+    root: &Path,
+    pats: FilePatterns,
+    alias: Option<&str>,
+    scopes: &mut Vec<(PathBuf, FileSelection)>,
+) -> Result<()> {
+    if pats.include.is_empty() {
+        if !pats.exclude.is_empty() {
+            scopes.push((root.to_owned(), FileSelection::new(&pats)?));
+        }
+        return Ok(());
+    }
+    // Each include decides independently whether it names `.git`/`.jj` so a broad
+    // pattern cannot admit unrelated VCS internals.
+    for include in pats.include {
+        let sel = FileSelection::new(&FilePatterns {
+            include: vec![include],
+            exclude: pats.exclude.clone(),
+        })?;
+        if let Some(alias) = alias {
+            for path in sel.roots() {
+                ensure!(
+                    tola_input::normalize_existing_prefix(&root.join(&path)).starts_with(root),
+                    "the `rerun-on` path `{}` leaves module `{alias}`",
+                    path.display()
+                );
+            }
+        }
+        scopes.push((root.to_owned(), sel));
+    }
+    Ok(())
 }
 
 /// Compiled hook input rules paired with their absolute roots.
@@ -420,18 +420,10 @@ pub enum HookDeclarationError {
 }
 
 fn relative(path: &Path, label: &'static str) -> std::result::Result<(), HookDeclarationError> {
-    let spelling = path.to_string_lossy();
-    if spelling.contains("{module}")
-        || spelling.contains("{project}")
-        || spelling.contains("{tola}")
-    {
+    if has_forbidden_marker(&path.to_string_lossy()) {
         return Err(HookDeclarationError::Substitution { label });
     }
-    if !(crate::is_relative_path(path)
-        && path
-            .components()
-            .any(|part| matches!(part, Component::Normal(_))))
-    {
+    if !crate::declaration::is_nonempty_relative_path(path) {
         return Err(HookDeclarationError::Path { label });
     }
     Ok(())
@@ -445,9 +437,9 @@ fn expand_outputs(outputs: &[CommandOutput], alias: &str) -> Result<Vec<CommandO
     let mut seen = BTreeSet::new();
     outputs
         .iter()
-        .map(|output| {
+        .map(|out| {
             let path =
-                tola_address::OutputPath::parse(&output.path().as_str().replace("{name}", alias))?;
+                tola_address::OutputPath::parse(&out.path().as_str().replace("{name}", alias))?;
             ensure!(
                 !path.is_reserved_for_non_system_output(),
                 "`{path}` is reserved for Tola"
@@ -456,7 +448,7 @@ fn expand_outputs(outputs: &[CommandOutput], alias: &str) -> Result<Vec<CommandO
                 seen.insert(path.clone()),
                 "the hook generates `{path}` twice after `{{name}}` substitution"
             );
-            Ok(match output {
+            Ok(match out {
                 CommandOutput::File(_) => CommandOutput::File(path),
                 CommandOutput::Tree(_) => CommandOutput::Tree(path),
             })
@@ -464,75 +456,81 @@ fn expand_outputs(outputs: &[CommandOutput], alias: &str) -> Result<Vec<CommandO
         .collect()
 }
 
+fn validate_hook_name<'a>(
+    names: &mut BTreeSet<(Option<HookStage>, &'a str)>,
+    stage: Option<HookStage>,
+    name: &'a str,
+) -> std::result::Result<(), HookDeclarationError> {
+    if name.is_empty() || name.chars().any(char::is_whitespace) {
+        return Err(HookDeclarationError::Name);
+    }
+    if !names.insert((stage, name)) {
+        return Err(HookDeclarationError::DuplicateName {
+            name: name.to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_build_hook(hook: Hook<'_>) -> std::result::Result<(), HookDeclarationError> {
+    hook.action()
+        .map_err(|reason| HookDeclarationError::Action {
+            hook: hook.name.into(),
+            reason,
+        })?;
+    if hook.dev.reuses_outputs() {
+        match hook.stage {
+            HookStage::AfterPublish => {
+                return Err(HookDeclarationError::AfterPublishReuse {
+                    hook: hook.name.into(),
+                });
+            }
+            HookStage::BeforeBuild if hook.generates.is_empty() => {
+                return Err(HookDeclarationError::ReuseNeedsGenerates {
+                    hook: hook.name.into(),
+                });
+            }
+            _ => {}
+        }
+    }
+    if let Some((key, _, err)) = hook.rerun_on.validate(true).next() {
+        return Err(HookDeclarationError::RerunPattern {
+            hook: hook.name.to_owned(),
+            key,
+            reason: err.to_string(),
+        });
+    }
+    for path in hook.generates {
+        relative(path, "generates")?;
+    }
+    if hook.stage == HookStage::GenerateOutputs && hook.outputs.is_empty() {
+        return Err(HookDeclarationError::GenerateOutputsNoOutputs);
+    }
+    let mut seen = BTreeSet::new();
+    for out in hook.outputs {
+        let path = out.path().as_str();
+        if has_forbidden_marker(path) {
+            return Err(HookDeclarationError::OutputSubstitution);
+        }
+        if out.path().is_reserved_for_non_system_output() {
+            return Err(HookDeclarationError::OutputReserved { path: path.into() });
+        }
+        if !seen.insert(out.path()) {
+            return Err(HookDeclarationError::OutputRepeated { path: path.into() });
+        }
+    }
+    Ok(())
+}
+
 /// Validate all declarations, including those disabled by options.
 pub fn validate_declarations(hooks: &ModuleHooks) -> std::result::Result<(), HookDeclarationError> {
-    fn validate_name<'a>(
-        names: &mut BTreeSet<(Option<HookStage>, &'a str)>,
-        stage: Option<HookStage>,
-        name: &'a str,
-    ) -> std::result::Result<(), HookDeclarationError> {
-        if name.is_empty() || name.chars().any(char::is_whitespace) {
-            return Err(HookDeclarationError::Name);
-        }
-        if !names.insert((stage, name)) {
-            return Err(HookDeclarationError::DuplicateName {
-                name: name.to_owned(),
-            });
-        }
-        Ok(())
-    }
     let mut names = BTreeSet::new();
     for hook in hooks.build_hooks() {
-        validate_name(&mut names, Some(hook.stage), hook.name)?;
-        hook.action()
-            .map_err(|reason| HookDeclarationError::Action {
-                hook: hook.name.into(),
-                reason,
-            })?;
-        if hook.dev.reuses_outputs() {
-            match hook.stage {
-                HookStage::AfterPublish => {
-                    return Err(HookDeclarationError::AfterPublishReuse {
-                        hook: hook.name.into(),
-                    });
-                }
-                HookStage::BeforeBuild if hook.generates.is_empty() => {
-                    return Err(HookDeclarationError::ReuseNeedsGenerates {
-                        hook: hook.name.into(),
-                    });
-                }
-                _ => {}
-            }
-        }
-        if let Some((key, _, error)) = hook.rerun_on.validate(true).next() {
-            return Err(HookDeclarationError::RerunPattern {
-                hook: hook.name.to_owned(),
-                key,
-                reason: error.to_string(),
-            });
-        }
-        for path in hook.generates {
-            relative(path, "generates")?;
-        }
-        if hook.stage == HookStage::GenerateOutputs && hook.outputs.is_empty() {
-            return Err(HookDeclarationError::GenerateOutputsNoOutputs);
-        }
-        let mut seen = BTreeSet::new();
-        for output in hook.outputs {
-            let path = output.path().as_str();
-            if path.contains("{module}") || path.contains("{project}") || path.contains("{tola}") {
-                return Err(HookDeclarationError::OutputSubstitution);
-            }
-            if output.path().is_reserved_for_non_system_output() {
-                return Err(HookDeclarationError::OutputReserved { path: path.into() });
-            }
-            if !seen.insert(output.path()) {
-                return Err(HookDeclarationError::OutputRepeated { path: path.into() });
-            }
-        }
+        validate_hook_name(&mut names, Some(hook.stage), hook.name)?;
+        validate_build_hook(hook)?;
     }
     for hook in &hooks.before_pack {
-        validate_name(&mut names, None, &hook.name)?;
+        validate_hook_name(&mut names, None, &hook.name)?;
         hook.action()
             .map_err(|reason| HookDeclarationError::Action {
                 hook: hook.name.clone(),
@@ -573,7 +571,7 @@ pub(crate) fn watch_inputs(
             inputs.hook_scripts.push(module.root.join(path));
         }
         if !hook.rerun_on.include.is_empty() {
-            let selection = hook
+            let sel = hook
                 .rerun_on
                 .expand(&module.name)
                 .compile_at(project_root, Some((&module.name, &module.root)))
@@ -582,7 +580,7 @@ pub(crate) fn watch_inputs(
                 name: hook.name.to_owned(),
                 manifest: module.manifest.clone(),
                 stage: hook.stage,
-                selection,
+                selection: sel,
             });
         }
         for path in hook.generates {
@@ -594,25 +592,34 @@ pub(crate) fn watch_inputs(
     Ok(())
 }
 
+fn eval_participation(
+    alias: &str,
+    hook: Hook<'_>,
+    opts: &toml::Table,
+) -> Result<HookParticipation> {
+    if !hook.enable {
+        return Ok(HookParticipation::Disabled);
+    }
+    let enabled = crate::options::enabled_by(hook.enable, hook.enabled_by, opts)
+        .map_err(anyhow::Error::msg)
+        .with_context(|| format!("module `{alias}` hook `{}`", hook.name))?;
+    Ok(if enabled {
+        HookParticipation::Enabled
+    } else {
+        HookParticipation::OptionDisabled
+    })
+}
+
 /// Evaluate module hook conditions and prepare declarations in module alias order.
 pub fn hook_stages(
     project_root: &Path,
     modules: &BTreeMap<String, LoadedModule>,
 ) -> Result<HooksContribution> {
-    let mut result = HooksContribution::default();
+    let mut out = HooksContribution::default();
     for (alias, module) in modules {
         for hook in module.hooks.build_hooks() {
             let name = format!("@module/{alias}/{}", hook.name);
-            let participation = if !hook.enable {
-                HookParticipation::Disabled
-            } else if !crate::options::enabled_by(hook.enable, hook.enabled_by, &module.options)
-                .map_err(anyhow::Error::msg)
-                .with_context(|| format!("module `{alias}` hook `{}`", hook.name))?
-            {
-                HookParticipation::OptionDisabled
-            } else {
-                HookParticipation::Enabled
-            };
+            let participation = eval_participation(alias, hook, &module.options)?;
             let origin = ModuleHookOrigin {
                 name: alias.clone(),
                 root: module.root.clone(),
@@ -637,7 +644,7 @@ pub fn hook_stages(
                     Ok(path)
                 })
                 .collect::<Result<_>>()?;
-            result.push(HookEntry {
+            out.push(HookEntry {
                 stage: hook.stage,
                 name,
                 declared_name: hook.name.to_owned(),
@@ -652,7 +659,7 @@ pub fn hook_stages(
             });
         }
     }
-    Ok(result)
+    Ok(out)
 }
 
 /// The module whose manifest supplied a hook, retained by the execution plan.
@@ -740,20 +747,20 @@ mod tests {
     use super::{HookDeclarationError, ModuleHooks, validate_declarations};
 
     #[test]
-    fn before_build_reuse_requires_generates() {
-        let source = "[[before-build]]\nname = 'prepare'\nnu = 'prepare.nu'\ndev = 'reuse'\n";
-        let hooks: ModuleHooks = toml::from_str(source).unwrap();
+    fn before_build_reuse_generates() {
+        let src = "[[before-build]]\nname = 'prepare'\nnu = 'prepare.nu'\ndev = 'reuse'\n";
+        let hooks: ModuleHooks = toml::from_str(src).unwrap();
         assert!(matches!(
             validate_declarations(&hooks),
             Err(HookDeclarationError::ReuseNeedsGenerates { .. })
         ));
 
         let hooks: ModuleHooks =
-            toml::from_str(&format!("{source}generates = ['content/generated.typ']\n")).unwrap();
+            toml::from_str(&format!("{src}generates = ['content/generated.typ']\n")).unwrap();
         assert!(validate_declarations(&hooks).is_ok());
 
         let hooks: ModuleHooks =
-            toml::from_str(&source.replace("before-build", "after-publish")).unwrap();
+            toml::from_str(&src.replace("before-build", "after-publish")).unwrap();
         assert!(matches!(
             validate_declarations(&hooks),
             Err(HookDeclarationError::AfterPublishReuse { .. })
@@ -761,11 +768,11 @@ mod tests {
     }
 
     #[test]
-    fn rerun_patterns_require_named_vcs_inputs() {
+    fn rerun_vcs_inputs() {
         use super::{RerunOn, RerunPath};
 
         let root = std::path::absolute("site").unwrap();
-        let selection = RerunOn {
+        let sel = RerunOn {
             include: [
                 "**/*.typ",
                 ".gitignore",
@@ -774,14 +781,14 @@ mod tests {
                 ".jj/repo/store/**",
             ]
             .into_iter()
-            .map(|path| RerunPath::Relative(path.to_owned()))
+            .map(|p| RerunPath::Relative(p.to_owned()))
             .collect(),
             exclude: Vec::new(),
         }
         .compile(&root, None)
         .unwrap();
         for path in [".git/objects", ".jj/working_copy", "nested/.git/refs"] {
-            assert!(!selection.could_match_below(&root.join(path)), "{path}");
+            assert!(!sel.could_match_below(&root.join(path)), "{path}");
         }
         for path in [
             ".git/HEAD",
@@ -790,14 +797,14 @@ mod tests {
             "docs/.hidden.typ",
             ".gitignore",
         ] {
-            assert!(selection.matches(&root.join(path)), "{path}");
+            assert!(sel.matches(&root.join(path)), "{path}");
         }
-        assert!(!selection.matches(&root.join(".git/refs/heads/other.typ")));
-        assert!(!selection.matches(&root.join(".jj/working_copy/input.typ")));
+        assert!(!sel.matches(&root.join(".git/refs/heads/other.typ")));
+        assert!(!sel.matches(&root.join(".jj/working_copy/input.typ")));
     }
 
     #[test]
-    fn order_belongs_to_build_hooks_only() {
+    fn hook_order_build_only() {
         let hooks: ModuleHooks =
             toml::from_str("[[before-build]]\nname = 'prepare'\norder = 4\nargv = ['tool']\n")
                 .unwrap();

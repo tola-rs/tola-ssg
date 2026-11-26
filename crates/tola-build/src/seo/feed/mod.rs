@@ -11,7 +11,7 @@ mod target;
 pub(super) use content::FeedContentViolation;
 
 use crate::cancellation::{BuildCancellation, BuildCancelled};
-use crate::config::ResolvedSiteConfig;
+use crate::config::SiteConfig;
 use crate::seo::RenderError;
 use crate::seo::declaration::SeoDeclaration;
 
@@ -86,7 +86,7 @@ fn serialize_error(declaration: &SeoDeclaration, error: anyhow::Error) -> Render
 }
 
 pub(super) fn render_outputs(
-    config: &ResolvedSiteConfig,
+    config: &SiteConfig,
     compilation: &tola_typst::BundleCompilation,
     cancellation: &BuildCancellation,
 ) -> Result<super::RenderedOutputs, RenderError> {

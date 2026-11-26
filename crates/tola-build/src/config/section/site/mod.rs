@@ -18,9 +18,9 @@ use serde::{Deserialize, Serialize};
 use tola_config::{Config, Fragment};
 
 mod language;
-mod resolved;
+mod settings;
 pub use language::{LanguageDeclaration, LanguageSubtag, SiteLanguage, UnusableLanguage};
-pub use resolved::ResolvedSiteSection;
+pub use settings::SiteSettings;
 
 /// A configured site author exposed to Typst templates.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default, Serialize, Deserialize, Fragment)]
@@ -258,7 +258,7 @@ mod tests {
         site.validate_address(&mut diagnostics);
         diagnostics.into_result().unwrap();
 
-        let site = site.into_resolved();
+        let site = site.into_settings();
 
         assert_eq!(site.origin.as_deref(), Some("https://example.com"));
         assert_eq!(site.base_path.base_path(), "/%E6%96%87%E6%A1%A3/");

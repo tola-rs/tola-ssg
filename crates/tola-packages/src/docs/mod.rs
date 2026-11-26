@@ -1,4 +1,4 @@
-//! Bundled declaration documentation, without evaluating package or site code.
+//! Bundled declaration documentation parsed from package AST and static natives.
 
 use tola_typst_syntax::docs::Documentation;
 use typst::foundations::{CastInfo, Repr};
@@ -12,37 +12,26 @@ mod resolution;
 
 use resolution::{Declaration, Declarations, DeclaredDocumentation, source_function};
 
-/// Why bundled export documentation could not be produced.
 #[derive(Debug, thiserror::Error)]
 pub enum ExportDocumentationError {
-    /// The requested name is not an export of the package.
     #[error("`{name}` is not an export of {package}")]
     NotAnExport { name: String, package: String },
-    /// An import names a source missing from the bundled files.
     #[error("builtin source `{0}` is absent")]
     MissingSource(String),
-    /// An import names a native absent from the host scope.
     #[error("unknown builtin native `{0}`")]
     UnknownNative(String),
-    /// A bundled package import contains an invalid package specification.
     #[error("invalid bundled package import: {0}")]
     InvalidImport(String),
-    /// A declaration has no binding in its lexical scope.
     #[error("bundled declaration `{0}` has no source binding")]
     MissingBinding(String),
-    /// A dictionary does not declare the selected member.
     #[error("bundled dictionary has no member `{0}`")]
     MissingMember(String),
-    /// A member selection has no source dictionary.
     #[error("bundled member `{0}` has no source dictionary")]
     MissingDictionary(String),
-    /// A selected expression does not declare a member through a dictionary.
     #[error("bundled member `{0}` is not declared by a dictionary")]
     MemberOutsideDictionary(String),
-    /// The declaration is missing an expression or uses an unsupported form.
     #[error("{0}")]
     InvalidDeclaration(&'static str),
-    /// A documentation block describes a parameter the declaration does not accept.
     #[error(
         "`{name}` documents parameter `{parameter}`, which the bundled declaration does not have"
     )]
@@ -56,12 +45,11 @@ pub use declaration::{
 pub use related::RelatedTarget;
 
 impl BuiltinPackage {
-    /// The entrypoint's opening `//` block, without its repeated package identity.
-    /// Export documentation begins at `///` and is kept separate from the overview.
+    /// Entrypoint's opening `//` block without its leading package identity prefix.
     pub fn overview(&self) -> Option<String> {
-        let (_, source) = self.files().find(|(path, _)| *path == "lib.typ")?;
+        let (_, src) = self.files().find(|(path, _)| *path == "lib.typ")?;
         let identity = format!("{} - ", self.spec());
-        let lines = source
+        let lines: Vec<_> = src
             .lines()
             .map_while(|line| {
                 let comment = line.strip_prefix("//")?;
@@ -71,24 +59,23 @@ impl BuiltinPackage {
                 Some(comment.strip_prefix(' ').unwrap_or(comment))
             })
             .enumerate()
-            .map(|(index, line)| {
-                if index == 0 {
+            .map(|(i, line)| {
+                if i == 0 {
                     line.strip_prefix(&identity).unwrap_or(line)
                 } else {
                     line
                 }
             })
-            .collect::<Vec<_>>();
-        let overview = lines.join("\n");
-        (!overview.trim().is_empty()).then(|| overview.trim_end().to_owned())
+            .collect();
+        let out = lines.join("\n");
+        (!out.trim().is_empty()).then(|| out.trim_end().to_owned())
     }
 
-    /// Describe selected exports in request order, using only bundled source and static natives.
-    /// All names are checked before any declaration is returned.
+    /// Describes selected exports in request order using bundled sources and static natives.
     pub fn export_documentation(
         &self,
         names: &[String],
-    ) -> std::result::Result<Vec<ExportDocumentation>, ExportDocumentationError> {
+    ) -> Result<Vec<ExportDocumentation>, ExportDocumentationError> {
         for name in names {
             if !self.exports().any(|export| export == name) {
                 return Err(ExportDocumentationError::NotAnExport {
@@ -100,18 +87,17 @@ impl BuiltinPackage {
         let sources = self
             .files()
             .filter(|(path, _)| path.ends_with(".typ"))
-            .map(|(path, source)| (path, Source::detached(source.into_owned())))
-            .collect::<Vec<_>>();
-        let declarations = Declarations {
+            .map(|(path, src)| (path, Source::detached(src.into_owned())))
+            .collect();
+        let decls = Declarations {
             sources,
             natives: crate::library::native_scope(),
         };
         names
             .iter()
             .map(|name| {
-                let file = declarations.file("lib.typ")?;
-                let (kind, docs) =
-                    declarations.binding(file, LinkedNode::new(file.1.root()), name)?;
+                let file = decls.file("lib.typ")?;
+                let (kind, docs) = decls.binding(file, LinkedNode::new(file.1.root()), name)?;
                 let declared = docs.unwrap_or_else(|| DeclaredDocumentation {
                     documentation: Documentation::parse(""),
                     related: Vec::new(),
@@ -119,10 +105,10 @@ impl BuiltinPackage {
                 let methods = match &kind {
                     Declaration::Native(func) => match func.returns() {
                         Some(CastInfo::Type(ty)) => crate::datalog::methods(*ty)
-                            .map(|(name, func)| {
-                                let mut signature = Signature::of(name, func);
-                                signature.parameters.remove(0);
-                                signature
+                            .map(|(mname, func)| {
+                                let mut sig = Signature::of(mname, func);
+                                sig.parameters.remove(0);
+                                sig
                             })
                             .collect(),
                         _ => Vec::new(),
@@ -149,11 +135,9 @@ impl BuiltinPackage {
                     Declaration::Site => {
                         ExportDeclaration::Value(format!("{name}: dictionary (site values)"))
                     }
-                    Declaration::Constant(value) => ExportDeclaration::Value(format!(
-                        "{name}: {} = {}",
-                        value.ty(),
-                        value.repr()
-                    )),
+                    Declaration::Constant(val) => {
+                        ExportDeclaration::Value(format!("{name}: {} = {}", val.ty(), val.repr()))
+                    }
                 };
                 Ok(ExportDocumentation {
                     name: name.clone(),
@@ -171,30 +155,27 @@ impl BuiltinPackage {
 mod tests {
     use super::*;
 
-    /// Every bundled function names the type of every parameter and of the value it returns, so
-    /// no rendered signature has to leave a type out.
     #[test]
-    fn bundled_functions_document_every_parameter_type() {
-        for package in crate::builtin_packages() {
-            let names = package.exports().map(str::to_owned).collect::<Vec<_>>();
-            for export in package.export_documentation(&names).unwrap() {
-                let ExportDeclaration::Function(signature) = &export.declaration else {
+    fn builtin_fns_document_params() {
+        for pkg in crate::builtin_packages() {
+            let names: Vec<_> = pkg.exports().map(str::to_owned).collect();
+            for export in pkg.export_documentation(&names).unwrap() {
+                let ExportDeclaration::Function(sig) = &export.declaration else {
                     continue;
                 };
                 assert!(
-                    signature.returns.is_some(),
+                    sig.returns.is_some(),
                     "{} `{}` documents no return type",
-                    package.spec(),
+                    pkg.spec(),
                     export.name
                 );
-                for parameter in &signature.parameters {
-                    // A source spread's sink type is Typst's `arguments`; nothing declares it.
+                for param in &sig.parameters {
                     assert!(
-                        parameter.ty.is_some() || parameter.kind == ParameterKind::Rest,
+                        param.ty.is_some() || param.kind == ParameterKind::Rest,
                         "{} `{}` documents no type for `{}`",
-                        package.spec(),
+                        pkg.spec(),
                         export.name,
-                        parameter.name
+                        param.name
                     );
                 }
             }
@@ -202,18 +183,18 @@ mod tests {
     }
 
     #[test]
-    fn schema_values_hide_private_initializers() {
-        let package = crate::builtin_package(&crate::TolaPackage::Schema.spec()).unwrap();
-        let exports = package
+    fn schema_exports_hide_initializers() {
+        let pkg = crate::builtin_package(&crate::TolaPackage::Schema.spec()).unwrap();
+        for export in pkg
             .export_documentation(&["email".into(), "any".into()])
-            .unwrap();
-        for export in exports {
+            .unwrap()
+        {
             assert!(!export.declaration.is_function());
-            let ExportDeclaration::Value(declaration) = &export.declaration else {
-                panic!("{} should be a value", export.name)
+            let ExportDeclaration::Value(decl) = &export.declaration else {
+                panic!("{} should be a value", export.name);
             };
             assert_eq!(
-                declaration,
+                decl,
                 &format!("{}: value (defined by package)", export.name)
             );
             assert!(!export.documentation.summary.is_empty());
@@ -221,48 +202,44 @@ mod tests {
     }
 
     #[test]
-    fn constant_declarations_show_theme_choices() {
-        let package = crate::builtin_package(&crate::TolaPackage::Code.spec()).unwrap();
-        let exports = package
-            .export_documentation(&["code-themes".into()])
-            .unwrap();
-        let ExportDeclaration::Value(declaration) = &exports[0].declaration else {
-            panic!("code-themes should be a value")
+    fn code_themes_export_value() {
+        let pkg = crate::builtin_package(&crate::TolaPackage::Code.spec()).unwrap();
+        let exports = pkg.export_documentation(&["code-themes".into()]).unwrap();
+        let ExportDeclaration::Value(decl) = &exports[0].declaration else {
+            panic!("code-themes should be a value");
         };
         for theme in crate::theme_names() {
-            let file = crate::theme_file(theme).expect("every offered theme names a file");
+            let file = crate::theme_file(theme).expect("offered theme has a file");
             assert!(
-                declaration.contains(&format!("{theme}: path(\"/{file}\")")),
-                "{declaration}"
+                decl.contains(&format!("{theme}: path(\"/{file}\")")),
+                "{decl}"
             );
         }
     }
 
     #[test]
-    fn overview_keeps_module_paragraphs() {
-        let package = crate::builtin_package(&crate::TolaPackage::Document.spec()).unwrap();
-        let overview = package.overview().unwrap();
-        assert!(!overview.starts_with(&package.spec().to_string()));
+    fn overview_paragraphs() {
+        let pkg = crate::builtin_package(&crate::TolaPackage::Document.spec()).unwrap();
+        let overview = pkg.overview().unwrap();
+        assert!(!overview.starts_with(&pkg.spec().to_string()));
         assert!(overview.contains("\n\n"));
         assert!(!overview.contains("///"));
     }
 
-    /// Every related target names an export of its own package or a package a site can import.
     #[test]
-    fn related_targets_resolve() {
-        for package in crate::builtin_packages() {
-            let names = package.exports().map(str::to_owned).collect::<Vec<_>>();
-            for export in package.export_documentation(&names).unwrap() {
-                for related in &export.related {
-                    match related {
+    fn related_targets_valid() {
+        for pkg in crate::builtin_packages() {
+            let names: Vec<_> = pkg.exports().map(str::to_owned).collect();
+            for export in pkg.export_documentation(&names).unwrap() {
+                for target in &export.related {
+                    match target {
                         RelatedTarget::Export(name) => assert!(
                             names.contains(name),
                             "`{}` relates `{name}`, which it does not export",
                             export.name
                         ),
                         RelatedTarget::Package(name) => assert!(
-                            crate::builtin_packages()
-                                .any(|package| package.spec().name.as_str() == name),
+                            crate::builtin_packages().any(|p| p.spec().name.as_str() == name),
                             "`{}` relates `@tola/{name}`, which no site can import",
                             export.name
                         ),

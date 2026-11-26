@@ -299,7 +299,7 @@ mod tests {
     use typst_html::{HtmlAttr, HtmlAttrs, HtmlElem, HtmlTag};
 
     #[test]
-    fn html_url_attributes_become_links() {
+    fn extract_html_links() {
         let mut link_attrs = HtmlAttrs::new();
         link_attrs.push(HtmlAttr::intern("href").unwrap(), "/document/");
         let mut image_attrs = HtmlAttrs::new();

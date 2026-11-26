@@ -22,13 +22,6 @@ pub(crate) enum PageId {
 }
 
 impl PageId {
-    pub(crate) fn canonical_uri(&self) -> String {
-        match self {
-            Self::PackageSelection { name, .. } => Self::Package { name: name.clone() }.uri(),
-            _ => self.uri(),
-        }
-    }
-
     pub(crate) fn uri(&self) -> String {
         let host = match self {
             Self::Overview => "overview",
@@ -71,6 +64,7 @@ pub(crate) enum LinkTarget {
 }
 
 impl LinkTarget {
+    #[allow(dead_code)]
     pub(crate) fn page(&self) -> Option<&PageId> {
         match self {
             Self::Page(page) | Self::PageAnchor(page, _) => Some(page),
@@ -226,7 +220,7 @@ fn fragment_anchor(fragment: &str) -> Option<Anchor> {
     if fragment.is_empty() {
         return None;
     }
-    let reference = tola_address::SiteReference::parse(&format!("/#{}", fragment)).ok()?;
+    let reference = tola_address::SiteRef::parse(&format!("/#{}", fragment)).ok()?;
     Some(Anchor::from_fragment(
         reference.decoded_fragment()?.into_owned(),
     ))
@@ -238,8 +232,8 @@ mod tests {
     use crate::help::model::anchor;
 
     #[test]
-    fn category_requests_locate_pages() {
-        for (arguments, page) in [
+    fn category_requests_resolve() {
+        for (args, page) in [
             (vec![], PageId::Overview),
             (vec!["config"], PageId::Index(HelpCategory::Config)),
             (vec!["package"], PageId::Index(HelpCategory::Packages)),
@@ -270,13 +264,13 @@ mod tests {
                 },
             ),
         ] {
-            let arguments = arguments.into_iter().map(str::to_owned).collect::<Vec<_>>();
-            assert_eq!(request(&arguments), Some(LinkTarget::Page(page)));
+            let args: Vec<_> = args.into_iter().map(str::to_owned).collect();
+            assert_eq!(request(&args), Some(LinkTarget::Page(page)));
         }
     }
 
     #[test]
-    fn array_table_requests_require_double_brackets() {
+    fn array_tables_require_double_brackets() {
         let section = PageId::Config {
             section: "hooks.before-build".into(),
         };
@@ -295,8 +289,8 @@ mod tests {
     }
 
     #[test]
-    fn page_urls_preserve_identity() {
-        let current = PageId::Overview;
+    fn page_urls_roundtrip() {
+        let cur = PageId::Overview;
         for page in [
             PageId::Overview,
             PageId::Index(HelpCategory::Config),
@@ -321,20 +315,20 @@ mod tests {
             },
         ] {
             let target = LinkTarget::Page(page.clone());
-            assert_eq!(LinkTarget::from_uri(&target.uri(), &current), Some(target));
+            assert_eq!(LinkTarget::from_uri(&target.uri(), &cur), Some(target));
             let target = LinkTarget::PageAnchor(page, anchor("Details 名称"));
-            assert_eq!(LinkTarget::from_uri(&target.uri(), &current), Some(target));
+            assert_eq!(LinkTarget::from_uri(&target.uri(), &cur), Some(target));
         }
     }
 
     #[test]
-    fn script_command_targets_its_heading() {
-        let arguments = ["@tola-scripts/image".to_owned(), "resize".to_owned()];
+    fn script_cmd_targets_heading() {
+        let args = ["@tola-scripts/image".to_owned(), "resize".to_owned()];
         let page = PageId::Script {
             name: "image".into(),
         };
         let target = LinkTarget::PageAnchor(page, anchor("resize"));
-        assert_eq!(request(&arguments), Some(target.clone()));
+        assert_eq!(request(&args), Some(target.clone()));
         assert_eq!(
             LinkTarget::from_uri(&target.uri(), &PageId::Overview),
             Some(target)

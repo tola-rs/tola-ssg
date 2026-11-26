@@ -1,9 +1,4 @@
-//! `tola.lock`: the resolved commit, version, and digest of every input a site selects.
-//!
-//! The lock records what a module resolved to, which version of a package the compiler read,
-//! and the digest of the exact bytes an icon collection arrived as.
-//! Strict parsing means a lock from an older format fails with a named repair instead of being
-//! read as if it still described this site.
+//! `tola.lock`: resolved commit, version, and digest of every input a site selects.
 
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
@@ -14,44 +9,44 @@ use super::hash::Sha256Digest;
 
 mod write;
 
-/// The file name of the lock, relative to the site root.
+/// Lock file name relative to the site root.
 pub const LOCK_FILE: &str = "tola.lock";
 
-/// Every input a site resolved, keyed by the name the site refers to it by.
+/// Resolved inputs for a site, keyed by alias, package spec, or icon namespace.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 pub struct InputLock {
     /// Remote and local modules, keyed by alias.
     pub modules: BTreeMap<String, LockedModule>,
-    /// Typst packages the compiler read, keyed by `@namespace/name`.
+    /// Typst packages read by the compiler, keyed by `@namespace/name`.
     pub packages: BTreeMap<String, LockedPackage>,
     /// Remote icon collections, keyed by namespace.
     pub icons: BTreeMap<String, LockedIcon>,
 }
 
 impl InputLock {
-    /// The lock's path under one site root.
+    /// Lock file path under `site_root`.
     pub fn path(site_root: &Path) -> PathBuf {
         site_root.join(LOCK_FILE)
     }
 
-    /// Read the lock of one site, or `None` when the site has never resolved its inputs.
+    /// Read the site lock, returning `None` if no lock file exists yet.
     pub fn read(site_root: &Path) -> Result<Option<Self>, LockError> {
         let path = Self::path(site_root);
         let text = match std::fs::read_to_string(&path) {
             Ok(text) => text,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(source) => return Err(LockError::Read { path, source }),
         };
         Self::parse(&text).map(Some)
     }
 
-    /// Parse one lock, naming a legacy layout instead of reporting an unknown field.
+    /// Parse a lock file, detecting legacy formats before reporting syntax errors.
     pub fn parse(text: &str) -> Result<Self, LockError> {
         let raw: RawLock = match toml::from_str(text) {
             Ok(raw) => raw,
             Err(source) => {
-                if let Some(error) = legacy_error(text) {
-                    return Err(error);
+                if let Some(err) = legacy_error(text) {
+                    return Err(err);
                 }
                 return Err(LockError::Parse { source });
             }
@@ -59,13 +54,13 @@ impl InputLock {
         raw.into_lock()
     }
 
-    /// The lock's TOML text.
+    /// Serialize the lock as pretty-printed TOML.
     pub fn to_toml(&self) -> Result<String, LockError> {
         toml::to_string_pretty(self).map_err(|source| LockError::Encode { source })
     }
 }
 
-/// The failure of reading, parsing, or writing the lock.
+/// Failure reading, parsing, or writing `tola.lock`.
 #[derive(Debug, thiserror::Error)]
 pub enum LockError {
     #[error("could not read `tola.lock`")]
@@ -173,36 +168,33 @@ pub enum LockError {
     IconSize { name: String },
 }
 
-/// One module's resolved identity.
-///
-/// A remote module records the commit its selector resolved to; a local module is site source and
-/// its digest only proves what a build read. Both serialize flat, as the lock format requires.
+/// Resolved identity of one module.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(untagged)]
 pub enum LockedModule {
-    /// A module fetched from a Git repository.
+    /// Module fetched from a Git repository.
     Git {
-        /// The repository the module resolved from.
+        /// Repository URL or locator.
         git: String,
-        /// The selector the module was resolved through; `None` selected the default branch.
+        /// Revision selector; `None` selects the default branch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         revision: Option<LockedRevision>,
-        /// The module's directory inside the repository; empty for the repository root.
+        /// Subdirectory inside the repository; empty for the repository root.
         #[serde(default, skip_serializing_if = "path_is_empty")]
         subdir: PathBuf,
-        /// The commit the selector resolved to.
+        /// Resolved 40-digit commit hash.
         commit: String,
-        /// The digest of the module directory this build reads.
+        /// Digest of the materialized module directory.
         tree_sha256: Sha256Digest,
     },
-    /// A module declared by a path inside the site.
+    /// Local module inside the site directory.
     Local {
-        /// The module's directory, relative to the site root.
+        /// Module directory relative to the site root.
         path: PathBuf,
-        /// The digest of the module directory this build reads.
+        /// Digest of the module directory.
         tree_sha256: Sha256Digest,
     },
-    /// A downloaded or local module archive and its expanded contents.
+    /// Downloaded or local module archive and its expanded contents.
     Tarball {
         tarball: TarballLocation,
         tarball_sha256: Sha256Digest,
@@ -210,7 +202,7 @@ pub enum LockedModule {
     },
 }
 
-/// Where the compressed bytes of a module are obtained.
+/// Source location for a module tarball.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(untagged)]
 pub enum TarballLocation {
@@ -219,7 +211,7 @@ pub enum TarballLocation {
 }
 
 impl TarballLocation {
-    /// Reject credentials and ambiguous locations before they can enter a lock or a request.
+    /// Reject embedded credentials, fragments, non-HTTPS URLs, and empty paths.
     pub fn validate(&self) -> Result<(), &'static str> {
         match self {
             Self::Url { url } => {
@@ -245,7 +237,7 @@ impl TarballLocation {
 }
 
 impl<'de> Deserialize<'de> for TarballLocation {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         #[derive(Deserialize)]
         #[serde(
             deny_unknown_fields,
@@ -255,8 +247,8 @@ impl<'de> Deserialize<'de> for TarballLocation {
             url: Option<String>,
             path: Option<PathBuf>,
         }
-        let fields = Fields::deserialize(deserializer)?;
-        let location = match (fields.url, fields.path) {
+        let fields = Fields::deserialize(d)?;
+        let loc = match (fields.url, fields.path) {
             (Some(url), None) => Self::Url { url },
             (None, Some(path)) => Self::File { path },
             _ => {
@@ -265,13 +257,13 @@ impl<'de> Deserialize<'de> for TarballLocation {
                 ));
             }
         };
-        location.validate().map_err(serde::de::Error::custom)?;
-        Ok(location)
+        loc.validate().map_err(serde::de::Error::custom)?;
+        Ok(loc)
     }
 }
 
 impl LockedModule {
-    /// The digest of the module directory this build reads.
+    /// Digest of the module directory read by this build.
     pub fn tree_sha256(&self) -> Sha256Digest {
         match self {
             Self::Git { tree_sha256, .. }
@@ -281,7 +273,7 @@ impl LockedModule {
     }
 }
 
-/// The revision selector a remote module declaration asked for.
+/// Revision selector requested for a remote module.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LockedRevision {
@@ -290,41 +282,32 @@ pub enum LockedRevision {
     Rev(String),
 }
 
-/// One Typst package version the compiler read.
+/// Locked Typst package version.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LockedPackage {
-    /// The package version the compiler selected.
     pub version: String,
-    /// The digest of the package directory.
     pub tree_sha256: Sha256Digest,
 }
 
-/// One remote icon collection's resolved identity.
+/// Locked remote icon collection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LockedIcon {
-    /// The declaration the collection resolved from.
     pub source: IconSource,
-    /// The URL the collection's bytes came from.
     pub url: String,
-    /// The digest of those exact bytes.
     pub sha256: Sha256Digest,
-    /// The length of those exact bytes.
     pub size: u64,
 }
 
-/// The declaration one icon collection resolved from.
+/// Declaration an icon collection resolved from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum IconSource {
-    /// A collection named by a preset and the release it resolved to.
     Preset { preset: String, version: String },
-    /// A collection named by a bare URL.
     Url { url: String },
 }
 
-/// The lock as written, before any field is trusted.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawLock {
@@ -338,27 +321,42 @@ struct RawLock {
 
 impl RawLock {
     fn into_lock(self) -> Result<InputLock, LockError> {
-        let mut modules = BTreeMap::new();
-        for (alias, module) in self.modules {
-            modules.insert(alias.clone(), module.into_locked(&alias)?);
-        }
-        let mut packages = BTreeMap::new();
-        for (name, package) in self.packages {
-            packages.insert(name.clone(), package.into_locked(&name)?);
-        }
-        let mut icons = BTreeMap::new();
-        for (name, icon) in self.icons {
-            icons.insert(name.clone(), icon.into_locked(&name)?);
-        }
         Ok(InputLock {
-            modules,
-            packages,
-            icons,
+            modules: convert_map(self.modules, |alias, m| m.into_locked(alias))?,
+            packages: convert_map(self.packages, |name, pkg| pkg.into_locked(name))?,
+            icons: convert_map(self.icons, |name, icon| icon.into_locked(name))?,
         })
     }
 }
 
-/// One module entry as written.
+fn convert_map<R, L>(
+    raw: BTreeMap<String, R>,
+    mut convert: impl FnMut(&str, R) -> Result<L, LockError>,
+) -> Result<BTreeMap<String, L>, LockError> {
+    raw.into_iter()
+        .map(|(k, v)| {
+            let locked = convert(&k, v)?;
+            Ok((k, locked))
+        })
+        .collect()
+}
+
+fn parse_digest(
+    raw: Option<String>,
+    missing: impl FnOnce() -> LockError,
+    invalid: impl FnOnce() -> LockError,
+) -> Result<Sha256Digest, LockError> {
+    let hex = raw.ok_or_else(missing)?;
+    Sha256Digest::from_hex(&hex).ok_or_else(invalid)
+}
+
+fn require_nonempty(
+    raw: Option<String>,
+    err: impl FnOnce() -> LockError,
+) -> Result<String, LockError> {
+    raw.filter(|s| !s.is_empty()).ok_or_else(err)
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawModule {
@@ -380,18 +378,15 @@ struct RawModule {
 
 impl RawModule {
     fn into_locked(self, alias: &str) -> Result<LockedModule, LockError> {
-        let tree_sha256 = match self.tree_sha256 {
-            Some(digest) => {
-                Sha256Digest::from_hex(&digest).ok_or_else(|| LockError::ModuleTreeHashFormat {
-                    alias: alias.to_owned(),
-                })?
-            }
-            None => {
-                return Err(LockError::ModuleTreeHash {
-                    alias: alias.to_owned(),
-                });
-            }
-        };
+        let tree_sha256 = parse_digest(
+            self.tree_sha256,
+            || LockError::ModuleTreeHash {
+                alias: alias.to_owned(),
+            },
+            || LockError::ModuleTreeHashFormat {
+                alias: alias.to_owned(),
+            },
+        )?;
         match (self.git, self.path, self.tarball) {
             (Some(git), None, None) => {
                 if self.tarball_sha256.is_some() {
@@ -406,12 +401,14 @@ impl RawModule {
                 }
                 let revision = self
                     .revision
-                    .map(|revision| normalize_revision(revision, alias))
+                    .map(|rev| normalize_revision(rev, alias))
                     .transpose()?;
-                let commit = self.commit.ok_or_else(|| LockError::ModuleCommit {
-                    alias: alias.to_owned(),
-                })?;
-                let commit = commit.to_ascii_lowercase();
+                let commit = self
+                    .commit
+                    .ok_or_else(|| LockError::ModuleCommit {
+                        alias: alias.to_owned(),
+                    })?
+                    .to_ascii_lowercase();
                 if !is_commit(&commit) {
                     return Err(LockError::ModuleCommitFormat {
                         alias: alias.to_owned(),
@@ -487,23 +484,21 @@ impl RawModule {
     }
 }
 
-/// The lock's revision selector with its commit form normalized.
-fn normalize_revision(revision: LockedRevision, alias: &str) -> Result<LockedRevision, LockError> {
-    match revision {
-        LockedRevision::Rev(value) => {
-            let value = value.to_ascii_lowercase();
-            if !is_commit(&value) {
+fn normalize_revision(rev: LockedRevision, alias: &str) -> Result<LockedRevision, LockError> {
+    match rev {
+        LockedRevision::Rev(val) => {
+            let val = val.to_ascii_lowercase();
+            if !is_commit(&val) {
                 return Err(LockError::ModuleRevisionFormat {
                     alias: alias.to_owned(),
                 });
             }
-            Ok(LockedRevision::Rev(value))
+            Ok(LockedRevision::Rev(val))
         }
-        revision => Ok(revision),
+        other => Ok(other),
     }
 }
 
-/// One package entry as written.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawPackage {
@@ -515,26 +510,18 @@ struct RawPackage {
 
 impl RawPackage {
     fn into_locked(self, name: &str) -> Result<LockedPackage, LockError> {
-        let version = match self.version {
-            Some(version) if !version.is_empty() => version,
-            _ => {
-                return Err(LockError::PackageVersion {
-                    name: name.to_owned(),
-                });
-            }
-        };
-        let tree_sha256 = match self.tree_sha256 {
-            Some(digest) => {
-                Sha256Digest::from_hex(&digest).ok_or_else(|| LockError::PackageTreeHashFormat {
-                    name: name.to_owned(),
-                })?
-            }
-            None => {
-                return Err(LockError::PackageTreeHash {
-                    name: name.to_owned(),
-                });
-            }
-        };
+        let version = require_nonempty(self.version, || LockError::PackageVersion {
+            name: name.to_owned(),
+        })?;
+        let tree_sha256 = parse_digest(
+            self.tree_sha256,
+            || LockError::PackageTreeHash {
+                name: name.to_owned(),
+            },
+            || LockError::PackageTreeHashFormat {
+                name: name.to_owned(),
+            },
+        )?;
         Ok(LockedPackage {
             version,
             tree_sha256,
@@ -542,7 +529,6 @@ impl RawPackage {
     }
 }
 
-/// One icon collection entry as written.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawIcon {
@@ -561,26 +547,18 @@ impl RawIcon {
         let source = self.source.ok_or_else(|| LockError::IconSource {
             name: name.to_owned(),
         })?;
-        let url = match self.url {
-            Some(url) if !url.is_empty() => url,
-            _ => {
-                return Err(LockError::IconUrl {
-                    name: name.to_owned(),
-                });
-            }
-        };
-        let sha256 = match self.sha256 {
-            Some(digest) => {
-                Sha256Digest::from_hex(&digest).ok_or_else(|| LockError::IconDigestFormat {
-                    name: name.to_owned(),
-                })?
-            }
-            None => {
-                return Err(LockError::IconDigest {
-                    name: name.to_owned(),
-                });
-            }
-        };
+        let url = require_nonempty(self.url, || LockError::IconUrl {
+            name: name.to_owned(),
+        })?;
+        let sha256 = parse_digest(
+            self.sha256,
+            || LockError::IconDigest {
+                name: name.to_owned(),
+            },
+            || LockError::IconDigestFormat {
+                name: name.to_owned(),
+            },
+        )?;
         let size = self.size.ok_or_else(|| LockError::IconSize {
             name: name.to_owned(),
         })?;
@@ -593,35 +571,30 @@ impl RawIcon {
     }
 }
 
-/// Whether one module directory inside its repository is unset.
 fn path_is_empty(path: &Path) -> bool {
     path.as_os_str().is_empty()
 }
 
-/// Whether `commit` is a full commit ID.
 fn is_commit(commit: &str) -> bool {
-    commit.len() == 40 && commit.bytes().all(|byte| byte.is_ascii_hexdigit())
+    commit.len() == 40 && commit.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-/// Whether `path` is relative and climbs no parent directory.
 fn is_contained(path: &Path) -> bool {
     path.components()
-        .all(|component| matches!(component, Component::CurDir | Component::Normal(_)))
+        .all(|c| matches!(c, Component::CurDir | Component::Normal(_)))
 }
 
-/// A repair for a lock written before the input model recorded integrity.
 fn legacy_error(text: &str) -> Option<LockError> {
-    let value: toml::Value = toml::from_str(text).ok()?;
+    let val: toml::Value = toml::from_str(text).ok()?;
     for key in ["version", "lock-version", "schema-version"] {
-        if value.get(key).is_some() {
+        if val.get(key).is_some() {
             return Some(LockError::FormatVersion);
         }
     }
-    let modules = value.get("modules")?.as_table()?;
-    if modules.values().any(|module| {
-        module.as_table().is_some_and(|module| {
-            module.contains_key("repository") || !module.contains_key("tree_sha256")
-        })
+    let modules = val.get("modules")?.as_table()?;
+    if modules.values().any(|m| {
+        m.as_table()
+            .is_some_and(|t| t.contains_key("repository") || !t.contains_key("tree_sha256"))
     }) {
         return Some(LockError::Legacy);
     }

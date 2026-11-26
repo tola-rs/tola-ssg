@@ -258,7 +258,7 @@ mod tests {
     }
 
     #[test]
-    fn declared_codes_have_distinct_text() {
+    fn unique_declared_codes() {
         let codes = declared();
         let unique = codes.iter().copied().collect::<BTreeSet<_>>();
         assert_eq!(codes.len(), unique.len(), "two constants share one code");

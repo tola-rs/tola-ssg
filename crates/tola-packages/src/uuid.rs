@@ -28,11 +28,11 @@ pub(super) fn v5(
     /// Name whose bytes determine the UUID.
     name: Readable,
 ) -> SourceResult<Str> {
-    let Ok(namespace) = Uuid::parse_str(namespace.as_str()) else {
+    let Ok(ns) = Uuid::parse_str(namespace.as_str()) else {
         bail!(span, "invalid UUID namespace: expected a UUID string");
     };
     let bytes = name.into_bytes();
-    Ok(Uuid::new_v5(&namespace, bytes.as_slice())
+    Ok(Uuid::new_v5(&ns, bytes.as_slice())
         .hyphenated()
         .to_string()
         .into())

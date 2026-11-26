@@ -14,6 +14,14 @@ use zune_core::bytestream::ZCursor;
 use zune_core::colorspace::ColorSpace;
 use zune_core::options::DecoderOptions;
 
+mod color;
+mod container;
+mod encode;
+
+use self::color::{ColorTransform, normalize_color};
+use self::container::{
+    inspect_svg, jpeg_has_icc, looks_like_xml, scan_bmp, scan_gif, scan_png, scan_webp,
+};
 use super::cancellation::{Cancellation, ensure_active_if_present};
 use super::recipe::PixelRecipe;
 use super::resample::{ResampledPixels, resample};
@@ -28,20 +36,19 @@ pub fn inspect(bytes: &[u8]) -> ImageResult<ImageMetadata> {
     Source::metadata(bytes)
 }
 
-/// Cancellation takes precedence even when an indivisible codec call also reports an error.
-/// Callers receive `ImageError::Cancelled` even if the codec reports a wrapped I/O error.
+/// Decode, resample, and encode `bytes` according to `recipe`, checking `cancel` before and after.
 pub fn render(
     bytes: &[u8],
     recipe: &ImageRecipe,
-    cancellation: &dyn Cancellation,
+    cancel: &dyn Cancellation,
 ) -> ImageResult<Arc<[u8]>> {
-    cancellation.ensure_active()?;
-    let decoded = DecodedSource::open(bytes, cancellation)?;
+    cancel.ensure_active()?;
+    let decoded = DecodedSource::open(bytes, cancel)?;
     recipe.validate(decoded.metadata())?;
-    let pixels = decoded.into_pixels(recipe.pixels(), cancellation)?;
-    let result = pixels.encode(recipe, cancellation);
-    cancellation.ensure_active()?;
-    result
+    let px = decoded.into_pixels(recipe.pixels(), cancel)?;
+    let res = px.encode(recipe, cancel);
+    cancel.ensure_active()?;
+    res
 }
 
 /// One decoded image, shared by every recipe resampled from it.
@@ -57,26 +64,26 @@ pub struct DecodedSource {
 
 impl DecodedSource {
     /// Decode an image into the sRGB RGBA8 pixels every recipe starts from.
-    pub fn open(bytes: &[u8], cancellation: &dyn Cancellation) -> ImageResult<Self> {
-        cancellation.ensure_active()?;
-        let result = Self::open_active(bytes, cancellation);
-        cancellation.ensure_active()?;
-        result
+    pub fn open(bytes: &[u8], cancel: &dyn Cancellation) -> ImageResult<Self> {
+        cancel.ensure_active()?;
+        let res = Self::open_active(bytes, cancel);
+        cancel.ensure_active()?;
+        res
     }
 
-    fn open_active(bytes: &[u8], cancellation: &dyn Cancellation) -> ImageResult<Self> {
+    fn open_active(bytes: &[u8], cancel: &dyn Cancellation) -> ImageResult<Self> {
         if looks_like_xml(bytes) {
             return Err(ImageError::NeedsRaster);
         }
         let Source {
             mut decoder,
-            width,
-            height,
+            width: w,
+            height: h,
             color,
             orientation,
-            metadata,
+            metadata: meta,
             container,
-        } = Source::open(bytes, cancellation)?;
+        } = Source::open(bytes, cancel)?;
         if container.is_animated {
             return Err(ImageError::unreadable(
                 "an animated image cannot be resized without dropping frames; use a still image",
@@ -84,11 +91,11 @@ impl DecodedSource {
         }
         // Only the declaration the container's own precedence selected is read: an ICC profile a
         // higher declaration supersedes is neither converted nor refused.
-        let transform = match container.color {
+        let xform = match container.color {
             SampleColor::Srgb => None,
             SampleColor::Gamma(gamma) => Some(ColorTransform::Gamma(gamma)),
             SampleColor::Unsupported(reason) => return Err(ImageError::unreadable(reason)),
-            SampleColor::StoredIcc(profile) => Some(ColorTransform::Icc(profile)),
+            SampleColor::StoredIcc(icc) => Some(ColorTransform::Icc(icc)),
             SampleColor::DecoderIcc => Some(ColorTransform::Icc(Cow::Owned(
                 decoder
                     .icc_profile()?
@@ -97,30 +104,30 @@ impl DecodedSource {
         };
         // Normalization rewrites the plane in place after dropping the decoder; only raw pixels
         // reduce the decoder's scratch allowance.
-        let decode_allotment = 512 * 1024 * 1024;
-        let samples = u64::from(width) * u64::from(height);
+        let allotment = 512 * 1024 * 1024;
+        let samples = u64::from(w) * u64::from(h);
         let raw_bytes = samples.saturating_mul(u64::from(color.bytes_per_pixel()));
         let required = samples.saturating_mul(u64::from(color.bytes_per_pixel().max(4)));
-        if required > decode_allotment {
+        if required > allotment {
             return Err(ImageError::TooLarge {
                 limit: SizeLimit::Decode,
-                allowed: decode_allotment,
+                allowed: allotment,
                 actual: required,
             });
         }
         let mut limits = Limits::default();
-        limits.max_alloc = Some(decode_allotment - raw_bytes);
-        cancellation.ensure_active()?;
-        let raw = decoder.decode(color, width, height, limits)?;
-        cancellation.ensure_active()?;
-        let rgba = normalize_color(raw, color, (width, height), transform, cancellation)?;
-        cancellation.ensure_active()?;
+        limits.max_alloc = Some(allotment - raw_bytes);
+        cancel.ensure_active()?;
+        let raw = decoder.decode(color, w, h, limits)?;
+        cancel.ensure_active()?;
+        let rgba = normalize_color(raw, color, (w, h), xform, cancel)?;
+        cancel.ensure_active()?;
         Ok(Self {
             rgba,
-            width,
-            height,
+            width: w,
+            height: h,
             orientation,
-            metadata,
+            metadata: meta,
         })
     }
 
@@ -140,61 +147,58 @@ impl DecodedSource {
     /// [`ResampledPixels::encode`].
     pub fn pixels(
         &self,
-        pixels: PixelRecipe,
-        cancellation: &dyn Cancellation,
+        px: PixelRecipe,
+        cancel: &dyn Cancellation,
     ) -> ImageResult<ResampledPixels> {
-        cancellation.ensure_active()?;
-        pixels.validate(&self.metadata)?;
-        let result = resample(
+        cancel.ensure_active()?;
+        px.validate(&self.metadata)?;
+        let res = resample(
             &self.rgba,
             self.width,
             self.height,
             self.orientation,
             !self.metadata.has_alpha,
-            pixels,
-            cancellation,
+            px,
+            cancel,
         );
-        cancellation.ensure_active()?;
-        result
+        cancel.ensure_active()?;
+        res
     }
 
     /// Resample these pixels, reusing the decoded buffer for an unchanged full frame.
     pub fn into_pixels(
         self,
-        pixels: PixelRecipe,
-        cancellation: &dyn Cancellation,
+        px: PixelRecipe,
+        cancel: &dyn Cancellation,
     ) -> ImageResult<ResampledPixels> {
-        let dimensions = (self.width, self.height);
+        let dims = (self.width, self.height);
         if self.orientation != Orientation::NoTransforms
-            || (pixels.width(), pixels.height()) != dimensions
-            || !pixels.raster_crop().is_some_and(|crop| {
-                (crop.x, crop.y) == (0, 0) && (crop.width, crop.height) == dimensions
-            })
+            || (px.width(), px.height()) != dims
+            || !px
+                .raster_crop()
+                .is_some_and(|crop| (crop.x, crop.y) == (0, 0) && (crop.width, crop.height) == dims)
         {
-            return self.pixels(pixels, cancellation);
+            return self.pixels(px, cancel);
         }
 
-        cancellation.ensure_active()?;
-        pixels.validate(&self.metadata)?;
-        let result =
-            ResampledPixels::assembled(pixels, self.rgba, !self.metadata.has_alpha, cancellation);
-        cancellation.ensure_active()?;
-        result
+        cancel.ensure_active()?;
+        px.validate(&self.metadata)?;
+        let res = ResampledPixels::assembled(px, self.rgba, !self.metadata.has_alpha, cancel);
+        cancel.ensure_active()?;
+        res
     }
 
     /// Resample and encode one recipe.
     pub fn render(
         &self,
         recipe: &ImageRecipe,
-        cancellation: &dyn Cancellation,
+        cancel: &dyn Cancellation,
     ) -> ImageResult<Arc<[u8]>> {
-        cancellation.ensure_active()?;
+        cancel.ensure_active()?;
         recipe.validate(&self.metadata)?;
-        let result = self
-            .pixels(recipe.pixels(), cancellation)?
-            .encode(recipe, cancellation);
-        cancellation.ensure_active()?;
-        result
+        let res = self.pixels(recipe.pixels(), cancel)?.encode(recipe, cancel);
+        cancel.ensure_active()?;
+        res
     }
 }
 
@@ -554,23 +558,15 @@ fn exif_orientation(bytes: &[u8]) -> Orientation {
     Orientation::from_exif_chunk(tiff).unwrap_or(Orientation::NoTransforms)
 }
 
-fn display_dimensions(width: u32, height: u32, orientation: Orientation) -> (u32, u32) {
+fn display_dimensions(w: u32, h: u32, orientation: Orientation) -> (u32, u32) {
     match orientation {
         Orientation::Rotate90
         | Orientation::Rotate270
         | Orientation::Rotate90FlipH
-        | Orientation::Rotate270FlipH => (height, width),
-        _ => (width, height),
+        | Orientation::Rotate270FlipH => (h, w),
+        _ => (w, h),
     }
 }
-use self::color::{ColorTransform, normalize_color};
-use self::container::{
-    inspect_svg, jpeg_has_icc, looks_like_xml, scan_bmp, scan_gif, scan_png, scan_webp,
-};
-
-mod color;
-mod container;
-mod encode;
 
 #[cfg(test)]
 pub(crate) mod tests {
@@ -594,63 +590,57 @@ pub(crate) mod tests {
         use std::sync::Arc;
 
         pub(crate) fn png(
-            pixels: &[u8],
-            width: u32,
-            height: u32,
+            px: &[u8],
+            w: u32,
+            h: u32,
             color: ExtendedColorType,
             icc: Option<Vec<u8>>,
             exif: Option<Vec<u8>>,
         ) -> Vec<u8> {
             let mut bytes = Vec::new();
-            let mut encoder = PngEncoder::new(&mut bytes);
+            let mut enc = PngEncoder::new(&mut bytes);
             if let Some(icc) = icc {
-                encoder.set_icc_profile(icc).unwrap();
+                enc.set_icc_profile(icc).unwrap();
             }
             if let Some(exif) = exif {
-                encoder.set_exif_metadata(exif).unwrap();
+                enc.set_exif_metadata(exif).unwrap();
             }
-            encoder.write_image(pixels, width, height, color).unwrap();
+            enc.write_image(px, w, h, color).unwrap();
             bytes
         }
 
-        /// An sRGB ICC profile whose transfer curves are linear, so a grey converts to near 188
-        /// rather than staying on 128.
+        /// Linear-TRC sRGB ICC profile so grey 128 converts to ~188 instead of staying at 128.
         pub(crate) fn linear_profile() -> Vec<u8> {
-            let mut profile = moxcms::ColorProfile::new_srgb();
-            // Without this the encoded profile still describes sRGB, and the curves below do not
-            // govern the transform.
-            profile.cicp = None;
+            let mut prof = moxcms::ColorProfile::new_srgb();
+            prof.cicp = None;
             let curve = moxcms::curve_from_gamma(1.0);
-            profile.red_trc = Some(curve.clone());
-            profile.green_trc = Some(curve.clone());
-            profile.blue_trc = Some(curve);
-            profile.encode().unwrap()
+            prof.red_trc = Some(curve.clone());
+            prof.green_trc = Some(curve.clone());
+            prof.blue_trc = Some(curve);
+            prof.encode().unwrap()
         }
 
-        /// One flat grey 3x3 JPEG carrying `linear_profile`, so a converted pixel lands near 188 and
-        /// a profile the decode drops leaves it on 128.
         pub(crate) fn linear_icc_jpeg() -> Vec<u8> {
             let mut jpeg = Vec::new();
-            let mut encoder = JpegEncoder::new_with_quality(&mut jpeg, 100);
-            encoder.set_icc_profile(linear_profile()).unwrap();
-            encoder
-                .write_image(&[128; 3 * 3 * 3], 3, 3, ExtendedColorType::Rgb8)
+            let mut enc = JpegEncoder::new_with_quality(&mut jpeg, 100);
+            enc.set_icc_profile(linear_profile()).unwrap();
+            enc.write_image(&[128; 3 * 3 * 3], 3, 3, ExtendedColorType::Rgb8)
                 .unwrap();
             jpeg
         }
 
         pub(crate) fn recipe(
             bytes: &[u8],
-            width: u32,
-            height: u32,
+            w: u32,
+            h: u32,
             format: OutputFormat,
             quality: Option<u8>,
         ) -> ImageRecipe {
             ImageRecipe::resolve(
                 &inspect(bytes).unwrap(),
                 ResizeOptions {
-                    width: Some(width),
-                    height: Some(height),
+                    width: Some(w),
+                    height: Some(h),
                     operation: ResizeOperation::Scale,
                     anchor: CropAnchor::Center,
                     format,
@@ -662,17 +652,15 @@ pub(crate) mod tests {
             .unwrap()
         }
 
-        /// One source rendered as PNG at `width × height`, the fixture most codec tests need.
-        pub(crate) fn render_png(source: &[u8], width: u32, height: u32) -> Arc<[u8]> {
+        pub(crate) fn render_png(src: &[u8], w: u32, h: u32) -> Arc<[u8]> {
             render(
-                source,
-                &recipe(source, width, height, OutputFormat::Png, None),
+                src,
+                &recipe(src, w, h, OutputFormat::Png, None),
                 &NO_CANCELLATION,
             )
             .unwrap()
         }
 
-        /// Assemble one PNG chunk: length, type, data, and the CRC the format carries.
         pub(crate) fn png_chunk(kind: &[u8; 4], data: &[u8]) -> Vec<u8> {
             let mut hasher = crc32fast::Hasher::new();
             hasher.update(kind);
@@ -685,12 +673,10 @@ pub(crate) mod tests {
             chunk
         }
 
-        /// Insert a chunk directly after the image header, where the format still lets a reader
-        /// honour it.
         pub(crate) fn insert_png_chunk(png: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
-            let header_bytes =
+            let hdr_bytes =
                 u32::from_be_bytes(png[8..12].try_into().expect("a chunk length")) as usize;
-            let at = 8 + 12 + header_bytes;
+            let at = 8 + 12 + hdr_bytes;
             png.splice(at..at, png_chunk(kind, data));
         }
 
@@ -734,9 +720,9 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn exif_orientation_is_applied_once() {
-        let pixels: Vec<u8> = (1..=6).flat_map(|value| [value, 0, 0, 255]).collect();
-        for (orientation, expected) in [
+    fn exif_orientation_applied_once() {
+        let px: Vec<u8> = (1..=6).flat_map(|v| [v, 0, 0, 255]).collect();
+        for (orient, expected) in [
             (1, [1, 2, 3, 4, 5, 6]),
             (2, [3, 2, 1, 6, 5, 4]),
             (3, [6, 5, 4, 3, 2, 1]),
@@ -746,79 +732,63 @@ pub(crate) mod tests {
             (7, [6, 3, 5, 2, 4, 1]),
             (8, [3, 6, 2, 5, 1, 4]),
         ] {
-            let source = png(
-                &pixels,
+            let src = png(
+                &px,
                 3,
                 2,
                 ExtendedColorType::Rgba8,
                 None,
-                Some(orientation_exif(orientation)),
+                Some(orientation_exif(orient)),
             );
-            let metadata = inspect(&source).unwrap();
-            let dimensions = if orientation >= 5 { (2, 3) } else { (3, 2) };
-            assert_eq!((metadata.width, metadata.height), dimensions);
-            let recipe = recipe(&source, dimensions.0, dimensions.1, OutputFormat::Png, None);
-            let result = render(&source, &recipe, &NO_CANCELLATION).unwrap();
-            let displayed: Vec<_> = rgba(&result)
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .map(|pixel| pixel[0])
-                .collect();
-            assert_eq!(displayed, expected);
-            let mut decoder = PngDecoder::new(Cursor::new(&result[..])).unwrap();
-            assert_eq!(decoder.orientation().unwrap(), Orientation::NoTransforms);
-            assert!(decoder.exif_metadata().unwrap().is_none());
+            let meta = inspect(&src).unwrap();
+            let dims = if orient >= 5 { (2, 3) } else { (3, 2) };
+            assert_eq!((meta.width, meta.height), dims);
+            let r = recipe(&src, dims.0, dims.1, OutputFormat::Png, None);
+            let res = render(&src, &r, &NO_CANCELLATION).unwrap();
+            let out: Vec<_> = rgba(&res).as_chunks::<4>().0.iter().map(|p| p[0]).collect();
+            assert_eq!(out, expected);
+            let mut dec = PngDecoder::new(Cursor::new(&res[..])).unwrap();
+            assert_eq!(dec.orientation().unwrap(), Orientation::NoTransforms);
+            assert!(dec.exif_metadata().unwrap().is_none());
         }
     }
 
     #[test]
-    fn jpeg_dimensions_account_for_orientation() {
-        let mut source = Vec::new();
-        let mut encoder = JpegEncoder::new_with_quality(&mut source, 90);
-        encoder.set_exif_metadata(orientation_exif(6)).unwrap();
-        encoder
-            .write_image(&[120; 3 * 2 * 3], 3, 2, ExtendedColorType::Rgb8)
+    fn jpeg_orientation_dims() {
+        let mut src = Vec::new();
+        let mut enc = JpegEncoder::new_with_quality(&mut src, 90);
+        enc.set_exif_metadata(orientation_exif(6)).unwrap();
+        enc.write_image(&[120; 3 * 2 * 3], 3, 2, ExtendedColorType::Rgb8)
             .unwrap();
-        let metadata = inspect(&source).unwrap();
-        assert_eq!((metadata.width, metadata.height), (2, 3));
-        let recipe = recipe(&source, 2, 3, OutputFormat::Jpeg, Some(90));
-        let encoded = render(&source, &recipe, &NO_CANCELLATION).unwrap();
-        let metadata = inspect(&encoded).unwrap();
+        let meta = inspect(&src).unwrap();
+        assert_eq!((meta.width, meta.height), (2, 3));
+        let r = recipe(&src, 2, 3, OutputFormat::Jpeg, Some(90));
+        let enc = render(&src, &r, &NO_CANCELLATION).unwrap();
+        let meta = inspect(&enc).unwrap();
         assert_eq!(
-            (metadata.width, metadata.height, metadata.format),
+            (meta.width, meta.height, meta.format),
             (2, 3, ImageFormat::Jpeg)
         );
-        let mut decoded = image::codecs::jpeg::JpegDecoder::new(Cursor::new(&encoded[..])).unwrap();
-        assert!(decoded.exif_metadata().unwrap().is_none());
+        let mut dec = image::codecs::jpeg::JpegDecoder::new(Cursor::new(&enc[..])).unwrap();
+        assert!(dec.exif_metadata().unwrap().is_none());
     }
 
-    /// The byte range of the APP2 segment carrying `linear_icc_jpeg`'s profile, which fits one
-    /// segment.
     fn icc_app2_span(jpeg: &[u8]) -> std::ops::Range<usize> {
-        let mut signatures = jpeg
+        let mut sigs = jpeg
             .windows(12)
             .enumerate()
-            .filter(|(_, window)| *window == b"ICC_PROFILE\0")
+            .filter(|(_, w)| *w == b"ICC_PROFILE\0")
             .map(|(at, _)| at - 4);
-        let at = signatures
-            .next()
-            .expect("the encoded profile's APP2 segment");
-        assert!(
-            signatures.next().is_none(),
-            "the profile fits one APP2 segment"
-        );
-        let length = usize::from(u16::from_be_bytes([jpeg[at + 2], jpeg[at + 3]]));
-        at..at + 2 + length
+        let at = sigs.next().expect("the encoded profile's APP2 segment");
+        assert!(sigs.next().is_none(), "the profile fits one APP2 segment");
+        let len = usize::from(u16::from_be_bytes([jpeg[at + 2], jpeg[at + 3]]));
+        at..at + 2 + len
     }
 
-    /// The same JPEG with `FF 00` stuffing inserted before its APP2 segment, and a COM segment as
-    /// long as the bytes the byte walk then reads as that segment's length.
     fn jpeg_stuffed_before_icc(jpeg: &[u8]) -> Vec<u8> {
         let span = icc_app2_span(jpeg);
-        // `FF 00` before the segment makes the walk read the segment's own `FF E2` marker as a
-        // 65506-byte length, so the stuffing only stays inside the file while the COM segment
-        // ends that mis-read exactly on the marker that follows the profile.
+        // `FF 00` makes the byte walk read APP2's `FF E2` as a 65506-byte length; the COM segment
+        // ends that misread right at the following marker.
         let footer = 65_506 - span.len();
         let mut stuffed = Vec::with_capacity(jpeg.len() + footer + 2);
         stuffed.extend_from_slice(&jpeg[..span.start]);
@@ -831,8 +801,6 @@ pub(crate) mod tests {
         stuffed
     }
 
-    /// The same JPEG with `FF 00` stuffing inserted right after its APP2 segment, where the byte
-    /// walk reads the next marker as the segment's length.
     fn jpeg_stuffed_after_icc(jpeg: &[u8]) -> Vec<u8> {
         let span = icc_app2_span(jpeg);
         let mut stuffed = Vec::with_capacity(jpeg.len() + 2);
@@ -842,45 +810,41 @@ pub(crate) mod tests {
         stuffed
     }
 
-    /// A profile the byte walk mis-parses is still the profile zune reads from the same headers:
-    /// the stuffing changes no pixel.
     #[test]
-    fn jpeg_padding_keeps_the_embedded_profile() {
+    fn jpeg_stuffed_keeps_icc() {
         let clean = linear_icc_jpeg();
         let stuffed = jpeg_stuffed_before_icc(&clean);
-        let clean_pixels = rgba(&render_png(&clean, 3, 3));
+        let clean_px = rgba(&render_png(&clean, 3, 3));
         assert!(
-            (180..=195).contains(&clean_pixels[0]),
-            "the embedded profile is applied: {clean_pixels:?}"
+            (180..=195).contains(&clean_px[0]),
+            "the embedded profile is applied: {clean_px:?}"
         );
-        let stuffed_pixels = rgba(&render_png(&stuffed, 3, 3));
-        assert_eq!(stuffed_pixels, clean_pixels);
+        let stuffed_px = rgba(&render_png(&stuffed, 3, 3));
+        assert_eq!(stuffed_px, clean_px);
     }
 
-    /// Stuffing the header parse tolerates is still damage to the byte walk: the metadata read
-    /// succeeds where resizing the same bytes refuses.
     #[test]
-    fn jpeg_padding_still_reports_metadata() {
+    fn jpeg_stuffed_metadata_ok() {
         let clean = linear_icc_jpeg();
         let stuffed = jpeg_stuffed_after_icc(&clean);
-        let metadata = inspect(&stuffed).unwrap();
-        assert_eq!((metadata.width, metadata.height), (3, 3));
-        let refusal = render(
+        let meta = inspect(&stuffed).unwrap();
+        assert_eq!((meta.width, meta.height), (3, 3));
+        let err = render(
             &stuffed,
             &recipe(&stuffed, 3, 3, OutputFormat::Png, None),
             &NO_CANCELLATION,
         )
         .unwrap_err();
         assert_eq!(
-            refusal.to_string(),
+            err.to_string(),
             "the JPEG image is damaged or incomplete; re-export it"
         );
     }
 
     #[test]
-    fn rgb_jpeg_retains_its_channels() {
+    fn rgb_jpeg_keeps_channels() {
         // Pillow's keep_rgb stores RGB component IDs rather than YCbCr samples.
-        let source = &[
+        let src = &[
             0xff, 0xd8, 0xff, 0xee, 0x00, 0x0e, 0x41, 0x64, 0x6f, 0x62, 0x65, 0x00, 0x64, 0x00,
             0x00, 0x00, 0x00, 0x00, 0xff, 0xdb, 0x00, 0x43, 0x00, 0x01, 0x01, 0x01, 0x01, 0x01,
             0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
@@ -896,8 +860,8 @@ pub(crate) mod tests {
             0x1f, 0xff, 0xd9,
         ];
         let png = render(
-            source,
-            &recipe(source, 1, 1, OutputFormat::Png, None),
+            src,
+            &recipe(src, 1, 1, OutputFormat::Png, None),
             &NO_CANCELLATION,
         )
         .unwrap();
@@ -905,8 +869,8 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn premultiplied_filtering_avoids_bleed() {
-        let source = png(
+    fn premultiplied_no_bleed() {
+        let src = png(
             &[255, 0, 0, 255, 0, 255, 0, 0],
             2,
             1,
@@ -914,13 +878,13 @@ pub(crate) mod tests {
             None,
             None,
         );
-        let recipe = recipe(&source, 1, 1, OutputFormat::Png, None);
-        let output = render(&source, &recipe, &NO_CANCELLATION).unwrap();
-        assert_eq!(rgba(&output), [255, 0, 0, 128]);
+        let r = recipe(&src, 1, 1, OutputFormat::Png, None);
+        let out = render(&src, &r, &NO_CANCELLATION).unwrap();
+        assert_eq!(rgba(&out), [255, 0, 0, 128]);
     }
 
     #[test]
-    fn malformed_images_are_rejected() {
+    fn reject_malformed_images() {
         for bytes in [
             b"".as_slice(),
             b"not an image",
@@ -931,39 +895,37 @@ pub(crate) mod tests {
         ] {
             assert!(inspect(bytes).is_err());
         }
-        let source = png(&[255, 0, 0], 1, 1, ExtendedColorType::Rgb8, None, None);
-        let recipe = recipe(&source, 1, 1, OutputFormat::Png, None);
-        assert!(render(&source[..source.len() - 5], &recipe, &NO_CANCELLATION).is_err());
+        let src = png(&[255, 0, 0], 1, 1, ExtendedColorType::Rgb8, None, None);
+        let r = recipe(&src, 1, 1, OutputFormat::Png, None);
+        assert!(render(&src[..src.len() - 5], &r, &NO_CANCELLATION).is_err());
     }
 
-    /// A plane beyond the decoder's budget is refused before any pixel is allocated.
     #[test]
-    fn decoding_refuses_oversized_plane() {
-        let source = oversized_png(20_000, 20_000);
-        let error = DecodedSource::open(&source, &NO_CANCELLATION)
+    fn reject_oversized_decode() {
+        let src = oversized_png(20_000, 20_000);
+        let err = DecodedSource::open(&src, &NO_CANCELLATION)
             .err()
             .expect("a 1.6 GB plane exceeds the 512 MiB budget");
         assert!(
             matches!(
-                error,
+                err,
                 ImageError::TooLarge {
                     limit: SizeLimit::Decode,
                     ..
                 }
             ),
-            "{error:#}"
+            "{err:#}"
         );
     }
 
-    fn oversized_png(width: u32, height: u32) -> Vec<u8> {
+    fn oversized_png(w: u32, h: u32) -> Vec<u8> {
         let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
-        let mut header = Vec::new();
-        header.extend_from_slice(&width.to_be_bytes());
-        header.extend_from_slice(&height.to_be_bytes());
-        header.extend_from_slice(&[8, 6, 0, 0, 0]);
-        bytes.extend(png_chunk(b"IHDR", &header));
-        // An empty zlib stream: the decoder needs an IDAT to accept the header, but the budget
-        // check refuses the plane before any of it is inflated.
+        let mut hdr = Vec::new();
+        hdr.extend_from_slice(&w.to_be_bytes());
+        hdr.extend_from_slice(&h.to_be_bytes());
+        hdr.extend_from_slice(&[8, 6, 0, 0, 0]);
+        bytes.extend(png_chunk(b"IHDR", &hdr));
+        // Empty zlib stream so the decoder accepts IHDR before hitting the plane budget.
         bytes.extend(png_chunk(
             b"IDAT",
             &[0x78, 0x9c, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01],
@@ -973,8 +935,8 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn exif_after_pixel_data_is_applied() {
-        let mut source = png(
+    fn exif_after_idat_applied() {
+        let mut src = png(
             &[1, 0, 0, 2, 0, 0],
             2,
             1,
@@ -983,29 +945,29 @@ pub(crate) mod tests {
             None,
         );
         let exif = orientation_exif(6);
-        let before_iend = source.len() - 12;
-        source.splice(before_iend..before_iend, png_chunk(b"eXIf", &exif));
-        let metadata = inspect(&source).unwrap();
-        assert_eq!((metadata.width, metadata.height), (1, 2));
-        let recipe = recipe(&source, 1, 2, OutputFormat::Png, None);
-        let output = render(&source, &recipe, &NO_CANCELLATION).unwrap();
-        assert_eq!(rgba(&output), [1, 0, 0, 255, 2, 0, 0, 255]);
-        source[before_iend + 8 + 18] = 8;
-        assert!(inspect(&source).is_err());
-        assert!(render(&source, &recipe, &NO_CANCELLATION).is_err());
+        let before_iend = src.len() - 12;
+        src.splice(before_iend..before_iend, png_chunk(b"eXIf", &exif));
+        let meta = inspect(&src).unwrap();
+        assert_eq!((meta.width, meta.height), (1, 2));
+        let r = recipe(&src, 1, 2, OutputFormat::Png, None);
+        let out = render(&src, &r, &NO_CANCELLATION).unwrap();
+        assert_eq!(rgba(&out), [1, 0, 0, 255, 2, 0, 0, 255]);
+        src[before_iend + 8 + 18] = 8;
+        assert!(inspect(&src).is_err());
+        assert!(render(&src, &r, &NO_CANCELLATION).is_err());
     }
 
     #[test]
-    fn cancellation_precedes_decode_errors() {
-        let source = png(&[10, 20, 30], 1, 1, ExtendedColorType::Rgb8, None, None);
-        let recipe = recipe(&source, 1, 1, OutputFormat::Png, None);
-        let cancellation = || true;
+    fn cancel_before_decode_error() {
+        let src = png(&[10, 20, 30], 1, 1, ExtendedColorType::Rgb8, None, None);
+        let r = recipe(&src, 1, 1, OutputFormat::Png, None);
+        let cancel = || true;
         assert!(matches!(
-            render(b"broken source", &recipe, &cancellation),
+            render(b"broken source", &r, &cancel),
             Err(ImageError::Cancelled(_))
         ));
         assert!(matches!(
-            render(&source, &recipe, &cancellation),
+            render(&src, &r, &cancel),
             Err(ImageError::Cancelled(_))
         ));
     }

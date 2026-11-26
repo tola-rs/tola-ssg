@@ -1,15 +1,7 @@
 //! Native image inspection and declarative derivative requests.
 //!
-//! Every function here loads through Typst's normal path loader: a source is a file path, never a
-//! browser URL, and asset URL mappings never remap it. Their exported Func values are not wrapped
-//! in Typst closures, so strings retain the native call-site span and explicit paths retain their
-//! original site/package root.
-//!
-//! `image_metadata` only inspects. `resize_image` computes one derivative's dimensions and URL.
-//! `image_srcset` does the same for several widths, ascending, or for the source's own width when
-//! `widths` is `auto`. Either way the request registers as a tracked World read: a complete build
-//! publishes every request its read evidence carries, while an editor source check evaluates the
-//! same call without running an image producer.
+//! Sources load via Typst's path loader (never remapped by asset URLs), and exported `Func` values
+//! are kept unwrapped so strings retain call-site spans and paths retain their site/package root.
 
 #![expect(
     clippy::too_many_arguments,
@@ -18,7 +10,12 @@
 
 use std::num::NonZeroU32;
 
+use tola_image::{
+    Background, CropAnchor, ImageFormat, ImageMetadata, ImageRecipe, OutputFormat, ResizeFilter,
+    ResizeOperation, ResizeOptions, SvgRender, inspect,
+};
 use tola_typst::ContentDigest;
+use tola_typst::svg::{SvgSource, looks_like_svg};
 use typst::World;
 use typst::diag::{At, SourceResult, bail};
 use typst::ecow::EcoString;
@@ -28,31 +25,23 @@ use typst::foundations::{
 };
 use typst::loading::{DataSource, Load, LoadSource};
 use typst::syntax::{FileId, RootedPath, Span, SpanKind, Spanned, VirtualPath, VirtualRoot};
+use typst::visualize::Color;
 use typst_html::{HtmlAttr, HtmlElem, attr, tag};
 
 use crate::image_request::ImageRequest;
-use tola_image::{
-    Background, CropAnchor, ImageFormat, ImageMetadata, ImageRecipe, OutputFormat, ResizeFilter,
-    ResizeOperation, ResizeOptions, SvgRender, inspect,
-};
-use tola_typst::svg::{SvgSource, looks_like_svg};
-use typst::visualize::Color;
 
 const ASSET_URL_SHADOWED_ORIGIN: &str = "AssetUrlShadowed";
 
-/// A physical image path that also names an asset published from another source.
+/// Physical image path that also names an asset published from a different source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AssetUrlShadowed<'a> {
-    /// The path spelling supplied to the native image function.
     pub written: &'a str,
-    /// The site-root file that spelling reads.
     pub resolved: &'a str,
-    /// The site-root file the asset declaration publishes.
     pub published_from: &'a str,
 }
 
 impl<'a> AssetUrlShadowed<'a> {
-    /// Interpret only the image producer's named evidence, never diagnostic prose.
+    /// Decodes only the producer's structured origin fields.
     pub fn from_origin(origin: &'a tola_typst::DiagnosticOrigin) -> Option<Self> {
         let tola_typst::DiagnosticOrigin::Producer(origin) = origin else {
             return None;
@@ -64,7 +53,7 @@ impl<'a> AssetUrlShadowed<'a> {
             origin
                 .fields()
                 .iter()
-                .find_map(|(key, value)| (key == name).then_some(value.as_str()))
+                .find_map(|(k, v)| (k == name).then_some(v.as_str()))
         };
         Some(Self {
             written: field("written")?,
@@ -74,7 +63,6 @@ impl<'a> AssetUrlShadowed<'a> {
     }
 }
 
-/// The fields `image-metadata` publishes, in the order it inserts them.
 pub(crate) const IMAGE_METADATA_FIELDS: [&str; 6] =
     ["width", "height", "format", "mime", "has-alpha", "is-lossy"];
 
@@ -84,65 +72,65 @@ pub(super) fn image_metadata(
     /// A path string relative to this call, or an already resolved path.
     source: Spanned<DataSource>,
 ) -> SourceResult<Dict> {
-    let metadata = load_source_image(engine, source)?.metadata;
-    let values = [
-        metadata.width.into_value(),
-        metadata.height.into_value(),
-        metadata.format.extension().into_value(),
-        metadata.format.mime().into_value(),
-        metadata.has_alpha.into_value(),
-        metadata.is_lossy.into_value(),
-    ];
-    let mut result = Dict::new();
-    for (name, value) in IMAGE_METADATA_FIELDS.into_iter().zip(values) {
-        result.insert(name.into(), value);
-    }
-    Ok(result)
+    let meta = load_source_image(engine, source)?.meta;
+    Ok(crate::dict(IMAGE_METADATA_FIELDS.into_iter().zip([
+        meta.width.into_value(),
+        meta.height.into_value(),
+        meta.format.extension().into_value(),
+        meta.format.mime().into_value(),
+        meta.has_alpha.into_value(),
+        meta.is_lossy.into_value(),
+    ])))
 }
 
-/// The resize operation one `op` value names.
-fn resize_operation(op: &str) -> Option<ResizeOperation> {
-    match op {
-        "scale" => Some(ResizeOperation::Scale),
-        "fit-width" => Some(ResizeOperation::FitWidth),
-        "fit-height" => Some(ResizeOperation::FitHeight),
-        "fit" => Some(ResizeOperation::Fit),
-        "fill" => Some(ResizeOperation::Fill),
-        _ => None,
-    }
+fn parse_op(op: &str, span: Span) -> SourceResult<ResizeOperation> {
+    Ok(match op {
+        "scale" => ResizeOperation::Scale,
+        "fit-width" => ResizeOperation::FitWidth,
+        "fit-height" => ResizeOperation::FitHeight,
+        "fit" => ResizeOperation::Fit,
+        "fill" => ResizeOperation::Fill,
+        _ => bail!(
+            span,
+            "`op` must be `scale`, `fit-width`, `fit-height`, `fit`, or `fill`, not `{op}`"
+        ),
+    })
 }
 
-/// The crop anchor one `anchor` value names.
-fn crop_anchor(anchor: &str) -> Option<CropAnchor> {
-    match anchor {
-        "center" => Some(CropAnchor::Center),
-        "top" => Some(CropAnchor::Top),
-        "bottom" => Some(CropAnchor::Bottom),
-        "left" => Some(CropAnchor::Left),
-        "right" => Some(CropAnchor::Right),
-        "top-left" => Some(CropAnchor::TopLeft),
-        "top-right" => Some(CropAnchor::TopRight),
-        "bottom-left" => Some(CropAnchor::BottomLeft),
-        "bottom-right" => Some(CropAnchor::BottomRight),
-        _ => None,
-    }
+fn parse_anchor(anchor: &str, span: Span) -> SourceResult<CropAnchor> {
+    Ok(match anchor {
+        "center" => CropAnchor::Center,
+        "top" => CropAnchor::Top,
+        "bottom" => CropAnchor::Bottom,
+        "left" => CropAnchor::Left,
+        "right" => CropAnchor::Right,
+        "top-left" => CropAnchor::TopLeft,
+        "top-right" => CropAnchor::TopRight,
+        "bottom-left" => CropAnchor::BottomLeft,
+        "bottom-right" => CropAnchor::BottomRight,
+        _ => bail!(
+            span,
+            "`anchor` must be `center`, `top`, `bottom`, `left`, `right`, `top-left`, `top-right`, `bottom-left`, or `bottom-right`, not `{anchor}`"
+        ),
+    })
 }
 
-/// The resampling kernel one `filter` value names.
-fn resize_filter(filter: &str) -> Option<ResizeFilter> {
-    match filter {
-        "nearest" => Some(ResizeFilter::Nearest),
-        "triangle" => Some(ResizeFilter::Triangle),
-        "catmull-rom" => Some(ResizeFilter::CatmullRom),
-        "gaussian" => Some(ResizeFilter::Gaussian),
-        "lanczos3" => Some(ResizeFilter::Lanczos3),
-        _ => None,
-    }
+fn parse_filter(filter: &str, span: Span) -> SourceResult<ResizeFilter> {
+    Ok(match filter {
+        "nearest" => ResizeFilter::Nearest,
+        "triangle" => ResizeFilter::Triangle,
+        "catmull-rom" => ResizeFilter::CatmullRom,
+        "gaussian" => ResizeFilter::Gaussian,
+        "lanczos3" => ResizeFilter::Lanczos3,
+        _ => bail!(
+            span,
+            "`filter` must be `nearest`, `triangle`, `catmull-rom`, `gaussian`, or `lanczos3`, not `{filter}`"
+        ),
+    })
 }
 
-/// The output format one `format` value names, or the failure a site author reads.
-fn output_format(format: &Str, span: Span) -> SourceResult<OutputFormat> {
-    Ok(match format.as_str() {
+fn parse_format(format: &str, span: Span) -> SourceResult<OutputFormat> {
+    Ok(match format {
         "auto" => OutputFormat::Auto,
         "jpg" | "jpeg" => OutputFormat::Jpeg,
         "png" => OutputFormat::Png,
@@ -154,45 +142,38 @@ fn output_format(format: &Str, span: Span) -> SourceResult<OutputFormat> {
         ),
         _ => bail!(
             span,
-            "`format` must be `auto`, `jpg` (or `jpeg`), `png`, or `webp`, not `{}`",
-            format.as_str()
+            "`format` must be `auto`, `jpg` (or `jpeg`), `png`, or `webp`, not `{format}`"
         ),
     })
 }
 
-/// The quality one `quality` value names, or the failure a site author reads.
 fn checked_quality(quality: Option<i64>, span: Span) -> SourceResult<Option<u8>> {
-    if let Some(invalid) = quality.filter(|quality| !(0..=100).contains(quality)) {
+    if let Some(invalid) = quality.filter(|q| !(0..=100).contains(q)) {
         bail!(span, "`quality` must be between 0 and 100, not `{invalid}`");
     }
-    Ok(quality.map(|quality| quality as u8))
+    Ok(quality.map(|q| q as u8))
 }
 
-/// The opaque background one `background` value names, or the failure a site author reads.
 fn checked_background(background: Option<Color>, span: Span) -> SourceResult<Option<Background>> {
     background
-        .map(|color| opaque_srgb_background(color, span))
+        .map(|c| opaque_srgb_background(c, span))
         .transpose()
 }
 
-/// One loaded source image: where it came from, the digest of its bytes, and what the container declares.
 struct SourceImage {
-    source: DataSource,
-    /// The resolved file for a path source; the call site for a bytes source.
+    src: DataSource,
     origin: RootedPath,
     digest: ContentDigest,
-    metadata: ImageMetadata,
+    meta: ImageMetadata,
     svg: Option<SvgSource>,
 }
 
-/// One derived image: the URL a document links, and the pixels that URL holds.
 struct Derivative {
     url: String,
     width: u32,
     height: u32,
 }
 
-/// Load one source image and read what its container declares about itself.
 fn load_source_image(
     engine: &mut Engine,
     source: Spanned<DataSource>,
@@ -208,7 +189,6 @@ fn load_source_image(
             (id, id.get().clone())
         }
         LoadSource::Bytes => {
-            // A detached span has no call-site file; the synthetic path only anchors font lookup.
             let id = span.id().unwrap_or_else(|| {
                 FileId::new(RootedPath::new(
                     VirtualRoot::Project,
@@ -221,9 +201,9 @@ fn load_source_image(
     let svg = looks_like_svg(&loaded.data)
         .then(|| SvgSource::parse(loaded.data.clone(), engine.world, file))
         .transpose()
-        .map_err(|error| error.to_string())
+        .map_err(|e| e.to_string())
         .at(span)?;
-    let metadata = match &svg {
+    let meta = match &svg {
         Some(svg) => {
             let (width, height) = svg.pixel_dimensions();
             ImageMetadata {
@@ -234,92 +214,77 @@ fn load_source_image(
                 is_lossy: false,
             }
         }
-        None => inspect(&loaded.data)
-            .map_err(|error| error.to_string())
-            .at(span)?,
+        None => inspect(&loaded.data).map_err(|e| e.to_string()).at(span)?,
     };
     Ok(SourceImage {
-        source: written,
+        src: written,
         origin,
         digest: ContentDigest::of(&loaded.data),
-        metadata,
+        meta,
         svg,
     })
 }
 
-/// Request one derivative and return what a document needs to name it.
 fn request_derivative(
     engine: &mut Engine,
     span: Span,
-    source: &SourceImage,
-    options: ResizeOptions,
+    img: &SourceImage,
+    opts: ResizeOptions,
 ) -> SourceResult<Derivative> {
-    let recipe = match &source.svg {
+    let recipe = match &img.svg {
         Some(svg) => ImageRecipe::resolve_svg(
             (svg.width(), svg.height()),
-            options,
+            opts,
             SvgRender::new(svg.hash()),
         ),
-        None => ImageRecipe::resolve(&source.metadata, options),
+        None => ImageRecipe::resolve(&img.meta, opts),
     }
-    .map_err(|error| error.to_string())
+    .map_err(|e| e.to_string())
     .at(span)?;
-    let request = ImageRequest::new(
-        source.source.clone(),
-        source.origin.clone(),
-        source.digest,
-        recipe,
-    );
-    let url = super::library::browser_output_url(engine, span, &request.output_path())?;
-    // The read is ordinary tracked World input, not an imperative output queue: an evaluated
-    // call requests publication even when the returned dictionary is never used. Typst's
-    // memoized native evaluation therefore replays both source and request reads, including
-    // when the dictionary is retained in source metadata or used during a later contextual
-    // evaluation.
-    engine.world.file(request.observation_id()).at(span)?;
+    let req = ImageRequest::new(img.src.clone(), img.origin.clone(), img.digest, recipe);
+    let url = super::library::browser_output_url(engine, span, &req.output_path())?;
+    // Tracked read requests publication even when the caller discards the returned dictionary.
+    engine.world.file(req.observation_id()).at(span)?;
     Ok(Derivative {
         url,
-        width: request.recipe().width(),
-        height: request.recipe().height(),
+        width: req.recipe().width(),
+        height: req.recipe().height(),
     })
 }
 
-/// The widths one `widths` array names: positive pixel counts, ascending and distinct.
 fn pixel_widths(widths: &Array, span: Span) -> SourceResult<Vec<NonZeroU32>> {
     if widths.is_empty() {
         bail!(span, "`widths` must name at least one width");
     }
-    let mut ordered = Vec::with_capacity(widths.len());
-    for width in widths {
-        let Ok(width) = width.clone().cast::<NonZeroU32>() else {
+    let mut out = Vec::with_capacity(widths.len());
+    for w in widths {
+        let Ok(w) = w.clone().cast::<NonZeroU32>() else {
             bail!(
                 span,
                 "`widths` must hold positive pixel counts, not `{}`",
-                width.repr()
+                w.repr()
             );
         };
-        ordered.push(width);
+        out.push(w);
     }
-    ordered.sort_unstable();
-    ordered.dedup();
-    Ok(ordered)
+    out.sort_unstable();
+    out.dedup();
+    Ok(out)
 }
 
-/// The widths one `widths` argument names: `auto` for the source's own width, or the pixel counts
-/// the array lists.
 fn requested_widths(
     widths: &Value,
-    metadata: &ImageMetadata,
+    meta: &ImageMetadata,
     span: Span,
 ) -> SourceResult<Vec<NonZeroU32>> {
     match widths {
         Value::Auto => {
-            let Some(width) = NonZeroU32::new(metadata.width) else {
+            let Some(w) = NonZeroU32::new(meta.width) else {
                 bail!(span, "the source image has no width to derive");
             };
-            Ok(vec![width])
+            Ok(vec![w])
         }
-        Value::Array(array) => pixel_widths(array, span),
+        Value::Array(arr) => pixel_widths(arr, span),
         _ => bail!(
             span,
             "`widths` must be `auto` or a list of positive pixel counts"
@@ -327,11 +292,10 @@ fn requested_widths(
     }
 }
 
-/// The `srcset` attribute value: every derivative with its width descriptor, in ascending order.
-fn srcset_attribute(derivatives: &[Derivative]) -> String {
+fn srcset_attr(derivatives: &[Derivative]) -> String {
     derivatives
         .iter()
-        .map(|derivative| format!("{} {}w", derivative.url, derivative.width))
+        .map(|d| format!("{} {}w", d.url, d.width))
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -384,57 +348,27 @@ pub(super) fn resize_image(
     background: Option<Color>,
 ) -> SourceResult<Dict> {
     let span = source.span;
-    let Some(operation) = resize_operation(op.as_str()) else {
-        bail!(
-            span,
-            "`op` must be `scale`, `fit-width`, `fit-height`, `fit`, or `fill`, not `{}`",
-            op.as_str()
-        );
-    };
-    let Some(anchor) = crop_anchor(anchor.as_str()) else {
-        bail!(
-            span,
-            "`anchor` must be `center`, `top`, `bottom`, `left`, `right`, `top-left`, `top-right`, `bottom-left`, or `bottom-right`, not `{}`",
-            anchor.as_str()
-        );
-    };
-    let format = output_format(&format, span)?;
-    let Some(filter) = resize_filter(filter.as_str()) else {
-        bail!(
-            span,
-            "`filter` must be `nearest`, `triangle`, `catmull-rom`, `gaussian`, or `lanczos3`, not `{}`",
-            filter.as_str()
-        );
-    };
-    let quality = checked_quality(quality, span)?;
-    let background = checked_background(background, span)?;
-    let options = ResizeOptions {
+    let opts = ResizeOptions {
         width: width.map(NonZeroU32::get),
         height: height.map(NonZeroU32::get),
-        operation,
-        anchor,
-        format,
-        quality,
-        filter,
-        background,
+        operation: parse_op(op.as_str(), span)?,
+        anchor: parse_anchor(anchor.as_str(), span)?,
+        format: parse_format(format.as_str(), span)?,
+        quality: checked_quality(quality, span)?,
+        filter: parse_filter(filter.as_str(), span)?,
+        background: checked_background(background, span)?,
     };
-    let source = load_source_image(engine, source)?;
-    let derivative = request_derivative(engine, span, &source, options)?;
-    let values = [
-        derivative.url.into_value(),
-        derivative.width.into_value(),
-        derivative.height.into_value(),
-        source.metadata.width.into_value(),
-        source.metadata.height.into_value(),
-    ];
-    let mut result = Dict::new();
-    for (name, value) in RESIZE_IMAGE_FIELDS.into_iter().zip(values) {
-        result.insert(name.into(), value);
-    }
-    Ok(result)
+    let img = load_source_image(engine, source)?;
+    let deriv = request_derivative(engine, span, &img, opts)?;
+    Ok(crate::dict(RESIZE_IMAGE_FIELDS.into_iter().zip([
+        deriv.url.into_value(),
+        deriv.width.into_value(),
+        deriv.height.into_value(),
+        img.meta.width.into_value(),
+        img.meta.height.into_value(),
+    ])))
 }
 
-/// The fields `resize-image` publishes, in the order it inserts them.
 pub(crate) const RESIZE_IMAGE_FIELDS: [&str; 5] = [
     "url",
     "width",
@@ -443,7 +377,6 @@ pub(crate) const RESIZE_IMAGE_FIELDS: [&str; 5] = [
     "original-height",
 ];
 
-/// The fields `image-srcset` publishes, in the order it inserts them.
 pub(crate) const IMAGE_SRCSET_FIELDS: [&str; 4] = ["url", "srcset", "width", "height"];
 
 #[func]
@@ -470,33 +403,23 @@ pub(super) fn image_srcset(
     background: Option<Color>,
 ) -> SourceResult<Dict> {
     let span = source.span;
-    let mut derivatives =
+    let mut derivs =
         request_derivatives(engine, source, &widths, &format, quality, background, span)?;
-    let srcset = srcset_attribute(&derivatives);
-    let widest = derivatives
-        .pop()
-        .expect("`requested_widths` never returns an empty list");
-    let values = [
+    let srcset = srcset_attr(&derivs);
+    let widest = derivs.pop().expect("requested_widths is nonempty");
+    Ok(crate::dict(IMAGE_SRCSET_FIELDS.into_iter().zip([
         widest.url.into_value(),
         srcset.into_value(),
         widest.width.into_value(),
         widest.height.into_value(),
-    ];
-    let mut result = Dict::new();
-    for (name, value) in IMAGE_SRCSET_FIELDS.into_iter().zip(values) {
-        result.insert(name.into(), value);
-    }
-    Ok(result)
+    ])))
 }
 
-/// The attributes `img` writes itself; `attrs` cannot name them.
-const IMG_OWNED_ATTRIBUTES: [&str; 6] = ["src", "srcset", "sizes", "width", "height", "alt"];
+const IMG_OWNED_ATTRS: [&str; 6] = ["src", "srcset", "sizes", "width", "height", "alt"];
 
-/// A responsive `<img>` written raw: the typed `sizes` model cannot express viewport units.
 #[func]
 pub(super) fn img(
     engine: &mut Engine,
-
     /// A path string relative to this call, or an already resolved path.
     source: Spanned<DataSource>,
     /// `auto` for the source's own width, or the positive pixel widths to derive.
@@ -531,56 +454,70 @@ pub(super) fn img(
     attrs: Dict,
 ) -> SourceResult<Content> {
     let span = source.span;
-    let mut derivatives =
+    let mut derivs =
         request_derivatives(engine, source, &widths, &format, quality, background, span)?;
-    let srcset = srcset_attribute(&derivatives);
-    let widest = derivatives
-        .pop()
-        .expect("`requested_widths` never returns an empty list");
-    let mut element = HtmlElem::new(tag::img)
+    let srcset = srcset_attr(&derivs);
+    let widest = derivs.pop().expect("requested_widths is nonempty");
+    let mut elem = HtmlElem::new(tag::img)
         .with_attr(attr::src, widest.url.as_str())
         .with_attr(attr::width, widest.width.to_string())
         .with_attr(attr::height, widest.height.to_string())
         .with_attr(attr::alt, alt.as_str());
-    if !derivatives.is_empty() {
-        element = element
+    if !derivs.is_empty() {
+        elem = elem
             .with_attr(attr::srcset, srcset)
             .with_attr(attr::sizes, sizes.as_str());
     }
+    let img_attrs = img_extras(attrs, span)?;
+    elem = elem
+        .with_attr(
+            attr::loading,
+            img_attrs.loading.unwrap_or_else(|| "lazy".into()),
+        )
+        .with_attr(
+            attr::decoding,
+            img_attrs.decoding.unwrap_or_else(|| "async".into()),
+        );
+    for (name, val) in img_attrs.extras {
+        elem = elem.with_attr(HtmlAttr::intern(&name).at(span)?, val);
+    }
+    Ok(elem.pack().spanned(span))
+}
+
+struct ImgAttrs {
+    loading: Option<EcoString>,
+    decoding: Option<EcoString>,
+    extras: Vec<(String, EcoString)>,
+}
+
+fn img_extras(attrs: Dict, span: Span) -> SourceResult<ImgAttrs> {
+    let mut loading = None;
+    let mut decoding = None;
     let mut extras = Vec::with_capacity(attrs.len());
-    for (name, value) in attrs {
+    for (name, val) in attrs {
         let name = name.as_str();
-        if let Some(owned) = IMG_OWNED_ATTRIBUTES
+        if let Some(owned) = IMG_OWNED_ATTRS
             .into_iter()
-            .find(|owned| name.eq_ignore_ascii_case(owned))
+            .find(|o| name.eq_ignore_ascii_case(o))
         {
             bail!(span, "`img` writes `{owned}`; remove it from `attrs`");
         }
-        let value = value.cast::<EcoString>().at(span)?;
-        extras.push((name.to_owned(), value));
-    }
-    let mut loading = None;
-    let mut decoding = None;
-    for (name, value) in &extras {
+        let val = val.cast::<EcoString>().at(span)?;
         if name.eq_ignore_ascii_case("loading") {
-            loading = Some(value.as_str());
+            loading = Some(val);
         } else if name.eq_ignore_ascii_case("decoding") {
-            decoding = Some(value.as_str());
+            decoding = Some(val);
+        } else {
+            extras.push((name.to_owned(), val));
         }
     }
-    element = element
-        .with_attr(attr::loading, loading.unwrap_or("lazy"))
-        .with_attr(attr::decoding, decoding.unwrap_or("async"));
-    for (name, value) in extras {
-        if name.eq_ignore_ascii_case("loading") || name.eq_ignore_ascii_case("decoding") {
-            continue;
-        }
-        element = element.with_attr(HtmlAttr::intern(&name).at(span)?, value);
-    }
-    Ok(element.pack().spanned(span))
+    Ok(ImgAttrs {
+        loading,
+        decoding,
+        extras,
+    })
 }
 
-/// The derivatives one `widths` request names, ascending.
 fn request_derivatives(
     engine: &mut Engine,
     source: Spanned<DataSource>,
@@ -590,19 +527,17 @@ fn request_derivatives(
     background: Option<Color>,
     span: Span,
 ) -> SourceResult<Vec<Derivative>> {
-    let format = output_format(format, span)?;
+    let format = parse_format(format.as_str(), span)?;
     let quality = checked_quality(quality, span)?;
     let background = checked_background(background, span)?;
-    // The source is loaded first: `widths: auto` names its own width.
-    let source = load_source_image(engine, source)?;
-    if source.svg.is_some() {
+    let img = load_source_image(engine, source)?;
+    if img.svg.is_some() {
         bail!(
             span,
             "a responsive set cannot be derived from an SVG; use `resize-image` with an explicit raster format, or `image()` for vector display"
         );
     }
-    let widths = requested_widths(widths, &source.metadata, span)?;
-    // Every derivative keeps the source's aspect ratio, so only its width differs.
+    let widths = requested_widths(widths, &img.meta, span)?;
     let shared = ResizeOptions {
         operation: ResizeOperation::FitWidth,
         format,
@@ -612,18 +547,22 @@ fn request_derivatives(
     };
     widths
         .iter()
-        .map(|width| {
-            let options = ResizeOptions {
-                width: Some(width.get()),
-                ..shared
-            };
-            request_derivative(engine, span, &source, options)
+        .map(|w| {
+            request_derivative(
+                engine,
+                span,
+                &img,
+                ResizeOptions {
+                    width: Some(w.get()),
+                    ..shared
+                },
+            )
         })
         .collect()
 }
 
 fn opaque_srgb_background(color: Color, span: Span) -> SourceResult<Background> {
-    if color.alpha().is_some_and(|alpha| alpha != 1.0) {
+    if color.alpha().is_some_and(|a| a != 1.0) {
         bail!(
             span,
             "`background` must be opaque; use a color without transparency"
@@ -640,39 +579,43 @@ fn warn_shadowed_asset_url(
     id: FileId,
 ) -> SourceResult<()> {
     let written = match written {
-        PathOrStr::Str(string) => string.as_str(),
-        PathOrStr::Path(path) => path.vpath().get_without_slash(),
+        PathOrStr::Str(s) => s.as_str(),
+        PathOrStr::Path(p) => p.vpath().get_without_slash(),
     };
     let named = written.split('?').next().unwrap_or_default();
     let Some(origins) = super::library::asset_origins(engine) else {
         return Ok(());
     };
-    let Ok(Value::Str(published_from)) = origins.get(named.trim_start_matches('/')) else {
+    let Some(published_from) = crate::dict_str(origins, named.trim_start_matches('/')) else {
         return Ok(());
     };
     if id.root() != &VirtualRoot::Project {
         return Ok(());
     }
     let resolved = id.vpath().get_without_slash();
-    if resolved == published_from.as_str() {
+    if resolved == published_from {
         return Ok(());
     }
-    // A numbered call-site source remains a tracked input of the native evaluation.
+    // Keep numbered call-site source tracked for native evaluation.
     if let SpanKind::Number { id, num } = span.get() {
-        let source = engine.world.source(id).at(span)?;
-        source
-            .range(num, None)
-            .expect("a native argument span belongs to its source");
+        let src = engine.world.source(id).at(span)?;
+        src.range(num, None)
+            .expect("native argument span belongs to its source");
     }
     let warning = tola_typst::diagnostic::producer_warning(
         span,
         ASSET_URL_SHADOWED_ORIGIN,
-        &[("written", named), ("resolved", resolved), ("published_from", published_from.as_str())],
+        &[
+            ("written", named),
+            ("resolved", resolved),
+            ("published_from", published_from),
+        ],
         format!(
             "`{named}` is also a published asset URL; this reads `{resolved}`, while the site \
              publishes that URL from `{published_from}`"
         ),
-    ).with_hint("Write the file the declaration publishes from, or use the URL where a URL is expected (`asset-url(\"…\")`)");
+    )
+    .with_hint("Write the file the declaration publishes from, or use the URL where a URL is expected (`asset-url(\"…\")`)");
     engine.sink.warn(warning);
     Ok(())
 }
@@ -683,7 +626,7 @@ mod tests {
     use typst::visualize::{LinearRgb, ProcessColor};
 
     #[test]
-    fn linear_background_uses_srgb() {
+    fn background_linear_srgb() {
         let color = Color::Process(ProcessColor::LinearRgb(LinearRgb::new(
             0.5, 0.25, 0.75, 1.0,
         )));
@@ -696,13 +639,15 @@ mod tests {
             }
         );
     }
+
     #[test]
-    fn translucent_background_is_rejected() {
+    fn background_rejects_alpha() {
         let color = Color::WHITE.with_alpha(0.999);
         assert!(opaque_srgb_background(color, Span::detached()).is_err());
     }
+
     #[test]
-    fn reordered_evidence_keeps_asset_identity() {
+    fn asset_url_shadowed_reordered_fields() {
         let warning = tola_typst::diagnostic::producer_warning(
             Span::detached(),
             ASSET_URL_SHADOWED_ORIGIN,
@@ -714,8 +659,8 @@ mod tests {
             "independent warning wording",
         );
         let native = tola_typst::NativeDiagnostic::from(warning);
-        let serialized = serde_json::to_vec(native.origin()).unwrap();
-        let origin: tola_typst::DiagnosticOrigin = serde_json::from_slice(&serialized).unwrap();
+        let bytes = serde_json::to_vec(native.origin()).unwrap();
+        let origin: tola_typst::DiagnosticOrigin = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(
             AssetUrlShadowed::from_origin(&origin),
             Some(AssetUrlShadowed {

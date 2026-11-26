@@ -4,27 +4,27 @@ use anyhow::Result;
 
 use tola_module::watch::HookWatchInputs;
 
-use crate::config::ResolvedSiteConfig;
+use crate::config::SiteConfig;
 use tola_input::{InputMode, InputScope};
 
 /// The module configuration one preparation froze, shared by development subscriptions and
 /// a build attempt so both read the same manifests.
-pub struct PreparedHookWatch {
-    site: crate::modules::prepared::PreparedSite,
+pub struct HookWatchEntry {
+    site: crate::modules::site::LoadedSite,
     scope: InputScope,
 }
 
-impl PreparedHookWatch {
+impl HookWatchEntry {
     /// The configuration this preparation applied.
-    pub fn config(&self) -> &ResolvedSiteConfig {
+    pub fn config(&self) -> &SiteConfig {
         self.site.config()
     }
     /// The applied configuration as the build's shared handle.
-    pub fn config_arc(&self) -> &std::sync::Arc<ResolvedSiteConfig> {
+    pub fn config_arc(&self) -> &std::sync::Arc<SiteConfig> {
         self.site.config_arc()
     }
     /// The prepared contribution these paths were derived from.
-    pub fn site(&self) -> &crate::modules::prepared::PreparedSite {
+    pub fn site(&self) -> &crate::modules::site::LoadedSite {
         &self.site
     }
     /// Conservative watch paths declared by that same configuration.
@@ -38,12 +38,12 @@ impl PreparedHookWatch {
 
 /// Freeze the module configuration and derive development watch paths without running commands.
 pub fn prepare_hook_watch(
-    config: &ResolvedSiteConfig,
+    config: &SiteConfig,
     mode: InputMode,
     cancellation: &crate::cancellation::BuildCancellation,
-) -> Result<PreparedHookWatch> {
-    let site = crate::modules::prepared::prepare_site(config, mode, cancellation)?;
-    Ok(PreparedHookWatch {
+) -> Result<HookWatchEntry> {
+    let site = crate::modules::site::prepare_site(config, mode, cancellation)?;
+    Ok(HookWatchEntry {
         site,
         scope: mode.scope(),
     })
@@ -107,10 +107,10 @@ rerun-on = { include = [{project = "not-watched"}] }
         assert_eq!(watch.name, "conditional");
         assert_eq!(
             watch.manifest,
-            prepared.config().get_root().join("module/tola-module.toml")
+            prepared.config().root().join("module/tola-module.toml")
         );
         let selection = &watch.selection;
-        let module = prepared.config().get_root().join("module");
+        let module = prepared.config().root().join("module");
         assert!(selection.matches(&module.join("data/entry.json")));
         assert!(!selection.matches(&module.join("data/vendor/entry.json")));
         assert!(

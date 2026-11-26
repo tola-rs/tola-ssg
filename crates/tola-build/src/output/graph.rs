@@ -588,19 +588,18 @@ mod tests {
 
     fn output(path: &str, owner: OutputOwner) -> OutputFile {
         let path = OutputPath::parse(path).unwrap();
-        let declaration = OutputDeclaration::opaque_from_output_path(&path);
-        OutputFile::new(path, declaration, owner, Vec::<u8>::new())
+        let decl = OutputDeclaration::opaque_from_output_path(&path);
+        OutputFile::new(path, decl, owner, Vec::<u8>::new())
     }
 
-    /// One producer's exclusive claim on a directory root.
     fn root_ownership(path: &str, owner: OutputOwner) -> owner::OutputRootOwnership {
         owner::OutputRootOwnership::new(OutputPath::parse(path).unwrap(), owner)
     }
 
     #[test]
-    fn counts_split_pages_documents_assets() {
+    fn counts_by_kind() {
         let mut graph = OutputGraphBuilder::new();
-        for (path, declaration) in [
+        for (path, decl) in [
             ("index.html", OutputDeclaration::html_document()),
             ("manual.pdf", OutputDeclaration::pdf_document()),
             (
@@ -612,7 +611,7 @@ mod tests {
             graph
                 .insert(OutputFile::new(
                     path,
-                    declaration,
+                    decl,
                     OutputOwner::bundle("site"),
                     Vec::<u8>::new(),
                 ))
@@ -630,7 +629,7 @@ mod tests {
     }
 
     #[test]
-    fn generated_html_is_an_asset() {
+    fn generated_html_is_asset() {
         let bytes: Arc<[u8]> = Arc::from(b"<p>Generated</p>".as_slice());
         let generated = GeneratedFile::new(
             "search",
@@ -644,20 +643,20 @@ mod tests {
         let mut graph = OutputGraphBuilder::new();
         graph.insert(generated.into_file()).unwrap();
         let graph = graph.finish();
-        let output = &graph.outputs()[0];
-        assert_eq!(output.kind(), OutputKind::Asset);
+        let out = &graph.outputs()[0];
+        assert_eq!(out.kind(), OutputKind::Asset);
         assert_eq!(
-            output.declaration().media_type(),
+            out.declaration().media_type(),
             &semantics::ResponseMediaType::PLAIN_TEXT
         );
         assert_eq!(
-            output.declaration().semantics(),
+            out.declaration().semantics(),
             semantics::DeclaredOutputSemantics::Opaque
         );
     }
 
     #[test]
-    fn blank_or_padded_producers_are_rejected() {
+    fn blank_producers_rejected() {
         for producer in ["", " search", "search "] {
             assert!(
                 GeneratedFile::new(
@@ -672,7 +671,7 @@ mod tests {
     }
 
     #[test]
-    fn root_ownership_survives_graph_reuse() {
+    fn root_ownership_across_reuse() {
         let owner = OutputOwner::command(0, "search");
         let ownership = root_ownership("search", owner.clone());
         let mut graph = OutputGraphBuilder::new();
@@ -684,9 +683,9 @@ mod tests {
             Err(OutputGraphError::TreeConflict { .. })
         ));
 
-        let mut generated = OutputGraphBuilder::new();
-        generated.own_root(ownership).unwrap();
-        let graph = generated.finish();
+        let mut builder = OutputGraphBuilder::new();
+        builder.own_root(ownership).unwrap();
+        let graph = builder.finish();
         let mut reused = OutputGraphBuilder::new();
         reused.insert_graph(&graph).unwrap();
         assert!(matches!(
@@ -697,7 +696,7 @@ mod tests {
     }
 
     #[test]
-    fn root_ownership_rejects_overlapping_files() {
+    fn root_ownership_rejects_overlap() {
         let owner = OutputOwner::command(0, "search");
         let mut graph = OutputGraphBuilder::new();
         graph
@@ -715,7 +714,7 @@ mod tests {
     }
 
     #[test]
-    fn tree_conflict_names_first_foreign_owner() {
+    fn tree_conflict_first_foreign_owner() {
         let first = OutputOwner::command(0, "first");
         let second = OutputOwner::command(1, "second");
         let mut graph = OutputGraphBuilder::new();
@@ -729,15 +728,15 @@ mod tests {
         }
         for (owner, expected) in [(first, "strasse/x.json"), (second, "Straße/z.json")] {
             let root = root_ownership("STRASSE", owner);
-            let error = graph.own_root(root).unwrap_err();
+            let err = graph.own_root(root).unwrap_err();
             assert!(
-                matches!(error, OutputGraphError::TreeConflict { path, .. } if path.as_str() == expected)
+                matches!(err, OutputGraphError::TreeConflict { path, .. } if path.as_str() == expected)
             );
         }
     }
 
     #[test]
-    fn output_kind_spelling_is_stable() {
+    fn output_kind_spelling() {
         for (kind, expected) in [
             (OutputKind::HtmlDocument, "html-document"),
             (OutputKind::PdfDocument, "pdf-document"),
@@ -750,10 +749,8 @@ mod tests {
         }
     }
 
-    /// Two spellings that denote one output path collide, whether a file meets a directory or two
-    /// spellings name the same path.
     #[test]
-    fn output_path_collisions_are_rejected() {
+    fn path_collisions_rejected() {
         for (first, second, expected) in [
             ("docs", "docs/index.html", OutputPathConflict::FileDirectory),
             ("docs/index.html", "docs", OutputPathConflict::FileDirectory),
@@ -783,22 +780,19 @@ mod tests {
             graph
                 .insert(output(first, OutputOwner::bundle("site")))
                 .unwrap();
-            let rejected = graph
+            let err = graph
                 .insert(output(second, OutputOwner::bundle("site")))
                 .unwrap_err();
             assert!(
-                matches!(
-                    rejected,
-                    OutputGraphError::PathConflict { conflict, .. } if conflict == expected
-                ),
-                "{first:?} / {second:?}: {rejected}"
+                matches!(err, OutputGraphError::PathConflict { conflict, .. } if conflict == expected),
+                "{first:?} / {second:?}: {err}"
             );
         }
     }
 
     #[test]
-    fn owner_kind_mismatches_are_rejected() {
-        for (declaration, owner) in [
+    fn owner_kind_mismatch_rejected() {
+        for (decl, owner) in [
             (
                 OutputDeclaration::html_document(),
                 OutputOwner::configured_asset("content/page.typ"),
@@ -809,39 +803,39 @@ mod tests {
             ),
         ] {
             let mut graph = OutputGraphBuilder::new();
-            let error = graph
+            let err = graph
                 .insert(OutputFile::new(
                     OutputPath::parse("output.bin").unwrap(),
-                    declaration,
+                    decl,
                     owner,
                     Vec::<u8>::new(),
                 ))
                 .unwrap_err();
-            assert!(matches!(error, OutputGraphError::OutputOwnerKind { .. }));
+            assert!(matches!(err, OutputGraphError::OutputOwnerKind { .. }));
         }
     }
 
     #[test]
-    fn output_clones_share_byte_storage() {
+    fn clones_share_bytes() {
         let path = OutputPath::parse("asset.bin").unwrap();
-        let declaration = OutputDeclaration::opaque_from_output_path(&path);
+        let decl = OutputDeclaration::opaque_from_output_path(&path);
         let bytes = b"owned bytes".to_vec();
-        let address = bytes.as_ptr();
-        let output = OutputFile::from_byte_owner(
+        let addr = bytes.as_ptr();
+        let out = OutputFile::from_byte_owner(
             path.clone(),
-            declaration.clone(),
+            decl.clone(),
             OutputOwner::system("test"),
             bytes,
         );
-        assert_eq!(output.bytes().as_ptr(), address);
-        let clone = output.clone();
-        assert!(output.shares_storage_with(&clone));
-        let retained = output.bytes_owner();
-        drop(output);
+        assert_eq!(out.bytes().as_ptr(), addr);
+        let clone = out.clone();
+        assert!(out.shares_storage_with(&clone));
+        let retained = out.bytes_owner();
+        drop(out);
         assert_eq!(retained.as_ref(), b"owned bytes");
         let separate = OutputFile::new(
             path,
-            declaration,
+            decl,
             OutputOwner::system("test"),
             b"owned bytes".to_vec(),
         );
@@ -850,7 +844,7 @@ mod tests {
     }
 
     #[test]
-    fn reserved_namespace_prefixes_are_rejected() {
+    fn reserved_namespace_rejected() {
         let mut graph = OutputGraphBuilder::new();
         assert!(matches!(
             graph
@@ -867,23 +861,23 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_outputs_name_both_owners() {
+    fn duplicate_outputs_name_owners() {
         let mut graph = OutputGraphBuilder::new();
         graph
             .insert(output("Posts/index.html", OutputOwner::bundle("site")))
             .unwrap();
-        let error = graph
+        let err = graph
             .insert(output(
                 "posts/index.html",
                 OutputOwner::configured_asset("content/page.typ"),
             ))
             .unwrap_err();
-        let diagnostic = error_diagnostic(&error.into()).unwrap();
-        assert_eq!(diagnostic.code, tola_diagnostic::codes::output::DUPLICATE);
+        let diag = error_diagnostic(&err.into()).unwrap();
+        assert_eq!(diag.code, tola_diagnostic::codes::output::DUPLICATE);
         for path in ["Posts/index.html", "posts/index.html"] {
-            assert!(diagnostic.message.contains(path));
+            assert!(diag.message.contains(path));
         }
-        let notes = diagnostic.notes.join("\n");
+        let notes = diag.notes.join("\n");
         assert!(notes.contains("root Bundle"));
         assert!(notes.contains("page.typ"));
     }

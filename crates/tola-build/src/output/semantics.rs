@@ -382,15 +382,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn custom_media_types_keep_parameters() {
+    fn media_types_keep_parameters() {
         for raw in [
             "text/vtt",
             "application/manifest+json",
             "application/vnd.example+json; version=2",
         ] {
-            let media_type = ResponseMediaType::parse(raw).unwrap();
-            assert_eq!(media_type.as_str(), raw);
-            assert_eq!(serde_json::to_value(&media_type).unwrap(), raw);
+            let mt = ResponseMediaType::parse(raw).unwrap();
+            assert_eq!(mt.as_str(), raw);
+            assert_eq!(serde_json::to_value(&mt).unwrap(), raw);
         }
         let css = ResponseMediaType::parse("TEXT/CSS; charset=iso-8859-1").unwrap();
         assert_eq!(css.essence(), ResponseMediaType::CSS.essence());
@@ -407,8 +407,8 @@ mod tests {
     }
 
     #[test]
-    fn declaration_decides_the_output_kind() {
-        for (declaration, kind) in [
+    fn declaration_output_kind() {
+        for (decl, kind) in [
             (OutputDeclaration::html_document(), OutputKind::HtmlDocument),
             (OutputDeclaration::pdf_document(), OutputKind::PdfDocument),
             (OutputDeclaration::png_document(), OutputKind::PngDocument),
@@ -421,30 +421,30 @@ mod tests {
                 OutputKind::Asset,
             ),
         ] {
-            assert_eq!(declaration.kind(), kind);
+            assert_eq!(decl.kind(), kind);
         }
     }
 
     #[test]
-    fn extension_names_the_declared_semantics() {
-        let declaration = OutputDeclaration::from_filesystem_source(Path::new("source/app.css"));
-        assert_eq!(declaration.semantics(), DeclaredOutputSemantics::Css);
-        assert_eq!(declaration.media_type(), &ResponseMediaType::CSS);
+    fn extension_declared_semantics() {
+        let decl = OutputDeclaration::from_filesystem_source(Path::new("source/app.css"));
+        assert_eq!(decl.semantics(), DeclaredOutputSemantics::Css);
+        assert_eq!(decl.media_type(), &ResponseMediaType::CSS);
 
-        let stylesheet = OutputPath::parse("styles/app.css").unwrap();
+        let css = OutputPath::parse("styles/app.css").unwrap();
         assert_eq!(
-            OutputDeclaration::opaque_from_output_path(&stylesheet).semantics(),
+            OutputDeclaration::opaque_from_output_path(&css).semantics(),
             DeclaredOutputSemantics::Opaque
         );
         assert_eq!(
-            OutputDeclaration::opaque_from_output_path(&stylesheet).media_type(),
+            OutputDeclaration::opaque_from_output_path(&css).media_type(),
             &ResponseMediaType::CSS
         );
 
         for path in ["download", "download.unknown"] {
-            let output = OutputPath::parse(path).unwrap();
+            let out = OutputPath::parse(path).unwrap();
             assert_eq!(
-                OutputDeclaration::opaque_from_output_path(&output).media_type(),
+                OutputDeclaration::opaque_from_output_path(&out).media_type(),
                 &ResponseMediaType::OCTET_STREAM,
                 "{path}"
             );

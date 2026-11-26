@@ -11,25 +11,24 @@ pub struct DiagnosticError {
 }
 
 impl DiagnosticError {
-    pub fn new(summary: impl Into<String>, mut diagnostics: Vec<Diagnostic>) -> Self {
+    pub fn new(summary: impl Into<String>, mut diags: Vec<Diagnostic>) -> Self {
         assert!(
-            !diagnostics.is_empty(),
+            !diags.is_empty(),
             "a diagnostic error must hold at least one diagnostic"
         );
-        super::coalesce_reports(&mut diagnostics);
+        super::coalesce_reports(&mut diags);
         Self {
             summary: summary.into(),
-            diagnostics,
+            diagnostics: diags,
             source: None,
         }
     }
 
-    /// Attach diagnostics to the anyhow chain a stage already built.
-    pub fn attach(source: anyhow::Error, diagnostics: Vec<Diagnostic>) -> Self {
-        let summary = source.to_string();
+    pub fn attach(src: anyhow::Error, diags: Vec<Diagnostic>) -> Self {
+        let summary = src.to_string();
         Self {
-            source: Some(source),
-            ..Self::new(summary, diagnostics)
+            source: Some(src),
+            ..Self::new(summary, diags)
         }
     }
 
@@ -38,28 +37,19 @@ impl DiagnosticError {
     }
 }
 
-/// Find diagnostics attached through [`DiagnosticError`] in the error chain.
-pub fn attached(error: &anyhow::Error) -> Option<&[Diagnostic]> {
-    error
-        .downcast_ref::<DiagnosticError>()
+pub fn attached(err: &anyhow::Error) -> Option<&[Diagnostic]> {
+    err.downcast_ref::<DiagnosticError>()
         .or_else(|| {
-            error
-                .chain()
-                .find_map(|cause| cause.downcast_ref::<DiagnosticError>())
+            err.chain()
+                .find_map(|c| c.downcast_ref::<DiagnosticError>())
         })
         .map(DiagnosticError::diagnostics)
 }
 
-/// Convert an unclassified error to a diagnostic the site author reads.
-pub fn fallback(code: super::DiagnosticCode, error: &anyhow::Error) -> Diagnostic {
-    Diagnostic::new(
-        code,
-        Severity::Error,
-        collapse_whitespace(&error.to_string()),
-    )
+pub fn fallback(code: super::DiagnosticCode, err: &anyhow::Error) -> Diagnostic {
+    Diagnostic::new(code, Severity::Error, collapse_whitespace(&err.to_string()))
 }
 
-/// Join text a producer wrote across lines into one line, each whitespace run becoming one space.
 pub fn collapse_whitespace(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
@@ -68,7 +58,7 @@ pub fn collapse_whitespace(text: &str) -> String {
 mod tests {
     use super::*;
 
-    fn diagnostic_error() -> DiagnosticError {
+    fn diag_err() -> DiagnosticError {
         DiagnosticError::new(
             "source analysis failed",
             vec![Diagnostic::new(
@@ -80,7 +70,7 @@ mod tests {
     }
 
     #[test]
-    fn finds_nested_diagnostics() {
+    fn nested_diagnostics() {
         #[derive(Debug, thiserror::Error)]
         #[error("read source failed")]
         struct ReadFailure {
@@ -88,30 +78,28 @@ mod tests {
             source: DiagnosticError,
         }
 
-        let direct = anyhow::Error::new(diagnostic_error());
-        let below_contexts = anyhow::anyhow!("disk read failed")
+        let direct = anyhow::Error::new(diag_err());
+        let below_ctx = anyhow::anyhow!("disk read failed")
             .context("read source")
-            .context(diagnostic_error())
+            .context(diag_err())
             .context("inspect sources");
-        let through_source = anyhow::Error::new(ReadFailure {
-            source: diagnostic_error(),
-        });
+        let via_source = anyhow::Error::new(ReadFailure { source: diag_err() });
 
-        for error in [direct, below_contexts, through_source] {
-            let diagnostics = attached(&error).expect("diagnostics should remain attached");
+        for err in [direct, below_ctx, via_source] {
+            let diags = attached(&err).expect("diagnostics should remain attached");
 
-            assert_eq!(diagnostics.len(), 1);
-            assert_eq!(diagnostics[0].code, "typst.source_analysis");
+            assert_eq!(diags.len(), 1);
+            assert_eq!(diags[0].code, "typst.source_analysis");
         }
     }
 
     #[test]
-    fn retains_typed_cause() {
+    fn typed_cause() {
         #[derive(Debug, thiserror::Error)]
         #[error("the staging directory is gone")]
         struct StagingDirectoryMissing;
 
-        let diagnostics = vec![
+        let diags = vec![
             Diagnostic::new(
                 crate::codes::typst::SOURCE_ANALYSIS,
                 Severity::Error,
@@ -120,19 +108,15 @@ mod tests {
             .with_note("the previous revision stays published"),
         ];
 
-        let error = anyhow::Error::new(DiagnosticError::attach(
+        let err = anyhow::Error::new(DiagnosticError::attach(
             anyhow::Error::new(StagingDirectoryMissing),
-            diagnostics,
+            diags,
         ));
 
-        assert!(
-            error
-                .chain()
-                .any(|cause| cause.is::<StagingDirectoryMissing>())
-        );
-        let attached = attached(&error).expect("the diagnostics stay attached");
-        assert_eq!(attached.len(), 1);
-        assert_eq!(attached[0].code, crate::codes::typst::SOURCE_ANALYSIS);
-        assert_eq!(attached[0].notes.len(), 1);
+        assert!(err.chain().any(|c| c.is::<StagingDirectoryMissing>()));
+        let diags = attached(&err).expect("the diagnostics stay attached");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, crate::codes::typst::SOURCE_ANALYSIS);
+        assert_eq!(diags[0].notes.len(), 1);
     }
 }

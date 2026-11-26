@@ -2,9 +2,9 @@
 
 pub(crate) mod active;
 mod command;
-mod evidence;
 mod executor;
 mod generate;
+mod output;
 mod pack;
 mod report;
 mod reuse;
@@ -13,12 +13,12 @@ mod schedule;
 
 pub(crate) use crate::config::section::build::hooks::hook_identity;
 pub use command::{HookRunner, NuHook, expand_hook_argument};
-pub use evidence::{FailedHookOutputs, HookOutputEvidence, SourceHookOutputs};
 pub use executor::HookExecutor;
 pub(crate) use generate::generate_outputs;
+pub use output::{FailedHookOutputs, HookOutput, SourceHookOutputs};
 pub use pack::{before_pack_context, run_before_pack};
 pub use reuse::AfterPublishDependencies;
-pub(crate) use reuse::{PreparedHooks, ReusableHookOutputs, observe_after_publish};
+pub(crate) use reuse::{ReadyHooks, ReusableHookOutputs, observe_after_publish};
 pub use runner::*;
 pub use schedule::{hook_batches, hook_limit};
 
@@ -37,7 +37,7 @@ pub fn current_hook_stage() -> Option<HookStage> {
 
 /// An enabled hook command announced by the host.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ConfiguredHook<'a> {
+pub struct SiteHook<'a> {
     pub stage: HookStage,
     /// Required name from the hook declaration.
     pub label: &'a str,
@@ -47,7 +47,7 @@ pub struct ConfiguredHook<'a> {
     pub origin: Option<&'a ModuleHookOrigin>,
 }
 
-impl ConfiguredHook<'_> {
+impl SiteHook<'_> {
     /// Whether this announced hook runs in `mode`; announcements hold enabled hooks only.
     pub fn participates(&self, mode: BuildMode) -> bool {
         hook_participates(true, self.dev, mode)
@@ -60,41 +60,85 @@ impl ConfiguredHook<'_> {
 }
 
 /// Announcements omit disabled hooks and follow lifecycle order.
-pub fn configured_hooks(hooks: &HooksConfig) -> impl Iterator<Item = ConfiguredHook<'_>> {
-    let before_build = hooks
-        .before_build
-        .iter()
-        .filter(|hook| hook.enable)
-        .map(|hook| ConfiguredHook {
-            stage: HookStage::BeforeBuild,
-            label: &hook.name,
-            dev: hook.dev,
-            argv: hook.argv.as_deref(),
-            origin: hook.origin.as_ref(),
-        });
-    let generate_outputs = hooks
-        .generate_outputs
-        .iter()
-        .filter(|command| command.enable)
-        .map(|hook| ConfiguredHook {
-            stage: HookStage::GenerateOutputs,
-            label: &hook.name,
-            dev: hook.dev,
-            argv: hook.argv.as_deref(),
-            origin: hook.origin.as_ref(),
-        });
-    let after_publish = hooks
-        .after_publish
-        .iter()
-        .filter(|hook| hook.enable)
-        .map(|hook| ConfiguredHook {
-            stage: HookStage::AfterPublish,
-            label: &hook.name,
-            dev: hook.dev,
-            argv: hook.argv.as_deref(),
-            origin: hook.origin.as_ref(),
-        });
-    before_build.chain(generate_outputs).chain(after_publish)
+pub fn configured_hooks(hooks: &HooksConfig) -> impl Iterator<Item = SiteHook<'_>> {
+    fn collect_stage<'a, T>(
+        items: &'a [T],
+        stage: HookStage,
+        fields: impl Fn(
+            &'a T,
+        ) -> (
+            bool,
+            &'a str,
+            DevParticipation,
+            Option<&'a [String]>,
+            Option<&'a ModuleHookOrigin>,
+        ) + 'a,
+    ) -> impl Iterator<Item = SiteHook<'a>> {
+        items.iter().filter_map(move |item| {
+            let (enable, label, dev, argv, origin) = fields(item);
+            enable.then_some(SiteHook {
+                stage,
+                label,
+                dev,
+                argv,
+                origin,
+            })
+        })
+    }
+
+    collect_stage(&hooks.before_build, HookStage::BeforeBuild, |h| {
+        (
+            h.enable,
+            &h.name,
+            h.dev,
+            h.argv.as_deref(),
+            h.origin.as_ref(),
+        )
+    })
+    .chain(collect_stage(
+        &hooks.generate_outputs,
+        HookStage::GenerateOutputs,
+        |h| {
+            (
+                h.enable,
+                &h.name,
+                h.dev,
+                h.argv.as_deref(),
+                h.origin.as_ref(),
+            )
+        },
+    ))
+    .chain(collect_stage(
+        &hooks.after_publish,
+        HookStage::AfterPublish,
+        |h| {
+            (
+                h.enable,
+                &h.name,
+                h.dev,
+                h.argv.as_deref(),
+                h.origin.as_ref(),
+            )
+        },
+    ))
+}
+
+pub(super) fn participating_batches<T>(
+    hooks: &[T],
+    site_first: bool,
+    mode: BuildMode,
+    fields: impl Fn(&T) -> (Option<&str>, u64, bool, DevParticipation),
+) -> Vec<Vec<usize>> {
+    hook_batches(hooks, site_first, |h| fields(h).0, |h| fields(h).1)
+        .into_iter()
+        .filter_map(|mut batch| {
+            batch.retain(|&idx| {
+                let (_, _, enable, dev) = fields(&hooks[idx]);
+                hook_participates(enable, dev, mode)
+            });
+            (!batch.is_empty()).then_some(batch)
+        })
+        .collect()
 }
 
 /// Site-relative inputs declared by enabled before-build hooks, after module hooks are installed.

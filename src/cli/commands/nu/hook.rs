@@ -14,14 +14,14 @@ use anyhow::{Context, Result, anyhow, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tola_build::hooks::NuHook;
-use tola_nu::{ConfiguredModule, Host, InvocationContext};
+use tola_nu::{Host, InvocationContext, ScriptModule};
 use tola_subprocess::Command;
 
 #[derive(Serialize, Deserialize)]
 struct Invocation {
     directory: PathBuf,
     environment: BTreeMap<String, Option<String>>,
-    libraries: Vec<ConfiguredModule>,
+    libraries: Vec<ScriptModule>,
     dependencies: Vec<PathBuf>,
     path: PathBuf,
     args: Vec<String>,
@@ -54,7 +54,7 @@ enum Request {
 
 pub(super) fn run(
     hook: &NuHook<'_>,
-    libraries: Vec<ConfiguredModule>,
+    libraries: Vec<ScriptModule>,
     dependencies: Vec<PathBuf>,
     host: Host,
 ) -> Result<()> {
@@ -64,7 +64,7 @@ pub(super) fn run(
     let mut key = [0; 32];
     getrandom::fill(&mut key).map_err(|_| anyhow!("create the Nu hook request key"))?;
     let invocation = Invocation {
-        directory: hook.config.get_root().to_owned(),
+        directory: hook.config.root().to_owned(),
         environment: super::call_environment(hook.scope, &hook.context, hook.temp_dir)?,
         libraries,
         dependencies,

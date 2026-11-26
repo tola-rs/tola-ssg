@@ -1,4 +1,4 @@
-//! The two worker lanes: what each job owes, panic containment, and job execution.
+//! Worker lanes: job ownership, panic containment, and dispatch execution.
 
 use std::path::PathBuf;
 use std::time::Instant;
@@ -15,7 +15,6 @@ pub(super) enum AnalysisJob {
     ReleaseIdle,
 }
 
-/// The panic's own message, for the log.
 fn panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
     payload
         .downcast_ref::<&str>()
@@ -24,57 +23,50 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
         .unwrap_or("no message")
 }
 
-/// What one lane job owes an answer, read before the job runs so a job that panicked can still be
-/// answered.
+/// Captures the owner of a job before execution so panics can still produce a reply.
 pub(super) enum JobOwner {
-    /// A source check, answered with its own revision's outcome.
-    Check { checked_revision: u64 },
-    /// One selection index a revision's corrections wait for, answered with the revision and site
-    /// it was asked about.
+    Check {
+        checked_revision: u64,
+    },
     Selection {
         revision: u64,
         serial: u64,
         root: PathBuf,
     },
-    /// A client request, answered under the id and serial it was admitted with.
     Request(RequestId, u64),
-    /// A job nothing claims.
     Unclaimed,
 }
 
 impl JobOwner {
-    /// The owner of one compiler-lane job.
     pub(super) fn of(job: &SourceJob) -> Self {
         match job {
-            SourceJob::Check(request) => Self::Check {
-                checked_revision: request.checked_revision,
+            SourceJob::Check(req) => Self::Check {
+                checked_revision: req.checked_revision,
             },
-            SourceJob::Query(request) => Self::Request(request.id.clone(), request.serial),
-            SourceJob::Route(request) => Self::Request(request.id.clone(), request.serial),
-            SourceJob::Lenses(request) => Self::Request(request.id.clone(), request.serial),
-            SourceJob::Rename(request) => Self::Request(request.id.clone(), request.serial),
-            SourceJob::Symbols(request) => Self::Request(request.id.clone(), request.serial),
-            SourceJob::PackageSource(request) => Self::Request(request.id.clone(), request.serial),
-            SourceJob::IncomingCalls(request) => Self::Request(request.id.clone(), request.serial),
-            SourceJob::RouteIndex(request) => Self::Request(request.id.clone(), request.serial),
-            SourceJob::Selection(request) => Self::Selection {
-                revision: request.revision,
-                serial: request.serial,
-                root: request.root.clone(),
+            SourceJob::Query(req) => Self::Request(req.id.clone(), req.serial),
+            SourceJob::Route(req) => Self::Request(req.id.clone(), req.serial),
+            SourceJob::Lenses(req) => Self::Request(req.id.clone(), req.serial),
+            SourceJob::Rename(req) => Self::Request(req.id.clone(), req.serial),
+            SourceJob::Symbols(req) => Self::Request(req.id.clone(), req.serial),
+            SourceJob::PackageSource(req) => Self::Request(req.id.clone(), req.serial),
+            SourceJob::IncomingCalls(req) => Self::Request(req.id.clone(), req.serial),
+            SourceJob::RouteIndex(req) => Self::Request(req.id.clone(), req.serial),
+            SourceJob::Selection(req) => Self::Selection {
+                revision: req.revision,
+                serial: req.serial,
+                root: req.root.clone(),
             },
             SourceJob::ReleaseIdle => Self::Unclaimed,
         }
     }
 
-    /// The owner of one analysis-lane job.
     pub(super) fn of_analysis(job: &AnalysisJob) -> Self {
         match job {
-            AnalysisJob::Request(request) => Self::Request(request.id.clone(), request.serial),
+            AnalysisJob::Request(req) => Self::Request(req.id.clone(), req.serial),
             AnalysisJob::ReleaseIdle => Self::Unclaimed,
         }
     }
 
-    /// The completion one job answers with when its work panicked.
     fn panicked(self) -> SourceCompilation {
         match self {
             Self::Check { checked_revision } => SourceCompilation::Checked {
@@ -103,8 +95,6 @@ impl JobOwner {
     }
 }
 
-/// What a lane's dispatch and run records name about one job: the lane it runs on, its kind, and
-/// the revision or serial its answer is keyed by.
 pub(super) struct JobTrace {
     lane: &'static str,
     kind: &'static str,
@@ -112,7 +102,6 @@ pub(super) struct JobTrace {
     serial: Option<u64>,
 }
 
-/// One job either lane runs, named for its dispatch and run records.
 pub(super) trait LaneJob {
     fn trace(&self) -> JobTrace;
 }
@@ -131,7 +120,7 @@ impl LaneJob for SourceJob {
 impl LaneJob for AnalysisJob {
     fn trace(&self) -> JobTrace {
         let (kind, serial) = match self {
-            Self::Request(request) => (request.kind(), Some(request.serial)),
+            Self::Request(req) => (req.kind(), Some(req.serial)),
             Self::ReleaseIdle => ("release", None),
         };
         JobTrace {
@@ -143,18 +132,15 @@ impl LaneJob for AnalysisJob {
     }
 }
 
-/// Run one lane job, turning a panic into the completion its owner is answered with.
-///
-/// The lane's caches are keyed and revalidated, so whatever a panicking job left half-written is
-/// re-derived by the next one; only the panic's own message reaches the log. This containment needs
-/// a profile that unwinds: `panic = 'abort'` ends the process before this call can return.
 fn contain_panic<J>(
     job: J,
     owner: JobOwner,
     work: impl FnOnce(J) -> SourceCompilation,
 ) -> SourceCompilation {
+    // Lane caches are keyed and revalidated, so any partial state is overwritten on the next run.
+    // Requires `panic = 'unwind'`.
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || work(job))) {
-        Ok(completed) => completed,
+        Ok(done) => done,
         Err(payload) => {
             tracing::error!(detail = panic_message(&*payload), "a lane job panicked");
             owner.panicked()
@@ -162,8 +148,6 @@ fn contain_panic<J>(
     }
 }
 
-/// Run one job inside the debug span that records what it ran, how long it took, and how it
-/// ended.
 fn run_job<J: LaneJob>(
     job: J,
     owner: JobOwner,
@@ -180,19 +164,17 @@ fn run_job<J: LaneJob>(
         outcome = tracing::field::Empty,
     );
     let started = Instant::now();
-    let completed = span.in_scope(|| contain_panic(job, owner, work));
+    let done = span.in_scope(|| contain_panic(job, owner, work));
     let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-    let ended = outcome(&completed);
+    let ended = outcome(&done);
     span.record("elapsed_ms", elapsed_ms);
     span.record("outcome", ended);
     tracing::debug!(parent: &span, elapsed_ms, outcome = ended, "lane job finished");
-    completed
+    done
 }
 
-/// The outcome one completion records: whether the job answered, was cancelled, panicked, or
-/// failed.
-fn outcome(completed: &SourceCompilation) -> &'static str {
-    let failure = match completed {
+fn outcome(done: &SourceCompilation) -> &'static str {
+    let failure = match done {
         SourceCompilation::Checked { checked, .. } => checked.as_ref().err(),
         SourceCompilation::Answered { response, .. } => response.as_ref().err(),
         SourceCompilation::Tokens { response, .. } => response.as_ref().err(),
@@ -207,22 +189,21 @@ fn outcome(completed: &SourceCompilation) -> &'static str {
     }
 }
 
-/// Run one lane's jobs until its channel closes or the connection is cancelled.
 pub(super) fn run<J: LaneJob>(
     jobs: Receiver<J>,
-    events: &Sender<Event>,
-    cancellation: &BuildCancellation,
+    ev_tx: &Sender<Event>,
+    cancel: &BuildCancellation,
     owner_of: impl Fn(&J) -> JobOwner,
     mut work: impl FnMut(J) -> SourceCompilation,
     event_of: impl Fn(SourceCompilation) -> Event,
 ) {
     for job in jobs {
-        if cancellation.is_cancelled() {
+        if cancel.is_cancelled() {
             break;
         }
         let owner = owner_of(&job);
-        let completed = run_job(job, owner, &mut work);
-        if !send_event(events, event_of(completed), cancellation) {
+        let done = run_job(job, owner, &mut work);
+        if !send_event(ev_tx, event_of(done), cancel) {
             break;
         }
     }
@@ -240,7 +221,7 @@ mod tests {
     };
 
     #[test]
-    fn routes_answer_with_the_site_address() {
+    fn routes_site_address() {
         let site = SiteDirectory::new();
         site.write("content/post.typ", "");
         let mut client = EditorSession::start(&site);
@@ -256,7 +237,7 @@ mod tests {
     }
 
     #[test]
-    fn mounted_site_answers_its_canonical_url() {
+    fn mounted_site_canonical_url() {
         let site = SiteDirectory::new();
         site.write(
             "tola.toml",
@@ -276,8 +257,9 @@ mod tests {
 
         client.shutdown();
     }
+
     #[test]
-    fn closed_buffer_lets_the_site_compile() {
+    fn closed_broken_buffer_unblocks_site() {
         let site = SiteDirectory::new();
         site.write(
             "site.typ",
@@ -289,10 +271,7 @@ mod tests {
         client.open("content/broken.typ", "#include \"absent.typ\"\n");
         client.open("content/preview.typ", "The preview serves this page.\n");
 
-        assert!(
-            client.routes("content/preview.typ").routes.is_empty(),
-            "an open buffer that does not compile stops the site"
-        );
+        assert!(client.routes("content/preview.typ").routes.is_empty());
 
         client.close("content/broken.typ");
         std::fs::remove_file(site.path("content/broken.typ")).unwrap();
@@ -302,8 +281,9 @@ mod tests {
 
         client.shutdown();
     }
+
     #[test]
-    fn broken_source_does_not_silence_others() {
+    fn broken_source_isolated() {
         let site = site_with_document();
         let mut client = EditorSession::start(&site);
         let text = "#let brand = rgb(\"#777\")\n#brand\n";
@@ -316,7 +296,7 @@ mod tests {
                 "content/document.typ",
                 "#let brand = rgb(\"#777\")\n#bra|nd\n",
             )
-            .expect("a hover about a source the site's failure did not touch");
+            .expect("hover for valid file");
         let lsp_types::HoverContents::Markup(markup) = hover.contents else {
             panic!("plain markdown, got {:?}", hover.contents);
         };
@@ -328,6 +308,7 @@ mod tests {
 
         client.shutdown();
     }
+
     #[test]
     fn references_bypass_pending_compilation() {
         struct CompilerPause(Sender<()>);
@@ -341,9 +322,9 @@ mod tests {
         let (notify_pause, compiler_paused) = crossbeam_channel::bounded(1);
         let (resume, resumption) = crossbeam_channel::bounded(1);
         let pause = CompilerPause(resume);
-        let mut is_first_load = true;
+        let mut first_load = true;
         let mut client = EditorSession::start_with_loader(&site, move |root, _, _| {
-            if std::mem::take(&mut is_first_load) {
+            if std::mem::take(&mut first_load) {
                 notify_pause.send(())?;
                 resumption.recv()?;
             }
@@ -352,20 +333,20 @@ mod tests {
         compiler_paused
             .recv_timeout(REPLY_TIMEOUT)
             .expect("the compiler reaches its host loader");
-        let position = client.type_marked("content/document.typ", "#let marker = 1\n#mar|ker\n");
+        let pos = client.type_marked("content/document.typ", "#let marker = 1\n#mar|ker\n");
         let reply = client.request(
             request::References::METHOD,
             serde_json::json!({
                 "textDocument": { "uri": site.uri("content/document.typ") },
-                "position": position,
+                "position": pos,
                 "context": { "includeDeclaration": false },
             }),
         );
-        let references: Vec<lsp_types::Location> = serde_json::from_value(reply).unwrap();
+        let refs: Vec<lsp_types::Location> = serde_json::from_value(reply).unwrap();
         let (_, start) = marked_cursor("#let marker = 1\n#|marker\n");
         let (_, end) = marked_cursor("#let marker = 1\n#marker|\n");
         assert_eq!(
-            references,
+            refs,
             vec![lsp_types::Location {
                 uri: site.uri("content/document.typ"),
                 range: lsp_types::Range::new(start, end),
@@ -374,15 +355,12 @@ mod tests {
         drop(pause);
         client.shutdown();
     }
-    /// A check whose lane panicked is contained: a later revision is still checked and reported.
+
     #[test]
     fn panic_leaves_lane_running() {
         let site = site_with_document();
         let (panicked, panic_seen) = crossbeam_channel::bounded(1);
         let mut client = EditorSession::start_with_loader(&site, move |root, sources, _| {
-            // The lane loads every revision through this callback, so the revision the test marks
-            // panics here; the signal tells the test the panicking check ran before it asks for the
-            // next revision, which keeps the sequence deterministic.
             if sources.iter().any(|(_, text)| text.contains("panic-now")) {
                 let _ = panicked.try_send(());
                 panic!("a check that fails");
@@ -399,17 +377,14 @@ mod tests {
             .recv_timeout(REPLY_TIMEOUT)
             .expect("the panicking check reached its host loader");
 
-        // Only the last text has a diagnostic, so a non-empty report for the version the last
-        // edit reported can only be that revision's: the lane kept checking after the panic.
-        let version = client.set_text(
+        let rev = client.set_text(
             "content/document.typ",
             "#let before = 1\n#undefined_after_the_panic\n",
         );
         let uri = uri_string(site.root(), "content/document.typ");
-        let (diagnostics, reported) =
-            client.await_diagnostics(&uri, |diagnostics, _| !diagnostics.is_empty());
-        assert_eq!(reported, Some(version), "the last revision's report");
-        assert!(!diagnostics.is_empty(), "{diagnostics:?}");
+        let (diags, reported) = client.await_diagnostics(&uri, |diags, _| !diags.is_empty());
+        assert_eq!(reported, Some(rev));
+        assert!(!diags.is_empty(), "{diags:?}");
 
         client.shutdown();
     }

@@ -1,13 +1,17 @@
-//! The natives behind `@tola/icon`: inline SVG, normalized bytes, and a published URL.
+//! Natives for `@tola/icon`: inline SVG, normalized bytes, and published URLs.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use crate::{ICON_OBSERVATION_DIRECTORY, ICON_REQUEST_OBSERVATION_DIRECTORY, TolaPackage};
 use tola_address::OutputPath;
-use tola_typst::ContentDigest;
+use tola_icons::{
+    IconCollectionKey, IconCollections, IconId, InvalidIconName, InvalidSvg, SvgIcon,
+};
+use tola_typst::{ContentDigest, PackageSpec, ReadLocator};
 use typst::World;
 use typst::comemo::Tracked;
-use typst::diag::{At, FileError, SourceResult, bail};
+use typst::diag::{At, FileError, SourceDiagnostic, SourceResult, bail};
 use typst::ecow::eco_vec;
 use typst::engine::Engine;
 use typst::foundations::{Args, Bytes, Content, Context, Dict, NativeElement, Str, func};
@@ -16,48 +20,43 @@ use typst::syntax::{FileId, RootedPath, Span, VirtualPath, VirtualRoot};
 use typst::text::TextElem;
 use typst_html::{HtmlAttr, HtmlAttrs, HtmlElem, HtmlTag};
 
-/// The configured collection named by an icon SVG or its `.names` observation.
-///
-/// `None` for any other package file, including malformed icon paths.
-pub fn collection_of_icon_file(path: &std::path::Path) -> Option<&str> {
-    let relative = path
+fn icon_pkg_id(rel: String) -> FileId {
+    FileId::new(RootedPath::new(
+        VirtualRoot::Package(TolaPackage::Icon.spec()),
+        VirtualPath::new(rel).expect("icon path is virtualizable"),
+    ))
+}
+
+/// Configured collection named by an icon SVG or `.names` observation path.
+pub fn collection_of_icon_file(path: &Path) -> Option<&str> {
+    let rel = path
         .strip_prefix(ICON_OBSERVATION_DIRECTORY)
         .ok()?
         .to_str()?;
-    let (collection, name) = relative.rsplit_once('/')?;
+    let (collection, name) = rel.rsplit_once('/')?;
     (!collection.is_empty() && (name.ends_with(".svg") || name == ".names")).then_some(collection)
 }
 
-/// Whether `path` names an icon observation in the `@tola/icon` package.
-///
-/// Any path under the observation directory qualifies, so a malformed or absent icon name stays
-/// the world's error to report rather than a silent miss.
-pub fn is_icon_file(package: &tola_typst::PackageSpec, path: &std::path::Path) -> bool {
-    TolaPackage::from_spec(package) == Some(TolaPackage::Icon)
+/// Whether `path` names an icon observation in `@tola/icon`.
+pub fn is_icon_file(pkg: &PackageSpec, path: &Path) -> bool {
+    TolaPackage::from_spec(pkg) == Some(TolaPackage::Icon)
         && path.starts_with(ICON_OBSERVATION_DIRECTORY)
 }
 
-/// The normalized bytes of one configured icon.
-///
-/// `None` for a path that names no icon, including an icon the configured collections do not
-/// carry, which leaves the miss to the world's own error.
+/// Normalized SVG bytes for a configured icon.
 pub fn icon_file_bytes<'a>(
-    collections: &'a tola_icons::IconCollections,
-    package: &tola_typst::PackageSpec,
-    path: &std::path::Path,
+    collections: &'a IconCollections,
+    pkg: &PackageSpec,
+    path: &Path,
 ) -> Option<&'a [u8]> {
-    let (collection, name) = observation_parts(package, path)?;
+    let (collection, name) = obs_parts(pkg, path)?;
     collections
         .get(collection, name.strip_suffix(".svg")?)
         .map(|icon| icon.svg().as_bytes())
 }
 
-/// The collection and name one observation path below the icon directory spells.
-fn observation_parts<'a>(
-    package: &tola_typst::PackageSpec,
-    path: &'a std::path::Path,
-) -> Option<(&'a str, &'a str)> {
-    if !is_icon_file(package, path) {
+fn obs_parts<'a>(pkg: &PackageSpec, path: &'a Path) -> Option<(&'a str, &'a str)> {
+    if !is_icon_file(pkg, path) {
         return None;
     }
     path.strip_prefix(ICON_OBSERVATION_DIRECTORY)
@@ -66,13 +65,13 @@ fn observation_parts<'a>(
         .rsplit_once('/')
 }
 
-/// Tracked names for suggestions within one mounted collection; aliases are included.
+/// Tracked newline-joined icon names for suggestions within a mounted collection.
 pub fn icon_collection_names_bytes(
-    collections: &tola_icons::IconCollections,
-    package: &tola_typst::PackageSpec,
-    path: &std::path::Path,
+    collections: &IconCollections,
+    pkg: &PackageSpec,
+    path: &Path,
 ) -> Option<Vec<u8>> {
-    let (collection, name) = observation_parts(package, path)?;
+    let (collection, name) = obs_parts(pkg, path)?;
     if name != ".names" {
         return None;
     }
@@ -86,203 +85,184 @@ pub fn icon_collection_names_bytes(
     )
 }
 
-/// One icon a document publishes as a file of its own.
-///
-/// `icon-url` reads this request's virtual file, and a complete build collects those reads, so
-/// exactly the icons documents asked for are published.
+/// Published icon file requested via `icon-url`.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct PublishedIcon {
-    identity: tola_icons::IconId,
+    id: IconId,
 }
 
 impl PublishedIcon {
-    /// Consume an identity already validated by the icon grammar.
-    pub fn new(identity: tola_icons::IconId) -> Self {
-        Self { identity }
+    pub fn new(id: IconId) -> Self {
+        Self { id }
     }
 
     pub fn namespace(&self) -> &str {
-        self.identity.collection()
+        self.id.collection()
     }
 
     pub fn name(&self) -> &str {
-        self.identity.name()
+        self.id.name()
     }
 
-    /// The observation file one `icon-url` call reads.
+    /// Tracked observation file read by `icon-url`.
     pub fn observation_id(&self) -> FileId {
-        FileId::new(RootedPath::new(
-            VirtualRoot::Package(TolaPackage::Icon.spec()),
-            VirtualPath::new(format!(
-                "{ICON_REQUEST_OBSERVATION_DIRECTORY}{}/{}",
-                self.namespace(),
-                self.name()
-            ))
-            .expect("a validated icon identity forms a virtual path"),
+        icon_pkg_id(format!(
+            "{ICON_REQUEST_OBSERVATION_DIRECTORY}{}/{}",
+            self.namespace(),
+            self.name()
         ))
     }
 
-    /// The request one observed read carries, or `None` for every other read.
-    pub fn from_read(locator: &tola_typst::ReadLocator) -> Option<Self> {
-        let (tola_typst::ReadLocator::Package { package, path }
-        | tola_typst::ReadLocator::ProvidedPackage { package, path }) = locator
+    pub fn from_read(locator: &ReadLocator) -> Option<Self> {
+        let (ReadLocator::Package { package, path }
+        | ReadLocator::ProvidedPackage { package, path }) = locator
         else {
             return None;
         };
         published_icon_request(package, path)
     }
 
-    /// The request one observed icon path names, or `None` for every other file.
-    pub fn from_path(path: &std::path::Path) -> Option<Self> {
-        let relative = path.to_str()?;
-        let relative = relative.strip_prefix('/').unwrap_or(relative);
-        let relative = relative.strip_prefix(ICON_REQUEST_OBSERVATION_DIRECTORY)?;
-        let (namespace, name) = relative.rsplit_once('/')?;
-        tola_icons::IconId::new(namespace, name).ok().map(Self::new)
+    pub fn from_path(path: &Path) -> Option<Self> {
+        let rel = path.to_str()?;
+        let rel = rel.strip_prefix('/').unwrap_or(rel);
+        let rel = rel.strip_prefix(ICON_REQUEST_OBSERVATION_DIRECTORY)?;
+        let (ns, name) = rel.rsplit_once('/')?;
+        IconId::new(ns, name).ok().map(Self::new)
     }
 }
 
-/// The published icon request one package path names, or `None` for every other file.
-///
-/// The engine answers these paths, so a document's request is ordinary tracked input.
-pub fn published_icon_request(
-    package: &tola_typst::PackageSpec,
-    path: &std::path::Path,
-) -> Option<PublishedIcon> {
-    if TolaPackage::from_spec(package) != Some(TolaPackage::Icon) {
+pub fn published_icon_request(pkg: &PackageSpec, path: &Path) -> Option<PublishedIcon> {
+    if TolaPackage::from_spec(pkg) != Some(TolaPackage::Icon) {
         return None;
     }
     PublishedIcon::from_path(path)
 }
 
-/// The output one published icon occupies, named by the bytes it serves: `_tola/icons/<key>.svg`.
+/// Content-addressed output path: `_tola/icons/<key>.svg`.
 pub fn published_icon_path(bytes: &[u8]) -> OutputPath {
     OutputPath::parse(&format!(
         "_tola/icons/{}.svg",
         ContentDigest::of(bytes).to_hex()
     ))
-    .expect("published icon paths contain only fixed segments and hexadecimal keys")
+    .expect("published icon paths contain only fixed segments and hex")
 }
 
-/// One requested icon: the identity it names and the bytes Tola would serve.
-struct ResolvedIcon {
-    identity: tola_icons::IconId,
+struct LoadedIcon {
+    id: IconId,
     bytes: Bytes,
 }
 
 #[comemo::memoize]
-fn icon_file(identity: &str) -> Result<(tola_icons::IconId, FileId), tola_icons::InvalidIconName> {
-    let identity = identity.parse::<tola_icons::IconId>()?;
-    let file = FileId::new(RootedPath::new(
-        VirtualRoot::Package(TolaPackage::Icon.spec()),
-        VirtualPath::new(format!(
-            "{ICON_OBSERVATION_DIRECTORY}/{}/{}.svg",
-            identity.collection(),
-            identity.name(),
-        ))
-        .expect("validated icon names form a virtual path"),
+fn icon_file(id: &str) -> Result<(IconId, FileId), InvalidIconName> {
+    let id = id.parse::<IconId>()?;
+    let file = icon_pkg_id(format!(
+        "{ICON_OBSERVATION_DIRECTORY}/{}/{}.svg",
+        id.collection(),
+        id.name()
     ));
-    Ok((identity, file))
+    Ok((id, file))
 }
 
 fn read_icon(
     engine: &mut Engine,
-    identity: &str,
+    requested: &str,
     module: Option<&str>,
     span: Span,
-) -> SourceResult<ResolvedIcon> {
-    let requested = identity;
-    if let Some(module) = module
-        && !super::library::module_records(engine).is_some_and(|modules| modules.contains(module))
+) -> SourceResult<LoadedIcon> {
+    if let Some(m) = module
+        && !super::library::module_records(engine).is_some_and(|ms| ms.contains(m))
     {
-        typst::diag::bail!(span, "module `{module}` is not configured for this site");
+        bail!(span, "module `{m}` is not configured for this site");
     }
     let parsed = (|| {
-        let (collection, name) = requested
-            .split_once(':')
-            .ok_or(tola_icons::InvalidIconName)?;
-        let collection = tola_icons::IconCollectionKey::new(module, collection)?;
-        let (identity, file) = icon_file(&format!("{collection}:{name}"))?;
-        Ok::<_, tola_icons::InvalidIconName>((collection, identity, file))
+        let (col, name) = requested.split_once(':').ok_or(InvalidIconName)?;
+        let col = IconCollectionKey::new(module, col)?;
+        let (id, file) = icon_file(&format!("{col}:{name}"))?;
+        Ok::<_, InvalidIconName>((col, id, file))
     })();
-    let (collection, identity, file) = parsed.map_err(|error| {
-        let mut error = crate::diagnostic::package_error(
+    let (col, id, file) = parsed.map_err(|err| {
+        let mut diag = crate::diagnostic::package_error(
             span,
             TolaPackage::Icon,
-            format!("`{requested}` is not a valid icon id: {error}"),
+            format!("`{requested}` is not a valid icon id: {err}"),
         );
-        error.hint("Write `collection:name` using a configured collection");
-        eco_vec![error]
+        diag.hint("Write `collection:name` using a configured collection");
+        eco_vec![diag]
     })?;
+    match engine.world.file(file) {
+        Ok(bytes) => Ok(LoadedIcon { id, bytes }),
+        Err(FileError::NotFound(_)) => Err(eco_vec![icon_not_found(
+            engine, requested, &col, &id, module, span
+        )?]),
+        Err(err) => Err::<LoadedIcon, String>(err.to_string()).at(span),
+    }
+}
+
+fn icon_not_found(
+    engine: &Engine,
+    requested: &str,
+    col: &IconCollectionKey,
+    id: &IconId,
+    module: Option<&str>,
+    span: Span,
+) -> SourceResult<SourceDiagnostic> {
     let owner = module.map_or_else(
         || "the site".to_owned(),
         |alias| format!("module `{alias}`"),
     );
-    let bytes = match engine.world.file(file) {
-        Ok(bytes) => bytes,
-        Err(FileError::NotFound(_)) => {
-            let names_file = FileId::new(RootedPath::new(
-                VirtualRoot::Package(TolaPackage::Icon.spec()),
-                VirtualPath::new(format!(
-                    "{ICON_OBSERVATION_DIRECTORY}/{}/.names",
-                    identity.collection()
-                ))
-                .expect("a validated collection name forms a virtual path"),
+    let names_file = icon_pkg_id(format!(
+        "{ICON_OBSERVATION_DIRECTORY}/{}/.names",
+        id.collection()
+    ));
+    match engine.world.file(names_file) {
+        Ok(names) => {
+            let mut diag = crate::diagnostic::package_error(
+                span,
+                TolaPackage::Icon,
+                format!(
+                    "the icon `{requested}` is not in collection `{}` of {owner}",
+                    col.name()
+                ),
+            );
+            let names = std::str::from_utf8(names.as_slice())
+                .expect("collection names are validated ASCII");
+            if let Some(closest) = tola_typst::spelling::closest(id.name(), names.lines()) {
+                diag.hint(format!("Did you mean `{}:{closest}`?", col.name()));
+            }
+            let selector = module.map_or_else(String::new, |alias| format!(" --module {alias}"));
+            diag.hint(format!(
+                "Run `tola inspect icons {}{selector}` to list names in this collection",
+                col.name()
             ));
-            let error = match engine.world.file(names_file) {
-                Ok(names) => {
-                    let mut error = crate::diagnostic::package_error(
-                        span,
-                        TolaPackage::Icon,
-                        format!(
-                            "the icon `{requested}` is not in collection `{}` of {owner}",
-                            collection.name()
-                        ),
-                    );
-                    let names = std::str::from_utf8(names.as_slice())
-                        .expect("collection names contain only validated ASCII names");
-                    if let Some(name) =
-                        tola_typst::spelling::closest(identity.name(), names.lines())
-                    {
-                        error.hint(format!("Did you mean `{}:{name}`?", collection.name()));
-                    }
-                    let selector =
-                        module.map_or_else(String::new, |alias| format!(" --module {alias}"));
-                    error.hint(format!(
-                        "Run `tola inspect icons {}{selector}` to list names in this collection",
-                        collection.name()
-                    ));
-                    error
-                }
-                Err(FileError::NotFound(_)) => {
-                    let mut error = crate::diagnostic::package_error(
-                        span,
-                        TolaPackage::Icon,
-                        format!(
-                            "icon collection `{}` is not declared in `icons.collections` of {owner}",
-                            collection.name()
-                        ),
-                    );
-                    let file = if module.is_some() {
-                        "the module's tola-module.toml"
-                    } else {
-                        "tola.toml"
-                    };
-                    error.hint(format!("Declare `[icons.collections.{}]` in {file}, or use a configured collection", collection.name()));
-                    error
-                }
-                Err(error) => return Err::<ResolvedIcon, String>(error.to_string()).at(span),
-            };
-            return Err(eco_vec![error]);
+            Ok(diag)
         }
-        Err(error) => return Err::<ResolvedIcon, String>(error.to_string()).at(span),
-    };
-    Ok(ResolvedIcon { identity, bytes })
+        Err(FileError::NotFound(_)) => {
+            let mut diag = crate::diagnostic::package_error(
+                span,
+                TolaPackage::Icon,
+                format!(
+                    "icon collection `{}` is not declared in `icons.collections` of {owner}",
+                    col.name()
+                ),
+            );
+            let cfg = if module.is_some() {
+                "the module's tola-module.toml"
+            } else {
+                "tola.toml"
+            };
+            diag.hint(format!(
+                "Declare `[icons.collections.{}]` in {cfg}, or use a configured collection",
+                col.name()
+            ));
+            Ok(diag)
+        }
+        Err(err) => Err::<SourceDiagnostic, String>(err.to_string()).at(span),
+    }
 }
 
 #[comemo::memoize]
-fn parsed_icon(bytes: &Bytes) -> Result<tola_icons::SvgIcon, tola_icons::InvalidSvg> {
-    tola_icons::SvgIcon::parse(bytes.as_slice())
+fn parsed_icon(bytes: &Bytes) -> Result<SvgIcon, InvalidSvg> {
+    SvgIcon::parse(bytes.as_slice())
 }
 
 #[func]
@@ -311,10 +291,9 @@ pub(super) fn tola_icon_url(
     module: Option<Str>,
 ) -> SourceResult<Str> {
     let icon = read_icon(engine, id.as_str(), module.as_deref(), span)?;
-    let published = PublishedIcon::new(icon.identity);
+    let published = PublishedIcon::new(icon.id);
     let url = super::library::browser_output_url(engine, span, &published_icon_path(&icon.bytes))?;
-    // This is ordinary tracked World input, not an imperative output queue, so a complete build
-    // collects exactly the icons its documents asked for, including through memoized replays.
+    // Tracked read lets a full build publish only requested icons, even across memoized replays.
     engine.world.file(published.observation_id()).at(span)?;
     Ok(Str::from(url))
 }
@@ -327,65 +306,60 @@ pub(super) fn tola_icon(
 ) -> SourceResult<Content> {
     let bytes = args.expect::<Bytes>("icon bytes")?;
     let label = args.named::<Option<Str>>("label")?.flatten();
-    let attributes = args.named::<Dict>("attrs")?.unwrap_or_default();
+    let attrs = args.named::<Dict>("attrs")?.unwrap_or_default();
     args.take().finish()?;
-    if label
-        .as_ref()
-        .is_some_and(|label| label.as_str().trim().is_empty())
-    {
+    if label.as_ref().is_some_and(|l| l.as_str().trim().is_empty()) {
         bail!(
             span,
             "`label` must be a nonempty string or `none` for a decorative icon"
         );
     }
-    let location = here(context).at(span)?;
-    let icon = parsed_icon(&bytes)
-        .map_err(|error| error.to_string())
-        .at(span)?;
+    let loc = here(context).at(span)?;
+    let icon = parsed_icon(&bytes).map_err(|e| e.to_string()).at(span)?;
     let svg = icon
-        .svg_with_id_prefix(&format!("tola-icon-{:032x}", location.hash()))
-        .map_err(|error| error.to_string())
+        .svg_with_id_prefix(&format!("tola-icon-{:032x}", loc.hash()))
+        .map_err(|e| e.to_string())
         .at(span)?;
-    let document = roxmltree::Document::parse(&svg)
-        .map_err(|error| error.to_string())
+    let doc = roxmltree::Document::parse(&svg)
+        .map_err(|e| e.to_string())
         .at(span)?;
-    let root = document.root_element();
-    let mut root_attributes = xml_attributes(root);
-    for namespace in root.namespaces() {
-        if let Some(prefix) = namespace.name() {
-            root_attributes.insert(format!("xmlns:{prefix}"), namespace.uri().to_owned());
+    let root = doc.root_element();
+    let mut root_attrs = xml_attrs(root);
+    for ns in root.namespaces() {
+        if let Some(prefix) = ns.name() {
+            root_attrs.insert(format!("xmlns:{prefix}"), ns.uri().to_owned());
         }
     }
-    root_attributes.insert("xmlns".into(), "http://www.w3.org/2000/svg".into());
-    root_attributes
+    root_attrs.insert("xmlns".into(), "http://www.w3.org/2000/svg".into());
+    root_attrs
         .entry("viewBox".into())
         .or_insert_with(|| icon.view_box().to_string());
-    root_attributes.insert("width".into(), format!("{}em", icon.aspect_ratio()));
-    root_attributes.insert("height".into(), "1em".into());
-    for (name, value) in attributes {
-        let name = crate::attribute_key(&name);
-        if label_owns_attribute(name) {
+    root_attrs.insert("width".into(), format!("{}em", icon.aspect_ratio()));
+    root_attrs.insert("height".into(), "1em".into());
+    for (name, val) in attrs {
+        let name = crate::attr_key(&name);
+        if label_owns_attr(name) {
             bail!(
                 span,
                 "set accessibility semantics with `label`, not `{name}`"
             );
         }
-        let value = value.cast::<Str>().at(span)?;
-        crate::merge_attribute(&mut root_attributes, name, value.as_str());
+        let val = val.cast::<Str>().at(span)?;
+        crate::merge_attr(&mut root_attrs, name, val.as_str());
     }
-    root_attributes.retain(|name, _| !label_owns_attribute(name));
+    root_attrs.retain(|name, _| !label_owns_attr(name));
     if let Some(label) = label {
-        root_attributes.insert("role".into(), "img".into());
-        root_attributes.insert("aria-label".into(), label.to_string());
+        root_attrs.insert("role".into(), "img".into());
+        root_attrs.insert("aria-label".into(), label.to_string());
     } else {
-        root_attributes.insert("aria-hidden".into(), "true".into());
+        root_attrs.insert("aria-hidden".into(), "true".into());
     }
-    root_attributes.insert("focusable".into(), "false".into());
+    root_attrs.insert("focusable".into(), "false".into());
 
-    xml_content(root, Some(root_attributes), span)
+    xml_content(root, Some(root_attrs), span)
 }
 
-fn label_owns_attribute(name: &str) -> bool {
+fn label_owns_attr(name: &str) -> bool {
     [
         "aria-label",
         "aria-labelledby",
@@ -397,39 +371,39 @@ fn label_owns_attribute(name: &str) -> bool {
     .any(|owned| name.eq_ignore_ascii_case(owned))
 }
 
-fn xml_attributes(node: roxmltree::Node<'_, '_>) -> BTreeMap<String, String> {
+fn xml_attrs(node: roxmltree::Node<'_, '_>) -> BTreeMap<String, String> {
     node.attributes()
-        .map(|attribute| {
-            let name = match attribute.namespace() {
-                Some("http://www.w3.org/XML/1998/namespace") => format!("xml:{}", attribute.name()),
-                Some("http://www.w3.org/1999/xlink") => format!("xlink:{}", attribute.name()),
-                _ => attribute.name().to_owned(),
+        .map(|attr| {
+            let name = match attr.namespace() {
+                Some("http://www.w3.org/XML/1998/namespace") => format!("xml:{}", attr.name()),
+                Some("http://www.w3.org/1999/xlink") => format!("xlink:{}", attr.name()),
+                _ => attr.name().to_owned(),
             };
-            (name, attribute.value().to_owned())
+            (name, attr.value().to_owned())
         })
         .collect()
 }
 
 fn xml_content(
     node: roxmltree::Node<'_, '_>,
-    root_attributes: Option<BTreeMap<String, String>>,
+    root_attrs: Option<BTreeMap<String, String>>,
     span: Span,
 ) -> SourceResult<Content> {
     if node.is_text() {
         return Ok(TextElem::packed(node.text().unwrap_or_default()));
     }
     let tag = HtmlTag::intern(node.tag_name().name()).at(span)?;
-    let mut attributes = HtmlAttrs::new();
-    for (name, value) in root_attributes.unwrap_or_else(|| xml_attributes(node)) {
-        attributes.push(HtmlAttr::intern(&name).at(span)?, value);
+    let mut attrs = HtmlAttrs::new();
+    for (name, val) in root_attrs.unwrap_or_else(|| xml_attrs(node)) {
+        attrs.push(HtmlAttr::intern(&name).at(span)?, val);
     }
     let children = node
         .children()
-        .filter(|child| child.is_element() || child.is_text())
-        .map(|child| xml_content(child, None, span))
+        .filter(|c| c.is_element() || c.is_text())
+        .map(|c| xml_content(c, None, span))
         .collect::<SourceResult<Vec<_>>>()?;
     Ok(HtmlElem::new(tag)
-        .with_attrs(attributes)
+        .with_attrs(attrs)
         .with_body(Some(Content::sequence(children)))
         .pack()
         .spanned(span))
@@ -440,15 +414,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn suggestions_stay_inside_collection() {
-        let collection = tola_icons::IconCollection::from_iconify(
+    fn icon_suggestions_scoped_to_collection() {
+        let col = tola_icons::IconCollection::from_iconify(
             br#"{"prefix":"upstream","icons":{"palette":{"body":"<path/>"}},"aliases":{"paints":{"parent":"palette"}},"chars":{"e001":"palette"}}"#,
         ).unwrap();
-        let mut collections = tola_icons::IconCollections::new();
-        collections.mount("lucide", collection).unwrap();
-        let package = TolaPackage::Icon.spec();
-        let path = std::path::Path::new(".tola-icon/lucide/.names");
-        let names = icon_collection_names_bytes(&collections, &package, path).unwrap();
+        let mut cols = IconCollections::new();
+        cols.mount("lucide", col).unwrap();
+        let pkg = TolaPackage::Icon.spec();
+        let path = Path::new(".tola-icon/lucide/.names");
+        let names = icon_collection_names_bytes(&cols, &pkg, path).unwrap();
         let names = std::str::from_utf8(&names).unwrap();
         assert_eq!(
             tola_typst::spelling::closest("paette", names.lines()),
@@ -464,21 +438,10 @@ mod tests {
         );
         assert_eq!(collection_of_icon_file(path), Some("lucide"));
         assert!(
-            icon_collection_names_bytes(
-                &collections,
-                &package,
-                std::path::Path::new(".tola-icon/upstream/.names")
-            )
-            .is_none()
+            icon_collection_names_bytes(&cols, &pkg, Path::new(".tola-icon/upstream/.names"))
+                .is_none()
         );
-        assert!(
-            icon_file_bytes(
-                &collections,
-                &package,
-                std::path::Path::new(".tola-icon/lucide/e001.svg")
-            )
-            .is_some()
-        );
+        assert!(icon_file_bytes(&cols, &pkg, Path::new(".tola-icon/lucide/e001.svg")).is_some());
         assert!(!names.contains("e001"));
     }
 }

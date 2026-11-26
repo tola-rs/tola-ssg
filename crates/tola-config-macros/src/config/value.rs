@@ -2,35 +2,28 @@
 
 use syn::Type;
 
-use crate::config::field_type::{
-    is_float_type, is_integer_type, option_inner_type, path_type_ident,
-};
+use crate::config::ty::{is_float, is_int, option_inner, path_ident};
 
-/// Choose a commented TOML example from the optional field's inner type.
 pub fn option_placeholder(ty: &Type) -> &'static str {
-    let Some(inner) = option_inner_type(ty) else {
+    let Some(inner) = option_inner(ty) else {
         return "\"\"";
     };
-    match path_type_ident(inner) {
-        Some(name) if name == "Vec" => "[]",
-        Some(name) if name == "HashMap" || name == "BTreeMap" => "{}",
-        Some(name) if name == "bool" => "false",
-        Some(name) if is_integer_type(name) || is_float_type(name) => "0",
+    match path_ident(inner) {
+        Some(id) if id == "Vec" => "[]",
+        Some(id) if id == "HashMap" || id == "BTreeMap" => "{}",
+        Some(id) if id == "bool" => "false",
+        Some(id) if is_int(id) || is_float(id) => "0",
         _ => "\"\"",
     }
 }
 
-/// Format an explicit scalar config default as valid TOML.
-///
-/// Attributes contain unescaped values such as `en` or `tailwind@4`.
-/// Strings and enums become TOML basic strings; numeric and boolean literals are
-/// checked before expansion. Composite defaults use the runtime TOML serializer.
-pub fn format_scalar_default_for_type(value: &str, ty: &Type) -> syn::Result<String> {
-    let value = value.trim();
-    match path_type_ident(ty) {
-        Some(name) if name == "bool" => {
-            if matches!(value, "true" | "false") {
-                Ok(value.to_owned())
+/// Format an explicit scalar default as valid TOML.
+pub fn format_scalar_default_for_type(val: &str, ty: &Type) -> syn::Result<String> {
+    let val = val.trim();
+    match path_ident(ty) {
+        Some(id) if id == "bool" => {
+            if matches!(val, "true" | "false") {
+                Ok(val.to_owned())
             } else {
                 Err(syn::Error::new_spanned(
                     ty,
@@ -38,9 +31,9 @@ pub fn format_scalar_default_for_type(value: &str, ty: &Type) -> syn::Result<Str
                 ))
             }
         }
-        Some(name) if is_integer_type(name) => {
-            if matches!(toml_literal(value), Some(toml::de::DeValue::Integer(_))) {
-                Ok(value.to_owned())
+        Some(id) if is_int(id) => {
+            if matches!(toml_literal(val), Some(toml::de::DeValue::Integer(_))) {
+                Ok(val.to_owned())
             } else {
                 Err(syn::Error::new_spanned(
                     ty,
@@ -48,9 +41,9 @@ pub fn format_scalar_default_for_type(value: &str, ty: &Type) -> syn::Result<Str
                 ))
             }
         }
-        Some(name) if is_float_type(name) => {
-            if matches!(toml_literal(value), Some(toml::de::DeValue::Float(_))) {
-                Ok(value.to_owned())
+        Some(id) if is_float(id) => {
+            if matches!(toml_literal(val), Some(toml::de::DeValue::Float(_))) {
+                Ok(val.to_owned())
             } else {
                 Err(syn::Error::new_spanned(
                     ty,
@@ -58,29 +51,27 @@ pub fn format_scalar_default_for_type(value: &str, ty: &Type) -> syn::Result<Str
                 ))
             }
         }
-        Some(name)
-            if name == "Option" || name == "Vec" || name == "HashMap" || name == "BTreeMap" =>
-        {
+        Some(id) if id == "Option" || id == "Vec" || id == "HashMap" || id == "BTreeMap" => {
             Err(syn::Error::new_spanned(
                 ty,
                 "#[config(default = ...)] requires a scalar field; define composite defaults with Default",
             ))
         }
-        _ => Ok(quote_toml_string(value)),
+        _ => Ok(quote_toml_string(val)),
     }
 }
 
-fn toml_literal(value: &str) -> Option<toml::de::DeValue<'_>> {
-    toml::de::DeValue::parse(value)
+fn toml_literal(val: &str) -> Option<toml::de::DeValue<'_>> {
+    toml::de::DeValue::parse(val)
         .ok()
         .map(|parsed| parsed.into_inner())
 }
 
-fn quote_toml_string(value: &str) -> String {
-    let mut quoted = String::with_capacity(value.len() + 2);
+fn quote_toml_string(val: &str) -> String {
+    let mut quoted = String::with_capacity(val.len() + 2);
     quoted.push('"');
-    for character in value.chars() {
-        match character {
+    for ch in val.chars() {
+        match ch {
             '\\' => quoted.push_str("\\\\"),
             '"' => quoted.push_str("\\\""),
             '\n' => quoted.push_str("\\n"),
@@ -88,12 +79,11 @@ fn quote_toml_string(value: &str) -> String {
             '\t' => quoted.push_str("\\t"),
             '\u{08}' => quoted.push_str("\\b"),
             '\u{0c}' => quoted.push_str("\\f"),
-            character if character.is_control() => {
+            ch if ch.is_control() => {
                 use std::fmt::Write;
-                write!(quoted, "\\u{:04X}", character as u32)
-                    .expect("writing to a String cannot fail");
+                write!(quoted, "\\u{:04X}", ch as u32).expect("writing to a String cannot fail");
             }
-            character => quoted.push(character),
+            ch => quoted.push(ch),
         }
     }
     quoted.push('"');
@@ -106,7 +96,7 @@ mod tests {
     use syn::parse_quote;
 
     #[test]
-    fn optional_placeholders_follow_type() {
+    fn option_placeholders() {
         assert_eq!(option_placeholder(&parse_quote!(Option<Vec<String>>)), "[]");
         assert_eq!(
             option_placeholder(&parse_quote!(
@@ -119,8 +109,8 @@ mod tests {
     }
 
     #[test]
-    fn defaults_outside_their_scalar_category_are_refused() {
-        for (value, ty) in [
+    fn invalid_scalar_defaults() {
+        for (val, ty) in [
             ("maybe", parse_quote!(bool)),
             ("1__2", parse_quote!(u16)),
             ("01", parse_quote!(u16)),
@@ -129,10 +119,7 @@ mod tests {
             ("1", parse_quote!(f64)),
             ("1\nother = 2", parse_quote!(u16)),
         ] {
-            assert!(
-                format_scalar_default_for_type(value, &ty).is_err(),
-                "{value}"
-            );
+            assert!(format_scalar_default_for_type(val, &ty).is_err(), "{val}");
         }
     }
 }

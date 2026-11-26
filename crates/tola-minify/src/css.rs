@@ -3,28 +3,28 @@
 use lightningcss::stylesheet::{MinifyOptions, ParserOptions, PrinterOptions, StyleSheet};
 use thiserror::Error;
 
-/// A stylesheet this crate could not rewrite.
+/// Error returned when a stylesheet cannot be minified.
 #[derive(Clone, Debug, Eq, PartialEq, Error)]
 pub enum CssMinifyError {
-    /// The stylesheet could not be parsed, with the parser's own reason and position.
+    /// Stylesheet failed to parse.
     #[error("{}", .reason)]
     Syntax {
-        /// What the parser rejected, in its own words.
+        /// Parser diagnostic message.
         reason: String,
         /// One-based line of the rejected syntax.
         line: u32,
         /// One-based column of the rejected syntax.
         column: u32,
     },
-    /// The parsed stylesheet uses syntax the semantic minifier cannot rewrite.
+    /// Parsed stylesheet uses syntax the minifier cannot rewrite.
     #[error("the stylesheet uses syntax this minifier cannot rewrite")]
     Unsupported,
-    /// The minified stylesheet could not be printed.
+    /// Minified stylesheet could not be printed.
     #[error("the minified stylesheet could not be printed")]
     Print,
 }
 
-/// Minify a stylesheet, preserving legal comments.
+/// Minify a stylesheet, preserving legal comments (`/*! ... */`).
 ///
 /// ```
 /// # use tola_minify::minify_css;
@@ -33,28 +33,28 @@ pub enum CssMinifyError {
 ///     ".a,.b{color:red}"
 /// );
 /// ```
-pub fn minify_css(source: &str) -> Result<String, CssMinifyError> {
-    let mut stylesheet = StyleSheet::parse(source, ParserOptions::default()).map_err(|error| {
-        // The parser numbers lines from zero and columns from one.
-        let (line, column) = error
+pub fn minify_css(src: &str) -> Result<String, CssMinifyError> {
+    let mut sheet = StyleSheet::parse(src, ParserOptions::default()).map_err(|err| {
+        // lightningcss numbers lines from zero and columns from one.
+        let (line, column) = err
             .loc
             .as_ref()
-            .map_or((1, 1), |location| (location.line + 1, location.column));
+            .map_or((1, 1), |loc| (loc.line + 1, loc.column));
         CssMinifyError::Syntax {
-            reason: error.kind.to_string(),
+            reason: err.kind.to_string(),
             line,
             column,
         }
     })?;
-    stylesheet
+    sheet
         .minify(MinifyOptions::default())
         .map_err(|_| CssMinifyError::Unsupported)?;
-    stylesheet
+    sheet
         .to_css(PrinterOptions {
             minify: true,
             ..PrinterOptions::default()
         })
-        .map(|result| result.code)
+        .map(|res| res.code)
         .map_err(|_| CssMinifyError::Print)
 }
 
@@ -63,7 +63,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn legal_comment_survives_minification() {
+    fn legal_comment_survives() {
         let css = minify_css("/*! Copyright */ .a { color: red; }").unwrap();
         assert!(css.starts_with("/*! Copyright */"), "{css:?}");
     }

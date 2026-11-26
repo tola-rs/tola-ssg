@@ -126,22 +126,22 @@ pub(crate) fn all_values(declarations: Vec<MetadataDeclaration>) -> Vec<Value> {
 mod tests {
     use super::*;
 
-    fn world(source: &str) -> (tempfile::TempDir, crate::TypstWorld) {
-        let directory = tempfile::TempDir::new().unwrap();
-        let path = directory.path().join("main.typ");
-        std::fs::write(&path, source).unwrap();
-        let world = crate::TypstWorld::builder(&path, directory.path())
+    fn world(src: &str) -> (tempfile::TempDir, crate::TypstWorld) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("main.typ");
+        std::fs::write(&path, src).unwrap();
+        let world = crate::TypstWorld::builder(&path, dir.path())
             .with_local_cache()
             .no_fonts()
             .build(&crate::BundleCancellation::default())
             .unwrap();
-        (directory, world)
+        (dir, world)
     }
 
     #[test]
-    fn scan_and_compile_agree_on_cardinality() {
-        let declarations = "#metadata(1) <record>\n#metadata(2) <record>\n#metadata(3) <single>";
-        let (_directory, world) = world(declarations);
+    fn metadata_cardinality() {
+        let decls = "#metadata(1) <record>\n#metadata(2) <record>\n#metadata(3) <single>";
+        let (_dir, world) = world(decls);
         let scanned = crate::scan_world(&world).unwrap();
         let compiled = crate::compile_world(&world).unwrap();
         let html = compiled.document();

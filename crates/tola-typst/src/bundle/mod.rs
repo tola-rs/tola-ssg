@@ -238,7 +238,7 @@ impl BundleCompilation {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::world::file::FileResolver;
+    use crate::world::file::FileStore;
     use std::fs;
     use tempfile::TempDir;
     use typst::foundations::Value;
@@ -261,21 +261,21 @@ mod tests {
     }
 
     #[test]
-    fn repeated_compilation_keeps_package_evidence() {
+    fn bundle_reuses_pkg_evidence() {
         let dir = TempDir::new().unwrap();
         let packages = dir.path().join("packages");
-        let package = packages.join("local/demo/1.0.0");
-        fs::create_dir_all(&package).unwrap();
+        let pkg = packages.join("local/demo/1.0.0");
+        fs::create_dir_all(&pkg).unwrap();
         fs::write(
-            package.join("typst.toml"),
+            pkg.join("typst.toml"),
             "[package]\nname = \"demo\"\nversion = \"1.0.0\"\nentrypoint = \"lib.typ\"\n",
         )
         .unwrap();
-        fs::write(package.join("lib.typ"), "#let text = \"payload\"").unwrap();
+        fs::write(pkg.join("lib.typ"), "#let text = \"payload\"").unwrap();
         let locations = crate::PackageLocations::from_absolute_roots(Some(packages), None).unwrap();
-        let files = Arc::new(FileResolver::from_package_locations(
+        let files = Arc::new(FileStore::from_package_locations(
             locations,
-            crate::PackageFetchPolicy::LocalOnly,
+            crate::PackageFetchMode::LocalOnly,
         ));
         let world = world_with_files(
             &dir,
@@ -297,9 +297,9 @@ mod tests {
         assert_eq!(first.entries()[0].bytes(), second.entries()[0].bytes());
     }
 
-    fn world_builder(dir: &TempDir, entry: &str, source: &str) -> crate::world::WorldBuilder {
+    fn world_builder(dir: &TempDir, entry: &str, src: &str) -> crate::world::WorldBuilder {
         let path = dir.path().join(entry);
-        fs::write(&path, source).unwrap();
+        fs::write(&path, src).unwrap();
         TypstWorld::builder(&path, dir.path())
     }
 
@@ -311,17 +311,17 @@ mod tests {
             .expect("valid test world")
     }
 
-    pub(super) fn world_for(dir: &TempDir, entry: &str, source: &str) -> TypstWorld {
-        fontless_world(world_builder(dir, entry, source))
+    pub(super) fn world_for(dir: &TempDir, entry: &str, src: &str) -> TypstWorld {
+        fontless_world(world_builder(dir, entry, src))
     }
 
     fn world_with_files(
         dir: &TempDir,
         entry: &str,
-        source: &str,
-        files: Arc<FileResolver>,
+        src: &str,
+        files: Arc<FileStore>,
     ) -> TypstWorld {
-        fontless_world(world_builder(dir, entry, source).with_files(files))
+        fontless_world(world_builder(dir, entry, src).with_files(files))
     }
 
     fn export_world(world: &TypstWorld) -> BundleExport {
@@ -336,7 +336,7 @@ mod tests {
     }
 
     #[test]
-    fn metadata_declarations_keep_their_owner() {
+    fn bundle_metadata_owners() {
         let compilation = compile_without_export(
             r#"
             #metadata((scope: "root", target: <second>)) <publication>
@@ -352,9 +352,9 @@ mod tests {
 
         let scopes = declarations
             .iter()
-            .map(|declaration| {
-                assert!(!declaration.span().is_detached());
-                let Value::Dict(value) = declaration.value() else {
+            .map(|decl| {
+                assert!(!decl.span().is_detached());
+                let Value::Dict(value) = decl.value() else {
                     panic!("expected metadata dictionary");
                 };
                 value.get("scope").unwrap().clone()
@@ -366,10 +366,10 @@ mod tests {
         );
         let paths = declarations
             .iter()
-            .map(|declaration| {
+            .map(|decl| {
                 compilation
                     .introspector()
-                    .path(declaration.location().unwrap())
+                    .path(decl.location().unwrap())
                     .map(|path| path.get_with_slash())
             })
             .collect::<Vec<_>>();
@@ -385,19 +385,13 @@ mod tests {
         );
 
         let path = typst::syntax::VirtualPath::new("a.html").unwrap();
-        let document_declarations = compilation
+        let doc_decls = compilation
             .document(&path)
             .unwrap()
             .metadata_declarations("publication");
-        assert_eq!(document_declarations.len(), 2);
-        assert_eq!(
-            document_declarations[0].location(),
-            declarations[1].location()
-        );
-        assert_eq!(
-            document_declarations[1].location(),
-            declarations[2].location()
-        );
+        assert_eq!(doc_decls.len(), 2);
+        assert_eq!(doc_decls[0].location(), declarations[1].location());
+        assert_eq!(doc_decls[1].location(), declarations[2].location());
     }
     mod bundle_context {
         use parking_lot::Mutex;
@@ -409,13 +403,13 @@ mod tests {
 
         use super::{export_world, world_for, world_with_files};
         use crate::{
-            AccessedDeps, BundleCancellation, FileProvider, FileResolver, FileTarget, ReadLocator,
+            AccessedDeps, BundleCancellation, FileProvider, FileStore, FileTarget, ReadLocator,
             compile_bundle_world,
         };
         use tempfile::TempDir;
 
         #[test]
-        fn root_declarations_converge() {
+        fn bundle_root_converges() {
             let dir = TempDir::new().unwrap();
             let result = export_world(&world_for(
                 &dir,
@@ -434,18 +428,18 @@ mod tests {
         }
 
         #[test]
-        fn cancelled_compile_reports_cancellation() {
+        fn bundle_compile_cancelled() {
             let dir = TempDir::new().unwrap();
             let world = world_for(
                 &dir,
                 "site.typ",
                 "#document(\"a.html\", [A])\n#document(\"b.html\", [B])\n",
             );
-            let cancellation = BundleCancellation::new();
-            cancellation.clone().cancel();
-            let error = compile_bundle_world(&world, &cancellation).unwrap_err();
+            let cancel = BundleCancellation::new();
+            cancel.clone().cancel();
+            let err = compile_bundle_world(&world, &cancel).unwrap_err();
 
-            assert!(error.is_cancelled());
+            assert!(err.is_cancelled());
         }
 
         fn root_read_names(accessed: &AccessedDeps) -> std::collections::BTreeSet<String> {
@@ -466,8 +460,8 @@ mod tests {
         }
 
         impl FileProvider for RecordingFiles {
-            fn target(&self, id: typst::syntax::FileId) -> Option<FileTarget> {
-                let path = id.vpath().get_with_slash().to_owned();
+            fn target(&self, fid: typst::syntax::FileId) -> Option<FileTarget> {
+                let path = fid.vpath().get_with_slash().to_owned();
                 if matches!(path.as_str(), "/a.txt" | "/b.txt" | "/shared.txt") {
                     self.reads.lock().push(path.clone());
                     return Some(FileTarget::Bytes(Arc::from(path.into_bytes())));
@@ -477,10 +471,10 @@ mod tests {
         }
 
         #[test]
-        fn official_compile_shares_whole_run_reads() {
+        fn bundle_shares_reads() {
             let dir = TempDir::new().unwrap();
             let reads = Arc::new(Mutex::new(Vec::new()));
-            let files = Arc::new(FileResolver::new().with_provider(RecordingFiles {
+            let files = Arc::new(FileStore::new().with_provider(RecordingFiles {
                 reads: Arc::clone(&reads),
             }));
             let world = world_with_files(
@@ -495,7 +489,7 @@ mod tests {
             let compilation = compile_bundle_world(&world, &BundleCancellation::default()).unwrap();
             let output_paths = compilation
                 .documents()
-                .map(|document| document.path().get_with_slash().to_owned())
+                .map(|doc| doc.path().get_with_slash().to_owned())
                 .collect::<Vec<_>>();
             let compile_reads = root_read_names(compilation.accessed());
             let mut realization_reads = reads
@@ -531,8 +525,8 @@ mod tests {
 
         #[cfg(feature = "parallel")]
         impl FileProvider for ParallelFiles {
-            fn target(&self, id: typst::syntax::FileId) -> Option<FileTarget> {
-                let path = id.vpath().get_with_slash();
+            fn target(&self, fid: typst::syntax::FileId) -> Option<FileTarget> {
+                let path = fid.vpath().get_with_slash();
                 match path {
                     "/preferred.txt" => {}
                     "/first.txt" | "/second.txt" => {
@@ -552,7 +546,7 @@ mod tests {
 
         #[cfg(feature = "parallel")]
         #[test]
-        fn parallel_children_share_whole_run_reads() {
+        fn bundle_parallel_shares_reads() {
             let dir = TempDir::new().unwrap();
             let state = Arc::new(ParallelState {
                 background_barrier: Barrier::new(2),
@@ -567,7 +561,7 @@ mod tests {
         #document("preferred.html")[#context read("preferred.txt")]
         #document("second.html")[#context read("second.txt")]
         "#,
-                Arc::new(FileResolver::new().with_provider(ParallelFiles {
+                Arc::new(FileStore::new().with_provider(ParallelFiles {
                     state: Arc::clone(&state),
                 })),
             );
@@ -598,18 +592,18 @@ mod tests {
         use tempfile::TempDir;
         use typst::syntax::{VirtualPath, VirtualRoot};
 
-        fn world(source: &str) -> (TempDir, TypstWorld) {
-            let directory = TempDir::new().unwrap();
-            let world = super::world_for(&directory, "site.typ", source);
-            (directory, world)
+        fn world(src: &str) -> (TempDir, TypstWorld) {
+            let dir = TempDir::new().unwrap();
+            let world = super::world_for(&dir, "site.typ", src);
+            (dir, world)
         }
 
         #[test]
-        fn body_source_ids_ignore_the_wrapper() {
-            let directory = TempDir::new().unwrap();
-            fs::write(directory.path().join("document.typ"), "Document").unwrap();
+        fn bundle_body_source_ids() {
+            let dir = TempDir::new().unwrap();
+            fs::write(dir.path().join("document.typ"), "Document").unwrap();
             let world = super::world_for(
-                &directory,
+                &dir,
                 "site.typ",
                 r#"#let thin(path, body) = document(path, body)
         #let body = include "document.typ"
@@ -625,9 +619,9 @@ mod tests {
                     .unwrap()
                     .source_ids()
                     .into_iter()
-                    .map(|id| {
-                        assert_eq!(id.get().root(), &VirtualRoot::Project);
-                        id.vpath().get_with_slash().to_owned()
+                    .map(|fid| {
+                        assert_eq!(fid.get().root(), &VirtualRoot::Project);
+                        fid.vpath().get_with_slash().to_owned()
                     })
                     .collect::<Vec<_>>()
             };
@@ -639,16 +633,16 @@ mod tests {
         }
 
         #[test]
-        fn outputs_keep_bundle_order() {
-            let (_directory, world) = world(
+        fn bundle_outputs_order() {
+            let (_dir, world) = world(
                 r#"
         #asset("data.txt", "payload")
         #document("b.html")[B]
         #document("a.svg")[#box(width: 2pt, height: 2pt, fill: red)]
         "#,
             );
-            let cancellation = BundleCancellation::default();
-            let compilation = compile_bundle_world(&world, &cancellation).unwrap();
+            let cancel = BundleCancellation::default();
+            let compilation = compile_bundle_world(&world, &cancel).unwrap();
             let outputs = compilation
                 .outputs()
                 .map(|(path, kind)| (path.get_with_slash().to_owned(), kind))
@@ -662,9 +656,9 @@ mod tests {
                 ]
             );
 
-            let document_path = VirtualPath::new("b.html").unwrap();
+            let doc_path = VirtualPath::new("b.html").unwrap();
             let asset_path = VirtualPath::new("data.txt").unwrap();
-            assert!(compilation.document(&document_path).is_some());
+            assert!(compilation.document(&doc_path).is_some());
             assert!(compilation.document(&asset_path).is_none());
         }
     }
@@ -677,23 +671,19 @@ mod tests {
         use tempfile::TempDir;
         use typst::foundations::{Dict, IntoValue, Value};
 
-        fn world_with_inputs(dir: &TempDir, entry: &str, source: &str, inputs: Dict) -> TypstWorld {
-            fontless_world(world_builder(dir, entry, source).with_inputs_dict(inputs))
+        fn world_with_inputs(dir: &TempDir, entry: &str, src: &str, inputs: Dict) -> TypstWorld {
+            fontless_world(world_builder(dir, entry, src).with_inputs_dict(inputs))
         }
 
-        fn handoff_world(
-            dir: &TempDir,
-            document: &str,
-            site: &str,
-        ) -> (TypstWorld, crate::ScanResult) {
-            let scan = crate::scan_world(&world_for(dir, "document.typ", document)).unwrap();
+        fn handoff_world(dir: &TempDir, doc: &str, site: &str) -> (TypstWorld, crate::ScanResult) {
+            let scan = crate::scan_world(&world_for(dir, "document.typ", doc)).unwrap();
             let mut inputs = Dict::new();
             inputs.insert("body".into(), scan.content().clone().into_value());
             (world_with_inputs(dir, "site.typ", site, inputs), scan)
         }
 
         #[test]
-        fn scanned_content_survives_site_handoff() {
+        fn bundle_handoff_content() {
             let dir = TempDir::new().unwrap();
             fs::write(dir.path().join("payload.txt"), "Transferred body").unwrap();
             let (world, scan) = handoff_world(
@@ -720,8 +710,8 @@ mod tests {
             assert!(html.contains("context-value"));
             assert!(html.contains(">4</span>"), "{html}");
 
-            let document = bundle.documents().next().unwrap();
-            let Value::Dict(source_meta) = document.metadata_first("source-meta").unwrap() else {
+            let doc = bundle.documents().next().unwrap();
+            let Value::Dict(source_meta) = doc.metadata_first("source-meta").unwrap() else {
                 panic!("expected source metadata dictionary");
             };
             assert_eq!(source_meta.get("owner").unwrap(), &"document".into_value());
@@ -734,29 +724,28 @@ mod tests {
         }
 
         #[test]
-        fn deferred_diagnostic_keeps_source_span() {
+        fn bundle_handoff_deferred_diag() {
             let dir = TempDir::new().unwrap();
             let (world, _scan) = handoff_world(
                 &dir,
                 "#context { panic(\"deferred document failure\") }\n",
                 "#document(\"index.html\")[#sys.inputs.body]\n",
             );
-            let error = compile_bundle_world(&world, &BundleCancellation::default()).unwrap_err();
-            let diagnostics = error.diagnostics().unwrap();
-            let diagnostic = diagnostics
+            let err = compile_bundle_world(&world, &BundleCancellation::default()).unwrap_err();
+            let diags = err.diagnostics().unwrap();
+            let diag = diags
                 .errors()
-                .find(|diagnostic| diagnostic.message.contains("deferred document failure"))
+                .find(|diag| diag.message.contains("deferred document failure"))
                 .expect("deferred document diagnostic");
 
             assert!(
-                diagnostic
-                    .location
+                diag.location
                     .source_lines
                     .iter()
                     .any(|line| line.text.contains("deferred document failure")),
-                "{diagnostic:?}"
+                "{diag:?}"
             );
-            assert!(format!("{diagnostics}").contains("document.typ"));
+            assert!(format!("{diags}").contains("document.typ"));
         }
     }
 }

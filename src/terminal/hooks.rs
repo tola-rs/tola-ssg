@@ -2,7 +2,7 @@
 
 use tola_build::build::BuildMode;
 use tola_build::config::section::build::hooks::HookStage;
-use tola_build::hooks::ConfiguredHook;
+use tola_build::hooks::SiteHook;
 use unicode_width::UnicodeWidthStr;
 
 use super::Palette;
@@ -33,7 +33,7 @@ const SKIPPED_MARK: &str = " (skipped in this session)";
 /// glance what this build will do. A hook the build mode leaves out is named with the reason
 /// instead of disappearing.
 pub(crate) fn overview(
-    hooks: &[ConfiguredHook<'_>],
+    hooks: &[SiteHook<'_>],
     mode: BuildMode,
     stages: &[HookStage],
     columns: Option<usize>,

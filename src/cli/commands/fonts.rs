@@ -47,7 +47,7 @@ pub(super) fn value(request: &super::SiteRequest<'_>) -> Result<serde_json::Valu
         .load(&tola_typst::BundleCancellation::from_flag(
             token.signal_flag(),
         ))
-        .map_err(|error| font_load_error(error, config.map(|config| config.get_root())))?;
+        .map_err(|error| font_load_error(error, config.map(|config| config.root())))?;
     Ok(serde_json::to_value(json_records(&fonts.compiler_fonts()))?)
 }
 

@@ -7,7 +7,7 @@ use anyhow::Result;
 use tola_input::FilesystemSourceIdentity;
 use typst::foundations::{Dict, IntoValue};
 
-use crate::config::ResolvedSiteConfig;
+use crate::config::SiteConfig;
 use crate::filesystem::FilesystemSourceKind;
 
 use super::AssetSourceError;
@@ -73,21 +73,21 @@ pub enum ModuleAssetInput {
 impl AssetUrls {
     /// Read the project declarations’ mounted URLs without reading asset bytes.
     pub fn for_check_project(
-        config: &ResolvedSiteConfig,
+        config: &SiteConfig,
         boundary: &tola_typst::SourceBoundary,
         cancellation: &crate::cancellation::BuildCancellation,
     ) -> Result<Self> {
         Self::for_check_with(
             config,
-            crate::modules::prepared::AppliedAssets::project_only(config),
+            crate::modules::site::AppliedAssets::project_only(config),
             boundary,
             cancellation,
         )
     }
 
     pub(crate) fn for_check_with(
-        config: &ResolvedSiteConfig,
-        assets: crate::modules::prepared::AppliedAssets<'_>,
+        config: &SiteConfig,
+        assets: crate::modules::site::AppliedAssets<'_>,
         boundary: &tola_typst::SourceBoundary,
         cancellation: &crate::cancellation::BuildCancellation,
     ) -> Result<Self> {
@@ -100,7 +100,7 @@ impl AssetUrls {
             cancellation.ensure_active()?;
             let id = &declaration.source;
             let mut record = |logical: &Path, relative: &Path| -> Result<()> {
-                let output = declaration.output(relative, logical, config.get_root(), None)?;
+                let output = declaration.output(relative, logical, config.root(), None)?;
                 published.push(declaration.published(config, &output, relative));
                 outputs.push(output);
                 Ok(())
@@ -133,7 +133,7 @@ impl AssetUrls {
                         &source.source_identity,
                         cancellation,
                         &crate::filesystem::TreeMemberWalk {
-                            display_root: config.get_root(),
+                            display_root: config.root(),
                             member_label: TREE_MEMBER_LABEL,
                             follow_file_symlinks: id.follow_file_symlinks,
                             validate_member: &|relative, logical, target| {
@@ -152,7 +152,7 @@ impl AssetUrls {
             }
         }
         check_tree_overlap(config, &trees)?;
-        check_paths(outputs.iter(), config.get_root(), cancellation)?;
+        check_paths(outputs.iter(), config.root(), cancellation)?;
         Ok(Self::from_preview(published))
     }
 
@@ -249,7 +249,7 @@ mod tests {
 
     fn config_with(
         declarations: impl IntoIterator<Item = AssetFileDeclaration>,
-    ) -> (tempfile::TempDir, Arc<ResolvedSiteConfig>) {
+    ) -> (tempfile::TempDir, Arc<SiteConfig>) {
         let directory = tempfile::TempDir::new().unwrap();
         let mut config = crate::config::tests::load_test_config(
             directory.path(),
@@ -260,7 +260,7 @@ mod tests {
     }
 
     #[test]
-    fn declarations_resolve_under_the_mount() {
+    fn declarations_resolve_under_mount() {
         let (_directory, config) = config_with([
             file_declaration("assets/app.js", "/app.js"),
             file_declaration("assets/%E5%9B%BE.svg", "/%E5%9B%BE.svg"),
@@ -324,9 +324,8 @@ mod tests {
         }
     }
 
-    /// A published asset names the declaration that publishes it.
     #[test]
-    fn published_assets_name_their_declaration() {
+    fn published_assets_record_origin() {
         let directory = tempfile::TempDir::new().unwrap();
         let assets = directory.path().join("assets");
         std::fs::create_dir_all(assets.join("images")).unwrap();
@@ -358,13 +357,12 @@ mod tests {
                 member: PathBuf::from("images/logo.svg"),
             })
         );
-        // A URL this site does not publish names no declaration at all.
         assert_eq!(urls.address("/nope.svg"), None);
         assert_eq!(urls.origin("/nope.svg"), None);
     }
 
     #[test]
-    fn resolved_addresses_stay_reusable() {
+    fn resolved_addresses_reuse() {
         let declared = |pairs: &[(&str, &str)]| {
             AssetUrls::from_published(pairs.iter().map(|(declared, browser)| {
                 (

@@ -1,4 +1,4 @@
-//! Text of Typst content, following Typst's own reading rules.
+//! Plain-text extraction over Typst content following Typst's own reading rules.
 
 use typst::diag::{SourceResult, bail, warning};
 use typst::ecow::EcoString;
@@ -16,16 +16,16 @@ pub(super) fn tola_plain_text(
     match value.v {
         Value::Str(text) => Ok(text),
         Value::Content(content) => {
-            let projection = TextProjection::of(&content);
-            if !projection.unreadable.is_empty() {
+            let buf = PlainTextBuf::of(&content);
+            if !buf.unreadable.is_empty() {
                 engine.sink.warn(warning!(
-                    projection.span().unwrap_or(value.span),
+                    buf.span().unwrap_or(value.span),
                     "{}",
-                    unreadable(&projection.unreadable);
+                    unreadable_msg(&buf.unreadable);
                     hint: "write the text you want in its place"
                 ));
             }
-            Ok(projection.text.into())
+            Ok(buf.text.into())
         }
         other => bail!(
             value.span,
@@ -36,28 +36,20 @@ pub(super) fn tola_plain_text(
 }
 
 #[derive(Default)]
-struct TextProjection {
+struct PlainTextBuf {
     text: EcoString,
     unreadable: Vec<(EcoString, Span)>,
 }
 
-impl TextProjection {
+impl PlainTextBuf {
     fn of(content: &Content) -> Self {
-        let mut projection = Self::default();
-        projection.write(content);
-        projection
-            .unreadable
-            .sort_by(|left, right| left.0.cmp(&right.0));
-        projection
-            .unreadable
-            .dedup_by(|left, right| left.0 == right.0);
-        projection
+        let mut buf = Self::default();
+        buf.write(content);
+        buf.unreadable.sort_by(|a, b| a.0.cmp(&b.0));
+        buf.unreadable.dedup_by(|a, b| a.0 == b.0);
+        buf
     }
 
-    /// Where the first omitted element was written, when that is known.
-    ///
-    /// An element built by a helper has no place of its own, so the call site is the
-    /// only location the author can act on.
     fn span(&self) -> Option<Span> {
         self.unreadable
             .iter()
@@ -66,37 +58,33 @@ impl TextProjection {
     }
 
     fn write(&mut self, content: &Content) {
-        // Typst's own reading decides which elements carry text. Everything it does
-        // not read contributes through its content instead.
         if let Some(readable) = content.with::<dyn PlainText>() {
             readable.plain_text(&mut self.text);
             return;
         }
-
-        // Metadata is not display content: its payload never becomes text.
+        // Metadata is non-visual payload, never rendered text.
         if content.is::<MetadataElem>() {
             return;
         }
-
-        let mut carries_content = false;
-        for (_, value) in content.fields() {
-            self.write_value(value, &mut carries_content);
+        let mut has_child = false;
+        for (_, val) in content.fields() {
+            self.write_val(val, &mut has_child);
         }
-        if !carries_content {
+        if !has_child {
             self.unreadable
                 .push((content.func().name().into(), content.span()));
         }
     }
 
-    fn write_value(&mut self, value: Value, carries_content: &mut bool) {
-        match value {
+    fn write_val(&mut self, val: Value, has_child: &mut bool) {
+        match val {
             Value::Content(content) => {
-                *carries_content = true;
+                *has_child = true;
                 self.write(&content);
             }
-            Value::Array(array) => {
-                for value in array {
-                    self.write_value(value, carries_content);
+            Value::Array(arr) => {
+                for item in arr {
+                    self.write_val(item, has_child);
                 }
             }
             _ => {}
@@ -104,9 +92,7 @@ impl TextProjection {
     }
 }
 
-/// State what the text left out, naming at most three elements like other Tola
-/// diagnostics that list an unbounded set.
-fn unreadable(unreadable: &[(EcoString, Span)]) -> String {
+fn unreadable_msg(unreadable: &[(EcoString, Span)]) -> String {
     let shown = unreadable
         .iter()
         .take(3)
@@ -117,11 +103,12 @@ fn unreadable(unreadable: &[(EcoString, Span)]) -> String {
         Some(extra) if extra > 0 => format!("{shown}, and {extra} more"),
         _ => shown,
     };
-    if unreadable.len() == 1 {
-        format!("{shown} has no text, so the text leaves it out")
+    let verb = if unreadable.len() == 1 {
+        "has no text, so the text leaves it out"
     } else {
-        format!("{shown} have no text, so the text leaves them out")
-    }
+        "have no text, so the text leaves them out"
+    };
+    format!("{shown} {verb}")
 }
 
 #[cfg(test)]
@@ -133,26 +120,20 @@ mod tests {
     use typst::text::{RawContent, RawElem, SmartQuoteElem, SpaceElem, TextElem};
     use typst::visualize::Color;
 
-    fn project(content: &Content) -> TextProjection {
-        TextProjection::of(content)
-    }
-
     fn text(content: &Content) -> String {
-        project(content).text.to_string()
+        PlainTextBuf::of(content).text.to_string()
     }
 
     fn unreadable_names(content: &Content) -> Vec<String> {
-        project(content)
+        PlainTextBuf::of(content)
             .unreadable
             .iter()
             .map(|(name, _)| name.to_string())
             .collect()
     }
 
-    /// One row per element kind: what Typst reads contributes its own text, and everything else
-    /// contributes through its content.
     #[test]
-    fn projection_follows_typst_reads() {
+    fn plain_text_elements() {
         let readable = Content::sequence([
             TextElem::packed("A"),
             SymbolElem::packed("+"),
@@ -178,14 +159,14 @@ mod tests {
         .set(TextElem::fill, Color::RED.into());
         assert_eq!(text(&containers), "bolditaliclinked");
 
-        let mathematics = Content::sequence([
+        let math = Content::sequence([
             TextElem::packed("before"),
             EquationElem::new(TextElem::packed("x")).pack(),
             TextElem::packed("after"),
         ]);
-        assert_eq!(text(&mathematics), "beforexafter");
+        assert_eq!(text(&math), "beforexafter");
 
-        let metadata = Content::sequence([
+        let meta = Content::sequence([
             TextElem::packed("before"),
             MetadataElem::new(Value::Content(
                 EquationElem::new(TextElem::packed("hidden equation")).pack(),
@@ -197,24 +178,24 @@ mod tests {
             ]))
             .pack(),
         ]);
-        assert_eq!(text(&metadata), "beforeafter");
+        assert_eq!(text(&meta), "beforeafter");
     }
 
     #[test]
-    fn unreadable_elements_are_named() {
-        let reference = |label: &str| {
+    fn plain_text_unreadable_warned() {
+        let mk_ref = |label: &str| {
             RefElem::new(Label::construct(label.into()).unwrap())
                 .pack()
                 .spanned(Span::detached())
         };
-        let source = Content::sequence([
+        let src = Content::sequence([
             TextElem::packed("see "),
-            reference("figure"),
+            mk_ref("figure"),
             TextElem::packed(" and "),
-            reference("table"),
+            mk_ref("table"),
         ]);
-        assert_eq!(text(&source), "see  and ");
-        assert_eq!(unreadable_names(&source), ["ref"]);
+        assert_eq!(text(&src), "see  and ");
+        assert_eq!(unreadable_names(&src), ["ref"]);
         assert!(unreadable_names(&Content::sequence([TextElem::packed("see ")])).is_empty());
     }
 }

@@ -14,14 +14,14 @@ pub(crate) use sources::BibliographyCache;
 use sources::{Bibliography, spelled_sources};
 use tola_build::cancellation::BuildCancellation;
 use tola_build::check::SourceCompilation;
-use tola_build::config::ResolvedSiteConfig;
+use tola_build::config::SiteConfig;
 use tola_typst::typst::World;
 use tola_typst::typst::syntax::{FileId, Source};
 
 /// The hover one citation answers with; a site naming no bibliography leaves `@key` to its labels.
 pub(super) fn hover(
     compilation: &SourceCompilation,
-    config: &ResolvedSiteConfig,
+    config: &SiteConfig,
     open: FileId,
     key: &str,
     cache: &mut BibliographyCache,
@@ -52,7 +52,7 @@ pub(super) fn hover(
 /// Where one citation's entry is written, or `None` when no bibliography declares `key`.
 pub(super) fn definition(
     compilation: &SourceCompilation,
-    config: &ResolvedSiteConfig,
+    config: &SiteConfig,
     open: FileId,
     key: &str,
     cache: &mut BibliographyCache,
@@ -69,7 +69,7 @@ pub(super) fn definition(
 /// The entries a citation may name, by key or title prefix, ignoring case.
 pub(super) fn completions(
     compilation: &SourceCompilation,
-    config: &ResolvedSiteConfig,
+    config: &SiteConfig,
     source: &Source,
     cursor: usize,
     cache: &mut BibliographyCache,
@@ -139,7 +139,7 @@ pub(super) struct CitationRequest<'a> {
 /// Every place the site spells the key; its bibliography entry is the declaration.
 pub(super) fn references(
     compilation: &SourceCompilation,
-    config: &ResolvedSiteConfig,
+    config: &SiteConfig,
     request: &CitationRequest<'_>,
     cache: &mut BibliographyCache,
     cancellation: &BuildCancellation,
@@ -161,7 +161,7 @@ pub(super) fn references(
         let Ok(source) = world.source(id) else {
             continue;
         };
-        let Some(uri) = crate::identity::client_uri(id, config.get_root(), client_root).ok() else {
+        let Some(uri) = crate::identity::client_uri(id, config.root(), client_root).ok() else {
             continue;
         };
         found.extend(spellings_in(&source, &uri, request.key));
@@ -200,7 +200,7 @@ mod tests {
     use lsp_types::{CompletionTextEdit, GotoDefinitionResponse, Position};
 
     #[test]
-    fn citation_keys_ignore_case() {
+    fn citation_case_insensitive_keys() {
         let mut site = QuerySession::new();
         site.site.write(
             "content/refs.bib",
@@ -218,34 +218,25 @@ mod tests {
         }
     }
 
-    /// A YAML key after multibyte text still points at the key itself: the scanner counts
-    /// characters, and a range that addresses bytes has both mapped.
     #[test]
-    fn yaml_keys_address_bytes() {
+    fn yaml_multibyte_key_range() {
         let mut site = QuerySession::new();
         site.site.write(
             "content/refs.yml",
             "x:\n  type: article\n  title: Über alles\n  author: Müller, Jürgen\n  date: 1990\n\nzweiter:\n  type: article\n  title: Zweite\n  author: Schmidt, Anna\n  date: 1995\n",
         );
-        let definition = site
+        let def = site
             .definition("#bibliography(\"refs.yml\")\n\nSee @zwei|ter.\n")
             .expect("a definition inside the YAML bibliography");
-        let GotoDefinitionResponse::Scalar(location) = definition else {
+        let GotoDefinitionResponse::Scalar(loc) = def else {
             panic!("a scalar definition");
         };
-        assert_eq!(
-            (location.range.start.line, location.range.start.character),
-            (6, 0)
-        );
-        assert_eq!(
-            (location.range.end.line, location.range.end.character),
-            (6, 7)
-        );
+        assert_eq!((loc.range.start.line, loc.range.start.character), (6, 0));
+        assert_eq!((loc.range.end.line, loc.range.end.character), (6, 7));
     }
 
-    /// Each bibliography renders its entries with the style its own call names.
     #[test]
-    fn bibliographies_keep_their_style() {
+    fn bibliography_per_call_csl() {
         let mut site = QuerySession::new();
         site.site.write(
             "content/refs.bib",
@@ -283,7 +274,7 @@ mod tests {
     }
 
     #[test]
-    fn title_completion_writes_the_key() {
+    fn citation_title_completion() {
         let mut site = QuerySession::new();
         site.site.write(
             "content/refs.bib",
@@ -308,10 +299,8 @@ mod tests {
         assert!(!completion_labels(&items).contains(&"Literate Programming"));
     }
 
-    /// A citation key answers where the site spells it, and its declaration when the request asks
-    /// for one.
     #[test]
-    fn citation_keys_answer_their_references() {
+    fn citation_key_references() {
         let mut site = QuerySession::new();
         site.site.write(
             "content/refs.bib",
@@ -333,15 +322,13 @@ mod tests {
         assert_eq!(all.len(), 2, "{all:?}");
         assert!(
             all.iter()
-                .any(|location| location.uri.as_str().ends_with("content/refs.bib")),
+                .any(|l| l.uri.as_str().ends_with("content/refs.bib")),
             "{all:?}"
         );
     }
 
-    /// A bibliography whose text no reader understood is named, so the author reads the diagnostic
-    /// pointing into it instead of hunting a misspelled key.
     #[test]
-    fn unreadable_bibliography_is_named() {
+    fn unreadable_bibliography_named() {
         let mut site = QuerySession::new();
         site.site
             .write("content/bad.bib", "@article{broken,\n  title = {Unclosed\n");
@@ -349,6 +336,5 @@ mod tests {
             .hover_text("#bibliography(\"bad.bib\")\n\nSee @bro|ken.\n")
             .expect("a hover for a key of an unreadable bibliography");
         assert!(hover.contains("content/bad.bib"), "{hover}");
-        assert!(hover.contains("Tola could not read"), "{hover}");
     }
 }

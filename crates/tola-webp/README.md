@@ -1,20 +1,11 @@
 # tola-webp
 
-Pure Rust lossy still-image WebP encoder with exact alpha. No C, no unsafe.
+Pure-Rust lossy still-image WebP encoder with exact alpha (no C, no `unsafe`).
 
 ```rust
 let webp = tola_webp::encode_rgba(&rgba, width, height, 75)?;
 ```
 
-Takes straight-alpha RGBA8; dimensions `1..=16383`; the buffer must be exactly
-`width * height * 4` bytes; quality `0..=100` (lossy at 100). `tola-image` uses this crate for
-lossy WebP. `encode_rgba_to` writes to a caller-supplied destination and accepts a cancellation
-callback and a worker limit.
-
-For small transparent artwork with a limited opaque palette, the encoder extends nearby colours
-into fully transparent pixels before chroma subsampling. The alpha plane remains exact.
-
-```sh
-cargo test --locked -p tola-webp
-```
-
+- Input: straight-alpha RGBA8 (`width * height * 4` bytes), dimensions `1..=16383`, quality `0..=100`.
+- `encode_rgba_to` writes to a caller buffer with optional cancellation and worker limit.
+- Extends nearby colors into fully transparent pixels before chroma subsampling while keeping alpha exact.

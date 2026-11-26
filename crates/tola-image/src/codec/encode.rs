@@ -18,30 +18,24 @@ const ENCODE_FAILURE: &str = "Tola could not encode the resized image; try anoth
 const PNG_IDAT_BYTES: usize = 64 * 1024;
 
 struct EncodeWriter<'a, W> {
-    destination: W,
-    cancellation: &'a dyn Cancellation,
+    dst: W,
+    cancel: &'a dyn Cancellation,
 }
 
 impl<W: Write> Write for EncodeWriter<'_, W> {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        self.cancellation
-            .ensure_active()
-            .map_err(io::Error::other)?;
-        self.destination.write(bytes)
+        self.cancel.ensure_active().map_err(io::Error::other)?;
+        self.dst.write(bytes)
     }
 
     fn write_vectored(&mut self, chunks: &[IoSlice<'_>]) -> io::Result<usize> {
-        self.cancellation
-            .ensure_active()
-            .map_err(io::Error::other)?;
-        self.destination.write_vectored(chunks)
+        self.cancel.ensure_active().map_err(io::Error::other)?;
+        self.dst.write_vectored(chunks)
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        self.cancellation
-            .ensure_active()
-            .map_err(io::Error::other)?;
-        self.destination.flush()
+        self.cancel.ensure_active().map_err(io::Error::other)?;
+        self.dst.flush()
     }
 }
 
@@ -56,8 +50,8 @@ impl<W: Write> Write for PngOutput<'_, W> {
         if let Some(kind) = self.failure {
             return Err(kind.into());
         }
-        self.writer.write_all(bytes).inspect_err(|error| {
-            self.failure = Some(error.kind());
+        self.writer.write_all(bytes).inspect_err(|err| {
+            self.failure = Some(err.kind());
         })?;
         Ok(bytes.len())
     }
@@ -75,27 +69,23 @@ impl ImageRecipe {
         workers: usize,
         may_have_transparency: bool,
     ) -> u64 {
-        let pixels = u64::from(self.width()) * u64::from(self.height());
-        let transparent = may_have_transparency && self.pixels().background.is_none();
+        let px = u64::from(self.width()) * u64::from(self.height());
+        let alpha = may_have_transparency && self.pixels().background.is_none();
         match self.encoding {
             // The writer and shared output can coexist while the output is published.
-            Encoding::Jpeg { .. } => pixels.saturating_mul(2),
+            Encoding::Jpeg { .. } => px.saturating_mul(2),
             Encoding::Png => {
                 // The stream holds three scanlines. Opaque output also converts one RGB row.
                 let rows = u64::from(self.width()) * 12;
-                let channels = if transparent { 4 } else { 3 };
-                pixels
-                    .saturating_mul(2 * channels)
+                let ch = if alpha { 4 } else { 3 };
+                px.saturating_mul(2 * ch)
                     .saturating_add(rows + PNG_IDAT_BYTES as u64)
             }
             // VP8L also keeps a mutable four-channel transform buffer.
-            Encoding::WebP { quality: None } => pixels.saturating_mul(12),
-            Encoding::WebP { quality: Some(_) } => tola_webp::estimated_scratch_bytes(
-                self.width(),
-                self.height(),
-                workers,
-                transparent,
-            ),
+            Encoding::WebP { quality: None } => px.saturating_mul(12),
+            Encoding::WebP { quality: Some(_) } => {
+                tola_webp::estimated_scratch_bytes(self.width(), self.height(), workers, alpha)
+            }
         }
     }
 }
@@ -109,31 +99,31 @@ impl ResampledPixels {
     pub fn encode(
         &self,
         recipe: &ImageRecipe,
-        cancellation: &dyn Cancellation,
+        cancel: &dyn Cancellation,
     ) -> ImageResult<Arc<[u8]>> {
-        self.encode_bytes(recipe, cancellation, None)
+        self.encode_bytes(recipe, cancel, None)
     }
 
     /// Encode with a maximum worker count, including the calling thread.
     pub fn encode_with_workers(
         &self,
         recipe: &ImageRecipe,
-        cancellation: &dyn Cancellation,
+        cancel: &dyn Cancellation,
         workers: usize,
     ) -> ImageResult<Arc<[u8]>> {
-        self.encode_bytes(recipe, cancellation, Some(workers))
+        self.encode_bytes(recipe, cancel, Some(workers))
     }
 
     fn encode_bytes(
         &self,
         recipe: &ImageRecipe,
-        cancellation: &dyn Cancellation,
+        cancel: &dyn Cancellation,
         workers: Option<usize>,
     ) -> ImageResult<Arc<[u8]>> {
         let mut bytes = Vec::new();
-        self.write_encoded(&mut bytes, recipe, cancellation, workers)?;
+        self.write_encoded(&mut bytes, recipe, cancel, workers)?;
         let encoded = bytes.into();
-        cancellation.ensure_active()?;
+        cancel.ensure_active()?;
         Ok(encoded)
     }
 
@@ -141,31 +131,28 @@ impl ResampledPixels {
     /// Codecs can retain compressed chunks before writing the container.
     pub fn encode_to(
         &self,
-        destination: impl Write,
+        dst: impl Write,
         recipe: &ImageRecipe,
-        cancellation: &dyn Cancellation,
+        cancel: &dyn Cancellation,
     ) -> ImageResult<ImageMetadata> {
-        self.write_encoded(destination, recipe, cancellation, None)
+        self.write_encoded(dst, recipe, cancel, None)
     }
 
     fn write_encoded(
         &self,
-        destination: impl Write,
+        dst: impl Write,
         recipe: &ImageRecipe,
-        cancellation: &dyn Cancellation,
+        cancel: &dyn Cancellation,
         workers: Option<usize>,
     ) -> ImageResult<ImageMetadata> {
-        cancellation.ensure_active()?;
+        cancel.ensure_active()?;
         if recipe.pixels() != self.pixels() {
             return Err(ImageError::unreadable(
                 "the image could not be encoded at this size; try another `width` or `height`",
             ));
         }
-        let mut writer = EncodeWriter {
-            destination,
-            cancellation,
-        };
-        let result = match recipe.encoding {
+        let mut writer = EncodeWriter { dst, cancel };
+        let res = match recipe.encoding {
             Encoding::Jpeg { quality } if !self.has_transparency() => encode_jpeg(
                 &mut writer,
                 self.rgba(),
@@ -174,13 +161,11 @@ impl ResampledPixels {
                 quality,
             ),
             Encoding::Jpeg { .. } => Err(ImageError::unreadable(ENCODE_FAILURE)),
-            Encoding::Png => encode_png(&mut writer, self, cancellation),
-            Encoding::WebP { quality } => {
-                encode_webp(&mut writer, self, quality, workers, cancellation)
-            }
+            Encoding::Png => encode_png(&mut writer, self, cancel),
+            Encoding::WebP { quality } => encode_webp(&mut writer, self, quality, workers, cancel),
         };
-        cancellation.ensure_active()?;
-        result?;
+        cancel.ensure_active()?;
+        res?;
         Ok(ImageMetadata {
             width: recipe.width(),
             height: recipe.height(),
@@ -196,83 +181,83 @@ impl ResampledPixels {
 
 fn encode_webp(
     writer: &mut impl Write,
-    pixels: &ResampledPixels,
-    quality: Option<u8>,
+    px: &ResampledPixels,
+    q: Option<u8>,
     workers: Option<usize>,
-    cancellation: &dyn Cancellation,
+    cancel: &dyn Cancellation,
 ) -> ImageResult<()> {
-    let geometry = pixels.pixels();
-    let Some(quality) = quality else {
+    let geom = px.pixels();
+    let Some(q) = q else {
         return image::codecs::webp::WebPEncoder::new_lossless(writer)
             .write_image(
-                pixels.rgba(),
-                geometry.width(),
-                geometry.height(),
+                px.rgba(),
+                geom.width(),
+                geom.height(),
                 ExtendedColorType::Rgba8,
             )
-            .map_err(|error| match error {
-                image::ImageError::IoError(error) => ImageError::codec(ENCODE_FAILURE, error),
-                error => ImageError::codec(WEBP_ENCODE_FAILURE, error),
+            .map_err(|err| match err {
+                image::ImageError::IoError(err) => ImageError::codec(ENCODE_FAILURE, err),
+                err => ImageError::codec(WEBP_ENCODE_FAILURE, err),
             });
     };
 
-    let mut options = workers.map_or_else(
-        || tola_webp::EncodeOptions::new(quality),
-        |workers| tola_webp::EncodeOptions::with_workers(quality, workers),
+    let mut opts = workers.map_or_else(
+        || tola_webp::EncodeOptions::new(q),
+        |workers| tola_webp::EncodeOptions::with_workers(q, workers),
     );
-    options.has_transparency = Some(pixels.has_transparency());
+    opts.has_transparency = Some(px.has_transparency());
     tola_webp::encode_rgba_to(
-        pixels.rgba(),
-        geometry.width(),
-        geometry.height(),
-        options,
-        &|| cancellation.is_cancelled(),
+        px.rgba(),
+        geom.width(),
+        geom.height(),
+        opts,
+        &|| cancel.is_cancelled(),
         writer,
     )
-    .map_err(|error| match error {
+    .map_err(|err| match err {
         tola_webp::WriteError::Encode(tola_webp::Error::Cancelled) => crate::ImageCancelled.into(),
-        tola_webp::WriteError::Encode(error) => ImageError::codec(WEBP_ENCODE_FAILURE, error),
-        tola_webp::WriteError::Write(error) => ImageError::codec(ENCODE_FAILURE, error),
+        tola_webp::WriteError::Encode(err) => ImageError::codec(WEBP_ENCODE_FAILURE, err),
+        tola_webp::WriteError::Write(err) => ImageError::codec(ENCODE_FAILURE, err),
     })
 }
 
 fn encode_png(
     writer: &mut impl Write,
-    pixels: &ResampledPixels,
-    cancellation: &dyn Cancellation,
+    px: &ResampledPixels,
+    cancel: &dyn Cancellation,
 ) -> ImageResult<()> {
-    let geometry = pixels.pixels();
-    let width = geometry.width();
-    let (color, mut rgb) = if pixels.has_transparency() {
+    let geom = px.pixels();
+    let w = geom.width();
+    let (color, mut rgb) = if px.has_transparency() {
         (png::ColorType::Rgba, Vec::new())
     } else {
-        (png::ColorType::Rgb, zeroed_plane(width as usize * 3)?)
+        (png::ColorType::Rgb, zeroed_plane(w as usize * 3)?)
     };
-    let output = PngOutput {
+    let out = PngOutput {
         writer,
         failure: None,
     };
-    let mut encoder = png::Encoder::new(output, width, geometry.height());
-    encoder.set_color(color);
+    let mut enc = png::Encoder::new(out, w, geom.height());
+    enc.set_color(color);
     // Level 6 is the measured trade: level 9 saved at most 5% and sometimes grew the file,
     // for 1.4–3× the encode time.
-    encoder.set_deflate_compression(png::DeflateCompression::Level(6));
-    encoder.set_filter(png::Filter::Adaptive);
-    let png_error = |error| ImageError::codec(ENCODE_FAILURE, error);
-    let mut writer = encoder.write_header().map_err(png_error)?;
+    enc.set_deflate_compression(png::DeflateCompression::Level(6));
+    enc.set_filter(png::Filter::Adaptive);
+    let png_err = |err| ImageError::codec(ENCODE_FAILURE, err);
+    let mut writer = enc.write_header().map_err(png_err)?;
     let mut stream = writer
         .stream_writer_with_size(PNG_IDAT_BYTES)
-        .map_err(png_error)?;
-    for row in pixels.rgba().chunks_exact(width as usize * 4) {
-        cancellation.ensure_active()?;
+        .map_err(png_err)?;
+    for row in px.rgba().chunks_exact(w as usize * 4) {
+        cancel.ensure_active()?;
         let samples = if color == png::ColorType::Rgb {
-            for (pixel, target) in row
+            for (p, dst) in row
                 .as_chunks::<4>()
                 .0
                 .iter()
                 .zip(rgb.as_chunks_mut::<3>().0)
             {
-                target.copy_from_slice(&pixel[..3]);
+                dst.copy_from_slice(&p[..3]);
             }
             rgb.as_slice()
         } else {
@@ -280,35 +265,25 @@ fn encode_png(
         };
         stream
             .write_all(samples)
-            .map_err(|error| ImageError::codec(ENCODE_FAILURE, error))?;
+            .map_err(|err| ImageError::codec(ENCODE_FAILURE, err))?;
     }
-    stream.finish().map_err(png_error)?;
-    writer.finish().map_err(png_error)
+    stream.finish().map_err(png_err)?;
+    writer.finish().map_err(png_err)
 }
 
 /// Encode one plane as JPEG with half-resolution colour: 4:2:0.
-///
-/// Chroma subsampling is the size/quality trade photographs are made for; coloured text and fine
-/// graphics belong in PNG or WebP.
-fn encode_jpeg(
-    writer: &mut impl Write,
-    pixels: &[u8],
-    width: u32,
-    height: u32,
-    quality: u8,
-) -> ImageResult<()> {
+fn encode_jpeg(writer: &mut impl Write, px: &[u8], w: u32, h: u32, q: u8) -> ImageResult<()> {
     let too_wide = |actual| ImageError::TooLarge {
         limit: SizeLimit::FrameAxis,
         allowed: u64::from(u16::MAX),
         actual,
     };
-    let width = u16::try_from(width).map_err(|_| too_wide(u64::from(width)))?;
-    let height = u16::try_from(height).map_err(|_| too_wide(u64::from(height)))?;
-    let mut encoder = jpeg_encoder::Encoder::new(writer, quality);
-    encoder.set_sampling_factor(jpeg_encoder::SamplingFactor::R_4_2_0);
-    encoder
-        .encode(pixels, width, height, jpeg_encoder::ColorType::Rgba)
-        .map_err(|error| ImageError::codec(ENCODE_FAILURE, error))
+    let w = u16::try_from(w).map_err(|_| too_wide(u64::from(w)))?;
+    let h = u16::try_from(h).map_err(|_| too_wide(u64::from(h)))?;
+    let mut enc = jpeg_encoder::Encoder::new(writer, q);
+    enc.set_sampling_factor(jpeg_encoder::SamplingFactor::R_4_2_0);
+    enc.encode(px, w, h, jpeg_encoder::ColorType::Rgba)
+        .map_err(|err| ImageError::codec(ENCODE_FAILURE, err))
 }
 
 #[cfg(test)]
@@ -321,8 +296,8 @@ mod tests {
     use std::io::Cursor;
 
     #[test]
-    fn cancellation_precedes_encoding_mismatch() {
-        let source = png(
+    fn cancel_before_mismatch() {
+        let src = png(
             &[10, 20, 30, 255],
             1,
             1,
@@ -330,179 +305,146 @@ mod tests {
             None,
             None,
         );
-        let matching = recipe(&source, 1, 1, OutputFormat::Png, None);
-        let mismatched = recipe(&source, 2, 1, OutputFormat::Png, None);
-        let decoded = DecodedSource::open(&source, &NO_CANCELLATION).unwrap();
-        let pixels = decoded.pixels(matching.pixels(), &NO_CANCELLATION).unwrap();
-        let cancellation = || true;
+        let matching = recipe(&src, 1, 1, OutputFormat::Png, None);
+        let mismatched = recipe(&src, 2, 1, OutputFormat::Png, None);
+        let decoded = DecodedSource::open(&src, &NO_CANCELLATION).unwrap();
+        let px = decoded.pixels(matching.pixels(), &NO_CANCELLATION).unwrap();
+        let cancel = || true;
         assert!(matches!(
-            pixels.encode(&mismatched, &cancellation).unwrap_err(),
+            px.encode(&mismatched, &cancel).unwrap_err(),
             crate::ImageError::Cancelled(_)
         ));
     }
 
     #[test]
-    fn lossless_formats_reproduce_their_pixels() {
-        let pixels = [200, 40, 70, 0, 10, 20, 30, 127, 99, 88, 77, 255];
-        let source = png(&pixels, 3, 1, ExtendedColorType::Rgba8, None, None);
-        for format in [OutputFormat::Png, OutputFormat::WebP] {
-            let recipe = recipe(&source, 3, 1, format, None);
-            let first = render(&source, &recipe, &NO_CANCELLATION).unwrap();
-            let second = render(&source, &recipe, &NO_CANCELLATION).unwrap();
-            assert_eq!(first, second);
-            assert_eq!(rgba(&first), pixels);
+    fn lossless_roundtrip_bytes() {
+        let px = [200, 40, 70, 0, 10, 20, 30, 127, 99, 88, 77, 255];
+        let src = png(&px, 3, 1, ExtendedColorType::Rgba8, None, None);
+        for fmt in [OutputFormat::Png, OutputFormat::WebP] {
+            let r = recipe(&src, 3, 1, fmt, None);
+            let a = render(&src, &r, &NO_CANCELLATION).unwrap();
+            let b = render(&src, &r, &NO_CANCELLATION).unwrap();
+            assert_eq!(a, b);
+            assert_eq!(rgba(&a), px);
         }
     }
 
-    /// Lossy WebP encodes alpha without loss, so only its colour may move.
     #[test]
-    fn lossy_webp_preserves_alpha() {
-        let pixels = [200, 40, 70, 0, 10, 20, 30, 127, 99, 88, 77, 255];
-        let source = png(&pixels, 3, 1, ExtendedColorType::Rgba8, None, None);
-        let lossy = recipe(&source, 3, 1, OutputFormat::WebP, Some(0));
-        let bytes = render(&source, &lossy, &NO_CANCELLATION).unwrap();
+    fn lossy_webp_keeps_alpha() {
+        let px = [200, 40, 70, 0, 10, 20, 30, 127, 99, 88, 77, 255];
+        let src = png(&px, 3, 1, ExtendedColorType::Rgba8, None, None);
+        let lossy = recipe(&src, 3, 1, OutputFormat::WebP, Some(0));
+        let bytes = render(&src, &lossy, &NO_CANCELLATION).unwrap();
         assert!(inspect(&bytes).unwrap().is_lossy);
         assert_eq!(
             rgba(&bytes)
                 .as_chunks::<4>()
                 .0
                 .iter()
-                .map(|pixel| pixel[3])
+                .map(|p| p[3])
                 .collect::<Vec<_>>(),
             [0, 127, 255]
         );
     }
 
-    /// The quality knob is the trade it is documented to be: a lower quality publishes fewer
-    /// bytes that stand further from the source. Either half alone would pass while the knob did
-    /// nothing, so one case proves both.
     #[test]
-    fn jpeg_quality_trades_size_for_fidelity() {
+    fn jpeg_quality_size_fidelity() {
         let side = 64u32;
-        let pixels: Vec<u8> = (0..side * side)
-            .flat_map(|index| {
-                let x = (index % side) as u8;
-                let y = (index / side) as u8;
+        let px: Vec<u8> = (0..side * side)
+            .flat_map(|i| {
+                let x = (i % side) as u8;
+                let y = (i / side) as u8;
                 [x.wrapping_mul(7), y.wrapping_mul(11), x ^ y]
             })
             .collect();
-        // Opaque so JPEG may encode it at all.
-        let source = png(&pixels, side, side, ExtendedColorType::Rgb8, None, None);
-        let original = rgba(&source);
+        let src = png(&px, side, side, ExtendedColorType::Rgb8, None, None);
+        let orig = rgba(&src);
         let mut sizes = Vec::new();
-        let mut deviations = Vec::new();
-        for quality in [10u8, 90] {
-            let recipe = recipe(&source, side, side, OutputFormat::Jpeg, Some(quality));
-            let encoded = render(&source, &recipe, &NO_CANCELLATION).unwrap();
-            sizes.push(encoded.len());
-            let decoded = image::DynamicImage::from_decoder(
-                image::codecs::jpeg::JpegDecoder::new(Cursor::new(&encoded[..])).unwrap(),
+        let mut devs = Vec::new();
+        for q in [10u8, 90] {
+            let r = recipe(&src, side, side, OutputFormat::Jpeg, Some(q));
+            let enc = render(&src, &r, &NO_CANCELLATION).unwrap();
+            sizes.push(enc.len());
+            let dec = image::DynamicImage::from_decoder(
+                image::codecs::jpeg::JpegDecoder::new(Cursor::new(&enc[..])).unwrap(),
             )
             .unwrap()
             .to_rgb8();
-            let deviation: u64 = original
+            let dev: u64 = orig
                 .as_chunks::<4>()
                 .0
                 .iter()
-                .zip(decoded.pixels())
-                .map(|(source, decoded)| {
-                    u64::from(source[0].abs_diff(decoded[0]))
-                        + u64::from(source[1].abs_diff(decoded[1]))
-                        + u64::from(source[2].abs_diff(decoded[2]))
+                .zip(dec.pixels())
+                .map(|(s, d)| {
+                    u64::from(s[0].abs_diff(d[0]))
+                        + u64::from(s[1].abs_diff(d[1]))
+                        + u64::from(s[2].abs_diff(d[2]))
                 })
                 .sum();
-            deviations.push(deviation);
+            devs.push(dev);
         }
-        assert!(
-            sizes[0] < sizes[1],
-            "quality 10 published {} bytes and quality 90 published {}",
-            sizes[0],
-            sizes[1]
-        );
-        assert!(
-            deviations[0] > deviations[1],
-            "quality 10 deviated by {} and quality 90 by {}",
-            deviations[0],
-            deviations[1]
-        );
+        assert!(sizes[0] < sizes[1], "{} vs {}", sizes[0], sizes[1]);
+        assert!(devs[0] > devs[1], "{} vs {}", devs[0], devs[1]);
     }
 
-    /// JPEG spends its bytes on luma: colour is subsampled at half resolution, 4:2:0.
     #[test]
-    fn jpeg_subsamples_chroma() {
+    fn jpeg_subsamples_420() {
         let side = 16u32;
-        let pixels: Vec<u8> = (0..side * side)
-            .flat_map(|index| {
-                let x = (index % side) as u8;
-                let y = (index / side) as u8;
+        let px: Vec<u8> = (0..side * side)
+            .flat_map(|i| {
+                let x = (i % side) as u8;
+                let y = (i / side) as u8;
                 [x.wrapping_mul(7), y.wrapping_mul(11), x ^ y]
             })
             .collect();
-        let source = png(&pixels, side, side, ExtendedColorType::Rgb8, None, None);
-        let encoded = render(
-            &source,
-            &recipe(&source, side, side, OutputFormat::Jpeg, Some(80)),
+        let src = png(&px, side, side, ExtendedColorType::Rgb8, None, None);
+        let enc = render(
+            &src,
+            &recipe(&src, side, side, OutputFormat::Jpeg, Some(80)),
             &NO_CANCELLATION,
         )
         .unwrap();
-        assert_eq!(jpeg_sampling_factors(&encoded), [0x22, 0x11, 0x11]);
+        assert_eq!(jpeg_sampling_factors(&enc), [0x22, 0x11, 0x11]);
     }
 
-    /// The sampling factors of a baseline JPEG's three components, from its frame header.
     fn jpeg_sampling_factors(jpeg: &[u8]) -> [u8; 3] {
-        let mut offset = 2;
-        while offset + 4 <= jpeg.len() {
-            assert_eq!(jpeg[offset], 0xFF, "every segment starts with a marker");
-            if jpeg[offset + 1] == 0xC0 {
-                assert_eq!(jpeg[offset + 9], 3, "a colour JPEG has three components");
-                return [jpeg[offset + 11], jpeg[offset + 14], jpeg[offset + 17]];
+        let mut off = 2;
+        while off + 4 <= jpeg.len() {
+            assert_eq!(jpeg[off], 0xFF, "every segment starts with a marker");
+            if jpeg[off + 1] == 0xC0 {
+                assert_eq!(jpeg[off + 9], 3, "a colour JPEG has three components");
+                return [jpeg[off + 11], jpeg[off + 14], jpeg[off + 17]];
             }
-            let length = usize::from(u16::from_be_bytes([jpeg[offset + 2], jpeg[offset + 3]]));
-            offset += 2 + length;
+            let len = usize::from(u16::from_be_bytes([jpeg[off + 2], jpeg[off + 3]]));
+            off += 2 + len;
         }
         panic!("the JPEG carries no frame header");
     }
 
-    /// Every encoder this crate writes is read back by its own scanner, and an unstated format
-    /// follows what that scanner reports. A lossy source without transparency is re-encoded as
-    /// JPEG; anything else stays lossless, so losing detail or transparency takes an explicit
-    /// request.
     #[test]
-    fn unstated_format_follows_the_encoder() {
-        let samples = |channels: usize| -> Vec<u8> {
+    fn auto_format_follows_encoder() {
+        let samples = |ch: usize| -> Vec<u8> {
             (0..8 * 8)
-                .flat_map(|index| {
-                    let x = (index % 8) as u8;
-                    let y = (index / 8) as u8;
-                    let color = [
+                .flat_map(|i| {
+                    let x = (i % 8) as u8;
+                    let y = (i / 8) as u8;
+                    let c = [
                         x.wrapping_mul(23),
                         y.wrapping_mul(37),
                         x ^ y,
                         y.wrapping_mul(9),
                     ];
-                    color[..channels].to_vec()
+                    c[..ch].to_vec()
                 })
                 .collect()
         };
         let opaque = png(&samples(3), 8, 8, ExtendedColorType::Rgb8, None, None);
-        let transparent = png(&samples(4), 8, 8, ExtendedColorType::Rgba8, None, None);
-        for (source, format, quality, lossy, resolved) in [
+        let alpha = png(&samples(4), 8, 8, ExtendedColorType::Rgba8, None, None);
+        for (src, fmt, q, lossy, resolved) in [
             (&opaque, OutputFormat::Png, None, false, ImageFormat::Png),
-            (
-                &transparent,
-                OutputFormat::Png,
-                None,
-                false,
-                ImageFormat::Png,
-            ),
+            (&alpha, OutputFormat::Png, None, false, ImageFormat::Png),
             (&opaque, OutputFormat::WebP, None, false, ImageFormat::Png),
-            (
-                &transparent,
-                OutputFormat::WebP,
-                None,
-                false,
-                ImageFormat::Png,
-            ),
+            (&alpha, OutputFormat::WebP, None, false, ImageFormat::Png),
             (
                 &opaque,
                 OutputFormat::WebP,
@@ -510,13 +452,7 @@ mod tests {
                 true,
                 ImageFormat::Jpeg,
             ),
-            (
-                &transparent,
-                OutputFormat::WebP,
-                Some(80),
-                true,
-                ImageFormat::Png,
-            ),
+            (&alpha, OutputFormat::WebP, Some(80), true, ImageFormat::Png),
             (
                 &opaque,
                 OutputFormat::Jpeg,
@@ -525,19 +461,11 @@ mod tests {
                 ImageFormat::Jpeg,
             ),
         ] {
-            let encoded = render(
-                source,
-                &recipe(source, 8, 8, format, quality),
-                &NO_CANCELLATION,
-            )
-            .unwrap();
-            let metadata = inspect(&encoded).unwrap();
-            assert_eq!(
-                metadata.is_lossy, lossy,
-                "{format:?} at {quality:?} reports its own lossiness"
-            );
+            let enc = render(src, &recipe(src, 8, 8, fmt, q), &NO_CANCELLATION).unwrap();
+            let meta = inspect(&enc).unwrap();
+            assert_eq!(meta.is_lossy, lossy, "{fmt:?} at {q:?}");
             let settled = ImageRecipe::resolve(
-                &metadata,
+                &meta,
                 ResizeOptions {
                     width: Some(4),
                     height: Some(4),
@@ -546,30 +474,26 @@ mod tests {
                 },
             )
             .unwrap();
-            assert_eq!(
-                settled.format(),
-                resolved,
-                "an unstated format follows {format:?} at {quality:?}"
-            );
+            assert_eq!(settled.format(), resolved, "{fmt:?} at {q:?}");
         }
     }
 
     #[test]
-    fn opaque_pixels_survive_lossless_encoding() {
-        let pixels: Vec<u8> = (0..12)
-            .flat_map(|value| [value * 7, value * 3, value * 11, u8::MAX])
+    fn opaque_lossless_roundtrip() {
+        let px: Vec<u8> = (0..12)
+            .flat_map(|v| [v * 7, v * 3, v * 11, u8::MAX])
             .collect();
-        let source = png(&pixels, 4, 3, ExtendedColorType::Rgba8, None, None);
-        let expected = rgba(&source);
-        for format in [OutputFormat::Png, OutputFormat::WebP] {
-            let recipe = recipe(&source, 4, 3, format, None);
-            let encoded = render(&source, &recipe, &NO_CANCELLATION).unwrap();
-            assert_eq!(rgba(&encoded), expected, "{format:?} changed opaque pixels");
+        let src = png(&px, 4, 3, ExtendedColorType::Rgba8, None, None);
+        let expected = rgba(&src);
+        for fmt in [OutputFormat::Png, OutputFormat::WebP] {
+            let r = recipe(&src, 4, 3, fmt, None);
+            let enc = render(&src, &r, &NO_CANCELLATION).unwrap();
+            assert_eq!(rgba(&enc), expected, "{fmt:?} changed opaque pixels");
         }
     }
 
     #[test]
-    fn png_reports_failure_at_the_last_idat() {
+    fn png_last_idat_error() {
         struct FailOnce(Option<usize>);
 
         impl Write for FailOnce {
@@ -579,10 +503,10 @@ mod tests {
                         self.0 = None;
                         Err(io::ErrorKind::BrokenPipe.into())
                     }
-                    Some(remaining) => {
-                        let accepted = bytes.len().min(remaining);
-                        self.0 = Some(remaining - accepted);
-                        Ok(accepted)
+                    Some(rem) => {
+                        let n = bytes.len().min(rem);
+                        self.0 = Some(rem - n);
+                        Ok(n)
                     }
                     None => Ok(bytes.len()),
                 }
@@ -593,46 +517,40 @@ mod tests {
             }
         }
 
-        let source = png(&[10, 20, 30], 1, 1, ExtendedColorType::Rgb8, None, None);
-        let recipe = recipe(&source, 1, 1, OutputFormat::Png, None);
-        let pixels = DecodedSource::open(&source, &NO_CANCELLATION)
+        let src = png(&[10, 20, 30], 1, 1, ExtendedColorType::Rgb8, None, None);
+        let r = recipe(&src, 1, 1, OutputFormat::Png, None);
+        let px = DecodedSource::open(&src, &NO_CANCELLATION)
             .unwrap()
-            .into_pixels(recipe.pixels(), &NO_CANCELLATION)
+            .into_pixels(r.pixels(), &NO_CANCELLATION)
             .unwrap();
-        let encoded = pixels.encode(&recipe, &NO_CANCELLATION).unwrap();
-        let mut offset = 8;
+        let enc = px.encode(&r, &NO_CANCELLATION).unwrap();
+        let mut off = 8;
         let mut last_idat_crc = None;
-        while offset < encoded.len() {
-            let len = u32::from_be_bytes(encoded[offset..][..4].try_into().unwrap()) as usize;
-            let crc = offset + 8 + len;
-            if &encoded[offset + 4..][..4] == b"IDAT" {
+        while off < enc.len() {
+            let len = u32::from_be_bytes(enc[off..][..4].try_into().unwrap()) as usize;
+            let crc = off + 8 + len;
+            if &enc[off + 4..][..4] == b"IDAT" {
                 last_idat_crc = Some(crc);
             }
-            offset = crc + 4;
+            off = crc + 4;
         }
 
-        let mut destination = FailOnce(last_idat_crc);
-        assert!(
-            pixels
-                .encode_to(&mut destination, &recipe, &NO_CANCELLATION)
-                .is_err()
-        );
-        assert!(destination.0.is_none());
+        let mut dst = FailOnce(last_idat_crc);
+        assert!(px.encode_to(&mut dst, &r, &NO_CANCELLATION).is_err());
+        assert!(dst.0.is_none());
     }
 
     #[test]
-    fn one_resample_serves_every_encoding() {
-        let pixels: Vec<u8> = (0..16)
-            .flat_map(|value| [value * 5, value, value * 3, u8::MAX])
-            .collect();
-        let source = png(&pixels, 4, 4, ExtendedColorType::Rgba8, None, None);
-        let metadata = inspect(&source).unwrap();
-        let resolve = |width: u32, height: u32, format: OutputFormat, quality: Option<u8>| {
+    fn shared_resample_multi_encode() {
+        let px: Vec<u8> = (0..16).flat_map(|v| [v * 5, v, v * 3, u8::MAX]).collect();
+        let src = png(&px, 4, 4, ExtendedColorType::Rgba8, None, None);
+        let meta = inspect(&src).unwrap();
+        let resolve = |w: u32, h: u32, format: OutputFormat, quality: Option<u8>| {
             ImageRecipe::resolve(
-                &metadata,
+                &meta,
                 ResizeOptions {
-                    width: Some(width),
-                    height: Some(height),
+                    width: Some(w),
+                    height: Some(h),
                     operation: ResizeOperation::Scale,
                     format,
                     quality,
@@ -648,33 +566,25 @@ mod tests {
         ];
         let alone: Vec<_> = recipes
             .iter()
-            .map(|recipe| render(&source, recipe, &NO_CANCELLATION).unwrap())
+            .map(|r| render(&src, r, &NO_CANCELLATION).unwrap())
             .collect();
 
-        let decoded = DecodedSource::open(&source, &NO_CANCELLATION).unwrap();
+        let decoded = DecodedSource::open(&src, &NO_CANCELLATION).unwrap();
         let resampled = decoded
             .pixels(recipes[0].pixels(), &NO_CANCELLATION)
             .unwrap();
-        for (recipe, expected) in recipes.iter().zip(&alone) {
-            assert_eq!(
-                &resampled.encode(recipe, &NO_CANCELLATION).unwrap(),
-                expected
-            );
+        for (r, expected) in recipes.iter().zip(&alone) {
+            assert_eq!(&resampled.encode(r, &NO_CANCELLATION).unwrap(), expected);
         }
         assert!(
             resampled
                 .encode(&resolve(3, 2, OutputFormat::Png, None), &NO_CANCELLATION)
                 .is_err()
         );
-        // A length check alone cannot refuse the same pixels in another shape: 2x2 and 4x1 hold
-        // the same count, so only the pixels' own geometry can refuse a derivative that would be
-        // encoded from a mismatch.
+        // 2x2 and 4x1 have equal pixel counts, so shape mismatch must still fail.
         let reshaped = resolve(4, 1, OutputFormat::Png, None);
-        let (resampled_pixels, reshaped_pixels) = (resampled.pixels(), reshaped.pixels());
-        assert_eq!(
-            resampled_pixels.width() * resampled_pixels.height(),
-            reshaped_pixels.width() * reshaped_pixels.height()
-        );
+        let (a, b) = (resampled.pixels(), reshaped.pixels());
+        assert_eq!(a.width() * a.height(), b.width() * b.height());
         assert!(resampled.encode(&reshaped, &NO_CANCELLATION).is_err());
     }
 }

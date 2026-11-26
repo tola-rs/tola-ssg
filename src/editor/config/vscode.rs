@@ -419,36 +419,32 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// A merge keeps the author's unrelated settings and their comments.
+    fn selected_directory() -> (tempfile::TempDir, std::path::PathBuf, EditorDirectory) {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg_path = dir.path().join("selected config.toml");
+        std::fs::write(&cfg_path, "").unwrap();
+        let loaded = loaded_config(Some(&cfg_path));
+        let editor_dir = EditorDirectory::from_config(loaded.config()).unwrap();
+        (dir, cfg_path, editor_dir)
+    }
+
     #[test]
-    fn merge_preserves_author_comments() {
-        let (root, _config_path, directory) = selected_directory();
-        let source = "{\n \"editor.fontSize\":14 // keep\n}\n";
-        let merged = merge(Some(source), &directory, false).unwrap();
+    fn merge_keeps_comments() {
+        let (_dir, _cfg, editor_dir) = selected_directory();
+        let src = "{\n \"editor.fontSize\":14 // keep\n}\n";
+        let merged = merge(Some(src), &editor_dir, false).unwrap();
         let settings: Value = jsonc_value(&merged).unwrap();
         assert_eq!(settings["editor.fontSize"], 14);
         assert!(merged.contains("14, // keep\n"));
-        assert_eq!(merge(Some(&merged), &directory, false).unwrap(), merged);
-        drop(root);
-    }
-
-    /// A site whose configuration was selected, and the file that selected it.
-    fn selected_directory() -> (tempfile::TempDir, std::path::PathBuf, EditorDirectory) {
-        let root = tempfile::tempdir().unwrap();
-        let config_path = root.path().join("selected config.toml");
-        std::fs::write(&config_path, "").unwrap();
-        let loaded = loaded_config(Some(&config_path));
-        let directory = EditorDirectory::from_config(loaded.config()).unwrap();
-        (root, config_path, directory)
+        assert_eq!(merge(Some(&merged), &editor_dir, false).unwrap(), merged);
     }
 
     #[test]
-    fn selected_config_keeps_author_settings() {
-        let (_root, _config_path, directory) = selected_directory();
-        let source =
+    fn selected_config_keeps_settings() {
+        let (_dir, _cfg, editor_dir) = selected_directory();
+        let src =
             "{\n // a server the author installed\n \"other.serverPath\": \"/custom/other\"\n}";
-
-        let merged = merge(Some(source), &directory, false).unwrap();
+        let merged = merge(Some(src), &editor_dir, false).unwrap();
         let settings: Value = jsonc_value(&merged).unwrap();
 
         assert_eq!(settings["other.serverPath"], "/custom/other");
@@ -457,8 +453,8 @@ mod tests {
     }
 
     #[test]
-    fn invalid_settings_are_refused() {
-        for source in [
+    fn invalid_settings_rejected() {
+        for src in [
             r#"{"editor.fontSize": banana}"#,
             r#"{"editor.custom": [,]}"#,
             r#"{"editor.custom": [1,,]}"#,
@@ -467,41 +463,40 @@ mod tests {
             r#"{"editor.custom": 1 2}"#,
         ] {
             assert!(
-                merge(Some(source), &editor_directory("."), false).is_err(),
-                "{source}"
+                merge(Some(src), &editor_directory("."), false).is_err(),
+                "{src}"
             );
         }
     }
 
     #[test]
-    fn conflicting_config_path_is_refused() {
-        let (root, _config_path, directory) = selected_directory();
+    fn conflicting_config_rejected() {
+        let (dir, _cfg, editor_dir) = selected_directory();
         let conflict = format!(
             "{{\"tola.configPath\": {}}}",
-            json!(root.path().join("other.toml"))
+            json!(dir.path().join("other.toml"))
         );
-
-        assert!(merge(Some(&conflict), &directory, false).is_err());
+        assert!(merge(Some(&conflict), &editor_dir, false).is_err());
     }
 
     #[test]
-    fn nushell_launcher_migrates_legacy_settings() {
-        let (_root, _config_path, directory) = selected_directory();
-        let source = r#"{
+    fn nu_launcher_migrates_legacy() {
+        let (_dir, _cfg, editor_dir) = selected_directory();
+        let src = r#"{
   "tola.nu.enabled": true, // one language service
   "nushellLanguageServer.nushellExecutablePath": "tola nu --lsp"
 }"#;
-        let merged = merge(Some(source), &directory, true).unwrap();
+        let merged = merge(Some(src), &editor_dir, true).unwrap();
         let settings = jsonc_value(&merged).unwrap();
         assert_eq!(settings[TOLA_NU], false);
         assert_eq!(
             settings[NUSHELL_PATH],
-            serde_json::json!(directory.root().join(nu_launcher()))
+            serde_json::json!(editor_dir.root().join(nu_launcher()))
         );
         assert!(merged.contains("// one language service"));
-        assert_eq!(merge(Some(&merged), &directory, true).unwrap(), merged);
+        assert_eq!(merge(Some(&merged), &editor_dir, true).unwrap(), merged);
 
         let custom = r#"{"nushellLanguageServer.nushellExecutablePath": "/custom/nu"}"#;
-        assert!(merge(Some(custom), &directory, true).is_err());
+        assert!(merge(Some(custom), &editor_dir, true).is_err());
     }
 }

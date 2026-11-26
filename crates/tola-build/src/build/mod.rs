@@ -22,7 +22,7 @@ pub use lock::{SiteBuildGuard, SiteBuildLock, SiteBuildLockError};
 pub use pipeline::build_site;
 pub use report::BuildReport;
 pub use revision::{
-    CheckedRevision, RevisionCheck, SiteBuild, UncheckedRevision, WriteOutcome, write_site,
+    CheckedRevision, PublishSummary, RevisionCheck, SiteBuild, UncheckedRevision, write_site,
 };
 /// Whether a build attempt checks the site's internal references.
 ///
@@ -45,7 +45,7 @@ pub(crate) mod tests {
 
     use anyhow::Result;
 
-    use crate::config::ResolvedSiteConfig;
+    use crate::config::SiteConfig;
 
     use super::pipeline::{BuildAttemptProducers, build_site_inner};
     use super::{
@@ -168,13 +168,13 @@ pub(crate) mod tests {
     }
 
     pub(super) fn build_site_with_host(
-        config: &ResolvedSiteConfig,
+        config: &SiteConfig,
         host: &crate::compiler::SiteHost,
         mode: BuildMode,
         producers: &mut BuildAttemptProducers,
     ) -> Result<SiteBuild> {
         let bundle = producers.cancellation.bundle_cancellation();
-        let site = crate::modules::prepared::prepare_site_with_bundle(
+        let site = crate::modules::site::prepare_site_with_bundle(
             config,
             producers.resources.input_mode(),
             &bundle,
@@ -210,20 +210,20 @@ pub(crate) mod tests {
 
     /// Load a resolved config for the conventional `site.typ`/`content` layout
     /// under `root`.
-    pub(super) fn site_config(root: &std::path::Path) -> ResolvedSiteConfig {
+    pub(super) fn site_config(root: &std::path::Path) -> SiteConfig {
         site_config_from(root, "")
     }
 
     /// Like [`site_config`], with `source` as the site's configuration document.
-    pub(super) fn site_config_from(root: &std::path::Path, source: &str) -> ResolvedSiteConfig {
+    pub(super) fn site_config_from(root: &std::path::Path, source: &str) -> SiteConfig {
         std::fs::create_dir_all(root.join("content")).unwrap();
         let mut config = crate::config::tests::load_test_config(root, source);
         config.build.entry = root.join("site.typ");
-        config.build.content_dir = config.get_root().join("content");
+        config.build.content_dir = config.root().join("content");
         config
     }
 
-    pub(super) fn build_and_publish(config: &ResolvedSiteConfig) -> Result<SiteBuild> {
+    pub(super) fn build_and_publish(config: &SiteConfig) -> Result<SiteBuild> {
         let build = build_site(config, BuildMode::Production)?;
         write_site(&build)?;
         Ok(build)

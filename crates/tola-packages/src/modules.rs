@@ -1,4 +1,4 @@
-//! Native access to the module records supplied by the build host.
+//! Native access to module records supplied by the build host.
 
 use typst::diag::{SourceResult, bail};
 use typst::engine::Engine;
@@ -7,8 +7,8 @@ use typst::syntax::{FileId, Span, VirtualRoot};
 
 fn caller_alias(id: FileId) -> Option<String> {
     match id.root() {
-        VirtualRoot::Package(package) if package.namespace.as_str() == "tola-modules" => {
-            Some(package.name.to_string())
+        VirtualRoot::Package(pkg) if pkg.namespace.as_str() == "tola-modules" => {
+            Some(pkg.name.to_string())
         }
         _ => None,
     }
@@ -21,14 +21,14 @@ fn lookup(engine: &Engine, name: &str, span: Span) -> SourceResult<Dict> {
             "Tola could not read module records for this compilation"
         );
     };
-    let Ok(value) = modules.get(name) else {
+    let Ok(val) = modules.get(name) else {
         bail!(
             span,
             "module `{name}` is not configured for this compilation"
         );
     };
-    match value {
-        Value::Dict(record) => Ok(record.clone()),
+    match val {
+        Value::Dict(dict) => Ok(dict.clone()),
         _ => bail!(span, "Tola received an invalid module record"),
     }
 }
@@ -38,7 +38,7 @@ pub(super) fn get_module(
     engine: &mut Engine,
     args: &mut Args,
     span: Span,
-    /// The configured alias. Inside an `@tola-modules` package, omit it to use the current instance.
+    /// Configured alias; omit inside `@tola-modules/*` to use the calling instance.
     #[external]
     #[default]
     name: Str,
@@ -66,11 +66,11 @@ mod tests {
     use typst::syntax::{RootedPath, VirtualPath};
 
     #[test]
-    fn caller_is_the_public_module_alias_only() {
+    fn caller_alias_matches_module_pkg() {
         let id = |root| FileId::new(RootedPath::new(root, VirtualPath::new("/lib.typ").unwrap()));
-        let package = "@tola-modules/notes:0.0.0".parse().unwrap();
+        let pkg = "@tola-modules/notes:0.0.0".parse().unwrap();
         assert_eq!(
-            caller_alias(id(VirtualRoot::Package(package))),
+            caller_alias(id(VirtualRoot::Package(pkg))),
             Some("notes".into())
         );
         let builtin = "@tola/source:0.0.0".parse().unwrap();

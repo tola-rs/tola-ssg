@@ -1,7 +1,9 @@
-//! Read-only help pages assembled from configuration and packages.
+//! Assemble typed `HelpPage` and `HelpCatalog` values from code schemas and `.typ` docs.
 
-use anyhow::Result;
+use std::sync::LazyLock;
 
+use anyhow::{Result, bail};
+use tola_build::config::SiteConfigSchema;
 use tola_build::config::section::{
     AssetsConfig, FontsConfig, FormatterConfig, IconsConfig, SiteSectionConfig, TypstSectionConfig,
     VendorConfig,
@@ -11,13 +13,17 @@ use tola_build::config::section::{
     },
 };
 use tola_diagnostic::{Diagnostic, DiagnosticCode, DiagnosticError, Severity};
-use tola_packages::{ExportDeclaration, RelatedTarget, Signature};
+use tola_packages::{ExportDeclaration, Signature};
 
-use super::data::{Export, Key, Method, Parameter, ReferenceLink, Signature as ReferenceSignature};
-use super::documentation::Documentation;
+use super::docs;
+use super::language::HelpLanguage;
+use super::markup::Markup;
+use super::model::{
+    CategoryEntry, ConfigChild, ConfigKey, ConfigPage, HelpCatalog, HelpCategory, HelpPage,
+    IndexEntry, IndexPage, LinkTarget, OverviewPage, PackageExport, PackageMethod, PackagePage,
+    PageId, Parameter, RelatedItem,
+};
 use crate::config::{DevConfig, DiagnosticsConfig, ServerConfig};
-use crate::help::model::{Anchor, HelpCategory, HelpPage, LinkTarget, PageId, anchor};
-use crate::i18n::{self, CONFIG_KEYS, CONFIG_USAGE, HelpLanguage, Translation};
 
 struct ConfigTable {
     section: &'static str,
@@ -26,7 +32,6 @@ struct ConfigTable {
 }
 
 impl ConfigTable {
-    /// One table declared as `[section]`.
     const fn new(section: &'static str) -> Self {
         Self {
             section,
@@ -35,7 +40,6 @@ impl ConfigTable {
         }
     }
 
-    /// One table declared as `[[section]]`.
     const fn new_array(section: &'static str) -> Self {
         Self {
             section,
@@ -44,7 +48,6 @@ impl ConfigTable {
         }
     }
 
-    /// One top-level key, rather than a TOML table.
     const fn new_key(section: &'static str) -> Self {
         Self {
             section,
@@ -87,6 +90,39 @@ const TABLES: &[ConfigTable] = &[
     ConfigTable::new(DiagnosticsConfig::TEMPLATE_SECTION),
 ];
 
+static DEFAULT_CONFIG: LazyLock<serde_json::Value> = LazyLock::new(|| {
+    let mut root = serde_json::to_value(SiteConfigSchema::default())
+        .expect("SiteConfigSchema::default must serialize");
+    if let serde_json::Value::Object(map) = &mut root {
+        map.insert(
+            ServerConfig::TEMPLATE_SECTION.to_owned(),
+            serde_json::to_value(ServerConfig::default())
+                .expect("ServerConfig::default must serialize"),
+        );
+        map.insert(
+            DevConfig::TEMPLATE_SECTION.to_owned(),
+            serde_json::to_value(DevConfig::default()).expect("DevConfig::default must serialize"),
+        );
+        map.insert(
+            DiagnosticsConfig::TEMPLATE_SECTION.to_owned(),
+            serde_json::to_value(DiagnosticsConfig::default())
+                .expect("DiagnosticsConfig::default must serialize"),
+        );
+    }
+    root
+});
+
+fn default_value(path: &str) -> Option<serde_json::Value> {
+    let mut current = &*DEFAULT_CONFIG;
+    for segment in path.split('.') {
+        current = current.get(segment)?;
+    }
+    if current.is_null() {
+        return None;
+    }
+    Some(current.clone())
+}
+
 fn config_table(section: &str) -> Option<&'static ConfigTable> {
     TABLES.iter().find(|table| table.section == section)
 }
@@ -94,6 +130,12 @@ fn config_table(section: &str) -> Option<&'static ConfigTable> {
 pub(super) fn config_section(selector: &str) -> Option<&'static str> {
     let table = config_table(selector.trim_matches(['[', ']']))?;
     (selector == table.header()).then_some(table.section)
+}
+
+pub(crate) fn table_header(section: &str) -> String {
+    config_table(section)
+        .map(ConfigTable::header)
+        .unwrap_or_else(|| format!("[{section}]"))
 }
 
 pub(crate) fn request(targets: &[String]) -> Result<LinkTarget> {
@@ -111,278 +153,487 @@ pub(crate) fn request(targets: &[String]) -> Result<LinkTarget> {
     })
 }
 
+pub(crate) fn page_for_target(target: &LinkTarget, language: HelpLanguage) -> Result<HelpPage> {
+    match target {
+        LinkTarget::Page(id) => page_of(id, language),
+        LinkTarget::PageAnchor(PageId::Script { name }, anchor) => Ok(HelpPage::Script(
+            super::scripts::page(name, Some(anchor.as_str()), language)?,
+        )),
+        LinkTarget::PageAnchor(id, _) => page_of(id, language),
+        LinkTarget::External(uri) => bail!("`{uri}` is an external URL, not a help page"),
+    }
+}
+
 pub(crate) fn page_of(id: &PageId, language: HelpLanguage) -> Result<HelpPage> {
     match id {
-        PageId::Overview => Ok(overview_page(language)),
-        PageId::Index(category) => Ok(index_page(*category, language)),
-        PageId::Config { section } => table_page(section, language),
-        PageId::Package { name } => package_page(name, &[], language),
-        PageId::PackageSelection { name, exports } => package_page(name, exports, language),
-        PageId::Script { name } => super::scripts::page(id.clone(), name, language),
-    }
-}
-
-/// Link only the token so surrounding command quotes remain copyable.
-fn cross_reference(token: &str, target: &LinkTarget) -> String {
-    format!("[`{token}`]({})", target.uri())
-}
-
-/// One named token, linked to the page it names when the index can resolve it; a mention the
-/// index cannot resolve stays plain text, because the index outlives a rename.
-fn named(token: &str, target: Option<LinkTarget>) -> String {
-    match target {
-        Some(target) => cross_reference(token, &target),
-        None => format!("`{token}`"),
-    }
-}
-
-/// What an export's own section calls it.
-fn export_kind(export: &tola_packages::ExportDocumentation) -> &'static str {
-    if export.declaration.is_function() {
-        "function"
-    } else {
-        "value"
-    }
-}
-
-/// The anchor of an export's own section, on the page that renders it.
-fn export_anchor(export: &tola_packages::ExportDocumentation) -> Anchor {
-    anchor(&format!("{} - {}", export.name, export_kind(export)))
-}
-
-pub(crate) fn render(markdown: &str, columns: Option<usize>, color: bool) -> String {
-    let mut text = Documentation::new(columns, color).render(markdown);
-    if !text.ends_with('\n') {
-        text.push('\n');
-    }
-    text
-}
-
-fn overview_page(language: HelpLanguage) -> HelpPage {
-    let id = PageId::Overview;
-    let mut markdown = format!("# Tola help\n\n{}\n", i18n::overview(language));
-    for (title, category) in [
-        ("Configuration", HelpCategory::Config),
-        ("Packages", HelpCategory::Packages),
-    ] {
-        let linked = cross_reference(title, &LinkTarget::Page(PageId::Index(category)));
-        markdown.push_str(&format!("\n- {linked}\n"));
-    }
-    markdown.push_str("\n## Examples\n\n");
-    for (name, exports) in [
-        ("source", &["tola-meta", "all-sources", "parse-sources"][..]),
-        (
-            "address",
-            &["output-of", "output-url", "route-url", "asset-url"][..],
-        ),
-        ("document", &["headings", "references"][..]),
-        ("diagnostic", &["report"][..]),
-        ("head", &["head-metadata", "canonical"][..]),
-        ("feed", &["feed"][..]),
-        ("sitemap", &["sitemap"][..]),
-    ] {
-        let command = format!("tola help \"@tola/{name}\" {}", exports.join(" "));
-        markdown.push_str(&format!(
-            "- {}\n",
-            named(&command, package_target(name, exports))
-        ));
-    }
-    markdown.push_str(&format!(
-        "- {}\n",
-        named("tola help \"[build]\"", table_target("build"))
-    ));
-    markdown.push_str(&format!(
-        "- {}\n",
-        named("tola help \"[hooks]\"", table_target("hooks"))
-    ));
-    HelpPage::new(id, markdown)
-}
-
-fn index_page(category: HelpCategory, language: HelpLanguage) -> HelpPage {
-    let id = PageId::Index(category);
-    let mut markdown = String::new();
-    let mut entries = Vec::new();
-    match category {
-        HelpCategory::Config => {
-            markdown.push_str(match language {
-                HelpLanguage::English => "# Configuration\n\nLook up settings in `tola.toml`. Use `tola help \"[build]\"` to find the publish directory, or `tola help \"[hooks]\"` to see when build scripts run.\n\n",
-                HelpLanguage::SimplifiedChinese => "# 配置\n\n查阅 `tola.toml`。用 `tola help --lang zh \"[build]\"` 查发布目录，用 `tola help --lang zh \"[hooks]\"` 查脚本在哪个构建阶段运行。\n\n",
-            });
-            // A table with settings of its own is an entry; so is a container grouping several
-            // child tables.
-            for table in TABLES.iter().filter(|table| {
-                let children = child_tables(table.section).count();
-                has_own_key(table.section)
-                    || children > 1
-                    || (children == 0 && section_help(table.section).is_some())
-            }) {
-                let title = table.header();
-                let target =
-                    table_target(table.section).expect("the index lists registered tables");
-                let label = cross_reference(&title, &target);
-                entries.push(ReferenceLink { title, target });
-                markdown.push_str(&format!("- {label}\n"));
-            }
+        PageId::Overview => Ok(HelpPage::Overview(overview_page(language))),
+        PageId::Index(category) => Ok(HelpPage::Index(index_page(*category, language))),
+        PageId::Config { section } => Ok(HelpPage::Config(config_page(section, language)?)),
+        PageId::Package { name } => Ok(HelpPage::Package(package_page(name, &[], language)?)),
+        PageId::PackageSelection { name, exports } => {
+            Ok(HelpPage::Package(package_page(name, exports, language)?))
         }
-        HelpCategory::Packages => {
-            markdown.push_str(match language {
-                HelpLanguage::English => "# Bundled Typst packages\n\nLook up imports, parameters, and examples for `@tola/*` packages. To highlight code in HTML, start with `tola help \"@tola/code\" render-code`.\n\n",
-                HelpLanguage::SimplifiedChinese => "# 内置 Typst 包\n\n查阅 `@tola/*` 包的导入方式、参数和示例。要给 HTML 中的代码加语法高亮，可以查 `tola help --lang zh \"@tola/code\" render-code`。\n\n",
-            });
-            for package in tola_packages::builtin_packages() {
-                let name = package.spec().name.to_string();
-                let title = format!("@tola/{name}");
-                let target = LinkTarget::Page(PageId::Package { name });
-                let label = cross_reference(&title, &target);
-                entries.push(ReferenceLink { title, target });
-                markdown.push_str(&format!("- {label}\n"));
-            }
-        }
-        HelpCategory::Scripts => {
-            markdown.push_str(match language {
-                HelpLanguage::English => {
-                    "# Built-in scripts\n\nRun these scripts with `tola nu`.\n\n"
-                }
-                HelpLanguage::SimplifiedChinese => "# 内置脚本\n\n用 `tola nu` 运行以下脚本。\n\n",
-            });
-            for script in super::scripts::builtins() {
-                let title = format!("@tola-scripts/{}", script.name);
-                let target = LinkTarget::Page(PageId::Script {
-                    name: script.name.to_owned(),
-                });
-                let label = cross_reference(&title, &target);
-                entries.push(ReferenceLink { title, target });
-                let intro = i18n::script(language, script.name)
-                    .and_then(Translation::intro)
-                    .unwrap_or(script.summary);
-                markdown.push_str(&format!("- {label}{}{intro}\n", language.colon()));
-            }
-        }
+        PageId::Script { name } => Ok(HelpPage::Script(super::scripts::page(
+            name, None, language,
+        )?)),
     }
-    let mut page = HelpPage::new(id, markdown);
-    page.reference.entries = entries;
-    page
 }
 
-/// The table page one section names, when the index names a real table.
-fn table_target(section: &str) -> Option<LinkTarget> {
-    config_table(section).map(|table| {
-        LinkTarget::Page(PageId::Config {
-            section: table.section.to_owned(),
-        })
+/// Every reference page for one language in canonical order (`tola help --all`).
+pub(crate) fn catalog(language: HelpLanguage) -> Result<HelpCatalog> {
+    let overview = overview_page(language);
+    let mut config = Vec::new();
+    for table in indexed_config_tables() {
+        config.push(config_page(table.section, language)?);
+    }
+    let mut packages = Vec::new();
+    for package in tola_packages::builtin_packages() {
+        let spec = package.spec();
+        packages.push(package_page(spec.name.as_str(), &[], language)?);
+    }
+    let mut scripts = Vec::new();
+    for script in super::scripts::builtins() {
+        scripts.push(super::scripts::page(script.name, None, language)?);
+    }
+    Ok(HelpCatalog {
+        kind: "catalog",
+        language: language.tag(),
+        overview,
+        config,
+        packages,
+        scripts,
     })
 }
 
-/// The package page one bundled package names, when every named export belongs to it.
-fn package_target(name: &str, exports: &[&str]) -> Option<LinkTarget> {
-    let package = tola_packages::builtin_packages().find(|package| package.spec().name == name)?;
-    if !exports
+/// Tables listed in the config index and catalog (omits single-child transparent containers like `[typst]`).
+fn indexed_config_tables() -> impl Iterator<Item = &'static ConfigTable> {
+    TABLES
         .iter()
-        .all(|export| package.exports().any(|name| name == *export))
-    {
-        return None;
-    }
-    let name = name.to_owned();
-    Some(LinkTarget::Page(match exports {
-        [] => PageId::Package { name },
-        exports => PageId::PackageSelection {
-            name,
-            exports: exports.iter().map(|export| (*export).to_owned()).collect(),
-        },
-    }))
+        .filter(|table| !is_empty_container(table.section))
 }
 
-fn table_page(target: &str, language: HelpLanguage) -> Result<HelpPage> {
-    let table = config_table(target).ok_or_else(|| target_error(target, &table_choices()))?;
-    // A container whose only content is its one child shows that child's page instead, so
-    // the reader lands on the table that names real settings.
-    if let Some(child) = sole_child_table(table.section) {
-        return table_page(child.section, language);
-    }
-    let id = PageId::Config {
-        section: table.section.to_owned(),
+fn overview_page(lang: HelpLanguage) -> OverviewPage {
+    let doc = docs::overview(lang);
+    let (title, cfg_t, pkg_t, scr_t) = match lang {
+        HelpLanguage::English => ("Tola help", "Configuration", "Packages", "Scripts"),
+        HelpLanguage::SimplifiedChinese => ("Tola 帮助", "配置", "内置包", "内置脚本"),
     };
-    let mut markdown = format!("# {}\n", table.header());
-    let translation = i18n::config(language, table.section);
-    let intro = documented(table.section)
-        .map(|english| translation.and_then(Translation::intro).unwrap_or(english));
-    if let Some(documentation) = intro {
-        markdown.push_str(&format!("\n{documentation}\n"));
+    OverviewPage {
+        language: lang.tag(),
+        title: title.to_owned(),
+        body: doc.body.clone(),
+        categories: vec![
+            CategoryEntry {
+                category: "config",
+                title: cfg_t,
+            },
+            CategoryEntry {
+                category: "packages",
+                title: pkg_t,
+            },
+            CategoryEntry {
+                category: "scripts",
+                title: scr_t,
+            },
+        ],
     }
-    if has_own_key(table.section) {
-        markdown.push_str(&declared_keys(table.section, language));
-    } else if child_tables(table.section).next().is_some() {
-        markdown.push_str(match language {
-            HelpLanguage::English => "\n**Tables**\n\n",
-            HelpLanguage::SimplifiedChinese => "\n**子表**\n\n",
-        });
-        for child in child_tables(table.section) {
-            let child_id = PageId::Config {
-                section: child.section.to_owned(),
-            };
-            let header = child.header();
-            // A table header is an array when its declaration is, so it includes its own brackets.
-            let table = cross_reference(&header, &LinkTarget::Page(child_id));
-            markdown.push_str(&format!(
-                "- {table}{}{}\n",
-                language.colon(),
-                child_description(child, language)
+}
+
+fn build_index(
+    cat: &'static str,
+    lang: HelpLanguage,
+    en: (&str, &str),
+    zh: (&str, &str),
+    entries: Vec<IndexEntry>,
+) -> IndexPage {
+    let (title, summary) = match lang {
+        HelpLanguage::English => en,
+        HelpLanguage::SimplifiedChinese => zh,
+    };
+    IndexPage {
+        category: cat,
+        language: lang.tag(),
+        title: title.to_owned(),
+        summary: Markup::parse(summary).expect("valid index summary"),
+        entries,
+    }
+}
+
+fn index_page(cat: HelpCategory, lang: HelpLanguage) -> IndexPage {
+    match cat {
+        HelpCategory::Config => {
+            let entries = indexed_config_tables()
+                .map(|t| IndexEntry {
+                    id: t.section.to_owned(),
+                    title: t.header(),
+                    summary: docs::config(lang, t.section)
+                        .map(|d| d.summary.clone())
+                        .unwrap_or_default(),
+                })
+                .collect();
+            build_index(
+                "config",
+                lang,
+                (
+                    "Configuration",
+                    "Reference for `tola.toml`. Run `tola help \"[build]\"` for build paths or `tola help \"[hooks]\"` for build stages.",
+                ),
+                (
+                    "配置",
+                    "`tola.toml` 配置参考。运行 `tola help --lang zh \"[build]\"` 查看构建路径，或 `tola help --lang zh \"[hooks]\"` 查看构建阶段。",
+                ),
+                entries,
+            )
+        }
+        HelpCategory::Packages => {
+            let entries = tola_packages::builtin_packages()
+                .map(|pkg| {
+                    let name = pkg.spec().name.to_string();
+                    IndexEntry {
+                        summary: docs::package(lang, &name)
+                            .map(|d| d.summary.clone())
+                            .unwrap_or_default(),
+                        title: format!("@tola/{name}"),
+                        id: name,
+                    }
+                })
+                .collect();
+            build_index(
+                "packages",
+                lang,
+                (
+                    "Bundled Typst packages",
+                    "Reference for built-in `@tola/*` packages. Run `tola help \"@tola/source\"` to inspect content discovery and metadata.",
+                ),
+                (
+                    "内置 Typst 包",
+                    "内置 `@tola/*` 包参考。运行 `tola help --lang zh \"@tola/source\"` 查看内容发现与元数据接口。",
+                ),
+                entries,
+            )
+        }
+        HelpCategory::Scripts => {
+            let entries = super::scripts::builtins()
+                .map(|s| IndexEntry {
+                    id: s.name.to_owned(),
+                    title: format!("@tola-scripts/{}", s.name),
+                    summary: docs::script(lang, s.name)
+                        .map(|d| d.summary.clone())
+                        .unwrap_or_default(),
+                })
+                .collect();
+            build_index(
+                "scripts",
+                lang,
+                (
+                    "Built-in scripts",
+                    "Utility scripts bundled with `tola nu`.",
+                ),
+                ("内置脚本", "随 `tola nu` 提供的内置脚本。"),
+                entries,
+            )
+        }
+    }
+}
+
+fn config_page(target: &str, lang: HelpLanguage) -> Result<ConfigPage> {
+    let table = config_table(target).ok_or_else(|| target_error(target, &table_choices()))?;
+    if let Some(child) = sole_child_table(table.section) {
+        return config_page(child.section, lang);
+    }
+    let doc = docs::config(lang, table.section)
+        .unwrap_or_else(|| panic!("missing config docs for `{}`", table.section));
+
+    let keys = documented_fields(table.section)
+        .into_iter()
+        .filter(|path| child_table(path).is_none())
+        .map(|path| {
+            let name = path.rsplit_once('.').map_or(path, |(_, n)| n);
+            let kdoc = doc.keys.get(name);
+            let body = kdoc.map(|i| i.body.clone()).unwrap_or_else(|| {
+                documented(path)
+                    .and_then(|fb| Markup::parse(fb).ok())
+                    .unwrap_or_default()
+            });
+            ConfigKey {
+                name: name.to_owned(),
+                path: path.to_owned(),
+                default: default_value(path),
+                values: tola_build::config::field_values(path).map(|s| s.to_vec()),
+                body,
+                examples: kdoc.map(|i| i.examples.clone()).unwrap_or_default(),
+            }
+        })
+        .collect();
+
+    let children = child_tables(table.section)
+        .map(|child| ConfigChild {
+            section: child.section.to_owned(),
+            header: child.header(),
+            summary: docs::config(lang, child.section)
+                .map(|d| d.summary.clone())
+                .unwrap_or_default(),
+        })
+        .collect();
+
+    let mut related = resolve_related_list(&doc.related, None)?;
+    for pkg_name in related_packages(table.section) {
+        let item = RelatedItem::Package {
+            title: format!("@tola/{pkg_name}"),
+            name: pkg_name,
+        };
+        if !related.contains(&item) {
+            related.push(item);
+        }
+    }
+
+    Ok(ConfigPage {
+        section: table.section.to_owned(),
+        header: table.header(),
+        language: lang.tag(),
+        summary: doc.summary.clone(),
+        body: doc.body.clone(),
+        keys,
+        children,
+        examples: doc.examples.clone(),
+        related,
+    })
+}
+
+fn builtin_pkg(name: &str) -> Option<tola_packages::BuiltinPackage> {
+    tola_packages::builtin_packages().find(|pkg| pkg.spec().name == name)
+}
+
+fn build_package_method(
+    export_name: &str,
+    method: &Signature,
+    mdoc: Option<&super::markup::MethodDoc>,
+    lang: HelpLanguage,
+) -> PackageMethod {
+    let recv = export_name
+        .chars()
+        .next()
+        .expect("export names are nonempty");
+    let recv_text = match lang {
+        HelpLanguage::English => format!("`{recv}` is the value returned by `{export_name}(...)`."),
+        HelpLanguage::SimplifiedChinese => format!("`{recv}` 是 `{export_name}(...)` 的返回值。"),
+    };
+    PackageMethod {
+        name: method.name.clone(),
+        declaration: method.method_code(recv),
+        returns: method.returns.clone(),
+        receiver_note: Markup::parse(&recv_text).expect("valid receiver note"),
+        summary: mdoc.map(|m| m.summary.clone()).unwrap_or_default(),
+        body: mdoc.map(|m| m.body.clone()).unwrap_or_default(),
+        parameters: build_parameters(method, |p| mdoc.and_then(|m| m.params.get(p))),
+        examples: mdoc.map(|m| m.examples.clone()).unwrap_or_default(),
+    }
+}
+
+fn package_page(name: &str, req: &[String], lang: HelpLanguage) -> Result<PackagePage> {
+    let pkg = builtin_pkg(name).ok_or_else(|| target_error(name, &package_choices()))?;
+    let target = format!("@tola/{name}");
+    for member in req {
+        if !pkg.exports().any(|e| e == member) {
+            return Err(help_error(
+                crate::codes::help::MEMBER,
+                format!("`{member}` is not an export of `{target}`"),
+                choice_line("Exports", pkg.exports().map(quoted)),
             ));
         }
     }
-    let usage = section_help(table.section).map(|english| {
-        translation
-            .and_then(|translation| translation.section(CONFIG_USAGE))
-            .unwrap_or(english)
-    });
-    if let Some(help) = usage {
-        markdown.push_str(&format!("\n{help}\n"));
+    let whole = req.is_empty();
+    let names = if whole {
+        pkg.exports().map(str::to_owned).collect::<Vec<_>>()
+    } else {
+        req.to_vec()
+    };
+    let imports = if whole {
+        "*".to_owned()
+    } else {
+        names.join(", ")
+    };
+    let import = format!("#import \"{}\": {imports}", pkg.spec());
+    let doc =
+        docs::package(lang, name).unwrap_or_else(|| panic!("missing package docs for `{name}`"));
+
+    let mut exports = Vec::new();
+    for exp in pkg.export_documentation(&names)? {
+        let edoc = doc.exports.get(&exp.name);
+        let (decl, returns, params) = match &exp.declaration {
+            ExportDeclaration::Function(sig) => (
+                sig.code(),
+                sig.returns.clone(),
+                build_parameters(sig, |p| edoc.and_then(|d| d.params.get(p))),
+            ),
+            ExportDeclaration::Value(val) => (val.clone(), None, Vec::new()),
+        };
+        let methods = exp
+            .methods
+            .iter()
+            .map(|m| {
+                build_package_method(
+                    &exp.name,
+                    m,
+                    edoc.and_then(|d| d.methods.get(&m.name)),
+                    lang,
+                )
+            })
+            .collect();
+        let related = edoc
+            .map(|d| resolve_related_list(&d.related, Some(name)))
+            .transpose()?
+            .unwrap_or_default();
+        exports.push(PackageExport {
+            name: exp.name.clone(),
+            kind: if exp.declaration.is_function() {
+                "function"
+            } else {
+                "value"
+            },
+            declaration: decl,
+            returns,
+            summary: edoc.map(|d| d.summary.clone()).unwrap_or_default(),
+            body: edoc.map(|d| d.body.clone()).unwrap_or_default(),
+            parameters: params,
+            methods,
+            examples: edoc.map(|d| d.examples.clone()).unwrap_or_default(),
+            related,
+        });
     }
-    let packages = related_packages(table.section);
-    if !packages.is_empty() {
-        markdown.push_str(&format!("\n### {}\n\n", language.related()));
-        for package in &packages {
-            markdown.push_str(&package_bullet(package));
+
+    let mut related = resolve_related_list(&doc.related, Some(name))?;
+    if let Some(section) = package_config_table(name) {
+        let item = RelatedItem::Config {
+            section: section.to_owned(),
+            header: table_header(section),
+        };
+        if !related.contains(&item) {
+            related.push(item);
         }
     }
-    let mut page = HelpPage::new(id, markdown);
-    page.reference.title = table.header();
-    page.reference.blocks = page.prose(
-        &[intro, usage]
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>()
-            .join("\n\n"),
-    );
-    page.reference.entries = child_tables(table.section)
-        .map(|child| ReferenceLink {
-            title: child.header(),
-            target: table_target(child.section).expect("child tables are registered"),
-        })
-        .collect();
-    page.reference.keys = documented_fields(table.section)
-        .into_iter()
-        .filter(|path| child_table(path).is_none())
-        .map(|path| Key {
-            path: path.to_owned(),
-            blocks: page.prose(key_prose(path, translation)),
-        })
-        .collect();
-    page.reference.related = packages
-        .into_iter()
-        .map(|name| ReferenceLink {
-            title: format!("@tola/{name}"),
-            target: LinkTarget::Page(PageId::Package { name }),
-        })
-        .collect();
-    Ok(page)
+
+    Ok(PackagePage {
+        name: name.to_owned(),
+        spec: pkg.spec().to_string(),
+        title: target,
+        import,
+        language: lang.tag(),
+        summary: if whole {
+            doc.summary.clone()
+        } else {
+            Markup::default()
+        },
+        body: if whole {
+            doc.body.clone()
+        } else {
+            Markup::default()
+        },
+        exports,
+        examples: if whole {
+            doc.examples.clone()
+        } else {
+            Vec::new()
+        },
+        related: if whole { related } else { Vec::new() },
+        selected: !whole,
+    })
 }
 
-/// Every key this section's declaration writes, in schema order, without the nested ones: its
-/// settings, and the keys opening child tables, each rendered as one bullet.
-///
-/// The renderer and the translation guard share this one enumeration.
-fn documented_fields(section: &str) -> Vec<&'static str> {
+fn build_parameters<'a>(
+    sig: &Signature,
+    lookup: impl Fn(&str) -> Option<&'a Markup>,
+) -> Vec<Parameter> {
+    use tola_packages::ParameterKind::{Named, Positional, Rest};
+    sig.parameters
+        .iter()
+        .map(|p| Parameter {
+            name: p.name.clone(),
+            kind: match p.kind {
+                Positional => "positional",
+                Named => "named",
+                Rest => "rest",
+            },
+            ty: Some(p.ty_spelling().to_owned()),
+            required: p.required,
+            default: p.default.clone(),
+            short: None,
+            description: lookup(&p.name).cloned().unwrap_or_default(),
+        })
+        .collect()
+}
+
+/// Resolve a `#ref(...)` or `related` target string into a typed `RelatedItem`.
+pub(crate) fn resolve_reference(raw: &str, cur_pkg: Option<&str>) -> Result<RelatedItem> {
+    if let Some(section) = config_section(raw) {
+        return Ok(RelatedItem::Config {
+            section: section.to_owned(),
+            header: table_header(section),
+        });
+    }
+    if let Some(rest) = raw.strip_prefix("@tola-scripts/") {
+        if let Some((script, cmd)) = rest.split_once('#') {
+            if super::scripts::builtins().any(|s| s.name == script) {
+                return Ok(RelatedItem::Command {
+                    script: script.to_owned(),
+                    name: cmd.to_owned(),
+                });
+            }
+        } else if super::scripts::builtins().any(|s| s.name == rest) {
+            return Ok(RelatedItem::Script {
+                name: rest.to_owned(),
+                locator: format!("@tola-scripts/{rest}"),
+            });
+        }
+        bail!("unknown script reference `{raw}`");
+    }
+    if let Some(rest) = raw.strip_prefix("@tola/") {
+        if let Some((pkg_name, exp_name)) = rest.split_once('#') {
+            let pkg = builtin_pkg(pkg_name)
+                .ok_or_else(|| anyhow::anyhow!("unknown package in reference `{raw}`"))?;
+            if !pkg.exports().any(|e| e == exp_name) {
+                bail!("unknown export `{exp_name}` in reference `{raw}`");
+            }
+            return Ok(RelatedItem::Export {
+                package: pkg_name.to_owned(),
+                name: exp_name.to_owned(),
+            });
+        }
+        if builtin_pkg(rest).is_some() {
+            return Ok(RelatedItem::Package {
+                name: rest.to_owned(),
+                title: format!("@tola/{rest}"),
+            });
+        }
+        bail!("unknown package reference `{raw}`");
+    }
+    if let Some(pkg_name) = cur_pkg
+        && let Some(pkg) = builtin_pkg(pkg_name)
+        && pkg.exports().any(|e| e == raw)
+    {
+        return Ok(RelatedItem::Export {
+            package: pkg_name.to_owned(),
+            name: raw.to_owned(),
+        });
+    }
+    bail!("unresolved help reference `{raw}`")
+}
+
+fn resolve_related_list(
+    targets: &[String],
+    current_package: Option<&str>,
+) -> Result<Vec<RelatedItem>> {
+    let mut items = Vec::new();
+    for raw in targets {
+        let item = resolve_reference(raw, current_package)?;
+        if !items.contains(&item) {
+            items.push(item);
+        }
+    }
+    Ok(items)
+}
+
+pub(crate) fn documented_fields(section: &str) -> Vec<&'static str> {
     let prefix = format!("{section}.");
     tola_build::config::field_paths()
         .map(|path| path.as_str())
@@ -397,26 +648,15 @@ fn documented_fields(section: &str) -> Vec<&'static str> {
         .collect()
 }
 
-/// The schema's own documentation of one declared key, when it has any.
-///
-/// A core key is answered by `tola-build` and a `[server]`, `[dev]`, or `[diagnostics]` key by
-/// this host, so the two declarations read as one schema.
 fn documented(path: &str) -> Option<&'static str> {
     tola_build::config::field_documentation(path)
         .or_else(|| crate::config::field_documentation(path))
 }
 
-/// The prose a table's page ends with: the core schema's own help, or the host's.
-fn section_help(section: &str) -> Option<&'static str> {
-    tola_build::config::section_help(section).or_else(|| crate::config::section_help(section))
-}
-
-/// The child table one key opens, when its own page documents it.
 fn child_table(path: &str) -> Option<&'static ConfigTable> {
     TABLES.iter().find(|child| child.section == path)
 }
 
-/// Every table whose own page is reached through `section`'s page, in schema order.
 fn child_tables(section: &str) -> impl Iterator<Item = &'static ConfigTable> {
     let prefix = format!("{section}.");
     TABLES.iter().filter(move |table| {
@@ -427,463 +667,23 @@ fn child_tables(section: &str) -> impl Iterator<Item = &'static ConfigTable> {
     })
 }
 
-/// The one rendered line describing one child table: the documentation its own page opens with.
-fn child_description(child: &ConfigTable, language: HelpLanguage) -> String {
-    let english = documented(child.section).expect("every table documents itself");
-    one_line(
-        i18n::config(language, child.section)
-            .and_then(Translation::intro)
-            .unwrap_or(english),
-    )
-}
-
-/// Whether a table holds nothing but one child table: no key of its own, and exactly one key
-/// opening a table, so that table's page is the whole content the container has.
-fn is_empty_container(section: &str) -> bool {
-    let mut children = child_tables(section);
-    children.next().is_some() && children.next().is_none() && !has_own_key(section)
-}
-
-/// Whether a table writes a key of its own: one that names a setting instead of opening a child
-/// table.
 fn has_own_key(section: &str) -> bool {
     documented_fields(section)
         .iter()
         .any(|path| child_table(path).is_none())
 }
 
-/// The one child table `section` reaches, when a container has nothing but it.
+fn is_empty_container(section: &str) -> bool {
+    let mut children = child_tables(section);
+    children.next().is_some() && children.next().is_none() && !has_own_key(section)
+}
+
 fn sole_child_table(section: &str) -> Option<&'static ConfigTable> {
     is_empty_container(section)
         .then(|| child_tables(section).next())
         .flatten()
 }
 
-/// Describe each setting or link to its child table. Keep examples inside their list item.
-fn declared_keys(section: &str, language: HelpLanguage) -> String {
-    let translation = i18n::config(language, section);
-    let mut markdown = String::new();
-    for path in documented_fields(section) {
-        if let Some(child) = child_table(path) {
-            let header = cross_reference(
-                &child.header(),
-                &LinkTarget::Page(PageId::Config {
-                    section: child.section.to_owned(),
-                }),
-            );
-            markdown.push_str(&format!(
-                "\n- {header}{}{}",
-                language.colon(),
-                child_description(child, language)
-            ));
-            continue;
-        }
-        let name = path.rsplit_once('.').map_or(path, |(_, name)| name);
-        markdown.push_str(&format!("\n- `{name}`"));
-        append_description(&mut markdown, key_prose(path, translation), language);
-    }
-    markdown.push('\n');
-    markdown
-}
-
-fn key_prose<'a>(path: &str, translation: Option<&'a Translation>) -> &'a str {
-    let name = path.rsplit_once('.').map_or(path, |(_, name)| name);
-    translation
-        .and_then(|translation| translation.field(CONFIG_KEYS, name))
-        .unwrap_or_else(|| documented(path).expect("the enumeration documents every field"))
-}
-
-/// One documentation paragraph whose lines the rendered page wraps itself.
-fn one_line(documentation: &str) -> String {
-    documentation
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn package_page(name: &str, requested: &[String], language: HelpLanguage) -> Result<HelpPage> {
-    let package = tola_packages::builtin_packages()
-        .find(|package| package.spec().name == name)
-        .ok_or_else(|| target_error(name, &package_choices()))?;
-    let target = format!("@tola/{name}");
-    for member in requested {
-        if !package.exports().any(|name| name == member) {
-            return Err(help_error(
-                crate::codes::help::MEMBER,
-                format!("`{member}` is not an export of `{target}`"),
-                choice_line("Exports", package.exports().map(quoted)),
-            ));
-        }
-    }
-    let whole_package = requested.is_empty();
-    let names = if whole_package {
-        package.exports().map(str::to_owned).collect::<Vec<_>>()
-    } else {
-        requested.to_vec()
-    };
-    let imports = if whole_package {
-        "*".to_owned()
-    } else {
-        names.join(", ")
-    };
-    let id = if whole_package {
-        PageId::Package {
-            name: name.to_owned(),
-        }
-    } else {
-        PageId::PackageSelection {
-            name: name.to_owned(),
-            exports: names.clone(),
-        }
-    };
-    let translation = i18n::package(language, name);
-    let import = format!("#import \"{}\": {imports}", package.spec());
-    let import_heading = match language {
-        HelpLanguage::English => "Import in Typst:",
-        HelpLanguage::SimplifiedChinese => "导入",
-    };
-    let mut text = format!(
-        "# {target}\n\n## {import_heading}\n\n{}",
-        code_block("typst", &import)
-    );
-    let overview = whole_package.then(|| package.overview()).flatten();
-    let overview = overview
-        .as_deref()
-        .map(|english| translation.and_then(Translation::intro).unwrap_or(english));
-    if let Some(overview) = overview {
-        text.push_str(&format!("\n{overview}\n"));
-    }
-    let exports = package.export_documentation(&names)?;
-    if whole_package {
-        let heading = match language {
-            HelpLanguage::English => "Exports:",
-            HelpLanguage::SimplifiedChinese => "导出成员",
-        };
-        text.push_str(&format!("\n## {heading}\n\n"));
-        for export in &exports {
-            let summary = translation
-                .and_then(|translation| translation.section(&export.name))
-                .map(summary_lead)
-                .or_else(|| export_summary(export));
-            let name = named(
-                &export.name,
-                Some(LinkTarget::PageAnchor(id.clone(), export_anchor(export))),
-            );
-            match summary {
-                Some(summary) => {
-                    text.push_str(&format!("- {name}{}{summary}\n", language.colon()));
-                }
-                None => text.push_str(&format!("- {name}\n")),
-            }
-        }
-    }
-    let config = package_config_table(name);
-    if let Some(section) = config {
-        let header = table_header(section);
-        text.push_str(&format!(
-            "\n## {}\n\n- {}\n",
-            language.related(),
-            named(&header, table_target(section))
-        ));
-    }
-    let mut page = HelpPage::new(id.clone(), text);
-    page.reference.title = target.clone();
-    page.reference.blocks = page.prose(overview.unwrap_or_default());
-    page.reference.import = Some(import);
-    page.reference.related = config
-        .into_iter()
-        .filter_map(|section| {
-            Some(ReferenceLink {
-                title: table_header(section),
-                target: table_target(section)?,
-            })
-        })
-        .collect();
-    let canonical = PageId::Package {
-        name: name.to_owned(),
-    };
-    for (position, export) in exports.iter().enumerate() {
-        let mut text = String::new();
-        if position > 0 {
-            // One rule between whole API sections: the reader sees where one ends.
-            text.push_str("\n---\n");
-        }
-        text.push_str(&format!(
-            "\n## {} - {}\n\n{}\n",
-            export.name,
-            export_kind(export),
-            code_block("typst-code", &declaration(&export.declaration))
-        ));
-        let summary = translation
-            .and_then(|translation| translation.section(&export.name))
-            .unwrap_or(&export.documentation.summary);
-        if !summary.is_empty() {
-            text.push_str(&format!("\n{summary}\n"));
-        }
-        let parameter_prose =
-            |name: &str| translation.and_then(|translation| translation.field(&export.name, name));
-        if let ExportDeclaration::Function(signature) = &export.declaration {
-            write_parameters(&mut text, signature, language, parameter_prose);
-        }
-        let mut methods = Vec::new();
-        for method in &export.methods {
-            let receiver = export
-                .name
-                .chars()
-                .next()
-                .expect("export names are nonempty");
-            let name = &export.name;
-            let receiver_help = match language {
-                HelpLanguage::English => {
-                    format!("`{receiver}` is the value returned by `{name}(...)`.")
-                }
-                HelpLanguage::SimplifiedChinese => {
-                    format!("`{receiver}` 是 `{name}(...)` 的返回值。")
-                }
-            };
-            let parameters = translation
-                .map(|translation| translation.method_parameters(&export.name, &method.name))
-                .unwrap_or_default();
-            let prose = |name: &str| {
-                parameters
-                    .get(name)
-                    .copied()
-                    .filter(|text| !text.is_empty())
-            };
-            let declaration = method.method_code(receiver);
-            text.push_str(&format!(
-                "\n### `{}`\n\n{}\n{receiver_help}\n",
-                method.name,
-                code_block("typst-code", &declaration),
-            ));
-            write_parameters(&mut text, method, language, prose);
-            methods.push(Method {
-                name: method.name.clone(),
-                anchor: anchor(&method.name).as_str().to_owned(),
-                signature: reference_signature(&page, method, declaration, prose),
-                blocks: page.prose(&receiver_help),
-            });
-        }
-        text.push_str(&related_section(&target, &export.related, &names, language));
-        page.push_export(text);
-        let signature = match &export.declaration {
-            ExportDeclaration::Function(signature) => {
-                reference_signature(&page, signature, signature.code(), parameter_prose)
-            }
-            ExportDeclaration::Value(value) => ReferenceSignature {
-                declaration: value.clone(),
-                parameters: Vec::new(),
-                returns: None,
-            },
-        };
-        let mut related = Vec::new();
-        for item in &export.related {
-            let link = match item {
-                RelatedTarget::Export(name) if name != &export.name => {
-                    let other =
-                        if let Some(other) = exports.iter().find(|export| &export.name == name) {
-                            export_anchor(other)
-                        } else {
-                            let other = package.export_documentation(std::slice::from_ref(name))?;
-                            export_anchor(&other[0])
-                        };
-                    ReferenceLink {
-                        title: name.clone(),
-                        target: LinkTarget::PageAnchor(canonical.clone(), other),
-                    }
-                }
-                RelatedTarget::Package(package) if package != name => ReferenceLink {
-                    title: format!("@tola/{package}"),
-                    target: LinkTarget::Page(PageId::Package {
-                        name: package.clone(),
-                    }),
-                },
-                _ => continue,
-            };
-            if !related
-                .iter()
-                .any(|item: &ReferenceLink| item.target == link.target)
-            {
-                related.push(link);
-            }
-        }
-        page.reference.exports.push(Export {
-            name: export.name.clone(),
-            kind: export_kind(export),
-            anchor: export_anchor(export).as_str().to_owned(),
-            signature,
-            blocks: page.prose(summary),
-            methods,
-            related,
-        });
-    }
-    Ok(page)
-}
-
-fn reference_signature<'a>(
-    page: &HelpPage,
-    signature: &Signature,
-    declaration: String,
-    prose: impl Fn(&str) -> Option<&'a str>,
-) -> ReferenceSignature {
-    use tola_packages::ParameterKind::{Named, Positional, Rest};
-    ReferenceSignature {
-        declaration,
-        parameters: signature
-            .parameters
-            .iter()
-            .map(|parameter| Parameter {
-                name: parameter.name.clone(),
-                kind: match parameter.kind {
-                    Positional => "positional",
-                    Named => "named",
-                    Rest => "rest",
-                },
-                ty: Some(parameter.ty_spelling().to_owned()),
-                required: parameter.required,
-                default: parameter.default.clone(),
-                blocks: page.prose(
-                    prose(&parameter.name)
-                        .or(parameter.docs.as_deref())
-                        .unwrap_or_default(),
-                ),
-                short: None,
-            })
-            .collect(),
-        returns: signature.returns.clone(),
-    }
-}
-
-/// The declaration block every export is configured with: a function's signature, or a value's
-/// own line.
-fn declaration(declaration: &ExportDeclaration) -> String {
-    match declaration {
-        ExportDeclaration::Function(signature) => signature.code(),
-        ExportDeclaration::Value(value) => value.clone(),
-    }
-}
-
-/// Describe parameters by name. Their types and defaults appear in the signature.
-fn write_parameters<'a>(
-    text: &mut String,
-    signature: &Signature,
-    language: HelpLanguage,
-    prose: impl Fn(&str) -> Option<&'a str>,
-) {
-    let (positional, rest, named, required) = match language {
-        HelpLanguage::English => (
-            "Positional parameters",
-            "Rest parameters",
-            "Named parameters",
-            "required",
-        ),
-        HelpLanguage::SimplifiedChinese => ("位置参数", "可变参数", "命名参数", "必填"),
-    };
-    let (open, close) = language.parentheses();
-    for (heading, group) in [
-        (positional, signature.positional()),
-        (rest, signature.rest()),
-        (named, signature.named()),
-    ] {
-        if group.is_empty() {
-            continue;
-        }
-        text.push_str(&format!("\n**{heading}**\n\n"));
-        for parameter in group {
-            let prefix = if parameter.kind == tola_packages::ParameterKind::Rest {
-                ".."
-            } else {
-                ""
-            };
-            text.push_str(&format!("- `{prefix}{}`", parameter.name));
-            if parameter.required {
-                text.push_str(&format!("{open}{required}{close}"));
-            }
-            let documentation = prose(&parameter.name).or(parameter.docs.as_deref());
-            if let Some(documentation) = documentation {
-                append_description(text, documentation, language);
-            }
-            text.push('\n');
-        }
-    }
-}
-
-/// Finish a list item with its Markdown description, including any nested blocks.
-fn append_description(text: &mut String, documentation: &str, language: HelpLanguage) {
-    let mut lines = documentation.lines();
-    if let Some(first) = lines.next() {
-        text.push_str(language.colon());
-        text.push_str(first);
-    }
-    for line in lines {
-        text.push('\n');
-        if !line.is_empty() {
-            text.push_str("  ");
-            text.push_str(line);
-        }
-    }
-}
-
-/// The related-targets section one export renders: the package's own exports as one command,
-/// then each bundled package as its own, in the order the block first names them. A target the
-/// page renders anyway is left out, and a block whose targets are all rendered has no section.
-fn related_section(
-    target: &str,
-    related: &[RelatedTarget],
-    rendered: &[String],
-    language: HelpLanguage,
-) -> String {
-    let mut exports: Vec<&str> = Vec::new();
-    let mut packages: Vec<&str> = Vec::new();
-    for related in related {
-        let (name, names) = match related {
-            RelatedTarget::Export(name) => (name.as_str(), &mut exports),
-            RelatedTarget::Package(name) => {
-                if target.strip_prefix("@tola/") == Some(name.as_str()) {
-                    continue;
-                }
-                (name.as_str(), &mut packages)
-            }
-        };
-        if !names.contains(&name) {
-            names.push(name);
-        }
-    }
-    exports.retain(|name| !rendered.iter().any(|export| export == name));
-    if exports.is_empty() && packages.is_empty() {
-        return String::new();
-    }
-    let mut text = format!("\n### {}\n\n", language.related());
-    if !exports.is_empty() {
-        let selection = PageId::PackageSelection {
-            name: target.trim_start_matches("@tola/").to_owned(),
-            exports: exports.iter().map(|name| (*name).to_owned()).collect(),
-        };
-        let named_exports = exports
-            .iter()
-            .map(|name| cross_reference(name, &LinkTarget::Page(selection.clone())))
-            .collect::<Vec<_>>()
-            .join(" ");
-        text.push_str(&format!("- {named_exports}\n"));
-    }
-    for package in packages {
-        text.push_str(&package_bullet(package));
-    }
-    text
-}
-
-/// One bullet naming a bundled package's page by its Typst import.
-fn package_bullet(package: &str) -> String {
-    let name = cross_reference(
-        &format!("@tola/{package}"),
-        &LinkTarget::Page(PageId::Package {
-            name: package.to_owned(),
-        }),
-    );
-    format!("- {name}\n")
-}
-
-/// The configuration table one bundled package configures, when a site author reads both together.
 fn package_config_table(name: &str) -> Option<&'static str> {
     match name {
         "site" => Some("site"),
@@ -892,14 +692,6 @@ fn package_config_table(name: &str) -> Option<&'static str> {
     }
 }
 
-/// The header one configuration table renders under.
-pub(crate) fn table_header(section: &str) -> String {
-    config_table(section)
-        .map(ConfigTable::header)
-        .unwrap_or_else(|| format!("[{section}]"))
-}
-
-/// The bundled packages that configure one configuration table.
 fn related_packages(section: &str) -> Vec<String> {
     tola_packages::builtin_packages()
         .map(|package| package.spec().name.to_string())
@@ -907,18 +699,6 @@ fn related_packages(section: &str) -> Vec<String> {
         .collect()
 }
 
-pub(super) fn code_block(language: &str, source: &str) -> String {
-    let longest = source
-        .split(|character| character != '`')
-        .map(str::len)
-        .max()
-        .unwrap_or(0);
-    let fence = "`".repeat((longest + 1).max(3));
-    let newline = if source.ends_with('\n') { "" } else { "\n" };
-    format!("{fence}{language}\n{source}{newline}{fence}\n")
-}
-
-/// One help line naming every selector a reader can pass instead.
 fn choice_line(label: &str, choices: impl IntoIterator<Item = String>) -> String {
     format!(
         "{label}: {}",
@@ -927,52 +707,21 @@ fn choice_line(label: &str, choices: impl IntoIterator<Item = String>) -> String
 }
 
 fn table_choices() -> String {
-    choice_line("Configuration entries", config_sections())
+    choice_line(
+        "Configuration entries",
+        TABLES.iter().map(ConfigTable::header),
+    )
 }
 
 fn package_choices() -> String {
-    choice_line("Bundled packages", package_names())
+    choice_line(
+        "Bundled packages",
+        tola_packages::builtin_packages().map(|package| package.spec().name.to_string()),
+    )
 }
 
-/// The first non-empty line of one documented unit.
-fn first_line(text: &str) -> Option<&str> {
-    text.lines().map(str::trim).find(|line| !line.is_empty())
-}
-
-/// The line one translated summary shows in an export index.
-///
-/// English indexes by a summary's first wrapped line, which the package sources break at a
-/// sentence end. A translation keeps each paragraph on one line, so it indexes by the first
-/// sentence instead.
-fn summary_lead(summary: &str) -> &str {
-    let summary = summary.trim();
-    match summary
-        .char_indices()
-        .find(|(_, character)| matches!(character, '。' | '！' | '？'))
-    {
-        Some((end, character)) => &summary[..end + character.len_utf8()],
-        None => summary,
-    }
-}
-
-/// The first documented line of an export, as its line in a package's export index.
-fn export_summary(export: &tola_packages::ExportDocumentation) -> Option<&str> {
-    first_line(&export.documentation.summary)
-}
-
-// Quotes keep table headers from being expanded as shell patterns.
 fn quoted(selector: &str) -> String {
     format!("\"{selector}\"")
-}
-
-/// Every configuration-table selector, shared by the no-argument index and the error help.
-fn config_sections() -> impl Iterator<Item = String> {
-    TABLES.iter().map(ConfigTable::header)
-}
-
-/// Every bundled-package selector, shared by the no-argument index and the error help.
-fn package_names() -> impl Iterator<Item = String> {
-    tola_packages::builtin_packages().map(|package| package.spec().name.to_string())
 }
 
 pub(super) fn target_error(target: &str, choices: &str) -> anyhow::Error {
@@ -991,336 +740,261 @@ fn help_error(code: DiagnosticCode, message: String, choices: String) -> anyhow:
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::help::model::{Block, CROSS_REFERENCE_SCHEME, HelpDocument, Inline};
 
-    fn contains_anchor(blocks: &[Block], wanted: &Anchor) -> bool {
-        blocks.iter().any(|block| match block {
-            Block::Heading { anchor, .. } => anchor == wanted,
-            Block::List { items, .. } => items.iter().any(|blocks| contains_anchor(blocks, wanted)),
-            Block::Quote { blocks } => contains_anchor(blocks, wanted),
-            _ => false,
-        })
+    fn targets(args: &[&str]) -> Vec<String> {
+        args.iter().map(|a| (*a).into()).collect()
     }
 
-    fn page(targets: &[String], language: HelpLanguage) -> Result<HelpPage> {
-        let target = request(targets)?;
-        page_of(
-            target.page().expect("a help request locates a page"),
-            language,
-        )
-    }
-
-    fn targets(arguments: &[&str]) -> Vec<String> {
-        arguments
-            .iter()
-            .map(|argument| (*argument).into())
-            .collect()
-    }
-
-    fn requests() -> Vec<Vec<String>> {
-        let mut requests = vec![
-            vec![],
-            targets(&["config"]),
-            targets(&["package"]),
-            targets(&["scripts"]),
-        ];
-        requests.extend(TABLES.iter().map(|table| vec![table.header()]));
-        for package in tola_packages::builtin_packages() {
-            let name = package.spec().name.to_string();
-            requests.push(vec![format!("@tola/{name}")]);
-            let mut selected = vec![format!("@tola/{name}")];
-            selected.extend(package.exports().take(2).map(str::to_owned));
-            requests.push(selected);
+    fn check_refs<'a>(refs: impl IntoIterator<Item = &'a str>, pkg: Option<&str>, ctx: &str) {
+        for raw in refs {
+            resolve_reference(raw, pkg)
+                .unwrap_or_else(|err| panic!("{ctx} broken ref `{raw}`: {err}"));
         }
-        requests
     }
 
-    #[test]
-    fn include_is_a_top_level_key_in_help() {
-        for language in [HelpLanguage::English, HelpLanguage::SimplifiedChinese] {
-            let index = page(&targets(&["config"]), language).unwrap().markdown();
-            let include = page(&targets(&["include"]), language).unwrap().markdown();
-            assert!(index.contains("`include`"));
-            assert!(include.starts_with("# include\n"));
-            assert!(include.contains("include = ["));
-            assert!(!include.contains("[include]"));
+    fn check_params(
+        doc_params: &std::collections::BTreeMap<String, Markup>,
+        sig_params: &[tola_packages::Parameter],
+        ctx: &str,
+    ) {
+        for p in doc_params.keys() {
+            assert!(
+                sig_params.iter().any(|sp| sp.name == *p),
+                "{ctx} documents unknown param `{p}`"
+            );
+        }
+        for p in sig_params {
+            assert!(
+                doc_params.contains_key(&p.name),
+                "{ctx} is missing param `{}`",
+                p.name
+            );
         }
     }
 
     #[test]
-    fn wrong_table_brackets_suggest_the_documented_selector() {
+    fn config_docs_match_schema() {
+        for lang in [HelpLanguage::English, HelpLanguage::SimplifiedChinese] {
+            let tag = lang.tag();
+            for section in docs::config_names() {
+                assert!(
+                    TABLES.iter().any(|t| t.section == section),
+                    "`{section}` is not a registered config table"
+                );
+                let doc = docs::config(lang, section).unwrap();
+                let schema_keys: Vec<&str> = documented_fields(section)
+                    .into_iter()
+                    .filter(|p| child_table(p).is_none())
+                    .map(|p| p.rsplit_once('.').map_or(p, |(_, n)| n))
+                    .collect();
+                for k in doc.keys.keys() {
+                    assert!(
+                        schema_keys.contains(&k.as_str()),
+                        "{tag} config `{section}` documents unknown key `{k}`"
+                    );
+                }
+                for k in &schema_keys {
+                    assert!(
+                        doc.keys.contains_key(*k),
+                        "{tag} config `{section}` is missing docs for key `{k}`"
+                    );
+                }
+                check_refs(
+                    doc.summary.refs().into_iter().chain(doc.body.refs()),
+                    None,
+                    &format!("{tag} config `{section}`"),
+                );
+                for (name, kdoc) in &doc.keys {
+                    check_refs(
+                        kdoc.body.refs(),
+                        None,
+                        &format!("{tag} config `{section}.{name}`"),
+                    );
+                }
+                resolve_related_list(&doc.related, None)
+                    .unwrap_or_else(|err| panic!("{tag} config `{section}` broken related: {err}"));
+            }
+            for table in TABLES {
+                assert!(
+                    docs::config(lang, table.section).is_some(),
+                    "{tag} missing config doc for `{}`",
+                    table.section
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn package_docs_match_declarations() {
+        for lang in [HelpLanguage::English, HelpLanguage::SimplifiedChinese] {
+            let tag = lang.tag();
+            for name in docs::package_names() {
+                let pkg = builtin_pkg(name)
+                    .unwrap_or_else(|| panic!("`{name}` is not a bundled package"));
+                let doc = docs::package(lang, name).unwrap();
+                let exp_names: Vec<String> = pkg.exports().map(str::to_owned).collect();
+                for dexp in doc.exports.keys() {
+                    assert!(
+                        exp_names.contains(dexp),
+                        "{tag} package `{name}` documents unknown export `{dexp}`"
+                    );
+                }
+                for exp in pkg.export_documentation(&exp_names).unwrap() {
+                    let ctx = format!("{tag} `{name}.{}`", exp.name);
+                    let edoc = doc.exports.get(&exp.name).unwrap_or_else(|| {
+                        panic!("{tag} package `{name}` missing export `{}`", exp.name)
+                    });
+                    if let ExportDeclaration::Function(sig) = &exp.declaration {
+                        check_params(&edoc.params, &sig.parameters, &ctx);
+                    } else {
+                        assert!(
+                            edoc.params.is_empty(),
+                            "{ctx} value should not document params"
+                        );
+                    }
+                    for mname in edoc.methods.keys() {
+                        assert!(
+                            exp.methods.iter().any(|m| m.name == *mname),
+                            "{ctx} documents unknown method `{mname}`"
+                        );
+                    }
+                    for m in &exp.methods {
+                        let mdoc = edoc
+                            .methods
+                            .get(&m.name)
+                            .unwrap_or_else(|| panic!("{ctx} missing method `{}`", m.name));
+                        check_params(&mdoc.params, &m.parameters, &format!("{ctx}.{}", m.name));
+                    }
+                    check_refs(
+                        edoc.summary
+                            .refs()
+                            .into_iter()
+                            .chain(edoc.body.refs())
+                            .chain(edoc.params.values().flat_map(Markup::refs)),
+                        Some(name),
+                        &ctx,
+                    );
+                    resolve_related_list(&edoc.related, Some(name))
+                        .unwrap_or_else(|err| panic!("{ctx} broken related: {err}"));
+                }
+                let pctx = format!("{tag} package `{name}`");
+                check_refs(
+                    doc.summary.refs().into_iter().chain(doc.body.refs()),
+                    Some(name),
+                    &pctx,
+                );
+                resolve_related_list(&doc.related, Some(name))
+                    .unwrap_or_else(|err| panic!("{pctx} broken related: {err}"));
+            }
+            for pkg in tola_packages::builtin_packages() {
+                let spec = pkg.spec();
+                let name = spec.name.as_str();
+                assert!(
+                    docs::package(lang, name).is_some(),
+                    "{tag} missing package doc for `{name}`"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn script_docs_match_signatures() {
+        for lang in [HelpLanguage::English, HelpLanguage::SimplifiedChinese] {
+            let tag = lang.tag();
+            for name in docs::script_names() {
+                let page = super::super::scripts::page(name, None, lang).unwrap();
+                let doc = docs::script(lang, name).unwrap();
+                for cmd in &page.commands {
+                    let ctx = format!("{tag} script `{name}.{}`", cmd.name);
+                    let cdoc = doc.commands.get(&cmd.name).unwrap_or_else(|| {
+                        panic!("{tag} script `{name}` missing command `{}`", cmd.name)
+                    });
+                    for param in cmd.parameters.iter().chain(&cmd.options) {
+                        assert!(
+                            cdoc.params.contains_key(&param.name),
+                            "{ctx} missing param `{}`",
+                            param.name
+                        );
+                    }
+                    check_refs(
+                        cdoc.summary
+                            .refs()
+                            .into_iter()
+                            .chain(cdoc.body.refs())
+                            .chain(cdoc.params.values().flat_map(Markup::refs)),
+                        None,
+                        &ctx,
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn catalog_serializes_for_both_languages() {
+        for lang in [HelpLanguage::English, HelpLanguage::SimplifiedChinese] {
+            let full = catalog(lang).unwrap();
+            let json = serde_json::to_value(&full).unwrap();
+            assert_eq!(json["kind"], "catalog");
+            assert_eq!(json["language"], lang.tag());
+            assert!(!full.config.is_empty());
+            assert!(!full.packages.is_empty());
+            assert!(!full.scripts.is_empty());
+        }
+    }
+
+    #[test]
+    fn wrong_brackets_suggest_selector() {
         for (wrong, header) in [
             ("[hooks.before-build]", "[[hooks.before-build]]"),
             ("[[build]]", "[build]"),
             ("[include]", "include"),
         ] {
-            let error = request(&targets(&[wrong])).unwrap_err();
-            let diagnostic = &tola_diagnostic::attached(&error).unwrap()[0];
-            assert_eq!(diagnostic.code, crate::codes::help::TARGET);
+            let err = request(&targets(&[wrong])).unwrap_err();
+            let diag = &tola_diagnostic::attached(&err).unwrap()[0];
+            assert_eq!(diag.code, crate::codes::help::TARGET);
             assert!(
-                diagnostic
-                    .help
+                diag.help
                     .iter()
-                    .any(|help| help.message.contains(&quoted(header)))
+                    .any(|h| h.message.contains(&quoted(header)))
             );
         }
     }
 
     #[test]
-    fn config_usage_headings_match_in_markdown_and_json() {
-        for section in ["include", "hooks", "modules", "options"] {
-            let id = PageId::Config {
-                section: section.into(),
-            };
-            let target = LinkTarget::Page(id.clone());
-            for language in [HelpLanguage::English, HelpLanguage::SimplifiedChinese] {
-                let page = page_of(&id, language).unwrap();
-                let markdown = HelpDocument::parse(&page);
-                let json = serde_json::to_value(
-                    crate::help::data::reference(page, &target, language).unwrap(),
-                )
-                .unwrap();
-                let headings = json["blocks"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .filter(|block| block["kind"] == "heading");
-                assert_eq!(
-                    headings
-                        .clone()
-                        .filter_map(|block| block["level"].as_u64())
-                        .min(),
-                    Some(3),
-                    "{section} ({})",
-                    language.tag()
-                );
-                for heading in headings {
-                    assert!(markdown.blocks.iter().any(|block| {
-                        let Block::Heading { level, anchor, .. } = block else {
-                            return false;
-                        };
-                        heading["level"].as_u64() == Some(u64::from(*level))
-                            && heading["anchor"] == anchor.as_str()
-                    }));
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn config_translations_name_existing_tables_and_keys() {
-        for section in i18n::config_names() {
-            assert!(
-                TABLES.iter().any(|table| table.section == section),
-                "`{section}` is not a configuration table"
-            );
-            let translation = i18n::config(HelpLanguage::SimplifiedChinese, section).unwrap();
-            for heading in translation.sections() {
-                assert!(
-                    matches!(heading, CONFIG_KEYS | CONFIG_USAGE),
-                    "`{section}` has an unknown translation heading `{heading}`"
-                );
-            }
-            let fields = documented_fields(section);
-            for name in translation.fields(CONFIG_KEYS) {
-                let path = format!("{section}.{name}");
-                assert!(
-                    fields.contains(&path.as_str()) && child_table(&path).is_none(),
-                    "`{path}` is not a key this table documents"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn empty_container_shows_child_settings() {
-        let page = page(&["[typst]".to_owned()], HelpLanguage::English).unwrap();
-        assert_eq!(
-            page.id,
-            PageId::Config {
-                section: "typst.fonts".into()
-            }
-        );
-        assert!(sole_child_table("build").is_none());
-    }
-
-    #[test]
-    fn config_index_lists_grouping_containers() {
-        let index =
-            HelpDocument::parse(&page(&targets(&["config"]), HelpLanguage::English).unwrap());
-        let links = cross_references(&index);
-        for (section, shown) in [
-            ("hooks", true),
-            ("modules", true),
-            ("options", true),
-            ("typst", false),
-        ] {
-            let target = PageId::Config {
-                section: section.into(),
-            };
-            assert_eq!(
-                links.iter().any(|link| link.page() == Some(&target)),
-                shown,
-                "{section}"
-            );
-        }
-    }
-
-    #[test]
-    fn related_targets_appear_on_both_sides() {
-        let related = |arguments: &[&str]| {
-            let document =
-                HelpDocument::parse(&page(&targets(arguments), HelpLanguage::English).unwrap());
-            cross_references(&document)
-                .into_iter()
-                .cloned()
-                .collect::<Vec<_>>()
+    fn empty_container_shows_child() {
+        let HelpPage::Config(page) = page_for_target(
+            &request(&targets(&["[typst]"])).unwrap(),
+            HelpLanguage::English,
+        )
+        .unwrap() else {
+            panic!("expected config page");
         };
-        for package in tola_packages::builtin_packages() {
-            let name = package.spec().name.to_string();
-            let Some(section) = package_config_table(&name) else {
-                continue;
-            };
-            assert!(
-                related(&[&format!("@tola/{name}")]).contains(&LinkTarget::Page(PageId::Config {
-                    section: section.into()
-                })),
-                "{name} does not link to {section}"
-            );
-            assert!(
-                related(&[&format!("[{section}]")])
-                    .contains(&LinkTarget::Page(PageId::Package { name: name.clone() })),
-                "{section} does not link to {name}"
-            );
-        }
+        assert_eq!(page.section, "typst.fonts");
     }
 
     #[test]
-    fn help_links_resolve_registered_pages() {
-        let mut loaded: Vec<(PageId, HelpDocument)> = Vec::new();
-        for arguments in requests() {
-            let document = HelpDocument::parse(&page(&arguments, HelpLanguage::English).unwrap());
-            for target in cross_references(&document) {
-                match target {
-                    LinkTarget::External(uri) => {
-                        assert!(!uri.starts_with(CROSS_REFERENCE_SCHEME), "{uri}")
-                    }
-                    LinkTarget::Page(id) | LinkTarget::PageAnchor(id, _) => {
-                        let document = if let Some((_, document)) =
-                            loaded.iter().find(|(page, _)| page == id)
-                        {
-                            document.clone()
-                        } else {
-                            let document =
-                                HelpDocument::parse(&page_of(id, HelpLanguage::English).unwrap());
-                            loaded.push((id.clone(), document.clone()));
-                            document
-                        };
-                        if let LinkTarget::PageAnchor(_, anchor) = target {
-                            assert!(
-                                contains_anchor(&document.blocks, anchor),
-                                "{}#{}",
-                                id.uri(),
-                                anchor.as_str()
-                            );
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    fn cross_references(document: &HelpDocument) -> Vec<&LinkTarget> {
-        let mut found = Vec::new();
-        for block in &document.blocks {
-            walk_block(block, &mut found);
-        }
-        found
-    }
-
-    fn walk_block<'a>(block: &'a Block, found: &mut Vec<&'a LinkTarget>) {
-        match block {
-            Block::Paragraph { spans, .. } | Block::Heading { spans, .. } => {
-                walk_spans(spans, found)
-            }
-            Block::List { items, .. } => {
-                for item in items {
-                    for block in item {
-                        walk_block(block, found);
-                    }
-                }
-            }
-            Block::Quote { blocks } => {
-                for block in blocks {
-                    walk_block(block, found);
-                }
-            }
-            Block::Table { headers, rows, .. } => {
-                for spans in headers.iter().chain(rows.iter().flatten()) {
-                    walk_spans(spans, found);
-                }
-            }
-            Block::Code { .. } | Block::Rule => {}
-        }
-    }
-
-    fn walk_spans<'a>(spans: &'a [Inline], found: &mut Vec<&'a LinkTarget>) {
-        for span in spans {
-            match span {
-                Inline::Link { label, target } => {
-                    found.push(target);
-                    walk_spans(label, found);
-                }
-                Inline::Emph(children) | Inline::Strong(children) => {
-                    walk_spans(children, found);
-                }
-                Inline::Text(_) | Inline::Code(_) => {}
-            }
-        }
-    }
-
-    #[test]
-    fn selected_exports_preserve_order() {
-        let selected = vec![
-            "@tola/address".to_owned(),
-            "output-url".into(),
-            "slugify".into(),
-        ];
-        let document = HelpDocument::parse(&page(&selected, HelpLanguage::English).unwrap());
-        let names = document
-            .blocks
-            .iter()
-            .filter_map(|block| match block {
-                Block::Heading {
-                    spans,
-                    role: crate::help::model::HeadingRole::Export,
-                    ..
-                } => spans.first().and_then(|span| match span {
-                    Inline::Text(text) | Inline::Code(text) => {
-                        text.split_whitespace().next().map(str::to_owned)
-                    }
-                    _ => None,
-                }),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
+    fn selected_exports_keep_order() {
+        let HelpPage::Package(page) = page_for_target(
+            &request(&targets(&["@tola/address", "output-url", "slugify"])).unwrap(),
+            HelpLanguage::English,
+        )
+        .unwrap() else {
+            panic!("expected package page");
+        };
+        let names: Vec<&str> = page.exports.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(names, ["output-url", "slugify"]);
     }
 
     #[test]
-    fn unknown_exports_prevent_output() {
-        let error = page(
-            &[
-                "@tola/address".to_owned(),
-                "slugify".into(),
-                "unknown".into(),
-            ],
+    fn unknown_export_rejected() {
+        let err = page_for_target(
+            &request(&targets(&["@tola/address", "slugify", "unknown"])).unwrap(),
             HelpLanguage::English,
         )
-        .err()
-        .expect("an unknown export is rejected");
+        .expect_err("an unknown export is rejected");
         assert_eq!(
-            tola_diagnostic::attached(&error).unwrap()[0].code,
+            tola_diagnostic::attached(&err).unwrap()[0].code,
             crate::codes::help::MEMBER
         );
     }

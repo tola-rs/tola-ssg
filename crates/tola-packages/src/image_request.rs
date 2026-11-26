@@ -1,72 +1,51 @@
-//! Immutable image-production requests carried by ordinary Typst file reads.
+//! Immutable image-production requests carried by tracked Typst file reads.
 //!
-//! The observation identity retains the source root and path for dependency tracking; the
-//! derivative identity contains only source bytes, the resolved recipe, and the image pipeline
-//! revision.
-//!
-//! A descriptor is a file in the reserved namespace whose path is its own content, so a read
-//! recovers the request without a lookup table.
+//! Observation IDs retain source root and path for dependency tracking; derivative keys hash only
+//! source bytes, the resolved recipe, and the image pipeline revision.
 
 use serde::{Deserialize, Serialize};
+use tola_address::OutputPath;
+use tola_image::{IMAGE_PIPELINE_REVISION, ImageRecipe};
 use tola_typst::{ContentDigest, PackageSpec, ReadLocator};
 use typst::foundations::{Bytes, PathOrStr};
 use typst::loading::DataSource;
 use typst::syntax::{FileId, RootedPath, VirtualPath, VirtualRoot};
 
 use crate::TolaPackage;
-use tola_address::OutputPath;
-
 use crate::protocol::{IMAGE_REQUEST_OBSERVATION_DIRECTORY, IMAGE_REQUEST_OBSERVATION_EXTENSION};
-use tola_image::{IMAGE_PIPELINE_REVISION, ImageRecipe};
 
-/// Keeps the derivative digest distinct from any other hash over the same bytes.
 const KEY_DOMAIN: &[u8] = b"tola:image-variant\0";
 
-/// Why a read in the observation namespace is not a request this crate wrote.
 #[derive(Debug, thiserror::Error)]
 pub enum DescriptorError {
-    /// The path does not end in the request extension.
     #[error("image request descriptor must end in .json")]
     MissingExtension,
-    /// The encoded bytes are not lowercase hexadecimal.
     #[error("image request descriptor must use lowercase hexadecimal encoding")]
     NotLowerHex,
-    /// The encoded bytes are not hexadecimal.
     #[error("invalid image request encoding")]
     Encoding(#[source] hex::FromHexError),
-    /// The descriptor did not decode.
     #[error("invalid image request descriptor")]
     Malformed(#[source] serde_json::Error),
-    /// The descriptor was written by another processing revision.
     #[error("unsupported image request processing revision")]
     UnsupportedRevision,
-    /// Re-encoding the descriptor does not reproduce its bytes.
     #[error("noncanonical image request descriptor")]
     Noncanonical,
-    /// Re-encoding failed.
     #[error(transparent)]
     Serialization(serde_json::Error),
-    /// The source digest is not lowercase hexadecimal.
     #[error("image source digest must use lowercase hexadecimal encoding")]
     DigestNotLowerHex,
-    /// The source digest is not hexadecimal.
     #[error("invalid image source digest")]
     DigestEncoding(#[source] hex::FromHexError),
-    /// The source package does not parse.
     #[error("invalid image source package")]
     SourcePackage(#[source] PackageSpecMessage),
-    /// The source package does not round-trip to the same spelling.
     #[error("noncanonical image source package")]
     NoncanonicalSourcePackage,
-    /// The source path is not a virtual path.
     #[error("invalid image source path")]
     SourcePath,
-    /// The source path is not a canonical rooted file path.
     #[error("image source path must be a canonical rooted file path")]
     NoncanonicalSourcePath,
 }
 
-/// The parser's message for one unparsable package spec.
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
 pub struct PackageSpecMessage(String);
@@ -74,7 +53,7 @@ pub struct PackageSpecMessage(String);
 #[derive(Clone, Debug)]
 pub struct ImageRequest {
     source: DataSource,
-    /// The resolved file for a path source; the call site for a bytes source.
+    /// Resolved file for a path source, or call site for a bytes source.
     origin: RootedPath,
     source_digest: ContentDigest,
     recipe: ImageRecipe,
@@ -115,14 +94,12 @@ impl ImageRequest {
         Self::variant_key(self.source_digest, &self.recipe)
     }
 
-    /// The encoded image's identity, shared by different sources of a resize request.
+    /// Encoded image identity shared across sources with matching bytes and recipe.
     pub fn variant_key(source_digest: ContentDigest, recipe: &ImageRecipe) -> ContentDigest {
         let mut hash = blake3::Hasher::new();
         hash.update(KEY_DOMAIN);
         hash.update(&IMAGE_PIPELINE_REVISION.to_le_bytes());
         hash.update(source_digest.as_bytes());
-        // Recipes carry only validated scalar fields; streaming their canonical serialization
-        // avoids allocating a second descriptor.
         serde_json::to_writer(&mut hash, recipe)
             .expect("image recipe serialization into a digest is infallible");
         ContentDigest::from_bytes(*hash.finalize().as_bytes())
@@ -134,35 +111,37 @@ impl ImageRequest {
             self.key().to_hex(),
             self.recipe.format().extension(),
         ))
-        .expect("image output paths contain only fixed segments and hexadecimal keys")
+        .expect("image output paths contain only fixed segments and hex")
     }
 
     pub fn observation_id(&self) -> FileId {
         let bytes = serde_json::to_vec(&self.descriptor())
-            .expect("image request descriptors contain only serializable scalar values");
+            .expect("image request descriptors contain only serializable values");
         let path = VirtualPath::new(format!(
             "{IMAGE_REQUEST_OBSERVATION_DIRECTORY}{}{IMAGE_REQUEST_OBSERVATION_EXTENSION}",
             hex::encode(bytes),
         ))
-        .expect("image observation paths contain only fixed segments and hexadecimal bytes");
-        FileId::new(RootedPath::new(VirtualRoot::Package(package_spec()), path))
+        .expect("image observation paths contain only fixed segments and hex");
+        FileId::new(RootedPath::new(
+            VirtualRoot::Package(TolaPackage::Image.spec()),
+            path,
+        ))
     }
 
-    /// Recover only this protocol's requests from successful read evidence. A file in the protocol
-    /// namespace with a malformed descriptor is an error, not a dependency to skip silently.
+    /// Recovers a request from read evidence; malformed descriptors in this namespace error.
     pub fn from_read(locator: &ReadLocator) -> Result<Option<Self>, DescriptorError> {
         let (ReadLocator::Package { package, path }
         | ReadLocator::ProvidedPackage { package, path }) = locator
         else {
             return Ok(None);
         };
-        if !owns_package(package) {
+        if !owns_pkg(package) {
             return Ok(None);
         }
         let Some(path) = path.to_str() else {
             return Ok(None);
         };
-        Ok(decode_observation(path)?.map(|(request, _)| request))
+        Ok(decode_observation(path)?.map(|(req, _)| req))
     }
 
     fn descriptor(&self) -> RequestDescriptor<&ImageRecipe> {
@@ -175,22 +154,17 @@ impl ImageRequest {
     }
 }
 
-/// Provider dispatch is a pure path-to-bytes mapping: it does not load the
-/// source, enqueue work, encode an image, or touch the filesystem.
-pub fn observation_bytes(package: &PackageSpec, path: &str) -> Option<Vec<u8>> {
-    if !owns_package(package) {
+/// Pure path-to-bytes mapping for the virtual request namespace.
+pub fn observation_bytes(pkg: &PackageSpec, path: &str) -> Option<Vec<u8>> {
+    if !owns_pkg(pkg) {
         return None;
     }
-    decode_observation(path)
-        .ok()
-        .flatten()
-        .map(|(_, bytes)| bytes)
+    decode_observation(path).ok().flatten().map(|(_, b)| b)
 }
 
-/// This reserved virtual namespace never falls through to package-directory files.
-pub fn owns_observation(package: &PackageSpec, path: &str) -> bool {
+pub fn owns_observation(pkg: &PackageSpec, path: &str) -> bool {
     let path = path.strip_prefix('/').unwrap_or(path);
-    owns_package(package)
+    owns_pkg(pkg)
         && (path == IMAGE_REQUEST_OBSERVATION_DIRECTORY.trim_end_matches('/')
             || path.starts_with(IMAGE_REQUEST_OBSERVATION_DIRECTORY))
 }
@@ -214,7 +188,6 @@ enum SourceDescriptor {
         package: String,
         path: String,
     },
-    /// An in-memory source: the call site that supplied it, plus the bytes.
     Bytes {
         origin: Box<SourceDescriptor>,
         bytes: Vec<u8>,
@@ -222,8 +195,8 @@ enum SourceDescriptor {
 }
 
 impl SourceDescriptor {
-    fn from_source(source: &DataSource, origin: &RootedPath) -> Self {
-        match source {
+    fn from_source(src: &DataSource, origin: &RootedPath) -> Self {
+        match src {
             DataSource::Path(_) => Self::from_path(origin),
             DataSource::Bytes(bytes) => Self::Bytes {
                 origin: Box::new(Self::from_path(origin)),
@@ -232,12 +205,12 @@ impl SourceDescriptor {
         }
     }
 
-    fn from_path(source: &RootedPath) -> Self {
-        let path = source.vpath().get_with_slash().to_owned();
-        match source.root() {
+    fn from_path(src: &RootedPath) -> Self {
+        let path = src.vpath().get_with_slash().to_owned();
+        match src.root() {
             VirtualRoot::Project => Self::Site { path },
-            VirtualRoot::Package(package) => Self::Package {
-                package: package.to_string(),
+            VirtualRoot::Package(pkg) => Self::Package {
+                package: pkg.to_string(),
                 path,
             },
         }
@@ -251,8 +224,8 @@ impl SourceDescriptor {
         let (root, path) = match self {
             Self::Site { path } => (VirtualRoot::Project, path),
             Self::Package { package, path } => {
-                let spec = package.parse::<PackageSpec>().map_err(|error| {
-                    DescriptorError::SourcePackage(PackageSpecMessage(error.to_string()))
+                let spec = package.parse::<PackageSpec>().map_err(|e| {
+                    DescriptorError::SourcePackage(PackageSpecMessage(e.to_string()))
                 })?;
                 if spec.to_string() != package {
                     return Err(DescriptorError::NoncanonicalSourcePackage);
@@ -261,11 +234,11 @@ impl SourceDescriptor {
             }
             Self::Bytes { .. } => unreachable!(),
         };
-        let virtual_path = VirtualPath::new(&path).map_err(|_| DescriptorError::SourcePath)?;
-        if virtual_path.is_root() || virtual_path.get_with_slash() != path {
+        let vpath = VirtualPath::new(&path).map_err(|_| DescriptorError::SourcePath)?;
+        if vpath.is_root() || vpath.get_with_slash() != path {
             return Err(DescriptorError::NoncanonicalSourcePath);
         }
-        let origin = RootedPath::new(root, virtual_path);
+        let origin = RootedPath::new(root, vpath);
         Ok((DataSource::Path(PathOrStr::Str(path.into())), origin))
     }
 }
@@ -282,46 +255,34 @@ fn decode_observation(path: &str) -> Result<Option<(ImageRequest, Vec<u8>)>, Des
         return Err(DescriptorError::NotLowerHex);
     }
     let bytes = hex::decode(encoded).map_err(DescriptorError::Encoding)?;
-    // ImageRecipe's deserializer validates structural bounds and encoding options; the producer
-    // additionally validates it against actual metadata.
-    let descriptor: RequestDescriptor<ImageRecipe> =
+    let desc: RequestDescriptor<ImageRecipe> =
         serde_json::from_slice(&bytes).map_err(DescriptorError::Malformed)?;
-    if descriptor.revision != IMAGE_PIPELINE_REVISION {
+    if desc.revision != IMAGE_PIPELINE_REVISION {
         return Err(DescriptorError::UnsupportedRevision);
     }
-    if serde_json::to_vec(&descriptor).map_err(DescriptorError::Serialization)? != bytes {
+    if serde_json::to_vec(&desc).map_err(DescriptorError::Serialization)? != bytes {
         return Err(DescriptorError::Noncanonical);
     }
-    let digest_hex = &descriptor.source_digest;
-    if !is_lower_hex(digest_hex) {
+    if !is_lower_hex(&desc.source_digest) {
         return Err(DescriptorError::DigestNotLowerHex);
     }
     let mut digest = [0; 32];
-    hex::decode_to_slice(digest_hex, &mut digest).map_err(DescriptorError::DigestEncoding)?;
-    let (source, origin) = descriptor.source.into_source()?;
+    hex::decode_to_slice(&desc.source_digest, &mut digest)
+        .map_err(DescriptorError::DigestEncoding)?;
+    let (src, origin) = desc.source.into_source()?;
     Ok(Some((
-        ImageRequest::new(
-            source,
-            origin,
-            ContentDigest::from_bytes(digest),
-            descriptor.recipe,
-        ),
+        ImageRequest::new(src, origin, ContentDigest::from_bytes(digest), desc.recipe),
         bytes,
     )))
 }
 
-fn is_lower_hex(value: &str) -> bool {
-    value
-        .bytes()
-        .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+fn is_lower_hex(val: &str) -> bool {
+    val.bytes()
+        .all(|b| b.is_ascii_digit() || matches!(b, b'a'..=b'f'))
 }
 
-fn owns_package(package: &PackageSpec) -> bool {
-    TolaPackage::from_spec(package) == Some(TolaPackage::Image)
-}
-
-fn package_spec() -> PackageSpec {
-    TolaPackage::Image.spec()
+fn owns_pkg(pkg: &PackageSpec) -> bool {
+    TolaPackage::from_spec(pkg) == Some(TolaPackage::Image)
 }
 
 #[cfg(test)]
@@ -351,57 +312,57 @@ mod tests {
         .unwrap()
     }
 
-    fn site_source(path: &str) -> RootedPath {
+    fn site_src(path: &str) -> RootedPath {
         RootedPath::new(VirtualRoot::Project, VirtualPath::new(path).unwrap())
     }
 
-    fn path_source(path: &str) -> DataSource {
+    fn path_src(path: &str) -> DataSource {
         DataSource::Path(PathOrStr::Str(path.into()))
     }
 
     fn locator(path: impl Into<PathBuf>) -> ReadLocator {
         ReadLocator::ProvidedPackage {
-            package: package_spec(),
+            package: TolaPackage::Image.spec(),
             path: path.into(),
         }
     }
+
     #[test]
-    fn observation_ids_round_trip_per_root() {
-        let package_source = RootedPath::new(
+    fn observation_id_roundtrip() {
+        let pkg_spec = TolaPackage::Image.spec();
+        let pkg_src = RootedPath::new(
             VirtualRoot::Package("@local/artwork:1.2.3".parse().unwrap()),
             VirtualPath::new("/assets/illustration.png").unwrap(),
         );
-        for source in [site_source("/images/hero.png"), package_source] {
-            let request = ImageRequest::new(
-                path_source(source.vpath().get_with_slash()),
-                source.clone(),
+        for src in [site_src("/images/hero.png"), pkg_src] {
+            let req = ImageRequest::new(
+                path_src(src.vpath().get_with_slash()),
+                src.clone(),
                 ContentDigest::of(b"pixels"),
                 recipe(120),
             );
-            let id = request.observation_id();
-            let read = locator(id.vpath().get_without_slash());
-            let recovered = ImageRequest::from_read(&read).unwrap().unwrap();
-            let bytes = observation_bytes(&package_spec(), id.vpath().get_with_slash()).unwrap();
+            let id = req.observation_id();
+            let recovered = ImageRequest::from_read(&locator(id.vpath().get_without_slash()))
+                .unwrap()
+                .unwrap();
+            let bytes = observation_bytes(&pkg_spec, id.vpath().get_with_slash()).unwrap();
 
-            assert_eq!(recovered.origin(), &source);
-            assert_eq!(
-                recovered.source(),
-                &path_source(source.vpath().get_with_slash())
-            );
-            assert_eq!(recovered.source_digest(), request.source_digest());
-            assert_eq!(recovered.recipe(), request.recipe());
-            assert_eq!(recovered.output_path(), request.output_path());
+            assert_eq!(recovered.origin(), &src);
+            assert_eq!(recovered.source(), &path_src(src.vpath().get_with_slash()));
+            assert_eq!(recovered.source_digest(), req.source_digest());
+            assert_eq!(recovered.recipe(), req.recipe());
+            assert_eq!(recovered.output_path(), req.output_path());
             assert_eq!(recovered.observation_id(), id);
             assert_eq!(
                 observation_bytes(
-                    &package_spec(),
+                    &pkg_spec,
                     recovered.observation_id().vpath().get_with_slash()
                 ),
                 Some(bytes),
             );
             assert_eq!(
                 ImageRequest::from_read(&ReadLocator::Package {
-                    package: package_spec(),
+                    package: pkg_spec.clone(),
                     path: PathBuf::from(id.vpath().get_without_slash()),
                 })
                 .unwrap()
@@ -413,18 +374,18 @@ mod tests {
     }
 
     #[test]
-    fn sources_share_derivative_identity() {
+    fn variant_key_shared_across_sources() {
         let bytes = b"same pixels".to_vec();
         let digest = ContentDigest::of(&bytes);
         let by_path = ImageRequest::new(
-            path_source("/assets/photo.png"),
-            site_source("/assets/photo.png"),
+            path_src("/assets/photo.png"),
+            site_src("/assets/photo.png"),
             digest,
             recipe(120),
         );
         let by_bytes = ImageRequest::new(
             DataSource::Bytes(Bytes::new(bytes)),
-            site_source("/content/figure.typ"),
+            site_src("/content/figure.typ"),
             digest,
             recipe(120),
         );
@@ -433,30 +394,31 @@ mod tests {
         assert_eq!(by_path.output_path(), by_bytes.output_path());
         assert_ne!(by_path.observation_id(), by_bytes.observation_id());
     }
+
     #[test]
-    fn only_image_package_reads_requests() {
-        let request = ImageRequest::new(
-            path_source("/hero.png"),
-            site_source("/hero.png"),
+    fn from_read_filters_package() {
+        let req = ImageRequest::new(
+            path_src("/hero.png"),
+            site_src("/hero.png"),
             ContentDigest::of(b"pixels"),
             recipe(120),
         );
-        let path = PathBuf::from(request.observation_id().vpath().get_without_slash());
+        let path = PathBuf::from(req.observation_id().vpath().get_without_slash());
         for spec in [
             "@preview/images:0.0.0",
             "@tola/icon:0.0.0",
             "@tola/image:0.0.1",
         ] {
-            let package = spec.parse::<PackageSpec>().unwrap();
+            let pkg = spec.parse::<PackageSpec>().unwrap();
             assert!(
                 ImageRequest::from_read(&ReadLocator::ProvidedPackage {
-                    package: package.clone(),
+                    package: pkg.clone(),
                     path: path.clone(),
                 })
                 .unwrap()
                 .is_none()
             );
-            assert!(observation_bytes(&package, path.to_str().unwrap()).is_none());
+            assert!(observation_bytes(&pkg, path.to_str().unwrap()).is_none());
         }
         assert!(
             ImageRequest::from_read(&ReadLocator::ProvidedRoot(path))

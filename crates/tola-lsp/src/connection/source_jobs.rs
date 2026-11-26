@@ -1,4 +1,4 @@
-//! Dispatches source requests to analysis or compilation while preserving each request's identity.
+//! Source request dispatch to the analysis or compiler lane.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -21,10 +21,6 @@ use super::replies::failed_response;
 use super::{Connection, Phase};
 
 impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
-    /// Admit one source request and queue the job that answers it.
-    ///
-    /// The job carries the identity and source inputs the admission assigned, so a job no admitted
-    /// request owns cannot be queued; a refused request queues nothing.
     fn queue(
         &mut self,
         id: RequestId,
@@ -38,9 +34,8 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
         Ok(())
     }
 
-    /// Routes realized from the current source check, not proof of dev-server publication.
-    pub(super) fn route(&mut self, id: RequestId, parameters: RouteParams) -> Result<()> {
-        if is_untitled(&parameters.uri) {
+    pub(super) fn route(&mut self, id: RequestId, params: RouteParams) -> Result<()> {
+        if is_untitled(&params.uri) {
             return self.source_reply(id, SourceReply::Routes(protocol::RouteReply::default()));
         }
         self.queue(id, |id, serial, sources| {
@@ -48,12 +43,11 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
                 id,
                 serial,
                 sources,
-                uri: parameters.uri,
+                uri: params.uri,
             })
         })
     }
 
-    /// Every page the checked sources realize, which no request of one document names.
     pub(super) fn route_index(&mut self, id: RequestId) -> Result<()> {
         self.queue(id, |id, serial, sources| {
             SourceJob::RouteIndex(RouteIndexRead {
@@ -64,9 +58,8 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
         })
     }
 
-    /// The commands every page of the requested source has.
-    pub(super) fn code_lens(&mut self, id: RequestId, parameters: CodeLensParams) -> Result<()> {
-        if is_untitled(&parameters.text_document.uri) {
+    pub(super) fn code_lens(&mut self, id: RequestId, params: CodeLensParams) -> Result<()> {
+        if is_untitled(&params.text_document.uri) {
             return self.source_reply(id, SourceReply::CodeLenses(None));
         }
         self.queue(id, |id, serial, sources| {
@@ -74,16 +67,15 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
                 id,
                 serial,
                 sources,
-                uri: parameters.text_document.uri,
+                uri: params.text_document.uri,
             })
         })
     }
 
-    /// The symbols of every source the site holds whose name answers the search.
     pub(super) fn workspace_symbols(
         &mut self,
         id: RequestId,
-        parameters: WorkspaceSymbolParams,
+        params: WorkspaceSymbolParams,
     ) -> Result<()> {
         let view = self.open.view();
         self.queue(id, |id, serial, sources| {
@@ -92,14 +84,13 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
                 serial,
                 sources,
                 view,
-                query: parameters.query,
+                query: params.query,
             })
         })
     }
 
-    /// The edit that keeps every import pointing at a file the editor is renaming.
-    pub(super) fn rename(&mut self, id: RequestId, parameters: RenameFilesParams) -> Result<()> {
-        let files: Vec<(PathBuf, PathBuf)> = parameters
+    pub(super) fn rename(&mut self, id: RequestId, params: RenameFilesParams) -> Result<()> {
+        let files: Vec<(PathBuf, PathBuf)> = params
             .files
             .into_iter()
             .filter_map(|file| {
@@ -124,7 +115,7 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
     pub(super) fn enqueue_analysis(
         &mut self,
         id: RequestId,
-        source: tola_typst::typst::syntax::Source,
+        src: tola_typst::typst::syntax::Source,
         task: AnalysisTask,
     ) -> Result<()> {
         let uri = match &task {
@@ -132,9 +123,9 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
             AnalysisTask::Tokens(read) => &read.uri,
         };
         let view = self.open.view();
-        let document_revision = view.get(uri).map(|parsed| (uri.clone(), parsed.revision));
+        let doc_rev = view.get(uri).map(|parsed| (uri.clone(), parsed.revision));
         let root = self.workspace().root.clone();
-        let package_locations = self.package_locations();
+        let pkg_locs = self.package_locations();
         let boundary = self.source_boundary();
         let Some(admission) = self.admit(&id)? else {
             return Ok(());
@@ -142,15 +133,15 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
         self.requests
             .get_mut(&id)
             .expect("admitted analysis")
-            .document_revision = document_revision;
+            .document_revision = doc_rev;
         self.analyses.push_back(AnalysisRequest {
             id,
             serial: admission.serial,
             sources: self.source_inputs(root, admission.cancellation),
             source_root: self.source_root(),
             view,
-            source,
-            package_locations,
+            source: src,
+            package_locations: pkg_locs,
             boundary,
             task,
         });
@@ -158,28 +149,26 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
     }
 
     pub(super) fn query(&mut self, id: RequestId, query: SourceQuery) -> Result<()> {
-        let workspace = self.workspace();
-        let root = workspace.root.clone();
-        let routes_as_hints = workspace.routes_as_hints;
+        let ws = self.workspace();
+        let root = ws.root.clone();
+        let routes_as_hints = ws.routes_as_hints;
         if let Some(reply) = self.configuration_query(&query, &root) {
             return self.source_reply(id, reply);
         }
-        // A fix reads the text the author is looking at, so it answers without the compilation a
-        // broken source cannot produce.
         if let SourceQuery::CodeActions(params) = query {
             return self.code_actions(id, params);
         }
-        let (uri, position) = query.document();
-        if let Some(source) = self.source(uri) {
-            let Ok(cursor) = crate::position::byte_offset(source.lines(), position) else {
+        let (uri, pos) = query.document();
+        if let Some(src) = self.source(uri) {
+            let Ok(cursor) = crate::position::byte_offset(src.lines(), pos) else {
                 return self.source_reply(id, crate::query::unavailable(&query));
             };
             if matches!(query, SourceQuery::Completion(_))
-                && let Some(reply) = crate::query::source_completion_reply(&source, cursor)
+                && let Some(reply) = crate::query::source_completion_reply(&src, cursor)
             {
                 return self.source_reply(id, reply);
             }
-            let answered_from_names = matches!(
+            let name_query = matches!(
                 query,
                 SourceQuery::Definition(_)
                     | SourceQuery::PrepareRename(_)
@@ -187,23 +176,20 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
                     | SourceQuery::References(_)
                     | SourceQuery::Rename(_)
             );
-            if answered_from_names
+            if name_query
                 || (matches!(query, SourceQuery::Completion(_))
                     && (is_untitled(uri)
                         || !self
                             .checked
                             .is_some_and(|check| check.revision == self.revision)))
             {
-                return self.enqueue_analysis(id, source, AnalysisTask::Query { query, cursor });
+                return self.enqueue_analysis(id, src, AnalysisTask::Query { query, cursor });
             }
-            let source_reply = crate::query::source_reply(&source, &query);
-            match source_reply {
+            match crate::query::source_reply(&src, &query) {
                 Ok(Some(reply)) => return self.source_reply(id, reply),
-                Err(error) => {
-                    return self.reply(failed_response(
-                        id,
-                        crate::compiler::SourceFailure::of(error),
-                    ));
+                Err(err) => {
+                    return self
+                        .reply(failed_response(id, crate::compiler::SourceFailure::of(err)));
                 }
                 Ok(None) => {}
             }
@@ -226,16 +212,13 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
         })
     }
 
-    /// The causes the last completed check reported for one document, when they are still the
-    /// version the client has synced: a client that reads no `data` cannot echo them, so the server
-    /// answers its fix requests from these.
+    /// Stored diagnostics for `uri` when synced version matches, used for clients without `data` support.
     pub(super) fn published_diagnostics(&self, uri: &Uri) -> Option<Vec<lsp_types::Diagnostic>> {
-        let Phase::Ready(workspace) = &self.phase else {
+        let Phase::Ready(ws) = &self.phase else {
             return None;
         };
         let synced = self.open.version(uri.as_str());
-        workspace
-            .diagnostics
+        ws.diagnostics
             .cause_diagnostics(uri, synced)
             .map(<[lsp_types::Diagnostic]>::to_vec)
     }
@@ -243,7 +226,7 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
     pub(super) fn package_source(
         &mut self,
         id: RequestId,
-        parameters: PackageSourceParams,
+        params: PackageSourceParams,
     ) -> Result<()> {
         let Some(admission) = self.admit(&id)? else {
             return Ok(());
@@ -252,28 +235,24 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
             .push_back(SourceJob::PackageSource(PackageSourceRead {
                 id,
                 serial: admission.serial,
-                uri: parameters.uri,
+                uri: params.uri,
                 cancellation: admission.cancellation,
             }));
         Ok(())
     }
 
-    /// The sources that reach the client's item, answered from the compiler lane's compilation.
     pub(super) fn incoming_calls(
         &mut self,
         id: RequestId,
-        parameters: CallHierarchyIncomingCallsParams,
+        params: CallHierarchyIncomingCallsParams,
     ) -> Result<()> {
-        let node = parameters
+        let node = params
             .item
             .data
             .as_ref()
             .and_then(|data| crate::call_hierarchy::item_file(data, &self.source_root()));
-        let source = node.and_then(|node| {
-            self.source(&parameters.item.uri)
-                .filter(|source| source.id() == node)
-        });
-        let Some(source) = source else {
+        let src = node.and_then(|node| self.source(&params.item.uri).filter(|s| s.id() == node));
+        let Some(src) = src else {
             return self.source_reply(id, SourceReply::IncomingCalls(None));
         };
         let view = self.open.view();
@@ -283,7 +262,7 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
                 serial,
                 sources,
                 view,
-                source,
+                source: src,
             })
         })
     }
@@ -303,74 +282,58 @@ mod tests {
     use tola_typst::typst::syntax::Source;
 
     #[test]
-    fn unnamed_highlights_need_no_compilation() {
-        let mut connection = ready(Vec::new());
+    fn unnamed_highlights_local() {
+        let mut conn = ready(Vec::new());
         let text = "#let count = 1\n#count";
-        let uri = open_draft(&mut connection, text);
-        let source = Source::detached(text);
-        let position = last_position(text, "count");
-        connection
-            .request(Request::new(
-                1.into(),
-                request::DocumentHighlightRequest::METHOD.into(),
-                json!({"textDocument":{"uri":uri.as_str()},"position":position}),
-            ))
-            .unwrap();
-        finish_analysis(&mut connection);
+        let uri = open_draft(&mut conn, text);
+        let src = Source::detached(text);
+        let pos = last_position(text, "count");
+        conn.request(Request::new(
+            1.into(),
+            request::DocumentHighlightRequest::METHOD.into(),
+            json!({"textDocument":{"uri":uri.as_str()},"position":pos}),
+        ))
+        .unwrap();
+        finish_analysis(&mut conn);
         let highlights: Vec<lsp_types::DocumentHighlight> =
-            serde_json::from_value(response(&mut connection).response_result.unwrap()).unwrap();
+            serde_json::from_value(response(&mut conn).response_result.unwrap()).unwrap();
         let expected: Vec<_> = text
             .match_indices("count")
             .map(|(start, name)| {
-                crate::position::utf16_range(source.lines(), start..start + name.len()).unwrap()
+                crate::position::utf16_range(src.lines(), start..start + name.len()).unwrap()
             })
             .collect();
         assert_eq!(
-            highlights
-                .iter()
-                .map(|highlight| highlight.range)
-                .collect::<Vec<_>>(),
+            highlights.iter().map(|h| h.range).collect::<Vec<_>>(),
             expected
         );
-        assert!(connection.next_job(Instant::now()).is_none());
+        assert!(conn.next_job(Instant::now()).is_none());
     }
 
-    /// The compiler lane finishes what the source-only graph cannot prove, under the client's own
-    /// request.
     #[test]
     fn dynamic_references_reach_compiler() {
-        let directory = tempfile::tempdir().unwrap();
-        let mut connection = ready_at(Vec::new(), directory.path().to_path_buf());
-        let (uri, position) = dynamic_import_position(&mut connection, directory.path());
-        connection
-            .request(references_request(&uri, position))
-            .unwrap();
-        let pending = connection
-            .next_analysis()
-            .expect("source analysis admission");
+        let dir = tempfile::tempdir().unwrap();
+        let mut conn = ready_at(Vec::new(), dir.path().to_path_buf());
+        let (uri, pos) = dynamic_import_position(&mut conn, dir.path());
+        conn.request(references_request(&uri, pos)).unwrap();
+        let pending = conn.next_analysis().expect("source analysis admission");
         let serial = pending.serial;
-        connection
-            .completed(crate::compiler::analyze(
-                &mut crate::analysis::DiskSources::default(),
-                &mut crate::analysis::GraphCache::default(),
-                pending,
-            ))
-            .unwrap();
-        assert!(
-            connection.writer.is_empty(),
-            "the source lane answers nothing of its own"
-        );
-        let Some(SourceJob::Query(request)) = connection.next_job(Instant::now()) else {
+        conn.completed(crate::compiler::analyze(
+            &mut crate::analysis::DiskSources::default(),
+            &mut crate::analysis::GraphCache::default(),
+            pending,
+        ))
+        .unwrap();
+        assert!(conn.writer.is_empty());
+        let Some(SourceJob::Query(req)) = conn.next_job(Instant::now()) else {
             panic!("the compiler lane owns the continuation");
         };
-        assert_eq!(request.id, 8.into());
-        assert_eq!(request.serial, serial);
-        assert!(matches!(request.query, SourceQuery::References(_)));
-        assert!(connection.next_job(Instant::now()).is_none());
+        assert_eq!(req.id, 8.into());
+        assert_eq!(req.serial, serial);
+        assert!(matches!(req.query, SourceQuery::References(_)));
+        assert!(conn.next_job(Instant::now()).is_none());
     }
 
-    /// A definition, highlight, or rename preparation the source-only graph cannot bind answers
-    /// from the compiler lane, under the same request, instead of from the names lane.
     #[test]
     fn dynamic_navigation_reaches_compiler() {
         for (method, matches_query) in [
@@ -390,58 +353,52 @@ mod tests {
                     as fn(&SourceQuery) -> bool,
             ),
         ] {
-            let directory = tempfile::tempdir().unwrap();
-            let mut connection = ready_at(Vec::new(), directory.path().to_path_buf());
-            let (uri, position) = dynamic_import_position(&mut connection, directory.path());
-            connection
-                .request(Request::new(
-                    8.into(),
-                    method.into(),
-                    json!({"textDocument":{"uri":uri.as_str()},"position":position}),
-                ))
-                .unwrap();
-            assert!(
-                connection.writer.is_empty(),
-                "{method} answered in the names lane"
-            );
-            finish_analysis(&mut connection);
-            let Some(SourceJob::Query(request)) = connection.next_job(Instant::now()) else {
+            let dir = tempfile::tempdir().unwrap();
+            let mut conn = ready_at(Vec::new(), dir.path().to_path_buf());
+            let (uri, pos) = dynamic_import_position(&mut conn, dir.path());
+            conn.request(Request::new(
+                8.into(),
+                method.into(),
+                json!({"textDocument":{"uri":uri.as_str()},"position":pos}),
+            ))
+            .unwrap();
+            assert!(conn.writer.is_empty());
+            finish_analysis(&mut conn);
+            let Some(SourceJob::Query(req)) = conn.next_job(Instant::now()) else {
                 panic!("the compiler lane owns {method}");
             };
-            assert_eq!(request.id, 8.into());
+            assert_eq!(req.id, 8.into());
             assert!(
-                matches_query(&request.query),
+                matches_query(&req.query),
                 "{method} arrived as {:?}",
-                request.query
+                req.query
             );
-            assert!(connection.next_job(Instant::now()).is_none());
+            assert!(conn.next_job(Instant::now()).is_none());
         }
     }
 
-    /// A name the source-only graph binds answers highlights without the compiler lane.
     #[test]
     fn static_highlights_answer_names_lane() {
-        let directory = tempfile::tempdir().unwrap();
-        let mut connection = ready_at(Vec::new(), directory.path().to_path_buf());
-        let uri = crate::uri::from_file_path(&directory.path().join("page.typ")).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let mut conn = ready_at(Vec::new(), dir.path().to_path_buf());
+        let uri = crate::uri::from_file_path(&dir.path().join("page.typ")).unwrap();
         let text = "#let count = 1\n#count\n";
-        open_document(&mut connection, &uri, 1, text);
+        open_document(&mut conn, &uri, 1, text);
         assert!(matches!(
-            connection.next_job(Instant::now()),
+            conn.next_job(Instant::now()),
             Some(SourceJob::Check(_))
         ));
-        let position = last_position(text, "count");
-        connection
-            .request(Request::new(
-                8.into(),
-                request::DocumentHighlightRequest::METHOD.into(),
-                json!({"textDocument":{"uri":uri.as_str()},"position":position}),
-            ))
-            .unwrap();
-        finish_analysis(&mut connection);
+        let pos = last_position(text, "count");
+        conn.request(Request::new(
+            8.into(),
+            request::DocumentHighlightRequest::METHOD.into(),
+            json!({"textDocument":{"uri":uri.as_str()},"position":pos}),
+        ))
+        .unwrap();
+        finish_analysis(&mut conn);
         let highlights: Vec<lsp_types::DocumentHighlight> =
-            serde_json::from_value(response(&mut connection).response_result.unwrap()).unwrap();
+            serde_json::from_value(response(&mut conn).response_result.unwrap()).unwrap();
         assert_eq!(highlights.len(), 2, "{highlights:?}");
-        assert!(connection.next_job(Instant::now()).is_none());
+        assert!(conn.next_job(Instant::now()).is_none());
     }
 }

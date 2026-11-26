@@ -3,10 +3,10 @@
 use nu_protocol::engine::{StateWorkingSet, VirtualPath};
 use std::path::Path;
 
-pub(super) fn register(working: &mut StateWorkingSet, root: &Path, sources: &[(&str, &[u8])]) {
-    for &(name, source) in sources {
+pub(super) fn register(ws: &mut StateWorkingSet, root: &Path, sources: &[(&str, &[u8])]) {
+    for &(name, src) in sources {
         let name = root.join(name).to_string_lossy().into_owned();
-        let file = working.add_file(&name, source);
-        let _ = working.add_virtual_path(name, VirtualPath::File(file));
+        let file = ws.add_file(&name, src);
+        let _ = ws.add_virtual_path(name, VirtualPath::File(file));
     }
 }

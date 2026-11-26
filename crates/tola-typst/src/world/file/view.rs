@@ -9,7 +9,7 @@ use rustc_hash::FxHashMap;
 use typst::foundations::Bytes;
 use typst::syntax::{FileId, Source};
 
-use super::{FileRead, FileResolver, Loaded, ReadAttempt};
+use super::{FileRead, FileStore, Loaded, ReadAttempt};
 use crate::BundleCancellation;
 use crate::world::ExplicitSources;
 use crate::world::package::{PackageCheck, PackageSpec, PackageStore};
@@ -68,7 +68,7 @@ fn observe<V: Clone>(
 pub struct FileView {
     root: PathBuf,
     sources: Option<Arc<ExplicitSources>>,
-    files: Arc<FileResolver>,
+    files: Arc<FileStore>,
     observations: RwLock<FxHashMap<FileId, FileObservation>>,
     packages: PackageObservations,
 }
@@ -77,7 +77,7 @@ impl FileView {
     /// Retain explicit sources and the resolver's first observations.
     ///
     /// Sources captured under different restrictions are read again through the resolver.
-    pub fn new(sources: Arc<ExplicitSources>, files: Arc<FileResolver>) -> Self {
+    pub fn new(sources: Arc<ExplicitSources>, files: Arc<FileStore>) -> Self {
         let same_boundary = sources.source_boundary() == files.source_boundary();
         let mut view = Self::from_resolver(sources.root(), files);
         view.sources = same_boundary.then_some(sources);
@@ -89,7 +89,7 @@ impl FileView {
         &self.root
     }
 
-    pub(crate) fn from_resolver(root: &Path, files: Arc<FileResolver>) -> Self {
+    pub(crate) fn from_resolver(root: &Path, files: Arc<FileStore>) -> Self {
         Self {
             root: root.to_path_buf(),
             sources: None,
@@ -99,80 +99,68 @@ impl FileView {
         }
     }
 
-    pub(crate) fn resolver(&self) -> &Arc<FileResolver> {
+    pub(crate) fn resolver(&self) -> &Arc<FileStore> {
         &self.files
     }
 
-    pub(crate) fn source(&self, id: FileId) -> Option<Loaded<Source>> {
-        self.sources.as_ref()?.get_source(id)
+    pub(crate) fn source(&self, fid: FileId) -> Option<Loaded<Source>> {
+        self.sources.as_ref()?.get_source(fid)
     }
 
-    pub(crate) fn file(&self, id: FileId) -> Option<Loaded<Bytes>> {
-        self.sources.as_ref()?.get_file(id)
+    pub(crate) fn file(&self, fid: FileId) -> Option<Loaded<Bytes>> {
+        self.sources.as_ref()?.get_file(fid)
     }
 
     #[cfg(test)]
-    pub(crate) fn read(&self, id: FileId) -> ReadAttempt<Bytes> {
-        self.read_with_cancellation(id, &BundleCancellation::default())
+    pub(crate) fn read(&self, fid: FileId) -> ReadAttempt<Bytes> {
+        self.read_cancellable(fid, &BundleCancellation::default())
     }
 
-    pub(crate) fn read_with_cancellation(
+    pub(crate) fn read_cancellable(
         &self,
-        id: FileId,
-        cancellation: &BundleCancellation,
+        fid: FileId,
+        cancel: &BundleCancellation,
     ) -> ReadAttempt<Bytes> {
-        if cancellation.is_cancelled() {
-            return ReadAttempt::without_inputs(Err(super::cancelled()));
+        if cancel.is_cancelled() {
+            return ReadAttempt::bare(Err(super::cancelled()));
         }
-        if let Some(bytes) = self.file(id) {
+        if let Some(buf) = self.file(fid) {
             return ReadAttempt {
-                result: Ok(bytes.value),
-                reads: Some(bytes.read),
+                result: Ok(buf.value),
+                read: Some(buf.read),
                 disk_reads: Vec::new(),
                 package_checks: Vec::new(),
             };
         }
-        observe(
-            &observation_cell(&self.observations, &id),
-            cancellation,
-            || {
-                let read = self.files.read_attempt_with_packages(
-                    id,
-                    self.root(),
-                    (&self.packages, cancellation),
-                );
-                ReadAttempt {
-                    result: read.result.map(Bytes::new),
-                    reads: read.reads,
-                    disk_reads: read.disk_reads,
-                    package_checks: read.package_checks,
-                }
-            },
-        )
-        .unwrap_or_else(|| ReadAttempt::without_inputs(Err(super::cancelled())))
+        observe(&observation_cell(&self.observations, &fid), cancel, || {
+            let attempt =
+                self.files
+                    .read_attempt_with_packages(fid, self.root(), (&self.packages, cancel));
+            ReadAttempt {
+                result: attempt.result.map(Bytes::new),
+                read: attempt.read,
+                disk_reads: attempt.disk_reads,
+                package_checks: attempt.package_checks,
+            }
+        })
+        .unwrap_or_else(|| ReadAttempt::bare(Err(super::cancelled())))
     }
 
     /// Observe a file and compare its exact successful read identity.
-    pub fn matches_read(&self, id: FileId, expected: &FileRead) -> bool {
-        self.matching_accessed(id, expected, &BundleCancellation::default())
+    pub fn matches_read(&self, fid: FileId, expected: &FileRead) -> bool {
+        self.matching_accessed(fid, expected, &BundleCancellation::default())
             .is_some()
     }
 
     /// Observe a file and return its inputs when the successful identity matches.
     pub fn matching_accessed(
         &self,
-        id: FileId,
+        fid: FileId,
         expected: &FileRead,
-        cancellation: &BundleCancellation,
+        cancel: &BundleCancellation,
     ) -> Option<crate::session::AccessedDeps> {
-        let observed = self.read_with_cancellation(id, cancellation);
-        (observed.result.is_ok() && observed.reads.as_ref() == Some(expected)).then_some(
-            crate::session::AccessedDeps {
-                reads: observed.reads.into_iter().collect(),
-                disk_reads: observed.disk_reads,
-                package_checks: observed.package_checks,
-            },
-        )
+        let obs = self.read_cancellable(fid, cancel);
+        (obs.result.is_ok() && obs.read.as_ref() == Some(expected)).then(|| obs.into_deps())
     }
 }
 
@@ -190,25 +178,25 @@ pub(crate) struct PackageObservation {
 impl PackageObservations {
     pub(crate) fn observe(
         &self,
-        package: &PackageSpec,
+        pkg: &PackageSpec,
         store: &PackageStore,
-        cancellation: &BundleCancellation,
+        cancel: &BundleCancellation,
     ) -> PackageObservation {
         observe(
-            &observation_cell(&self.observations, package),
-            cancellation,
-            || match store.prepare_with_cancellation(package, cancellation) {
+            &observation_cell(&self.observations, pkg),
+            cancel,
+            || match store.prepare_with_cancellation(pkg, cancel) {
                 Ok(prepared) => {
-                    let (directory, checks) = prepared.into_directory_and_checks();
+                    let (dir, checks) = prepared.into_directory_and_checks();
                     PackageObservation {
-                        directory: Ok(directory),
+                        directory: Ok(dir),
                         checks,
                     }
                 }
                 Err(failure) => {
-                    let (error, checks) = failure.into_error_and_checks();
+                    let (err, checks) = failure.into_error_and_checks();
                     PackageObservation {
-                        directory: Err(error),
+                        directory: Err(err),
                         checks,
                     }
                 }
@@ -231,12 +219,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_cancelled_read_leaves_the_observation_unset() {
+    fn observe_cancelled_leaves_empty() {
         let cell = Mutex::default();
-        let cancelled = BundleCancellation::new();
+        let cancel = BundleCancellation::new();
         assert_eq!(
-            observe(&cell, &cancelled, || {
-                cancelled.cancel();
+            observe(&cell, &cancel, || {
+                cancel.cancel();
                 1
             }),
             Some(1)
@@ -244,14 +232,14 @@ mod tests {
         assert_eq!(observe(&cell, &BundleCancellation::new(), || 2), Some(2));
     }
 
-    fn id(path: &str) -> FileId {
+    fn fid(path: &str) -> FileId {
         FileId::new(RootedPath::new(
             VirtualRoot::Project,
             VirtualPath::new(path).unwrap(),
         ))
     }
 
-    fn file_view(root: &Path, files: Arc<FileResolver>) -> FileView {
+    fn file_view(root: &Path, files: Arc<FileStore>) -> FileView {
         let sources = ExplicitSources::build(&[], root)
             .unwrap()
             .into_sources_and_accessed()
@@ -260,25 +248,25 @@ mod tests {
     }
 
     #[test]
-    fn file_view_freezes_first_observation() {
-        let directory = TempDir::new().unwrap();
-        let path = directory.path().join("value.txt");
-        let files = Arc::new(FileResolver::new());
+    fn file_view_pins_first_read() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("value.txt");
+        let files = Arc::new(FileStore::new());
 
         fs::write(&path, "first").unwrap();
-        let present = file_view(directory.path(), Arc::clone(&files));
+        let present = file_view(dir.path(), Arc::clone(&files));
         assert_eq!(
-            present.read(id("value.txt")).result.unwrap().as_ref(),
+            present.read(fid("value.txt")).result.unwrap().as_ref(),
             b"first"
         );
         fs::write(&path, "second").unwrap();
         assert_eq!(
-            present.read(id("value.txt")).result.unwrap().as_ref(),
+            present.read(fid("value.txt")).result.unwrap().as_ref(),
             b"first"
         );
         assert_eq!(
-            file_view(directory.path(), Arc::clone(&files))
-                .read(id("value.txt"))
+            file_view(dir.path(), Arc::clone(&files))
+                .read(fid("value.txt"))
                 .result
                 .unwrap()
                 .as_ref(),
@@ -286,13 +274,13 @@ mod tests {
         );
 
         fs::remove_file(&path).unwrap();
-        let absent = file_view(directory.path(), Arc::clone(&files));
-        assert!(absent.read(id("value.txt")).result.is_err());
+        let absent = file_view(dir.path(), Arc::clone(&files));
+        assert!(absent.read(fid("value.txt")).result.is_err());
         fs::write(&path, "created").unwrap();
-        assert!(absent.read(id("value.txt")).result.is_err());
+        assert!(absent.read(fid("value.txt")).result.is_err());
         assert_eq!(
-            file_view(directory.path(), files)
-                .read(id("value.txt"))
+            file_view(dir.path(), files)
+                .read(fid("value.txt"))
                 .result
                 .unwrap()
                 .as_ref(),
@@ -302,57 +290,56 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn retargeted_package_symlink_ignored() {
+    fn file_view_pins_pkg_symlink() {
         use typst::syntax::package::PackageSpec;
 
-        fn package_id(package: &PackageSpec, path: &str) -> FileId {
+        fn pkg_id(pkg: &PackageSpec, path: &str) -> FileId {
             FileId::new(RootedPath::new(
-                VirtualRoot::Package(package.clone()),
+                VirtualRoot::Package(pkg.clone()),
                 VirtualPath::new(path).unwrap(),
             ))
         }
 
-        let directory = TempDir::new().unwrap();
-        let packages = directory.path().join("packages");
-        let package_link = packages.join("local/demo/1.0.0");
-        let first_directory = directory.path().join("first");
-        let second_directory = directory.path().join("second");
-        fs::create_dir_all(package_link.parent().unwrap()).unwrap();
-        fs::create_dir_all(&first_directory).unwrap();
-        fs::create_dir_all(&second_directory).unwrap();
-        fs::write(first_directory.join("value.txt"), "first value").unwrap();
-        fs::write(second_directory.join("value.txt"), "second value").unwrap();
-        std::os::unix::fs::symlink(&first_directory, &package_link).unwrap();
+        let dir = TempDir::new().unwrap();
+        let pkgs = dir.path().join("packages");
+        let pkg_link = pkgs.join("local/demo/1.0.0");
+        let first_dir = dir.path().join("first");
+        let second_dir = dir.path().join("second");
+        fs::create_dir_all(pkg_link.parent().unwrap()).unwrap();
+        fs::create_dir_all(&first_dir).unwrap();
+        fs::create_dir_all(&second_dir).unwrap();
+        fs::write(first_dir.join("value.txt"), "first value").unwrap();
+        fs::write(second_dir.join("value.txt"), "second value").unwrap();
+        std::os::unix::fs::symlink(&first_dir, &pkg_link).unwrap();
         let locations =
-            crate::world::package::PackageLocations::from_absolute_roots(Some(packages), None)
-                .unwrap();
-        let files = Arc::new(FileResolver::from_package_locations(
+            crate::world::package::PackageLocations::from_absolute_roots(Some(pkgs), None).unwrap();
+        let files = Arc::new(FileStore::from_package_locations(
             locations,
-            crate::world::package::PackageFetchPolicy::LocalOnly,
+            crate::world::package::PackageFetchMode::LocalOnly,
         ));
-        let package: PackageSpec = "@local/demo:1.0.0".parse().unwrap();
-        let frozen = file_view(directory.path(), Arc::clone(&files));
+        let pkg: PackageSpec = "@local/demo:1.0.0".parse().unwrap();
+        let frozen = file_view(dir.path(), Arc::clone(&files));
         assert_eq!(
             frozen
-                .read(package_id(&package, "value.txt"))
+                .read(pkg_id(&pkg, "value.txt"))
                 .result
                 .unwrap()
                 .as_ref(),
             b"first value"
         );
 
-        fs::remove_file(&package_link).unwrap();
-        std::os::unix::fs::symlink(&second_directory, &package_link).unwrap();
+        fs::remove_file(&pkg_link).unwrap();
+        std::os::unix::fs::symlink(&second_dir, &pkg_link).unwrap();
 
-        let frozen_again = frozen.read(package_id(&package, "value.txt"));
+        let frozen_again = frozen.read(pkg_id(&pkg, "value.txt"));
         assert_eq!(frozen_again.result.unwrap().as_ref(), b"first value");
         assert_eq!(
             frozen_again.package_checks[0].canonical_target(),
-            Some(first_directory.canonicalize().unwrap().as_path())
+            Some(first_dir.canonicalize().unwrap().as_path())
         );
         assert_eq!(
-            file_view(directory.path(), files)
-                .read(package_id(&package, "value.txt"))
+            file_view(dir.path(), files)
+                .read(pkg_id(&pkg, "value.txt"))
                 .result
                 .unwrap()
                 .as_ref(),

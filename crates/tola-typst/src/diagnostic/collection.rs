@@ -280,7 +280,7 @@ impl Diagnostics {
     /// so a diagnostic that is not about one keeps no package.
     pub(crate) fn attach_package_failures(
         &mut self,
-        resolve: impl Fn(&NativeDiagnostic) -> Option<super::ResolvedPackageFailure>,
+        resolve: impl Fn(&NativeDiagnostic) -> Option<super::PackageFailure>,
     ) {
         if !self.raw_is_aligned() {
             return;
@@ -339,18 +339,18 @@ impl Diagnostics {
         &self,
         predicate: impl Fn(&Diagnostic, Option<&NativeDiagnostic>) -> bool,
     ) -> Self {
-        let raw_is_aligned = self.raw_is_aligned();
-        let mut selected = Self::new();
-        for (index, diagnostic) in self.messages.iter().enumerate() {
-            let raw = raw_is_aligned.then(|| &self.raw[index]);
-            if predicate(diagnostic, raw) {
-                selected.messages.push(diagnostic.clone());
+        let aligned = self.raw_is_aligned();
+        let mut out = Self::new();
+        for (idx, diag) in self.messages.iter().enumerate() {
+            let raw = aligned.then(|| &self.raw[idx]);
+            if predicate(diag, raw) {
+                out.messages.push(diag.clone());
                 if let Some(raw) = raw {
-                    selected.raw.push(raw.clone());
+                    out.raw.push(raw.clone());
                 }
             }
         }
-        selected
+        out
     }
 
     /// Whether every message carries its original native diagnostic at the same index.
@@ -375,18 +375,18 @@ impl IntoIterator for Diagnostics {
 impl fmt::Display for Diagnostics {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut ordered: Vec<&Diagnostic> = self.messages.iter().collect();
-        ordered.sort_by_key(|diagnostic| match diagnostic.severity {
+        ordered.sort_by_key(|diag| match diag.severity {
             Severity::Error => 0,
             Severity::Warning => 1,
         });
-        for diagnostic in ordered {
-            let label = match diagnostic.severity {
+        for diag in ordered {
+            let lvl = match diag.severity {
                 Severity::Error => "error",
                 Severity::Warning => "warning",
             };
-            match diagnostic.location.spelled() {
-                Some(location) => writeln!(f, "{location}: {label}: {}", diagnostic.message)?,
-                None => writeln!(f, "{label}: {}", diagnostic.message)?,
+            match diag.location.spelled() {
+                Some(loc) => writeln!(f, "{loc}: {lvl}: {}", diag.message)?,
+                None => writeln!(f, "{lvl}: {}", diag.message)?,
             }
         }
         Ok(())
@@ -410,7 +410,7 @@ mod tests {
     use typst::syntax::Span;
 
     fn unresolved_diagnostics(native: NativeDiagnostic) -> Diagnostics {
-        let diagnostic = Diagnostic {
+        let diag = Diagnostic {
             origin: native.origin().clone(),
             severity: native.source().severity,
             message: native.source().message.to_string(),
@@ -421,17 +421,17 @@ mod tests {
             package_failure: None,
         };
         Diagnostics {
-            messages: vec![diagnostic],
+            messages: vec![diag],
             raw: vec![native],
         }
     }
 
     #[test]
-    fn repeated_warnings_merge_package_navigation() {
-        let warning = SourceDiagnostic::warning(Span::detached(), "missing font");
-        let mut retained = unresolved_diagnostics(warning.clone().into());
+    fn extend_distinct_merges_importers() {
+        let warn = SourceDiagnostic::warning(Span::detached(), "missing font");
+        let mut retained = unresolved_diagnostics(warn.clone().into());
         retained.messages[0].imported_by = vec!["content/b.typ".into()];
-        let mut repeated = unresolved_diagnostics(warning.with_hint("another context").into());
+        let mut repeated = unresolved_diagnostics(warn.with_hint("another context").into());
         repeated.messages[0].imported_by = vec!["content/a.typ".into(), "content/b.typ".into()];
 
         retained.extend_distinct(&repeated);
@@ -446,16 +446,16 @@ mod tests {
     }
 
     #[test]
-    fn distinct_native_issues_remain_separate() {
+    fn extend_distinct_keeps_unique() {
         use typst::syntax::{DiagSpan, RootedPath, VirtualPath, VirtualRoot};
 
-        let source = RootedPath::new(
+        let src = RootedPath::new(
             VirtualRoot::Project,
             VirtualPath::new("content/page.typ").unwrap(),
         )
         .intern();
-        let first = DiagSpan::from_range(source, 0..1);
-        let second = DiagSpan::from_range(source, 2..3);
+        let first = DiagSpan::from_range(src, 0..1);
+        let second = DiagSpan::from_range(src, 2..3);
         let native: [NativeDiagnostic; 6] = [
             SourceDiagnostic::warning(first, "warning").into(),
             SourceDiagnostic::warning(second, "warning").into(),
@@ -466,21 +466,21 @@ mod tests {
             super::super::producer_warning(Span::detached(), "image", &[("path", "b")], "warning")
                 .into(),
         ];
-        let mut diagnostics = Diagnostics::new();
-        for warning in &native {
-            diagnostics.extend_distinct(&unresolved_diagnostics(warning.clone()));
+        let mut diags = Diagnostics::new();
+        for warn in &native {
+            diags.extend_distinct(&unresolved_diagnostics(warn.clone()));
         }
-        diagnostics.extend_distinct(&diagnostics.clone());
-        assert_eq!(diagnostics.len(), native.len());
-        assert_eq!(diagnostics.raw(), &native);
+        diags.extend_distinct(&diags.clone());
+        assert_eq!(diags.len(), native.len());
+        assert_eq!(diags.raw(), &native);
     }
 
     #[test]
-    fn mixed_collection_filters_by_resolved_message() {
-        let info = |message: &str| Diagnostic {
+    fn filter_out_unaligned() {
+        let info = |msg: &str| Diagnostic {
             origin: crate::diagnostic::DiagnosticOrigin::Typst,
             severity: Severity::Warning,
-            message: message.into(),
+            message: msg.into(),
             location: SourceLocation {
                 path: None,
                 line: None,
@@ -495,7 +495,7 @@ mod tests {
             imported_by: Vec::new(),
             package_failure: None,
         };
-        let diagnostics = Diagnostics {
+        let diags = Diagnostics {
             messages: vec![info("keep"), info("drop")],
             raw: vec![SourceDiagnostic::warning(Span::detached(), "raw only").into()],
         };
@@ -504,7 +504,7 @@ mod tests {
             crate::diagnostic::FilterType::MessageContains("drop".into()),
         );
 
-        let filtered = diagnostics.filter_out(&[filter]);
+        let filtered = diags.filter_out(&[filter]);
 
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered.as_slice()[0].message, "keep");

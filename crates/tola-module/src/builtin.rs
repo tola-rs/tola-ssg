@@ -20,21 +20,21 @@ static MODULES: OnceLock<&'static [BuiltinModule]> = OnceLock::new();
 /// Install the embedded modules before reading site declarations.
 pub fn install_builtin_modules(modules: &'static [BuiltinModule]) -> Result<(), &'static str> {
     let mut names = BTreeSet::new();
-    for module in modules {
-        if OutputPath::parse(module.name).is_err()
-            || module.name.contains('/')
-            || !names.insert(tola_address::portable_collision_key(module.name))
+    for pkg in modules {
+        if OutputPath::parse(pkg.name).is_err()
+            || pkg.name.contains('/')
+            || !names.insert(tola_address::portable_collision_key(pkg.name))
         {
             return Err("built-in modules need distinct names without directory separators");
         }
         let mut paths = BTreeSet::new();
-        for (file, _) in module.files {
+        for (file, _) in pkg.files {
             let path = OutputPath::parse(file).map_err(|_| "invalid built-in module file name")?;
             if !paths.insert(path.portable_key()) {
                 return Err("built-in module files need distinct paths");
             }
         }
-        if !module
+        if !pkg
             .files
             .iter()
             .any(|(file, _)| *file == "tola-module.toml")
@@ -50,7 +50,7 @@ pub fn install_builtin_modules(modules: &'static [BuiltinModule]) -> Result<(), 
 
 impl BuiltinModule {
     pub(crate) fn named(name: &str) -> Option<&'static Self> {
-        MODULES.get()?.iter().find(|module| module.name == name)
+        MODULES.get()?.iter().find(|pkg| pkg.name == name)
     }
 
     pub(crate) fn root(&self, site: &Path) -> PathBuf {

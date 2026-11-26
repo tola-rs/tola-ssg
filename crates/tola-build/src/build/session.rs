@@ -39,13 +39,13 @@ pub(crate) struct RetainedProducerCaches {
     pub(crate) dependencies: CompilationDependencies,
     pub(crate) source_analysis: analysis::SourceAnalysisCache,
     pub(crate) site_program: SiteProgramCache,
-    pub(crate) configured_assets: crate::asset::ConfiguredAssets,
+    pub(crate) configured_assets: crate::asset::SiteAssets,
     pub(crate) icons: crate::icon::IconInventory,
     pub(crate) images: std::sync::Arc<crate::image::output::ImageOutputs>,
     pub(crate) seo: std::sync::Arc<crate::seo::SeoCompilation>,
     /// Fingerprints of what the before-build hooks wrote for this revision.
     pub(crate) hook_outputs: crate::hooks::SourceHookOutputs,
-    pub(crate) prepared_hooks: crate::hooks::PreparedHooks,
+    pub(crate) prepared_hooks: crate::hooks::ReadyHooks,
     /// The previous successful development revision's reusable `generate-outputs` products.
     pub(crate) hook_reuse: crate::hooks::ReusableHookOutputs,
 }
@@ -96,9 +96,9 @@ impl BuildCacheUpdate {
     /// Both the build attempt and the caller can stop the freshness walk.
     pub(super) fn freshness(
         &self,
-        config: &crate::config::ResolvedSiteConfig,
-        modules: &tola_module::prepared::PreparedModules,
-        hook_outputs: &[crate::hooks::HookOutputEvidence],
+        config: &crate::config::SiteConfig,
+        modules: &tola_module::bundle::ModuleBundle,
+        hook_outputs: &[crate::hooks::HookOutput],
         attempt_cancellation: &crate::cancellation::BuildCancellation,
         caller_cancellation: &crate::cancellation::BuildCancellation,
     ) -> anyhow::Result<super::InputFreshness> {
@@ -151,7 +151,7 @@ pub struct BuildRequest {
     pub generated_files: Vec<crate::output::GeneratedFile>,
     pub cancellation: crate::cancellation::BuildCancellation,
     /// Whether candidate construction runs hook commands. Publication consumers
-    /// are invoked separately through [`super::WriteOutcome::run_after_publish`].
+    /// are invoked separately through [`super::PublishSummary::run_after_publish`].
     pub hook_execution: crate::hooks::HookExecution,
     /// Whether the attempt checks page references against the published site.
     pub reference_checks: super::ReferenceChecks,
@@ -186,9 +186,9 @@ impl Default for BuildRequest {
 
 /// An owned build attempt suitable for a caller's blocking worker.
 pub struct BuildAttempt {
-    config: std::sync::Arc<crate::config::ResolvedSiteConfig>,
+    config: std::sync::Arc<crate::config::SiteConfig>,
     /// Set when the attempt starts from an already prepared hook watch.
-    prepared: Option<crate::modules::PreparedSite>,
+    prepared: Option<crate::modules::LoadedSite>,
     baseline: BuildSession,
     hook_epoch: u64,
     request: BuildRequest,
@@ -202,14 +202,13 @@ impl BuildAttempt {
 
     /// Prepare resources and run the build pipeline.
     pub fn run(mut self) -> Result<super::SiteBuild, super::BuildFailure> {
-        let before_attempt =
-            |error| super::BuildFailure::before_attempt(error, self.config.get_root());
+        let before_attempt = |error| super::BuildFailure::before_attempt(error, self.config.root());
         super::diagnostic::refuse_incomplete_vendor(&self.config).map_err(before_attempt)?;
         let mut site = match self.prepared.take() {
             Some(site) => site,
             None => {
                 let bundle = self.request.cancellation.bundle_cancellation();
-                crate::modules::prepared::prepare_site_with_bundle(
+                crate::modules::site::prepare_site_with_bundle(
                     &self.config,
                     self.baseline.resources.input_mode(),
                     &bundle,
@@ -275,14 +274,14 @@ impl BuildAttempt {
                 built.cache_update.attribute_to(&self.baseline);
                 let reads = producers.inputs.package_reads().to_vec();
                 if let Err(error) = crate::package::write_package_lock(
-                    self.config.get_root(),
+                    self.config.root(),
                     &reads,
                     self.baseline.resources.input_mode(),
                 ) {
                     return Err(super::BuildFailure::new(
                         error.into(),
                         producers.into_inputs(),
-                        self.config.get_root(),
+                        self.config.root(),
                     ));
                 }
                 Ok(built)
@@ -290,7 +289,7 @@ impl BuildAttempt {
             Err(error) => Err(super::BuildFailure::new(
                 error,
                 producers.into_inputs(),
-                self.config.get_root(),
+                self.config.root(),
             )),
         }
     }
@@ -300,7 +299,7 @@ impl BuildAttempt {
         &self,
         producers: &mut super::pipeline::BuildAttemptProducers,
         hooks_executed: bool,
-        site: &crate::modules::PreparedSite,
+        site: &crate::modules::LoadedSite,
     ) -> anyhow::Result<SiteHost> {
         let cancellation = producers.cancellation.clone();
         anyhow::ensure!(
@@ -403,13 +402,13 @@ impl BuildSession {
     }
 
     /// Build and commit the output tree, then accept its caches.
-    /// Consumers run only when the caller invokes [`super::WriteOutcome::run_after_publish`]
+    /// Consumers run only when the caller invokes [`super::PublishSummary::run_after_publish`]
     /// on the returned outcome, after the build lock has been released.
     pub fn build_and_write(
         &mut self,
-        config: &crate::config::ResolvedSiteConfig,
+        config: &crate::config::SiteConfig,
         request: BuildRequest,
-    ) -> anyhow::Result<super::WriteOutcome> {
+    ) -> anyhow::Result<super::PublishSummary> {
         let locked = super::SiteBuildGuard::build_for_publication(
             self,
             std::sync::Arc::new(config.clone()),
@@ -426,7 +425,7 @@ impl BuildSession {
     /// Capture a request and its accepted baseline without filesystem work.
     pub fn prepare(
         &mut self,
-        config: std::sync::Arc<crate::config::ResolvedSiteConfig>,
+        config: std::sync::Arc<crate::config::SiteConfig>,
         request: BuildRequest,
     ) -> BuildAttempt {
         BuildAttempt {
@@ -446,7 +445,7 @@ impl BuildSession {
     /// Start an attempt from the prepared hook watch whose paths were staged.
     pub fn prepare_with_hook_watch(
         &mut self,
-        watch: &crate::modules::PreparedHookWatch,
+        watch: &crate::modules::HookWatchEntry,
         request: BuildRequest,
     ) -> anyhow::Result<BuildAttempt> {
         if watch.scope() != self.resources.input_scope() {
@@ -459,8 +458,8 @@ impl BuildSession {
 
     fn load_host(
         &self,
-        config: &crate::config::ResolvedSiteConfig,
-        prepared: &tola_module::prepared::PreparedModules,
+        config: &crate::config::SiteConfig,
+        prepared: &tola_module::bundle::ModuleBundle,
         cancellation: &crate::cancellation::BuildCancellation,
     ) -> anyhow::Result<SiteHost> {
         cancellation.ensure_active()?;
@@ -488,12 +487,12 @@ impl BuildSession {
                 cancellation,
             )?,
         };
-        let lock = tola_input::InputLock::read(config.get_root())?.unwrap_or_default();
-        let host =
-            match crate::package::verifier(&lock, self.resources.input_mode(), config.get_root()) {
-                Some(verifier) => host.with_package_verifier(verifier),
-                None => host,
-            };
+        let lock = tola_input::InputLock::read(config.root())?.unwrap_or_default();
+        let host = match crate::package::verifier(&lock, self.resources.input_mode(), config.root())
+        {
+            Some(verifier) => host.with_package_verifier(verifier),
+            None => host,
+        };
         cancellation.ensure_active()?;
         self.retain_host(&host);
         Ok(host.with_local_packages(std::sync::Arc::clone(&prepared.packages)))
@@ -538,7 +537,7 @@ impl BuildSession {
     /// The accepted content inventory, when this rebuild can reuse it.
     pub(crate) fn reusable_content_inventory(
         &self,
-        config: &crate::config::ResolvedSiteConfig,
+        config: &crate::config::SiteConfig,
         changed_paths: &[std::path::PathBuf],
         allow_pre_scan_reuse: bool,
     ) -> Option<std::sync::Arc<[crate::content::ContentUnit]>> {
@@ -628,7 +627,7 @@ impl BuildSession {
         self.accepted = Some(std::sync::Arc::new(committed));
     }
 
-    pub(crate) fn configured_assets(&self) -> Option<&crate::asset::ConfiguredAssets> {
+    pub(crate) fn configured_assets(&self) -> Option<&crate::asset::SiteAssets> {
         self.accepted_caches()
             .map(|caches| &caches.configured_assets)
     }
@@ -645,23 +644,23 @@ mod tests {
     use std::path::Path;
     use tempfile::TempDir;
 
-    fn dev_config(root: &Path) -> crate::config::ResolvedSiteConfig {
-        let mut config = site_config(root);
-        std::fs::write(&config.build.entry, "#document(\"index.html\")[Site]").unwrap();
-        config.typst.fonts.paths = vec![root.join("fonts")];
-        std::fs::create_dir_all(&config.typst.fonts.paths[0]).unwrap();
-        config
+    fn dev_config(root: &Path) -> crate::config::SiteConfig {
+        let mut cfg = site_config(root);
+        std::fs::write(&cfg.build.entry, "#document(\"index.html\")[Site]").unwrap();
+        cfg.typst.fonts.paths = vec![root.join("fonts")];
+        std::fs::create_dir_all(&cfg.typst.fonts.paths[0]).unwrap();
+        cfg
     }
 
-    fn published_input_site(root: &Path) -> std::sync::Arc<crate::config::ResolvedSiteConfig> {
-        let config = dev_config(root);
+    fn published_input_site(root: &Path) -> std::sync::Arc<crate::config::SiteConfig> {
+        let cfg = dev_config(root);
         std::fs::write(root.join("value.txt"), "Published value").unwrap();
         std::fs::write(
-            &config.build.entry,
+            &cfg.build.entry,
             r#"#document("index.html")[#read("value.txt")]"#,
         )
         .unwrap();
-        std::sync::Arc::new(config)
+        std::sync::Arc::new(cfg)
     }
 
     /// Executed as an independent hook child, never directly by the test harness.
@@ -678,7 +677,6 @@ mod tests {
         .unwrap();
     }
 
-    /// Every output of one build, keyed by logical output path.
     fn all_output_bytes(
         build: &crate::build::SiteBuild,
     ) -> std::collections::BTreeMap<String, Vec<u8>> {
@@ -686,32 +684,30 @@ mod tests {
             .graph()
             .outputs()
             .iter()
-            .map(|output| (output.path().as_str().to_owned(), output.bytes().to_vec()))
+            .map(|out| (out.path().as_str().to_owned(), out.bytes().to_vec()))
             .collect()
     }
 
     #[test]
-    fn reuse_matches_cold_build() {
-        let directory = tempfile::TempDir::new().unwrap();
-        let root = directory.path();
-        let config = published_input_site(root);
-        // The edit reaches `about` through the site metadata but cannot reach
-        // `plain`, whose analysis must therefore be reused verbatim.
+    fn warm_reuse_matches_cold() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let cfg = published_input_site(dir.path());
+        // Edits reach `about` via metadata while leaving `plain` reusable.
         std::fs::write(
-            config.build.content_dir.join("about.typ"),
+            cfg.build.content_dir.join("about.typ"),
             r#"#import "@tola/source:0.0.0": all-sources
 #import "@tola/source:0.0.0": tola-meta
 #tola-meta((title: "About"))"#,
         )
         .unwrap();
         std::fs::write(
-            config.build.content_dir.join("plain.typ"),
+            cfg.build.content_dir.join("plain.typ"),
             r#"#import "@tola/source:0.0.0": tola-meta
 #tola-meta((title: "Plain"))"#,
         )
         .unwrap();
         std::fs::write(
-            &config.build.entry,
+            &cfg.build.entry,
             r#"#import "@tola/source:0.0.0": all-sources
 #let about = all-sources().find(source => source.id == "about.typ")
 #let plain = all-sources().find(source => source.id == "plain.typ")
@@ -722,7 +718,7 @@ mod tests {
         let mut session = BuildSession::new();
         let cold = session
             .prepare(
-                std::sync::Arc::clone(&config),
+                std::sync::Arc::clone(&cfg),
                 super::BuildRequest::new(super::BuildMode::Development),
             )
             .run()
@@ -734,16 +730,16 @@ mod tests {
         accept_build(&mut session, cold);
 
         std::fs::write(
-            config.build.content_dir.join("about.typ"),
+            cfg.build.content_dir.join("about.typ"),
             r#"#import "@tola/source:0.0.0": all-sources
 #import "@tola/source:0.0.0": tola-meta
 #tola-meta((title: "Changed"))"#,
         )
         .unwrap();
-        let changed = config.build.content_dir.join("about.typ");
+        let changed = cfg.build.content_dir.join("about.typ");
         let warm = session
             .prepare(
-                std::sync::Arc::clone(&config),
+                std::sync::Arc::clone(&cfg),
                 super::BuildRequest {
                     trigger: super::BuildTrigger::Paths([changed].into()),
                     reuse: super::BuildReuse {
@@ -758,7 +754,7 @@ mod tests {
             .unwrap();
 
         let plain = crate::compiler::TypstDependencyReader::ContentSource(
-            tola_input::normalize_path(&config.build.content_dir.join("plain.typ")),
+            tola_input::normalize_path(&cfg.build.content_dir.join("plain.typ")),
         );
         assert!(
             warm.cache_update
@@ -767,32 +763,26 @@ mod tests {
                 .reused_dependency_readers()
                 .contains(&plain)
         );
-        let cold_again = crate::build::build_site(&config, super::BuildMode::Development).unwrap();
+        let cold_again = crate::build::build_site(&cfg, super::BuildMode::Development).unwrap();
 
-        // Cache reuse is an optimization, never a second semantic path: a warm
-        // revision must be indistinguishable from the cold one it replaces, in
-        // every output byte and in every diagnostic the author would read.
         assert_eq!(all_output_bytes(&warm), all_output_bytes(&cold_again));
         assert_eq!(warm.diagnostics(), cold_again.diagnostics());
         let warm_html =
             String::from_utf8_lossy(&all_output_bytes(&warm)["index.html"]).into_owned();
-        assert!(
-            warm_html.contains("Changed"),
-            "the warm build must publish the edit, not a reused stale value: {warm_html}"
-        );
+        assert!(warm_html.contains("Changed"), "{warm_html}");
         assert!(warm_html.contains("Plain"), "{warm_html}");
     }
 
     #[test]
-    fn rebuild_publishes_new_bytes() {
-        let directory = tempfile::TempDir::new().unwrap();
-        let config = published_input_site(directory.path());
+    fn rebuild_publishes_updates() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let cfg = published_input_site(dir.path());
         let mut session = BuildSession::new();
         let first = session
-            .build_and_write(&config, super::BuildRequest::default())
+            .build_and_write(&cfg, super::BuildRequest::default())
             .unwrap();
         assert_eq!(first.counts().pages, 1);
-        assert_eq!(first.output_root(), config.build.publish_dir.as_path());
+        assert_eq!(first.output_root(), cfg.build.publish_dir.as_path());
         let html_path = first.output_root().join("index.html");
         assert!(
             std::fs::read_to_string(&html_path)
@@ -800,9 +790,9 @@ mod tests {
                 .contains("Published value")
         );
 
-        std::fs::write(directory.path().join("value.txt"), "Second value").unwrap();
+        std::fs::write(dir.path().join("value.txt"), "Second value").unwrap();
         let second = session
-            .build_and_write(&config, super::BuildRequest::default())
+            .build_and_write(&cfg, super::BuildRequest::default())
             .unwrap();
         assert_eq!(second.counts().pages, 1);
         assert!(
@@ -811,28 +801,27 @@ mod tests {
     }
 
     #[test]
-    fn reuse_follows_hook_output_bytes() {
+    fn reuse_follows_hook_outputs() {
         let dir = TempDir::new().unwrap();
         let root = dir.path();
         fs::create_dir(root.join("content")).unwrap();
         fs::create_dir(root.join("src")).unwrap();
         let trigger = root.join("src/style.txt");
         fs::write(&trigger, "first").unwrap();
-        let entry = root.join("site.typ");
         fs::write(
-            &entry,
+            root.join("site.typ"),
             "#let style = read(\"generated/site.css\")\n#document(\"index.html\")[#style]",
         )
         .unwrap();
         let generated = root.join("generated");
 
-        let mut config = site_config(root);
-        config.build.publish_dir = root.join("public");
-        config.assets.trees = vec![AssetTreeDeclaration::new(
+        let mut cfg = site_config(root);
+        cfg.build.publish_dir = root.join("public");
+        cfg.assets.trees = vec![AssetTreeDeclaration::new(
             &generated,
             AssetUrlPrefix::parse("/assets").unwrap(),
         )];
-        config.hooks.before_build.push(BeforeBuildHookConfig {
+        cfg.hooks.before_build.push(BeforeBuildHookConfig {
             name: "stylesheet".into(),
             argv: Some(hook_child_command(
                 "build::session::tests::child_copies_stylesheet_trigger",
@@ -848,23 +837,22 @@ mod tests {
             ..BeforeBuildHookConfig::default()
         });
 
-        let config = std::sync::Arc::new(config);
+        let cfg = std::sync::Arc::new(cfg);
         let mut session = BuildSession::new();
         let first = session
             .prepare(
-                config.clone(),
+                cfg.clone(),
                 super::BuildRequest::new(super::BuildMode::Development),
             )
             .run()
             .unwrap();
         accept_build(&mut session, first);
 
-        // The watcher batch does not cover the generated path. The hook's own
-        // output comparison must withdraw permission to reuse the old inputs.
+        // Unrelated watcher trigger; hook output comparison must still invalidate stale reuse.
         let mut rebuild = || {
             session
                 .prepare(
-                    config.clone(),
+                    cfg.clone(),
                     super::BuildRequest {
                         trigger: super::BuildTrigger::Paths(
                             [root.join("notes/unrelated.txt")].into(),

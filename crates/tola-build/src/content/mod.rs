@@ -61,7 +61,7 @@ pub struct ContentUnit {
 
 /// Select canonical content entry sources for a read-only source inspection.
 pub(crate) fn select_content_sources(
-    config: &crate::config::ResolvedSiteConfig,
+    config: &crate::config::SiteConfig,
     scopes: &[PathBuf],
     units: &[ContentUnit],
 ) -> Result<Vec<PathBuf>, ContentDiscoveryError> {
@@ -69,7 +69,7 @@ pub(crate) fn select_content_sources(
         return Ok(units.iter().map(|unit| unit.source.clone()).collect());
     }
 
-    let site_root = normalize_path(config.get_root());
+    let site_root = normalize_path(config.root());
     let mut selected = BTreeSet::new();
     for scope in scopes {
         let mut matched = false;
@@ -101,14 +101,14 @@ pub(crate) fn select_content_sources(
 }
 
 pub(crate) fn discover_content_units_for_config_with_cancellation(
-    config: &crate::config::ResolvedSiteConfig,
+    config: &crate::config::SiteConfig,
     cancellation: &crate::cancellation::BuildCancellation,
 ) -> Result<Vec<ContentUnit>, ContentDiscoveryError> {
     crate::resources::source_boundary(config, tola_input::InputScope::Online)
         .check(&config.build.content_dir)?;
     discover_from_root(
         &config.build.content_dir,
-        config.get_root(),
+        config.root(),
         &config.build.entry,
         cancellation,
     )
@@ -116,7 +116,7 @@ pub(crate) fn discover_content_units_for_config_with_cancellation(
 
 /// Whether accepted changes may alter the discovered content inventory.
 pub(crate) fn inventory_may_change(
-    config: &crate::config::ResolvedSiteConfig,
+    config: &crate::config::SiteConfig,
     inventory: &[ContentUnit],
     changed_paths: &[PathBuf],
 ) -> bool {
@@ -266,7 +266,7 @@ fn content_name_is_hidden(file_name: &OsStr) -> bool {
 
 /// Add unsaved editor sources; discovered units are already canonical.
 pub(crate) fn content_units_with_sources(
-    config: &crate::config::ResolvedSiteConfig,
+    config: &crate::config::SiteConfig,
     inventory: &[ContentUnit],
     opened: impl IntoIterator<Item = PathBuf>,
     cancellation: &crate::cancellation::BuildCancellation,
@@ -325,10 +325,15 @@ fn is_index_source(path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    fn content_units(
-        root: &std::path::Path,
-    ) -> std::result::Result<Vec<super::ContentUnit>, super::ContentDiscoveryError> {
-        super::discover_from_root(
+    use std::fs;
+    use tempfile::TempDir;
+
+    use crate::config::SiteConfig;
+
+    use super::*;
+
+    fn content_units(root: &Path) -> Result<Vec<ContentUnit>, ContentDiscoveryError> {
+        discover_from_root(
             root,
             root,
             &root.join("site.typ"),
@@ -336,93 +341,84 @@ mod tests {
         )
     }
 
-    fn configured_content(
-        config: &crate::config::ResolvedSiteConfig,
-    ) -> std::result::Result<Vec<super::ContentUnit>, super::ContentDiscoveryError> {
-        super::discover_content_units_for_config_with_cancellation(
-            config,
+    fn configured_content(cfg: &SiteConfig) -> Result<Vec<ContentUnit>, ContentDiscoveryError> {
+        discover_content_units_for_config_with_cancellation(
+            cfg,
             &crate::cancellation::BuildCancellation::default(),
         )
     }
 
-    /// A config whose content root is `content`, declaring one asset tree and one asset file.
     fn asset_config(
-        root: &std::path::Path,
-        content: &std::path::Path,
-        tree: (&std::path::Path, &str),
-        file: (&std::path::Path, &str),
-    ) -> crate::config::ResolvedSiteConfig {
+        root: &Path,
+        content: &Path,
+        tree: (&Path, &str),
+        file: (&Path, &str),
+    ) -> SiteConfig {
         use crate::config::section::assets::{
             AssetFileDeclaration, AssetTreeDeclaration, AssetUrl, AssetUrlPrefix,
         };
 
-        let mut config = crate::config::tests::load_test_config(root, "");
-        config.build.content_dir = content.to_path_buf();
-        config.assets.trees = vec![AssetTreeDeclaration::new(
+        let mut cfg = crate::config::tests::load_test_config(root, "");
+        cfg.build.content_dir = content.to_path_buf();
+        cfg.assets.trees = vec![AssetTreeDeclaration::new(
             tree.0,
             AssetUrlPrefix::parse(tree.1).unwrap(),
         )];
-        config.assets.files = vec![AssetFileDeclaration::new(
+        cfg.assets.files = vec![AssetFileDeclaration::new(
             file.0,
             AssetUrl::parse(file.1).unwrap(),
         )];
-        config
+        cfg
     }
 
-    use super::*;
-    use std::fs;
-    use tempfile::TempDir;
-
     #[test]
-    fn discovery_needs_no_worker() {
-        // Discovery must not need a worker from the pool that called it: a walk that
-        // waited on one would find none free and report no content at all.
-        let directory = TempDir::new().unwrap();
-        fs::create_dir_all(directory.path().join("posts")).unwrap();
-        fs::write(directory.path().join("index.typ"), "").unwrap();
-        fs::write(directory.path().join("posts/hello.typ"), "").unwrap();
+    fn discovery_no_pool_starvation() {
+        let dir = TempDir::new().unwrap();
+        fs::create_dir_all(dir.path().join("posts")).unwrap();
+        fs::write(dir.path().join("index.typ"), "").unwrap();
+        fs::write(dir.path().join("posts/hello.typ"), "").unwrap();
 
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(1)
             .build()
             .unwrap();
-        let discovered = pool.install(|| content_units(directory.path()));
+        let discovered = pool.install(|| content_units(dir.path()));
 
         assert_eq!(
             discovered
                 .unwrap()
                 .iter()
-                .map(|unit| unit.id.to_string())
+                .map(|u| u.id.to_string())
                 .collect::<Vec<_>>(),
             ["index.typ", "posts/hello.typ"]
         );
     }
 
     #[test]
-    fn cancelled_build_skips_discovery() {
-        let directory = TempDir::new().unwrap();
+    fn discovery_cancelled() {
+        let dir = TempDir::new().unwrap();
         let canceller = crate::cancellation::BuildCanceller::new();
         canceller.cancel();
 
-        let error = discover_from_root(
-            directory.path(),
-            directory.path(),
-            &directory.path().join("site.typ"),
+        let err = discover_from_root(
+            dir.path(),
+            dir.path(),
+            &dir.path().join("site.typ"),
             &canceller.token(),
         )
         .unwrap_err();
 
         assert!(matches!(
-            error,
-            super::ContentDiscoveryError::Cancelled(crate::cancellation::BuildCancelled)
+            err,
+            ContentDiscoveryError::Cancelled(crate::cancellation::BuildCancelled)
         ));
     }
 
     #[test]
-    fn discovery_finds_nested_sources() {
-        let d = TempDir::new().unwrap();
-        fs::create_dir_all(d.path().join("posts/rust")).unwrap();
-        for source in [
+    fn discovery_nested_sources() {
+        let dir = TempDir::new().unwrap();
+        fs::create_dir_all(dir.path().join("posts/rust")).unwrap();
+        for src in [
             "posts/a.typ",
             "posts/index.typ",
             "posts/helper.typ",
@@ -430,16 +426,13 @@ mod tests {
             "posts/rust/helper.typ",
             "posts/rust/ignored.TYP",
         ] {
-            fs::write(d.path().join(source), "").unwrap();
+            fs::write(dir.path().join(src), "").unwrap();
         }
 
-        let units = content_units(d.path()).unwrap();
+        let units = content_units(dir.path()).unwrap();
 
         assert_eq!(
-            units
-                .iter()
-                .map(|unit| unit.id.to_string())
-                .collect::<Vec<_>>(),
+            units.iter().map(|u| u.id.to_string()).collect::<Vec<_>>(),
             vec![
                 "posts/a.typ",
                 "posts/helper.typ",
@@ -448,20 +441,20 @@ mod tests {
                 "posts/rust/index.typ"
             ]
         );
-        assert!(units.iter().any(|unit| {
-            unit.id.as_path() == Path::new("posts/rust/index.typ")
-                && unit.layout == ContentSourceLayout::DirectoryIndex
+        assert!(units.iter().any(|u| {
+            u.id.as_path() == Path::new("posts/rust/index.typ")
+                && u.layout == ContentSourceLayout::DirectoryIndex
         }));
-        assert!(units.iter().any(|unit| {
-            unit.id.as_path() == Path::new("posts/rust/helper.typ")
-                && unit.layout == ContentSourceLayout::SingleFile
+        assert!(units.iter().any(|u| {
+            u.id.as_path() == Path::new("posts/rust/helper.typ")
+                && u.layout == ContentSourceLayout::SingleFile
         }));
     }
 
     #[test]
-    fn asset_declarations_keep_every_source() {
-        let directory = TempDir::new().unwrap();
-        let content = directory.path().join("content");
+    fn asset_declarations_keep_sources() {
+        let dir = TempDir::new().unwrap();
+        let content = dir.path().join("content");
         fs::create_dir_all(content.join("assets")).unwrap();
         fs::create_dir_all(content.join("downloads")).unwrap();
         fs::write(content.join("index.typ"), "").unwrap();
@@ -470,20 +463,16 @@ mod tests {
         fs::write(content.join("downloads/tree-member.typ"), "").unwrap();
         fs::write(content.join("exact-file.typ"), "").unwrap();
 
-        let config = asset_config(
-            directory.path(),
+        let cfg = asset_config(
+            dir.path(),
             &content,
             (&content.join("downloads"), "/downloads"),
             (&content.join("exact-file.typ"), "/exact-file.typ"),
         );
 
-        let units = configured_content(&config).unwrap();
-
+        let units = configured_content(&cfg).unwrap();
         assert_eq!(
-            units
-                .iter()
-                .map(|unit| unit.id.to_string())
-                .collect::<Vec<_>>(),
+            units.iter().map(|u| u.id.to_string()).collect::<Vec<_>>(),
             vec![
                 "assets/nested.typ",
                 "downloads/tree-member.typ",
@@ -495,86 +484,81 @@ mod tests {
     }
 
     #[test]
-    fn missing_content_root_is_reported() {
-        let directory = TempDir::new().unwrap();
-        let missing = directory.path().join("missing-content");
-        let mut config = crate::config::tests::load_test_config(directory.path(), "");
-        config.build.content_dir = missing.clone();
+    fn missing_content_root_reported() {
+        let dir = TempDir::new().unwrap();
+        let missing = dir.path().join("missing-content");
+        let mut cfg = crate::config::tests::load_test_config(dir.path(), "");
+        cfg.build.content_dir = missing;
 
-        let error = configured_content(&config).unwrap_err();
+        let err = configured_content(&cfg).unwrap_err();
         assert!(matches!(
-            error,
+            err,
             ContentDiscoveryError::MissingContentRoot { path } if path == "missing-content"
         ));
     }
 
     #[test]
-    fn known_edits_keep_inventory() {
-        let directory = TempDir::new().unwrap();
-        let content = directory.path().join("content");
-        let document = content.join("document");
-        let nested = document.join("assets");
-        let tree_source = content.join("shared-assets");
-        let exact_source = content.join("download.typ");
+    fn inventory_change_detection() {
+        let dir = TempDir::new().unwrap();
+        let content = dir.path().join("content");
+        let doc = content.join("document");
+        let nested = doc.join("assets");
+        let tree_src = content.join("shared-assets");
+        let exact_src = content.join("download.typ");
         fs::create_dir_all(&nested).unwrap();
-        fs::create_dir_all(&tree_source).unwrap();
-        let index = document.join("index.typ");
+        fs::create_dir_all(&tree_src).unwrap();
+        let index = doc.join("index.typ");
         fs::write(&index, "Document").unwrap();
-        fs::write(tree_source.join("hidden.typ"), "asset").unwrap();
-        fs::write(&exact_source, "asset").unwrap();
+        fs::write(tree_src.join("hidden.typ"), "asset").unwrap();
+        fs::write(&exact_src, "asset").unwrap();
 
-        let config = asset_config(
-            directory.path(),
+        let cfg = asset_config(
+            dir.path(),
             &content,
-            (&tree_source, "/shared"),
-            (&exact_source, "/download.typ"),
+            (&tree_src, "/shared"),
+            (&exact_src, "/download.typ"),
         );
-        let inventory = configured_content(&config).unwrap();
+        let inv = configured_content(&cfg).unwrap();
 
-        assert_eq!(inventory.len(), 3);
+        assert_eq!(inv.len(), 3);
         assert!(!inventory_may_change(
-            &config,
-            &inventory,
-            std::slice::from_ref(&index),
+            &cfg,
+            &inv,
+            std::slice::from_ref(&index)
+        ));
+        assert!(inventory_may_change(&cfg, &inv, &[nested.join("new.typ")]));
+        assert!(!inventory_may_change(
+            &cfg,
+            &inv,
+            &[dir.path().join("outside.typ")]
         ));
         assert!(inventory_may_change(
-            &config,
-            &inventory,
-            &[nested.join("new.typ")],
+            &cfg,
+            &inv,
+            &[tree_src.join("new.typ")]
         ));
-        assert!(!inventory_may_change(
-            &config,
-            &inventory,
-            &[directory.path().join("outside.typ")],
-        ));
-
-        assert!(inventory_may_change(
-            &config,
-            &inventory,
-            &[tree_source.join("new.typ")],
-        ));
-        fs::remove_file(&exact_source).unwrap();
-        assert!(inventory_may_change(&config, &inventory, &[exact_source]));
+        fs::remove_file(&exact_src).unwrap();
+        assert!(inventory_may_change(&cfg, &inv, &[exact_src]));
         fs::remove_file(&index).unwrap();
-        assert!(inventory_may_change(&config, &inventory, &[index]));
+        assert!(inventory_may_change(&cfg, &inv, &[index]));
     }
 
     #[test]
-    fn scopes_resolve_from_content_root() {
-        let directory = TempDir::new().unwrap();
-        let content = directory.path().join("content");
+    fn scopes_resolve_from_root() {
+        let dir = TempDir::new().unwrap();
+        let content = dir.path().join("content");
         fs::create_dir_all(content.join("posts")).unwrap();
         fs::create_dir_all(content.join("guides")).unwrap();
         fs::write(content.join("posts/hello.typ"), "").unwrap();
         fs::write(content.join("guides/start.typ"), "").unwrap();
 
-        let mut config = crate::config::tests::load_test_config(directory.path(), "");
-        config.build.content_dir = content;
+        let mut cfg = crate::config::tests::load_test_config(dir.path(), "");
+        cfg.build.content_dir = content;
 
-        let discovered = configured_content(&config).unwrap();
+        let discovered = configured_content(&cfg).unwrap();
         let scopes = ["posts/hello", "guides", "guides"].map(PathBuf::from);
-        let selected = select_content_sources(&config, &scopes, &discovered).unwrap();
-        let content = normalize_path(&config.build.content_dir);
+        let selected = select_content_sources(&cfg, &scopes, &discovered).unwrap();
+        let content = normalize_path(&cfg.build.content_dir);
         assert_eq!(
             selected,
             [
@@ -585,115 +569,95 @@ mod tests {
     }
 
     #[test]
-    fn same_stem_layouts_stay_distinct() {
-        let directory = TempDir::new().unwrap();
-        fs::create_dir_all(directory.path().join("about")).unwrap();
-        for source in ["about.typ", "about/index.typ", "index.typ"] {
-            fs::write(directory.path().join(source), "").unwrap();
+    fn same_stem_layouts_distinct() {
+        let dir = TempDir::new().unwrap();
+        fs::create_dir_all(dir.path().join("about")).unwrap();
+        for src in ["about.typ", "about/index.typ", "index.typ"] {
+            fs::write(dir.path().join(src), "").unwrap();
         }
-        let units = content_units(directory.path()).unwrap();
+        let units = content_units(dir.path()).unwrap();
         assert_eq!(
-            units
-                .iter()
-                .map(|unit| unit.id.to_string())
-                .collect::<Vec<_>>(),
+            units.iter().map(|u| u.id.to_string()).collect::<Vec<_>>(),
             ["about/index.typ", "about.typ", "index.typ"]
         );
     }
 
     #[test]
-    fn entry_never_joins_inventory() {
-        let directory = TempDir::new().unwrap();
-        let root = directory.path();
+    fn entry_excluded_from_inventory() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
         let content = root.join("content");
         fs::create_dir(&content).unwrap();
         fs::write(content.join("site.typ"), "#document(\"index.html\")[Home]").unwrap();
         fs::write(content.join("document.typ"), "Document").unwrap();
         fs::create_dir(content.join("helpers")).unwrap();
         fs::write(content.join("helpers/card.typ"), "Card").unwrap();
-        let config =
+        let cfg =
             crate::config::tests::load_test_config(root, "[build]\nentry = \"content/site.typ\"");
-        let inventory = configured_content(&config).unwrap();
+        let inv = configured_content(&cfg).unwrap();
         assert_eq!(
-            inventory
-                .iter()
-                .map(|unit| unit.id.to_string())
-                .collect::<Vec<_>>(),
+            inv.iter().map(|u| u.id.to_string()).collect::<Vec<_>>(),
             ["document.typ", "helpers/card.typ"]
         );
-        let cancellation = crate::cancellation::BuildCancellation::default();
+        let cancel = crate::cancellation::BuildCancellation::default();
 
         fs::remove_file(content.join("site.typ")).unwrap();
-        let unopened = content_units_with_sources(
-            &config,
-            &inventory,
-            [content.join("site.typ")],
-            &cancellation,
-        )
-        .unwrap();
+        let unopened =
+            content_units_with_sources(&cfg, &inv, [content.join("site.typ")], &cancel).unwrap();
 
-        assert_eq!(unopened, inventory);
+        assert_eq!(unopened, inv);
     }
 
     #[test]
-    fn unsaved_source_joins_the_inventory() {
-        let directory = TempDir::new().unwrap();
-        let root = directory.path();
+    fn unsaved_source_joins_inventory() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
         let content = root.join("content");
         fs::create_dir(&content).unwrap();
         fs::write(content.join("document.typ"), "Document").unwrap();
-        let mut config = crate::config::tests::load_test_config(root, "");
-        config.build.content_dir = content.clone();
-        let inventory = configured_content(&config).unwrap();
+        let mut cfg = crate::config::tests::load_test_config(root, "");
+        cfg.build.content_dir = content.clone();
+        let inv = configured_content(&cfg).unwrap();
         assert_eq!(
-            inventory
-                .iter()
-                .map(|unit| unit.id.to_string())
-                .collect::<Vec<_>>(),
+            inv.iter().map(|u| u.id.to_string()).collect::<Vec<_>>(),
             ["document.typ"]
         );
 
         let opened = content_units_with_sources(
-            &config,
-            &inventory,
+            &cfg,
+            &inv,
             [content.join("unsaved.typ")],
             &crate::cancellation::BuildCancellation::default(),
         )
         .unwrap();
 
         assert_eq!(
-            opened
-                .iter()
-                .map(|unit| unit.id.to_string())
-                .collect::<Vec<_>>(),
+            opened.iter().map(|u| u.id.to_string()).collect::<Vec<_>>(),
             ["document.typ", "unsaved.typ"]
         );
     }
 
     #[test]
-    fn each_scope_selects_sources() {
-        let directory = TempDir::new().unwrap();
-        fs::create_dir_all(directory.path().join("b")).unwrap();
-        for source in ["a.typ", "b.typ", "b/helper.typ", "b/index.typ"] {
-            fs::write(directory.path().join(source), "").unwrap();
+    fn scope_selects_matching_sources() {
+        let dir = TempDir::new().unwrap();
+        fs::create_dir_all(dir.path().join("b")).unwrap();
+        for src in ["a.typ", "b.typ", "b/helper.typ", "b/index.typ"] {
+            fs::write(dir.path().join(src), "").unwrap();
         }
-        let discovered = content_units(directory.path()).unwrap();
-        let mut config = crate::config::tests::load_test_config(directory.path(), "");
-        let content = normalize_path(directory.path());
-        config.build.content_dir = content.clone();
+        let discovered = content_units(dir.path()).unwrap();
+        let mut cfg = crate::config::tests::load_test_config(dir.path(), "");
+        let content = normalize_path(dir.path());
+        cfg.build.content_dir = content.clone();
         for (scope, expected) in [
             ("a", vec!["a.typ"]),
             ("b", vec!["b/helper.typ", "b/index.typ"]),
             ("b.typ", vec!["b.typ"]),
         ] {
             let selected =
-                select_content_sources(&config, &[PathBuf::from(scope)], &discovered).unwrap();
+                select_content_sources(&cfg, &[PathBuf::from(scope)], &discovered).unwrap();
             assert_eq!(
                 selected,
-                expected
-                    .iter()
-                    .map(|name| content.join(name))
-                    .collect::<Vec<_>>(),
+                expected.iter().map(|n| content.join(n)).collect::<Vec<_>>(),
                 "{scope}"
             );
         }

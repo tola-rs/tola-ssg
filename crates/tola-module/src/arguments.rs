@@ -4,20 +4,20 @@ use std::ffi::{OsStr, OsString};
 
 /// Substitute declared markers once, preserving native paths and argument boundaries.
 pub fn expand_argument(argument: &str, bindings: &[(&str, &OsStr)]) -> OsString {
-    let mut expanded = OsString::new();
+    let mut buf = OsString::new();
     let mut rest = argument;
     loop {
         let next = bindings
             .iter()
-            .filter_map(|(marker, value)| rest.find(*marker).map(|offset| (offset, marker, value)))
-            .min_by_key(|(offset, _, _)| *offset);
-        let Some((offset, marker, value)) = next else {
-            expanded.push(rest);
-            return expanded;
+            .filter_map(|(marker, val)| rest.find(*marker).map(|off| (off, marker, val)))
+            .min_by_key(|(off, _, _)| *off);
+        let Some((off, marker, val)) = next else {
+            buf.push(rest);
+            return buf;
         };
-        expanded.push(&rest[..offset]);
-        expanded.push(value);
-        rest = &rest[offset + marker.len()..];
+        buf.push(&rest[..off]);
+        buf.push(val);
+        rest = &rest[off + marker.len()..];
     }
 }
 
@@ -26,7 +26,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn inserted_not_interpreted_more_markers() {
+    fn expand_skips_inserted_markers() {
         let bindings = [
             ("{module}", OsStr::new("/themes/{project}/notes")),
             ("{project}", OsStr::new("/my site")),

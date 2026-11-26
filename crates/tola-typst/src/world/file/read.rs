@@ -67,8 +67,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn decode_utf8_strips_bom_or_rejects() {
-        for (name, bytes, expected) in [
+    fn decode_utf8_bom_and_invalid() {
+        for (name, buf, expected) in [
             (
                 "plain text",
                 &b"Hello, \xe4\xb8\x96\xe7\x95\x8c!"[..],
@@ -77,7 +77,7 @@ mod tests {
             ("utf-8 bom", &b"\xef\xbb\xbfHello"[..], Some("Hello")),
             ("invalid utf-8", &[0xff, 0xfe][..], None),
         ] {
-            let decoded = decode_utf8(bytes);
+            let decoded = decode_utf8(buf);
             match expected {
                 Some(text) => assert_eq!(decoded.unwrap(), text, "{name}"),
                 None => assert_eq!(decoded.unwrap_err(), FileError::InvalidUtf8, "{name}"),

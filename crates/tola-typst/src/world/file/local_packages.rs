@@ -166,7 +166,7 @@ impl LocalPackages {
 mod tests {
     use super::*;
     use crate::world::file::{
-        FileMap, FileProvider, FileResolver, FileTarget, ReadLocator, ReadOrigin, SharedFileCache,
+        FileMap, FileProvider, FileStore, FileTarget, ReadLocator, ReadOrigin, SharedFileCache,
     };
     use crate::{BundleCancellation, TypstWorld};
     use std::fs;
@@ -202,13 +202,13 @@ mod tests {
             .unwrap()
         }
 
-        fn files(&self) -> FileResolver {
-            FileResolver::new().with_local_packages(Arc::new(
+        fn files(&self) -> FileStore {
+            FileStore::new().with_local_packages(Arc::new(
                 LocalPackages::new([self.package()], ["tola-modules"]).unwrap(),
             ))
         }
 
-        fn world(&self, files: FileResolver, cache: Arc<SharedFileCache>) -> TypstWorld {
+        fn world(&self, files: FileStore, cache: Arc<SharedFileCache>) -> TypstWorld {
             TypstWorld::builder(&self.project.join("main.typ"), &self.project)
                 .with_files(Arc::new(files))
                 .with_shared_cache(cache)
@@ -231,7 +231,7 @@ mod tests {
     }
 
     #[test]
-    fn native_import_keeps_both_roots() {
+    fn local_pkg_dual_roots() {
         let site = Site::new();
         fs::create_dir(site.module.join("lib")).unwrap();
         fs::create_dir(site.module.join("assets")).unwrap();
@@ -284,45 +284,36 @@ mod tests {
         );
         assert_eq!(world.root(), site.project.canonicalize().unwrap());
 
-        let selected = site.package();
-        assert_eq!(selected.root(), site.module.canonicalize().unwrap());
-        let id = selected.file_id(VirtualPath::new("assets/name.txt").unwrap());
-        let (bytes, observed) = world.read_file_with_evidence(id);
-        assert_eq!(bytes.unwrap().as_slice(), b"module-relative");
-        let ReadOrigin::Disk(path) = observed.reads[0].origin() else {
+        let pkg = site.package();
+        assert_eq!(pkg.root(), site.module.canonicalize().unwrap());
+        let fid = pkg.file_id(VirtualPath::new("assets/name.txt").unwrap());
+        let (buf, obs) = world.read_file_with_evidence(fid);
+        assert_eq!(buf.unwrap().as_slice(), b"module-relative");
+        let ReadOrigin::Disk(path) = obs.reads[0].origin() else {
             panic!("the local package asset must retain its disk origin");
         };
-        // Registration fixes the physical root; the caller's spelling may be
-        // an alias, including /var versus /private/var on macOS.
-        assert_eq!(path.as_path(), selected.root().join("assets/name.txt"));
-        assert_eq!(observed.disk_reads[0].as_path(), path.as_path());
+        assert_eq!(path.as_path(), pkg.root().join("assets/name.txt"));
+        assert_eq!(obs.disk_reads[0].as_path(), path.as_path());
         assert!(
-            matches!(observed.reads[0].evidence().locator(), ReadLocator::ProvidedPackage { package, path }
-            if package == selected.spec() && path == Path::new("assets/name.txt"))
+            matches!(obs.reads[0].evidence().locator(), ReadLocator::ProvidedPackage { package, path }
+            if package == pkg.spec() && path == Path::new("assets/name.txt"))
         );
-        assert!(observed.package_checks.is_empty());
-        assert_eq!(
-            site.files()
-                .read_reported(
-                    &site.project,
-                    Path::new("@tola-modules/forester:0.0.0/assets/name.txt")
-                )
-                .unwrap(),
-            "module-relative"
-        );
-        assert_eq!(
-            site.files()
-                .read_reported(
-                    &site.project,
-                    Path::new(r"@tola-modules\forester:0.0.0\assets\name.txt"),
-                )
-                .unwrap(),
-            "module-relative"
-        );
+        assert!(obs.package_checks.is_empty());
+        for reported in [
+            "@tola-modules/forester:0.0.0/assets/name.txt",
+            r"@tola-modules\forester:0.0.0\assets\name.txt",
+        ] {
+            assert_eq!(
+                site.files()
+                    .read_reported(&site.project, Path::new(reported))
+                    .unwrap(),
+                "module-relative"
+            );
+        }
     }
 
     #[test]
-    fn package_main_keeps_project_root() {
+    fn local_pkg_main_root() {
         let site = Site::new();
         fs::write(site.module.join("value.txt"), "package driver").unwrap();
         fs::write(
@@ -346,33 +337,33 @@ mod tests {
     }
 
     #[test]
-    fn reserved_packages_never_fall_back_to_global_roots() {
+    fn reserved_ns_no_fallback() {
         let site = Site::new();
         let global = site.project.join("cache");
         for name in ["forester", "unknown"] {
-            let directory = global.join(format!("tola-modules/{name}/0.0.0"));
-            fs::create_dir_all(&directory).unwrap();
-            fs::write(directory.join("missing.typ"), "global package bytes").unwrap();
+            let dir = global.join(format!("tola-modules/{name}/0.0.0"));
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("missing.typ"), "global package bytes").unwrap();
         }
         let locations = crate::PackageLocations::from_absolute_roots(Some(global), None).unwrap();
         let files =
-            FileResolver::from_package_locations(locations, crate::PackageFetchPolicy::LocalOnly)
+            FileStore::from_package_locations(locations, crate::PackageFetchMode::LocalOnly)
                 .with_local_packages(Arc::new(
                     LocalPackages::new([site.package()], ["tola-modules"]).unwrap(),
                 ));
         for name in ["forester", "unknown"] {
-            let id = FileId::new(RootedPath::new(
+            let fid = FileId::new(RootedPath::new(
                 VirtualRoot::Package(format!("@tola-modules/{name}:0.0.0").parse().unwrap()),
                 VirtualPath::new("missing.typ").unwrap(),
             ));
-            let observed = files.read_attempt(id, &site.project);
-            assert!(observed.result.is_err());
-            assert!(observed.package_checks.is_empty());
+            let obs = files.read_attempt(fid, &site.project);
+            assert!(obs.result.is_err());
+            assert!(obs.package_checks.is_empty());
         }
     }
 
     #[test]
-    fn providers_outrank_local_packages() {
+    fn provider_outranks_local_pkg() {
         struct Exclusive;
         impl FileProvider for Exclusive {
             fn target(&self, _: FileId) -> Option<FileTarget> {
@@ -384,39 +375,39 @@ mod tests {
         }
         let site = Site::new();
         fs::write(site.module.join("lib.typ"), "package source").unwrap();
-        let id = site.package().entry_id();
+        let fid = site.package().entry_id();
         assert!(
             site.files()
                 .with_provider(Exclusive)
-                .read(id, &site.project)
+                .read(fid, &site.project)
                 .is_err()
         );
         let mut provided = FileMap::new();
-        provided.insert(id, Arc::<[u8]>::from(&b"provider source"[..]));
+        provided.insert(fid, Arc::<[u8]>::from(&b"provider source"[..]));
         assert_eq!(
             site.files()
                 .with_provider(provided)
-                .read(id, &site.project)
+                .read(fid, &site.project)
                 .unwrap(),
             b"provider source"
         );
         assert!(
             site.files()
                 .with_source_boundary(SourceBoundary::new(&site.project, true))
-                .read(id, &site.project)
+                .read(fid, &site.project)
                 .is_err()
         );
         assert!(
             site.files()
                 .with_source_boundary(SourceBoundary::default().excluding(site.module.clone()))
-                .read(id, &site.project)
+                .read(fid, &site.project)
                 .is_err()
         );
     }
 
     #[cfg(unix)]
     #[test]
-    fn package_symlinks_cannot_escape_even_with_editor_overrides() {
+    fn local_pkg_symlink_boundary() {
         use std::os::unix::fs::symlink;
         let site = Site::new();
         fs::write(site.module.join("lib.typ"), "inside").unwrap();
@@ -450,21 +441,18 @@ mod tests {
             b"inside"
         );
         for path in ["outside.typ", "absent.typ"] {
-            let error = files
+            let err = files
                 .read(
                     site.package().file_id(VirtualPath::new(path).unwrap()),
                     &site.project,
                 )
                 .unwrap_err();
-            assert!(
-                error.to_string().contains("declared package root"),
-                "{error}"
-            );
+            assert!(err.to_string().contains("declared package root"), "{err}");
         }
     }
 
     #[test]
-    fn shared_cache_revalidates_alias_rebinding_and_local_edits() {
+    fn shared_cache_rebinds_local_pkg() {
         let site = Site::new();
         fs::write(site.module.join("lib.typ"), "#let value = \"one\"").unwrap();
         fs::write(
@@ -479,18 +467,17 @@ mod tests {
         let second_root = site.module.with_file_name("second-module");
         fs::create_dir(&second_root).unwrap();
         fs::write(second_root.join("lib.typ"), "#let value = \"two\"").unwrap();
-        let package = LocalPackage::new(
+        let pkg = LocalPackage::new(
             site.package().spec().clone(),
             &second_root,
             VirtualPath::new("lib.typ").unwrap(),
         )
         .unwrap();
-        let second_files = FileResolver::new().with_local_packages(Arc::new(
-            LocalPackages::new([package], ["tola-modules"]).unwrap(),
+        let second_files = FileStore::new().with_local_packages(Arc::new(
+            LocalPackages::new([pkg], ["tola-modules"]).unwrap(),
         ));
         let second = site.world(second_files.clone(), Arc::clone(&cache));
         assert_eq!(result(&second), "two".into_value());
-        // The registry selection of an older resolver is immutable.
         assert_eq!(
             result(&site.world(first_files, Arc::clone(&cache))),
             "one".into_value()
@@ -503,7 +490,7 @@ mod tests {
     }
 
     #[test]
-    fn distinct_aliases_reject_duplicates() {
+    fn local_pkg_duplicate_spec_rejected() {
         let site = Site::new();
         fs::write(site.module.join("lib.typ"), "#let value = 7").unwrap();
         let first = site.package();
@@ -515,7 +502,7 @@ mod tests {
         .unwrap();
         assert_ne!(first.entry_id(), second.entry_id());
         assert!(LocalPackages::new([first.clone(), first.clone()], ["tola-modules"]).is_err());
-        let files = FileResolver::new().with_local_packages(Arc::new(
+        let files = FileStore::new().with_local_packages(Arc::new(
             LocalPackages::new([first, second], ["tola-modules"]).unwrap(),
         ));
         fs::write(site.project.join("main.typ"), "#import \"@tola-modules/forester:0.0.0\" as a\n#import \"@tola-modules/other:0.0.0\" as b\n#metadata(a.value + b.value)<result>").unwrap();

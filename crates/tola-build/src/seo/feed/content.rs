@@ -662,7 +662,7 @@ mod tests {
     }
 
     #[test]
-    fn splits_inline_markup_across_paragraphs() {
+    fn splits_inline_across_paragraphs() {
         let source = StrongElem::new(Content::sequence([
             TextElem::packed("first"),
             ParbreakElem::shared().clone(),
@@ -687,10 +687,8 @@ mod tests {
         );
     }
 
-    /// Values a feed reader cannot receive faithfully: styled or realized nodes,
-    /// lifecycle attributes, unlisted elements, explicit visual fields, and nested links.
     #[test]
-    fn unrepresentable_content_is_rejected() {
+    fn unrepresentable_content_rejected() {
         for (label, source, path) in [
             (
                 "styled text",

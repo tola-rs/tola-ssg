@@ -31,6 +31,7 @@ enum Constant {
 
 #[derive(Clone, Debug)]
 struct BytesValue(Bytes);
+
 impl PartialEq for BytesValue {
     fn eq(&self, other: &Self) -> bool {
         self.0.as_slice() == other.0.as_slice()
@@ -50,6 +51,7 @@ impl Ord for BytesValue {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct FiniteFloat(u64);
+
 impl PartialOrd for FiniteFloat {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
@@ -63,6 +65,7 @@ impl Ord for FiniteFloat {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct DateValue(Datetime);
+
 impl Eq for DateValue {}
 impl PartialOrd for DateValue {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
@@ -79,32 +82,34 @@ impl Ord for DateValue {
         }
     }
 }
-fn date_kind(value: Datetime) -> u8 {
-    match value {
+
+fn date_kind(val: Datetime) -> u8 {
+    match val {
         Datetime::Date(_) => 0,
         Datetime::Time(_) => 1,
         Datetime::Datetime(_) => 2,
     }
 }
+
 impl Hash for Constant {
-    fn hash<H: Hasher>(&self, hasher: &mut H) {
-        std::mem::discriminant(self).hash(hasher);
+    fn hash<H: Hasher>(&self, h: &mut H) {
+        std::mem::discriminant(self).hash(h);
         match self {
             Self::None => {}
-            Self::Bool(v) => v.hash(hasher),
-            Self::Int(v) => v.hash(hasher),
-            Self::Float(v) => v.0.hash(hasher),
-            Self::Decimal(v) => v.hash(hasher),
-            Self::Str(v) => v.hash(hasher),
-            Self::Bytes(v) => v.0.hash(hasher),
-            Self::Date(v) => v.0.hash(hasher),
+            Self::Bool(v) => v.hash(h),
+            Self::Int(v) => v.hash(h),
+            Self::Float(v) => v.0.hash(h),
+            Self::Decimal(v) => v.hash(h),
+            Self::Str(v) => v.hash(h),
+            Self::Bytes(v) => v.0.hash(h),
+            Self::Date(v) => v.0.hash(h),
         }
     }
 }
 
 impl Constant {
-    fn from_value(value: &Value, span: Span) -> SourceResult<Self> {
-        Ok(match value {
+    fn from_value(val: &Value, span: Span) -> SourceResult<Self> {
+        Ok(match val {
             Value::None => Self::None,
             Value::Bool(v) => Self::Bool(*v),
             Value::Int(v) => Self::Int(*v),
@@ -123,6 +128,7 @@ impl Constant {
             }
         })
     }
+
     fn into_value(self) -> Value {
         match self {
             Self::None => Value::None,
@@ -137,12 +143,11 @@ impl Constant {
     }
 }
 
-fn normalize_decimal(value: Decimal) -> Decimal {
-    if value.is_zero() {
+fn normalize_decimal(val: Decimal) -> Decimal {
+    if val.is_zero() {
         return Decimal::ZERO;
     }
-    // Typst exposes exact decimal text, but no scale-normalization API.
-    let text = value.to_string();
+    let text = val.to_string();
     let trimmed = if text.contains('.') {
         text.trim_end_matches('0').trim_end_matches('.')
     } else {
@@ -159,6 +164,7 @@ struct LocatedAtom {
     key: Arc<LazyHash<Atom<Constant>>>,
     span: Span,
 }
+
 impl LocatedAtom {
     fn new(atom: Atom<Constant>, span: Span) -> Self {
         Self {
@@ -171,11 +177,13 @@ impl LocatedAtom {
         &self.key
     }
 }
+
 #[derive(Clone, Debug, Hash, PartialEq)]
 struct LocatedLiteral {
     atom: LocatedAtom,
     negative: bool,
 }
+
 impl LocatedLiteral {
     fn to_literal(&self) -> Literal<Constant> {
         let atom = self.atom.as_atom().clone();
@@ -186,52 +194,59 @@ impl LocatedLiteral {
         }
     }
 }
+
 #[derive(Clone, Debug, Hash, PartialEq)]
 struct LocatedRule {
     head: LocatedAtom,
     body: Vec<LocatedLiteral>,
 }
+
 struct DatabaseClauses<'a> {
     relations: &'a [LocatedRelation],
     atoms: &'a [&'a LocatedAtom],
     rules: &'a [&'a LocatedRule],
 }
+
 impl Hash for DatabaseClauses<'_> {
-    fn hash<H: Hasher>(&self, hasher: &mut H) {
+    fn hash<H: Hasher>(&self, h: &mut H) {
         // Cached errors use input positions; keys preserve clause order and omit spans.
-        self.relations.len().hash(hasher);
-        for relation in self.relations {
-            relation.relation.hash(hasher);
+        self.relations.len().hash(h);
+        for rel in self.relations {
+            rel.relation.hash(h);
         }
-        self.atoms.len().hash(hasher);
+        self.atoms.len().hash(h);
         for atom in self.atoms {
-            atom.key.hash(hasher);
+            atom.key.hash(h);
         }
-        self.rules.len().hash(hasher);
+        self.rules.len().hash(h);
         for rule in self.rules {
-            rule.head.key.hash(hasher);
-            hash_body(&rule.body, hasher);
+            rule.head.key.hash(h);
+            hash_body(&rule.body, h);
         }
     }
 }
+
 struct QueryClauses<'a> {
     select: Vec<String>,
     body: &'a [LocatedLiteral],
 }
+
 impl Hash for QueryClauses<'_> {
-    fn hash<H: Hasher>(&self, hasher: &mut H) {
-        self.select.hash(hasher);
-        hash_body(self.body, hasher);
+    fn hash<H: Hasher>(&self, h: &mut H) {
+        self.select.hash(h);
+        hash_body(self.body, h);
     }
 }
-fn hash_body<H: Hasher>(body: &[LocatedLiteral], hasher: &mut H) {
-    body.len().hash(hasher);
-    for literal in body {
-        literal.negative.hash(hasher);
-        literal.atom.key.hash(hasher);
+
+fn hash_body<H: Hasher>(body: &[LocatedLiteral], h: &mut H) {
+    body.len().hash(h);
+    for lit in body {
+        lit.negative.hash(h);
+        lit.atom.key.hash(h);
     }
 }
-/// A value used by the Datalog package.
+
+/// Internal Datalog term/clause value.
 #[ty]
 #[derive(Clone, Debug, Hash, PartialEq)]
 enum DatalogValue {
@@ -240,6 +255,7 @@ enum DatalogValue {
     Literal(LocatedLiteral),
     Rule(LocatedRule),
 }
+
 impl Repr for DatalogValue {
     fn repr(&self) -> EcoString {
         match self {
@@ -247,36 +263,41 @@ impl Repr for DatalogValue {
                 format!("<variable {}>", Str::from(name.as_str()).repr()).into()
             }
             Self::Atom(atom) => atom_repr("atom", &atom.as_atom().relation),
-            Self::Literal(literal) => atom_repr("negated atom", &literal.atom.as_atom().relation),
+            Self::Literal(lit) => atom_repr("negated atom", &lit.atom.as_atom().relation),
             Self::Rule(rule) => atom_repr("rule for", &rule.head.as_atom().relation),
         }
     }
 }
-fn atom_repr(kind: &str, relation: &Relation) -> EcoString {
+
+fn atom_repr(kind: &str, rel: &Relation) -> EcoString {
     format!(
         "<{kind} {} / {}>",
-        Str::from(relation.name.as_str()).repr(),
-        relation.arity
+        Str::from(rel.name.as_str()).repr(),
+        rel.arity
     )
     .into()
 }
-fn wrapped(value: DatalogValue) -> Value {
-    Value::dynamic(value)
+
+fn wrapped(val: DatalogValue) -> Value {
+    Value::dynamic(val)
 }
-fn datalog(value: &Value) -> Option<&DatalogValue> {
-    match value {
+
+fn datalog(val: &Value) -> Option<&DatalogValue> {
+    match val {
         Value::Dyn(v) => v.downcast(),
         _ => None,
     }
 }
-fn get_atom(value: &Value, span: Span) -> SourceResult<&LocatedAtom> {
-    match datalog(value) {
+
+fn get_atom(val: &Value, span: Span) -> SourceResult<&LocatedAtom> {
+    match datalog(val) {
         Some(DatalogValue::Atom(v)) => Ok(v),
         _ => bail!(span, "expected a Datalog atom"),
     }
 }
-fn body_literal(value: &Value, span: Span) -> SourceResult<LocatedLiteral> {
-    match datalog(value) {
+
+fn body_literal(val: &Value, span: Span) -> SourceResult<LocatedLiteral> {
+    match datalog(val) {
         Some(DatalogValue::Atom(v)) => Ok(LocatedLiteral {
             atom: v.clone(),
             negative: false,
@@ -286,7 +307,27 @@ fn body_literal(value: &Value, span: Span) -> SourceResult<LocatedLiteral> {
     }
 }
 
-/// A declaration of a Datalog relation.
+fn extract_entries<'a, T>(
+    arr: &'a Spanned<Array>,
+    field: &str,
+    expected: &str,
+    mut parse: impl FnMut(&'a Value) -> Option<T>,
+) -> SourceResult<Vec<T>> {
+    let mut out = Vec::with_capacity(arr.v.len());
+    for (idx, val) in arr.v.iter().enumerate() {
+        let Some(item) = parse(val) else {
+            bail!(
+                arr.span,
+                "entry {} in `{field}` must be a {expected}",
+                idx + 1
+            );
+        };
+        out.push(item);
+    }
+    Ok(out)
+}
+
+/// Declaration of a Datalog relation.
 #[ty(scope, name = "datalog-relation")]
 #[derive(Clone, Debug, Hash, PartialEq)]
 struct LocatedRelation {
@@ -311,13 +352,13 @@ fn datalog_relation(
     if name.v.is_empty() {
         bail!(name.span, "relation name must not be empty")
     }
-    let Ok(arity_value) = usize::try_from(arity.v) else {
+    let Ok(arity) = usize::try_from(arity.v) else {
         bail!(arity.span, "relation arity is out of range"; hint: "use a nonnegative integer")
     };
     Ok(LocatedRelation {
         relation: Relation {
             name: name.v.to_string(),
-            arity: arity_value,
+            arity,
         },
         span,
     })
@@ -389,6 +430,7 @@ fn datalog_negate(
         negative: true,
     })))
 }
+
 #[func]
 fn datalog_rule(
     /// Atom to derive.
@@ -406,6 +448,7 @@ fn datalog_rule(
         .collect::<SourceResult<Vec<_>>>()?;
     Ok(wrapped(DatalogValue::Rule(LocatedRule { head, body })))
 }
+
 #[func]
 fn datalog_database(
     span: Span,
@@ -420,72 +463,45 @@ fn datalog_database(
     #[default(Spanned::detached(Array::new()))]
     rules: Spanned<Array>,
 ) -> SourceResult<DatalogDatabase> {
-    let declarations = relations
-        .v
-        .iter()
-        .enumerate()
-        .map(|(index, value)| {
-            match value {
-                Value::Dyn(value) => value.downcast::<LocatedRelation>().cloned(),
-                _ => None,
-            }
-            .ok_or_else(|| {
-                eco_vec![error!(
-                    relations.span,
-                    "entry {} in `relations` must be a Datalog relation",
-                    index + 1
-                )]
-            })
-        })
-        .collect::<SourceResult<Vec<_>>>()?;
-    let mut atoms = Vec::with_capacity(facts.v.len());
-    for (index, value) in facts.v.iter().enumerate() {
-        let Some(DatalogValue::Atom(atom)) = datalog(value) else {
-            bail!(
-                facts.span,
-                "entry {} in `facts` must be a Datalog atom",
-                index + 1
-            );
-        };
+    let decls = extract_entries(&relations, "relations", "Datalog relation", |v| match v {
+        Value::Dyn(v) => v.downcast::<LocatedRelation>().cloned(),
+        _ => None,
+    })?;
+    let atoms = extract_entries(&facts, "facts", "Datalog atom", |v| match datalog(v) {
+        Some(DatalogValue::Atom(atom)) => Some(atom),
+        _ => None,
+    })?;
+    for atom in &atoms {
         if atom
             .as_atom()
             .terms
             .iter()
-            .any(|term| matches!(term, Term::Variable(_)))
+            .any(|t| matches!(t, Term::Variable(_)))
         {
             bail!(atom.span, "database facts must contain only constants");
         }
-        atoms.push(atom);
     }
-    let mut definitions = Vec::with_capacity(rules.v.len());
-    for (index, value) in rules.v.iter().enumerate() {
-        let Some(DatalogValue::Rule(rule)) = datalog(value) else {
-            bail!(
-                rules.span,
-                "entry {} in `rules` must be a Datalog rule",
-                index + 1
-            );
-        };
-        definitions.push(rule);
-    }
+    let defs = extract_entries(&rules, "rules", "Datalog rule", |v| match datalog(v) {
+        Some(DatalogValue::Rule(rule)) => Some(rule),
+        _ => None,
+    })?;
     let clauses = DatabaseClauses {
-        relations: &declarations,
+        relations: &decls,
         atoms: &atoms,
-        rules: &definitions,
+        rules: &defs,
     };
-    let database = database_snapshot(clauses).map_err(|e| {
-        diagnostic(e, span, |location| match location {
-            Location::Relation(i) => declarations.get(i).map(|v| v.span),
+    database_snapshot(clauses).map_err(|err| {
+        diagnostic(err, span, |loc| match loc {
+            Location::Relation(i) => decls.get(i).map(|v| v.span),
             Location::Fact(i) => atoms.get(i).map(|v| v.span),
-            Location::RuleHead(i) => definitions.get(i).map(|v| v.head.span),
-            Location::RuleBody { rule, atom } => definitions
+            Location::RuleHead(i) => defs.get(i).map(|v| v.head.span),
+            Location::RuleBody { rule, atom } => defs
                 .get(rule)
-                .and_then(|rule| rule.body.get(atom))
-                .map(|literal| literal.atom.span),
+                .and_then(|r| r.body.get(atom))
+                .map(|l| l.atom.span),
             _ => None,
         })
-    })?;
-    Ok(database)
+    })
 }
 
 #[comemo::memoize]
@@ -493,7 +509,7 @@ fn database_snapshot(clauses: DatabaseClauses<'_>) -> Result<DatalogDatabase, Er
     let rows = clauses.atoms.iter().map(|atom| {
         let atom = atom.as_atom();
         let values = atom.terms.iter().map(|term| match term {
-            Term::Constant(value) => value.clone(),
+            Term::Constant(val) => val.clone(),
             Term::Variable(_) => unreachable!(),
         });
         (&atom.relation, values)
@@ -506,12 +522,12 @@ fn database_snapshot(clauses: DatabaseClauses<'_>) -> Result<DatalogDatabase, Er
             body: rule.body.iter().map(LocatedLiteral::to_literal).collect(),
         })
         .collect();
-    let relations = clauses.relations.iter().map(|relation| &relation.relation);
+    let relations = clauses.relations.iter().map(|r| &r.relation);
     Database::from_rows(relations, rows, rules)
-        .map(|database| DatalogDatabase(Arc::new(LazyHash::new(database))))
+        .map(|db| DatalogDatabase(Arc::new(LazyHash::new(db))))
 }
 
-/// An immutable Datalog database.
+/// Immutable Datalog database.
 #[ty(scope)]
 #[derive(Clone, Debug, Hash, PartialEq)]
 struct DatalogDatabase(Arc<LazyHash<Database<Constant>>>);
@@ -547,7 +563,7 @@ static QUERY: NativeFuncData = NativeFuncData {
     contextual: false,
     scope: LazyLock::new(&Scope::new),
     params: LazyLock::new(&|| {
-        let parameter = |name, docs, input, named| NativeParamInfo {
+        let param = |name, docs, input, named| NativeParamInfo {
             name,
             docs,
             input,
@@ -560,14 +576,14 @@ static QUERY: NativeFuncData = NativeFuncData {
             settable: false,
         };
         vec![
-            parameter("self", "", DatalogDatabase::input(), false),
-            parameter(
+            param("self", "", DatalogDatabase::input(), false),
+            param(
                 "select",
                 "Pass an array of variables in output column order. You can repeat a variable.",
                 Array::input(),
                 true,
             ),
-            parameter(
+            param(
                 "where",
                 "Pass an array of conditions. Each atom or `negate` condition must hold. Use `()` for no conditions.",
                 Array::input(),
@@ -580,7 +596,7 @@ static QUERY: NativeFuncData = NativeFuncData {
 
 fn query(args: &mut Args) -> SourceResult<Array> {
     let span = args.span;
-    let database: DatalogDatabase = args.expect("self")?;
+    let db: DatalogDatabase = args.expect("self")?;
     let select: Spanned<Array> = args
         .named("select")?
         .ok_or_else(|| eco_vec![error!(span, "query requires `select`")])?;
@@ -588,19 +604,14 @@ fn query(args: &mut Args) -> SourceResult<Array> {
         .named("where")?
         .ok_or_else(|| eco_vec![error!(span, "query requires `where`")])?;
     args.take().finish()?;
-    let mut names = Vec::with_capacity(select.v.len());
-    let mut select_spans = Vec::with_capacity(select.v.len());
-    for (index, value) in select.v.iter().enumerate() {
-        let Some(DatalogValue::Variable(name, span)) = datalog(value) else {
-            bail!(
-                select.span,
-                "entry {} in `select` must be a Datalog variable",
-                index + 1
-            );
-        };
-        names.push(name.clone());
-        select_spans.push(*span);
-    }
+
+    let selected = extract_entries(&select, "select", "Datalog variable", |v| {
+        match datalog(v) {
+            Some(DatalogValue::Variable(name, span)) => Some((name.clone(), *span)),
+            _ => None,
+        }
+    })?;
+    let (names, select_spans): (Vec<_>, Vec<_>) = selected.into_iter().unzip();
     let body = where_
         .v
         .iter()
@@ -610,8 +621,8 @@ fn query(args: &mut Args) -> SourceResult<Array> {
         select: names,
         body: &body,
     };
-    query_rows(&database.0, clauses).map_err(|e| {
-        diagnostic(e, span, |location| match location {
+    query_rows(&db.0, clauses).map_err(|err| {
+        diagnostic(err, span, |loc| match loc {
             Location::QueryBody(i) => body.get(i).map(|v| v.atom.span),
             Location::QuerySelect(i) => select_spans.get(i).copied(),
             _ => None,
@@ -630,10 +641,10 @@ pub(crate) fn methods(ty: Type) -> impl Iterator<Item = (&'static str, &'static 
         })
 }
 
-// The compile boundary handles cancellation so Typst cannot cache a cancelled query.
+// Compile boundary handles cancellation so Typst cannot cache a cancelled query.
 #[comemo::memoize]
 fn query_rows(
-    database: &LazyHash<Database<Constant>>,
+    db: &LazyHash<Database<Constant>>,
     clauses: QueryClauses<'_>,
 ) -> Result<Array, Error> {
     let query = Query {
@@ -644,7 +655,7 @@ fn query_rows(
             .map(LocatedLiteral::to_literal)
             .collect(),
     };
-    let rows = database.query(&query, || false)?;
+    let rows = db.query(&query, || false)?;
     Ok(rows
         .into_iter()
         .map(|row| {
@@ -657,13 +668,13 @@ fn query_rows(
 }
 
 fn diagnostic(
-    error: Error,
+    err: Error,
     fallback: Span,
     locate: impl FnOnce(Location) -> Option<Span>,
 ) -> typst::ecow::EcoVec<typst::diag::SourceDiagnostic> {
-    let span = locate(error.location).unwrap_or(fallback);
-    let negative_cycle = matches!(error.kind, ErrorKind::NegativeCycle);
-    let message = match error.kind {
+    let span = locate(err.location).unwrap_or(fallback);
+    let neg_cycle = matches!(err.kind, ErrorKind::NegativeCycle);
+    let msg = match err.kind {
         ErrorKind::Arity { expected, actual } => {
             format!("relation expects {expected} terms, found {actual}")
         }
@@ -683,19 +694,23 @@ fn diagnostic(
         ErrorKind::NegativeCycle => "rules contain a cycle through negation".to_owned(),
         ErrorKind::Cancelled => "Datalog query was cancelled".to_owned(),
     };
-    let mut diagnostic = typst::diag::SourceDiagnostic::error(span, message);
-    if negative_cycle {
-        diagnostic.hint("remove the dependency cycle through negation");
+    let mut diag = typst::diag::SourceDiagnostic::error(span, msg);
+    if neg_cycle {
+        diag.hint("remove the dependency cycle through negation");
     }
-    typst::ecow::eco_vec![diagnostic]
+    eco_vec![diag]
 }
 
 pub(crate) fn define(scope: &mut Scope) {
-    scope.define("datalog-relation", Func::from(datalog_relation::data()));
-    scope.define("datalog-var", Func::from(datalog_var::data()));
-    scope.define("datalog-rule", Func::from(datalog_rule::data()));
-    scope.define("datalog-negate", Func::from(datalog_negate::data()));
-    scope.define("datalog-database", Func::from(datalog_database::data()));
+    for (name, data) in [
+        ("datalog-relation", datalog_relation::data()),
+        ("datalog-var", datalog_var::data()),
+        ("datalog-rule", datalog_rule::data()),
+        ("datalog-negate", datalog_negate::data()),
+        ("datalog-database", datalog_database::data()),
+    ] {
+        scope.define(name, Func::from(data));
+    }
 }
 
 #[cfg(test)]
@@ -703,16 +718,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn query_signature_requires_named_arrays() {
+    fn query_signature_params() {
         let query = Func::from(&QUERY);
-        let parameters = query.params().skip(1).collect::<Vec<_>>();
-        assert_eq!(parameters.len(), 2);
-        for (parameter, name) in parameters.into_iter().zip(["select", "where"]) {
-            let parameter = parameter.to_native().unwrap();
-            assert_eq!(parameter.name, name);
-            assert!(parameter.named && parameter.required);
-            assert_eq!(parameter.input, Array::input());
-            assert!(parameter.default.is_none());
+        let params = query.params().skip(1).collect::<Vec<_>>();
+        assert_eq!(params.len(), 2);
+        for (param, name) in params.into_iter().zip(["select", "where"]) {
+            let param = param.to_native().unwrap();
+            assert_eq!(param.name, name);
+            assert!(param.named && param.required);
+            assert_eq!(param.input, Array::input());
+            assert!(param.default.is_none());
         }
     }
 }

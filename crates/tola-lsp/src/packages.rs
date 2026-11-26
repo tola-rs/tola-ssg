@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use tola_build::config::ResolvedSiteConfig;
+use tola_build::config::SiteConfig;
 use tola_typst::typst::diag::EcoString;
 use tola_typst::typst::syntax::package::{PackageSpec, PackageVersion};
 
@@ -21,7 +21,7 @@ pub(super) struct PackageAccess<'a> {
 
 impl<'a> PackageAccess<'a> {
     pub(super) fn new(
-        config: &ResolvedSiteConfig,
+        config: &SiteConfig,
         local_packages: Arc<tola_typst::LocalPackages>,
         resources: &tola_build::BuildResources,
         published: &'a [PublishedPackage],
@@ -46,7 +46,7 @@ impl<'a> PackageAccess<'a> {
 
     /// Static package admission for one request; compiled worlds retain their own selection.
     pub(super) fn prepared(
-        config: &ResolvedSiteConfig,
+        config: &SiteConfig,
         resources: &tola_build::BuildResources,
         published: &'a [PublishedPackage],
     ) -> anyhow::Result<Self> {

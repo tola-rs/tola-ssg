@@ -162,6 +162,7 @@ impl ClientRequest {
 pub(super) fn initialize_result(
     features: &crate::capabilities::ClientFeatures,
 ) -> InitializeResult {
+    #[allow(clippy::needless_update)]
     InitializeResult {
         capabilities: ServerCapabilities {
             position_encoding: Some(PositionEncodingKind::UTF16),

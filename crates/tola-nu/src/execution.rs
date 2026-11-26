@@ -15,43 +15,39 @@ use nu_protocol::{
 use crate::error::{NuError, Result};
 
 pub(super) fn source(engine: &EngineState, path: &Path) -> Result<(PathBuf, Vec<u8>)> {
-    let name = path.to_str().ok_or(NuError::NotUtf8 { what: "script" })?;
-    let working = StateWorkingSet::new(engine);
-    if let Some(virtual_path) = working.find_virtual_path(name) {
-        let bytes = ParserPath::from_virtual_path(&working, name, virtual_path)
-            .read(&working)
+    let name = crate::path_str(path, "script")?;
+    let ws = StateWorkingSet::new(engine);
+    if let Some(vpath) = ws.find_virtual_path(name) {
+        let buf = ParserPath::from_virtual_path(&ws, name, vpath)
+            .read(&ws)
             .ok_or(NuError::ModuleSourceUnloaded)?;
-        return Ok((path.to_path_buf(), bytes));
+        return Ok((path.to_path_buf(), buf));
     }
     let path = PathBuf::from(engine.cwd_as_string(None)?).join(path);
-    let bytes = std::fs::read(&path).map_err(|source| NuError::Input {
+    let buf = std::fs::read(&path).map_err(|source| NuError::Input {
         action: "read Nu script",
         path: path.clone(),
         source,
     })?;
-    Ok((path, bytes))
+    Ok((path, buf))
 }
 
-pub(super) fn parse(
-    working: &mut StateWorkingSet,
-    name: &str,
-    source: &[u8],
-) -> Result<Arc<Block>> {
-    let block = nu_parser::parse_fresh(working, Some(name), source, false);
-    check_errors(working)?;
+pub(super) fn parse(ws: &mut StateWorkingSet, name: &str, src: &[u8]) -> Result<Arc<Block>> {
+    let block = nu_parser::parse_fresh(ws, Some(name), src, false);
+    check_errors(ws)?;
     Ok(block)
 }
 
 /// Report the first parse or compile failure the working set recorded.
-pub(super) fn check_errors(working: &StateWorkingSet) -> Result<()> {
-    if let Some(error) = working.parse_errors.first() {
+pub(super) fn check_errors(ws: &StateWorkingSet) -> Result<()> {
+    if let Some(err) = ws.parse_errors.first() {
         return Err(NuError::ModuleParse {
-            report: nu_protocol::format_cli_error(None, working, error, Some("nu::parser::error")),
+            report: nu_protocol::format_cli_error(None, ws, err, Some("nu::parser::error")),
         });
     }
-    if let Some(error) = working.compile_errors.first() {
+    if let Some(err) = ws.compile_errors.first() {
         return Err(NuError::ModuleParse {
-            report: nu_protocol::format_cli_error(None, working, error, Some("nu::compile::error")),
+            report: nu_protocol::format_cli_error(None, ws, err, Some("nu::compile::error")),
         });
     }
     Ok(())
@@ -59,19 +55,18 @@ pub(super) fn check_errors(working: &StateWorkingSet) -> Result<()> {
 
 /// Find the `main` commands defined in this script, excluding imported declarations.
 pub(super) fn main_declarations(
-    working: &StateWorkingSet,
+    ws: &StateWorkingSet,
     script: &Block,
 ) -> Result<Vec<(Vec<u8>, DeclId)>> {
     let script_span = script.span.ok_or(NuError::ModuleSourceUnloaded)?;
-    Ok(working
+    Ok(ws
         .last_overlay()
         .decls
         .iter()
         .filter(|(name, _)| name.as_slice() == b"main" || name.starts_with(b"main "))
         .filter(|(_, id)| {
-            working.get_decl(**id).block_id().is_some_and(|block_id| {
-                working
-                    .get_block(block_id)
+            ws.get_decl(**id).block_id().is_some_and(|block_id| {
+                ws.get_block(block_id)
                     .span
                     .is_some_and(|span| script_span.contains_span(span))
             })
@@ -81,7 +76,7 @@ pub(super) fn main_declarations(
 }
 
 /// Parse one command with argv boundaries fixed before the Nu parser sees it.
-pub(super) fn parse_main(working: &mut StateWorkingSet, args: &[String]) -> Block {
+pub(super) fn parse_main(ws: &mut StateWorkingSet, args: &[String]) -> Block {
     use nu_parser::{Token, TokenContents};
 
     let mut spelling = String::from("main");
@@ -93,10 +88,9 @@ pub(super) fn parse_main(working: &mut StateWorkingSet, args: &[String]) -> Bloc
         spelling.push_str(&crate::escape_argument(arg));
         ranges.push(start..spelling.len());
     }
-    // The backing text supplies spans and the spelling of multiword command names.
-    // Each range is already a token, so argument bytes cannot create a pipeline or redirection.
-    let file = working.add_file("<commandline>", spelling.as_bytes());
-    let span = working.get_span_for_file(file);
+    // Fixed TokenContents::Item boundaries keep argument bytes from injecting pipelines or redirections.
+    let file = ws.add_file("<commandline>", spelling.as_bytes());
+    let span = ws.get_span_for_file(file);
     let tokens = ranges
         .into_iter()
         .map(|range| {
@@ -106,7 +100,7 @@ pub(super) fn parse_main(working: &mut StateWorkingSet, args: &[String]) -> Bloc
             )
         })
         .collect::<Vec<_>>();
-    nu_parser::parse_block(working, &tokens, span, false, false, None)
+    nu_parser::parse_block(ws, &tokens, span, false, false, None)
 }
 
 pub(super) fn evaluate(
@@ -119,12 +113,12 @@ pub(super) fn evaluate(
     match evaluate_source(path, args, engine, stack, input) {
         Ok(code) => code,
         Err(NuError::Shell(ShellError::Exit { code, .. })) => code,
-        Err(NuError::Shell(error)) => {
-            report_shell_error(Some(stack), engine, &error);
-            error.exit_code().unwrap_or(1)
+        Err(NuError::Shell(err)) => {
+            report_shell_error(Some(stack), engine, &err);
+            err.exit_code().unwrap_or(1)
         }
-        Err(error) => {
-            eprintln!("{error}");
+        Err(err) => {
+            eprintln!("{err}");
             1
         }
     }
@@ -137,76 +131,75 @@ fn evaluate_source(
     stack: &mut Stack,
     input: PipelineData,
 ) -> Result<i32> {
-    let (filename, bytes) = source(engine, path)?;
-    let name = filename
-        .to_str()
-        .ok_or(NuError::NotUtf8 { what: "script" })?;
-    engine.file = Some(filename.clone());
-    for (variable, value) in [
-        ("FILE_PWD", filename.parent().unwrap().to_string_lossy()),
-        ("CURRENT_FILE", filename.to_string_lossy()),
+    let (file, src) = source(engine, path)?;
+    let name = crate::path_str(&file, "script")?.to_owned();
+    engine.file = Some(file.clone());
+    for (var, val) in [
+        ("FILE_PWD", file.parent().unwrap().to_string_lossy()),
+        ("CURRENT_FILE", file.to_string_lossy()),
         ("PROCESS_PATH", path.to_string_lossy()),
     ] {
-        stack.add_env_var(variable.into(), Value::string(value, Span::unknown()));
+        stack.add_env_var(var.into(), Value::string(val, Span::unknown()));
     }
-    let mut working = StateWorkingSet::new(engine);
-    let block = parse(&mut working, name, &bytes)?;
-    if let Some(warning) = working.parse_warnings.first() {
-        report_parse_warning(Some(stack), &working, warning);
+    let mut ws = StateWorkingSet::new(engine);
+    let block = parse(&mut ws, &name, &src)?;
+    if let Some(warning) = ws.parse_warnings.first() {
+        report_parse_warning(Some(stack), &ws, warning);
     }
-    let script_name = filename.file_name().unwrap().to_string_lossy();
-    let declarations = main_declarations(&working, &block)?;
-    let has_main = !declarations.is_empty();
+    let script_name = file.file_name().unwrap().to_string_lossy();
+    let decls = main_declarations(&ws, &block)?;
+    let has_main = !decls.is_empty();
     let mut aliases = Vec::new();
-    for (name, id) in declarations {
+    for (name, id) in decls {
         let mut alias = script_name.as_bytes().to_vec();
         alias.extend_from_slice(&name[4..]);
-        if let Some(block_id) = working.get_decl(id).block_id()
+        if let Some(block_id) = ws.get_decl(id).block_id()
             && let Some(block) = block_id
                 .get()
                 .checked_sub(engine.num_blocks())
-                .and_then(|index| working.delta.blocks.get_mut(index))
+                .and_then(|idx| ws.delta.blocks.get_mut(idx))
         {
             Arc::make_mut(block).signature.name = String::from_utf8_lossy(&alias).into_owned();
         }
         aliases.push((alias, id));
     }
     if !aliases.is_empty() {
-        working.use_decls(aliases);
+        ws.use_decls(aliases);
     }
-    engine.merge_delta(working.render())?;
+    engine.merge_delta(ws.render())?;
     if !has_main {
-        let evaluated =
-            nu_engine::eval_block_with_early_return::<WithoutDebug>(engine, stack, &block, input)?;
-        let no_newline = matches!(&evaluated.body, PipelineData::ByteStream(..));
-        print_output(engine, stack, evaluated.body, no_newline)?;
-        check_pipeline(evaluated.exit)?;
+        return eval_and_print(engine, stack, &block, input);
+    }
+    let mut ws = StateWorkingSet::new(engine);
+    let mut inv = parse_main(&mut ws, args);
+    check_errors(&ws)?;
+    match nu_engine::compile(&ws, &inv) {
+        Ok(ir) => inv.ir_block = Some(ir),
+        Err(err) => ws.compile_errors.push(err),
+    }
+    check_errors(&ws)?;
+    engine.merge_delta(ws.render())?;
+    let init = nu_engine::eval_block::<WithoutDebug>(engine, stack, &block, PipelineData::empty())?;
+    if init.early_return {
         return Ok(0);
     }
-    let mut working = StateWorkingSet::new(engine);
-    let mut invocation = parse_main(&mut working, args);
-    check_errors(&working)?;
-    match nu_engine::compile(&working, &invocation) {
-        Ok(ir) => invocation.ir_block = Some(ir),
-        Err(error) => working.compile_errors.push(error),
-    }
-    check_errors(&working)?;
-    engine.merge_delta(working.render())?;
-    let initialized =
-        nu_engine::eval_block::<WithoutDebug>(engine, stack, &block, PipelineData::empty())?;
-    if initialized.early_return {
-        return Ok(0);
-    }
-    print_output(engine, stack, initialized.body, true)?;
-    let invoked =
-        nu_engine::eval_block_with_early_return::<WithoutDebug>(engine, stack, &invocation, input)?;
-    let no_newline = matches!(&invoked.body, PipelineData::ByteStream(..));
-    print_output(engine, stack, invoked.body, no_newline)?;
-    check_pipeline(invoked.exit)?;
+    print_output(engine, stack, init.body, true)?;
+    eval_and_print(engine, stack, &inv, input)
+}
+
+fn eval_and_print(
+    engine: &mut EngineState,
+    stack: &mut Stack,
+    block: &Block,
+    input: PipelineData,
+) -> Result<i32> {
+    let out = nu_engine::eval_block_with_early_return::<WithoutDebug>(engine, stack, block, input)?;
+    let no_newline = matches!(&out.body, PipelineData::ByteStream(..));
+    print_output(engine, stack, out.body, no_newline)?;
+    check_pipeline(out.exit)?;
     Ok(0)
 }
 
-/// Apply Nushell's pipefail setting to a finished pipeline, matching the CLI's exit contract.
 fn check_pipeline(exit: Vec<Option<nu_protocol::process::ExitStatusGuard>>) -> Result<()> {
     if nu_experimental::PIPE_FAIL.get() {
         nu_protocol::process::check_exit_status_future(exit)?;
@@ -214,12 +207,11 @@ fn check_pipeline(exit: Vec<Option<nu_protocol::process::ExitStatusGuard>>) -> R
     Ok(())
 }
 
-/// Print one pipeline through the CLI's configured display hooks. An empty Nu block forwards
-/// the pipeline unchanged, so this is the public way to reuse the CLI's printing convention.
+/// Print via CLI display hooks; an empty block forwards the pipeline unchanged.
 fn print_output(
     engine: &mut EngineState,
     stack: &mut Stack,
-    output: PipelineData,
+    out: PipelineData,
     no_newline: bool,
 ) -> Result<()> {
     nu_cli::evaluate_commands(
@@ -229,7 +221,7 @@ fn print_output(
         },
         engine,
         stack,
-        output,
+        out,
         Vec::new(),
         nu_cli::EvaluateCommandsOpts {
             no_newline,

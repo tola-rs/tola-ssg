@@ -1,21 +1,20 @@
-# Native filesystem operations
+# tola-fs
 
-`tola-fs` owns the platform implementations used by the application, input readers, module
-packing, and build publication. It supports Unix and Windows and depends on no Tola domain crate.
+Platform filesystem primitives (Unix and Windows) used by input readers, module packing, and build publication. Depends on no other Tola crate.
 
 ## Operations
 
-- `lib.rs` exposes regular-file reads and the platform operations; it has no compatibility exports from other crates.
-- `sys/unix.rs` and `sys/windows.rs` implement metadata checks, link counts, opens, links, permissions, path encoding, and no-overwrite file publication.
-- `replace.rs` owns a directory replacement workspace, its staged tree, and retention after failed restoration.
-- `sys/exchange.rs` uses native directory exchange on Apple, Linux, and Android; `sys/backup.rs` moves the old directory aside and restores it after failed installation elsewhere.
+- `lib.rs` — regular-file reads and platform helpers.
+- `sys/unix.rs`, `sys/windows.rs` — metadata checks, link counts, opens, links, permissions, path encoding, and no-overwrite writes.
+- `replace.rs` — staged directory replacement and rollback state.
+- `sys/exchange.rs`, `sys/backup.rs` — atomic directory exchange (Apple/Linux/Android) and backup-and-restore fallback elsewhere.
 
 ## Invariants
 
-- A handle check uses that handle's metadata. Entry classification is an observation, not proof that a later open sees the same object.
-- Windows link classification rejects every reparse point, including those not reported as symbolic links.
-- Link counts are returned unchanged; callers decide which counts they accept.
-- Unix permission bits are optional on other platforms. Release permissions belong to module packing.
-- Directory replacement owns backup names and cleanup. Failed restoration retains the workspace and returns the old directory's location.
-- Directory-relative Windows publication requires the caller to keep every ancestor open without delete sharing. No-overwrite publication never falls back to an existence check followed by ordinary rename.
-- Selection, cancellation, build journals, and author diagnostics stay with callers.
+- Metadata checks inspect the opened handle; directory entries are not proof that a later open hits the same object.
+- On Windows, every reparse point is rejected as a link, even if not marked as a symlink.
+- Link counts are returned raw; callers decide which counts to accept.
+- Unix mode bits are optional on non-Unix platforms; release permissions belong to module packing.
+- Directory replacement owns backup naming and cleanup; if rollback fails, it keeps the workspace and returns the backup path.
+- Windows directory-relative publication keeps every ancestor handle open without delete sharing; no-overwrite writes never fall back to check-then-rename.
+- Path selection, cancellation, journals, and user diagnostics belong to callers.

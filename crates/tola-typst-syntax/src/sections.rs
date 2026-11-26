@@ -19,40 +19,37 @@ pub struct Section {
 
 /// Every heading section of the source, in document order.
 ///
-/// A heading owns the content that follows it until the next heading of the same or a higher
-/// level, so a section ends where its parent's markup ends. A heading inside a content block
-/// owns only content inside that block.
-pub fn sections(source: &Source) -> Vec<Section> {
-    let mut sections = Vec::new();
-    record_sections(&LinkedNode::new(source.root()), source, &mut sections);
-    sections
+/// A heading owns content until the next heading of the same or higher level, or the end of
+/// its enclosing markup block.
+pub fn sections(src: &Source) -> Vec<Section> {
+    let mut found = Vec::new();
+    record_sections(&LinkedNode::new(src.root()), src, &mut found);
+    found
 }
 
-/// Record every heading section of `node`, in document order.
-fn record_sections(node: &LinkedNode<'_>, source: &Source, sections: &mut Vec<Section>) {
+fn record_sections(node: &LinkedNode<'_>, src: &Source, found: &mut Vec<Section>) {
     let children = node.children().collect::<Vec<_>>();
-    for (position, child) in children.iter().enumerate() {
+    for (pos, child) in children.iter().enumerate() {
         if node.kind() == SyntaxKind::Markup {
-            record_heading(node, &children, position, child, source, sections);
+            record_heading(node, &children, pos, child, src, found);
         }
-        record_sections(child, source, sections);
+        record_sections(child, src, found);
     }
 }
 
-/// Record `child`'s section when it is a heading of the markup `node`.
 fn record_heading(
     node: &LinkedNode<'_>,
     children: &[LinkedNode<'_>],
-    position: usize,
+    pos: usize,
     child: &LinkedNode<'_>,
-    source: &Source,
-    sections: &mut Vec<Section>,
+    src: &Source,
+    found: &mut Vec<Section>,
 ) {
     let Some(heading) = child.cast::<ast::Heading>() else {
         return;
     };
     let depth = heading.depth().get();
-    let end = children[position + 1..]
+    let end = children[pos + 1..]
         .iter()
         .find(|next| {
             next.cast::<ast::Heading>()
@@ -62,11 +59,11 @@ fn record_heading(
     let body = child
         .find(heading.body().span())
         .expect("a heading carries its own body");
-    sections.push(Section {
+    found.push(Section {
         heading: child.range(),
         body: child.range().start..end,
         depth,
-        name: source.text()[body.range()].trim().to_owned(),
+        name: src.text()[body.range()].trim().to_owned(),
     });
 }
 
@@ -74,22 +71,22 @@ fn record_heading(
 mod tests {
     use super::*;
 
-    fn range_of(source: &Source, section: &Section) -> (String, String) {
+    fn range_of(src: &Source, section: &Section) -> (String, String) {
         (
-            source.text()[section.body.clone()].to_owned(),
+            src.text()[section.body.clone()].to_owned(),
             section.name.clone(),
         )
     }
 
     #[test]
-    fn section_owns_content_after_its_heading() {
-        let source = Source::detached("= One\nfirst\n\n== Two\nsecond\n\n= Three\nthird\n");
-        let sections = sections(&source);
-        assert_eq!(sections.len(), 3);
+    fn section_owns_body() {
+        let src = Source::detached("= One\nfirst\n\n== Two\nsecond\n\n= Three\nthird\n");
+        let found = sections(&src);
+        assert_eq!(found.len(), 3);
         assert_eq!(
-            sections
+            found
                 .iter()
-                .map(|section| range_of(&source, section))
+                .map(|section| range_of(&src, section))
                 .collect::<Vec<_>>(),
             [
                 (
@@ -103,10 +100,10 @@ mod tests {
     }
 
     #[test]
-    fn heading_without_content_owns_its_line() {
-        let source = Source::detached("= One");
-        let sections = sections(&source);
-        assert_eq!(sections.len(), 1);
-        assert_eq!(sections[0].body, sections[0].heading);
+    fn section_empty_heading() {
+        let src = Source::detached("= One");
+        let found = sections(&src);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].body, found[0].heading);
     }
 }

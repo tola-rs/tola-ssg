@@ -154,41 +154,35 @@ mod tests {
     use crate::config::ConfigDiagnostics;
 
     #[test]
-    fn vendor_paths_stay_below_site() {
+    fn vendor_path_site_relative() {
         for declared in [".tola/vendor", "../vendor", "."] {
-            let config = VendorConfig {
+            let cfg = VendorConfig {
                 path: Some(PathBuf::from(declared)),
             };
-            let mut diagnostics = ConfigDiagnostics::new();
-            config.validate_paths(&mut diagnostics);
-            assert!(
-                diagnostics.into_result().is_err(),
-                "{declared} must be rejected"
-            );
+            let mut diag = ConfigDiagnostics::new();
+            cfg.validate_paths(&mut diag);
+            assert!(diag.into_result().is_err(), "{declared} must be rejected");
         }
     }
 
     #[test]
-    fn internal_directory_reserved_any_spelling() {
+    fn vendor_rejects_internal_dir() {
         let site = tempfile::TempDir::new().unwrap();
         for declared in [".tola/vendor", ".TOLA/vendor", ".Tola/vendor"] {
-            let config = VendorConfig {
+            let cfg = VendorConfig {
                 path: Some(PathBuf::from(declared)),
             };
-            let mut diagnostics = ConfigDiagnostics::new();
-            config.validate_paths(&mut diagnostics);
-            assert!(
-                diagnostics.into_result().is_err(),
-                "{declared} must be rejected"
-            );
+            let mut diag = ConfigDiagnostics::new();
+            cfg.validate_paths(&mut diag);
+            assert!(diag.into_result().is_err(), "{declared} must be rejected");
 
             let resolved = VendorConfig {
                 path: Some(site.path().join(declared)),
             };
-            let mut diagnostics = ConfigDiagnostics::new();
-            resolved.validate_internal_boundaries(site.path(), &mut diagnostics);
+            let mut diag = ConfigDiagnostics::new();
+            resolved.validate_internal_boundaries(site.path(), &mut diag);
             assert!(
-                diagnostics.into_result().is_err(),
+                diag.into_result().is_err(),
                 "{declared} must be rejected after resolution"
             );
         }
@@ -196,14 +190,14 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn vendor_alias_cannot_escape_site() {
+    fn vendor_alias_site_relative() {
         let site = tempfile::TempDir::new().unwrap();
         let outside = tempfile::TempDir::new().unwrap();
         let path = site.path().join("vendor");
         std::os::unix::fs::symlink(outside.path(), &path).unwrap();
-        let config = VendorConfig { path: Some(path) };
-        let mut diagnostics = ConfigDiagnostics::new();
-        config.validate_internal_boundaries(site.path(), &mut diagnostics);
-        assert!(diagnostics.into_result().is_err());
+        let cfg = VendorConfig { path: Some(path) };
+        let mut diag = ConfigDiagnostics::new();
+        cfg.validate_internal_boundaries(site.path(), &mut diag);
+        assert!(diag.into_result().is_err());
     }
 }

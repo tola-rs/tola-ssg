@@ -398,7 +398,7 @@ mod tests {
     }
 
     #[test]
-    fn cancelled_freshness_stays_cancelled() {
+    fn cancelled_freshness_preserved() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("unsaved.svg");
         let canceller = crate::cancellation::BuildCanceller::new();
@@ -512,7 +512,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn atomic_replacement_is_detected() {
+    fn atomic_replacement_detected() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("collection.json");
         let replacement = directory.path().join("download.json");
@@ -580,7 +580,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn linked_subtrees_are_rejected() {
+    fn linked_subtrees_rejected() {
         use std::os::unix::fs::symlink;
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("icons");

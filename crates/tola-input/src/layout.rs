@@ -1,105 +1,95 @@
-//! Every path below a site's `.tola` working root, and how long each one lives.
+//! Paths under a site's `.tola` working root.
 //!
-//! Nothing below `.tola` is a site source: every path here is rebuilt, re-fetched, or discarded
-//! on demand, so deleting the whole tree changes how long the next build takes and never what it
-//! produces.
+//! Everything under `.tola` is disposable/reproducible and must not affect build outputs.
 
 use std::path::{Path, PathBuf};
 
-/// Disposable local work; formal site inputs must not depend on this directory.
+/// Disposable working directory excluded from formal site inputs.
 pub const INTERNAL_DIR: &str = ".tola";
 
-/// The package mirrors `tola editor setup` publishes below this site's mirrors directory.
-const PACKAGE_MIRROR_DIRECTORY: &str = "builtin-packages";
+const PACKAGE_MIRROR_DIR: &str = "builtin-packages";
+const MIRRORS_DIR: &str = "mirrors";
 
-/// The directory holding every package mirror of one site.
-const MIRRORS: &str = "mirrors";
-
-/// One directory directly below the site's working root.
-fn below_working_root(site: &Path, name: &str) -> PathBuf {
+fn internal_subdir(site: &Path, name: &str) -> PathBuf {
     site.join(INTERNAL_DIR).join(name)
 }
 
-/// Selected remote module directories, keyed by locked commit and the selected subdirectory.
-/// Online and offline builds may read this cache when vendor has no copy; pure builds never do.
+/// Cached remote module directories, keyed by locked commit and subdirectory.
 pub fn modules(site: &Path) -> PathBuf {
-    below_working_root(site, "modules")
+    internal_subdir(site, "modules")
 }
 
-/// What a build keeps instead of rebuilding or downloading it again.
+/// Reusable build and fetch caches.
 pub fn cache(site: &Path) -> PathBuf {
-    below_working_root(site, "cache")
+    internal_subdir(site, "cache")
 }
 
-/// Encoded image variants, valid only while their bytes match the digest beside them.
+/// Encoded image variant cache.
 pub fn image_cache(site: &Path) -> PathBuf {
     cache(site).join("images")
 }
 
-/// Downloaded remote icon collections, one file per digest the configuration pins.
+/// Downloaded remote icon collection cache.
 pub fn icon_cache(site: &Path) -> PathBuf {
     cache(site).join("icons")
 }
 
-/// The package mirrors a site's editor reads directly.
+/// Editor-visible package mirrors.
 pub fn mirrors(site: &Path) -> PathBuf {
-    below_working_root(site, MIRRORS)
+    internal_subdir(site, MIRRORS_DIR)
 }
 
-/// The embedded package sources `tola editor setup` publishes.
+/// Embedded package sources published by `tola editor setup`.
 pub fn builtin_packages(site: &Path) -> PathBuf {
-    mirrors(site).join(PACKAGE_MIRROR_DIRECTORY)
+    mirrors(site).join(PACKAGE_MIRROR_DIR)
 }
 
-/// The mirrors as editor settings spell them: relative to the site root, so a site keeps its
-/// settings when it moves.
+/// Relative path to embedded package mirrors from the site root.
 pub fn builtin_packages_relative() -> PathBuf {
-    // An empty site root leaves every component relative.
-    mirrors(Path::new("")).join(PACKAGE_MIRROR_DIRECTORY)
+    mirrors(Path::new("")).join(PACKAGE_MIRROR_DIR)
 }
 
-/// The package view `tola editor setup` links a site's local packages into.
+/// Local package links created by `tola editor setup`.
 pub fn editor_packages(site: &Path) -> PathBuf {
     mirrors(site).join("editor-packages")
 }
 
-/// Directories one build owns until the work that created them ends.
+/// Per-build scratch directories cleaned up when the run ends.
 pub fn scratch(site: &Path) -> PathBuf {
-    below_working_root(site, "scratch")
+    internal_subdir(site, "scratch")
 }
 
-/// One hook invocation's temporary directory, removed with the invocation.
+/// Temporary directory for hook invocations.
 pub fn hook_scratch(site: &Path) -> PathBuf {
     scratch(site).join("hooks")
 }
 
-/// The read-only upstream snapshot one generation round reads.
+/// Read-only upstream snapshot passed to generation hooks.
 pub fn hook_candidates(site: &Path) -> PathBuf {
     scratch(site).join("candidates")
 }
 
-/// The files one `generate-outputs` command wrote, removed once they join the candidate.
+/// Staging directory for `generate-outputs` command outputs.
 pub fn hook_outputs(site: &Path) -> PathBuf {
     scratch(site).join("hook-outputs")
 }
 
-/// What a hook command keeps between runs; the command owns it, and Tola never reads or cleans it.
+/// Persistent cache directory owned by hook commands.
 pub fn hook_cache(site: &Path) -> PathBuf {
-    below_working_root(site, "hooks")
+    internal_subdir(site, "hooks")
 }
 
-/// What one run leaves for another process to read: its logs and a development server's address.
+/// Runtime state directory (logs, dev-server address).
 pub fn state(site: &Path) -> PathBuf {
-    below_working_root(site, "state")
+    internal_subdir(site, "state")
 }
 
-/// Session logs a command appends to.
+/// Session log directory.
 pub fn logs(site: &Path) -> PathBuf {
     state(site).join("logs")
 }
 
-/// Written once a development server's listener is bound and removed when it stops; a file a
-/// killed server left behind names no server.
+/// Dev server address file written while the listener is bound.
 pub fn dev_server_address(site: &Path) -> PathBuf {
     state(site).join("dev-server.json")
 }

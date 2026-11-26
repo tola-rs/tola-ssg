@@ -7,12 +7,10 @@ use moxcms::{ColorProfile, DataColorSpace, Layout, RenderingIntent, TransformOpt
 
 use crate::cancellation::Cancellation;
 use crate::rows::rewrite_rows_in_place;
-use crate::{ImageError, ImageResult};
+use crate::{HOLD_IN_MEMORY, ImageError, ImageResult, pixel_bytes};
 
-/// How an embedded profile that cannot govern the samples reads.
 const PROFILE_UNSUPPORTED: &str =
     "the embedded color profile cannot be applied to this image; convert the image to sRGB";
-use crate::{HOLD_IN_MEMORY, pixel_bytes};
 
 /// How a decode converts its samples to sRGB.
 pub(in crate::codec) enum ColorTransform<'a> {
@@ -25,12 +23,12 @@ pub(in crate::codec) enum ColorTransform<'a> {
 pub(in crate::codec) fn normalize_color(
     raw: Vec<u8>,
     color: ColorType,
-    dimensions: (u32, u32),
+    dims: (u32, u32),
     transform: Option<ColorTransform<'_>>,
-    cancellation: &dyn Cancellation,
+    cancel: &dyn Cancellation,
 ) -> ImageResult<Vec<u8>> {
-    let (width, _) = dimensions;
-    cancellation.ensure_active()?;
+    let (w, _) = dims;
+    cancel.ensure_active()?;
     if color == ColorType::Rgba8 && transform.is_none() {
         return Ok(raw);
     }
@@ -49,57 +47,56 @@ pub(in crate::codec) fn normalize_color(
             ));
         }
     };
-    let grayscale = matches!(layout, Layout::Gray | Layout::GrayAlpha);
+    let gray = matches!(layout, Layout::Gray | Layout::GrayAlpha);
     let profile = match transform {
         Some(ColorTransform::Icc(icc)) => {
-            let profile = ColorProfile::new_from_slice(icc.as_ref())
-                .map_err(|error| ImageError::codec(super::PROFILE_DAMAGED, error))?;
-            if !(profile.color_space
-                == if grayscale {
-                    DataColorSpace::Gray
-                } else {
-                    DataColorSpace::Rgb
-                })
-            {
+            let prof = ColorProfile::new_from_slice(icc.as_ref())
+                .map_err(|err| ImageError::codec(super::PROFILE_DAMAGED, err))?;
+            let expected_space = if gray {
+                DataColorSpace::Gray
+            } else {
+                DataColorSpace::Rgb
+            };
+            if prof.color_space != expected_space {
                 return Err(ImageError::unreadable(
                     "the embedded color profile does not match the image's color space; convert the image to sRGB",
                 ));
             }
-            Some(profile)
+            Some(prof)
         }
         Some(ColorTransform::Gamma(gamma)) => {
-            if grayscale {
+            if gray {
                 Some(ColorProfile::new_gray_with_gamma(gamma))
             } else {
-                let mut profile = ColorProfile::new_srgb();
-                profile.cicp = None;
+                let mut prof = ColorProfile::new_srgb();
+                prof.cicp = None;
                 let curve = moxcms::curve_from_gamma(gamma);
-                profile.red_trc = Some(curve.clone());
-                profile.green_trc = Some(curve.clone());
-                profile.blue_trc = Some(curve);
-                Some(profile)
+                prof.red_trc = Some(curve.clone());
+                prof.green_trc = Some(curve.clone());
+                prof.blue_trc = Some(curve);
+                Some(prof)
             }
         }
         None => None,
     };
-    cancellation.ensure_active()?;
-    let Some(profile) = profile else {
+    cancel.ensure_active()?;
+    let Some(prof) = profile else {
         return rewrite_plane(
             raw,
             layout,
             sample_bytes,
-            dimensions,
-            cancellation,
+            dims,
+            cancel,
             || (),
             |(), input, output| {
-                cancellation.ensure_active()?;
+                cancel.ensure_active()?;
                 for (src, dst) in input
                     .chunks_exact(layout.channels() * sample_bytes)
                     .zip(output.as_chunks_mut::<4>().0.iter_mut())
                 {
                     dst[0] = sample_at(src, 0, sample_bytes);
-                    dst[1] = sample_at(src, if grayscale { 0 } else { 1 }, sample_bytes);
-                    dst[2] = sample_at(src, if grayscale { 0 } else { 2 }, sample_bytes);
+                    dst[1] = sample_at(src, if gray { 0 } else { 1 }, sample_bytes);
+                    dst[2] = sample_at(src, if gray { 0 } else { 2 }, sample_bytes);
                     dst[3] = if layout.has_alpha() {
                         sample_at(src, layout.channels() - 1, sample_bytes)
                     } else {
@@ -115,45 +112,43 @@ pub(in crate::codec) fn normalize_color(
     let srgb = &*SRGB;
     // Alpha is coverage, not a color channel. Transform only RGB/gray
     // samples and restore source alpha independently for both precisions.
-    let color_layout = if grayscale { Layout::Gray } else { Layout::Rgb };
-    let color_channels = color_layout.channels();
-    let options = TransformOptions {
+    let color_layout = if gray { Layout::Gray } else { Layout::Rgb };
+    let color_ch = color_layout.channels();
+    let opts = TransformOptions {
         rendering_intent: RenderingIntent::RelativeColorimetric,
         ..TransformOptions::default()
     };
     if sample_bytes == 2 {
-        let transform = profile
-            .create_transform_16bit(color_layout, srgb, Layout::Rgba, options)
-            .map_err(|error| ImageError::codec(PROFILE_UNSUPPORTED, error))?;
-        cancellation.ensure_active()?;
+        let xform = prof
+            .create_transform_16bit(color_layout, srgb, Layout::Rgba, opts)
+            .map_err(|err| ImageError::codec(PROFILE_UNSUPPORTED, err))?;
+        cancel.ensure_active()?;
         rewrite_plane(
             raw,
             layout,
             sample_bytes,
-            dimensions,
-            cancellation,
+            dims,
+            cancel,
             || {
                 (
-                    vec![0u16; width as usize * color_channels],
-                    vec![0u16; width as usize * 4],
+                    vec![0u16; w as usize * color_ch],
+                    vec![0u16; w as usize * 4],
                 )
             },
-            |(input_row, output_row), input, output| {
-                cancellation.ensure_active()?;
-                for (source, destination) in input
+            |(in_row, out_row), input, output| {
+                cancel.ensure_active()?;
+                for (src, dst) in input
                     .chunks_exact(layout.channels() * 2)
-                    .zip(input_row.chunks_exact_mut(color_channels))
+                    .zip(in_row.chunks_exact_mut(color_ch))
                 {
-                    for (sample, bytes) in
-                        destination.iter_mut().zip(source.as_chunks::<2>().0.iter())
-                    {
-                        *sample = u16::from_ne_bytes([bytes[0], bytes[1]]);
+                    for (sample, b) in dst.iter_mut().zip(src.as_chunks::<2>().0.iter()) {
+                        *sample = u16::from_ne_bytes([b[0], b[1]]);
                     }
                 }
-                transform
-                    .transform(input_row, output_row)
-                    .map_err(|error| ImageError::codec(PROFILE_UNSUPPORTED, error))?;
-                for (dst, src) in output.iter_mut().zip(output_row.iter()) {
+                xform
+                    .transform(in_row, out_row)
+                    .map_err(|err| ImageError::codec(PROFILE_UNSUPPORTED, err))?;
+                for (dst, src) in output.iter_mut().zip(out_row.iter()) {
                     *dst = ((u32::from(*src) + 128) / 257) as u8;
                 }
                 if layout.has_alpha() {
@@ -163,39 +158,39 @@ pub(in crate::codec) fn normalize_color(
             },
         )
     } else {
-        let transform = profile
-            .create_transform_8bit(color_layout, srgb, Layout::Rgba, options)
-            .map_err(|error| ImageError::codec(PROFILE_UNSUPPORTED, error))?;
-        cancellation.ensure_active()?;
+        let xform = prof
+            .create_transform_8bit(color_layout, srgb, Layout::Rgba, opts)
+            .map_err(|err| ImageError::codec(PROFILE_UNSUPPORTED, err))?;
+        cancel.ensure_active()?;
         rewrite_plane(
             raw,
             layout,
             sample_bytes,
-            dimensions,
-            cancellation,
+            dims,
+            cancel,
             || {
                 if layout.has_alpha() {
-                    vec![0; width as usize * color_channels]
+                    vec![0; w as usize * color_ch]
                 } else {
                     Vec::new()
                 }
             },
-            |input_row, input, output| {
-                cancellation.ensure_active()?;
-                let color_input = if layout.has_alpha() {
-                    for (source, destination) in input
+            |in_row, input, output| {
+                cancel.ensure_active()?;
+                let color_in = if layout.has_alpha() {
+                    for (src, dst) in input
                         .chunks_exact(layout.channels())
-                        .zip(input_row.chunks_exact_mut(color_channels))
+                        .zip(in_row.chunks_exact_mut(color_ch))
                     {
-                        destination.copy_from_slice(&source[..color_channels]);
+                        dst.copy_from_slice(&src[..color_ch]);
                     }
-                    input_row.as_slice()
+                    in_row.as_slice()
                 } else {
                     input
                 };
-                transform
-                    .transform(color_input, output)
-                    .map_err(|error| ImageError::codec(PROFILE_UNSUPPORTED, error))?;
+                xform
+                    .transform(color_in, output)
+                    .map_err(|err| ImageError::codec(PROFILE_UNSUPPORTED, err))?;
                 if layout.has_alpha() {
                     restore_alpha(input, output, layout, 1);
                 }
@@ -206,67 +201,62 @@ pub(in crate::codec) fn normalize_color(
 }
 
 /// One source sample as eight bits, narrowing a sixteen-bit sample around its midpoint.
-fn sample_at(source: &[u8], channel: usize, sample_bytes: usize) -> u8 {
-    let offset = channel * sample_bytes;
+fn sample_at(src: &[u8], ch: usize, sample_bytes: usize) -> u8 {
+    let off = ch * sample_bytes;
     match sample_bytes {
-        2 => {
-            ((u32::from(u16::from_ne_bytes([source[offset], source[offset + 1]])) + 128) / 257)
-                as u8
-        }
-        _ => source[offset],
+        2 => ((u32::from(u16::from_ne_bytes([src[off], src[off + 1]])) + 128) / 257) as u8,
+        _ => src[off],
     }
 }
 
 /// Copy each source pixel's alpha into the RGBA row, which the color transform leaves untouched.
-fn restore_alpha(input: &[u8], output: &mut [u8], layout: Layout, sample_bytes: usize) {
-    let channels = layout.channels();
-    for (source, destination) in input
-        .chunks_exact(channels * sample_bytes)
-        .zip(output.as_chunks_mut::<4>().0.iter_mut())
+fn restore_alpha(src_row: &[u8], dst_row: &mut [u8], layout: Layout, sample_bytes: usize) {
+    let ch = layout.channels();
+    for (src, dst) in src_row
+        .chunks_exact(ch * sample_bytes)
+        .zip(dst_row.as_chunks_mut::<4>().0.iter_mut())
     {
-        destination[3] = sample_at(source, channels - 1, sample_bytes);
+        dst[3] = sample_at(src, ch - 1, sample_bytes);
     }
 }
 
-/// Convert one decoded plane to the RGBA8 pixels a recipe starts from, in place.
-///
-/// The plane is grown or shrunk to four bytes per pixel and its rows are rewritten where they lie,
-/// so a decode holds one plane rather than the decoded plane and its normalized copy at once.
+/// Convert one decoded plane to RGBA8 in place so decode holds only one plane at a time.
 fn rewrite_plane<S, I, F>(
     raw: Vec<u8>,
     layout: Layout,
     sample_bytes: usize,
-    dimensions: (u32, u32),
-    cancellation: &dyn Cancellation,
-    initial: I,
-    row_work: F,
+    dims: (u32, u32),
+    cancel: &dyn Cancellation,
+    init: I,
+    work: F,
 ) -> ImageResult<Vec<u8>>
 where
     S: Send,
     I: Fn() -> S + Send + Sync,
     F: Fn(&mut S, &[u8], &mut [u8]) -> ImageResult<()> + Send + Sync,
 {
-    let (width, height) = dimensions;
-    let destination_bytes = pixel_bytes(width, height, 4)?;
+    let (w, h) = dims;
+    let dst_bytes = pixel_bytes(w, h, 4)?;
     let mut rgba = raw;
-    if rgba.len() < destination_bytes {
-        rgba.try_reserve_exact(destination_bytes - rgba.len())
-            .map_err(|error| ImageError::codec(HOLD_IN_MEMORY, error))?;
-        rgba.resize(destination_bytes, 0);
+    if rgba.len() < dst_bytes {
+        rgba.try_reserve_exact(dst_bytes - rgba.len())
+            .map_err(|err| ImageError::codec(HOLD_IN_MEMORY, err))?;
+        rgba.resize(dst_bytes, 0);
     }
     rewrite_rows_in_place(
         &mut rgba,
-        height as usize,
-        width as usize * layout.channels() * sample_bytes,
-        width as usize * 4,
-        initial,
-        row_work,
+        h as usize,
+        w as usize * layout.channels() * sample_bytes,
+        w as usize * 4,
+        init,
+        work,
     )?;
-    rgba.truncate(destination_bytes);
+    rgba.truncate(dst_bytes);
     rgba.shrink_to_fit();
-    cancellation.ensure_active()?;
+    cancel.ensure_active()?;
     Ok(rgba)
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -279,24 +269,17 @@ mod tests {
     use std::io::Cursor;
 
     #[test]
-    fn grayscale_icc_conversion_keeps_alpha() {
-        let profile = ColorProfile::new_gray_with_gamma(1.0).encode().unwrap();
-        let source = png(
-            &[128, 63],
-            1,
-            1,
-            ExtendedColorType::La8,
-            Some(profile),
-            None,
-        );
-        let output = render_png(&source, 1, 1);
-        let pixel = rgba(&output);
-        assert!((185..=190).contains(&pixel[0]));
-        assert_eq!(pixel[0], pixel[1]);
-        assert_eq!(pixel[1], pixel[2]);
-        assert_eq!(pixel[3], 63);
+    fn gray_icc_keeps_alpha() {
+        let icc = ColorProfile::new_gray_with_gamma(1.0).encode().unwrap();
+        let src = png(&[128, 63], 1, 1, ExtendedColorType::La8, Some(icc), None);
+        let out = render_png(&src, 1, 1);
+        let px = rgba(&out);
+        assert!((185..=190).contains(&px[0]));
+        assert_eq!(px[0], px[1]);
+        assert_eq!(px[1], px[2]);
+        assert_eq!(px[3], 63);
         assert!(
-            PngDecoder::new(Cursor::new(&output[..]))
+            PngDecoder::new(Cursor::new(&out[..]))
                 .unwrap()
                 .icc_profile()
                 .unwrap()
@@ -304,73 +287,56 @@ mod tests {
         );
     }
 
-    /// A JPEG that carries a colour profile is converted. The decoder's opaque-alpha shortcut
-    /// applies only to sources that need no colour management.
     #[test]
-    fn jpeg_colour_profile_is_applied() {
-        let source = linear_icc_jpeg();
-        let output = render_png(&source, 3, 3);
-        let pixel = rgba(&output);
+    fn jpeg_icc_applied() {
+        let src = linear_icc_jpeg();
+        let out = render_png(&src, 3, 3);
+        let px = rgba(&out);
         assert!(
-            (180..=195).contains(&pixel[0]),
-            "the embedded profile is applied, not skipped: {pixel:?}"
+            (180..=195).contains(&px[0]),
+            "the embedded profile is applied, not skipped: {px:?}"
         );
-        assert_eq!(pixel[0], pixel[1]);
-        assert_eq!(pixel[1], pixel[2]);
+        assert_eq!(px[0], px[1]);
+        assert_eq!(px[1], px[2]);
     }
 
     #[test]
-    fn sixteen_bit_input_is_color_converted() {
-        let profile = linear_profile();
-        let pixels: Vec<u8> = [32_768u16, 32_768, 32_768, 16_384]
+    fn icc_16bit_convert() {
+        let icc = linear_profile();
+        let px_bytes: Vec<u8> = [32_768u16, 32_768, 32_768, 16_384]
             .into_iter()
             .flat_map(u16::to_ne_bytes)
             .collect();
-        let source = png(
-            &pixels,
-            1,
-            1,
-            ExtendedColorType::Rgba16,
-            Some(profile),
-            None,
-        );
-        let output = render_png(&source, 1, 1);
-        let pixel = rgba(&output);
-        assert!(
-            pixel[..3]
-                .iter()
-                .all(|channel| (185..=190).contains(channel))
-        );
-        assert_eq!(pixel[3], 64);
+        let src = png(&px_bytes, 1, 1, ExtendedColorType::Rgba16, Some(icc), None);
+        let out = render_png(&src, 1, 1);
+        let px = rgba(&out);
+        assert!(px[..3].iter().all(|ch| (185..=190).contains(ch)));
+        assert_eq!(px[3], 64);
     }
 
     #[test]
-    fn invalid_icc_profiles_are_rejected() {
+    fn reject_invalid_icc() {
         let mut cmyk = ColorProfile::new_srgb().encode().unwrap();
         cmyk[16..20].copy_from_slice(b"CMYK");
-        for profile in [cmyk, b"not an ICC profile".to_vec()] {
-            let source = png(
+        for icc in [cmyk, b"not an ICC profile".to_vec()] {
+            let src = png(
                 &[30, 80, 120],
                 1,
                 1,
                 ExtendedColorType::Rgb8,
-                Some(profile),
+                Some(icc),
                 None,
             );
-            let recipe = recipe(&source, 1, 1, OutputFormat::Png, None);
-            assert!(render(&source, &recipe, &NO_CANCELLATION).is_err());
+            let r = recipe(&src, 1, 1, OutputFormat::Png, None);
+            assert!(render(&src, &r, &NO_CANCELLATION).is_err());
         }
     }
 
     #[test]
-    fn png_gamma_is_applied_without_icc() {
-        let mut source = png(&[128, 128, 128], 1, 1, ExtendedColorType::Rgb8, None, None);
-        insert_png_chunk(&mut source, b"gAMA", &100_000u32.to_be_bytes());
-        let output = render_png(&source, 1, 1);
-        assert!(
-            rgba(&output)[..3]
-                .iter()
-                .all(|channel| (185..=190).contains(channel))
-        );
+    fn png_gamma_fallback() {
+        let mut src = png(&[128, 128, 128], 1, 1, ExtendedColorType::Rgb8, None, None);
+        insert_png_chunk(&mut src, b"gAMA", &100_000u32.to_be_bytes());
+        let out = render_png(&src, 1, 1);
+        assert!(rgba(&out)[..3].iter().all(|ch| (185..=190).contains(ch)));
     }
 }

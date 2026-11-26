@@ -256,8 +256,8 @@
     }
   }
 
-  function createPatchPlan() {
-    const plan = { structural: false, head: [], body: [], images: [] };
+  function createPatchOps() {
+    const patch = { structural: false, head: [], body: [], images: [] };
     plan.text = (node, value) => plan.body.push({ op: 'text', node, value });
     plan.attributes = (node, set, remove) => plan.body.push({ op: 'attributes', node, set, remove });
     plan.remove = node => {
@@ -1524,7 +1524,7 @@
       if (!currentBody || !nextBody) throw new Error('the update could not be applied in place');
       if (!sameAttributes(currentBody, nextBody)) throw new Error('the update could not be applied in place');
       const signature = normalizedMarkup(document);
-      const plan = createPatchPlan();
+      const patch = createPatchOps();
       planHead(plan, representations, document.head, next.head);
       planChildren(plan, representations, currentBody, nextBody);
       await prepareImages(plan);

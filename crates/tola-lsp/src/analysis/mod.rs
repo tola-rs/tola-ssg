@@ -15,7 +15,7 @@ use lsp_types::{
     PrepareRenameResponse, TextEdit, WorkspaceEdit,
 };
 use tola_typst::typst::syntax::{FileId, Source, VirtualRoot};
-use tola_typst::{PackageFetchPolicy, PackageStore};
+use tola_typst::{PackageFetchMode, PackageStore};
 use tola_typst_syntax::imports::{BindingId, NameEdit, NameGraph, PendingImport};
 
 /// Orders source identities by the site path the compiler addresses them under.
@@ -195,7 +195,7 @@ pub(crate) fn respond(inputs: NameGraphReply<'_>) -> Result<Option<SourceReply>>
             .then(|| crate::query::unavailable(query)));
     };
     let packages = locations.map(|locations| {
-        PackageStore::new(locations.clone(), PackageFetchPolicy::LocalOnly)
+        PackageStore::new(locations.clone(), PackageFetchMode::LocalOnly)
             .with_source_boundary(boundary.clone())
     });
     let mut located = EditorLocations {

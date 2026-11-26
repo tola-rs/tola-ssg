@@ -1,18 +1,11 @@
-//! The builtin `@tola/*` packages a site author imports.
-//!
-//! A package is an identity, the sources it carries, and the values the engine supplies to it. The
-//! manifest every package needs is generated from that identity, so a package cannot carry a
-//! manifest that disagrees with the specification it is resolved by.
-//!
-//! The engine, the language service, and the editor integration all read this crate: it is the
-//! one owner of what a builtin package is, which of them a site imports, and how the engine
-//! and the packages exchange values.
+//! Builtin `@tola/*` Typst packages, their embedded sources, and engine host bindings.
 
 #![forbid(unsafe_code)]
 
 use std::collections::BTreeMap;
 
-use typst::foundations::Str;
+use typst::foundations::{Array, Dict, Str, Value};
+use typst::syntax::{FileId, VirtualRoot};
 
 mod assets;
 mod builtin;
@@ -77,8 +70,44 @@ pub use source_meta::{
     CaptureError, CaptureHeader, Declaration, DeclaredMeta, SourceCapture, decode_capture,
 };
 
-/// The key an author attribute is written under; `class` and `style` keep the element's spelling.
-pub(crate) fn attribute_key(name: &Str) -> &str {
+pub(crate) fn dict<'a>(fields: impl IntoIterator<Item = (&'a str, Value)>) -> Dict {
+    let mut out = Dict::new();
+    for (k, v) in fields {
+        out.insert(k.into(), v);
+    }
+    out
+}
+
+pub(crate) fn dict_str<'a>(dict: &'a Dict, key: &str) -> Option<&'a str> {
+    match dict.get(key) {
+        Ok(Value::Str(val)) => Some(val.as_str()),
+        _ => None,
+    }
+}
+
+pub(crate) fn dict_array<'a>(dict: &'a Dict, key: &str) -> Option<&'a Array> {
+    match dict.get(key) {
+        Ok(Value::Array(val)) => Some(val),
+        _ => None,
+    }
+}
+
+pub(crate) fn dict_dict<'a>(dict: &'a Dict, key: &str) -> Option<&'a Dict> {
+    match dict.get(key) {
+        Ok(Value::Dict(val)) => Some(val),
+        _ => None,
+    }
+}
+
+pub(crate) fn pkg_of_file(id: FileId) -> Option<TolaPackage> {
+    match id.root() {
+        VirtualRoot::Package(spec) => TolaPackage::from_spec(spec),
+        VirtualRoot::Project => None,
+    }
+}
+
+/// Canonicalizes `class` and `style` attribute keys to lowercase; preserves other names.
+pub(crate) fn attr_key(name: &Str) -> &str {
     if name.as_str().eq_ignore_ascii_case("class") {
         "class"
     } else if name.as_str().eq_ignore_ascii_case("style") {
@@ -88,12 +117,85 @@ pub(crate) fn attribute_key(name: &Str) -> &str {
     }
 }
 
-/// Join one author value onto what the element already sets: `class` is a list, `style` a block.
-pub(crate) fn merge_attribute(attributes: &mut BTreeMap<String, String>, name: &str, value: &str) {
-    let merged = match (name, attributes.get(name)) {
-        ("class", Some(current)) => format!("{current} {value}"),
-        ("style", Some(current)) => format!("{};{value}", current.trim_end_matches(';')),
-        _ => value.to_owned(),
+/// Merges `value` into `attrs`, joining `class` with spaces and `style` with semicolons.
+pub(crate) fn merge_attr(attrs: &mut BTreeMap<String, String>, name: &str, val: &str) {
+    let merged = match (name, attrs.get(name)) {
+        ("class", Some(cur)) => format!("{cur} {val}"),
+        ("style", Some(cur)) => format!("{};{val}", cur.trim_end_matches(';')),
+        _ => val.to_owned(),
     };
-    attributes.insert(name.to_owned(), merged);
+    attrs.insert(name.to_owned(), merged);
+}
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::path::Path;
+    use std::sync::Arc;
+
+    use tola_typst::{
+        BundleCancellation, FileMap, FileProvider, FileStore, FileTarget, TypstWorld, file_id,
+    };
+    use typst::Library;
+    use typst::foundations::{Array, Dict};
+    use typst::syntax::{FileId, VirtualRoot};
+    use typst::utils::LazyHash;
+
+    use crate::library::HostInputs;
+    use crate::{TOLA_NAMESPACE, TolaPackage};
+
+    pub(crate) struct TestFiles(pub FileMap);
+
+    impl FileProvider for TestFiles {
+        fn target(&self, id: FileId) -> Option<FileTarget> {
+            if let Some(target) = self.0.target(id) {
+                return Some(target);
+            }
+            let VirtualRoot::Package(spec) = id.root() else {
+                return None;
+            };
+            let path = Path::new(id.vpath().get_without_slash());
+            TolaPackage::from_spec(spec)
+                .and_then(|pkg| pkg.file(path))
+                .map(|src| FileTarget::Bytes(Arc::from(src.into_owned().into_bytes())))
+        }
+
+        fn owned_namespaces(&self) -> &'static [&'static str] {
+            &[TOLA_NAMESPACE, "tola-modules"]
+        }
+    }
+
+    pub(crate) fn empty_inputs() -> HostInputs {
+        HostInputs {
+            site: Dict::new(),
+            modules: Dict::new(),
+            asset_urls: Dict::new(),
+            asset_origins: Dict::new(),
+            source_records: Array::new(),
+            source_records_by_file: Dict::new(),
+            source_origins: Dict::new(),
+        }
+    }
+
+    pub(crate) fn file_map(files: &[(&str, &str)]) -> FileMap {
+        let mut map = FileMap::new();
+        for (path, text) in files {
+            map.insert(file_id(path), text.as_bytes().to_vec());
+        }
+        map
+    }
+
+    pub(crate) fn test_world(
+        dir: &str,
+        files: FileMap,
+        library: Arc<LazyHash<Library>>,
+    ) -> TypstWorld {
+        let root = std::env::temp_dir().join(dir);
+        TypstWorld::builder(&root.join("main.typ"), &root)
+            .with_files(Arc::new(FileStore::new().with_provider(TestFiles(files))))
+            .with_local_cache()
+            .no_fonts()
+            .with_shared_library(library)
+            .build(&BundleCancellation::default())
+            .expect("valid test world")
+    }
 }

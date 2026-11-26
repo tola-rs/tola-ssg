@@ -3,9 +3,9 @@
 use lsp_types::{
     ClientCapabilities, CodeActionOrCommand, CompletionItem, CompletionResponse,
     CompletionTextEdit, Diagnostic, DiagnosticTag, DocumentChangeOperation, DocumentChanges,
-    Documentation, HoverContents, InsertTextFormat, MarkedString, MarkupContent, MarkupKind, OneOf,
-    PublishDiagnosticsParams, ResourceOp, ResourceOperationKind, SignatureHelp, TextDocumentEdit,
-    TextEdit, WorkspaceEdit,
+    Documentation, Hover, HoverContents, InsertTextFormat, MarkedString, MarkupContent, MarkupKind,
+    OneOf, PublishDiagnosticsParams, ResourceOp, ResourceOperationKind, SignatureHelp,
+    TextDocumentEdit, TextEdit, WorkspaceEdit,
 };
 
 use crate::markdown;
@@ -14,8 +14,6 @@ use crate::protocol::SourceReply;
 #[derive(Clone, Default)]
 pub(super) struct ClientFeatures {
     snippets: bool,
-    /// Whether the client reads a completion's insert-and-replace edit, which has the range it
-    /// replaces and the range it inserts at.
     insert_replace: bool,
     completion_label_details: bool,
     completion_markup: Option<MarkupKind>,
@@ -32,154 +30,106 @@ pub(super) struct ClientFeatures {
     diagnostic_version: bool,
     diagnostic_tags: Vec<DiagnosticTag>,
     diagnostic_data: bool,
-    /// Whether the client pulls diagnostics with `textDocument/diagnostic`.
     pub(super) pull_diagnostics: bool,
-    /// Whether the client registers file watchers dynamically, so a file it never opened still
-    /// starts a check.
     pub(super) watched_files_dynamic: bool,
     pub(super) watched_files_relative: bool,
     pub(super) semantic_tokens_refresh: bool,
-    /// Whether the client accepts `workspace/diagnostic/refresh`.
     pub(super) diagnostic_refresh: bool,
-    /// Whether the client receives `window/workDoneProgress` and the `$/progress` reports behind
-    /// it.
     pub(super) work_done_progress: bool,
-    /// Whether the client answers `workspace/configuration`.
     pub(super) configuration: bool,
-    /// Whether the client opens a document this server names, through `window/showDocument`.
     pub(super) show_document: bool,
 }
 
 impl ClientFeatures {
-    pub(super) fn new(capabilities: &ClientCapabilities) -> Self {
-        let document = capabilities.text_document.as_ref();
-        let completion = document
-            .and_then(|document| document.completion.as_ref())
-            .and_then(|completion| completion.completion_item.as_ref());
-        let signature_information = document
-            .and_then(|document| document.signature_help.as_ref())
-            .and_then(|signature| signature.signature_information.as_ref());
-        let action = document.and_then(|document| document.code_action.as_ref());
-        let publish_diagnostics =
-            document.and_then(|document| document.publish_diagnostics.as_ref());
-        let workspace = capabilities.workspace.as_ref();
-        let edits = workspace.and_then(|workspace| workspace.workspace_edit.as_ref());
-        let watched = workspace.and_then(|workspace| workspace.did_change_watched_files.as_ref());
-        let window = capabilities.window.as_ref();
+    pub(super) fn new(caps: &ClientCapabilities) -> Self {
+        let doc = caps.text_document.as_ref();
+        let comp = doc
+            .and_then(|d| d.completion.as_ref())
+            .and_then(|c| c.completion_item.as_ref());
+        let sig = doc
+            .and_then(|d| d.signature_help.as_ref())
+            .and_then(|s| s.signature_information.as_ref());
+        let action = doc.and_then(|d| d.code_action.as_ref());
+        let publish_diag = doc.and_then(|d| d.publish_diagnostics.as_ref());
+        let ws = caps.workspace.as_ref();
+        let edits = ws.and_then(|w| w.workspace_edit.as_ref());
+        let watched = ws.and_then(|w| w.did_change_watched_files.as_ref());
+        let window = caps.window.as_ref();
         Self {
-            snippets: completion
-                .and_then(|completion| completion.snippet_support)
-                .unwrap_or(false),
-            insert_replace: completion
-                .and_then(|completion| completion.insert_replace_support)
-                .unwrap_or(false),
-            completion_label_details: completion
-                .and_then(|completion| completion.label_details_support)
-                .unwrap_or(false),
+            snippets: comp.and_then(|c| c.snippet_support).unwrap_or(false),
+            insert_replace: comp.and_then(|c| c.insert_replace_support).unwrap_or(false),
+            completion_label_details: comp.and_then(|c| c.label_details_support).unwrap_or(false),
             completion_markup: preferred_markup(
-                completion.and_then(|completion| completion.documentation_format.as_deref()),
+                comp.and_then(|c| c.documentation_format.as_deref()),
             ),
             hover_markup: preferred_markup(
-                document
-                    .and_then(|document| document.hover.as_ref())
-                    .and_then(|hover| hover.content_format.as_deref()),
+                doc.and_then(|d| d.hover.as_ref())
+                    .and_then(|h| h.content_format.as_deref()),
             ),
-            signature_markup: preferred_markup(
-                signature_information
-                    .and_then(|signature| signature.documentation_format.as_deref()),
-            ),
-            signature_active_parameter: signature_information
-                .and_then(|signature| signature.active_parameter_support)
+            signature_markup: preferred_markup(sig.and_then(|s| s.documentation_format.as_deref())),
+            signature_active_parameter: sig
+                .and_then(|s| s.active_parameter_support)
                 .unwrap_or(false),
-            will_rename_files: workspace
-                .and_then(|workspace| workspace.file_operations.as_ref())
-                .and_then(|operations| operations.will_rename)
+            will_rename_files: ws
+                .and_then(|w| w.file_operations.as_ref())
+                .and_then(|o| o.will_rename)
                 .unwrap_or(false),
-            document_changes: edits
-                .and_then(|edits| edits.document_changes)
-                .unwrap_or(false),
+            document_changes: edits.and_then(|e| e.document_changes).unwrap_or(false),
             resource_operations: edits
-                .and_then(|edits| edits.resource_operations.clone())
+                .and_then(|e| e.resource_operations.clone())
                 .unwrap_or_default(),
-            annotations: edits.is_some_and(|edits| edits.change_annotation_support.is_some()),
+            annotations: edits.is_some_and(|e| e.change_annotation_support.is_some()),
             action_annotations: action
-                .and_then(|action| action.honors_change_annotations)
+                .and_then(|a| a.honors_change_annotations)
                 .unwrap_or(false),
-            action_literals: action
-                .is_some_and(|action| action.code_action_literal_support.is_some()),
-            diagnostic_related: publish_diagnostics
-                .and_then(|diagnostics| diagnostics.related_information)
+            action_literals: action.is_some_and(|a| a.code_action_literal_support.is_some()),
+            diagnostic_related: publish_diag
+                .and_then(|d| d.related_information)
                 .unwrap_or(false),
-            diagnostic_version: publish_diagnostics
-                .and_then(|diagnostics| diagnostics.version_support)
+            diagnostic_version: publish_diag
+                .and_then(|d| d.version_support)
                 .unwrap_or(false),
-            diagnostic_tags: publish_diagnostics
-                .and_then(|diagnostics| diagnostics.tag_support.as_ref())
-                .map(|tags| tags.value_set.clone())
+            diagnostic_tags: publish_diag
+                .and_then(|d| d.tag_support.as_ref())
+                .map(|t| t.value_set.clone())
                 .unwrap_or_default(),
-            diagnostic_data: publish_diagnostics
-                .and_then(|diagnostics| diagnostics.data_support)
-                .unwrap_or(false),
-            pull_diagnostics: document
-                .and_then(|document| document.diagnostic.as_ref())
-                .is_some(),
+            diagnostic_data: publish_diag.and_then(|d| d.data_support).unwrap_or(false),
+            pull_diagnostics: doc.and_then(|d| d.diagnostic.as_ref()).is_some(),
             watched_files_dynamic: watched
-                .and_then(|watched| watched.dynamic_registration)
+                .and_then(|w| w.dynamic_registration)
                 .unwrap_or(false),
             watched_files_relative: watched
-                .and_then(|watched| watched.relative_pattern_support)
+                .and_then(|w| w.relative_pattern_support)
                 .unwrap_or(false),
-            semantic_tokens_refresh: workspace
-                .and_then(|workspace| workspace.semantic_tokens.as_ref())
-                .and_then(|tokens| tokens.refresh_support)
+            semantic_tokens_refresh: ws
+                .and_then(|w| w.semantic_tokens.as_ref())
+                .and_then(|t| t.refresh_support)
                 .unwrap_or(false),
-            diagnostic_refresh: workspace
-                .and_then(|workspace| workspace.diagnostic.as_ref())
-                .and_then(|diagnostics| diagnostics.refresh_support)
+            diagnostic_refresh: ws
+                .and_then(|w| w.diagnostic.as_ref())
+                .and_then(|d| d.refresh_support)
                 .unwrap_or(false),
-            work_done_progress: window
-                .and_then(|window| window.work_done_progress)
-                .unwrap_or(false),
-            configuration: workspace
-                .and_then(|workspace| workspace.configuration)
-                .unwrap_or(false),
+            work_done_progress: window.and_then(|w| w.work_done_progress).unwrap_or(false),
+            configuration: ws.and_then(|w| w.configuration).unwrap_or(false),
             show_document: window
-                .and_then(|window| window.show_document.as_ref())
-                .map(|document| document.support)
+                .and_then(|w| w.show_document.as_ref())
+                .map(|d| d.support)
                 .unwrap_or(false),
         }
     }
 
     pub(super) fn reply(&self, reply: &mut SourceReply) {
         match reply {
-            SourceReply::Completion(response) => {
-                let completions = match response {
-                    CompletionResponse::Array(completions) => completions,
+            SourceReply::Completion(resp) => {
+                let items = match resp {
+                    CompletionResponse::Array(items) => items,
                     CompletionResponse::List(list) => &mut list.items,
                 };
-                for completion in completions {
-                    self.completion(completion);
+                for item in items {
+                    self.completion(item);
                 }
             }
-            SourceReply::Hover(Some(hover)) => {
-                let kind = self.hover_markup.clone().unwrap_or(MarkupKind::Markdown);
-                let contents =
-                    std::mem::replace(&mut hover.contents, HoverContents::Array(Vec::new()));
-                let value = match contents {
-                    HoverContents::Markup(markup) => markup_value(markup, &kind),
-                    HoverContents::Scalar(marked) => marked_value(marked, &kind),
-                    HoverContents::Array(marked) => marked
-                        .into_iter()
-                        .map(|marked| marked_value(marked, &kind))
-                        .collect::<Vec<_>>()
-                        .join("\n\n"),
-                };
-                hover.contents = if self.hover_markup.is_some() {
-                    HoverContents::Markup(MarkupContent { kind, value })
-                } else {
-                    HoverContents::Scalar(MarkedString::String(value))
-                };
-            }
+            SourceReply::Hover(Some(hover)) => self.hover(hover),
             SourceReply::SignatureHelp(Some(help)) => self.signature(help),
             SourceReply::Rename(edit) => {
                 if let Some(edit) = edit
@@ -196,8 +146,8 @@ impl ClientFeatures {
                     if !self.action_literals {
                         return false;
                     }
-                    for diagnostic in action.diagnostics.iter_mut().flatten() {
-                        self.diagnostic(diagnostic);
+                    for diag in action.diagnostics.iter_mut().flatten() {
+                        self.diagnostic(diag);
                     }
                     action.edit.as_mut().is_none_or(|edit| {
                         self.workspace_edit(edit, self.annotations && self.action_annotations)
@@ -208,30 +158,49 @@ impl ClientFeatures {
         }
     }
 
-    fn completion(&self, completion: &mut CompletionItem) {
+    fn hover(&self, hover: &mut Hover) {
+        let kind = self.hover_markup.clone().unwrap_or(MarkupKind::Markdown);
+        let contents = std::mem::replace(&mut hover.contents, HoverContents::Array(Vec::new()));
+        let value = match contents {
+            HoverContents::Markup(markup) => markup_value(markup, &kind),
+            HoverContents::Scalar(marked) => marked_value(marked, &kind),
+            HoverContents::Array(marked) => marked
+                .into_iter()
+                .map(|m| marked_value(m, &kind))
+                .collect::<Vec<_>>()
+                .join("\n\n"),
+        };
+        hover.contents = if self.hover_markup.is_some() {
+            HoverContents::Markup(MarkupContent { kind, value })
+        } else {
+            HoverContents::Scalar(MarkedString::String(value))
+        };
+    }
+
+    fn completion(&self, item: &mut CompletionItem) {
         if !self.completion_label_details
-            && let Some(labels) = completion.label_details.take()
+            && let Some(labels) = item.label_details.take()
         {
-            completion.detail = [completion.detail.take(), labels.detail, labels.description]
+            item.detail = [item.detail.take(), labels.detail, labels.description]
                 .into_iter()
                 .flatten()
                 .reduce(|detail, label| format!("{detail}\n{label}"));
         }
-        if !self.snippets && completion.insert_text_format == Some(InsertTextFormat::SNIPPET) {
-            if let Some(text) = &mut completion.insert_text {
+        if !self.snippets && item.insert_text_format == Some(InsertTextFormat::SNIPPET) {
+            if let Some(text) = &mut item.insert_text {
                 *text = crate::completion::plain_text(text);
             }
-            if let Some(edit) = &mut completion.text_edit {
+            if let Some(edit) = &mut item.text_edit {
                 let text = match edit {
                     CompletionTextEdit::Edit(edit) => &mut edit.new_text,
                     CompletionTextEdit::InsertAndReplace(edit) => &mut edit.new_text,
                 };
                 *text = crate::completion::plain_text(text);
             }
-            completion.insert_text_format = Some(InsertTextFormat::PLAIN_TEXT);
+            item.insert_text_format = Some(InsertTextFormat::PLAIN_TEXT);
         }
         if !self.insert_replace {
-            completion.text_edit = completion.text_edit.take().map(|edit| match edit {
+            item.text_edit = item.text_edit.take().map(|edit| match edit {
                 CompletionTextEdit::InsertAndReplace(insert) => {
                     CompletionTextEdit::Edit(TextEdit {
                         range: insert.replace,
@@ -241,7 +210,7 @@ impl ClientFeatures {
                 edit => edit,
             });
         }
-        project_documentation(&mut completion.documentation, &self.completion_markup);
+        project_documentation(&mut item.documentation, &self.completion_markup);
     }
 
     fn signature(&self, help: &mut SignatureHelp) {
@@ -250,53 +219,51 @@ impl ClientFeatures {
                 .signatures
                 .get(help.active_signature.unwrap_or(0) as usize)
                 .or_else(|| help.signatures.first())
-                .and_then(|signature| signature.active_parameter)
+                .and_then(|sig| sig.active_parameter)
                 .or(help.active_parameter);
         }
-        for signature in &mut help.signatures {
-            project_documentation(&mut signature.documentation, &self.signature_markup);
+        for sig in &mut help.signatures {
+            project_documentation(&mut sig.documentation, &self.signature_markup);
             if !self.signature_active_parameter {
-                signature.active_parameter = None;
+                sig.active_parameter = None;
             }
-            if let Some(parameters) = &mut signature.parameters {
-                for parameter in parameters {
-                    project_documentation(&mut parameter.documentation, &self.signature_markup);
+            if let Some(params) = &mut sig.parameters {
+                for param in params {
+                    project_documentation(&mut param.documentation, &self.signature_markup);
                 }
             }
         }
     }
 
-    /// Whether this client reads a diagnostic's related information.
     pub(super) fn reads_related_information(&self) -> bool {
         self.diagnostic_related
     }
 
-    /// Whether this client keeps a diagnostic's `data`, so it can echo the cause back with a
-    /// request that asks for a fix.
+    /// Whether this client echoes `diagnostic.data` back in code-action requests.
     pub(super) fn reads_diagnostic_data(&self) -> bool {
         self.diagnostic_data
     }
 
-    pub(super) fn diagnostics(&self, parameters: &mut PublishDiagnosticsParams) {
+    pub(super) fn diagnostics(&self, params: &mut PublishDiagnosticsParams) {
         if !self.diagnostic_version {
-            parameters.version = None;
+            params.version = None;
         }
-        for diagnostic in &mut parameters.diagnostics {
-            self.diagnostic(diagnostic);
+        for diag in &mut params.diagnostics {
+            self.diagnostic(diag);
         }
     }
 
-    fn diagnostic(&self, diagnostic: &mut Diagnostic) {
+    fn diagnostic(&self, diag: &mut Diagnostic) {
         if !self.reads_related_information() {
-            diagnostic.related_information = None;
+            diag.related_information = None;
         }
         if !self.reads_diagnostic_data() {
-            diagnostic.data = None;
+            diag.data = None;
         }
-        if let Some(tags) = &mut diagnostic.tags {
+        if let Some(tags) = &mut diag.tags {
             tags.retain(|tag| self.diagnostic_tags.contains(tag));
             if tags.is_empty() {
-                diagnostic.tags = None;
+                diag.tags = None;
             }
         }
     }
@@ -304,18 +271,17 @@ impl ClientFeatures {
     fn workspace_edit(&self, edit: &mut WorkspaceEdit, keep_annotations: bool) -> bool {
         let keep_annotations = keep_annotations && self.document_changes;
         if !keep_annotations
-            && edit.change_annotations.as_ref().is_some_and(|annotations| {
-                annotations
-                    .values()
-                    .any(|annotation| annotation.needs_confirmation == Some(true))
+            && edit.change_annotations.as_ref().is_some_and(|anns| {
+                anns.values()
+                    .any(|ann| ann.needs_confirmation == Some(true))
             })
         {
             return false;
         }
-        if let Some(DocumentChanges::Operations(operations)) = &edit.document_changes {
-            for operation in operations {
-                if let DocumentChangeOperation::Op(operation) = operation {
-                    let kind = match operation {
+        if let Some(DocumentChanges::Operations(ops)) = &edit.document_changes {
+            for op in ops {
+                if let DocumentChangeOperation::Op(op) = op {
+                    let kind = match op {
                         ResourceOp::Create(_) => ResourceOperationKind::Create,
                         ResourceOp::Rename(_) => ResourceOperationKind::Rename,
                         ResourceOp::Delete(_) => ResourceOperationKind::Delete,
@@ -327,70 +293,67 @@ impl ClientFeatures {
             }
         }
         if !keep_annotations {
-            edit.change_annotations = None;
-            match &mut edit.document_changes {
-                Some(DocumentChanges::Edits(edits)) => {
-                    for edit in edits {
-                        strip_annotations(edit);
-                    }
-                }
-                Some(DocumentChanges::Operations(operations)) => {
-                    for operation in operations {
-                        match operation {
-                            DocumentChangeOperation::Edit(edit) => strip_annotations(edit),
-                            DocumentChangeOperation::Op(ResourceOp::Create(create)) => {
-                                create.annotation_id = None
-                            }
-                            DocumentChangeOperation::Op(ResourceOp::Rename(rename)) => {
-                                rename.annotation_id = None
-                            }
-                            DocumentChangeOperation::Op(ResourceOp::Delete(delete)) => {
-                                if let Some(options) = &mut delete.options {
-                                    options.annotation_id = None;
-                                }
-                            }
-                        }
-                    }
-                }
-                None => {}
-            }
+            strip_edit_annotations(edit);
         }
         if !self.document_changes
             && let Some(changes) = edit.document_changes.take()
         {
-            let changes = match changes {
-                DocumentChanges::Edits(edits) => edits,
-                DocumentChanges::Operations(operations) => operations
-                    .into_iter()
-                    .filter_map(|operation| match operation {
-                        DocumentChangeOperation::Edit(edit) => Some(edit),
-                        DocumentChangeOperation::Op(_) => None,
-                    })
-                    .collect(),
-            };
-            let documents = edit.changes.get_or_insert_default();
-            for document in changes {
-                documents
-                    .entry(document.text_document.uri)
-                    .or_default()
-                    .extend(document.edits.into_iter().map(|edit| match edit {
-                        OneOf::Left(edit) => edit,
-                        OneOf::Right(edit) => edit.text_edit,
-                    }));
-            }
+            fold_document_changes(edit, changes);
         }
         true
     }
 }
 
-/// The first format a client declared, which is the one it prefers; both `MarkupKind`s are formats
-/// this server writes.
+fn strip_edit_annotations(edit: &mut WorkspaceEdit) {
+    edit.change_annotations = None;
+    match &mut edit.document_changes {
+        Some(DocumentChanges::Edits(edits)) => edits.iter_mut().for_each(strip_doc_annotations),
+        Some(DocumentChanges::Operations(ops)) => {
+            for op in ops {
+                match op {
+                    DocumentChangeOperation::Edit(edit) => strip_doc_annotations(edit),
+                    DocumentChangeOperation::Op(ResourceOp::Create(c)) => c.annotation_id = None,
+                    DocumentChangeOperation::Op(ResourceOp::Rename(r)) => r.annotation_id = None,
+                    DocumentChangeOperation::Op(ResourceOp::Delete(d)) => {
+                        if let Some(opts) = &mut d.options {
+                            opts.annotation_id = None;
+                        }
+                    }
+                }
+            }
+        }
+        None => {}
+    }
+}
+
+fn fold_document_changes(edit: &mut WorkspaceEdit, changes: DocumentChanges) {
+    let changes = match changes {
+        DocumentChanges::Edits(edits) => edits,
+        DocumentChanges::Operations(ops) => ops
+            .into_iter()
+            .filter_map(|op| match op {
+                DocumentChangeOperation::Edit(edit) => Some(edit),
+                DocumentChangeOperation::Op(_) => None,
+            })
+            .collect(),
+    };
+    let docs = edit.changes.get_or_insert_default();
+    for doc in changes {
+        docs.entry(doc.text_document.uri)
+            .or_default()
+            .extend(doc.edits.into_iter().map(|edit| match edit {
+                OneOf::Left(edit) => edit,
+                OneOf::Right(edit) => edit.text_edit,
+            }));
+    }
+}
+
 fn preferred_markup(formats: Option<&[MarkupKind]>) -> Option<MarkupKind> {
     formats.and_then(|formats| formats.first().cloned())
 }
 
-fn project_documentation(documentation: &mut Option<Documentation>, kind: &Option<MarkupKind>) {
-    let Some(Documentation::MarkupContent(markup)) = documentation else {
+fn project_documentation(doc: &mut Option<Documentation>, kind: &Option<MarkupKind>) {
+    let Some(Documentation::MarkupContent(markup)) = doc else {
         return;
     };
     match kind {
@@ -410,7 +373,7 @@ fn project_documentation(documentation: &mut Option<Documentation>, kind: &Optio
             } else {
                 std::mem::take(&mut markup.value)
             };
-            *documentation = Some(Documentation::String(value));
+            *doc = Some(Documentation::String(value));
         }
         _ => {}
     }
@@ -423,14 +386,14 @@ fn markup_value(markup: MarkupContent, kind: &MarkupKind) -> String {
     if *kind == MarkupKind::PlainText {
         return markdown::plain(&markup.value);
     }
-    let mut markdown = String::with_capacity(markup.value.len());
+    let mut md = String::with_capacity(markup.value.len());
     for ch in markup.value.chars() {
         if ch.is_ascii_punctuation() {
-            markdown.push('\\');
+            md.push('\\');
         }
-        markdown.push(ch);
+        md.push(ch);
     }
-    markdown
+    md
 }
 
 fn marked_value(marked: MarkedString, kind: &MarkupKind) -> String {
@@ -444,7 +407,7 @@ fn marked_value(marked: MarkedString, kind: &MarkupKind) -> String {
     }
 }
 
-fn strip_annotations(edit: &mut TextDocumentEdit) {
+fn strip_doc_annotations(edit: &mut TextDocumentEdit) {
     for change in &mut edit.edits {
         if let OneOf::Right(annotated) = change {
             *change = OneOf::Left(TextEdit {
@@ -460,47 +423,46 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn features(capabilities: serde_json::Value) -> ClientFeatures {
-        ClientFeatures::new(&serde_json::from_value(capabilities).unwrap())
+    fn features(caps: serde_json::Value) -> ClientFeatures {
+        ClientFeatures::new(&serde_json::from_value(caps).unwrap())
     }
+
     #[test]
-    fn completion_details_follow_client_support() {
+    fn completion_details_projection() {
         for supported in [false, true] {
             let client = features(json!({"textDocument":{"completion":{"completionItem":{
                 "labelDetailsSupport":supported
             }}}}));
             for detail in [None, Some("bibliography citation")] {
-                let mut completion: CompletionItem = serde_json::from_value(json!({
+                let mut item: CompletionItem = serde_json::from_value(json!({
                     "label":"draw", "detail":detail,
                     "labelDetails":{"detail":"(value)","description":"draw(value: int)"}
                 }))
                 .unwrap();
-                let original = completion.clone();
-                let mut reply =
-                    SourceReply::Completion(CompletionResponse::Array(vec![completion]));
+                let orig = item.clone();
+                let mut reply = SourceReply::Completion(CompletionResponse::Array(vec![item]));
                 client.reply(&mut reply);
-                let SourceReply::Completion(CompletionResponse::Array(mut completions)) = reply
-                else {
+                let SourceReply::Completion(CompletionResponse::Array(mut items)) = reply else {
                     panic!("completion array");
                 };
-                completion = completions.remove(0);
+                item = items.remove(0);
                 if supported {
-                    assert_eq!(completion, original);
+                    assert_eq!(item, orig);
                 } else {
-                    assert!(completion.label_details.is_none());
+                    assert!(item.label_details.is_none());
                     let expected = match detail {
                         Some(detail) => format!("{detail}\n(value)\ndraw(value: int)"),
                         None => "(value)\ndraw(value: int)".to_owned(),
                     };
-                    assert_eq!(completion.detail, Some(expected));
-                    assert_eq!(completion.label, original.label);
+                    assert_eq!(item.detail, Some(expected));
+                    assert_eq!(item.label, orig.label);
                 }
             }
         }
     }
 
     #[test]
-    fn document_changes_fold_into_changes() {
+    fn document_changes_fold() {
         let mut edit: WorkspaceEdit = serde_json::from_value(json!({"documentChanges":[
             {"textDocument":{"uri":"file:///site/a.typ","version":2},"edits":[{"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":1}},"newText":"renamed","annotationId":"rename"}]}
         ],"changeAnnotations":{"rename":{"label":"rename"}}})).unwrap();
@@ -515,18 +477,18 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_creation_keeps_no_half_edit() {
+    fn unsupported_creation_rejected() {
         let path = std::env::temp_dir().join("missing.typ");
         let CodeActionOrCommand::CodeAction(action) = crate::protocol::create_file(&path).unwrap()
         else {
             panic!("create action");
         };
         let edit = action.edit.unwrap();
-        for capabilities in [
+        for caps in [
             json!({}),
             json!({"workspace":{"workspaceEdit":{"documentChanges":true,"resourceOperations":["rename"]}}}),
         ] {
-            assert!(!features(capabilities).workspace_edit(&mut edit.clone(), true));
+            assert!(!features(caps).workspace_edit(&mut edit.clone(), true));
         }
         let client = features(
             json!({"workspace":{"workspaceEdit":{"documentChanges":true,"resourceOperations":["create"],"changeAnnotationSupport":{}}}}),
@@ -535,20 +497,20 @@ mod tests {
     }
 
     #[test]
-    fn diagnostics_omit_unnegotiated_fields() {
-        let mut parameters: PublishDiagnosticsParams = serde_json::from_value(json!({
+    fn diagnostics_strip_unsupported() {
+        let mut params: PublishDiagnosticsParams = serde_json::from_value(json!({
             "uri":"file:///site/a.typ","version":3,"diagnostics":[{
                 "range":{"start":{"line":0,"character":0},"end":{"line":0,"character":1}},
                 "message":"bad name","tags":[1],"data":{},
                 "relatedInformation":[{"location":{"uri":"file:///site/b.typ","range":{"start":{"line":0,"character":0},"end":{"line":0,"character":1}}},"message":"declared here"}]
             }]
         })).unwrap();
-        ClientFeatures::default().diagnostics(&mut parameters);
-        let value = serde_json::to_value(parameters).unwrap();
-        assert!(value.get("version").is_none());
+        ClientFeatures::default().diagnostics(&mut params);
+        let val = serde_json::to_value(params).unwrap();
+        assert!(val.get("version").is_none());
         for field in ["relatedInformation", "tags", "data"] {
-            assert!(value["diagnostics"][0].get(field).is_none());
+            assert!(val["diagnostics"][0].get(field).is_none());
         }
-        assert_eq!(value["diagnostics"][0]["message"], "bad name");
+        assert_eq!(val["diagnostics"][0]["message"], "bad name");
     }
 }

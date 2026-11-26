@@ -7,10 +7,10 @@ use anyhow::Result;
 use super::boundaries::{check_publish_dir, module_input_paths, validate_site_paths};
 pub(crate) use super::boundaries::{overlapping_module_root, validate_hook_output_boundaries};
 use super::diagnostic::config_error;
-use crate::config::section::build::{BuildEntry, MinifyConfig, ResolvedBuildConfig};
+use crate::config::section::build::{BuildEntry, BuildSettings, MinifyConfig};
 use crate::config::{
     ConfigDiagnostic, ConfigDiagnostics, ConfigError, ConfigPresence, ConfigSource, FieldPath,
-    ParsedConfig, ResolvedSiteConfig, SiteConfigSchema,
+    ParsedConfig, SiteConfig, SiteConfigSchema,
 };
 
 /// Per-invocation build settings applied before effective configuration validation.
@@ -29,12 +29,12 @@ pub struct BuildOverrides {
 /// A validated configuration and the digest of the exact TOML text that produced it.
 #[derive(Debug)]
 pub struct SiteConfigWithSourceDigest {
-    config: ResolvedSiteConfig,
+    config: SiteConfig,
     source_hash: blake3::Hash,
 }
 
 impl SiteConfigWithSourceDigest {
-    pub fn config(&self) -> &ResolvedSiteConfig {
+    pub fn config(&self) -> &SiteConfig {
         &self.config
     }
 
@@ -49,7 +49,7 @@ impl SiteConfigWithSourceDigest {
         self
     }
 
-    pub fn into_config(self) -> ResolvedSiteConfig {
+    pub fn into_config(self) -> SiteConfig {
         self.config
     }
 }
@@ -114,7 +114,7 @@ fn resolve_schema(
     presence: &ConfigPresence,
     mut package_locations: tola_typst::PackageLocations,
     build: &BuildOverrides,
-) -> Result<ResolvedSiteConfig> {
+) -> Result<SiteConfig> {
     let positions = config_source
         .as_ref()
         .map(|source| std::sync::Arc::clone(source.positions()))
@@ -176,7 +176,7 @@ fn resolve_schema(
         BuildEntry::Project(path) => (path, None),
         BuildEntry::Module { module } => (PathBuf::new(), Some(module)),
     };
-    Ok(ResolvedSiteConfig {
+    Ok(SiteConfig {
         package_locations,
         config_path,
         config_source,
@@ -185,8 +185,8 @@ fn resolve_schema(
         positions,
         declares_font_paths: presence
             .contains(crate::config::section::FontsConfig::FIELDS.paths.as_str()),
-        site: site.into_resolved(),
-        build: ResolvedBuildConfig {
+        site: site.into_settings(),
+        build: BuildSettings {
             par_hooks: build_config.par_hooks,
             hook_jobs: build_config.hook_jobs,
             entry,
@@ -439,7 +439,7 @@ impl SiteConfigSchema {
         config_path: &Path,
         package_locations: tola_typst::PackageLocations,
         build: &BuildOverrides,
-    ) -> Result<ResolvedSiteConfig> {
+    ) -> Result<SiteConfig> {
         self.options = tola_module::options::deserialize_options(std::mem::take(&mut self.options))
             .map_err(|error| {
                 let mut diagnostics = ConfigDiagnostics::new();
@@ -467,391 +467,4 @@ impl SiteConfigSchema {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::config::tests::{VENDORED_SITE_SOURCE, attached_diagnostics, diagnostic_mentioning};
-
-    /// A `tola.toml` source with `site.title` and the default build entry and content root.
-    fn site_source(title: &str) -> String {
-        format!(
-            r#"[site]
-title = "{title}"
-
-[build]
-entry = "site.typ"
-content-dir = "content"
-"#
-        )
-    }
-
-    /// Write `source` as the `tola.toml` of `directory` and return its path.
-    fn write_config(directory: &Path, source: &str) -> PathBuf {
-        let config_path = directory.join("tola.toml");
-        std::fs::write(&config_path, source).unwrap();
-        config_path
-    }
-
-    /// The failure of loading the configuration at `config_path`.
-    fn load_error(config_path: &Path) -> anyhow::Error {
-        load_site_config(
-            Some(config_path),
-            tola_typst::PackageLocations::default(),
-            &BuildOverrides::default(),
-        )
-        .unwrap_err()
-    }
-
-    #[test]
-    fn diagnostics_name_the_written_line() {
-        for (source, field) in [
-            (
-                "[site]\ntitle = \"Site\"\nlanguage = \"nope\"\n",
-                "site.language",
-            ),
-            (
-                "[build]\nentry = \"site.typ\"\nminfy = true\n",
-                "build.minfy",
-            ),
-        ] {
-            let directory = tempfile::TempDir::new().unwrap();
-            let config_path = write_config(directory.path(), source);
-
-            let error = load_error(&config_path);
-
-            let diagnostic = diagnostic_mentioning(&error, field);
-            assert_eq!(diagnostic.code, tola_diagnostic::codes::config::INVALID);
-            let location = diagnostic.location.as_ref().unwrap();
-            assert_eq!(location.path, "tola.toml");
-            assert_eq!((location.line, location.column), (Some(3), Some(1)));
-        }
-    }
-
-    #[test]
-    fn supplied_text_outranks_the_config_file() {
-        let directory = tempfile::TempDir::new().unwrap();
-        let config_path = write_config(directory.path(), &site_source("Disk"));
-        let source = site_source("Supplied");
-        let parsed = resolve_site_config(
-            &config_path,
-            &source,
-            tola_typst::PackageLocations::default(),
-            &BuildOverrides::default(),
-        )
-        .unwrap();
-
-        assert_eq!(parsed.config().site().title, "Supplied");
-        assert_eq!(
-            parsed.config().source().unwrap().sources()[0].hash(),
-            blake3::hash(source.as_bytes())
-        );
-        assert!(parsed.config().warnings().is_empty());
-        assert_eq!(
-            std::fs::read_to_string(config_path).unwrap(),
-            site_source("Disk")
-        );
-    }
-
-    #[test]
-    fn directory_config_path_is_refused() {
-        let directory = tempfile::TempDir::new().unwrap();
-        let error = resolve_site_config(
-            directory.path(),
-            &site_source("Site"),
-            tola_typst::PackageLocations::default(),
-            &BuildOverrides::default(),
-        )
-        .unwrap_err();
-
-        let diagnostics = attached_diagnostics(&error);
-        assert!(
-            diagnostics[0].message.contains("is not a file"),
-            "{diagnostics:?}"
-        );
-        assert!(
-            diagnostics[0]
-                .message
-                .contains(&written_path(directory.path())),
-            "{diagnostics:?}"
-        );
-        assert!(
-            diagnostics[0]
-                .help
-                .iter()
-                .any(|help| help.message.contains("--config")),
-            "{diagnostics:?}"
-        );
-        assert!(
-            diagnostics
-                .iter()
-                .all(|diagnostic| diagnostic.location.is_none())
-        );
-    }
-
-    #[test]
-    fn output_errors_name_the_config_path() {
-        let directory = tempfile::TempDir::new().unwrap();
-        let config_path = write_config(
-            directory.path(),
-            &format!("{}publish-dir = \".\"\n", site_source("Site")),
-        );
-
-        let error = load_error(&config_path);
-        let diagnostics = attached_diagnostics(&error);
-
-        assert!(!diagnostics.is_empty());
-        assert!(diagnostics.iter().all(|diagnostic| {
-            diagnostic
-                .location
-                .as_ref()
-                .is_some_and(|location| location.path == "tola.toml")
-        }));
-        assert!(error.chain().any(|cause| matches!(
-            cause.downcast_ref::<crate::filesystem::OutputBoundaryError>(),
-            Some(crate::filesystem::OutputBoundaryError::OutsideSite)
-        )));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn broken_symlink_stops_the_search() {
-        let root = tempfile::tempdir().unwrap();
-        std::fs::write(root.path().join("tola.toml"), "").unwrap();
-        let nested = root.path().join("nested");
-        std::fs::create_dir(&nested).unwrap();
-        let path = nested.join("tola.toml");
-        std::os::unix::fs::symlink("missing.toml", &path).unwrap();
-
-        assert_eq!(find_default_config(&nested), Some(path.clone()));
-        let error = ConfigSource::load(Some(&path), tola_input::InputScope::Online).unwrap_err();
-        assert!(error.paths().contains(&path));
-        assert!(
-            error
-                .diagnostics()
-                .iter()
-                .any(|diagnostic| { diagnostic.code == tola_diagnostic::codes::config::IO })
-        );
-        let error = anyhow::Error::new(error);
-        assert!(error.chain().any(|cause| {
-            cause
-                .downcast_ref::<std::io::Error>()
-                .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound)
-        }));
-    }
-
-    #[test]
-    fn declared_vendor_packages_precede_host_roots() {
-        let site_directory = tempfile::tempdir().unwrap();
-        let config_path = site_directory.path().join("tola.toml");
-        let locations = || {
-            tola_typst::PackageLocations::from_absolute_roots(
-                Some(site_directory.path().join("host-packages")),
-                Some(site_directory.path().join("host-cache")),
-            )
-            .unwrap()
-        };
-        let mut declared_schema = SiteConfigSchema::default();
-        declared_schema.vendor.path = Some("vendor".into());
-
-        let declared = declared_schema
-            .resolve(&config_path, locations(), &BuildOverrides::default())
-            .unwrap();
-
-        assert_eq!(
-            declared
-                .package_locations()
-                .declared()
-                .first()
-                .unwrap()
-                .root(),
-            declared.get_root().join("vendor/typst-packages")
-        );
-
-        let undeclared = SiteConfigSchema::default()
-            .resolve(&config_path, locations(), &BuildOverrides::default())
-            .unwrap();
-
-        assert!(undeclared.package_locations().declared().is_empty());
-        assert!(undeclared.package_locations().data().is_some());
-    }
-
-    #[test]
-    fn schema_cannot_bypass_path_boundaries() {
-        type SchemaCase<'a> = (fn(&mut SiteConfigSchema), &'a str);
-
-        let directory = tempfile::tempdir().unwrap();
-        let config_path = directory.path().join("tola.toml");
-        let cases: [SchemaCase<'_>; 7] = [
-            (
-                |schema| schema.build.entry = "../site.typ".into(),
-                "build.entry",
-            ),
-            (
-                |schema| schema.build.entry = "C:site.typ".into(),
-                "build.entry",
-            ),
-            (
-                |schema| schema.build.entry = r"\\server\share\site.typ".into(),
-                "build.entry",
-            ),
-            (
-                |schema| schema.build.publish_dir = ".".into(),
-                "build.publish-dir",
-            ),
-            (
-                |schema| schema.build.entry = ".tola/site.typ".into(),
-                "build.entry",
-            ),
-            (
-                |schema| schema.typst.fonts.paths = vec![".tola/fonts".into()],
-                "typst.fonts.paths",
-            ),
-            (
-                |schema| {
-                    schema.vendor.path = Some("vendor".into());
-                    schema.build.publish_dir = ".vendor-swap/site".into();
-                },
-                "build.publish-dir",
-            ),
-        ];
-
-        for (edit, expected) in cases {
-            let mut schema = SiteConfigSchema::default();
-            edit(&mut schema);
-
-            let error = schema
-                .resolve(
-                    &config_path,
-                    tola_typst::PackageLocations::default(),
-                    &BuildOverrides::default(),
-                )
-                .unwrap_err();
-
-            assert!(attached_diagnostics(&error).iter().any(|diagnostic| {
-                diagnostic.notes.iter().any(|note| note == expected)
-                    || diagnostic.message.contains(expected)
-            }));
-        }
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn hook_output_cannot_reach_the_configuration() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path();
-        let config_path = write_config(root, "");
-        std::os::unix::fs::symlink("tola.toml", root.join("alias.toml")).unwrap();
-        std::os::unix::fs::symlink(".", root.join("linked")).unwrap();
-        let mut schema = SiteConfigSchema::default();
-        schema.hooks.before_build = vec![crate::config::section::build::BeforeBuildHookConfig {
-            name: "generator".into(),
-            argv: Some(vec!["generator".into()]),
-            generates: vec!["tola.toml".into(), "alias.toml".into(), "linked".into()],
-            ..crate::config::section::build::BeforeBuildHookConfig::default()
-        }];
-
-        let error = schema
-            .resolve(
-                &config_path,
-                tola_typst::PackageLocations::default(),
-                &BuildOverrides::default(),
-            )
-            .unwrap_err();
-
-        let diagnostics = attached_diagnostics(&error);
-        assert_eq!(diagnostics.len(), 3, "{diagnostics:?}");
-        for diagnostic in diagnostics {
-            assert!(
-                diagnostic.message.contains("site configuration"),
-                "{diagnostic:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn hook_output_boundary_names_its_entry() {
-        let directory = tempfile::tempdir().unwrap();
-        let config_path = write_config(
-            directory.path(),
-            r#"[[hooks.before-build]]
-name = "first"
-argv = ["first.sh"]
-generates = ["generated/first"]
-
-[[hooks.before-build]]
-name = "second"
-argv = ["second.sh"]
-generates = [".tola/cache"]
-"#,
-        );
-
-        let error = load_error(&config_path);
-
-        let diagnostic = diagnostic_mentioning(&error, ".tola/cache");
-        assert_eq!(diagnostic.code, tola_diagnostic::codes::config::INVALID);
-        // Line 9 writes the second entry's own `generates`, not the first entry's line 4.
-        let location = diagnostic
-            .location
-            .as_ref()
-            .expect("the refusal is located");
-        assert_eq!(location.line, Some(9));
-    }
-
-    #[test]
-    fn vendor_candidate_never_reads_old_copy() {
-        let directory = tempfile::tempdir().unwrap();
-        let config = crate::config::tests::load_test_config(directory.path(), VENDORED_SITE_SOURCE);
-        let old = config
-            .vendor
-            .typst_packages()
-            .unwrap()
-            .join("local/demo/1.0.0");
-        std::fs::create_dir_all(&old).unwrap();
-        std::fs::write(old.join("value.typ"), "old vendor").unwrap();
-        let candidate = config.get_root().join(".vendor-swap/candidate");
-        std::fs::create_dir_all(&candidate).unwrap();
-        let config = config.with_vendor_root(Some(candidate.clone())).unwrap();
-        let pure = crate::BuildResources::new().with_input_scope(tola_input::InputScope::Pure);
-        let files = tola_typst::FileResolver::from_package_locations(
-            pure.package_locations(&config),
-            tola_typst::PackageFetchPolicy::LocalOnly,
-        )
-        .with_source_boundary(pure.source_boundary(&config));
-        let id = typst::syntax::FileId::new(typst::syntax::RootedPath::new(
-            typst::syntax::VirtualRoot::Package("@local/demo:1.0.0".parse().unwrap()),
-            typst::syntax::VirtualPath::new("value.typ").unwrap(),
-        ));
-        assert!(files.read(id, config.get_root()).is_err());
-        let package = candidate.join("typst-packages/local/demo/1.0.0");
-        std::fs::create_dir_all(&package).unwrap();
-        std::fs::write(package.join("value.typ"), "candidate vendor").unwrap();
-        assert_eq!(
-            files.read(id, config.get_root()).unwrap(),
-            b"candidate vendor"
-        );
-    }
-
-    #[test]
-    fn refresh_keeps_workspace_exclusions() {
-        let directory = tempfile::tempdir().unwrap();
-        let config = crate::config::tests::load_test_config(directory.path(), VENDORED_SITE_SOURCE);
-        let workspace = config
-            .vendor
-            .path
-            .as_deref()
-            .and_then(crate::filesystem::swap_workspace)
-            .unwrap();
-        std::fs::create_dir_all(&workspace).unwrap();
-        std::fs::write(workspace.join("old.typ"), "generated previous source").unwrap();
-        let refreshed = config.with_vendor_root(None).unwrap();
-        let files = tola_typst::FileResolver::new()
-            .with_source_boundary(crate::BuildResources::new().source_boundary(&refreshed));
-        assert!(
-            files
-                .read(
-                    tola_typst::file_id(".vendor-swap/old.typ"),
-                    refreshed.get_root(),
-                )
-                .is_err()
-        );
-    }
-}
+mod tests;

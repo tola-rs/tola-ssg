@@ -7,7 +7,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use tola_build::cancellation::BuildCancellation;
 use tola_build::check::{SourceCompilation, SourceDiagnosticSession};
-use tola_build::config::ResolvedSiteConfig;
+use tola_build::config::SiteConfig;
 use tola_typst::typst::foundations::Value;
 use tola_typst::typst::syntax::{FileId, LinkedNode, Side, Source, SyntaxKind, VirtualRoot};
 use tola_typst_syntax::imports::PendingImport;
@@ -23,7 +23,7 @@ use super::semantic::Semantic;
 /// One graph reply's session, packages, source, query, lane caches, and cancellation.
 pub(super) struct GraphReplyRequest<'a, 'b> {
     pub(super) session: &'a mut SourceDiagnosticSession,
-    pub(super) config: &'a ResolvedSiteConfig,
+    pub(super) config: &'a SiteConfig,
     pub(super) package_access: &'a PackageAccess<'b>,
     pub(super) overrides: &'a [(PathBuf, Arc<str>)],
     pub(super) view: &'a SourceView,
@@ -54,7 +54,7 @@ pub(super) fn graph_reply(inputs: GraphReplyRequest<'_, '_>) -> Result<Option<So
         cancellation,
         client_root,
     } = inputs;
-    let root = config.get_root();
+    let root = config.root();
     let locations = Some(&package_access.locations);
     let include_dependents = matches!(query, SourceQuery::References(_) | SourceQuery::Rename(_));
     let mut proven: Vec<(PendingImport, FileId)> = Vec::new();
@@ -191,7 +191,7 @@ fn traced_import_target(
     file: FileId,
     value: &Value,
     root: &Path,
-    resolver: Option<&tola_typst::FileResolver>,
+    resolver: Option<&tola_typst::FileStore>,
 ) -> Option<FileId> {
     match value {
         Value::Str(path) => crate::analysis::import_target(file, path, root, resolver),

@@ -1,21 +1,12 @@
-//! The Issue a site author reads: decoded, normalized, and rendered in one place.
-//!
-//! The schema combinators evaluate in Typst and describe failures in a tree whose generated
-//! values are wrapper nodes. That shape is convenient while evaluating but leaks a coordinate
-//! system no site author should meet. This module folds the wrappers into an explicit `origin`,
-//! and renders the same sentences for `format-issues` and the compiler diagnostic.
+//! Schema Issue decoding, wrapper normalization, and diagnostic/text rendering.
 
 use typst::ecow::EcoString;
 use typst::foundations::{Array, Dict, Repr, Value};
 
-/// How a generated value came to be.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OriginKind {
-    /// The object key was absent and `optional` supplied its declared default.
     Default,
-    /// `map` or `convert` produced the value, which the output schema then rejected.
     Output,
-    /// Generated values of more than one kind produced the value.
     Generated,
 }
 
@@ -29,9 +20,9 @@ impl OriginKind {
     }
 
     fn summary(kinds: &[Self]) -> Self {
-        if kinds.iter().all(|kind| *kind == Self::Default) {
+        if kinds.iter().all(|k| *k == Self::Default) {
             Self::Default
-        } else if kinds.iter().all(|kind| *kind == Self::Output) {
+        } else if kinds.iter().all(|k| *k == Self::Output) {
             Self::Output
         } else {
             Self::Generated
@@ -63,38 +54,40 @@ impl OriginKind {
     }
 }
 
-/// The generated value an issue's message applies to.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Origin {
-    /// How the value was generated.
     pub kind: OriginKind,
-    /// Path inside the generated value to the failing value.
     pub path: Vec<Value>,
 }
 
-/// One failure, as a site author reads it.
+impl Origin {
+    fn encode(&self) -> Value {
+        Value::Dict(crate::dict([
+            ("kind", Value::Str(self.kind.wire_kind().into())),
+            ("path", Value::Array(self.path.iter().cloned().collect())),
+        ]))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Issue {
     pub code: EcoString,
-    /// Path relative to the parent value.
     pub path: Vec<Value>,
     pub message: EcoString,
     pub notes: Vec<EcoString>,
     pub children: Vec<Issue>,
-    /// `none` when the input supplied the value; otherwise how the schema generated it.
     pub origin: Option<Origin>,
 }
 
 impl Issue {
-    /// Decode one Issue without interpreting its wrappers.
-    pub(crate) fn decode(value: &Value) -> Result<Self, EcoString> {
-        let Value::Dict(issue) = value else {
+    pub(crate) fn decode(val: &Value) -> Result<Self, EcoString> {
+        let Value::Dict(issue) = val else {
             return Err("expected an Issue dictionary".into());
         };
         if issue.len() != 5 && issue.len() != 6 {
             return Err("expected an Issue with five fields and an optional `origin`".into());
         }
-        let path = array(issue, "path")?;
+        let path = array_field(issue, "path")?;
         validate_path(path.as_slice())?;
         let origin = match issue.get("origin") {
             Ok(Value::None) | Err(_) => None,
@@ -102,17 +95,17 @@ impl Issue {
             _ => return Err("Issue `origin` must be `none` or a dictionary".into()),
         };
         Ok(Self {
-            code: string(issue, "code")?,
+            code: str_field(issue, "code")?,
             path: path.iter().cloned().collect(),
-            message: string(issue, "message")?,
-            notes: array(issue, "notes")?
+            message: str_field(issue, "message")?,
+            notes: array_field(issue, "notes")?
                 .iter()
-                .map(|note| match note {
-                    Value::Str(note) => Ok(note.as_str().into()),
+                .map(|n| match n {
+                    Value::Str(s) => Ok(s.as_str().into()),
                     _ => Err("Issue notes must be strings".into()),
                 })
                 .collect::<Result<Vec<EcoString>, EcoString>>()?,
-            children: array(issue, "children")?
+            children: array_field(issue, "children")?
                 .iter()
                 .map(Self::decode)
                 .collect::<Result<_, _>>()?,
@@ -120,44 +113,35 @@ impl Issue {
         })
     }
 
-    /// Encode one Issue as the `@tola/schema` package spells it.
     pub(crate) fn encode(&self) -> Value {
-        let mut issue = Dict::new();
-        issue.insert("code".into(), Value::Str(self.code.as_str().into()));
-        issue.insert(
-            "path".into(),
-            Value::Array(self.path.iter().cloned().collect()),
-        );
-        issue.insert("message".into(), Value::Str(self.message.as_str().into()));
-        issue.insert(
-            "notes".into(),
-            Value::Array(
-                self.notes
-                    .iter()
-                    .map(|note| Value::Str(note.as_str().into()))
-                    .collect(),
+        Value::Dict(crate::dict([
+            ("code", Value::Str(self.code.as_str().into())),
+            ("path", Value::Array(self.path.iter().cloned().collect())),
+            ("message", Value::Str(self.message.as_str().into())),
+            (
+                "notes",
+                Value::Array(
+                    self.notes
+                        .iter()
+                        .map(|n| Value::Str(n.as_str().into()))
+                        .collect(),
+                ),
             ),
-        );
-        issue.insert(
-            "children".into(),
-            Value::Array(self.children.iter().map(Self::encode).collect()),
-        );
-        issue.insert(
-            "origin".into(),
-            match &self.origin {
-                Some(origin) => origin.encode(),
-                None => Value::None,
-            },
-        );
-        Value::Dict(issue)
+            (
+                "children",
+                Value::Array(self.children.iter().map(Self::encode).collect()),
+            ),
+            (
+                "origin",
+                self.origin.as_ref().map_or(Value::None, Origin::encode),
+            ),
+        ]))
     }
 
     fn generated(&self) -> bool {
         OriginKind::from_code(&self.code).is_some()
     }
 
-    /// The sentence a site author reads. `field` names the generated value, and `origin_path`
-    /// locates the failure inside it.
     pub(crate) fn sentence(
         &self,
         field: &[Value],
@@ -167,7 +151,7 @@ impl Issue {
         let field = format!("`{}`", issue_path(field));
         let built_in = self.code.starts_with("schema.");
         let wrapper = self.code == "schema.default" || self.code == "schema.output";
-        let mut sentence: EcoString = match kind {
+        let mut out: EcoString = match kind {
             OriginKind::Output if built_in => {
                 format!("{field} was converted by the schema, but the result is invalid")
             }
@@ -189,51 +173,43 @@ impl Issue {
                     OriginKind::Generated => ", and the schema-generated value fails",
                     OriginKind::Default => ", and the schema's default fails",
                 };
-                sentence.push_str(clause);
+                out.push_str(clause);
             }
-            sentence.push_str(&format!(" at `{}`", issue_path(origin_path)));
+            out.push_str(&format!(" at `{}`", issue_path(origin_path)));
         }
-        // A wrapper with no cause keeps its message in the data; the sentence already says that
-        // the generated value is invalid.
         if !wrapper {
-            sentence.push_str(": ");
-            sentence.push_str(self.message.as_str());
+            out.push_str(": ");
+            out.push_str(self.message.as_str());
         }
-        sentence
+        out
     }
 }
 
-/// Fold generated-value wrappers into `origin`, preserving every cause and note.
+/// Folds generated-value wrappers into `origin` while preserving causes and notes.
 pub(crate) fn normalize(issues: &[Issue]) -> Vec<Issue> {
-    let mut normalized = Vec::new();
+    let mut out = Vec::new();
     for issue in issues {
         if issue.generated() && issue.origin.is_none() {
-            collect_generated(issue, &issue.path, &[], &[], &mut normalized);
+            collect_generated(issue, &issue.path, &[], &[], &mut out);
         } else {
-            normalized.push(copy_issue(issue, &issue.path, issue.origin.clone()));
+            out.push(copy_issue(issue, &issue.path, issue.origin.clone()));
         }
     }
-    normalized
+    out
 }
 
-/// Render Issues to the deterministic text `format-issues` returns.
 pub(crate) fn format(issues: &[Issue]) -> String {
-    let normalized = normalize(issues);
     let mut lines = Vec::new();
-    for issue in &normalized {
+    for issue in &normalize(issues) {
         render(issue, &[], &Region::root(), "", &mut lines);
     }
     lines.join("\n")
 }
 
-/// Where an issue's path is measured.
 #[derive(Debug, Clone)]
 pub(crate) struct Region {
-    /// The generated value's field path, or `none` at the root.
     field: Option<Vec<Value>>,
-    /// The generated value's kind, meaningful when `field` is `some`.
     kind: OriginKind,
-    /// Path from the generated value's root to the current parent value.
     prefix: Vec<Value>,
 }
 
@@ -254,23 +230,21 @@ impl Region {
         }
     }
 
-    /// Whether paths are measured inside a generated value.
     pub(crate) fn is_generated(&self) -> bool {
         self.field.is_some()
     }
 
-    /// How a hinted issue at `path` reads.
     pub(crate) fn position(&self, path: &[Value]) -> String {
         let Some(field) = &self.field else {
             return format!("`{}`", issue_path(path));
         };
         let full = [self.prefix.as_slice(), path].concat();
-        let value = self.kind.value_phrase();
+        let val = self.kind.value_phrase();
         if full.is_empty() {
-            format!("the {value} for `{}`", issue_path(field))
+            format!("the {val} for `{}`", issue_path(field))
         } else {
             format!(
-                "`{}` in the {value} for `{}`",
+                "`{}` in the {val} for `{}`",
                 issue_path(&full),
                 issue_path(field)
             )
@@ -278,7 +252,6 @@ impl Region {
     }
 }
 
-/// The sentence one generated-value issue reads, and the region its children are measured in.
 pub(crate) struct Description {
     pub(crate) field: Vec<Value>,
     pub(crate) kind: OriginKind,
@@ -286,7 +259,6 @@ pub(crate) struct Description {
     pub(crate) child: Region,
 }
 
-/// Describe `issue` at `path` inside `region`, when the schema generated its value.
 pub(crate) fn describe(issue: &Issue, path: &[Value], region: &Region) -> Option<Description> {
     let origin = issue.origin.as_ref()?;
     let full = [path, &issue.path].concat();
@@ -318,40 +290,30 @@ pub(crate) fn describe(issue: &Issue, path: &[Value], region: &Region) -> Option
 }
 
 fn render(issue: &Issue, path: &[Value], region: &Region, indent: &str, lines: &mut Vec<String>) {
-    let full = [path, &issue.path].concat();
-    if let Some(description) = describe(issue, path, region) {
-        lines.push(format!(
-            "{indent}{}",
-            issue.sentence(
-                &description.field,
-                description.kind,
-                &description.origin_path
+    let (head, child_path, child_region) = match describe(issue, path, region) {
+        Some(desc) => (
+            issue
+                .sentence(&desc.field, desc.kind, &desc.origin_path)
+                .to_string(),
+            Vec::new(),
+            desc.child,
+        ),
+        None => {
+            let full = [path, &issue.path].concat();
+            (
+                format!("{}: {}", region.position(&full), issue.message),
+                full,
+                region.clone(),
             )
-        ));
-        for note in &issue.notes {
-            lines.push(format!("{indent}  note: {note}"));
         }
-        for child in &issue.children {
-            render(
-                child,
-                &[],
-                &description.child,
-                &format!("{indent}  "),
-                lines,
-            );
-        }
-    } else {
-        lines.push(format!(
-            "{indent}{}: {}",
-            region.position(&full),
-            issue.message
-        ));
-        for note in &issue.notes {
-            lines.push(format!("{indent}  note: {note}"));
-        }
-        for child in &issue.children {
-            render(child, &full, region, &format!("{indent}  "), lines);
-        }
+    };
+    lines.push(format!("{indent}{head}"));
+    for note in &issue.notes {
+        lines.push(format!("{indent}  note: {note}"));
+    }
+    let next_indent = format!("{indent}  ");
+    for child in &issue.children {
+        render(child, &child_path, &child_region, &next_indent, lines);
     }
 }
 
@@ -360,20 +322,20 @@ fn collect_generated(
     field: &[Value],
     prefix: &[Value],
     kinds: &[OriginKind],
-    normalized: &mut Vec<Issue>,
+    out: &mut Vec<Issue>,
 ) {
     let kinds = [
         kinds,
         &[OriginKind::from_code(&issue.code).expect("generated")],
     ]
     .concat();
-    let origin = OriginKind::summary(&kinds);
+    let kind = OriginKind::summary(&kinds);
     if issue.children.is_empty() {
-        normalized.push(copy_issue(
+        out.push(copy_issue(
             issue,
             field,
             Some(Origin {
-                kind: origin,
+                kind,
                 path: prefix.to_vec(),
             }),
         ));
@@ -382,13 +344,9 @@ fn collect_generated(
     for child in &issue.children {
         let path = [prefix, &child.path].concat();
         if child.generated() {
-            collect_generated(child, field, &path, &kinds, normalized);
+            collect_generated(child, field, &path, &kinds, out);
         } else {
-            normalized.push(copy_issue(
-                child,
-                field,
-                Some(Origin { kind: origin, path }),
-            ));
+            out.push(copy_issue(child, field, Some(Origin { kind, path })));
         }
     }
 }
@@ -404,39 +362,42 @@ fn copy_issue(issue: &Issue, path: &[Value], origin: Option<Origin>) -> Issue {
     }
 }
 
-/// One path as `format-issues` and the diagnostics spell it.
 pub(crate) fn issue_path(path: &[Value]) -> String {
-    let mut rendered = "$".to_owned();
-    for segment in path {
-        match segment {
-            Value::Int(index) => rendered.push_str(&format!("[{index}]")),
+    let mut out = "$".to_owned();
+    for seg in path {
+        match seg {
+            Value::Int(idx) => out.push_str(&format!("[{idx}]")),
             Value::Str(key)
-                if key.chars().enumerate().all(|(index, ch)| {
-                    ch.is_ascii_alphabetic()
-                        || ch == '_'
-                        || (index > 0 && (ch.is_ascii_digit() || ch == '-'))
-                }) && !key.is_empty() =>
+                if !key.is_empty()
+                    && key.chars().enumerate().all(|(i, c)| {
+                        c.is_ascii_alphabetic()
+                            || c == '_'
+                            || (i > 0 && (c.is_ascii_digit() || c == '-'))
+                    }) =>
             {
-                rendered.push('.');
-                rendered.push_str(key.as_str());
+                out.push('.');
+                out.push_str(key.as_str());
             }
             Value::Str(key) => {
-                rendered.push_str(&format!("[{}]", key.repr().replace("`", "\\u{60}")))
+                out.push_str(&format!(
+                    "[{}]",
+                    key.repr().as_str().replace('`', "\\u{60}")
+                ));
             }
-            _ => unreachable!("Issue path segments were checked on ingress"),
+            _ => unreachable!("Issue path segments were checked on decode"),
         }
     }
-    rendered
+    out
 }
 
 fn decode_origin(origin: &Dict) -> Result<Origin, EcoString> {
-    let kind = match string(origin, "kind")?.as_str() {
+    let kind = match str_field(origin, "kind")?.as_str() {
         "default" => OriginKind::Default,
         "output" => OriginKind::Output,
         "generated" => OriginKind::Generated,
         other => return Err(format!("unknown Issue origin kind `{other}`").into()),
     };
-    let path = array(origin, "path")?;
+    let path = array_field(origin, "path")?;
     validate_path(path.as_slice())?;
     Ok(Origin {
         kind,
@@ -445,54 +406,39 @@ fn decode_origin(origin: &Dict) -> Result<Origin, EcoString> {
 }
 
 fn validate_path(path: &[Value]) -> Result<(), EcoString> {
-    if path.iter().all(|segment| {
-        matches!(segment, Value::Str(_)) || matches!(segment, Value::Int(index) if *index >= 0)
-    }) {
+    if path
+        .iter()
+        .all(|s| matches!(s, Value::Str(_)) || matches!(s, Value::Int(i) if *i >= 0))
+    {
         Ok(())
     } else {
         Err("Issue paths contain string keys or nonnegative indices".into())
     }
 }
 
-fn string(dict: &Dict, key: &str) -> Result<EcoString, EcoString> {
-    match dict.get(key) {
-        Ok(Value::Str(value)) => Ok(value.as_str().into()),
-        _ => Err(format!("Issue `{key}` must be a string").into()),
-    }
+fn str_field(dict: &Dict, key: &str) -> Result<EcoString, EcoString> {
+    crate::dict_str(dict, key)
+        .map(Into::into)
+        .ok_or_else(|| format!("Issue `{key}` must be a string").into())
 }
 
-fn array<'a>(dict: &'a Dict, key: &str) -> Result<&'a Array, EcoString> {
-    match dict.get(key) {
-        Ok(Value::Array(value)) => Ok(value),
-        _ => Err(format!("Issue `{key}` must be an array").into()),
-    }
-}
-
-impl Origin {
-    fn encode(&self) -> Value {
-        let mut origin = Dict::new();
-        origin.insert("kind".into(), Value::Str(self.kind.wire_kind().into()));
-        origin.insert(
-            "path".into(),
-            Value::Array(self.path.iter().cloned().collect()),
-        );
-        Value::Dict(origin)
-    }
+fn array_field<'a>(dict: &'a Dict, key: &str) -> Result<&'a Array, EcoString> {
+    crate::dict_array(dict, key).ok_or_else(|| format!("Issue `{key}` must be an array").into())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn key(value: &str) -> Value {
-        Value::Str(value.into())
+    fn key(val: &str) -> Value {
+        Value::Str(val.into())
     }
 
-    fn issue(code: &str, path: Vec<Value>, message: &str) -> Issue {
+    fn issue(code: &str, path: Vec<Value>, msg: &str) -> Issue {
         Issue {
             code: code.into(),
             path,
-            message: message.into(),
+            message: msg.into(),
             notes: Vec::new(),
             children: Vec::new(),
             origin: None,
@@ -511,7 +457,7 @@ mod tests {
     }
 
     #[test]
-    fn normalization_folds_default_into_origin() {
+    fn normalize_default_origin() {
         let cause = issue(
             "schema.type",
             vec![key("count")],
@@ -519,38 +465,36 @@ mod tests {
         );
         let raw = wrapper("schema.default", vec![key("rows")], vec![cause]);
 
-        let normalized = normalize(&[raw]);
-
-        assert_eq!(normalized.len(), 1);
-        let issue = &normalized[0];
-        assert_eq!(issue.code, "schema.type");
-        assert_eq!(issue.path, vec![key("rows")]);
+        let out = normalize(&[raw]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].code, "schema.type");
+        assert_eq!(out[0].path, vec![key("rows")]);
         assert_eq!(
-            issue.origin,
+            out[0].origin,
             Some(Origin {
                 kind: OriginKind::Default,
                 path: vec![key("count")],
             })
         );
-        assert!(issue.children.is_empty());
+        assert!(out[0].children.is_empty());
     }
 
     #[test]
-    fn normalization_keeps_nested_generations_in_outer_field() {
+    fn normalize_nested_origin() {
         let cause = issue("schema.type", vec![], "expected `int`, found `str`");
         let inner = wrapper("schema.default", vec![key("count")], vec![cause]);
         let outer = wrapper("schema.default", vec![key("value")], vec![inner]);
 
-        let normalized = normalize(&[outer]);
-
-        assert_eq!(normalized.len(), 1);
-        assert_eq!(normalized[0].path, vec![key("value")]);
-        let origin = normalized[0].origin.as_ref().expect("generated");
+        let out = normalize(&[outer]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].path, vec![key("value")]);
+        let origin = out[0].origin.as_ref().expect("generated");
         assert_eq!(origin.kind, OriginKind::Default);
         assert_eq!(origin.path, vec![key("count")]);
     }
+
     #[test]
-    fn ordinary_issues_keep_tree() {
+    fn format_nested_issues() {
         let mut parent = issue("custom", vec![], "outer");
         parent.children.push(issue(
             "schema.type",

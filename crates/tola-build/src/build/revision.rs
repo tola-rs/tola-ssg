@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 
-use crate::{config::ResolvedSiteConfig, hooks, site::SiteIndex};
+use crate::{config::SiteConfig, hooks, site::SiteIndex};
 
 use super::diagnostic;
 use super::input::{input_observation, stale_input_error};
@@ -15,7 +15,7 @@ use super::{BuildCacheUpdate, BuildMode, InputFreshness, InputObservation};
 /// Custom callers may inspect it before [`write_site`] or prepare an immutable
 /// revision. Ordinary repeated disk builds use [`super::BuildSession::build_and_write`].
 pub struct SiteBuild {
-    pub(super) config: std::sync::Arc<ResolvedSiteConfig>,
+    pub(super) config: std::sync::Arc<SiteConfig>,
     pub(super) mode: BuildMode,
     pub(super) cancellation: BuildCancellation,
     pub(super) hook_executor: hooks::HookExecutor,
@@ -27,7 +27,7 @@ pub struct SiteBuild {
     pub(crate) source_hooks: crate::hooks::SourceHookOutputs,
     pub(super) report: Option<super::BuildReport>,
     /// Modules this build prepared; freshness and observations re-read the same manifests.
-    pub(super) modules: tola_module::prepared::PreparedModules,
+    pub(super) modules: tola_module::bundle::ModuleBundle,
     /// The invocation's input scope, for after-publish hook environments.
     pub(super) scope: tola_input::InputScope,
 }
@@ -41,7 +41,7 @@ pub struct UncheckedRevision {
     cancellation: BuildCancellation,
     source_hooks: crate::hooks::SourceHookOutputs,
     cache_update: BuildCacheUpdate,
-    modules: tola_module::prepared::PreparedModules,
+    modules: tola_module::bundle::ModuleBundle,
 }
 
 impl UncheckedRevision {
@@ -49,7 +49,7 @@ impl UncheckedRevision {
         &self.site
     }
 
-    pub fn hook_outputs(&self) -> &[crate::hooks::HookOutputEvidence] {
+    pub fn hook_outputs(&self) -> &[crate::hooks::HookOutput] {
         self.source_hooks.outputs()
     }
 
@@ -143,7 +143,7 @@ impl SiteBuild {
         self.report.as_ref()
     }
 
-    pub fn config(&self) -> &std::sync::Arc<ResolvedSiteConfig> {
+    pub fn config(&self) -> &std::sync::Arc<SiteConfig> {
         &self.config
     }
 
@@ -168,7 +168,7 @@ impl SiteBuild {
     pub fn references(&self) -> &crate::site::references::References {
         &self.references
     }
-    pub fn hook_outputs(&self) -> &[crate::hooks::HookOutputEvidence] {
+    pub fn hook_outputs(&self) -> &[crate::hooks::HookOutput] {
         self.source_hooks.outputs()
     }
 
@@ -255,18 +255,18 @@ impl SiteBuild {
 
 /// A committed output tree and its optional, explicitly invoked consumers.
 #[derive(Debug)]
-pub struct WriteOutcome {
+pub struct PublishSummary {
     output_root: std::path::PathBuf,
     counts: crate::output::summary::OutputCounts,
     diagnostics: Vec<tola_diagnostic::Diagnostic>,
-    config: std::sync::Arc<ResolvedSiteConfig>,
+    config: std::sync::Arc<SiteConfig>,
     mode: BuildMode,
     scope: tola_input::InputScope,
     hook_executor: hooks::HookExecutor,
     consumer_graph: Option<crate::output::graph::OutputGraph>,
 }
 
-impl WriteOutcome {
+impl PublishSummary {
     pub fn output_root(&self) -> &std::path::Path {
         &self.output_root
     }
@@ -290,7 +290,7 @@ impl WriteOutcome {
     ) -> Result<Vec<tola_diagnostic::Diagnostic>> {
         if let Some(graph) = self.consumer_graph {
             let files = crate::output::files::HookOutputFiles::materialize_candidate(
-                self.config.get_root(),
+                self.config.root(),
                 &graph,
                 Some(cancellation),
             )?;
@@ -309,13 +309,13 @@ impl WriteOutcome {
 
 /// Write an inspected build with recoverable output-tree replacement.
 /// Recheck inputs and the original cancellation immediately before replacement.
-/// No consumer runs here; invoke [`WriteOutcome::run_after_publish`] after releasing the build lock.
+/// No consumer runs here; invoke [`PublishSummary::run_after_publish`] after releasing the build lock.
 ///
 /// This acquires the site lock. A caller already holding it uses
 /// [`super::SiteBuildLock::write_site`] or [`super::SiteBuildGuard::write_site`] instead.
 ///
 /// For repeated builds with cache acceptance, use [`super::BuildSession::build_and_write`].
-pub fn write_site(build: &SiteBuild) -> Result<WriteOutcome> {
+pub fn write_site(build: &SiteBuild) -> Result<PublishSummary> {
     let lock = super::SiteBuildLock::acquire(&build.config, &build.cancellation, || {})
         .map_err(|error| write_error(build, anyhow::Error::new(error)))?;
     write_site_locked(build, &lock)
@@ -324,12 +324,12 @@ pub fn write_site(build: &SiteBuild) -> Result<WriteOutcome> {
 pub(super) fn write_site_locked(
     build: &SiteBuild,
     lock: &super::SiteBuildLock,
-) -> Result<WriteOutcome> {
+) -> Result<PublishSummary> {
     write_site_inner(build, lock).map_err(|error| write_error(build, error))
 }
 
 fn write_error(build: &SiteBuild, error: anyhow::Error) -> anyhow::Error {
-    let error = diagnostic::with_write(error, build.config.get_root());
+    let error = diagnostic::with_write(error, build.config.root());
     if crate::cancellation::is_cancelled(&error) || build.diagnostics.is_empty() {
         return error;
     }
@@ -341,7 +341,7 @@ fn write_error(build: &SiteBuild, error: anyhow::Error) -> anyhow::Error {
     tola_diagnostic::DiagnosticError::attach(error, diagnostics).into()
 }
 
-fn write_site_inner(build: &SiteBuild, lock: &super::SiteBuildLock) -> Result<WriteOutcome> {
+fn write_site_inner(build: &SiteBuild, lock: &super::SiteBuildLock) -> Result<PublishSummary> {
     build.cancellation.ensure_active()?;
     let config = build.config.as_ref();
     let mode = build.mode();
@@ -359,7 +359,7 @@ fn write_site_inner(build: &SiteBuild, lock: &super::SiteBuildLock) -> Result<Wr
         crate::output::files::StagedBuildFiles::materialize(graph, &writing, &build.cancellation)?;
     build.ensure_fresh(&build.cancellation)?;
     staged.commit(writing)?;
-    Ok(WriteOutcome {
+    Ok(PublishSummary {
         output_root: destination.path().to_path_buf(),
         counts: graph.counts(),
         diagnostics: build.diagnostics.clone(),
@@ -383,15 +383,15 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn retargeted_module_root_is_rejected() {
+    fn retargeted_module_root_rejected() {
         use std::os::unix::fs::symlink;
-        let directory = TempDir::new().unwrap();
-        let root = directory.path();
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
         fs::create_dir(root.join("content")).unwrap();
-        let source = "[build]\nentry=\"site.typ\"\n";
+        let src = "[build]\nentry=\"site.typ\"\n";
         for name in ["first", "second"] {
             fs::create_dir(root.join(name)).unwrap();
-            fs::write(root.join(name).join("tola-module.toml"), source).unwrap();
+            fs::write(root.join(name).join("tola-module.toml"), src).unwrap();
             fs::write(
                 root.join(name).join("site.typ"),
                 "#document(\"index.html\")[Site]",
@@ -399,11 +399,11 @@ mod tests {
             .unwrap();
         }
         symlink("first", root.join("theme")).unwrap();
-        let config = crate::config::tests::load_test_config(
+        let cfg = crate::config::tests::load_test_config(
             root,
             "[modules.forest]\npath=\"theme\"\n[build]\nentry={module=\"forest\"}\n",
         );
-        let candidate = build_site(&config, BuildMode::Production).unwrap();
+        let candidate = build_site(&cfg, BuildMode::Production).unwrap();
         fs::remove_file(root.join("theme")).unwrap();
         symlink("second", root.join("theme")).unwrap();
         assert!(
@@ -413,11 +413,11 @@ mod tests {
                 .is_stale(InputKind::ModuleManifests)
         );
         assert!(write_site(&candidate).is_err());
-        assert!(!config.build.publish_dir.exists());
+        assert!(!cfg.build.publish_dir.exists());
     }
 
     #[test]
-    fn overlapping_bundle_read_stops_the_build() {
+    fn overlapping_bundle_read_rejected() {
         let dir = TempDir::new().unwrap();
         let root = dir.path();
         let content = root.join("content");
@@ -425,54 +425,46 @@ mod tests {
         fs::create_dir_all(&content).unwrap();
         fs::create_dir_all(&templates).unwrap();
         fs::write(templates.join("value.txt"), "protected input").unwrap();
-        let entry = root.join("site.typ");
         fs::write(
-            &entry,
+            root.join("site.typ"),
             "#document(\"index.html\")[#read(\"/templates/value.txt\")]",
         )
         .unwrap();
 
-        let mut config = site_config(root);
-        config.build.publish_dir = config.get_root().join("templates");
+        let mut cfg = site_config(root);
+        cfg.build.publish_dir = cfg.root().join("templates");
 
-        let error = match build_site(&config, BuildMode::Production) {
+        let err = match build_site(&cfg, BuildMode::Production) {
             Ok(_) => panic!("a Bundle read inside the published output compiled"),
-            Err(error) => error,
+            Err(err) => err,
         };
 
-        // The read boundary refuses the output tree while the Bundle compiles, so publication
-        // never reaches the write-stage overlap check that `output/root.rs` exercises directly.
-        let diagnostics = error.diagnostics(config.get_root());
+        let diag = err.diagnostics(cfg.root());
         assert!(
-            diagnostics.iter().any(|diagnostic| {
-                diagnostic.code == "typst.compile"
-                    && diagnostic.message.contains("templates/value.txt")
-            }),
-            "{diagnostics:#?}"
+            diag.iter()
+                .any(|d| d.code == "typst.compile" && d.message.contains("templates/value.txt")),
+            "{diag:#?}"
         );
     }
 
     #[test]
-    fn unreported_change_forces_retry() {
+    fn unreported_change_triggers_retry() {
         let dir = TempDir::new().unwrap();
         let root = dir.path();
-        let content = root.join("content");
-        fs::create_dir_all(&content).unwrap();
-        let template = root.join("template.typ");
-        fs::write(&template, "#let message = \"first\"").unwrap();
-        let entry = root.join("site.typ");
+        fs::create_dir_all(root.join("content")).unwrap();
+        let tpl = root.join("template.typ");
+        fs::write(&tpl, "#let message = \"first\"").unwrap();
         fs::write(
-            &entry,
+            root.join("site.typ"),
             "#import \"template.typ\": message\n#document(\"index.html\")[#message]",
         )
         .unwrap();
 
-        let config = site_config(root);
-
-        let mut session = crate::build::BuildSession::new();
-        let host = compiler_host(&config).unwrap();
+        let cfg = site_config(root);
+        let mut session = BuildSession::new();
+        let host = compiler_host(&cfg).unwrap();
         let first = build_site_with_host(
-            &config,
+            &cfg,
             &host,
             BuildMode::Production,
             &mut BuildAttemptProducers::default(),
@@ -480,7 +472,7 @@ mod tests {
         .unwrap();
         install_build(&mut session, first);
 
-        fs::write(&template, "#let message = \"second\"").unwrap();
+        fs::write(&tpl, "#let message = \"second\"").unwrap();
         let decision = session.rebuild_decision(&[], false);
         let reuse = session.reusable_compilation(&decision, true).unwrap();
         assert!(matches!(
@@ -488,7 +480,7 @@ mod tests {
             crate::compiler::CompilationReuse::SiteProgram { .. }
         ));
         let stale = build_site_with_host(
-            &config,
+            &cfg,
             &host,
             BuildMode::Production,
             &mut BuildAttemptProducers {
@@ -521,7 +513,7 @@ mod tests {
             crate::compiler::CompilationReuse::SourceAnalysis { .. }
         ));
         let second = build_site_with_host(
-            &config,
+            &cfg,
             &host,
             BuildMode::Production,
             &mut BuildAttemptProducers {
@@ -534,19 +526,17 @@ mod tests {
         let html = String::from_utf8_lossy(output_bytes(&graph, "index.html"));
         assert!(html.contains("second"), "{html}");
 
-        let fresh_host = compiler_host(&config).unwrap();
+        let fresh_host = compiler_host(&cfg).unwrap();
         let fresh = build_site_with_host(
-            &config,
+            &cfg,
             &fresh_host,
             BuildMode::Production,
             &mut BuildAttemptProducers::default(),
         )
         .unwrap();
-        let fresh_graph = fresh.graph;
         assert_eq!(
             output_bytes(&graph, "index.html"),
-            output_bytes(&fresh_graph, "index.html"),
-            "the write retry must match a clean compilation",
+            output_bytes(&fresh.graph, "index.html"),
         );
     }
 }

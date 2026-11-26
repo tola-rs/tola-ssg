@@ -1,4 +1,4 @@
-//! VP8 coefficient tokens: the scan, contexts, token tree, and extra bits (RFC 6386 §13).
+//! VP8 coefficient tokens, scan order, contexts, and extra bits (RFC 6386 §13).
 
 #[cfg(test)]
 use crate::bool_writer::tree_path;
@@ -8,38 +8,24 @@ use crate::macroblock::{CoefficientSpool, Luma, Macroblock, PackedLevels};
 use crate::tables::{COEFF_UPDATE_PROBS, DEFAULT_COEFF_PROBS};
 use std::sync::{Arc, LazyLock};
 
-/// Coefficient positions per block (4x4).
 pub(crate) const BLOCK_COEFFICIENTS: usize = 16;
-/// Probability contexts for a coefficient band.
 pub(crate) const CONTEXTS: usize = 3;
-/// Probability bands over the scan.
 pub(crate) const BANDS: usize = 8;
-/// Token categories per coefficient.
 pub(crate) const TOKENS: usize = 12;
-/// Coarse probability entries: plane * band * context.
 pub(crate) const ENTRIES: usize = 96;
-/// Probabilities per entry in the VP8 coefficient table.
 pub(crate) const PROBABILITIES_PER_ENTRY: usize = 11;
-/// Total coefficient probabilities in a VP8 frame.
 pub(crate) const COEFFICIENT_PROBABILITIES: usize = ENTRIES * PROBABILITIES_PER_ENTRY;
-/// Largest coefficient magnitude the token tables cover.
 pub(crate) const MAGNITUDES: usize = 2048;
-/// Largest magnitude served by the small-coefficient table.
 pub(crate) const SMALL_MAGNITUDES: usize = 128;
-/// Largest magnitude the six-bit pair table covers.
 pub(crate) const PAIR_MAGNITUDES: usize = 32;
-/// Packed pair-table entries (two six-bit magnitudes).
 pub(crate) const PAIR_ENTRIES: usize = PAIR_MAGNITUDES * PAIR_MAGNITUDES;
 
-/// RFC 6386 §13.2: the coefficient token tree.
 const COEFF_TREE: [i8; 22] = [
     -11, 2, 0, 4, -1, 6, 8, 12, -2, 10, -3, -4, 14, 16, -5, -6, 18, 20, -7, -8, -9, -10,
 ];
 
-/// One coefficient-tree branch: probability offset within the entry, then the branch value.
 type TokenStep = (u8, bool);
 
-/// The fixed tree walk for one coefficient token, shared by branch counting and emission.
 #[derive(Clone, Copy)]
 struct TokenPath {
     steps: [TokenStep; 7],
@@ -90,49 +76,43 @@ const fn coefficient_paths<const N: usize>(tree: &[i8], start: usize) -> [TokenP
     paths
 }
 
-/// RFC 6386 §13.3: coefficient position to probability band.
 pub(crate) const COEFF_BANDS: [usize; BLOCK_COEFFICIENTS] =
     [0, 1, 2, 3, 6, 4, 5, 6, 6, 6, 6, 6, 6, 6, 6, 7];
 
-/// Probability entry for each plane and scan position, before adding the context.
 const ENTRY_BASE: [[u16; BLOCK_COEFFICIENTS]; 4] = {
     let mut table = [[0u16; BLOCK_COEFFICIENTS]; 4];
     let mut plane = 0;
     while plane < table.len() {
-        let mut position = 0;
-        while position < BLOCK_COEFFICIENTS {
-            table[plane][position] = band_entry(plane, COEFF_BANDS[position], 0) as u16;
-            position += 1;
+        let mut pos = 0;
+        while pos < BLOCK_COEFFICIENTS {
+            table[plane][pos] = band_entry(plane, COEFF_BANDS[pos], 0) as u16;
+            pos += 1;
         }
         plane += 1;
     }
     table
 };
 
-/// The block's coefficients in scan order, written back to raster positions.
 pub(crate) const ZIGZAG: [usize; 16] = [0, 1, 4, 8, 5, 2, 3, 6, 9, 12, 13, 10, 7, 11, 14, 15];
 
-/// Raster offsets of each scan pair packed four bits each, for planes whose first
-/// coefficient is position 0 or 1.
 const PAIR_SCAN: [[u8; BLOCK_COEFFICIENTS / 2]; 2] = {
     let mut scan = [[0; BLOCK_COEFFICIENTS / 2]; 2];
     let mut first = 0;
     while first < scan.len() {
-        let mut position = first;
-        while position + 1 < BLOCK_COEFFICIENTS {
-            scan[first][position / 2] = (ZIGZAG[position] | (ZIGZAG[position + 1] << 4)) as u8;
-            position += 2;
+        let mut pos = first;
+        while pos + 1 < BLOCK_COEFFICIENTS {
+            scan[first][pos / 2] = (ZIGZAG[pos] | (ZIGZAG[pos + 1] << 4)) as u8;
+            pos += 2;
         }
         first += 1;
     }
     scan
 };
 
-const fn band_entry(plane: usize, band: usize, context: usize) -> usize {
-    (plane * BANDS + band) * CONTEXTS + context
+const fn band_entry(plane: usize, band: usize, ctx: usize) -> usize {
+    (plane * BANDS + band) * CONTEXTS + ctx
 }
 
-/// RFC 6386 §13.2: extra-bit probabilities for each magnitude category.
 const CATEGORY_ONE: [u8; 1] = [159];
 const CATEGORY_TWO: [u8; 2] = [165, 145];
 const CATEGORY_THREE: [u8; 3] = [173, 148, 140];
@@ -140,7 +120,6 @@ const CATEGORY_FOUR: [u8; 4] = [176, 155, 140, 135];
 const CATEGORY_FIVE: [u8; 5] = [180, 157, 141, 134, 130];
 const CATEGORY_SIX: [u8; 11] = [254, 254, 243, 230, 196, 177, 153, 140, 133, 130, 129];
 
-/// Plane indices of the coefficient probability table.
 const PLANE_Y_AFTER_Y2: usize = 0;
 const PLANE_Y2: usize = 1;
 const PLANE_CHROMA: usize = 2;
@@ -171,7 +150,7 @@ impl CoefficientPlane {
     }
 
     pub(crate) fn distortion_weight(self) -> u64 {
-        // DCT energy is four times pixel energy; the Y2 WHT adds another factor of four.
+        // DCT energy is 4x pixel energy; Y2 WHT adds another factor of 4.
         if matches!(self, Self::LumaDc) {
             4096
         } else {
@@ -184,22 +163,22 @@ impl CoefficientPlane {
 pub(crate) struct TokenCosts {
     tokens: [[u16; TOKENS]; ENTRIES],
     roots: [u16; ENTRIES],
-    magnitudes: &'static [u16; MAGNITUDES],
-    small_coefficients: Arc<[[u16; SMALL_MAGNITUDES]; ENTRIES]>,
-    // Masked to 127 in the hot loop, so every lookup is bounds-check free.
-    coefficient_pairs: Arc<[[u16; PAIR_ENTRIES]; ENTRIES]>,
+    mags: &'static [u16; MAGNITUDES],
+    small_coeff: Arc<[[u16; SMALL_MAGNITUDES]; ENTRIES]>,
+    // Masked to 127 in hot loop to elide bounds checks.
+    coeff_pairs: Arc<[[u16; PAIR_ENTRIES]; ENTRIES]>,
 }
 
 static MAGNITUDE_COSTS: LazyLock<[u16; MAGNITUDES]> = LazyLock::new(|| {
-    std::array::from_fn(|magnitude| {
-        if magnitude == 0 {
+    std::array::from_fn(|mag| {
+        if mag == 0 {
             return 0;
         }
-        let mut writer = CostWriter::new();
-        let token = token_for_magnitude(magnitude as u16);
-        write_extra_bits(&mut writer, magnitude as u16, token);
-        writer.write_bool(128, false);
-        writer.bits() as u16
+        let mut w = CostWriter::new();
+        let tok = token_for_magnitude(mag as u16);
+        write_extra_bits(&mut w, mag as u16, tok);
+        w.write_bool(128, false);
+        w.bits() as u16
     })
 });
 
@@ -212,16 +191,13 @@ impl Default for TokenCosts {
     }
 }
 
-/// The running state of one wide coefficient-block scan.
-///
-/// Every field is a borrow or a copy, so continuing a scan allocates nothing.
 struct WideScan<'a> {
     levels: &'a [i16; 16],
     plane: CoefficientPlane,
     first: usize,
     rate: u64,
-    position: usize,
-    context: usize,
+    pos: usize,
+    ctx: usize,
     last: usize,
 }
 
@@ -229,63 +205,53 @@ impl TokenCosts {
     pub(crate) fn new(probs: &[u8; COEFFICIENT_PROBABILITIES]) -> Self {
         let mut tokens = [[0; TOKENS]; ENTRIES];
         let mut roots = [0; ENTRIES];
-        let magnitudes = &*MAGNITUDE_COSTS;
+        let mags = &*MAGNITUDE_COSTS;
         for entry in 0..ENTRIES {
-            let probabilities =
-                &probs[entry * PROBABILITIES_PER_ENTRY..(entry + 1) * PROBABILITIES_PER_ENTRY];
-            roots[entry] = bool_cost(probabilities[0], true) as u16;
+            let p = &probs[entry * PROBABILITIES_PER_ENTRY..(entry + 1) * PROBABILITIES_PER_ENTRY];
+            roots[entry] = bool_cost(p[0], true) as u16;
             tokens[entry] = COEFF_PATHS[0].map(|path| {
                 path.branches()
                     .iter()
-                    .map(|&(offset, branch)| {
-                        bool_cost(probabilities[usize::from(offset)], branch) as u16
-                    })
+                    .map(|&(off, branch)| bool_cost(p[usize::from(off)], branch) as u16)
                     .sum()
             });
         }
-        let small_coefficients: Arc<[[u16; SMALL_MAGNITUDES]; ENTRIES]> =
+        let small_coeff: Arc<[[u16; SMALL_MAGNITUDES]; ENTRIES]> =
             Arc::new(std::array::from_fn(|entry| {
-                std::array::from_fn(|magnitude| {
-                    // (8 token branches + 11 extra bits) * 2048 + 256 sign units fits u16.
-                    tokens[entry][usize::from(token_for_magnitude(magnitude as u16))]
-                        + magnitudes[magnitude]
+                std::array::from_fn(|mag| {
+                    tokens[entry][usize::from(token_for_magnitude(mag as u16))] + mags[mag]
                 })
             }));
         let pairs: Arc<[[u16; PAIR_ENTRIES]]> = (0..ENTRIES)
             .map(|entry| {
-                let context = entry % CONTEXTS;
+                let ctx = entry % CONTEXTS;
                 let group = entry / CONTEXTS % BANDS;
                 let plane = entry / (CONTEXTS * BANDS);
-                let position = usize::from(plane == PLANE_Y_AFTER_Y2) + 2 * group;
+                let pos = usize::from(plane == PLANE_Y_AFTER_Y2) + 2 * group;
                 std::array::from_fn(|packed| {
-                    if position + 1 >= 16 {
+                    if pos + 1 >= 16 {
                         return 0;
                     }
                     let first = packed & (PAIR_MAGNITUDES - 1);
                     let second = packed >> PAIR_MAGNITUDES.trailing_zeros();
-                    let first_entry = band_entry(plane, COEFF_BANDS[position], context);
-                    let second_entry = band_entry(plane, COEFF_BANDS[position + 1], first.min(2));
-                    let first_cost = small_coefficients[first_entry][first]
-                        - if group != 0 && context == 0 {
-                            roots[first_entry]
-                        } else {
-                            0
-                        };
-                    let second_cost = small_coefficients[second_entry][second]
-                        - if first == 0 { roots[second_entry] } else { 0 };
-                    first_cost + second_cost
+                    let e0 = band_entry(plane, COEFF_BANDS[pos], ctx);
+                    let e1 = band_entry(plane, COEFF_BANDS[pos + 1], first.min(2));
+                    let c0 =
+                        small_coeff[e0][first] - if group != 0 && ctx == 0 { roots[e0] } else { 0 };
+                    let c1 = small_coeff[e1][second] - if first == 0 { roots[e1] } else { 0 };
+                    c0 + c1
                 })
             })
             .collect();
-        let coefficient_pairs = pairs
+        let coeff_pairs = pairs
             .try_into()
             .expect("the pair table has a fixed row count");
         Self {
             tokens,
             roots,
-            magnitudes,
-            small_coefficients,
-            coefficient_pairs,
+            mags,
+            small_coeff,
+            coeff_pairs,
         }
     }
 
@@ -293,19 +259,19 @@ impl TokenCosts {
     pub(crate) fn coefficient(
         &self,
         plane: CoefficientPlane,
-        position: usize,
-        context: usize,
-        previous_was_zero: bool,
-        magnitude: u16,
+        pos: usize,
+        ctx: usize,
+        prev_zero: bool,
+        mag: u16,
     ) -> u32 {
-        let entry = usize::from(ENTRY_BASE[plane.index()][position]) + context;
-        let rate = if magnitude < SMALL_MAGNITUDES as u16 {
-            u32::from(self.small_coefficients[entry][usize::from(magnitude)])
+        let entry = usize::from(ENTRY_BASE[plane.index()][pos]) + ctx;
+        let rate = if mag < SMALL_MAGNITUDES as u16 {
+            u32::from(self.small_coeff[entry][usize::from(mag)])
         } else {
-            let token = usize::from(token_for_magnitude(magnitude));
-            u32::from(self.tokens[entry][token]) + self.magnitude_cost(magnitude)
+            let tok = usize::from(token_for_magnitude(mag));
+            u32::from(self.tokens[entry][tok]) + self.magnitude_cost(mag)
         };
-        rate - if previous_was_zero {
+        rate - if prev_zero {
             u32::from(self.roots[entry])
         } else {
             0
@@ -316,86 +282,72 @@ impl TokenCosts {
         &self,
         plane: CoefficientPlane,
         band: usize,
-        context: usize,
+        ctx: usize,
     ) -> (u16, [u16; TOKENS]) {
-        let entry = band_entry(plane.index(), band, context);
+        let entry = band_entry(plane.index(), band, ctx);
         (self.roots[entry], self.tokens[entry])
     }
 
-    pub(crate) fn magnitude_cost(&self, magnitude: u16) -> u32 {
-        u32::from(self.magnitudes[usize::from(magnitude)])
+    pub(crate) fn magnitude_cost(&self, mag: u16) -> u32 {
+        u32::from(self.mags[usize::from(mag)])
     }
 
     #[inline(always)]
-    pub(crate) fn end(&self, plane: CoefficientPlane, position: usize, context: usize) -> u32 {
-        let entry = usize::from(ENTRY_BASE[plane.index()][position]) + context;
+    pub(crate) fn end(&self, plane: CoefficientPlane, pos: usize, ctx: usize) -> u32 {
+        let entry = usize::from(ENTRY_BASE[plane.index()][pos]) + ctx;
         u32::from(self.tokens[entry][usize::from(TOKEN_END)])
     }
 
-    pub(crate) fn block(
-        &self,
-        levels: &[i16; 16],
-        plane: CoefficientPlane,
-        first_context: usize,
-    ) -> u64 {
-        self.block_rate(levels, plane, first_context).0
+    pub(crate) fn block(&self, levels: &[i16; 16], plane: CoefficientPlane, ctx0: usize) -> u64 {
+        self.block_rate(levels, plane, ctx0).0
     }
 
-    fn block_rate(
-        &self,
-        levels: &[i16; 16],
-        plane: CoefficientPlane,
-        first_context: usize,
-    ) -> (u64, bool) {
+    fn block_rate(&self, levels: &[i16; 16], plane: CoefficientPlane, ctx0: usize) -> (u64, bool) {
         let first = plane.first_position();
         let Some(last) = last_nonzero(levels, first) else {
-            return (u64::from(self.end(plane, first, first_context)), false);
+            return (u64::from(self.end(plane, first, ctx0)), false);
         };
         let scan = &PAIR_SCAN[first & 1];
         let mut pair_entry = plane.index() * (CONTEXTS * BANDS);
         let mut rate = 0;
-        let mut context = first_context;
-        let mut position = first;
-        // `last <= 15` bounds the walk to the eight fixed scan pairs.
+        let mut ctx = ctx0;
+        let mut pos = first;
         for &offsets in scan {
-            if position >= last {
+            if pos >= last {
                 break;
             }
-            let first_magnitude = levels[usize::from(offsets & 15)].unsigned_abs();
-            let second_magnitude = levels[usize::from(offsets >> 4)].unsigned_abs();
-            if usize::from(first_magnitude | second_magnitude) >= PAIR_MAGNITUDES {
+            let m0 = levels[usize::from(offsets & 15)].unsigned_abs();
+            let m1 = levels[usize::from(offsets >> 4)].unsigned_abs();
+            if usize::from(m0 | m1) >= PAIR_MAGNITUDES {
                 return self.block_rate_wide(WideScan {
                     levels,
                     plane,
                     first,
                     rate,
-                    position,
-                    context,
+                    pos,
+                    ctx,
                     last,
                 });
             }
-            let packed = (usize::from(first_magnitude)
-                | (usize::from(second_magnitude) << PAIR_MAGNITUDES.trailing_zeros()))
+            let packed = (usize::from(m0) | (usize::from(m1) << PAIR_MAGNITUDES.trailing_zeros()))
                 & (PAIR_ENTRIES - 1);
-            rate += u64::from(self.coefficient_pairs[pair_entry + context][packed]);
+            rate += u64::from(self.coeff_pairs[pair_entry + ctx][packed]);
             pair_entry += CONTEXTS;
-            position += 2;
-            context = usize::from(second_magnitude.min(2));
+            pos += 2;
+            ctx = usize::from(m1.min(2));
         }
-        if position == last {
-            let magnitude = levels[ZIGZAG[position]].unsigned_abs();
-            let previous_was_zero = position != first && levels[ZIGZAG[position - 1]] == 0;
-            rate +=
-                u64::from(self.coefficient(plane, position, context, previous_was_zero, magnitude));
-            context = magnitude_context(magnitude);
+        if pos == last {
+            let mag = levels[ZIGZAG[pos]].unsigned_abs();
+            let prev_zero = pos != first && levels[ZIGZAG[pos - 1]] == 0;
+            rate += u64::from(self.coefficient(plane, pos, ctx, prev_zero, mag));
+            ctx = mag_context(mag);
         }
         if last < 15 {
-            rate += u64::from(self.end(plane, last + 1, context));
+            rate += u64::from(self.end(plane, last + 1, ctx));
         }
         (rate, true)
     }
 
-    /// Continue from the first pair whose magnitudes exceed the pair table.
     #[inline(never)]
     fn block_rate_wide(&self, scan: WideScan<'_>) -> (u64, bool) {
         let WideScan {
@@ -403,40 +355,27 @@ impl TokenCosts {
             plane,
             first,
             mut rate,
-            mut position,
-            mut context,
+            mut pos,
+            mut ctx,
             last,
         } = scan;
-        let mut previous_was_zero = position != first && levels[ZIGZAG[position - 1]] == 0;
-        while position < last {
-            let first_magnitude = levels[ZIGZAG[position]].unsigned_abs();
-            let second_magnitude = levels[ZIGZAG[position + 1]].unsigned_abs();
-            rate += u64::from(self.coefficient(
-                plane,
-                position,
-                context,
-                previous_was_zero,
-                first_magnitude,
-            ));
-            rate += u64::from(self.coefficient(
-                plane,
-                position + 1,
-                magnitude_context(first_magnitude),
-                first_magnitude == 0,
-                second_magnitude,
-            ));
-            previous_was_zero = second_magnitude == 0;
-            context = magnitude_context(second_magnitude);
-            position += 2;
+        let mut prev_zero = pos != first && levels[ZIGZAG[pos - 1]] == 0;
+        while pos < last {
+            let m0 = levels[ZIGZAG[pos]].unsigned_abs();
+            let m1 = levels[ZIGZAG[pos + 1]].unsigned_abs();
+            rate += u64::from(self.coefficient(plane, pos, ctx, prev_zero, m0));
+            rate += u64::from(self.coefficient(plane, pos + 1, mag_context(m0), m0 == 0, m1));
+            prev_zero = m1 == 0;
+            ctx = mag_context(m1);
+            pos += 2;
         }
-        if position == last {
-            let magnitude = levels[ZIGZAG[position]].unsigned_abs();
-            rate +=
-                u64::from(self.coefficient(plane, position, context, previous_was_zero, magnitude));
-            context = magnitude_context(magnitude);
+        if pos == last {
+            let mag = levels[ZIGZAG[pos]].unsigned_abs();
+            rate += u64::from(self.coefficient(plane, pos, ctx, prev_zero, mag));
+            ctx = mag_context(mag);
         }
         if last < 15 {
-            rate += u64::from(self.end(plane, last + 1, context));
+            rate += u64::from(self.end(plane, last + 1, ctx));
         }
         (rate, true)
     }
@@ -458,12 +397,9 @@ pub(crate) struct MacroblockContexts {
 }
 
 impl MacroblockContexts {
-    /// Rates for an empty Intra16 luma plane (including Y2) and the two empty chroma planes.
     pub(crate) fn empty_rates(&self, costs: &TokenCosts) -> (u64, u64) {
         let end = |plane: CoefficientPlane| {
-            std::array::from_fn(|context| {
-                u64::from(costs.end(plane, plane.first_position(), context))
-            })
+            std::array::from_fn(|ctx| u64::from(costs.end(plane, plane.first_position(), ctx)))
         };
         let y2 = u64::from(costs.end(CoefficientPlane::LumaDc, 0, self.y2()));
         let luma = y2 + empty_grid_rate(end(CoefficientPlane::LumaAc), &self.above.y, &self.left.y);
@@ -477,36 +413,36 @@ impl MacroblockContexts {
         usize::from(self.above.y2) + usize::from(self.left.y2)
     }
 
-    pub(crate) fn set_y2(&mut self, nonzero: bool) {
-        self.above.y2 = nonzero;
-        self.left.y2 = nonzero;
+    pub(crate) fn set_y2(&mut self, nz: bool) {
+        self.above.y2 = nz;
+        self.left.y2 = nz;
     }
 
-    pub(crate) fn y(&self, index: usize) -> usize {
-        usize::from(self.above.y[index % 4]) + usize::from(self.left.y[index / 4])
+    pub(crate) fn y(&self, i: usize) -> usize {
+        usize::from(self.above.y[i % 4]) + usize::from(self.left.y[i / 4])
     }
 
-    pub(crate) fn set_y(&mut self, index: usize, nonzero: bool) {
-        self.above.y[index % 4] = nonzero;
-        self.left.y[index / 4] = nonzero;
+    pub(crate) fn set_y(&mut self, i: usize, nz: bool) {
+        self.above.y[i % 4] = nz;
+        self.left.y[i / 4] = nz;
     }
 
-    pub(crate) fn u(&self, index: usize) -> usize {
-        usize::from(self.above.u[index % 2]) + usize::from(self.left.u[index / 2])
+    pub(crate) fn u(&self, i: usize) -> usize {
+        usize::from(self.above.u[i % 2]) + usize::from(self.left.u[i / 2])
     }
 
-    pub(crate) fn set_u(&mut self, index: usize, nonzero: bool) {
-        self.above.u[index % 2] = nonzero;
-        self.left.u[index / 2] = nonzero;
+    pub(crate) fn set_u(&mut self, i: usize, nz: bool) {
+        self.above.u[i % 2] = nz;
+        self.left.u[i / 2] = nz;
     }
 
-    pub(crate) fn v(&self, index: usize) -> usize {
-        usize::from(self.above.v[index % 2]) + usize::from(self.left.v[index / 2])
+    pub(crate) fn v(&self, i: usize) -> usize {
+        usize::from(self.above.v[i % 2]) + usize::from(self.left.v[i / 2])
     }
 
-    pub(crate) fn set_v(&mut self, index: usize, nonzero: bool) {
-        self.above.v[index % 2] = nonzero;
-        self.left.v[index / 2] = nonzero;
+    pub(crate) fn set_v(&mut self, i: usize, nz: bool) {
+        self.above.v[i % 2] = nz;
+        self.left.v[i / 2] = nz;
     }
 
     #[cfg(test)]
@@ -518,17 +454,17 @@ impl MacroblockContexts {
     ) -> u64 {
         let mut rate = 0;
         let plane = if let Some(y2) = y2 {
-            let (block_rate, nonzero) = costs.block_rate(y2, CoefficientPlane::LumaDc, self.y2());
-            rate += block_rate;
-            self.set_y2(nonzero);
+            let (blk_rate, nz) = costs.block_rate(y2, CoefficientPlane::LumaDc, self.y2());
+            rate += blk_rate;
+            self.set_y2(nz);
             CoefficientPlane::LumaAc
         } else {
             CoefficientPlane::Luma
         };
-        for (index, block) in y.iter().enumerate() {
-            let (block_rate, nonzero) = costs.block_rate(block, plane, self.y(index));
-            rate += block_rate;
-            self.set_y(index, nonzero);
+        for (i, blk) in y.iter().enumerate() {
+            let (blk_rate, nz) = costs.block_rate(blk, plane, self.y(i));
+            rate += blk_rate;
+            self.set_y(i, nz);
         }
         rate
     }
@@ -540,86 +476,71 @@ impl MacroblockContexts {
         v: &[[i16; 16]; 4],
     ) -> u64 {
         let mut rate = 0;
-        for (index, block) in u.iter().enumerate() {
-            let (block_rate, nonzero) =
-                costs.block_rate(block, CoefficientPlane::Chroma, self.u(index));
-            rate += block_rate;
-            self.set_u(index, nonzero);
+        for (i, blk) in u.iter().enumerate() {
+            let (blk_rate, nz) = costs.block_rate(blk, CoefficientPlane::Chroma, self.u(i));
+            rate += blk_rate;
+            self.set_u(i, nz);
         }
-        for (index, block) in v.iter().enumerate() {
-            let (block_rate, nonzero) =
-                costs.block_rate(block, CoefficientPlane::Chroma, self.v(index));
-            rate += block_rate;
-            self.set_v(index, nonzero);
+        for (i, blk) in v.iter().enumerate() {
+            let (blk_rate, nz) = costs.block_rate(blk, CoefficientPlane::Chroma, self.v(i));
+            rate += blk_rate;
+            self.set_v(i, nz);
         }
         rate
     }
 }
 
-/// Empty blocks replace the above and left contexts with zero as they are visited in scan order.
 fn empty_grid_rate<const N: usize>(
     rates: [u64; CONTEXTS],
     above: &[bool; N],
     left: &[bool; N],
 ) -> u64 {
     let first = usize::from(above[0]) + usize::from(left[0]);
-    // Only the rest of the top row and left column can still see one nonzero neighbor.
     let ones = above[1..]
         .iter()
         .chain(&left[1..])
-        .map(|&nonzero| u64::from(nonzero))
+        .map(|&nz| u64::from(nz))
         .sum::<u64>();
     let zeros = (N * N - 1) as u64 - ones;
     rates[first] + ones * rates[1] + zeros * rates[0]
 }
 
-/// Coefficient branches carry probability indices; fixed extra bits and signs do not.
 pub(crate) trait TokenSink {
-    fn write_bool(&mut self, probability: u8, value: bool);
+    fn write_bool(&mut self, prob: u8, value: bool);
     #[inline(always)]
-    fn coefficient_branch(&mut self, _index: usize, probability: u8, value: bool) {
-        self.write_bool(probability, value);
+    fn coefficient_branch(&mut self, _index: usize, prob: u8, value: bool) {
+        self.write_bool(prob, value);
     }
-    /// Whether this sink only counts coefficient branches and can skip fixed extra bits.
     fn counts_only(&self) -> bool {
         false
     }
-    /// Emits or accounts for one coefficient token; the default walks its compiled path.
     #[inline(always)]
-    fn coefficient_token(
-        &mut self,
-        entry: usize,
-        token: u8,
-        skip_end_branch: bool,
-        probabilities: &[u8; 1056],
-    ) where
+    fn coefficient_token(&mut self, entry: usize, tok: u8, skip_end: bool, probs: &[u8; 1056])
+    where
         Self: Sized,
     {
-        let path = &COEFF_PATHS[usize::from(skip_end_branch)][usize::from(token)];
-        write_path(self, path, entry * 11, probabilities);
+        let path = &COEFF_PATHS[usize::from(skip_end)][usize::from(tok)];
+        write_path(self, path, entry * 11, probs);
     }
 }
 
 impl TokenSink for BoolWriter {
     #[inline(always)]
-    fn write_bool(&mut self, probability: u8, value: bool) {
-        BoolWriter::write_bool(self, probability, value);
+    fn write_bool(&mut self, prob: u8, value: bool) {
+        BoolWriter::write_bool(self, prob, value);
     }
 }
 
 impl TokenSink for CostWriter {
-    fn write_bool(&mut self, probability: u8, value: bool) {
-        CostWriter::write_bool(self, probability, value);
+    fn write_bool(&mut self, prob: u8, value: bool) {
+        CostWriter::write_bool(self, prob, value);
     }
 }
 
 pub(crate) const TOKEN_END: u8 = 11;
 
-/// Branch outcomes per coefficient-probability entry: `[zero, one]`.
 pub(crate) type BranchCounts = Box<[[u32; 2]; 1056]>;
 
-/// How often each coefficient token occurs, keyed by probability entry and by whether a
-/// preceding zero coefficient skipped the leading EOB branch.
 pub(crate) struct TokenCounts {
     tokens: Box<[[u32; 16]; 256]>,
 }
@@ -631,19 +552,17 @@ impl TokenCounts {
         }
     }
 
-    /// Expands the token histogram into the branch counts the fit consumes. One expansion per
-    /// frame costs 96 x 12 path walks instead of one walk per emitted token.
     pub(crate) fn into_counts(self) -> BranchCounts {
         let mut counts = Box::new([[0; 2]; 1056]);
-        for (slot, histogram) in self.tokens[..192].iter().enumerate() {
+        for (slot, hist) in self.tokens[..192].iter().enumerate() {
             let entry = slot / 2;
-            let skip_end_branch = slot % 2;
-            for (token, &occurrences) in histogram.iter().enumerate() {
-                if occurrences == 0 {
+            let skip_end = slot % 2;
+            for (tok, &n) in hist.iter().enumerate() {
+                if n == 0 {
                     continue;
                 }
-                for &(offset, branch) in COEFF_PATHS[skip_end_branch][token].branches() {
-                    counts[entry * 11 + usize::from(offset)][usize::from(branch)] += occurrences;
+                for &(off, branch) in COEFF_PATHS[skip_end][tok].branches() {
+                    counts[entry * 11 + usize::from(off)][usize::from(branch)] += n;
                 }
             }
         }
@@ -652,61 +571,49 @@ impl TokenCounts {
 }
 
 impl TokenSink for TokenCounts {
-    fn write_bool(&mut self, _probability: u8, _value: bool) {}
+    fn write_bool(&mut self, _prob: u8, _value: bool) {}
 
     fn counts_only(&self) -> bool {
         true
     }
 
-    fn coefficient_token(
-        &mut self,
-        entry: usize,
-        token: u8,
-        skip_end_branch: bool,
-        _probabilities: &[u8; 1056],
-    ) {
-        // Masked power-of-two indices keep both dimensions provably in bounds.
-        self.tokens[(entry * 2 + usize::from(skip_end_branch)) & 255][usize::from(token) & 15] += 1;
+    fn coefficient_token(&mut self, entry: usize, tok: u8, skip_end: bool, _probs: &[u8; 1056]) {
+        // Power-of-two masks keep both indices in bounds.
+        self.tokens[(entry * 2 + usize::from(skip_end)) & 255][usize::from(tok) & 15] += 1;
     }
 }
 
-/// Emits the fitted residual partition while a length-only state tracks the default table.
-///
-/// The token writer must use the fitted table, so each coefficient branch's `probability` is
-/// `fitted_probs[index]`; the length state substitutes `DEFAULT_COEFF_PROBS[index]`. Fixed
-/// extra-bit and sign probabilities are identical under both tables.
+/// Emits fitted residual tokens while tracking the default-table partition length.
 pub(crate) struct FittedPartition<'a> {
-    writer: BoolWriter,
-    default_length: LengthWriter,
+    w: BoolWriter,
+    default_len: LengthWriter,
     fitted_probs: &'a [u8; 1056],
 }
 
 impl<'a> FittedPartition<'a> {
     pub(crate) fn new(fitted_probs: &'a [u8; 1056]) -> Self {
         Self {
-            writer: BoolWriter::new(),
-            default_length: LengthWriter::new(),
+            w: BoolWriter::new(),
+            default_len: LengthWriter::new(),
             fitted_probs,
         }
     }
 
-    /// The fitted partition bytes and the default partition's exact length.
     pub(crate) fn finish(self) -> (Vec<u8>, usize) {
-        (self.writer.finish(), self.default_length.finish())
+        (self.w.finish(), self.default_len.finish())
     }
 }
 
 impl TokenSink for FittedPartition<'_> {
-    fn write_bool(&mut self, probability: u8, value: bool) {
-        self.writer.write_bool(probability, value);
-        self.default_length.write_bool(probability, value);
+    fn write_bool(&mut self, prob: u8, value: bool) {
+        self.w.write_bool(prob, value);
+        self.default_len.write_bool(prob, value);
     }
 
-    fn coefficient_branch(&mut self, index: usize, probability: u8, value: bool) {
-        debug_assert_eq!(probability, self.fitted_probs[index]);
-        self.writer.write_bool(probability, value);
-        self.default_length
-            .write_bool(DEFAULT_COEFF_PROBS[index], value);
+    fn coefficient_branch(&mut self, idx: usize, prob: u8, value: bool) {
+        debug_assert_eq!(prob, self.fitted_probs[idx]);
+        self.w.write_bool(prob, value);
+        self.default_len.write_bool(DEFAULT_COEFF_PROBS[idx], value);
     }
 }
 
@@ -717,17 +624,17 @@ pub(crate) struct TokenContexts {
 }
 
 impl TokenContexts {
-    pub(crate) fn new(macroblock_columns: usize) -> Self {
+    pub(crate) fn new(mb_cols: usize) -> Self {
         Self {
-            above: vec![Edges::default(); macroblock_columns],
+            above: vec![Edges::default(); mb_cols],
             left: Edges::default(),
         }
     }
 
-    pub(crate) fn contexts(&self, macroblock_x: usize) -> MacroblockContexts {
+    pub(crate) fn contexts(&self, mb_x: usize) -> MacroblockContexts {
         MacroblockContexts {
-            above: self.above[macroblock_x],
-            left: if macroblock_x == 0 {
+            above: self.above[mb_x],
+            left: if mb_x == 0 {
                 Edges::default()
             } else {
                 self.left
@@ -740,36 +647,35 @@ impl TokenContexts {
         self.left
     }
 
-    /// Replace the left edge with the previous strip's final macroblock of this row.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn set_left(&mut self, left: Edges) {
         self.left = left;
     }
 
-    pub(crate) fn advance(&mut self, macroblock_x: usize, macroblock: &Macroblock) {
-        let mut neighbors = self.contexts(macroblock_x);
-        let first = match &macroblock.luma {
+    pub(crate) fn advance(&mut self, mb_x: usize, mb: &Macroblock) {
+        let mut ctx = self.contexts(mb_x);
+        let first = match &mb.luma {
             Luma::Intra16 { .. } => {
-                neighbors.set_y2(macroblock.lengths[0] != 0);
+                ctx.set_y2(mb.lengths[0] != 0);
                 1
             }
             Luma::Intra4 { .. } => 0,
         };
-        for (index, &length) in macroblock.lengths[1..17].iter().enumerate() {
-            neighbors.set_y(index, usize::from(length) > first);
+        for (i, &len) in mb.lengths[1..17].iter().enumerate() {
+            ctx.set_y(i, usize::from(len) > first);
         }
-        for (index, &length) in macroblock.lengths[17..21].iter().enumerate() {
-            neighbors.set_u(index, length != 0);
+        for (i, &len) in mb.lengths[17..21].iter().enumerate() {
+            ctx.set_u(i, len != 0);
         }
-        for (index, &length) in macroblock.lengths[21..].iter().enumerate() {
-            neighbors.set_v(index, length != 0);
+        for (i, &len) in mb.lengths[21..].iter().enumerate() {
+            ctx.set_v(i, len != 0);
         }
-        self.commit(macroblock_x, neighbors);
+        self.commit(mb_x, ctx);
     }
 
-    fn commit(&mut self, macroblock_x: usize, neighbors: MacroblockContexts) {
-        self.above[macroblock_x] = neighbors.above;
-        self.left = neighbors.left;
+    fn commit(&mut self, mb_x: usize, ctx: MacroblockContexts) {
+        self.above[mb_x] = ctx.above;
+        self.left = ctx.left;
     }
 }
 
@@ -780,112 +686,93 @@ pub(crate) struct TokenWriter {
 }
 
 impl TokenWriter {
-    pub(crate) fn new(macroblock_columns: usize) -> Self {
-        Self::with_probs(macroblock_columns, DEFAULT_COEFF_PROBS)
+    pub(crate) fn new(mb_cols: usize) -> Self {
+        Self::with_probs(mb_cols, DEFAULT_COEFF_PROBS)
     }
 
-    pub(crate) fn with_probs(macroblock_columns: usize, probs: [u8; 1056]) -> Self {
+    pub(crate) fn with_probs(mb_cols: usize, probs: [u8; 1056]) -> Self {
         Self {
             probs,
-            contexts: TokenContexts::new(macroblock_columns),
+            contexts: TokenContexts::new(mb_cols),
         }
     }
 
-    pub(crate) fn skip_macroblock(&mut self, macroblock_x: usize, luma: &Luma) {
-        let mut neighbors = MacroblockContexts::default();
+    pub(crate) fn skip_macroblock(&mut self, mb_x: usize, luma: &Luma) {
+        let mut ctx = MacroblockContexts::default();
         if matches!(luma, Luma::Intra4 { .. }) {
-            let previous = self.contexts.contexts(macroblock_x);
-            neighbors.above.y2 = previous.above.y2;
-            neighbors.left.y2 = previous.left.y2;
+            let prev = self.contexts.contexts(mb_x);
+            ctx.above.y2 = prev.above.y2;
+            ctx.left.y2 = prev.left.y2;
         }
-        self.contexts.commit(macroblock_x, neighbors);
+        self.contexts.commit(mb_x, ctx);
     }
 
     #[inline]
     pub(crate) fn write_macroblock<W: TokenSink>(
         &mut self,
-        writer: &mut W,
-        macroblock_x: usize,
-        macroblock: &Macroblock,
+        w: &mut W,
+        mb_x: usize,
+        mb: &Macroblock,
         spool: &CoefficientSpool,
     ) {
-        let mut neighbors = self.contexts.contexts(macroblock_x);
-        match spool.levels(macroblock) {
-            PackedLevels::Narrow(levels) => {
-                self.write_blocks(writer, levels, macroblock, &mut neighbors);
-            }
-            PackedLevels::Wide(levels) => {
-                self.write_blocks(writer, levels, macroblock, &mut neighbors);
-            }
+        let mut ctx = self.contexts.contexts(mb_x);
+        match spool.levels(mb) {
+            PackedLevels::Narrow(levels) => self.write_blocks(w, levels, mb, &mut ctx),
+            PackedLevels::Wide(levels) => self.write_blocks(w, levels, mb, &mut ctx),
         }
-        self.contexts.commit(macroblock_x, neighbors);
+        self.contexts.commit(mb_x, ctx);
     }
 
     fn write_blocks<W: TokenSink, C: Copy + Into<i16>>(
         &self,
-        writer: &mut W,
+        w: &mut W,
         mut levels: &[C],
-        macroblock: &Macroblock,
-        neighbors: &mut MacroblockContexts,
+        mb: &Macroblock,
+        ctx: &mut MacroblockContexts,
     ) {
-        let lengths = &macroblock.lengths;
-        let plane = match macroblock.luma {
+        let lengths = &mb.lengths;
+        let plane = match mb.luma {
             Luma::Intra4 { .. } => CoefficientPlane::Luma,
             Luma::Intra16 { .. } => {
                 let (y2, rest) = levels.split_at(usize::from(lengths[0]));
                 levels = rest;
-                let nonzero = write_block(
-                    writer,
-                    y2,
-                    CoefficientPlane::LumaDc,
-                    neighbors.y2(),
-                    &self.probs,
-                );
-                neighbors.set_y2(nonzero);
+                let nz = write_block(w, y2, CoefficientPlane::LumaDc, ctx.y2(), &self.probs);
+                ctx.set_y2(nz);
                 CoefficientPlane::LumaAc
             }
         };
-        for (index, &length) in lengths[1..17].iter().enumerate() {
-            let (block, rest) = levels.split_at(usize::from(length));
+        for (i, &len) in lengths[1..17].iter().enumerate() {
+            let (blk, rest) = levels.split_at(usize::from(len));
             levels = rest;
-            let nonzero = write_block(writer, block, plane, neighbors.y(index), &self.probs);
-            neighbors.set_y(index, nonzero);
+            let nz = write_block(w, blk, plane, ctx.y(i), &self.probs);
+            ctx.set_y(i, nz);
         }
         for (base, above, left) in [
-            (17, &mut neighbors.above.u, &mut neighbors.left.u),
-            (21, &mut neighbors.above.v, &mut neighbors.left.v),
+            (17, &mut ctx.above.u, &mut ctx.left.u),
+            (21, &mut ctx.above.v, &mut ctx.left.v),
         ] {
-            for (index, &length) in lengths[base..base + 4].iter().enumerate() {
-                let column = index % 2;
-                let row = index / 2;
-                let context = usize::from(above[column]) + usize::from(left[row]);
-                let (block, rest) = levels.split_at(usize::from(length));
+            for (i, &len) in lengths[base..base + 4].iter().enumerate() {
+                let col = i % 2;
+                let row = i / 2;
+                let blk_ctx = usize::from(above[col]) + usize::from(left[row]);
+                let (blk, rest) = levels.split_at(usize::from(len));
                 levels = rest;
-                let nonzero = write_block(
-                    writer,
-                    block,
-                    CoefficientPlane::Chroma,
-                    context,
-                    &self.probs,
-                );
-                above[column] = nonzero;
-                left[row] = nonzero;
+                let nz = write_block(w, blk, CoefficientPlane::Chroma, blk_ctx, &self.probs);
+                above[col] = nz;
+                left[row] = nz;
             }
         }
     }
 }
 
-/// Highest scan position at or above `first` (0 or 1) that carries a non-zero coefficient.
-///
-/// Descending groups let the common short block skip most of a linear fifteen-step scan.
 #[inline]
 pub(crate) fn last_nonzero(levels: &[i16; 16], first: usize) -> Option<usize> {
-    let at = |position: usize| levels[ZIGZAG[position]];
+    let at = |pos: usize| levels[ZIGZAG[pos]];
     if at(8) | at(9) | at(10) | at(11) | at(12) | at(13) | at(14) | at(15) != 0 {
-        return (8..16).rev().find(|&position| at(position) != 0);
+        return (8..16).rev().find(|&pos| at(pos) != 0);
     }
     if at(4) | at(5) | at(6) | at(7) != 0 {
-        return (4..8).rev().find(|&position| at(position) != 0);
+        return (4..8).rev().find(|&pos| at(pos) != 0);
     }
     if at(2) | at(3) != 0 {
         return Some(if at(3) != 0 { 3 } else { 2 });
@@ -896,85 +783,70 @@ pub(crate) fn last_nonzero(levels: &[i16; 16], first: usize) -> Option<usize> {
     (first == 0 && at(0) != 0).then_some(0)
 }
 
-/// Write one block from its scan-order prefix and return whether it carries a coefficient at or
-/// after `first_position`.
 #[inline(always)]
 fn write_block<W: TokenSink, C: Copy + Into<i16>>(
-    writer: &mut W,
+    w: &mut W,
     levels: &[C],
     plane: CoefficientPlane,
-    first_context: usize,
+    ctx0: usize,
     probs: &[u8; 1056],
 ) -> bool {
-    let first_position = plane.first_position();
+    let first = plane.first_position();
     let plane = plane.index();
-    if levels.len() <= first_position {
-        write_token(
-            writer,
-            TOKEN_END,
-            (plane, first_position, first_context),
-            false,
-            probs,
-        );
+    if levels.len() <= first {
+        write_token(w, TOKEN_END, (plane, first, ctx0), false, probs);
         return false;
     }
 
     let last = levels.len() - 1;
-    let mut context = first_context;
-    let mut previous_was_zero = false;
-    for (position, &level) in levels.iter().enumerate().skip(first_position) {
+    let mut ctx = ctx0;
+    let mut prev_zero = false;
+    for (pos, &level) in levels.iter().enumerate().skip(first) {
         let level = level.into();
-        let magnitude = level.unsigned_abs();
-        let token = token_for_magnitude(magnitude);
-        write_token(
-            writer,
-            token,
-            (plane, position, context),
-            previous_was_zero,
-            probs,
-        );
-        if magnitude != 0 && !writer.counts_only() {
-            write_extra_bits(writer, magnitude, token);
-            writer.write_bool(128, level < 0);
+        let mag = level.unsigned_abs();
+        let tok = token_for_magnitude(mag);
+        write_token(w, tok, (plane, pos, ctx), prev_zero, probs);
+        if mag != 0 && !w.counts_only() {
+            write_extra_bits(w, mag, tok);
+            w.write_bool(128, level < 0);
         }
-        context = magnitude_context(magnitude);
-        previous_was_zero = magnitude == 0;
+        ctx = mag_context(mag);
+        prev_zero = mag == 0;
     }
 
     if last < 15 {
-        write_token(writer, TOKEN_END, (plane, last + 1, context), false, probs);
+        write_token(w, TOKEN_END, (plane, last + 1, ctx), false, probs);
     }
     true
 }
 
-/// Write one token's coefficient branches; `base` is the entry's first probability index.
 #[inline(always)]
-fn write_path<W: TokenSink>(writer: &mut W, path: &TokenPath, base: usize, probs: &[u8]) {
-    for &(offset, branch) in path.branches() {
-        let index = base + usize::from(offset);
-        writer.coefficient_branch(index, probs[index], branch);
+fn write_path<W: TokenSink>(w: &mut W, path: &TokenPath, base: usize, probs: &[u8]) {
+    for &(off, branch) in path.branches() {
+        let idx = base + usize::from(off);
+        w.coefficient_branch(idx, probs[idx], branch);
     }
 }
 
 #[inline(always)]
 fn write_token<W: TokenSink>(
-    writer: &mut W,
-    token: u8,
-    (plane, position, context): (usize, usize, usize),
-    skip_end_branch: bool,
+    w: &mut W,
+    tok: u8,
+    (plane, pos, ctx): (usize, usize, usize),
+    skip_end: bool,
     probs: &[u8; 1056],
 ) {
-    let entry = usize::from(ENTRY_BASE[plane][position]) + context;
+    let entry = usize::from(ENTRY_BASE[plane][pos]) + ctx;
     debug_assert_ne!(
-        COEFF_PATHS[usize::from(skip_end_branch)][usize::from(token)].len,
+        COEFF_PATHS[usize::from(skip_end)][usize::from(tok)].len,
         0,
         "the token must be a tree leaf"
     );
-    writer.coefficient_token(entry, token, skip_end_branch, probs);
+    w.coefficient_token(entry, tok, skip_end, probs);
 }
 
-fn write_extra_bits<W: TokenSink>(writer: &mut W, magnitude: u16, token: u8) {
-    let (base, probabilities): (u16, &[u8]) = match token {
+fn write_extra_bits<W: TokenSink>(w: &mut W, mag: u16, tok: u8) {
+    let (base, probs): (u16, &[u8]) = match tok {
         5 => (5, &CATEGORY_ONE),
         6 => (7, &CATEGORY_TWO),
         7 => (11, &CATEGORY_THREE),
@@ -983,15 +855,15 @@ fn write_extra_bits<W: TokenSink>(writer: &mut W, magnitude: u16, token: u8) {
         10 => (67, &CATEGORY_SIX),
         _ => return,
     };
-    let extra = magnitude - base;
-    for (index, probability) in probabilities.iter().enumerate() {
-        let shift = probabilities.len() - index - 1;
-        writer.write_bool(*probability, extra & (1 << shift) != 0);
+    let extra = mag - base;
+    for (i, &prob) in probs.iter().enumerate() {
+        let shift = probs.len() - i - 1;
+        w.write_bool(prob, extra & (1 << shift) != 0);
     }
 }
 
-pub(crate) const fn token_for_magnitude(magnitude: u16) -> u8 {
-    match magnitude {
+pub(crate) const fn token_for_magnitude(mag: u16) -> u8 {
+    match mag {
         0 => 0,
         1 => 1,
         2 => 2,
@@ -1007,49 +879,43 @@ pub(crate) const fn token_for_magnitude(magnitude: u16) -> u8 {
     }
 }
 
-fn magnitude_context(magnitude: u16) -> usize {
-    match magnitude {
+fn mag_context(mag: u16) -> usize {
+    match mag {
         0 => 0,
         1 => 1,
         _ => 2,
     }
 }
 
-/// A fitted table with its estimated net savings in 1/256 bit.
 pub(crate) struct ProbabilityFit {
     pub(crate) probs: [u8; 1056],
     pub(crate) savings: u64,
 }
 
-/// Empirical probabilities change only when estimated savings repay their header updates.
-///
-/// `None` means every entry stayed at its default. `savings` is the sum of net estimates over
-/// changed entries; callers use it to decide whether exact acceptance is worth its cost.
 pub(crate) fn fit_probs(counts: &[[u32; 2]; 1056]) -> Option<ProbabilityFit> {
     let mut probs = DEFAULT_COEFF_PROBS;
     let mut savings = 0;
-    for (index, counts) in counts.iter().enumerate() {
+    for (i, counts) in counts.iter().enumerate() {
         let total = u64::from(counts[0]) + u64::from(counts[1]);
         if total == 0 {
             continue;
         }
-        let old = probs[index];
-        let old_cost = u64::from(counts[0]) * u64::from(crate::cost::bool_cost(old, false))
-            + u64::from(counts[1]) * u64::from(crate::cost::bool_cost(old, true));
-        let update_cost = u64::from(crate::cost::bool_cost(COEFF_UPDATE_PROBS[index], true))
-            + 8 * 256
-            - u64::from(crate::cost::bool_cost(COEFF_UPDATE_PROBS[index], false));
+        let old = probs[i];
+        let old_cost = u64::from(counts[0]) * u64::from(bool_cost(old, false))
+            + u64::from(counts[1]) * u64::from(bool_cost(old, true));
+        let update_cost = u64::from(bool_cost(COEFF_UPDATE_PROBS[i], true)) + 8 * 256
+            - u64::from(bool_cost(COEFF_UPDATE_PROBS[i], false));
         if old_cost <= update_cost {
             continue;
         }
         let fitted = ((u64::from(counts[0]) * 256 + total / 2) / total).clamp(1, 255) as u8;
-        let new_cost = u64::from(counts[0]) * u64::from(crate::cost::bool_cost(fitted, false))
-            + u64::from(counts[1]) * u64::from(crate::cost::bool_cost(fitted, true));
+        let new_cost = u64::from(counts[0]) * u64::from(bool_cost(fitted, false))
+            + u64::from(counts[1]) * u64::from(bool_cost(fitted, true));
         let saving = old_cost
             .saturating_sub(new_cost)
             .saturating_sub(update_cost);
         if saving > 0 {
-            probs[index] = fitted;
+            probs[i] = fitted;
             savings += saving;
         }
     }
@@ -1064,46 +930,39 @@ mod tests {
     fn emitted_block_cost(
         levels: &[i16; 16],
         plane: CoefficientPlane,
-        first_context: usize,
+        ctx0: usize,
         probs: &[u8; 1056],
     ) -> u64 {
-        let length = last_nonzero(levels, plane.first_position()).map_or(0, |last| last + 1);
-        let prefix: [i16; 16] = std::array::from_fn(|position| levels[ZIGZAG[position]]);
-        let mut writer = CostWriter::new();
-        write_block(&mut writer, &prefix[..length], plane, first_context, probs);
-        writer.bits()
+        let len = last_nonzero(levels, plane.first_position()).map_or(0, |last| last + 1);
+        let prefix: [i16; 16] = std::array::from_fn(|pos| levels[ZIGZAG[pos]]);
+        let mut w = CostWriter::new();
+        write_block(&mut w, &prefix[..len], plane, ctx0, probs);
+        w.bits()
     }
 
     fn emitted_token_cost(
         plane: CoefficientPlane,
-        position: usize,
-        context: usize,
-        previous_was_zero: bool,
-        magnitude: Option<u16>,
+        pos: usize,
+        ctx: usize,
+        prev_zero: bool,
+        mag: Option<u16>,
         probs: &[u8; 1056],
     ) -> u64 {
-        let mut writer = CostWriter::new();
-        let token = magnitude.map_or(TOKEN_END, token_for_magnitude);
-        write_token(
-            &mut writer,
-            token,
-            (plane.index(), position, context),
-            previous_was_zero,
-            probs,
-        );
-        if let Some(magnitude) = magnitude.filter(|magnitude| *magnitude != 0) {
-            write_extra_bits(&mut writer, magnitude, token);
-            writer.write_bool(128, false);
+        let mut w = CostWriter::new();
+        let tok = mag.map_or(TOKEN_END, token_for_magnitude);
+        write_token(&mut w, tok, (plane.index(), pos, ctx), prev_zero, probs);
+        if let Some(mag) = mag.filter(|&m| m != 0) {
+            write_extra_bits(&mut w, mag, tok);
+            w.write_bool(128, false);
         }
-        writer.bits()
+        w.bits()
     }
 
-    fn coefficient_probability_cases() -> [[u8; 1056]; 2] {
-        [DEFAULT_COEFF_PROBS, synthetic_probs()]
-    }
-
-    fn synthetic_probs() -> [u8; 1056] {
-        std::array::from_fn(|index| (1 + index * 71 % 255) as u8)
+    fn prob_cases() -> [[u8; 1056]; 2] {
+        [
+            DEFAULT_COEFF_PROBS,
+            std::array::from_fn(|i| (1 + i * 71 % 255) as u8),
+        ]
     }
 
     const PLANES: [CoefficientPlane; 4] = [
@@ -1113,18 +972,14 @@ mod tests {
         CoefficientPlane::Luma,
     ];
 
-    /// Every magnitude a token can carry, including both sides of each band boundary.
     const TOKEN_MAGNITUDES: [u16; 20] = [
         0, 1, 2, 3, 4, 5, 6, 7, 10, 11, 18, 19, 34, 35, 66, 67, 127, 128, 129, 2047,
     ];
 
-    /// The magnitudes one coefficient at one position takes in the cached-rate check.
     const CACHED_MAGNITUDES: [u16; 19] = [
         0, 1, 2, 3, 4, 5, 6, 7, 10, 11, 15, 16, 18, 19, 34, 35, 66, 67, 2047,
     ];
 
-    /// One row of the cost-model contract: what the model estimates, what the writer emits for
-    /// the same coefficients, and the case that names the disagreement when they differ.
     type CostRow = (String, u64, u64);
 
     fn assert_cost_rows(rows: Vec<CostRow>) {
@@ -1134,42 +989,35 @@ mod tests {
     }
 
     #[test]
-    fn token_bits_match_tree_walk() {
-        for probs in coefficient_probability_cases() {
-            let mut writer = BoolWriter::new();
-            let mut reference = BoolWriter::new();
+    fn token_tree_paths() {
+        for probs in prob_cases() {
+            let mut w = BoolWriter::new();
+            let mut ref_w = BoolWriter::new();
             let mut counts = TokenCounts::new();
-            let mut reference_counts = Box::new([[0; 2]; 1056]);
+            let mut ref_counts = Box::new([[0; 2]; 1056]);
             for plane in 0..4 {
-                for (position, &band) in COEFF_BANDS.iter().enumerate() {
-                    for context in 0..3 {
+                for (pos, &band) in COEFF_BANDS.iter().enumerate() {
+                    for ctx in 0..3 {
                         for start in [0, 2] {
-                            for token in 0..12 {
+                            for tok in 0..12 {
                                 let mut path = [false; 8];
-                                let Some(len) = tree_path(&COEFF_TREE, start, token, &mut path)
+                                let Some(len) = tree_path(&COEFF_TREE, start, tok, &mut path)
                                 else {
                                     continue;
                                 };
-                                write_token(
-                                    &mut writer,
-                                    token,
-                                    (plane, position, context),
-                                    start != 0,
-                                    &probs,
-                                );
+                                write_token(&mut w, tok, (plane, pos, ctx), start != 0, &probs);
                                 write_token(
                                     &mut counts,
-                                    token,
-                                    (plane, position, context),
+                                    tok,
+                                    (plane, pos, ctx),
                                     start != 0,
                                     &probs,
                                 );
-                                let entry = (plane * 8 + band) * 3 + context;
+                                let entry = (plane * 8 + band) * 3 + ctx;
                                 let mut node = start;
                                 for branch in path.into_iter().take(len) {
-                                    reference.write_bool(probs[entry * 11 + node / 2], branch);
-                                    reference_counts[entry * 11 + node / 2][usize::from(branch)] +=
-                                        1;
+                                    ref_w.write_bool(probs[entry * 11 + node / 2], branch);
+                                    ref_counts[entry * 11 + node / 2][usize::from(branch)] += 1;
                                     node = COEFF_TREE[node + usize::from(branch)] as usize;
                                 }
                             }
@@ -1177,15 +1025,14 @@ mod tests {
                     }
                 }
             }
-            assert_eq!(writer.finish(), reference.finish());
-            assert_eq!(counts.into_counts(), reference_counts);
+            assert_eq!(w.finish(), ref_w.finish());
+            assert_eq!(counts.into_counts(), ref_counts);
         }
     }
 
-    /// The rate model must emit exactly the bits the writer produces.
     #[test]
-    fn cost_model_matches_emitted_bits() {
-        for probs in coefficient_probability_cases() {
+    fn cost_model_exact() {
+        for probs in prob_cases() {
             let costs = TokenCosts::new(&probs);
             assert_cost_rows(token_cost_rows(&costs, &probs));
             assert_cost_rows(block_cost_rows(&costs, &probs));
@@ -1196,30 +1043,17 @@ mod tests {
     fn token_cost_rows(costs: &TokenCosts, probs: &[u8; 1056]) -> Vec<CostRow> {
         let mut rows = Vec::new();
         for plane in PLANES {
-            for context in 0..3 {
-                for position in plane.first_position()..16 {
-                    for previous_was_zero in [false, true] {
-                        for magnitude in TOKEN_MAGNITUDES {
+            for ctx in 0..3 {
+                for pos in plane.first_position()..16 {
+                    for prev_zero in [false, true] {
+                        for mag in TOKEN_MAGNITUDES {
                             rows.push((
                                 format!(
-                                    "token {} {position}/{context} previous_was_zero={previous_was_zero} magnitude={magnitude}",
-                                plane.index()
+                                    "token {} {pos}/{ctx} prev_zero={prev_zero} mag={mag}",
+                                    plane.index()
                                 ),
-                                u64::from(costs.coefficient(
-                                    plane,
-                                    position,
-                                    context,
-                                    previous_was_zero,
-                                    magnitude,
-                                )),
-                                emitted_token_cost(
-                                    plane,
-                                    position,
-                                    context,
-                                    previous_was_zero,
-                                    Some(magnitude),
-                                    probs,
-                                ),
+                                u64::from(costs.coefficient(plane, pos, ctx, prev_zero, mag)),
+                                emitted_token_cost(plane, pos, ctx, prev_zero, Some(mag), probs),
                             ));
                         }
                     }
@@ -1228,35 +1062,31 @@ mod tests {
         }
         for plane in PLANES {
             for group in 0..8 {
-                let position = plane.first_position() + 2 * group;
-                if position + 1 >= 16 {
+                let pos = plane.first_position() + 2 * group;
+                if pos + 1 >= 16 {
                     continue;
                 }
-                for context in 0..3 {
-                    let pair_context = (plane.index() * 8 + group) * 3 + context;
-                    for (packed, &rate) in costs.coefficient_pairs[pair_context].iter().enumerate()
-                    {
-                        let first = (packed & (PAIR_MAGNITUDES - 1)) as u16;
-                        let second = (packed >> PAIR_MAGNITUDES.trailing_zeros()) as u16;
+                for ctx in 0..3 {
+                    let pair_ctx = (plane.index() * 8 + group) * 3 + ctx;
+                    for (packed, &rate) in costs.coeff_pairs[pair_ctx].iter().enumerate() {
+                        let m0 = (packed & (PAIR_MAGNITUDES - 1)) as u16;
+                        let m1 = (packed >> PAIR_MAGNITUDES.trailing_zeros()) as u16;
                         rows.push((
-                            format!(
-                                "pair {} {position}/{context} {first}+{second}",
-                                plane.index()
-                            ),
+                            format!("pair {} {pos}/{ctx} {m0}+{m1}", plane.index()),
                             u64::from(rate),
                             emitted_token_cost(
                                 plane,
-                                position,
-                                context,
-                                group != 0 && context == 0,
-                                Some(first),
+                                pos,
+                                ctx,
+                                group != 0 && ctx == 0,
+                                Some(m0),
                                 probs,
                             ) + emitted_token_cost(
                                 plane,
-                                position + 1,
-                                magnitude_context(first),
-                                first == 0,
-                                Some(second),
+                                pos + 1,
+                                mag_context(m0),
+                                m0 == 0,
+                                Some(m1),
                                 probs,
                             ),
                         ));
@@ -1270,43 +1100,39 @@ mod tests {
     fn block_cost_rows(costs: &TokenCosts, probs: &[u8; 1056]) -> Vec<CostRow> {
         let mut rows = Vec::new();
         for plane in PLANES {
-            for context in 0..3 {
+            for ctx in 0..3 {
                 for last in plane.first_position()..16 {
                     for seed in 0..32usize {
                         let mut levels = [0i16; 16];
-                        for position in plane.first_position()..last {
-                            levels[ZIGZAG[position]] = ((seed * 31 + position * 7) % 8) as i16;
+                        for pos in plane.first_position()..last {
+                            levels[ZIGZAG[pos]] = ((seed * 31 + pos * 7) % 8) as i16;
                         }
                         levels[ZIGZAG[last]] = ((seed * 17 + last) % 7 + 1) as i16;
                         rows.push((
-                            format!("block-low {} {last}/{context} seed={seed}", plane.index()),
-                            costs.block(&levels, plane, context),
-                            emitted_block_cost(&levels, plane, context, probs),
+                            format!("block-low {} {last}/{ctx} seed={seed}", plane.index()),
+                            costs.block(&levels, plane, ctx),
+                            emitted_block_cost(&levels, plane, ctx, probs),
                         ));
                     }
                 }
                 for seed in 0..64usize {
-                    let magnitudes = [0, 1, -1, 2, -2, 15, -15, 16, -16, 127, -128, 2047];
-                    let levels = std::array::from_fn(|position| {
-                        magnitudes[(seed * 73 + position * 31) % magnitudes.len()]
-                    });
+                    let mags = [0, 1, -1, 2, -2, 15, -15, 16, -16, 127, -128, 2047];
+                    let levels =
+                        std::array::from_fn(|pos| mags[(seed * 73 + pos * 31) % mags.len()]);
                     rows.push((
-                        format!("block-dense {}/{context} seed={seed}", plane.index()),
-                        costs.block(&levels, plane, context),
-                        emitted_block_cost(&levels, plane, context, probs),
+                        format!("block-dense {}/{ctx} seed={seed}", plane.index()),
+                        costs.block(&levels, plane, ctx),
+                        emitted_block_cost(&levels, plane, ctx, probs),
                     ));
                 }
-                for position in plane.first_position()..16 {
-                    for magnitude in CACHED_MAGNITUDES {
+                for pos in plane.first_position()..16 {
+                    for mag in CACHED_MAGNITUDES {
                         let mut levels = [0; 16];
-                        levels[ZIGZAG[position]] = -(magnitude as i16);
+                        levels[ZIGZAG[pos]] = -(mag as i16);
                         rows.push((
-                            format!(
-                                "block-cached {} {position}/{context} {magnitude}",
-                                plane.index()
-                            ),
-                            costs.block(&levels, plane, context),
-                            emitted_block_cost(&levels, plane, context, probs),
+                            format!("block-cached {} {pos}/{ctx} {mag}", plane.index()),
+                            costs.block(&levels, plane, ctx),
+                            emitted_block_cost(&levels, plane, ctx, probs),
                         ));
                     }
                 }
@@ -1315,7 +1141,7 @@ mod tests {
         rows
     }
 
-    fn zero_macroblock() -> DenseMacroblock {
+    fn zero_mb() -> DenseMacroblock {
         DenseMacroblock {
             luma: Luma::Intra16 { mode: 0 },
             y2: [0; 16],
@@ -1326,7 +1152,7 @@ mod tests {
         }
     }
 
-    fn dense_macroblock(round: usize) -> DenseMacroblock {
+    fn dense_mb(round: usize) -> DenseMacroblock {
         let (luma, y2) = if round.is_multiple_of(3) {
             (Luma::Intra4 { modes: [0; 16] }, [0; 16])
         } else {
@@ -1334,26 +1160,26 @@ mod tests {
             dc[0] = 7;
             (Luma::Intra16 { mode: 0 }, dc)
         };
-        let mut macroblock = DenseMacroblock {
+        let mut mb = DenseMacroblock {
             luma,
             y2,
-            ..zero_macroblock()
+            ..zero_mb()
         };
-        for (index, block) in macroblock.y.iter_mut().enumerate() {
-            block[ZIGZAG[(index + round) % 16]] = (index * round) as i16;
-            if matches!(&macroblock.luma, Luma::Intra16 { .. }) {
-                block[0] = 0;
+        for (i, blk) in mb.y.iter_mut().enumerate() {
+            blk[ZIGZAG[(i + round) % 16]] = (i * round) as i16;
+            if matches!(&mb.luma, Luma::Intra16 { .. }) {
+                blk[0] = 0;
             }
         }
-        macroblock.u[round % 4][15] = [-128, 127, -129, 128][round % 4];
-        macroblock.v[(round + 1) % 4][4] = 1;
-        macroblock
+        mb.u[round % 4][15] = [-128, 127, -129, 128][round % 4];
+        mb.v[(round + 1) % 4][4] = 1;
+        mb
     }
 
     fn pack(dense: DenseMacroblock) -> (Macroblock, CoefficientSpool) {
         let mut spool = CoefficientSpool::new();
-        let macroblock = Macroblock::pack(dense, &mut spool);
-        (macroblock, spool)
+        let mb = Macroblock::pack(dense, &mut spool);
+        (mb, spool)
     }
 
     fn macroblock_cost_rows(probs: [u8; 1056]) -> Vec<CostRow> {
@@ -1361,53 +1187,49 @@ mod tests {
         let mut tokens = TokenWriter::with_probs(2, probs);
         let mut rows = Vec::new();
         for round in 0..8 {
-            let column = round % 2;
-            let dense = dense_macroblock(round);
-            let (macroblock, _spool) = pack(dense);
-            let neighbors = tokens.contexts.contexts(column);
-            let (zero_luma, zero_chroma) = neighbors.empty_rates(&costs);
-            let luma_only = DenseMacroblock {
+            let col = round % 2;
+            let dense = dense_mb(round);
+            let (mb, _spool) = pack(dense);
+            let ctx = tokens.contexts.contexts(col);
+            let (empty_y, empty_uv) = ctx.empty_rates(&costs);
+            let y_only = DenseMacroblock {
                 luma: dense.luma,
                 y2: dense.y2,
                 y: dense.y,
-                ..zero_macroblock()
+                ..zero_mb()
             };
-            let chroma_only = DenseMacroblock {
+            let uv_only = DenseMacroblock {
                 u: dense.u,
                 v: dense.v,
-                ..zero_macroblock()
+                ..zero_mb()
             };
-            let luma_dc = match &dense.luma {
+            let y2 = match &dense.luma {
                 Luma::Intra16 { .. } => Some(&dense.y2),
                 Luma::Intra4 { .. } => None,
             };
-            let mut luma_neighbors = neighbors;
-            let luma_rate = luma_neighbors.luma_cost(&costs, luma_dc, &dense.y);
-            let mut chroma_neighbors = neighbors;
-            let chroma_rate = chroma_neighbors.chroma_cost(&costs, &dense.u, &dense.v);
-            for (label, candidate, rate) in [
-                ("dense", &dense, luma_rate + chroma_rate),
-                ("luma", &luma_only, luma_rate + zero_chroma),
-                ("chroma", &chroma_only, zero_luma + chroma_rate),
+            let mut y_ctx = ctx;
+            let y_rate = y_ctx.luma_cost(&costs, y2, &dense.y);
+            let mut uv_ctx = ctx;
+            let uv_rate = uv_ctx.chroma_cost(&costs, &dense.u, &dense.v);
+            for (label, cand, rate) in [
+                ("dense", &dense, y_rate + uv_rate),
+                ("luma", &y_only, y_rate + empty_uv),
+                ("chroma", &uv_only, empty_y + uv_rate),
             ] {
-                let (candidate, candidate_spool) = pack(*candidate);
-                let mut emitted = CostWriter::new();
+                let (cand, cand_spool) = pack(*cand);
+                let mut w = CostWriter::new();
                 tokens
                     .clone()
-                    .write_macroblock(&mut emitted, column, &candidate, &candidate_spool);
-                rows.push((
-                    format!("macroblock {label} round {round}"),
-                    rate,
-                    emitted.bits(),
-                ));
+                    .write_macroblock(&mut w, col, &cand, &cand_spool);
+                rows.push((format!("mb {label} round {round}"), rate, w.bits()));
             }
-            tokens.contexts.advance(column, &macroblock);
+            tokens.contexts.advance(col, &mb);
         }
         rows
     }
 
     #[test]
-    fn probability_updates_repay_header_cost() {
+    fn prob_fit_saves_bits() {
         assert!(fit_probs(&[[0; 2]; 1056]).is_none());
         let mut counts = [[0; 2]; 1056];
         counts[0] = [16_777_216, 0];
@@ -1423,12 +1245,12 @@ mod tests {
     }
 
     #[test]
-    fn scan_covers_every_coefficient() {
+    fn zigzag_permutation() {
         let mut seen = [false; 16];
-        for position in ZIGZAG {
-            assert!(!seen[position]);
-            seen[position] = true;
+        for pos in ZIGZAG {
+            assert!(!seen[pos]);
+            seen[pos] = true;
         }
-        assert!(seen.iter().all(|seen| *seen));
+        assert!(seen.iter().all(|&s| s));
     }
 }

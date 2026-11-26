@@ -1,4 +1,4 @@
-//! The tables this build carries, and the order a lookup consults them.
+//! Enabled pronunciation tables in tiebreak precedence order.
 
 use crate::table::PronunciationTable;
 
@@ -9,10 +9,7 @@ use crate::jmdict;
 #[cfg(feature = "unihan")]
 use crate::unihan;
 
-/// Every source that names a pronunciation for Chinese text, in the order a tie is decided.
-///
-/// A word source precedes a character source: a word and a character of the same length
-/// both name the position they start at, and the word is the one read as a word.
+/// Chinese tables in precedence order (words before single characters).
 pub(crate) const CHINESE_TABLES: &[&PronunciationTable] = &[
     #[cfg(feature = "cedict")]
     &cedict::TABLE,
@@ -20,10 +17,7 @@ pub(crate) const CHINESE_TABLES: &[&PronunciationTable] = &[
     &unihan::TABLE,
 ];
 
-/// Every source that names a pronunciation for Japanese text.
-///
-/// The pronunciation a Japanese source names is kana, which the caller reads as its own
-/// script: a rule set turns kana into Latin, and no table has to hold both.
+/// Japanese tables (delivering kana for downstream romanization).
 pub(crate) const JAPANESE_TABLES: &[&PronunciationTable] = &[
     #[cfg(feature = "jmdict")]
     &jmdict::TABLE,

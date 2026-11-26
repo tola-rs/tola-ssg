@@ -30,7 +30,7 @@ where
         }
         let (served, session) = Self::prepared_session(&mut self.session);
         let configuration = served.configuration();
-        let root = configuration.get_root().to_path_buf();
+        let root = configuration.root().to_path_buf();
         let client_root = crate::uri::ClientRoot::new(&request.sources.root);
         let boundary = session.resources().source_boundary(configuration);
         let mut symbols = Vec::new();
@@ -85,7 +85,7 @@ where
                     .map_err(SourceFailure::of)?;
             symbols.extend(crate::symbols::pages(
                 &realized,
-                configuration.get_root(),
+                configuration.root(),
                 &client_root,
                 &request.query,
             ));
@@ -155,7 +155,7 @@ where
         };
         crate::call_hierarchy::incoming(crate::call_hierarchy::Incoming {
             disk: &mut self.disk,
-            root: configuration.get_root(),
+            root: configuration.root(),
             view: &request.view,
             locations: Some(&locations),
             boundary: &boundary,
@@ -183,7 +183,7 @@ where
         let configuration = served.configuration();
         let Some(source) = crate::sources::load(
             &request.uri,
-            configuration.get_root(),
+            configuration.root(),
             &request.sources.overrides,
             &session.resources().source_boundary(configuration),
             None,
@@ -234,7 +234,7 @@ where
         let configuration = served.configuration();
         let Some(source) = crate::sources::load(
             &request.uri,
-            configuration.get_root(),
+            configuration.root(),
             &request.sources.overrides,
             &session.resources().source_boundary(configuration),
             None,

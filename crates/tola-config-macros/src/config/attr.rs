@@ -207,20 +207,19 @@ pub fn infer_section(name: &str) -> String {
     to_snake_case(name)
 }
 
-/// Convert PascalCase to snake_case.
 fn to_snake_case(s: &str) -> String {
-    let mut result = String::new();
-    for (i, c) in s.chars().enumerate() {
-        if c.is_uppercase() {
-            if i > 0 {
-                result.push('_');
+    let mut out = String::new();
+    for (idx, ch) in s.chars().enumerate() {
+        if ch.is_uppercase() {
+            if idx > 0 {
+                out.push('_');
             }
-            result.push(c.to_ascii_lowercase());
+            out.push(ch.to_ascii_lowercase());
         } else {
-            result.push(c);
+            out.push(ch);
         }
     }
-    result
+    out
 }
 
 fn require_scope(
@@ -231,13 +230,13 @@ fn require_scope(
     if actual == expected {
         Ok(())
     } else {
-        let expected_name = match expected {
+        let scope_name = match expected {
             ConfigAttrScope::Struct => "struct",
             ConfigAttrScope::Field => "field",
         };
         Err(syn::Error::new_spanned(
             key,
-            format!("{key} is only valid on a config {expected_name}"),
+            format!("{key} is only valid on a config {scope_name}"),
         ))
     }
 }
@@ -264,11 +263,11 @@ fn parse_string_value(
     meta: &syn::meta::ParseNestedMeta<'_>,
     key: &syn::Ident,
 ) -> syn::Result<String> {
-    let value = meta.value()?;
-    let literal: syn::LitStr = value.parse().map_err(|error| {
-        syn::Error::new(error.span(), format!("{key} expects a string literal"))
-    })?;
-    Ok(literal.value())
+    let val = meta.value()?;
+    let lit: syn::LitStr = val
+        .parse()
+        .map_err(|err| syn::Error::new(err.span(), format!("{key} expects a string literal")))?;
+    Ok(lit.value())
 }
 
 pub(super) fn validate_section_path(section: &str, span: proc_macro2::Span) -> syn::Result<()> {
@@ -316,19 +315,17 @@ fn parse_collection_shape(meta: &syn::meta::ParseNestedMeta<'_>) -> syn::Result<
     }
 }
 
-/// Status and collection choices accept either an identifier or a string.
 fn parse_choice_name(meta: &syn::meta::ParseNestedMeta<'_>, expected: &str) -> syn::Result<String> {
-    let value = meta.value()?;
-    if value.peek(syn::Ident) {
-        Ok(value.parse::<syn::Ident>()?.to_string())
-    } else if value.peek(syn::LitStr) {
-        Ok(value.parse::<syn::LitStr>()?.value())
+    let val = meta.value()?;
+    if val.peek(syn::Ident) {
+        Ok(val.parse::<syn::Ident>()?.to_string())
+    } else if val.peek(syn::LitStr) {
+        Ok(val.parse::<syn::LitStr>()?.value())
     } else {
         Err(meta.error(expected))
     }
 }
 
-/// Extract doc comment from #[doc = "..."] attributes.
 pub fn extract_doc_comment(attrs: &[Attribute]) -> Option<String> {
     let docs: Vec<String> = attrs
         .iter()
@@ -360,7 +357,7 @@ mod tests {
     use syn::parse_quote;
 
     #[test]
-    fn section_names_come_from_type_names() {
+    fn inferred_sections() {
         for (name, expected) in [
             ("BuildSectionConfig", "build"),
             ("SiteMetaConfig", "site"),
@@ -372,26 +369,25 @@ mod tests {
         }
     }
 
-    /// Each accepted spelling reaches the parsed attribute field it names.
     #[test]
-    fn accepted_attributes_parse() {
+    fn parse_valid_attrs() {
         let attrs = vec![parse_quote!(#[config(
             name = "title",
             default = "hello",
             status = "experimental",
             sub
         )])];
-        let parsed = ConfigAttrs::parse(&attrs, ConfigAttrScope::Field).unwrap();
-        assert_eq!(parsed.name.as_deref(), Some("title"));
-        assert_eq!(parsed.default.as_deref(), Some("hello"));
-        assert_eq!(parsed.status, Some(FieldStatus::Experimental));
-        assert!(parsed.sub);
+        let cfg = ConfigAttrs::parse(&attrs, ConfigAttrScope::Field).unwrap();
+        assert_eq!(cfg.name.as_deref(), Some("title"));
+        assert_eq!(cfg.default.as_deref(), Some("hello"));
+        assert_eq!(cfg.status, Some(FieldStatus::Experimental));
+        assert!(cfg.sub);
 
         let attrs = vec![parse_quote!(#[tola_config(section = "site")])];
-        let parsed = ConfigAttrs::parse(&attrs, ConfigAttrScope::Struct).unwrap();
-        assert_eq!(parsed.section.as_deref(), Some("site"));
+        let cfg = ConfigAttrs::parse(&attrs, ConfigAttrScope::Struct).unwrap();
+        assert_eq!(cfg.section.as_deref(), Some("site"));
         assert_eq!(
-            parsed.crate_path.unwrap().to_token_stream().to_string(),
+            cfg.crate_path.unwrap().to_token_stream().to_string(),
             "tola_config"
         );
 
@@ -413,7 +409,7 @@ mod tests {
     }
 
     #[test]
-    fn incompatible_attributes_are_refused() {
+    fn invalid_attrs_refused() {
         for (attrs, scope) in [
             (
                 vec![parse_quote!(#[config(collection = inline)])],
@@ -448,11 +444,11 @@ mod tests {
     }
 
     #[test]
-    fn sections_require_bare_key_components() {
-        for section in ["", "site.child", "site-name.child_1", "123"] {
-            assert!(super::validate_section_path(section, proc_macro2::Span::call_site()).is_ok());
+    fn section_bare_keys() {
+        for sec in ["", "site.child", "site-name.child_1", "123"] {
+            assert!(super::validate_section_path(sec, proc_macro2::Span::call_site()).is_ok());
         }
-        for section in [
+        for sec in [
             "site!",
             "site..child",
             ".site",
@@ -461,8 +457,8 @@ mod tests {
             "站点",
             "\"site\"",
         ] {
-            let literal = syn::LitStr::new(section, proc_macro2::Span::call_site());
-            let attrs = vec![parse_quote!(#[config(section = #literal)])];
+            let lit = syn::LitStr::new(sec, proc_macro2::Span::call_site());
+            let attrs = vec![parse_quote!(#[config(section = #lit)])];
             assert!(ConfigAttrs::parse(&attrs, ConfigAttrScope::Struct).is_err());
         }
     }

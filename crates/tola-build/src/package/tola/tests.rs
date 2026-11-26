@@ -10,6 +10,10 @@ use std::io::Cursor;
 use std::path::Path;
 use std::sync::Arc;
 
+use tempfile::TempDir;
+use typst::World;
+use typst::foundations::{Array, Dict, IntoValue};
+
 use super::*;
 use crate::content::{
     ContentId, ContentSourceLayout, ContentUnit, SourceMetadataDeclaration, SourceRecords,
@@ -17,42 +21,38 @@ use crate::content::{
 };
 use crate::metadata::SourceMetadata;
 use crate::package::SiteBindings;
-use tempfile::TempDir;
-use typst::World;
-use typst::foundations::{Array, Dict, IntoValue};
 
 #[derive(Default)]
 struct IconFiles(Arc<tola_icons::IconCollections>);
 
 impl tola_typst::FileProvider for IconFiles {
     fn target(&self, id: typst::syntax::FileId) -> Option<tola_typst::FileTarget> {
-        let typst::syntax::VirtualRoot::Package(package) = id.root() else {
+        let typst::syntax::VirtualRoot::Package(pkg) = id.root() else {
             return None;
         };
         let path = Path::new(id.vpath().get_with_slash().trim_start_matches('/'));
-        if tola_packages::is_icon_file(package, path) {
-            return Some(icon_file_target(&self.0, package, path));
+        if tola_packages::is_icon_file(pkg, path) {
+            return Some(icon_file_target(&self.0, pkg, path));
         }
-        read_package(package, id.vpath().get_with_slash())
+        read_package(pkg, id.vpath().get_with_slash())
             .map(|bytes| tola_typst::FileTarget::Bytes(bytes.into()))
     }
 }
 
-/// A world compiling `source` against `library` and `icons`, with `fonts` when given.
 fn typst_world(
-    source: &str,
-    library: &tola_packages::library::SiteLibrary,
+    src: &str,
+    lib: &tola_packages::library::SiteLibrary,
     icons: Arc<tola_icons::IconCollections>,
     fonts: Option<Arc<FontStore>>,
 ) -> (TempDir, TypstWorld) {
-    let directory = TempDir::new().unwrap();
-    let main = directory.path().join("main.typ");
-    fs::write(&main, source).unwrap();
-    let files = tola_typst::FileResolver::new().with_provider(IconFiles(icons));
-    let builder = TypstWorld::builder(&main, directory.path())
+    let dir = TempDir::new().unwrap();
+    let main = dir.path().join("main.typ");
+    fs::write(&main, src).unwrap();
+    let files = tola_typst::FileStore::new().with_provider(IconFiles(icons));
+    let builder = TypstWorld::builder(&main, dir.path())
         .with_files(Arc::new(files))
         .with_local_cache()
-        .with_shared_library(library.shared());
+        .with_shared_library(lib.shared());
     let builder = match fonts {
         Some(fonts) => builder.with_fonts(fonts),
         None => builder.no_fonts(),
@@ -60,45 +60,23 @@ fn typst_world(
     let world = builder
         .build(&tola_typst::BundleCancellation::default())
         .expect("valid test world");
-    (directory, world)
+    (dir, world)
 }
 
-/// A world compiling against the given library and icon collections.
-fn world_with_icons(
-    source: &str,
-    library: &tola_packages::library::SiteLibrary,
-    icons: Arc<tola_icons::IconCollections>,
-) -> (TempDir, TypstWorld) {
-    typst_world(source, library, icons, None)
+fn default_library(srcs: SourceRecords) -> tola_packages::library::SiteLibrary {
+    let cfg = crate::config::tests::OwnedSiteConfig::new("");
+    SiteBindings::from_config(&cfg.config, Default::default(), None).library(srcs)
 }
 
-/// The library of a default site configuration holding `sources`.
-fn default_library(sources: SourceRecords) -> tola_packages::library::SiteLibrary {
-    let site_config = crate::config::tests::OwnedSiteConfig::new("");
-    let identity = SiteBindings::from_config(&site_config.config, Default::default(), None);
-    identity.library(sources)
+fn world_from_default_config(src: &str, srcs: SourceRecords) -> (TempDir, TypstWorld) {
+    typst_world(src, &default_library(srcs), Arc::default(), None)
 }
 
-/// A world compiling against the library of a default site configuration.
-fn world_from_default_config(source: &str, sources: SourceRecords) -> (TempDir, TypstWorld) {
-    world_with_icons(source, &default_library(sources), Arc::default())
+fn assert_default_compiles(src: &str) {
+    let (_dir, world) = world_from_default_config(src, SourceRecords::default());
+    tola_typst::compile_bundle_world(&world, &tola_typst::BundleCancellation::default()).unwrap();
 }
 
-/// The compilation of `source` in a default site world with no source records.
-fn compiled_from_default_config(source: &str) -> (TempDir, tola_typst::BundleCompilation) {
-    let (directory, world) = world_from_default_config(source, SourceRecords::default());
-    let compilation =
-        tola_typst::compile_bundle_world(&world, &tola_typst::BundleCancellation::default())
-            .unwrap();
-    (directory, compilation)
-}
-
-/// Asserts a default site world compiles `source`.
-fn assert_default_compiles(source: &str) {
-    let _ = compiled_from_default_config(source);
-}
-
-/// The example site's configuration: one published asset tree and one icon collection.
 const EXAMPLE_SITE_CONFIG: &str = r#"[site]
 title = "Example site"
 origin = "https://example.test"
@@ -113,23 +91,18 @@ source-type = "local-svg-dir"
 path = "icons/brand"
 "#;
 
-/// The SVG of the example site's `mark` asset and `brand:mark` icon.
 const MARK_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill="currentColor" d="M12 2 2 22h20z"/></svg>"#;
-
-/// The SVG of the example site's `brand:logo` icon.
 const LOGO_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="currentColor"/></svg>"#;
 
-/// The example site's `assets/logo.png`: 8×4 opaque pixels.
 fn logo_png() -> Vec<u8> {
     let pixels = ::image::RgbImage::from_pixel(8, 4, ::image::Rgb([0x33, 0x66, 0x99]));
-    let mut encoded = Cursor::new(Vec::new());
+    let mut buf = Cursor::new(Vec::new());
     ::image::DynamicImage::ImageRgb8(pixels)
-        .write_to(&mut encoded, ::image::ImageFormat::Png)
+        .write_to(&mut buf, ::image::ImageFormat::Png)
         .unwrap();
-    encoded.into_inner()
+    buf.into_inner()
 }
 
-/// The host library of a world that only evaluates a source, with no site records.
 fn source_library() -> Arc<typst::utils::LazyHash<typst::Library>> {
     tola_packages::library::SiteLibrary::new(tola_packages::library::HostInputs {
         site: Dict::new(),
@@ -143,13 +116,10 @@ fn source_library() -> Arc<typst::utils::LazyHash<typst::Library>> {
     .shared()
 }
 
-/// The metadata declaration `source` has, scanned in a world that binds no site records.
-///
-/// `None` when the source declares none.
-fn declared_metadata(source: &Path, root: &Path) -> Option<SourceMetadataDeclaration> {
-    let world = TypstWorld::builder(source, root)
+fn declared_metadata(src: &Path, root: &Path) -> Option<SourceMetadataDeclaration> {
+    let world = TypstWorld::builder(src, root)
         .with_files(Arc::new(
-            tola_typst::FileResolver::new().with_provider(IconFiles::default()),
+            tola_typst::FileStore::new().with_provider(IconFiles::default()),
         ))
         .with_local_cache()
         .no_fonts()
@@ -173,8 +143,6 @@ fn declared_metadata(source: &Path, root: &Path) -> Option<SourceMetadataDeclara
     }
 }
 
-/// The example site's content sources, in discovery order: the path below `content/` and the
-/// source's own text.
 const EXAMPLE_CONTENT: [(&str, &str); 7] = [
     (
         "index.typ",
@@ -182,76 +150,47 @@ const EXAMPLE_CONTENT: [(&str, &str); 7] = [
     ),
     (
         "guide/index.typ",
-        "#import \"@tola/source:0.0.0\": tola-meta\n\
-         #tola-meta((title: \"Guide\", order: 0))\n",
+        "#import \"@tola/source:0.0.0\": tola-meta\n#tola-meta((title: \"Guide\", order: 0))\n",
     ),
     (
         "guide/install.typ",
-        "#import \"@tola/source:0.0.0\": tola-meta\n\
-         #tola-meta((title: \"Install\", order: 1))\n",
+        "#import \"@tola/source:0.0.0\": tola-meta\n#tola-meta((title: \"Install\", order: 1))\n",
     ),
     (
         "guide/deploy.typ",
-        "#import \"@tola/source:0.0.0\": tola-meta\n\
-         #tola-meta((title: \"Deploy\", order: 2))\n",
+        "#import \"@tola/source:0.0.0\": tola-meta\n#tola-meta((title: \"Deploy\", order: 2))\n",
     ),
     (
         "guide/advanced/plugins.typ",
-        "#import \"@tola/source:0.0.0\": tola-meta\n\
-         #tola-meta((title: \"Plugins\", order: 3))\n",
+        "#import \"@tola/source:0.0.0\": tola-meta\n#tola-meta((title: \"Plugins\", order: 3))\n",
     ),
     (
         "notes/first-post.typ",
-        "#import \"@tola/source:0.0.0\": tola-meta\n\
-         #tola-meta((title: \"First post\", tags: (\"web\",), \
-         published: datetime(year: 2026, month: 5, day: 1)))\n",
+        "#import \"@tola/source:0.0.0\": tola-meta\n#tola-meta((title: \"First post\", tags: (\"web\",), published: datetime(year: 2026, month: 5, day: 1)))\n",
     ),
     (
         "notes/second-post.typ",
-        "#import \"@tola/source:0.0.0\": tola-meta\n\
-         #tola-meta((title: \"Second post\", tags: (\"web\", \"typst\"), \
-         published: datetime(year: 2026, month: 6, day: 1)))\n",
+        "#import \"@tola/source:0.0.0\": tola-meta\n#tola-meta((title: \"Second post\", tags: (\"web\", \"typst\"), published: datetime(year: 2026, month: 6, day: 1)))\n",
     ),
 ];
 
-/// A world compiling `source` against the example site a `site` fence selects.
-///
-/// Authors may rely on exactly these inputs:
-/// - `content/` holds seven sources, in this discovery order: `index.typ` (title `Welcome`),
-///   `guide/index.typ` (title `Guide`, `order` 0), `guide/install.typ` (title `Install`,
-///   `order` 1), `guide/deploy.typ` (title `Deploy`, `order` 2),
-///   `guide/advanced/plugins.typ` (title `Plugins`, `order` 3), `notes/first-post.typ`
-///   (title `First post`, tags `("web",)`, published 2026-05-01), and
-///   `notes/second-post.typ` (title `Second post`, tags `("web", "typst")`, published
-///   2026-06-01).
-/// - `assets/` is published below `/assets` and holds `logo.png`, an 8×4 opaque PNG, and
-///   `mark.svg`.
-/// - `brand` is an icon collection with the icons `brand:mark` and `brand:logo`.
-/// - `site.base-path` is `/`, `site.title` is `Example site`, and `site.origin` is
-///   `https://example.test`.
-/// - The world has Tola's embedded fonts and no system fonts, so an example that lays
-///   content out — a math frame in a feed, for instance — renders offline.
-///
-/// `source` becomes the site root's `main.typ`, so a relative path such as `assets/logo.png`
-/// reads from the site root. The example's own file is not a content source, so
-/// `current-source()` names no record here.
-fn world_from_example_site(source: &str, files: &[(String, String)]) -> (TempDir, TypstWorld) {
-    let directory = TempDir::new().unwrap();
-    let config = crate::config::tests::load_test_config(directory.path(), EXAMPLE_SITE_CONFIG);
-    let root = config.get_root();
+fn world_from_example_site(src: &str, files: &[(String, String)]) -> (TempDir, TypstWorld) {
+    let dir = TempDir::new().unwrap();
+    let cfg = crate::config::tests::load_test_config(dir.path(), EXAMPLE_SITE_CONFIG);
+    let root = cfg.root();
 
     let content = root.join("content");
     let mut units = Vec::new();
-    let mut declarations = BTreeMap::new();
+    let mut decls = BTreeMap::new();
     for (path, text) in EXAMPLE_CONTENT {
-        let source = content.join(path);
-        fs::create_dir_all(source.parent().unwrap()).unwrap();
-        fs::write(&source, text).unwrap();
-        declarations.insert(source.clone(), declared_metadata(&source, root));
+        let src_path = content.join(path);
+        fs::create_dir_all(src_path.parent().unwrap()).unwrap();
+        fs::write(&src_path, text).unwrap();
+        decls.insert(src_path.clone(), declared_metadata(&src_path, root));
         units.push(ContentUnit {
             root: content.clone(),
             id: ContentId::new(path.into()),
-            source,
+            source: src_path,
             layout: ContentSourceLayout::from_entry_path(Path::new(path)),
         });
     }
@@ -272,37 +211,37 @@ fn world_from_example_site(source: &str, files: &[(String, String)]) -> (TempDir
         fs::write(path, contents).unwrap();
     }
 
-    let cancellation = crate::cancellation::BuildCancellation::default();
+    let cancel = crate::cancellation::BuildCancellation::default();
     let collections = crate::icon::prepare(
-        &config,
-        &cancellation,
+        &cfg,
+        &cancel,
         None,
         &crate::resources::BuildResources::default(),
         &crate::filesystem::SourceOverrides::default(),
     )
-    .expect("the example site's icon collection loads")
+    .expect("example site icon collection loads")
     .collections();
     let asset_urls = crate::asset::build_configured_assets(
-        &config,
-        crate::modules::prepared::AppliedAssets::project_only(&config),
-        &crate::resources::source_boundary(&config, tola_input::InputScope::Online),
-        &cancellation,
+        &cfg,
+        crate::modules::site::AppliedAssets::project_only(&cfg),
+        &crate::resources::source_boundary(&cfg, tola_input::InputScope::Online),
+        &cancel,
         None,
         &[],
     )
-    .expect("the example site's asset tree renders")
-    .asset_urls(&config)
-    .expect("the example site's asset URLs resolve");
-    let records = SourceSet::without_metadata(&units, &config)
+    .expect("example site asset tree renders")
+    .asset_urls(&cfg)
+    .expect("example site asset URLs resolve");
+    let records = SourceSet::without_metadata(&units, &cfg)
         .unwrap()
-        .with_metadata(&declarations)
+        .with_metadata(&decls)
         .inputs()
         .to_source_records();
-    let library = SiteBindings::from_config(&config, asset_urls, None).library(records);
+    let lib = SiteBindings::from_config(&cfg, asset_urls, None).library(records);
 
     let main = root.join("main.typ");
-    fs::write(&main, source).unwrap();
-    let files = tola_typst::FileResolver::new().with_provider(IconFiles(collections));
+    fs::write(&main, src).unwrap();
+    let files = tola_typst::FileStore::new().with_provider(IconFiles(collections));
     let fonts = Arc::new(FontStore::with_options(
         FontOptions::new()
             .with_system_fonts(false)
@@ -311,24 +250,20 @@ fn world_from_example_site(source: &str, files: &[(String, String)]) -> (TempDir
     let world = TypstWorld::builder(&main, root)
         .with_files(Arc::new(files))
         .with_local_cache()
-        .with_shared_library(library.shared())
+        .with_shared_library(lib.shared())
         .with_fonts(fonts)
         .build(&tola_typst::BundleCancellation::default())
         .expect("valid example site world");
-    (directory, world)
+    (dir, world)
 }
 
-/// Which world one documented example compiles in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ExampleWorld {
-    /// A default site configuration, with no sources, assets, or icons.
     Default,
-    /// The example site `world_from_example_site` builds.
     ExampleSite,
 }
 
 impl ExampleWorld {
-    /// The world's name in a failure message.
     fn name(self) -> &'static str {
         match self {
             Self::Default => "default",
@@ -350,30 +285,19 @@ enum ExampleFence {
     Output,
 }
 
-/// A named SVG or JSON fence supplies a file to the next `typst site` fence.
-///
-/// Typst fences without `site` compile with the default configuration. HTML fences show
-/// output and are not compiled.
 fn documented_examples(docs: &str) -> Result<Vec<Example>, String> {
     let mut examples = Vec::new();
     let mut fence: Option<(Option<u8>, usize, usize, ExampleFence)> = None;
-    let mut source = String::new();
+    let mut src = String::new();
     let mut files = Vec::new();
-    for (index, line) in docs.lines().enumerate() {
+    for (idx, line) in docs.lines().enumerate() {
         let trimmed = line.trim_start();
         let marker = trimmed.as_bytes().first().copied();
-        let length = trimmed
-            .bytes()
-            .take_while(|byte| Some(*byte) == marker)
-            .count();
-        let is_fence = matches!(marker, Some(b'`' | b'~')) && length >= 3;
-        if let Some((opening, minimum, start, kind)) = &fence {
-            if is_fence
-                && marker == *opening
-                && length >= *minimum
-                && trimmed[length..].trim().is_empty()
-            {
-                let contents = std::mem::take(&mut source);
+        let len = trimmed.bytes().take_while(|b| Some(*b) == marker).count();
+        let is_fence = matches!(marker, Some(b'`' | b'~')) && len >= 3;
+        if let Some((opening, min, start, kind)) = &fence {
+            if is_fence && marker == *opening && len >= *min && trimmed[len..].trim().is_empty() {
+                let contents = std::mem::take(&mut src);
                 match kind {
                     ExampleFence::Typst(world) => {
                         if *world == ExampleWorld::Default && !files.is_empty() {
@@ -393,34 +317,33 @@ fn documented_examples(docs: &str) -> Result<Vec<Example>, String> {
                 }
                 fence = None;
             } else if !matches!(kind, ExampleFence::Output) {
-                source.push_str(line);
-                source.push('\n');
+                src.push_str(line);
+                src.push('\n');
             }
         } else if is_fence {
-            let info = trimmed[length..].trim();
+            let info = trimmed[len..].trim();
             let kind = match info.split_whitespace().collect::<Vec<_>>().as_slice() {
                 ["typ" | "typst" | "typc"] => ExampleFence::Typst(ExampleWorld::Default),
                 ["typ" | "typst" | "typc", "site"] => {
                     ExampleFence::Typst(ExampleWorld::ExampleSite)
                 }
                 ["html"] => ExampleFence::Output,
-                [format @ ("svg" | "json"), path]
-                    if Path::new(path).extension().and_then(|ext| ext.to_str()) == Some(format)
+                [fmt @ ("svg" | "json"), path]
+                    if Path::new(path).extension().and_then(|e| e.to_str()) == Some(fmt)
                         && Path::new(path)
                             .components()
-                            .all(|part| matches!(part, std::path::Component::Normal(_))) =>
+                            .all(|p| matches!(p, std::path::Component::Normal(_))) =>
                 {
                     ExampleFence::File((*path).to_owned())
                 }
                 _ => {
                     return Err(format!(
-                        "invalid API example fence at documentation line {}: `{info}`; expected \
-                         a Typst fence, an `html` output fence, or `svg PATH` or `json PATH`",
-                        index + 1
+                        "invalid API example fence at documentation line {}: `{info}`",
+                        idx + 1
                     ));
                 }
             };
-            fence = Some((marker, length, index + 1, kind));
+            fence = Some((marker, len, idx + 1, kind));
         }
     }
     if let Some((_, _, start, _)) = fence {
@@ -437,25 +360,24 @@ fn documented_examples(docs: &str) -> Result<Vec<Example>, String> {
 #[test]
 fn documented_examples_compile() {
     let mut checked = 0;
-    for package in tola_packages::builtin_packages() {
-        let names = package.exports().map(str::to_owned).collect::<Vec<_>>();
-        let mut sections = vec![("overview".to_owned(), package.overview())];
+    for pkg in tola_packages::builtin_packages() {
+        let names: Vec<_> = pkg.exports().map(str::to_owned).collect();
+        let mut sections = vec![("overview".to_owned(), pkg.overview())];
         sections.extend(
-            package
-                .export_documentation(&names)
+            pkg.export_documentation(&names)
                 .unwrap()
                 .into_iter()
-                .map(|export| {
-                    let summary = export.documentation.summary.clone();
-                    (export.name, (!summary.is_empty()).then_some(summary))
+                .map(|e| {
+                    let summary = e.documentation.summary.clone();
+                    (e.name, (!summary.is_empty()).then_some(summary))
                 }),
         );
         for (name, docs) in sections {
             let Some(docs) = docs else { continue };
             let examples = documented_examples(&docs)
-                .unwrap_or_else(|error| panic!("{} / {name}: {error}", package.spec()));
+                .unwrap_or_else(|err| panic!("{} / {name}: {err}", pkg.spec()));
             for (
-                index,
+                idx,
                 Example {
                     line,
                     source,
@@ -464,24 +386,20 @@ fn documented_examples_compile() {
                 },
             ) in examples.into_iter().enumerate()
             {
-                // Compile exactly what the author can copy: injected imports or document
-                // wrappers would conceal missing dependencies and invalid placement.
-                let (_directory, compilation_world) = match world {
+                let (_dir, comp_world) = match world {
                     ExampleWorld::Default => {
                         world_from_default_config(&source, SourceRecords::default())
                     }
                     ExampleWorld::ExampleSite => world_from_example_site(&source, &files),
                 };
-                let compilation =
-                    tola_typst::compile_bundle_world(&compilation_world, &Default::default());
+                let comp = tola_typst::compile_bundle_world(&comp_world, &Default::default());
                 assert!(
-                    compilation.is_ok(),
-                    "{} / {name} / example {} (documentation line {line}) in the {} world\n\
-                     {source}\n{}",
-                    package.spec(),
-                    index + 1,
+                    comp.is_ok(),
+                    "{} / {name} / example {} (documentation line {line}) in the {} world\n{source}\n{}",
+                    pkg.spec(),
+                    idx + 1,
                     world.name(),
-                    compilation.unwrap_err(),
+                    comp.unwrap_err(),
                 );
                 checked += 1;
             }
@@ -490,44 +408,37 @@ fn documented_examples_compile() {
     assert!(checked > 0, "no public API examples were discovered");
 }
 
-/// A program importing every `@tola/<package>` native and running `assertions` before its one
-/// document.
-fn package_program(package: &str, assertions: &str) -> String {
+fn package_program(pkg: &str, assertions: &str) -> String {
     format!(
-        "#import \"@tola/{package}:0.0.0\": *\n\
+        "#import \"@tola/{pkg}:0.0.0\": *\n\
          {assertions}\n\
          #document(\"assertions.html\")[]"
     )
 }
 
-/// The world package assertions run in: the host library with no site records, so a package
-/// can use the host natives it imports without receiving site data.
-fn package_world(source: &str) -> (TempDir, TypstWorld) {
-    let directory = TempDir::new().unwrap();
-    let main = directory.path().join("main.typ");
-    fs::write(&main, source).unwrap();
-    let files = tola_typst::FileResolver::new().with_provider(IconFiles::default());
-    let world = TypstWorld::builder(&main, directory.path())
+fn package_world(src: &str) -> (TempDir, TypstWorld) {
+    let dir = TempDir::new().unwrap();
+    let main = dir.path().join("main.typ");
+    fs::write(&main, src).unwrap();
+    let files = tola_typst::FileStore::new().with_provider(IconFiles::default());
+    let world = TypstWorld::builder(&main, dir.path())
         .with_files(Arc::new(files))
         .with_local_cache()
         .no_fonts()
         .with_shared_library(source_library())
         .build(&tola_typst::BundleCancellation::default())
         .expect("valid test world");
-    (directory, world)
+    (dir, world)
 }
 
-/// Compiles `assertions` against `@tola/<package>` in a world with no site records, which must
-/// hold.
-fn assert_package(package: &str, assertions: &str) {
-    let (_directory, world) = package_world(&package_program(package, assertions));
+fn assert_package(pkg: &str, assertions: &str) {
+    let (_dir, world) = package_world(&package_program(pkg, assertions));
     tola_typst::compile_bundle_world(&world, &Default::default())
         .expect("package assertions must hold");
 }
 
-/// Asserts compiling `assertions` against `@tola/<package>` fails with diagnostics.
-fn reject_package(package: &str, assertions: &str) {
-    let (_directory, world) = package_world(&package_program(package, assertions));
+fn reject_package(pkg: &str, assertions: &str) {
+    let (_dir, world) = package_world(&package_program(pkg, assertions));
     tola_typst::compile_bundle_world(&world, &Default::default())
         .expect_err("invalid assertions must fail compiling")
         .diagnostics()
@@ -535,9 +446,9 @@ fn reject_package(package: &str, assertions: &str) {
 }
 
 fn source_records(ids: &[&str]) -> SourceRecords {
-    let site_config = crate::config::tests::OwnedSiteConfig::new("");
-    let root = site_config.config.get_root().join("content");
-    let units = ids
+    let cfg = crate::config::tests::OwnedSiteConfig::new("");
+    let root = cfg.config.root().join("content");
+    let units: Vec<_> = ids
         .iter()
         .map(|id| ContentUnit {
             root: root.clone(),
@@ -545,75 +456,75 @@ fn source_records(ids: &[&str]) -> SourceRecords {
             source: root.join(id),
             layout: ContentSourceLayout::from_entry_path(Path::new(id)),
         })
-        .collect::<Vec<_>>();
-    SourceSet::without_metadata(&units, &site_config.config)
+        .collect();
+    SourceSet::without_metadata(&units, &cfg.config)
         .unwrap()
         .inputs()
         .to_source_records()
 }
 
 #[test]
-fn address_errors_point_at_argument() {
-    for (function, argument) in [
+fn address_error_spans() {
+    for (func, arg) in [
         ("output-of", "relative"),
         ("route-of", "/index.html"),
         ("decode-url-path", "/%zz"),
     ] {
-        let source = format!(
-            "#import \"@tola/address:0.0.0\": {function}\n\
-             #let url = {function}({argument:?})\n\
+        let src = format!(
+            "#import \"@tola/address:0.0.0\": {func}\n\
+             #let url = {func}({arg:?})\n\
              #document(\"index.html\")[]"
         );
-        let (_directory, world) = world_from_default_config(&source, SourceRecords::default());
+        let (_dir, world) = world_from_default_config(&src, SourceRecords::default());
         let failure = tola_typst::compile_bundle_world(&world, &Default::default()).unwrap_err();
-        let error = failure.diagnostics().unwrap().errors().next().unwrap();
-        assert_eq!(error.location.path.as_deref(), Some("main.typ"));
-        let range = error.location.range.unwrap();
-        let line = source.lines().nth(range.start.line).unwrap();
+        let err = failure.diagnostics().unwrap().errors().next().unwrap();
+        assert_eq!(err.location.path.as_deref(), Some("main.typ"));
+        let range = err.location.range.unwrap();
+        let line = src.lines().nth(range.start.line).unwrap();
         assert_eq!(range.start.line, range.end.line);
         assert_eq!(
             line[range.start.character..range.end.character].trim_matches('"'),
-            argument,
-            "{error:?}"
+            arg,
+            "{err:?}"
         );
     }
 }
 
 #[test]
-fn helper_failure_keeps_call_site() {
-    for (helper, is_typst_error) in [
+fn helper_error_call_site() {
+    for (helper, is_typst_err) in [
         (
             r#"#let url() = address("/guide/", base-path: "/docs")"#,
             false,
         ),
         (r#"#let url() = address(panic("route unavailable"))"#, true),
     ] {
-        let source = format!(
+        let src = format!(
             "#import \"@tola/address:0.0.0\": route-url as address\n\
              {helper}\n\
              #let selected = url()\n\
              #document(\"index.html\")[]"
         );
-        let (_directory, world) = world_from_default_config(&source, SourceRecords::default());
+        let (_dir, world) = world_from_default_config(&src, SourceRecords::default());
         let failure = tola_typst::compile_bundle_world(&world, &Default::default()).unwrap_err();
-        let error = failure.diagnostics().unwrap().errors().next().unwrap();
-        assert_eq!(error.location.path.as_deref(), Some("main.typ"));
-        assert_eq!(error.location.line, Some(2));
+        let err = failure.diagnostics().unwrap().errors().next().unwrap();
+        assert_eq!(err.location.path.as_deref(), Some("main.typ"));
+        assert_eq!(err.location.line, Some(2));
         assert_eq!(
-            error.origin == tola_typst::DiagnosticOrigin::Typst,
-            is_typst_error
+            err.origin == tola_typst::DiagnosticOrigin::Typst,
+            is_typst_err
         );
         assert!(
-            error.traces.iter().any(|trace| {
-                trace.location.path.as_deref() == Some("main.typ") && trace.location.line == Some(3)
+            err.traces.iter().any(|t| {
+                t.location.path.as_deref() == Some("main.typ") && t.location.line == Some(3)
             }),
-            "{error:?}"
+            "{err:?}"
         );
     }
 }
 
 #[test]
-fn url_path_schema_decodes_once() {
+fn url_path_schema_decodes() {
     assert_default_compiles(
         r#"#import "@tola/schema:0.0.0": parse, try-parse, schema, url-path
 #import "@tola/address:0.0.0": route-url
@@ -633,58 +544,49 @@ fn url_path_schema_decodes_once() {
 }
 
 #[test]
-fn helper_sees_its_own_source() {
-    let sources = source_records(&["helper.typ"]);
-    let (directory, world) = world_from_default_config(
+fn helper_current_source() {
+    let srcs = source_records(&["helper.typ"]);
+    let (dir, world) = world_from_default_config(
         r#"
 #import "content/helper.typ": helper-source
 #assert.eq(helper-source().filename, "helper.typ")
 #assert.eq(helper-source().path, "helper.typ")
 #document("index.html")[]
 "#,
-        sources,
+        srcs,
     );
-    fs::create_dir(directory.path().join("content")).unwrap();
+    fs::create_dir(dir.path().join("content")).unwrap();
     fs::write(
-        directory.path().join("content/helper.typ"),
-        r#"
-#import "@tola/source:0.0.0": current-source
-#let helper-source() = current-source()
-"#,
+        dir.path().join("content/helper.typ"),
+        "#import \"@tola/source:0.0.0\": current-source\n#let helper-source() = current-source()\n",
     )
     .unwrap();
-    let compilation =
-        tola_typst::compile_bundle_world(&world, &BundleCancellation::default()).unwrap();
-    assert_eq!(compilation.documents().count(), 1);
+    let comp = tola_typst::compile_bundle_world(&world, &BundleCancellation::default()).unwrap();
+    assert_eq!(comp.documents().count(), 1);
 }
 
 #[test]
-fn included_source_keeps_identity() {
-    let sources = source_records(&["document.typ"]);
-    let (directory, world) = world_from_default_config(
+fn included_source_identity() {
+    let srcs = source_records(&["document.typ"]);
+    let (dir, world) = world_from_default_config(
         r#"
 #import "@tola/source:0.0.0": all-sources
 #let document-source = all-sources().first()
-#document("first/index.html")[
-  #include document-source.file
-]
-#document("second.html")[
-  #include document-source.file
-]
+#document("first/index.html")[#include document-source.file]
+#document("second.html")[#include document-source.file]
 "#,
-        sources,
+        srcs,
     );
-    fs::create_dir(directory.path().join("content")).unwrap();
+    fs::create_dir(dir.path().join("content")).unwrap();
     fs::write(
-        directory.path().join("content/document.typ"),
+        dir.path().join("content/document.typ"),
         r#"
 #import "@tola/address:0.0.0": join-route
 #import "@tola/document:0.0.0": current-document
-#import "@tola/source:0.0.0": current-source
+#import "@tola/source:0.0.0": current-source, tola-meta
 #let source = current-source()
 #assert.eq(source.path, "document.typ")
 #assert.eq(join-route(source.at("route-segments")), "/document/")
-#import "@tola/source:0.0.0": tola-meta
 #tola-meta((filename: source.filename))
 #context {
   let page = current-document()
@@ -695,15 +597,14 @@ fn included_source_keeps_identity() {
 "#,
     )
     .unwrap();
-    let compilation =
-        tola_typst::compile_bundle_world(&world, &BundleCancellation::default()).unwrap();
-    assert_eq!(compilation.documents().count(), 2);
+    let comp = tola_typst::compile_bundle_world(&world, &BundleCancellation::default()).unwrap();
+    assert_eq!(comp.documents().count(), 2);
 }
 
 #[test]
-fn qualified_imports_reach_package() {
-    let sources = source_records(&["document.typ"]);
-    let (directory, world) = world_from_default_config(
+fn qualified_imports() {
+    let srcs = source_records(&["document.typ"]);
+    let (dir, world) = world_from_default_config(
         r#"
 #import "@tola/source:0.0.0"
 #import "@tola/head:0.0.0" as page-head
@@ -721,11 +622,11 @@ fn qualified_imports_reach_package() {
   ]
 ]
 "#,
-        sources,
+        srcs,
     );
-    fs::create_dir(directory.path().join("content")).unwrap();
+    fs::create_dir(dir.path().join("content")).unwrap();
     fs::write(
-        directory.path().join("content/document.typ"),
+        dir.path().join("content/document.typ"),
         r#"
 #import "@tola/document:0.0.0": current-document
 #import "@tola/source:0.0.0": current-source
@@ -739,13 +640,12 @@ fn qualified_imports_reach_package() {
 "#,
     )
     .unwrap();
-    let compilation =
-        tola_typst::compile_bundle_world(&world, &BundleCancellation::default()).unwrap();
-    assert_eq!(compilation.documents().count(), 3);
+    let comp = tola_typst::compile_bundle_world(&world, &BundleCancellation::default()).unwrap();
+    assert_eq!(comp.documents().count(), 3);
 }
 
 #[test]
-fn datalog_scalars_keep_types() {
+fn datalog_values_and_decimals() {
     assert_package(
         "datalog",
         r##"
@@ -767,17 +667,7 @@ fn datalog_scalars_keep_types() {
 #for expected in values { assert(rows.contains((expected,))) }
 #let zero = database((scalar,), facts: (scalar.atom(-0.0), scalar.atom(0.0)))
 #assert.eq(zero.query(select: (value,), where: (scalar.atom(value),)), ((0.0,),))
-"##,
-    );
-}
 
-#[test]
-fn datalog_normalizes_decimals() {
-    assert_package(
-        "datalog",
-        r##"
-#let scalar = relation("scalar", 1)
-#let value = var("value")
 #for (amount, canonical) in (
   (decimal("1.0"), decimal("1")),
   (decimal("1.00"), decimal("1")),
@@ -807,7 +697,7 @@ fn datalog_normalizes_decimals() {
 }
 
 #[test]
-fn datalog_snapshots_canonicalize_rows() {
+fn datalog_snapshots_and_queries() {
     assert_package(
         "datalog",
         r##"
@@ -821,18 +711,9 @@ fn datalog_snapshots_canonicalize_rows() {
   assert.eq(db, database((p,), facts: (p.atom(left), p.atom(right))))
   assert.eq(db.query(select: (x,), where: (p.atom(x),)), ((left,), (right,)))
 }
-"##,
-    );
-}
 
-#[test]
-fn datalog_queries_use_their_snapshot() {
-    assert_package(
-        "datalog",
-        r##"
 #let link = relation("link", 2)
 #let reach = relation("reach", 2)
-#let x = var("x")
 #let y = var("y")
 #let z = var("z")
 #let rules = (rule(reach.atom(x, y), link.atom(x, y)), rule(reach.atom(x, z), reach.atom(x, y), link.atom(y, z)))
@@ -856,46 +737,42 @@ fn datalog_queries_use_their_snapshot() {
 }
 
 #[test]
-fn cached_errors_keep_location() {
-    for (declarations, clauses, line) in [
+fn datalog_error_locations() {
+    for (decls, clauses, line) in [
         (
             "#let p = d.relation(\"p\", 1)\n#let x = d.var(\"x\")\n",
             "#let r = d.rule(p.atom(x), p.atom(1))\n#let db = d.database((p,), rules: (r,))\n",
             3,
         ),
         (
-            "#let downstream = d.relation(\"downstream\", 0)\n\
-             #let cycle = d.relation(\"cycle\", 0)\n",
-            "#let dependent = d.rule(downstream.atom(), cycle.atom())\n\
-             #let recursive = d.rule(cycle.atom(), d.negate(cycle.atom()))\n\
-             #let db = d.database((downstream, cycle), rules: (dependent, recursive))\n",
+            "#let downstream = d.relation(\"downstream\", 0)\n#let cycle = d.relation(\"cycle\", 0)\n",
+            "#let dependent = d.rule(downstream.atom(), cycle.atom())\n#let recursive = d.rule(cycle.atom(), d.negate(cycle.atom()))\n#let db = d.database((downstream, cycle), rules: (dependent, recursive))\n",
             4,
         ),
         (
             "#let p = d.relation(\"p\", 1)\n",
-            "#let x = d.var(\"x\")\n\
-             #let rows = d.database((p,)).query(select: (x,), where: ())\n",
+            "#let x = d.var(\"x\")\n#let rows = d.database((p,)).query(select: (x,), where: ())\n",
             2,
         ),
     ] {
         for blank_lines in [0, 3] {
-            let source = format!(
-                "#import \"@tola/datalog:0.0.0\" as d\n{declarations}{}{clauses}",
+            let src = format!(
+                "#import \"@tola/datalog:0.0.0\" as d\n{decls}{}{clauses}",
                 "\n".repeat(blank_lines),
             );
-            let (_directory, world) = world_from_default_config(&source, SourceRecords::default());
+            let (_dir, world) = world_from_default_config(&src, SourceRecords::default());
             let failure =
                 tola_typst::compile_bundle_world(&world, &Default::default()).unwrap_err();
-            let error = failure.diagnostics().unwrap().errors().next().unwrap();
-            assert_eq!(error.location.path.as_deref(), Some("main.typ"));
-            assert_eq!(error.location.range.unwrap().start.line, line + blank_lines);
+            let err = failure.diagnostics().unwrap().errors().next().unwrap();
+            assert_eq!(err.location.path.as_deref(), Some("main.typ"));
+            assert_eq!(err.location.range.unwrap().start.line, line + blank_lines);
         }
     }
 }
 
 #[test]
-fn datalog_rejects_invalid_clauses() {
-    for expression in [
+fn datalog_invalid_clauses() {
+    for expr in [
         r#"relation("", 1)"#,
         r#"relation("p", -1)"#,
         r#"var("")"#,
@@ -919,13 +796,13 @@ fn datalog_rejects_invalid_clauses() {
         r#"database((relation("p", 1),)).query(select: (), where: (negate(relation("p", 1).atom(var("x"))),))"#,
         r#"database(()).query(select: (), where: (negate(relation("missing", 0).atom()),))"#,
     ] {
-        reject_package("datalog", &format!("#let value = {expression}"));
+        reject_package("datalog", &format!("#let value = {expr}"));
     }
 }
 
 #[test]
-fn package_guards_locate_calls() {
-    for (package, expression, details) in [
+fn package_guard_spans() {
+    for (pkg, expr, details) in [
         ("collection", "pick(none, ())", ["`fields`", "none"]),
         ("collection", "pick(auto, ())", ["`fields`", "auto"]),
         ("collection", "index-by((1,))", ["`key`", "`int`"]),
@@ -965,66 +842,66 @@ fn package_guards_locate_calls() {
         ("source", "parse-sources(none, int)", ["`sources`", "none"]),
         ("source", "parse-sources((7,), int)", ["index 0", "`7`"]),
     ] {
-        let source = format!(
-            "#import \"@tola/{package}:0.0.0\": *\n\
-             #let selected = {expression}\n\
+        let src = format!(
+            "#import \"@tola/{pkg}:0.0.0\": *\n\
+             #let selected = {expr}\n\
              #document(\"index.html\")[]"
         );
-        let (_directory, world) = world_from_default_config(&source, SourceRecords::default());
+        let (_dir, world) = world_from_default_config(&src, SourceRecords::default());
         let failure = tola_typst::compile_bundle_world(&world, &Default::default()).unwrap_err();
-        let error = failure.diagnostics().unwrap().errors().next().unwrap();
-        assert_eq!(error.location.path.as_deref(), Some("main.typ"));
-        let range = error.location.range.unwrap();
-        assert_eq!((range.start.line, range.end.line), (1, 1), "{error:?}");
-        let line = source.lines().nth(1).unwrap();
+        let err = failure.diagnostics().unwrap().errors().next().unwrap();
+        assert_eq!(err.location.path.as_deref(), Some("main.typ"));
+        let range = err.location.range.unwrap();
+        assert_eq!((range.start.line, range.end.line), (1, 1), "{err:?}");
+        let line = src.lines().nth(1).unwrap();
         assert_eq!(
             &line[range.start.character..range.end.character],
-            expression,
-            "{error:?}"
+            expr,
+            "{err:?}"
         );
         assert!(matches!(
-            error.origin,
+            err.origin,
             tola_typst::DiagnosticOrigin::Producer(_)
         ));
         for detail in details {
-            assert!(error.message.contains(detail), "{expression}: {error:?}");
+            assert!(err.message.contains(detail), "{expr}: {err:?}");
         }
-        assert!(!error.message.contains("assertion failed"), "{error:?}");
-        assert!(!error.message.contains("panicked"), "{error:?}");
+        assert!(!err.message.contains("assertion failed"), "{err:?}");
+        assert!(!err.message.contains("panicked"), "{err:?}");
     }
 }
 
 #[test]
-fn package_callbacks_keep_panic_spans() {
-    for (package, expression) in [
+fn package_callback_spans() {
+    for (pkg, expr) in [
         ("collection", r#"index-by(("a",), key: fail)"#),
         ("schema", "parse(1, map(int, fail))"),
     ] {
-        let source = format!(
-            "#import \"@tola/{package}:0.0.0\": *\n\
+        let src = format!(
+            "#import \"@tola/{pkg}:0.0.0\": *\n\
              #let fail(value) = panic(\"callback unavailable\")\n\
-             #let selected = {expression}\n\
+             #let selected = {expr}\n\
              #document(\"index.html\")[]"
         );
-        let (_directory, world) = world_from_default_config(&source, SourceRecords::default());
+        let (_dir, world) = world_from_default_config(&src, SourceRecords::default());
         let failure = tola_typst::compile_bundle_world(&world, &Default::default()).unwrap_err();
-        let error = failure.diagnostics().unwrap().errors().next().unwrap();
-        assert_eq!(error.location.path.as_deref(), Some("main.typ"));
-        let range = error.location.range.unwrap();
-        assert_eq!((range.start.line, range.end.line), (1, 1), "{error:?}");
-        let line = source.lines().nth(1).unwrap();
+        let err = failure.diagnostics().unwrap().errors().next().unwrap();
+        assert_eq!(err.location.path.as_deref(), Some("main.typ"));
+        let range = err.location.range.unwrap();
+        assert_eq!((range.start.line, range.end.line), (1, 1), "{err:?}");
+        let line = src.lines().nth(1).unwrap();
         assert_eq!(
             &line[range.start.character..range.end.character],
             r#"panic("callback unavailable")"#,
-            "{error:?}"
+            "{err:?}"
         );
-        assert_eq!(error.origin, tola_typst::DiagnosticOrigin::Typst);
-        assert!(error.message.contains("callback unavailable"), "{error:?}");
+        assert_eq!(err.origin, tola_typst::DiagnosticOrigin::Typst);
+        assert!(err.message.contains("callback unavailable"), "{err:?}");
         assert!(
-            error.traces.iter().any(|trace| {
-                trace.location.path.as_deref() == Some("main.typ") && trace.location.line == Some(3)
+            err.traces.iter().any(|t| {
+                t.location.path.as_deref() == Some("main.typ") && t.location.line == Some(3)
             }),
-            "{error:?}"
+            "{err:?}"
         );
     }
 }

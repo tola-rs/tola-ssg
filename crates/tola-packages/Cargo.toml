@@ -3,7 +3,7 @@ name = "tola-packages"
 version.workspace = true
 edition = "2024"
 rust-version.workspace = true
-description = "The builtin @tola/* Typst packages: identities, sources, natives, and manifests"
+description = "Built-in @tola/* Typst packages"
 license = "MIT"
 repository = "https://github.com/tola-rs/tola-ssg"
 

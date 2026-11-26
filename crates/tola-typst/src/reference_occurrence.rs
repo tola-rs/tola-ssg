@@ -543,16 +543,16 @@ mod tests {
 
     use crate::{BundleCancellation, TypstWorld};
 
-    fn world(source: &str) -> (TempDir, TypstWorld) {
-        let directory = TempDir::new().unwrap();
-        let main = directory.path().join("main.typ");
-        fs::write(&main, source).unwrap();
-        let world = TypstWorld::builder(&main, directory.path())
+    fn world(src: &str) -> (TempDir, TypstWorld) {
+        let dir = TempDir::new().unwrap();
+        let main = dir.path().join("main.typ");
+        fs::write(&main, src).unwrap();
+        let world = TypstWorld::builder(&main, dir.path())
             .with_local_cache()
             .no_fonts()
             .build(&BundleCancellation::default())
             .expect("valid test world");
-        (directory, world)
+        (dir, world)
     }
 
     fn url(occurrence: &ReferenceOccurrence) -> String {
@@ -562,10 +562,9 @@ mod tests {
         }
     }
 
-    /// What one round records on its sink is what a later round reads back, in order.
     #[test]
-    fn recorded_occurrences_read_back_in_order() {
-        let (_directory, world) = world("#document(\"index.html\")[Hello]");
+    fn occurrences_preserve_order() {
+        let (_dir, world) = world("#document(\"index.html\")[Hello]");
         let world_ref: &dyn typst::World = &world;
         let traced = Traced::default();
         let mut sink = Sink::new();

@@ -7,7 +7,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use tola_build::cancellation::BuildCancellation;
 use tola_build::check::{SourceDiagnosticSession, SourceRevision};
-use tola_build::config::ResolvedSiteConfig;
+use tola_build::config::SiteConfig;
 use tola_diagnostic::Diagnostic;
 use tola_typst::typst::syntax::Source;
 use tola_typst_syntax::names::{SelectedInterfaces, SourceNames};
@@ -20,7 +20,7 @@ use crate::server::ServedWorkspace;
 use crate::sources::SourceView;
 
 pub(crate) struct CheckedSources {
-    pub(crate) configuration: Option<Arc<ResolvedSiteConfig>>,
+    pub(crate) configuration: Option<Arc<SiteConfig>>,
     pub(crate) compiled: bool,
     pub(crate) diagnostics: Vec<Diagnostic>,
     /// The disk paths this check read, or `None` when it established no read evidence: a consumer
@@ -40,10 +40,10 @@ pub(crate) struct CheckedSources {
 /// The selection index a check builds is built under the same root, so a report reads exactly the
 /// index its own check returned.
 pub(crate) fn checked_root<'a>(
-    configuration: Option<&'a Arc<ResolvedSiteConfig>>,
+    configuration: Option<&'a Arc<SiteConfig>>,
     workspace_root: &'a Path,
 ) -> &'a Path {
-    configuration.map_or(workspace_root, |configuration| configuration.get_root())
+    configuration.map_or(workspace_root, |configuration| configuration.root())
 }
 
 /// The selection index one check licenses its findings with, built for the revision it reads.
@@ -53,7 +53,7 @@ pub(crate) fn checked_root<'a>(
 fn checked_selection(
     sources: &SourceInputs,
     view: &SourceView,
-    configuration: Option<&Arc<ResolvedSiteConfig>>,
+    configuration: Option<&Arc<SiteConfig>>,
     resources: &tola_build::BuildResources,
     disk: &mut DiskSources,
 ) -> Result<Arc<SelectedInterfaces>, SourceFailure> {
@@ -131,14 +131,13 @@ where
         // Editor hints ride the check: they need the same world the compiler read.
         let world = revision.checked().map(|checked| checked.world());
         for (path, text) in sources.overrides.iter() {
-            let Some(names) = open_document_names(view, path, text, configuration.get_root())
-            else {
+            let Some(names) = open_document_names(view, path, text, configuration.root()) else {
                 continue;
             };
             append_document_editor_diagnostics(
                 &mut diagnostics,
                 path,
-                configuration.get_root(),
+                configuration.root(),
                 &names,
                 world,
                 &selected,
@@ -227,7 +226,7 @@ fn append_document_editor_diagnostics(
 /// must not age it, or a hover burst would drop sources the site still holds.
 fn close_editor_revision(
     session: &mut SourceDiagnosticSession,
-    configuration: &ResolvedSiteConfig,
+    configuration: &SiteConfig,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     session.evict_stale_file_cache_entries();
@@ -243,7 +242,7 @@ fn close_editor_revision(
 /// never reached answers from.
 fn check_documents(
     session: &mut SourceDiagnosticSession,
-    configuration: &Arc<ResolvedSiteConfig>,
+    configuration: &Arc<SiteConfig>,
     sources: &SourceInputs,
     view: &SourceView,
     selected: &Arc<SelectedInterfaces>,
@@ -254,8 +253,8 @@ fn check_documents(
     let documents = sources.overrides.iter().filter_map(|(path, text)| {
         // A document outside the workspace's own directory belongs to another root, and a vendor
         // file is not the author's document.
-        let relative = path.strip_prefix(configuration.get_root()).ok()?.to_str()?;
-        let names = open_document_names(view, path, text, configuration.get_root())?;
+        let relative = path.strip_prefix(configuration.root()).ok()?.to_str()?;
+        let names = open_document_names(view, path, text, configuration.root())?;
         Some((relative, (path, names)))
     });
     for checked in
@@ -268,7 +267,7 @@ fn check_documents(
         append_document_editor_diagnostics(
             &mut diagnostics,
             path,
-            configuration.get_root(),
+            configuration.root(),
             &names,
             revision.checked().map(|checked| checked.world()),
             selected,

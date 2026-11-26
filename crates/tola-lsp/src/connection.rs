@@ -1,8 +1,4 @@
-//! One client's connection: its protocol phase, tracked sources, pending requests, and the two
-//! work lanes' queues.
-//!
-//! This module owns the state every submodule reads and writes and the entry points a host drives
-//! the connection through; each submodule answers one part of the protocol.
+//! Per-client LSP connection state, tracked sources, pending requests, and worker queues.
 
 mod changes;
 mod code_actions;
@@ -40,32 +36,20 @@ use crate::server::HostSections;
 use crate::sources::OpenSources;
 use crate::transport::{InvalidMessage, write_invalid};
 
-/// Whether a source's pages reach the author as inlay hints.
-///
-/// A client that shows code lenses reads each page's address from the lens that opens it. A client
-/// that shows hints and no lenses has nothing else to read it from — Helix reads no lenses — so the
-/// pages arrive as annotations there instead.
-pub(crate) fn routes_as_hints(capabilities: &lsp_types::ClientCapabilities) -> bool {
-    capabilities
-        .text_document
+/// Clients supporting inlay hints but not code lenses (e.g., Helix) receive page routes as hints.
+pub(crate) fn routes_as_hints(caps: &lsp_types::ClientCapabilities) -> bool {
+    caps.text_document
         .as_ref()
-        .is_some_and(|document| document.inlay_hint.is_some() && document.code_lens.is_none())
+        .is_some_and(|doc| doc.inlay_hint.is_some() && doc.code_lens.is_none())
 }
 
-/// A check waiting for dispatch: the revision it answers, the moment it may run, and the sources
-/// it reads, before the selection evidence is frozen with them.
 struct PendingCheck {
     checked_revision: u64,
-    /// When this revision's check was created, which its dispatch wait is measured from.
     queued_at: Instant,
-    /// A typing change sets the moment after the settle delay; every other change sets it now.
     due: Instant,
     sources: SourceInputs,
 }
 
-/// The last completed source check: the revision it answered, and whether the worlds it resolved
-/// are usable. The check lane computes the flag (CheckedSources::compiled): the Bundle in site
-/// mode, the documents the check covered in document mode.
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct CompletedCheck {
     revision: u64,
@@ -89,83 +73,44 @@ pub(super) struct Connection<W, D> {
     serial: u64,
     checking: BuildCanceller,
     requests: BTreeMap<RequestId, PendingRequest>,
-    /// Jobs waiting for the compiler lane, each holding the moment it was queued.
     queries: JobQueue<SourceJob>,
-    /// Requests waiting for the analysis lane, each holding the moment it was queued.
     analyses: JobQueue<AnalysisRequest>,
     check: Option<PendingCheck>,
-    /// One build serves the revision's waiting corrections independently of check cancellation.
     selection_build: Option<SelectionBuild>,
     /// Failed reloads retain the last accepted package locations and configuration identity.
-    configuration: Option<Arc<tola_build::config::ResolvedSiteConfig>>,
-    /// The configuration an author named with `--config`, kept before a check resolves one, so the
-    /// editor's own document answers while the site does not compile.
+    configuration: Option<Arc<tola_build::config::SiteConfig>>,
     named_configuration: Option<PathBuf>,
-    /// The source revision whose check the compiler lane is running now.
     running_check: Option<u64>,
-    /// The last completed source check, whose progress the client was told.
     checked: Option<CompletedCheck>,
-    /// The disk paths the last completed check read: the evidence deciding whether a changed file
-    /// can change what this connection answers.
     read_paths: std::collections::BTreeSet<PathBuf>,
-    /// Additional model reads accepted from editor requests in the current revision.
     query_read_paths: std::collections::BTreeSet<PathBuf>,
-    /// The check whose progress the client is being shown, while it runs.
     progress: Option<Progress>,
-    /// The report whose creation the client has not answered; its own id and token prevent a
-    /// late answer from opening another check's report.
     progress_create: Option<PendingCreation>,
-    /// Whether this client created a progress report without an error; a client that refused one
-    /// is never sent another.
     progress_agreed: bool,
-
-    /// Whether a check has already finished on this connection: the first check is the one the
-    /// author is waiting for, so it is shown at once, while a later one is shown only once it runs
-    /// long.
     warm: bool,
-    /// The number the next identifier this connection mints carries: request identifiers and
-    /// progress tokens are scoped to their sender, so this sequence never meets the client's.
     identifier_serial: u64,
-    /// The `workspace/configuration` request whose answer has this client's settings.
     settings_pull: Option<RequestId>,
-    /// The origin a client named for the development server, which outranks the site's own
-    /// generated state.
     named_origin: Option<String>,
-    /// The origin a command line named, which stands in for one the site's generated state holds.
     default_origin: Option<String>,
-    /// The configuration sections this host declares, which a `tola.toml` answer reads its keys
-    /// from.
     host_sections: HostSections,
-    /// When a worker last had work, absent before the first job or after idle release.
     last_work: Option<Instant>,
-    /// Whether the author was already told a check's own work failed, so one failing run of checks
-    /// announces itself once rather than on every edit.
     announced_panic: bool,
-    /// Documents with displayed tokens; `None` records a range reply without a full delta base.
+    /// Cached token lists; `None` marks a range reply with no full-document delta baseline.
     tokens: std::collections::HashMap<Uri, Option<lsp_types::SemanticTokens>>,
-    /// The identifier the next token result has, which a delta request echoes.
     tokens_serial: u64,
     semantic_refresh: refresh::SemanticRefresh,
     watchers: changes::Watchers,
 }
 
-/// One open work-done report.
 struct Progress {
-    /// The revision the report belongs to: a check superseded by a newer revision ends this report
-    /// without ending the one the newer check opened.
     revision: u64,
     token: NumberOrString,
-    /// The moment the report may open; a check that finishes before it never opens one.
     due: Instant,
-    /// Whether the client has been shown the report, so ending it is all that is left.
     opened: bool,
 }
 
-/// One report whose creation the client has not answered yet.
 struct PendingCreation {
-    /// The id the creation request was sent under, which its answer has.
     id: RequestId,
-    /// The report's token, which its answer must name for that report to open.
     token: NumberOrString,
 }
 
@@ -228,8 +173,8 @@ impl<W, D> Connection<W, D> {
         if let Some(build) = &self.selection_build {
             build.canceller.cancel();
         }
-        for request in self.requests.values() {
-            request.canceller.cancel();
+        for req in self.requests.values() {
+            req.canceller.cancel();
         }
     }
 
@@ -242,26 +187,20 @@ impl<W, D> Connection<W, D> {
         }
     }
 
-    /// The inputs one source job reads: the workspace root a job resolves against, this
-    /// connection's overrides at the revision its tracked sources hold.
-    fn source_inputs(&self, root: PathBuf, cancellation: BuildCancellation) -> SourceInputs {
+    fn source_inputs(&self, root: PathBuf, cancel: BuildCancellation) -> SourceInputs {
         SourceInputs {
             root,
             overrides: Arc::clone(self.open.overrides()),
             source_revision: self.open.revision(),
-            cancellation,
+            cancellation: cancel,
         }
     }
 
-    /// The workspace this connection serves.
-    ///
-    /// Every request, notification, and lane completion this type receives runs after `initialize`
-    /// answered, so a connection that never reached `Phase::Ready` runs none of them.
     fn workspace(&self) -> &Workspace {
-        let Phase::Ready(workspace) = &self.phase else {
+        let Phase::Ready(ws) = &self.phase else {
             unreachable!("the connection is initialized before it serves anything");
         };
-        workspace
+        ws
     }
 }
 
@@ -272,15 +211,14 @@ impl<W, D> Drop for Connection<W, D> {
 }
 
 impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
-    /// File identities follow the selected configuration; workspace URIs keep the client's root.
     fn source_root(&self) -> PathBuf {
         let root = self
             .configuration
             .as_ref()
-            .map(|config| config.get_root())
+            .map(|cfg| cfg.root())
             .or_else(|| self.named_configuration.as_deref().and_then(Path::parent))
             .unwrap_or_else(|| match &self.phase {
-                Phase::Ready(workspace) | Phase::Initializing(workspace) => &workspace.root,
+                Phase::Ready(ws) | Phase::Initializing(ws) => &ws.root,
                 _ => unreachable!("source roots are selected during initialization"),
             });
         tola_input::normalize_existing_prefix(root)
@@ -288,55 +226,41 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
 
     pub(super) fn receive(
         &mut self,
-        message: std::result::Result<Message, InvalidMessage>,
+        msg: std::result::Result<Message, InvalidMessage>,
     ) -> Result<ControlFlow<()>> {
-        match message {
+        match msg {
             Err(invalid) => write_invalid(&mut self.writer, invalid)?,
-            Ok(Message::Request(request)) => self.request(request)?,
-            Ok(Message::Notification(message)) => return Ok(self.notification(message)?),
-            Ok(Message::Response(response)) => self.response(response)?,
+            Ok(Message::Request(req)) => self.request(req)?,
+            Ok(Message::Notification(msg)) => return Ok(self.notification(msg)?),
+            Ok(Message::Response(resp)) => self.response(resp)?,
         }
         Ok(ControlFlow::Continue(()))
     }
 
-    /// Write one response.
-    ///
-    /// A client that stopped reading blocks this write, and with it the connection: no cancellation
-    /// reaches a write already in flight, so the host's token is observed between messages and the
-    /// connection stalls until the client reads again or the process ends.
-    fn reply(&mut self, response: Response) -> Result<()> {
-        let message: Message = response.into();
-        message.write(&mut self.writer)?;
+    fn reply(&mut self, resp: Response) -> Result<()> {
+        let msg: Message = resp.into();
+        msg.write(&mut self.writer)?;
         Ok(())
     }
 
-    /// Write one notification to the client.
     fn notify(&mut self, method: &str, params: impl serde::Serialize) -> Result<()> {
-        let message: Message = Notification::new(method.to_owned(), params).into();
-        message.write(&mut self.writer)?;
+        let msg: Message = Notification::new(method.to_owned(), params).into();
+        msg.write(&mut self.writer)?;
         Ok(())
     }
 
-    /// Send one request to the client, under this connection's own identifier sequence.
-    fn send_request(
-        &mut self,
-        method: &str,
-        parameters: impl serde::Serialize,
-    ) -> Result<RequestId> {
+    fn send_request(&mut self, method: &str, params: impl serde::Serialize) -> Result<RequestId> {
         let id = RequestId::from(format!("tola-{}", self.next_identifier()));
-        let message: Message = Request::new(id.clone(), method.to_owned(), parameters).into();
-        message.write(&mut self.writer)?;
+        let msg: Message = Request::new(id.clone(), method.to_owned(), params).into();
+        msg.write(&mut self.writer)?;
         Ok(id)
     }
 
-    /// The next number of this connection's own identifier sequence.
     fn next_identifier(&mut self) -> u64 {
         self.identifier_serial += 1;
         self.identifier_serial
     }
 
-    /// Stop every job this revision owns, refusing its admitted requests with `refusal`: the
-    /// check, the waiting selection build, the queued lane work, and the report the check opened.
     fn cancel_pending_work(&mut self, refusal: (ErrorCode, &str)) -> Result<()> {
         self.checking.cancel();
         self.cancel_selection();
@@ -354,19 +278,12 @@ struct PendingRequest {
     canceller: BuildCanceller,
     /// Open-source revisions stay distinct when a closed URI restarts its document version.
     document_revision: Option<(Uri, u64)>,
-    /// The fixes a code action request already earned, held until the compiler lane adds the
-    /// narrowing actions the checked world justifies.
     narrowing: Option<Vec<CodeActionOrCommand>>,
-    /// The code action this request stands in, held while the revision's selection index is built
-    /// on the compiler lane.
     waiting: Option<PendingSelection>,
 }
 
-/// One code action a revision has no accepted selection index for.
 struct PendingSelection {
-    /// The revision whose index the answer reads.
     revision: u64,
-    /// The request as the client sent it, which is answered unchanged once that index exists.
     params: lsp_types::CodeActionParams,
 }
 
@@ -380,17 +297,10 @@ enum Phase {
 struct Workspace {
     root: PathBuf,
     diagnostics: ClientDiagnostics,
-    /// When a source change reruns the site's check, which the client states for this site.
     check_mode: CheckMode,
     source_check_status: bool,
-
-    /// Where the client's launch configuration says the development server serves the site, as
-    /// `http://host:port` with no path; the site's own mount path is read from its configuration.
     preview_origin: Option<String>,
-    /// Whether the client folds complete lines only, which asks for no character columns.
     line_folding_only: bool,
-    /// Whether a source's pages reach the author as inlay hints, which a client showing no code
-    /// lens reads.
     routes_as_hints: bool,
     features: ClientFeatures,
 }
@@ -408,64 +318,61 @@ pub(crate) mod tests {
     use tola_typst::typst::syntax::Source;
 
     pub(super) fn ready_workspace(
-        connection: &mut Connection<Vec<u8>, impl Fn(&[Diagnostic])>,
+        conn: &mut Connection<Vec<u8>, impl Fn(&[Diagnostic])>,
     ) -> &mut Workspace {
-        let Phase::Ready(workspace) = &mut connection.phase else {
+        let Phase::Ready(ws) = &mut conn.phase else {
             unreachable!("a ready connection");
         };
-        workspace
+        ws
     }
 
-    pub(crate) fn finish_analysis(connection: &mut Connection<Vec<u8>, impl Fn(&[Diagnostic])>) {
-        let request = connection
-            .next_analysis()
-            .expect("a queued source analysis");
-        answer_analysis(connection, request);
+    pub(crate) fn finish_analysis(conn: &mut Connection<Vec<u8>, impl Fn(&[Diagnostic])>) {
+        let req = conn.next_analysis().expect("a queued source analysis");
+        answer_analysis(conn, req);
     }
 
     pub(crate) fn answer_analysis(
-        connection: &mut Connection<Vec<u8>, impl Fn(&[Diagnostic])>,
-        request: AnalysisRequest,
+        conn: &mut Connection<Vec<u8>, impl Fn(&[Diagnostic])>,
+        req: AnalysisRequest,
     ) {
-        connection
-            .completed(crate::compiler::analyze(
-                &mut crate::analysis::DiskSources::default(),
-                &mut crate::analysis::GraphCache::default(),
-                request,
-            ))
-            .expect("the analysis answered");
+        conn.completed(crate::compiler::analyze(
+            &mut crate::analysis::DiskSources::default(),
+            &mut crate::analysis::GraphCache::default(),
+            req,
+        ))
+        .expect("the analysis answered");
     }
 
     pub(crate) fn dynamic_import_position(
-        connection: &mut Connection<Vec<u8>, impl Fn(&[Diagnostic])>,
-        directory: &Path,
+        conn: &mut Connection<Vec<u8>, impl Fn(&[Diagnostic])>,
+        dir: &Path,
     ) -> (Uri, lsp_types::Position) {
-        std::fs::write(directory.join("library.typ"), "#let greet = [hello]\n").unwrap();
-        let uri = crate::uri::from_file_path(&directory.join("page.typ")).unwrap();
+        std::fs::write(dir.join("library.typ"), "#let greet = [hello]\n").unwrap();
+        let uri = crate::uri::from_file_path(&dir.join("page.typ")).unwrap();
         let text = "#let base = \"library\"\n#import base + \".typ\": greet\n#greet\n";
-        open_document(connection, &uri, 1, text);
+        open_document(conn, &uri, 1, text);
         assert!(matches!(
-            connection.next_job(Instant::now()),
+            conn.next_job(Instant::now()),
             Some(SourceJob::Check(_))
         ));
-        let position = last_position(text, "greet");
-        (uri, position)
+        let pos = last_position(text, "greet");
+        (uri, pos)
     }
 
     pub(crate) fn last_position(text: &str, needle: &str) -> lsp_types::Position {
-        let source = Source::detached(text);
+        let src = Source::detached(text);
         let byte = text.rfind(needle).unwrap();
-        crate::position::utf16_range(source.lines(), byte..byte)
+        crate::position::utf16_range(src.lines(), byte..byte)
             .unwrap()
             .start
     }
 
-    pub(crate) fn references_request(uri: &Uri, position: lsp_types::Position) -> Request {
+    pub(crate) fn references_request(uri: &Uri, pos: lsp_types::Position) -> Request {
         Request::new(
             8.into(),
             request::References::METHOD.into(),
             json!({
-                "textDocument":{"uri":uri.as_str()}, "position":position, "context":{"includeDeclaration":true}
+                "textDocument":{"uri":uri.as_str()}, "position":pos, "context":{"includeDeclaration":true}
             }),
         )
     }
@@ -478,18 +385,17 @@ pub(crate) mod tests {
         writer: W,
         root: PathBuf,
     ) -> Connection<W, impl Fn(&[Diagnostic])> {
-        let mut connection = Connection::new(
+        let mut conn = Connection::new(
             writer,
             |_: &[Diagnostic]| {},
             BuildCanceller::new(),
             tola_build::BuildResources::default(),
             None,
-            // No launch origin: these tests never send the handshake that names one.
             None,
             &[],
         );
-        connection.open = OpenSources::new(&root);
-        connection.phase = Phase::Ready(Workspace {
+        conn.open = OpenSources::new(&root);
+        conn.phase = Phase::Ready(Workspace {
             diagnostics: ClientDiagnostics::new(root.clone()),
             root,
             check_mode: CheckMode::default(),
@@ -499,7 +405,7 @@ pub(crate) mod tests {
             line_folding_only: false,
             features: ClientFeatures::default(),
         });
-        connection
+        conn
     }
 
     pub(crate) fn uninitialized() -> Connection<Vec<u8>, impl Fn(&[Diagnostic])> {
@@ -514,32 +420,30 @@ pub(crate) mod tests {
         )
     }
 
-    pub(crate) fn initialize(connection: &mut Connection<Vec<u8>, impl Fn(&[Diagnostic])>) {
+    pub(crate) fn initialize(conn: &mut Connection<Vec<u8>, impl Fn(&[Diagnostic])>) {
         let root = std::env::current_dir().unwrap();
-        connection
-            .request(Request::new(
-                1.into(),
-                request::Initialize::METHOD.into(),
-                serde_json::to_value(InitializeParams {
-                    workspace_folders: Some(vec![lsp_types::WorkspaceFolder {
-                        uri: crate::uri::from_file_path(&root).unwrap(),
-                        name: "site".to_owned(),
-                    }]),
-                    ..Default::default()
-                })
-                .unwrap(),
-            ))
-            .unwrap();
+        conn.request(Request::new(
+            1.into(),
+            request::Initialize::METHOD.into(),
+            serde_json::to_value(InitializeParams {
+                workspace_folders: Some(vec![lsp_types::WorkspaceFolder {
+                    uri: crate::uri::from_file_path(&root).unwrap(),
+                    name: "site".to_owned(),
+                }]),
+                ..Default::default()
+            })
+            .unwrap(),
+        ))
+        .unwrap();
     }
 
-    /// One `didOpen` of `uri` at `version`, holding `text`.
     pub(crate) fn open_document(
-        connection: &mut Connection<Vec<u8>, impl Fn(&[Diagnostic])>,
+        conn: &mut Connection<Vec<u8>, impl Fn(&[Diagnostic])>,
         uri: &Uri,
         version: i32,
         text: &str,
     ) {
-        let _ = connection
+        let _ = conn
             .notification(Notification::new(
                 notification::DidOpenTextDocument::METHOD.into(),
                 json!({"textDocument":{"uri":uri.as_str(),"languageId":"typst","version":version,"text":text}}),
@@ -548,36 +452,33 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn open_draft(
-        connection: &mut Connection<Vec<u8>, impl Fn(&[Diagnostic])>,
+        conn: &mut Connection<Vec<u8>, impl Fn(&[Diagnostic])>,
         text: &str,
     ) -> Uri {
         let uri: Uri = "untitled:Draft".parse().unwrap();
-        open_document(connection, &uri, 1, text);
+        open_document(conn, &uri, 1, text);
         uri
     }
 
-    pub(crate) fn response(
-        connection: &mut Connection<Vec<u8>, impl Fn(&[Diagnostic])>,
-    ) -> Response {
-        messages(connection)
+    pub(crate) fn response(conn: &mut Connection<Vec<u8>, impl Fn(&[Diagnostic])>) -> Response {
+        messages(conn)
             .into_iter()
-            .find_map(|message| match message {
-                Message::Response(response) => Some(response),
+            .find_map(|msg| match msg {
+                Message::Response(resp) => Some(resp),
                 _ => None,
             })
             .unwrap_or_else(|| panic!("request produced no response"))
     }
 
-    /// The error code this connection replied to `id` with.
     pub(crate) fn rejection(
-        connection: &mut Connection<Vec<u8>, impl Fn(&[Diagnostic])>,
+        conn: &mut Connection<Vec<u8>, impl Fn(&[Diagnostic])>,
         id: &RequestId,
     ) -> i32 {
-        messages(connection)
+        messages(conn)
             .into_iter()
-            .find_map(|message| match message {
-                Message::Response(response) if response.id == *id => {
-                    Some(response.response_result.expect_err("a refusal").code)
+            .find_map(|msg| match msg {
+                Message::Response(resp) if resp.id == *id => {
+                    Some(resp.response_result.expect_err("a refusal").code)
                 }
                 _ => None,
             })
@@ -593,15 +494,12 @@ pub(crate) mod tests {
         })
     }
 
-    /// Every message this connection has written, drained so the next read starts empty.
-    pub(crate) fn messages(
-        connection: &mut Connection<Vec<u8>, impl Fn(&[Diagnostic])>,
-    ) -> Vec<Message> {
-        let mut reader = std::io::Cursor::new(std::mem::take(&mut connection.writer));
-        let mut messages = Vec::new();
-        while let Some(message) = Message::read(&mut reader).expect("a framed message") {
-            messages.push(message);
+    pub(crate) fn messages(conn: &mut Connection<Vec<u8>, impl Fn(&[Diagnostic])>) -> Vec<Message> {
+        let mut reader = std::io::Cursor::new(std::mem::take(&mut conn.writer));
+        let mut msgs = Vec::new();
+        while let Some(msg) = Message::read(&mut reader).expect("a framed message") {
+            msgs.push(msg);
         }
-        messages
+        msgs
     }
 }

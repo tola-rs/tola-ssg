@@ -5,7 +5,7 @@ use std::path::Path;
 use serde_json::{Value, json};
 
 use crate::cancellation::BuildCancellation;
-use crate::config::ResolvedSiteConfig;
+use crate::config::SiteConfig;
 use crate::config::section::IconCollectionSource;
 use crate::resources::BuildResources;
 use tola_diagnostic::display_path;
@@ -15,7 +15,7 @@ use tola_diagnostic::display_path;
 /// Collections are prepared through the same cache a build uses, so remote bytes are fetched only
 /// when they are not cached yet. Selected names include aliases and are in lexical order.
 pub fn icons(
-    config: &ResolvedSiteConfig,
+    config: &SiteConfig,
     resources: &BuildResources,
     cancellation: &BuildCancellation,
     namespace: Option<&str>,
@@ -28,7 +28,7 @@ pub fn icons(
         &Default::default(),
     )?;
     let collections = icons.collections();
-    let root = config.get_root();
+    let root = config.root();
     let mut rows = Vec::new();
     for (name, source) in &config.icons.collections {
         if namespace.is_some_and(|selected| selected != name) {

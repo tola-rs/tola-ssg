@@ -222,8 +222,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sha256_is_refused_with_its_repair() {
-        let error = toml::from_str::<IconsConfig>(
+    fn sha256_invalid_reports_help() {
+        let err = toml::from_str::<IconsConfig>(
             r#"
             [collections.ui]
             source-type = "remote-json"
@@ -232,22 +232,22 @@ mod tests {
             "#,
         )
         .unwrap_err();
-        let reason = error.message();
+        let reason = err.message();
         assert!(reason.contains("sha256"), "{reason}");
         assert!(reason.contains("tola.lock"), "{reason}");
         assert!(reason.contains("tola update"), "{reason}");
     }
 
     #[test]
-    fn source_debug_redacts_url_queries() {
-        let source = IconCollectionSource::RemoteJson {
+    fn source_debug_redacts_queries() {
+        let src = IconCollectionSource::RemoteJson {
             preset: None,
             version: None,
             url: Some("https://example.test/icons.json?token=private".into()),
             mirrors: None,
         };
-        let debug = format!("{source:?}");
-        assert!(debug.contains("<redacted>"));
-        assert!(!debug.contains("private"));
+        let dbg = format!("{src:?}");
+        assert!(dbg.contains("<redacted>"));
+        assert!(!dbg.contains("private"));
     }
 }

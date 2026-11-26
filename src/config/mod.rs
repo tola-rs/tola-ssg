@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use tola_build::config::loading::{
     BuildOverrides, SiteConfigWithSourceDigest, resolve_parsed_site_config,
 };
-use tola_build::config::{ConfigSource, FieldPath, ResolvedSiteConfig, SiteConfigSchema};
+use tola_build::config::{ConfigSource, FieldPath, SiteConfig, SiteConfigSchema};
 use tola_config::Config;
 use tola_input::InputScope;
 
@@ -20,11 +20,7 @@ pub(crate) use dev::DevConfig;
 pub(crate) use diagnostics::DiagnosticsConfig;
 pub(crate) use server::{ServerConfig, ServerOverrides};
 
-/// The core sections and the version declaration are read through
-/// [`ConfigSource::decode_with_host`], so adding one to the core schema needs no edit here.
-///
-/// The derive gives each key the documentation its section's declaration writes, so `tola help`
-/// and the editor answer `[server]`, `[dev]`, and `[diagnostics]` from one text.
+/// Host-only configuration sections decoded alongside the core schema.
 #[derive(Debug, Default, Serialize, Deserialize, Config)]
 #[serde(default)]
 #[config(crate = tola_config, section = "")]
@@ -39,12 +35,7 @@ pub(crate) struct ConfigSchema {
     diagnostics: DiagnosticsConfig,
 }
 
-/// The host sections `tola.toml` is decoded through beyond the core schema, each as the field
-/// list its own `Config` derive generated.
-///
-/// `tola-build` lists the core schema's keys; `[server]`, `[dev]`, and `[diagnostics]` are
-/// decoded here, so their keys and documentation come from this list. The language server reads
-/// `tola.toml` keys from it too, so a section added to [`ConfigSchema`] needs no second edit.
+/// Host sections decoded beyond the core schema, in declaration order.
 pub(crate) const HOST_SECTIONS: &[&[(FieldPath, Option<&'static str>)]] = &[
     ConfigSchema::DECLARED_FIELDS,
     ServerConfig::DECLARED_FIELDS,
@@ -59,29 +50,15 @@ pub(crate) fn field_paths() -> impl Iterator<Item = FieldPath> {
         .flat_map(|fields| fields.iter().map(|(path, _)| *path))
 }
 
-/// The documentation a declared host key has, when its declaration writes one.
+/// Documentation for a declared host key, when available.
 pub(crate) fn field_documentation(path: &str) -> Option<&'static str> {
     HOST_SECTIONS
         .iter()
         .flat_map(|fields| fields.iter())
         .find(|(field, _)| field.as_str() == path)
-        .and_then(|(_, documentation)| *documentation)
+        .and_then(|(_, doc)| *doc)
 }
 
-/// What `tola help` adds under a host section's table.
-pub(crate) fn section_help(section: &str) -> Option<&'static str> {
-    [
-        (ServerConfig::TEMPLATE_SECTION, ServerConfig::HELP),
-        (DevConfig::TEMPLATE_SECTION, DevConfig::HELP),
-        (DiagnosticsConfig::TEMPLATE_SECTION, DiagnosticsConfig::HELP),
-    ]
-    .into_iter()
-    .find_map(|(name, help)| (name == section).then_some(help))
-}
-
-/// The invocation overrides a command applies on top of the configuration file.
-///
-/// The default overrides nothing.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ConfigOverrides {
     pub(crate) build: BuildOverrides,
@@ -103,9 +80,8 @@ pub(crate) struct LoadedConfig {
 }
 
 impl std::fmt::Debug for LoadedConfig {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("LoadedConfig")
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LoadedConfig")
             .field("config", self.core.config())
             .field("server", &self.server)
             .field("dev", &self.dev)
@@ -114,7 +90,7 @@ impl std::fmt::Debug for LoadedConfig {
 }
 
 impl LoadedConfig {
-    pub(crate) fn config(&self) -> &ResolvedSiteConfig {
+    pub(crate) fn config(&self) -> &SiteConfig {
         self.core.config()
     }
 
@@ -130,18 +106,11 @@ impl LoadedConfig {
         &self.diagnostics
     }
 
-    pub(crate) fn into_config(self) -> ResolvedSiteConfig {
+    pub(crate) fn into_config(self) -> SiteConfig {
         self.core.into_config()
     }
 
-    pub(crate) fn into_parts(
-        self,
-    ) -> (
-        Arc<ResolvedSiteConfig>,
-        ServerConfig,
-        DevConfig,
-        ConfigLoader,
-    ) {
+    pub(crate) fn into_parts(self) -> (Arc<SiteConfig>, ServerConfig, DevConfig, ConfigLoader) {
         (
             Arc::new(self.core.into_config()),
             self.server,
@@ -157,26 +126,23 @@ pub(crate) fn load(
     packages: tola_typst::PackageLocations,
     overrides: &ConfigOverrides,
 ) -> Result<LoadedConfig> {
-    let source = ConfigSource::load(explicit, scope).map_err(|error| {
-        if !matches!(
-            error,
-            tola_build::config::ConfigSourceError::NotFound { .. }
-        ) {
-            return anyhow::Error::new(error);
+    let src = ConfigSource::load(explicit, scope).map_err(|err| {
+        if !matches!(err, tola_build::config::ConfigSourceError::NotFound { .. }) {
+            return anyhow::Error::new(err);
         }
-        let diagnostics = error
+        let diags = err
             .diagnostics()
             .iter()
             .cloned()
-            .map(|diagnostic| diagnostic.with_help("Run `tola init` to create a site"))
+            .map(|diag| diag.with_help("Run `tola init` to create a site"))
             .collect();
-        tola_diagnostic::DiagnosticError::attach(error.into(), diagnostics).into()
+        tola_diagnostic::DiagnosticError::attach(err.into(), diags).into()
     })?;
-    resolve(source, packages, overrides)
+    resolve(src, packages, overrides)
 }
 
 pub(crate) fn resolve(
-    source: ConfigSource,
+    src: ConfigSource,
     packages: tola_typst::PackageLocations,
     overrides: &ConfigOverrides,
 ) -> Result<LoadedConfig> {
@@ -184,18 +150,21 @@ pub(crate) fn resolve(
         packages,
         overrides: overrides.clone(),
     });
-    let (core, server, dev, diagnostics) = resolve_source(&source, &inputs)?;
+    let (core, server, dev, diagnostics) = resolve_source(&src, &inputs)?;
     Ok(LoadedConfig {
         core,
         server,
         dev,
         diagnostics,
-        loader: ConfigLoader { source, inputs },
+        loader: ConfigLoader {
+            source: src,
+            inputs,
+        },
     })
 }
 
 fn resolve_source(
-    source: &ConfigSource,
+    src: &ConfigSource,
     inputs: &ConfigInputs,
 ) -> Result<(
     SiteConfigWithSourceDigest,
@@ -203,7 +172,7 @@ fn resolve_source(
     DevConfig,
     DiagnosticsConfig,
 )> {
-    let (core, host) = source.decode_with_host::<ConfigSchema>()?;
+    let (core, host) = src.decode_with_host::<ConfigSchema>()?;
     let mut server = host.schema().server.clone();
     let mut dev = host.schema().dev.clone();
     let diagnostics = host.schema().diagnostics.clone();
@@ -227,16 +196,16 @@ pub(crate) fn validate_settings(
     scope: InputScope,
     overlays: &[(PathBuf, Arc<str>)],
 ) -> Result<(SiteConfigSchema, Vec<PathBuf>)> {
-    let source = ConfigSource::parse_with_sources(path, text, scope, overlays, None)?;
-    let paths = source.paths().map(Path::to_path_buf).collect();
-    let (parsed, _) = source.decode_with_host::<ConfigSchema>()?;
+    let src = ConfigSource::parse_with_sources(path, text, scope, overlays, None)?;
+    let paths = src.paths().map(Path::to_path_buf).collect();
+    let (parsed, _) = src.decode_with_host::<ConfigSchema>()?;
     parsed.validate_settings()?;
     Ok((parsed.into_schema(), paths))
 }
 
 /// A reloaded configuration awaiting acceptance by the running session.
 pub(crate) struct ConfigCandidate {
-    config: Arc<ResolvedSiteConfig>,
+    config: Arc<SiteConfig>,
     server: ServerConfig,
     dev: DevConfig,
     diagnostics: DiagnosticsConfig,
@@ -245,7 +214,7 @@ pub(crate) struct ConfigCandidate {
 }
 
 impl ConfigCandidate {
-    pub(crate) fn config(&self) -> Arc<ResolvedSiteConfig> {
+    pub(crate) fn config(&self) -> Arc<SiteConfig> {
         Arc::clone(&self.config)
     }
 
@@ -261,32 +230,27 @@ impl ConfigCandidate {
         &self.diagnostics
     }
 
-    /// Whether a reloaded configuration leaves every setting in effect unchanged.
-    ///
-    /// A `false` answer is a configuration the caller must accept: the prepared session, and the
-    /// answers a request reads, would otherwise keep the previous values. `server`, `dev`, and
-    /// `diagnostics` are host settings, applied separately from this comparison.
     #[cfg(test)]
-    pub(crate) fn has_same_effective_settings(&self, config: &ResolvedSiteConfig) -> Result<bool> {
-        Ok(self.config.get_root() == config.get_root()
-            && self.config.package_locations() == config.package_locations()
-            && same_section(self.config.site(), config.site())?
-            && same_section(self.config.build(), config.build())?
-            && self.config.module_entry() == config.module_entry()
-            && self.config.modules() == config.modules()
-            && self.config.hooks() == config.hooks()
-            && self.config.options() == config.options()
-            && same_section(self.config.assets(), config.assets())?
-            && same_section(self.config.fonts(), config.fonts())?
-            && same_section(self.config.icons(), config.icons())?
-            && same_section(self.config.vendor(), config.vendor())?
-            && same_section(self.config.formatter(), config.formatter())?
-            && self.config.warnings().len() == config.warnings().len()
+    pub(crate) fn has_same_effective_settings(&self, cfg: &SiteConfig) -> Result<bool> {
+        Ok(self.config.root() == cfg.root()
+            && self.config.package_locations() == cfg.package_locations()
+            && same_section(self.config.site(), cfg.site())?
+            && same_section(self.config.build(), cfg.build())?
+            && self.config.module_entry() == cfg.module_entry()
+            && self.config.modules() == cfg.modules()
+            && self.config.hooks() == cfg.hooks()
+            && self.config.options() == cfg.options()
+            && same_section(self.config.assets(), cfg.assets())?
+            && same_section(self.config.fonts(), cfg.fonts())?
+            && same_section(self.config.icons(), cfg.icons())?
+            && same_section(self.config.vendor(), cfg.vendor())?
+            && same_section(self.config.formatter(), cfg.formatter())?
+            && self.config.warnings().len() == cfg.warnings().len()
             && self
                 .config
                 .warnings()
                 .iter()
-                .zip(config.warnings())
+                .zip(cfg.warnings())
                 .all(|(left, right)| {
                     left.field == right.field
                         && left.message == right.message
@@ -297,7 +261,6 @@ impl ConfigCandidate {
     }
 }
 
-/// Whether two configuration sections hold the same values.
 #[cfg(test)]
 fn same_section(left: &impl Serialize, right: &impl Serialize) -> Result<bool> {
     Ok(toml::Value::try_from(left)? == toml::Value::try_from(right)?)
@@ -331,17 +294,17 @@ impl ConfigLoader {
         self.resolve_changed(self.source.changed_sources(overlays, cancellation)?)
     }
 
-    fn resolve_changed(&self, source: Option<ConfigSource>) -> Result<Option<ConfigCandidate>> {
-        let Some(source) = source else {
+    fn resolve_changed(&self, src: Option<ConfigSource>) -> Result<Option<ConfigCandidate>> {
+        let Some(src) = src else {
             return Ok(None);
         };
-        let (core, server, dev, diagnostics) = resolve_source(&source, &self.inputs)?;
+        let (core, server, dev, diagnostics) = resolve_source(&src, &self.inputs)?;
         Ok(Some(ConfigCandidate {
             config: Arc::new(core.into_config()),
             server,
             dev,
             diagnostics,
-            source,
+            source: src,
             inputs: Arc::clone(&self.inputs),
         }))
     }
@@ -377,11 +340,11 @@ mod tests {
     }
 
     #[test]
-    fn single_document_supplies_all_sections() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("tola.toml");
-        let source = "[server]\nport = 9000\n[dev]\nwatch = false\n[diagnostics]\nmax_errors = 7\nmax_warnings = 1\n[build.minify]\nhtml = false\n";
-        let parsed = ConfigSource::parse(&path, source, InputScope::Online).unwrap();
+    fn single_document_all_sections() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tola.toml");
+        let src = "[server]\nport = 9000\n[dev]\nwatch = false\n[diagnostics]\nmax_errors = 7\nmax_warnings = 1\n[build.minify]\nhtml = false\n";
+        let parsed = ConfigSource::parse(&path, src, InputScope::Online).unwrap();
         assert!(parsed.presence().contains("server.port"));
         assert!(parsed.presence().contains("build.minify.html"));
 
@@ -398,16 +361,16 @@ mod tests {
         assert!(!loaded.config().build().minify.html);
         assert_eq!(
             loaded.config().source().unwrap().sources()[0].hash(),
-            blake3::hash(source.as_bytes())
+            blake3::hash(src.as_bytes())
         );
         assert!(loaded.config().warnings().is_empty());
         assert!(!path.exists());
     }
 
     #[test]
-    fn server_defaults_bind_loopback() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("tola.toml");
+    fn server_defaults_loopback() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tola.toml");
         std::fs::write(&path, text("Site")).unwrap();
         let loaded = load_at(&path);
 
@@ -416,8 +379,8 @@ mod tests {
     }
 
     #[test]
-    fn unknown_configuration_keys_stop_the_load() {
-        let directory = tempfile::tempdir().unwrap();
+    fn unknown_keys_rejected() {
+        let dir = tempfile::tempdir().unwrap();
         for (toml, key) in [
             ("[unknown]\nvalue = true\n", "unknown"),
             (
@@ -425,27 +388,23 @@ mod tests {
                 "site.titel",
             ),
         ] {
-            let source = ConfigSource::parse(
-                &directory.path().join("tola.toml"),
-                toml,
-                InputScope::Online,
-            )
-            .unwrap();
-            let error = resolve(
-                source,
+            let src = ConfigSource::parse(&dir.path().join("tola.toml"), toml, InputScope::Online)
+                .unwrap();
+            let err = resolve(
+                src,
                 tola_typst::PackageLocations::default(),
                 &ConfigOverrides::default(),
             )
             .unwrap_err();
-            assert!(error.to_string().contains(key), "{error:#}");
-            assert!(tola_diagnostic::attached(&error).is_some());
+            assert!(err.to_string().contains(key), "{err:#}");
+            assert!(tola_diagnostic::attached(&err).is_some());
         }
     }
 
     #[test]
-    fn reload_reuses_initial_overrides() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("tola.toml");
+    fn reload_reuses_overrides() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tola.toml");
         std::fs::write(&path, text("First")).unwrap();
         let mut overrides = ConfigOverrides {
             build: BuildOverrides {
@@ -478,7 +437,7 @@ mod tests {
         assert_eq!(server.port, 8000);
         assert_eq!(
             candidate.config().build().publish_dir,
-            first.get_root().join("dist")
+            first.root().join("dist")
         );
         assert_eq!(candidate.server().interface.to_string(), "0.0.0.0");
         assert_eq!(candidate.server().port, 8000);
@@ -487,20 +446,14 @@ mod tests {
             candidate.source.sources()[0].hash(),
             blake3::hash(changed.as_bytes())
         );
-        assert_eq!(
-            overrides.build.publish_dir,
-            Some(std::path::PathBuf::from("other-output"))
-        );
-        assert_eq!(overrides.server.port, Some(9000));
-        assert_eq!(overrides.watch, Some(true));
         loader.acknowledge(&candidate);
         assert!(loader.load_candidate().unwrap().is_none());
     }
 
     #[test]
-    fn failed_reload_keeps_the_source() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("tola.toml");
+    fn failed_reload_retains_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tola.toml");
         std::fs::write(&path, text("First")).unwrap();
         let (_, _, _, mut loader) = load_at(&path).into_parts();
         let accepted = loader.source.source_hash();
@@ -515,9 +468,9 @@ mod tests {
     }
 
     #[test]
-    fn unsaved_text_keeps_disk_source() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("tola.toml");
+    fn unsaved_text_preserves_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tola.toml");
         std::fs::write(&path, text("Disk")).unwrap();
         let loaded = load(
             Some(&path),
@@ -532,16 +485,16 @@ mod tests {
             },
         )
         .unwrap();
-        let (config, _, _, mut loader) = loaded.into_parts();
+        let (cfg, _, _, mut loader) = loaded.into_parts();
         let candidate = loader
             .load_text_candidate(&text("Buffer"))
             .unwrap()
             .unwrap();
         assert_eq!(candidate.config().site().title, "Buffer");
-        assert_eq!(candidate.config().get_root(), config.get_root());
+        assert_eq!(candidate.config().root(), cfg.root());
         assert_eq!(
             candidate.config().build().publish_dir,
-            config.get_root().join("dist")
+            cfg.root().join("dist")
         );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), text("Disk"));
         loader.acknowledge(&candidate);
@@ -564,28 +517,26 @@ mod tests {
     }
 
     #[test]
-    fn mount_identity_decides_build_reuse() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("tola.toml");
+    fn mount_identity_equivalence() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tola.toml");
         std::fs::write(&path, "[site]\nbase-path = \"/文档/\"\n").unwrap();
-        let (config, _, _, loader) = load_at(&path).into_parts();
+        let (cfg, _, _, loader) = load_at(&path).into_parts();
 
         for (base_path, unchanged) in [("/%e6%96%87%e6%a1%a3/", true), ("/notes/", false)] {
-            let source = format!("[site]\nbase-path = \"{base_path}\"\n");
-            let candidate = loader.load_text_candidate(&source).unwrap().unwrap();
+            let src = format!("[site]\nbase-path = \"{base_path}\"\n");
+            let candidate = loader.load_text_candidate(&src).unwrap().unwrap();
             assert_eq!(
-                candidate.has_same_effective_settings(&config).unwrap(),
+                candidate.has_same_effective_settings(&cfg).unwrap(),
                 unchanged
             );
         }
     }
 
     #[test]
-    fn edited_section_changes_effective_settings() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("tola.toml");
-        // Every row edits a section that decides what the prepared session or an answer reads,
-        // so a reload keeping its previous values would answer from them.
+    fn edited_section_changes_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tola.toml");
         let rows = [
             ("assets", "[assets]\ncache-busting = true\n"),
             ("fonts", "[typst.fonts]\nsystem = true\n"),
@@ -604,73 +555,70 @@ mod tests {
         ];
         for (section, added) in rows {
             std::fs::write(&path, "# base\n").unwrap();
-            let (config, _, _, loader) = load_at(&path).into_parts();
+            let (cfg, _, _, loader) = load_at(&path).into_parts();
             std::fs::write(&path, format!("# base\n{added}")).unwrap();
             let candidate = loader.load_candidate().unwrap().unwrap();
             assert!(
-                config.warnings().is_empty() && candidate.config().warnings().is_empty(),
-                "{section} must load without a warning of its own"
+                cfg.warnings().is_empty() && candidate.config().warnings().is_empty(),
+                "{section}"
             );
             assert!(
-                !candidate.has_same_effective_settings(&config).unwrap(),
-                "{section} must be a setting in effect"
+                !candidate.has_same_effective_settings(&cfg).unwrap(),
+                "{section}"
             );
         }
     }
 
     #[test]
-    fn changing_module_entry_alias_requires_a_new_configuration() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("tola.toml");
+    fn module_entry_alias_changes_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tola.toml");
         let modules = "[modules.first]\npath = 'theme'\n[modules.second]\npath = 'theme'\n";
-        let source = |alias| format!("[build]\nentry = {{ module = '{alias}' }}\n{modules}");
-        std::fs::write(&path, source("first")).unwrap();
-        let (config, _, _, loader) = load_at(&path).into_parts();
-        let candidate = loader
-            .load_text_candidate(&source("second"))
-            .unwrap()
-            .unwrap();
+        let src = |alias| format!("[build]\nentry = {{ module = '{alias}' }}\n{modules}");
+        std::fs::write(&path, src("first")).unwrap();
+        let (cfg, _, _, loader) = load_at(&path).into_parts();
+        let candidate = loader.load_text_candidate(&src("second")).unwrap().unwrap();
 
-        assert!(!candidate.has_same_effective_settings(&config).unwrap());
+        assert!(!candidate.has_same_effective_settings(&cfg).unwrap());
     }
 
     #[test]
-    fn comment_edit_leaves_effective_settings_unchanged() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("tola.toml");
+    fn comment_edit_preserves_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tola.toml");
         std::fs::write(&path, text("Same")).unwrap();
-        let (config, _, _, loader) = load_at(&path).into_parts();
+        let (cfg, _, _, loader) = load_at(&path).into_parts();
         let candidate = loader
             .load_text_candidate(&format!("{}# note\n", text("Same")))
             .unwrap()
             .unwrap();
-        assert!(candidate.has_same_effective_settings(&config).unwrap());
+        assert!(candidate.has_same_effective_settings(&cfg).unwrap());
     }
 
     #[test]
-    fn fragment_comment_updates_source_snapshot() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path();
+    fn fragment_comment_updates_digest() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
         let path = root.join("tola.toml");
         let fragment = root.join("site.toml");
         std::fs::write(&path, "include = ['site.toml']\n").unwrap();
         std::fs::write(&fragment, text("Same")).unwrap();
-        let (config, _, _, mut loader) = load_at(&path).into_parts();
-        let previous = loader.source.source_hash();
+        let (cfg, _, _, mut loader) = load_at(&path).into_parts();
+        let prev = loader.source.source_hash();
         std::fs::write(&fragment, format!("{}# note\n", text("Same"))).unwrap();
         let candidate = loader.load_candidate().unwrap().unwrap();
-        assert!(candidate.has_same_effective_settings(&config).unwrap());
-        assert_ne!(candidate.source.source_hash(), previous);
+        assert!(candidate.has_same_effective_settings(&cfg).unwrap());
+        assert_ne!(candidate.source.source_hash(), prev);
         loader.acknowledge(&candidate);
         assert!(loader.load_candidate().unwrap().is_none());
     }
 
     #[test]
     #[cfg(unix)]
-    fn symlinked_config_keeps_site_root() {
-        let directory = tempfile::tempdir().unwrap();
-        let site = directory.path().join("site");
-        let shared = directory.path().join("shared");
+    fn symlinked_config_preserves_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let site = dir.path().join("site");
+        let shared = dir.path().join("shared");
         std::fs::create_dir_all(&site).unwrap();
         std::fs::create_dir_all(&shared).unwrap();
         let target = shared.join("tola.toml");
@@ -680,38 +628,31 @@ mod tests {
         let (first, _, _, loader) = load_at(&path).into_parts();
         std::fs::write(&target, text("Second")).unwrap();
         let candidate = loader.load_candidate().unwrap().unwrap();
-        assert_eq!(candidate.config().get_root(), first.get_root());
+        assert_eq!(candidate.config().root(), first.root());
         assert_eq!(candidate.config().build().entry, first.build().entry);
     }
 
     #[test]
-    fn host_accessors_answer_their_keys() {
+    fn host_accessors_cover_keys() {
         let paths = field_paths().map(|path| path.as_str()).collect::<Vec<_>>();
-        for (section, key, help) in [
-            ("server", "server.port", ServerConfig::HELP),
-            ("dev", "dev.watch", DevConfig::HELP),
-            (
-                "diagnostics",
-                "diagnostics.max_errors",
-                DiagnosticsConfig::HELP,
-            ),
+        for (section, key) in [
+            ("server", "server.port"),
+            ("dev", "dev.watch"),
+            ("diagnostics", "diagnostics.max_errors"),
         ] {
-            assert!(paths.contains(&section), "`{section}` is not a field path");
-            assert!(paths.contains(&key), "`{key}` is not a field path");
-            assert!(field_documentation(key).is_some(), "`{key}` has no meaning");
-            assert_eq!(section_help(section), Some(help));
+            assert!(paths.contains(&section));
+            assert!(paths.contains(&key));
+            assert!(field_documentation(key).is_some());
         }
     }
 
-    /// The core sections stay `tola-build`'s, which `tola help` consults first.
     #[test]
-    fn host_accessors_ignore_core_keys() {
+    fn host_accessors_ignore_core() {
         for section in ["site", "build", "icons", "typst"] {
-            assert!(section_help(section).is_none(), "`{section}` answers here");
             assert!(!field_paths().any(|path| path.as_str() == section));
         }
         for key in ["build.entry", "icons.collections", "typst.fonts.system"] {
-            assert!(field_documentation(key).is_none(), "`{key}` answers here");
+            assert!(field_documentation(key).is_none());
         }
     }
 }

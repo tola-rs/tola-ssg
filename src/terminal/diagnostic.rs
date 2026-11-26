@@ -252,7 +252,6 @@ mod tests {
     use tola_diagnostic::{Help, SourceLine, SourcePosition, SourceRange, TraceFrame};
     use unicode_width::UnicodeWidthStr;
 
-    /// One location whose line the renderer can show without reading a file.
     pub(super) fn snippet(line: usize, text: &str) -> Location {
         Location {
             file: None,
@@ -271,38 +270,32 @@ mod tests {
         }
     }
 
-    /// A located help states what is wrong at the location it points at, so its text belongs on the
-    /// code a reader compares, not only in the headline.
     #[test]
-    fn located_help_draws_its_text() {
-        let mut diagnostic = Diagnostic::at_location(
+    fn located_help_rendered() {
+        let mut diag = Diagnostic::at_location(
             COMPILE,
             Severity::Error,
             snippet(2, "#document(\"same/index.html\")[B]"),
             "path `same/index.html` occurs multiple times in the bundle",
         );
-        diagnostic.help.push(Help {
+        diag.help.push(Help {
             message: "path is already in use here".into(),
             location: Some(snippet(1, "#document(\"same/index.html\")[A]")),
         });
 
-        let rendered = render(&diagnostic, None, false);
-        assert!(
-            rendered.contains("path is already in use here"),
-            "{rendered}"
-        );
+        let out = render(&diag, None, false);
+        assert!(out.contains("path is already in use here"), "{out}");
     }
 
-    /// A help whose file the renderer cannot read still reaches the reader as a note.
     #[test]
-    fn help_without_source_renders_note() {
-        let mut diagnostic = Diagnostic::at_path(
+    fn unreadable_help_renders_note() {
+        let mut diag = Diagnostic::at_path(
             COMPILE,
             Severity::Error,
             "site.typ",
             "path `same/index.html` occurs multiple times in the bundle",
         );
-        diagnostic.help.push(Help {
+        diag.help.push(Help {
             message: "path is already in use here".into(),
             location: Some(Location {
                 file: None,
@@ -314,58 +307,50 @@ mod tests {
             }),
         });
 
-        let rendered = render(&diagnostic, None, false);
-        assert!(rendered.contains("other.typ:1:0"), "{rendered}");
-        assert!(
-            rendered.contains("path is already in use here"),
-            "{rendered}"
-        );
+        let out = render(&diag, None, false);
+        assert!(out.contains("other.typ:1:0"), "{out}");
+        assert!(out.contains("path is already in use here"), "{out}");
     }
 
-    /// Escaping a source line for display never moves a caret: what replaces a control has the
-    /// byte length of the character it hides, and a wide character keeps its width.
     #[test]
     fn escapes_preserve_caret_offsets() {
         for line in ["let x = \"a\u{1b}z\";", "\"界\u{7}z\""] {
-            let highlighted = line.find('z').expect("the excerpt marks `z`");
-            let mut location = snippet(1, line);
-            location.source_lines[0].highlight = Some((highlighted, highlighted + 1));
-            let rendered = render(
-                &Diagnostic::at_location(COMPILE, Severity::Error, location, "unexpected control"),
+            let hi = line.find('z').expect("the excerpt marks `z`");
+            let mut loc = snippet(1, line);
+            loc.source_lines[0].highlight = Some((hi, hi + 1));
+            let out = render(
+                &Diagnostic::at_location(COMPILE, Severity::Error, loc, "unexpected control"),
                 None,
                 false,
             );
 
-            assert!(!rendered.contains('\u{1b}'), "{rendered:?}");
-            assert!(!rendered.contains('\u{7}'), "{rendered:?}");
-            let rows = rendered.lines().collect::<Vec<_>>();
-            let source_index = rows
+            assert!(!out.contains('\u{1b}'), "{out:?}");
+            assert!(!out.contains('\u{7}'), "{out:?}");
+            let rows: Vec<_> = out.lines().collect();
+            let src_idx = rows
                 .iter()
-                .position(|row| row.contains('z'))
-                .expect("the source line is drawn");
-            let source = rows[source_index];
+                .position(|r| r.contains('z'))
+                .expect("source line drawn");
+            let src = rows[src_idx];
             assert!(
-                source.contains(line.replace(['\u{1b}', '\u{7}'], "?").as_str()),
-                "{rendered}"
+                src.contains(line.replace(['\u{1b}', '\u{7}'], "?").as_str()),
+                "{out}"
             );
             let caret = rows
-                .get(source_index + 1)
-                .and_then(|row| row.find('^'))
-                .expect("a caret follows the source line");
+                .get(src_idx + 1)
+                .and_then(|r| r.find('^'))
+                .expect("caret follows source line");
             assert_eq!(
-                rows[source_index + 1][..caret].width(),
-                source[..source.find('z').expect("the line keeps `z`")].width(),
-                "{rendered}"
+                rows[src_idx + 1][..caret].width(),
+                src[..src.find('z').expect("line keeps `z`")].width(),
+                "{out}"
             );
         }
     }
 
-    /// A failing hook's output is text Tola did not write: the drawn diagnostic keeps the styling
-    /// it carries and drops every control that could move the cursor, showing a carriage return
-    /// instead of obeying it.
     #[test]
-    fn foreign_note_text_keeps_styling_only() {
-        let diagnostic = Diagnostic::new(
+    fn foreign_note_keeps_sgr_only() {
+        let diag = Diagnostic::new(
             COMMAND,
             Severity::Error,
             "the `styles` hook in `hooks.before-build` failed: the command exited with status 3",
@@ -373,13 +358,13 @@ mod tests {
         .with_note(
             "stderr:\nplain-err fail\n\u{1b}[32mansi-err\u{1b}[0m\ncr-err cccc\rdddd\neeee\n\u{1b}[2J",
         );
-        let plain = render(&diagnostic, None, false);
+        let plain = render(&diag, None, false);
         assert!(!plain.contains(['\u{1b}', '\r']), "{plain:?}");
         assert!(plain.contains("plain-err fail"), "{plain:?}");
         assert!(plain.contains("ansi-err"), "{plain:?}");
         assert!(plain.contains("cr-err cccc\\rdddd"), "{plain:?}");
 
-        let styled = render(&diagnostic, None, true);
+        let styled = render(&diag, None, true);
         assert!(
             styled.contains("\u{1b}[0;32mansi-err\u{1b}[0m"),
             "{styled:?}"
@@ -388,20 +373,18 @@ mod tests {
         assert!(!styled.contains('\r'), "{styled:?}");
     }
 
-    /// A trace frame whose location spans many source lines draws as one marked line, and never
-    /// carries the note a shortened source excerpt gets.
     #[test]
-    fn trace_truncates_to_one_line() {
+    fn trace_truncates_multiline() {
         {
-            let mut diagnostic = Diagnostic::at_location(
+            let mut diag = Diagnostic::at_location(
                 COMPILE,
                 Severity::Error,
                 snippet(1, "#panic(\"missing home page\")"),
                 "missing home page",
             );
-            let mut location = snippet(4, "#page-shell[");
-            location.column = Some(2);
-            location.range = Some(SourceRange {
+            let mut loc = snippet(4, "#page-shell[");
+            loc.column = Some(2);
+            loc.range = Some(SourceRange {
                 start: SourcePosition {
                     line: 3,
                     character: 1,
@@ -411,7 +394,7 @@ mod tests {
                     character: 1,
                 },
             });
-            location.source_lines.extend((5..15).map(|line| SourceLine {
+            loc.source_lines.extend((5..15).map(|line| SourceLine {
                 line,
                 text: "  page body must stay out of the trace".to_owned(),
                 start_column: 0,
@@ -419,7 +402,7 @@ mod tests {
                 ends_line: true,
                 highlight: None,
             }));
-            location.source_lines.push(SourceLine {
+            loc.source_lines.push(SourceLine {
                 line: 15,
                 text: "]".to_owned(),
                 start_column: 0,
@@ -429,26 +412,26 @@ mod tests {
             });
             let frame = TraceFrame {
                 message: "while calling `page-shell`".to_owned(),
-                location: Some(location),
+                location: Some(loc),
             };
-            diagnostic.trace.extend([frame.clone(), frame]);
+            diag.trace.extend([frame.clone(), frame]);
 
-            let rendered = render(&diagnostic, None, false);
-            assert!(rendered.contains("page-shell[…]"), "{rendered}");
+            let out = render(&diag, None, false);
+            assert!(out.contains("page-shell[…]"), "{out}");
             assert_eq!(
-                rendered.matches("while calling `page-shell`").count(),
+                out.matches("while calling `page-shell`").count(),
                 2,
-                "{rendered}"
+                "{out}"
             );
-            assert_eq!(rendered.matches("site.typ:4:1").count(), 2, "{rendered}");
-            assert!(!rendered.contains("page body"), "{rendered}");
-            assert!(!rendered.contains("the excerpt is shortened"), "{rendered}");
+            assert_eq!(out.matches("site.typ:4:1").count(), 2, "{out}");
+            assert!(!out.contains("page body"), "{out}");
+            assert!(!out.contains("the excerpt is shortened"), "{out}");
         }
         {
-            let mut diagnostic = Diagnostic::new(COMPILE, Severity::Error, "missing page");
-            let mut location = snippet(3, "#🦊 + 页面[界👩‍💻e\u{301}\u{1b}");
-            location.column = Some(6);
-            location.range = Some(SourceRange {
+            let mut diag = Diagnostic::new(COMPILE, Severity::Error, "missing page");
+            let mut loc = snippet(3, "#🦊 + 页面[界👩‍💻e\u{301}\u{1b}");
+            loc.column = Some(6);
+            loc.range = Some(SourceRange {
                 start: SourcePosition {
                     line: 2,
                     character: 6,
@@ -458,151 +441,131 @@ mod tests {
                     character: 1,
                 },
             });
-            diagnostic.trace.push(TraceFrame {
+            diag.trace.push(TraceFrame {
                 message: "while calling `页面`".to_owned(),
-                location: Some(location),
+                location: Some(loc),
             });
 
-            let rendered = render(&diagnostic, None, false);
-            assert!(rendered.contains("页面[界👩‍💻e\u{301}?…"), "{rendered}");
-            assert!(!rendered.contains("?…]"), "{rendered}");
-            assert!(!rendered.contains('\u{1b}'), "{rendered:?}");
-            assert!(!rendered.contains("the excerpt is shortened"), "{rendered}");
+            let out = render(&diag, None, false);
+            assert!(out.contains("页面[界👩‍💻e\u{301}?…"), "{out}");
+            assert!(!out.contains("?…]"), "{out}");
+            assert!(!out.contains('\u{1b}'), "{out:?}");
+            assert!(!out.contains("the excerpt is shortened"), "{out}");
         }
     }
 
     #[test]
-    fn advice_locations_stay_distinct() {
-        let mut diagnostic = Diagnostic::new(COMPILE, Severity::Error, "missing page")
+    fn advice_locations_distinct() {
+        let mut diag = Diagnostic::new(COMPILE, Severity::Error, "missing page")
             .with_note("the home page needs content")
             .with_note("the home page needs content");
         let help = Help {
             message: "add a page here".to_owned(),
             location: Some(snippet(2, "#page(\"index.html\")[Home]")),
         };
-        diagnostic.help.extend([help.clone(), help]);
-        diagnostic.help.push(Help {
+        diag.help.extend([help.clone(), help]);
+        diag.help.push(Help {
             message: "add a page here".to_owned(),
             location: Some(snippet(4, "#page(\"about.html\")[About]")),
         });
 
-        let rendered = render(&diagnostic, None, false);
+        let out = render(&diag, None, false);
         assert_eq!(
-            rendered.matches("the home page needs content").count(),
+            out.matches("the home page needs content").count(),
             1,
-            "{rendered}"
+            "{out}"
         );
-        assert_eq!(rendered.matches("add a page here").count(), 2, "{rendered}");
-        assert!(rendered.contains("[Home]"), "{rendered}");
-        assert!(rendered.contains("[About]"), "{rendered}");
+        assert_eq!(out.matches("add a page here").count(), 2, "{out}");
+        assert!(out.contains("[Home]"), "{out}");
+        assert!(out.contains("[About]"), "{out}");
     }
 
-    /// A source metadata issue names a field; the site's parse pipeline is not evidence the author
-    /// needs, so the terminal leaves those frames to the log file.
     #[test]
-    fn source_metadata_omits_parse_trace() {
+    fn metadata_error_omits_trace() {
         use tola_diagnostic::codes::source::METADATA;
 
-        let mut diagnostic = Diagnostic::at_path(
+        let mut diag = Diagnostic::at_path(
             METADATA,
             Severity::Error,
             "content/note.typ",
             "`$.published` is not set: Published blog pages need a publication date",
         )
         .with_position(1, 1);
-        diagnostic.trace.push(TraceFrame {
+        diag.trace.push(TraceFrame {
             message: "while calling `select-pages`".into(),
             location: Some(snippet(1, "select-pages(all-sources())")),
         });
 
-        let rendered = render(&diagnostic, None, false);
-        assert!(rendered.contains("`$.published` is not set"), "{rendered}");
-        assert!(!rendered.contains("select-pages"), "{rendered}");
+        let out = render(&diag, None, false);
+        assert!(out.contains("`$.published` is not set"), "{out}");
+        assert!(!out.contains("select-pages"), "{out}");
     }
 
     #[test]
-    fn package_locations_keep_referents() {
-        let mut diagnostic = Diagnostic::at_location(
+    fn package_locations_kept() {
+        let mut diag = Diagnostic::at_location(
             COMPILE,
             Severity::Error,
             snippet(2, "#tola-meta((title: \"A\", authros: \"x\"))"),
             "`$.authros`: is not a declared field",
         );
-        let mut location = snippet(93, "report-source-issues(issues)");
-        location.path = "@tola/source:0.0.0/lib.typ".to_owned();
-        location.source_lines[0].highlight = Some((0, location.source_lines[0].text.len()));
-        diagnostic.trace.push(tola_diagnostic::TraceFrame {
+        let mut loc = snippet(93, "report-source-issues(issues)");
+        loc.path = "@tola/source:0.0.0/lib.typ".to_owned();
+        loc.source_lines[0].highlight = Some((0, loc.source_lines[0].text.len()));
+        diag.trace.push(TraceFrame {
             message: "while calling `tola-report-source-issues`".into(),
-            location: Some(location),
+            location: Some(loc),
         });
 
-        let mut location = snippet(12, "  let parsed = try-parse(metadata, schema)");
-        location.path = "@tola/schema:0.0.0/lib.typ".to_owned();
-        diagnostic.help.push(Help {
+        let mut loc = snippet(12, "  let parsed = try-parse(metadata, schema)");
+        loc.path = "@tola/schema:0.0.0/lib.typ".to_owned();
+        diag.help.push(Help {
             message: "check the metadata declaration".into(),
-            location: Some(location),
+            location: Some(loc),
         });
 
-        let rendered = render(&diagnostic, None, false);
+        let out = render(&diag, None, false);
+        assert!(out.contains("@tola/source:0.0.0/lib.typ:93:0"), "{out}");
         assert!(
-            rendered.contains("@tola/source:0.0.0/lib.typ:93:0"),
-            "{rendered}"
+            out.contains("while calling `tola-report-source-issues`"),
+            "{out}"
         );
-        assert!(
-            rendered.contains("while calling `tola-report-source-issues`"),
-            "{rendered}"
-        );
-        assert!(
-            rendered.contains("report-source-issues(issues)"),
-            "{rendered}"
-        );
-        assert!(
-            rendered.contains("@tola/schema:0.0.0/lib.typ:12:0"),
-            "{rendered}"
-        );
-        assert!(
-            rendered.contains("try-parse(metadata, schema)"),
-            "{rendered}"
-        );
-        assert!(
-            rendered.contains("check the metadata declaration"),
-            "{rendered}"
-        );
+        assert!(out.contains("report-source-issues(issues)"), "{out}");
+        assert!(out.contains("@tola/schema:0.0.0/lib.typ:12:0"), "{out}");
+        assert!(out.contains("try-parse(metadata, schema)"), "{out}");
+        assert!(out.contains("check the metadata declaration"), "{out}");
     }
 
     #[test]
     fn anonymous_trace_shows_location() {
-        let mut diagnostic = Diagnostic::at_location(
+        let mut diag = Diagnostic::at_location(
             COMPILE,
             Severity::Error,
             snippet(2, "#let value = absent"),
             "unknown variable: absent",
         );
-        diagnostic.trace.push(tola_diagnostic::TraceFrame {
+        diag.trace.push(TraceFrame {
             message: "while calling function".into(),
             location: Some(snippet(1, "#select-pages(all-sources())")),
         });
 
-        let rendered = render(&diagnostic, None, false);
-        assert!(rendered.contains("while calling function"), "{rendered}");
-        assert!(rendered.contains("site.typ:1:0"), "{rendered}");
+        let out = render(&diag, None, false);
+        assert!(out.contains("while calling function"), "{out}");
+        assert!(out.contains("site.typ:1:0"), "{out}");
     }
 
     #[test]
-    fn primary_and_trace_share_columns() {
-        let location = snippet(1, "#panic(\"missing page\")");
-        let mut diagnostic =
-            Diagnostic::at_location(COMPILE, Severity::Error, location.clone(), "missing page");
-        diagnostic.trace.push(TraceFrame {
+    fn primary_trace_share_columns() {
+        let loc = snippet(1, "#panic(\"missing page\")");
+        let mut diag =
+            Diagnostic::at_location(COMPILE, Severity::Error, loc.clone(), "missing page");
+        diag.trace.push(TraceFrame {
             message: "while calling function".to_owned(),
-            location: Some(location),
+            location: Some(loc),
         });
-        let rendered = render(&diagnostic, None, false);
-        assert_eq!(rendered.matches("site.typ:1:0").count(), 2, "{rendered}");
-        assert_eq!(diagnostic.location.as_ref().unwrap().column, Some(1));
-        assert_eq!(
-            diagnostic.trace[0].location.as_ref().unwrap().column,
-            Some(1)
-        );
+        let out = render(&diag, None, false);
+        assert_eq!(out.matches("site.typ:1:0").count(), 2, "{out}");
+        assert_eq!(diag.location.as_ref().unwrap().column, Some(1));
+        assert_eq!(diag.trace[0].location.as_ref().unwrap().column, Some(1));
     }
 }

@@ -1,226 +1,204 @@
-//! Browser URL resolution shared by document graphs and reference validation.
+//! Browser URL classification shared by document graphs and reference checks.
 
 use thiserror::Error;
 
-use super::{SiteReference, SiteUrlMount, UrlPath};
+use super::{SiteRef, SiteUrlMount, UrlPath};
 
-/// The origin a document's own URL has while a reference resolves.
-///
-/// The document's decoded route and the deployment mount stand in for a real address, so a
-/// reference that keeps this origin is one the build itself can resolve; a reference that names
-/// another origin belongs to whatever serves it, which this build cannot observe.
+/// Synthetic origin used to test whether a resolved reference stays local to the build.
 const DOCUMENT_ORIGIN: &str = "https://tola-document.invalid";
 
-/// A browser reference resolved against its document and deployment mount.
+/// Browser reference classified against its document and deployment mount.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ResolvedBrowserReference {
-    /// A site-root reference inside the deployment mount, with its query and fragment.
-    Site(SiteReference),
-    /// A document-relative reference outside the deployment mount.
+pub enum BrowserRef {
+    /// Site-root reference inside the deployment mount, with optional query and fragment.
+    Site(SiteRef),
+    /// Same-origin reference outside the deployment mount.
     OutsideSite(String),
-    /// A reference naming another origin, or a non-http scheme.
+    /// Reference to another origin or a non-http scheme.
     External,
 }
 
-/// A reference that cannot be resolved as a browser URL.
+/// Invalid browser URL reference.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[error("`{reference}` is not a valid URL")]
-pub struct BrowserReferenceError {
+pub struct BrowserRefError {
     reference: String,
 }
 
-/// Apply browser URL resolution before looking up an address in a sealed site.
+/// Classify `raw` against `doc`, `mount`, and optional `<base href>`.
 ///
-/// `document` is a decoded site-root route and `base_href` is the final HTML document base,
-/// when present. A reference that resolves to the document's own synthesized origin is local: it
-/// is a [`Site`](ResolvedBrowserReference::Site) reference when it stays inside the deployment
-/// mount and [`OutsideSite`](ResolvedBrowserReference::OutsideSite) when it does not. A reference
-/// naming any other origin — including the configured `site.origin` — and every non-http scheme
-/// is [`External`](ResolvedBrowserReference::External): it belongs to whatever serves that
-/// address, which the build cannot observe, so it is never validated.
-///
-/// A document base naming another origin therefore makes the whole page external, which is why
-/// producers that report on unvalidated pages ask [`base_href_keeps_build_origin`] first.
-pub fn resolve_browser_reference(
-    document: &UrlPath,
+/// Any other origin (including configured `site.origin`) or non-http scheme is [`BrowserRef::External`].
+pub fn classify_browser_ref(
+    doc: &UrlPath,
     mount: &SiteUrlMount,
     base_href: Option<&str>,
-    reference: &str,
-) -> Result<ResolvedBrowserReference, BrowserReferenceError> {
-    let invalid = || BrowserReferenceError {
-        reference: reference.to_owned(),
+    raw: &str,
+) -> Result<BrowserRef, BrowserRefError> {
+    let err = || BrowserRefError {
+        reference: raw.to_owned(),
     };
 
-    let fallback = document_url(document, mount).ok_or_else(invalid)?;
+    let fallback = doc_url(doc, mount).ok_or_else(err)?;
     let base = base_href
-        .and_then(|value| document_base(&fallback, value))
+        .and_then(|val| doc_base(&fallback, val))
         .unwrap_or(fallback);
-    let resolved = base.join(reference).map_err(|_| invalid())?;
+    let url = base.join(raw).map_err(|_| err())?;
 
-    if resolved.origin().ascii_serialization() != DOCUMENT_ORIGIN {
-        return Ok(ResolvedBrowserReference::External);
+    if url.origin().ascii_serialization() != DOCUMENT_ORIGIN {
+        return Ok(BrowserRef::External);
     }
 
-    let path = UrlPath::parse(resolved.path()).map_err(|_| invalid())?;
-    let Some(site_route) = mount.strip(&path) else {
-        return Ok(ResolvedBrowserReference::OutsideSite(browser_value(
-            &resolved,
-        )));
+    let path = UrlPath::parse(url.path()).map_err(|_| err())?;
+    let Some(route) = mount.strip(&path) else {
+        return Ok(BrowserRef::OutsideSite(browser_value(&url)));
     };
-    Ok(ResolvedBrowserReference::Site(SiteReference {
-        route: site_route,
-        query: resolved.query().map(str::to_owned),
-        fragment: resolved.fragment().map(str::to_owned),
+    Ok(BrowserRef::Site(SiteRef {
+        route,
+        query: url.query().map(str::to_owned),
+        fragment: url.fragment().map(str::to_owned),
     }))
 }
 
-/// Whether a document's `<base href>` keeps this build's own origin.
-///
-/// A base that cannot be joined, or that a browser document base rejects, leaves this build's
-/// origin in place and answers `true`. Only a base naming another origin answers `false`, and
-/// then every reference of that page resolves [`External`](ResolvedBrowserReference::External).
-pub fn base_href_keeps_build_origin(document: &UrlPath, mount: &SiteUrlMount, value: &str) -> bool {
-    let Some(fallback) = document_url(document, mount) else {
+/// Return whether `<base href>` keeps the build's own origin (rejected/invalid bases fall back to `true`).
+pub fn is_local_base_href(doc: &UrlPath, mount: &SiteUrlMount, val: &str) -> bool {
+    let Some(fallback) = doc_url(doc, mount) else {
         return true;
     };
-    match document_base(&fallback, value) {
+    match doc_base(&fallback, val) {
         Some(base) => base.origin().ascii_serialization() == DOCUMENT_ORIGIN,
         None => true,
     }
 }
 
-/// The page's own address while a reference resolves: the build's origin plus its mounted route.
-///
-/// A route that cannot be joined under that origin answers `None`; no validated document reaches
-/// it, and each caller decides what an unaddressable page means for its own question.
-fn document_url(document: &UrlPath, mount: &SiteUrlMount) -> Option<url::Url> {
+fn doc_url(doc: &UrlPath, mount: &SiteUrlMount) -> Option<url::Url> {
     url::Url::parse(DOCUMENT_ORIGIN)
-        .expect("the document origin is a valid URL")
-        .join(&mount.browser_path(document))
+        .expect("document origin is a valid URL")
+        .join(&mount.browser_path(doc))
         .ok()
 }
 
-/// The document base one written `<base href>` names under the page's own address, when a browser
-/// would accept it as a document base: not an opaque URL, and not a script or data scheme.
-fn document_base(fallback: &url::Url, value: &str) -> Option<url::Url> {
-    let base = fallback.join(value).ok()?;
-    let accepted = !base.cannot_be_a_base() && !matches!(base.scheme(), "data" | "javascript");
-    accepted.then_some(base)
+fn doc_base(fallback: &url::Url, val: &str) -> Option<url::Url> {
+    let base = fallback.join(val).ok()?;
+    let ok = !base.cannot_be_a_base() && !matches!(base.scheme(), "data" | "javascript");
+    ok.then_some(base)
 }
 
-/// The host-relative value a browser would request for an inherited-origin reference.
-fn browser_value(resolved: &url::Url) -> String {
-    let mut value = resolved.path().to_owned();
-    if let Some(query) = resolved.query() {
-        value.push('?');
-        value.push_str(query);
+fn browser_value(url: &url::Url) -> String {
+    let mut out = url.path().to_owned();
+    if let Some(q) = url.query() {
+        out.push('?');
+        out.push_str(q);
     }
-    if let Some(fragment) = resolved.fragment() {
-        value.push('#');
-        value.push_str(fragment);
+    if let Some(frag) = url.fragment() {
+        out.push('#');
+        out.push_str(frag);
     }
-    value
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tests::test_support::url_path;
+
+    fn url_path(raw: &str) -> UrlPath {
+        UrlPath::parse(raw).unwrap()
+    }
+
+    fn site_ref(encoded: &str) -> BrowserRef {
+        BrowserRef::Site(SiteRef::parse(encoded).unwrap())
+    }
 
     #[test]
-    fn base_href_decides_internal_or_external() {
+    fn base_href_origin() {
         let page = url_path("/guide/");
         assert_eq!(
-            resolve_browser_reference(&page, &SiteUrlMount::root(), Some("/docs/"), "target/")
-                .unwrap(),
-            resolved_site("/docs/target/")
+            classify_browser_ref(&page, &SiteUrlMount::root(), Some("/docs/"), "target/").unwrap(),
+            site_ref("/docs/target/")
         );
         assert_eq!(
-            resolve_browser_reference(
+            classify_browser_ref(
                 &page,
                 &SiteUrlMount::root(),
                 Some("https://example.test/docs/"),
                 "target/"
             )
             .unwrap(),
-            ResolvedBrowserReference::External
+            BrowserRef::External
         );
     }
 
     #[test]
-    fn invalid_base_uses_document_url() {
+    fn invalid_base_fallback() {
         let page = url_path("/guide/");
         for base in ["https://[", "data:text/plain,hello", "javascript:void(0)"] {
             assert_eq!(
-                resolve_browser_reference(&page, &SiteUrlMount::root(), Some(base), "target/")
-                    .unwrap(),
-                resolved_site("/guide/target/")
+                classify_browser_ref(&page, &SiteUrlMount::root(), Some(base), "target/").unwrap(),
+                site_ref("/guide/target/")
             );
         }
     }
 
     #[test]
-    fn absolute_urls_stay_external() {
+    fn external_urls() {
         let page = url_path("/guide/");
-        for reference in [
+        for raw in [
             "https://example.com/target/",
             "//example.com/target/",
             "https://other.test/target/",
         ] {
             assert_eq!(
-                resolve_browser_reference(&page, &SiteUrlMount::root(), None, reference).unwrap(),
-                ResolvedBrowserReference::External,
-                "{reference}"
+                classify_browser_ref(&page, &SiteUrlMount::root(), None, raw).unwrap(),
+                BrowserRef::External,
+                "{raw}"
             );
         }
     }
 
     #[test]
-    fn mounted_site_maps_browser_to_site() {
+    fn mounted_site_ref() {
         let page = url_path("/guide/");
         let mount = SiteUrlMount::from_base_path("/docs/").unwrap();
         assert_eq!(
-            resolve_browser_reference(&page, &mount, None, "target/").unwrap(),
-            resolved_site("/guide/target/")
+            classify_browser_ref(&page, &mount, None, "target/").unwrap(),
+            site_ref("/guide/target/")
         );
         assert_eq!(
-            resolve_browser_reference(&page, &mount, None, "/docs/target/").unwrap(),
-            resolved_site("/target/")
+            classify_browser_ref(&page, &mount, None, "/docs/target/").unwrap(),
+            site_ref("/target/")
         );
         assert_eq!(
-            resolve_browser_reference(&page, &mount, None, "/%64ocs/target/").unwrap(),
-            resolved_site("/target/")
+            classify_browser_ref(&page, &mount, None, "/%64ocs/target/").unwrap(),
+            site_ref("/target/")
         );
         assert_eq!(
-            resolve_browser_reference(&page, &mount, None, "/target/").unwrap(),
-            ResolvedBrowserReference::OutsideSite("/target/".into())
+            classify_browser_ref(&page, &mount, None, "/target/").unwrap(),
+            BrowserRef::OutsideSite("/target/".into())
         );
     }
 
     #[test]
-    fn resolution_keeps_query_and_fragment() {
+    fn query_and_fragment() {
         let page = url_path("/posts/hello/");
         let mount = SiteUrlMount::root();
         assert_eq!(
-            resolve_browser_reference(&page, &mount, None, "../shared%20image.png?q=1#preview")
-                .unwrap(),
-            ResolvedBrowserReference::Site(SiteReference {
+            classify_browser_ref(&page, &mount, None, "../shared%20image.png?q=1#preview").unwrap(),
+            BrowserRef::Site(SiteRef {
                 route: UrlPath::parse("/posts/shared%20image.png").unwrap(),
                 query: Some("q=1".into()),
                 fragment: Some("preview".into()),
             })
         );
         assert_eq!(
-            resolve_browser_reference(&page, &mount, None, "?q=rust").unwrap(),
-            ResolvedBrowserReference::Site(SiteReference {
+            classify_browser_ref(&page, &mount, None, "?q=rust").unwrap(),
+            BrowserRef::Site(SiteRef {
                 route: UrlPath::parse("/posts/hello/").unwrap(),
                 query: Some("q=rust".into()),
                 fragment: None,
             })
         );
         assert_eq!(
-            resolve_browser_reference(&page, &mount, None, "#intro").unwrap(),
-            ResolvedBrowserReference::Site(SiteReference {
+            classify_browser_ref(&page, &mount, None, "#intro").unwrap(),
+            BrowserRef::Site(SiteRef {
                 route: UrlPath::parse("/posts/hello/").unwrap(),
                 query: None,
                 fragment: Some("intro".into()),
@@ -229,31 +207,27 @@ mod tests {
     }
 
     #[test]
-    fn escaped_paths_decode_once() {
+    fn escaped_path_decode() {
         let page = url_path("/index.html");
         let mount = SiteUrlMount::root();
-        for (reference, route) in [("/100%25-ready/", "/100%-ready/"), ("/a%23b/", "/a#b/")] {
+        for (raw, route) in [("/100%25-ready/", "/100%-ready/"), ("/a%23b/", "/a#b/")] {
             assert_eq!(
-                resolve_browser_reference(&page, &mount, None, reference).unwrap(),
-                ResolvedBrowserReference::Site(SiteReference {
+                classify_browser_ref(&page, &mount, None, raw).unwrap(),
+                BrowserRef::Site(SiteRef {
                     route: UrlPath::from_decoded(route).unwrap(),
                     query: None,
                     fragment: None,
                 }),
-                "{reference}"
+                "{raw}"
             );
         }
         assert_eq!(
-            resolve_browser_reference(&page, &mount, None, "/#a%23b").unwrap(),
-            ResolvedBrowserReference::Site(SiteReference {
+            classify_browser_ref(&page, &mount, None, "/#a%23b").unwrap(),
+            BrowserRef::Site(SiteRef {
                 route: UrlPath::parse("/").unwrap(),
                 query: None,
                 fragment: Some("a%23b".into()),
             })
         );
-    }
-    /// The site reference a rooted encoded path names, for assertions.
-    fn resolved_site(encoded: &str) -> ResolvedBrowserReference {
-        ResolvedBrowserReference::Site(SiteReference::parse(encoded).unwrap())
     }
 }

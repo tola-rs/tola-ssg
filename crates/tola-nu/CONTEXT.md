@@ -1,27 +1,26 @@
 # tola-nu
 
-`tola-nu` prepares one Nushell environment for Tola: built-in virtual sources, configured site modules, image and diagnostic commands, and an LSP supervisor. The caller supplies the configuration, modules, overlays, and invocation; this crate loads no personal Nu configuration or plugins.
+Embedded Nushell runtime for Tola: virtual built-in libraries, configured site modules, image/diagnostic commands, and the `nu-lsp` supervisor. Loads no personal Nu config or plugins.
 
 ## Modules
 
-- `execution.rs` — evaluates prepared Nu blocks and returns exit codes instead of terminating the host.
-- `host.rs` — native getters, queries, diagnostic rendering, and report submission bound to one invocation.
-- `modules.rs` — configured modules, sources, overlays, and dependency evidence.
-- `resources.rs` — built-in module sources registered from embedded bytes as virtual files.
-- `signatures.rs` — native command signatures for module and script help without evaluating scripts.
-- `image.rs`, `palette.rs`, `highlight.rs` — image inspection and resizing, the default TUI palette, and highlighting. SVG resize uses Typst's renderer with the invocation's fonts.
-- `lsp.rs` — the official `nu-lsp` supervisor, rebuilt when module inputs change.
-- `error.rs` — the crate's error type.
+- `execution.rs` — runs prepared Nu blocks and returns exit codes without terminating the host process.
+- `host.rs` — per-invocation native commands (`get-site`, `get-module`, `get-hook`, `get-assets`, `get-init`, `get-context`, `query`, `submit`, `render-diagnostics`).
+- `modules.rs` — configured site modules, overlays, and dependency tracking.
+- `resources.rs` — registers embedded built-in Nu sources as virtual files.
+- `signatures.rs` — reads command signatures for `--help` without running scripts.
+- `image.rs`, `palette.rs`, `highlight.rs` — image commands (SVG via Typst + invocation fonts), TUI palette, and highlighting.
+- `lsp.rs` — `nu-lsp` supervisor, rebuilt when module inputs change.
+- `error.rs` — crate error type.
 
 ## Embedded sources
 
-`nu/` ships the diagnostic and image libraries and their command entries. The application supplies `nu-helpers` from `modules/nu-helpers/`. The root `tola` module exports the native getters, `query`, and `syntax-highlight`. The diagnostic and image sources import Rust commands from `tola-native`, whose name is bound while the built-in sources are parsed.
+`nu/` contains the built-in diagnostic and image libraries; the binary supplies `nu-helpers` from `modules/nu-helpers/`. The root `tola` module exports host commands, `query`, and `syntax-highlight`. Built-in sources import Rust commands from `tola-native`, bound during parsing.
 
 ## Invariants
 
-- Parse each named script once, evaluate the parsed block through the official engine; never rewrite module block spans.
-- Real site modules keep file and overlay tracking; imports do not select independent instances.
-- Getters read the invocation's supplied records. Queries and diagnostic submission call the supplied host functions.
-- Nu's `PWD` stays in its engine and stack. Disable `nu_protocol::engine::UPDATE_CWD` before initialization so display hooks and environment merges never change the host process directory.
-- The root `$nu` path fields stay empty: no personal config, plugins, or environment discovery.
-- The LSP supervisor discards or restarts work on malformed input instead of exiting the host.
+- Parse each script once and run it through the official Nu engine without rewriting module spans.
+- Site modules keep file and overlay tracking; importing another Nu library does not change the active module instance.
+- Keep Nu's `PWD` inside the engine stack (`UPDATE_CWD` disabled) so scripts never mutate the host process working directory.
+- Keep root `$nu` config/plugin paths empty.
+- The `nu-lsp` supervisor discards or restarts on malformed input instead of exiting the host.

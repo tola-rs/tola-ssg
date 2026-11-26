@@ -443,21 +443,22 @@ mod tests {
 
     use super::*;
 
-    fn world(source: &str) -> (tempfile::TempDir, crate::TypstWorld) {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("site.typ");
-        std::fs::write(&path, source).unwrap();
-        let world = crate::TypstWorld::builder(&path, directory.path())
+    fn world(src: &str) -> (tempfile::TempDir, crate::TypstWorld) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("site.typ");
+        std::fs::write(&path, src).unwrap();
+        let world = crate::TypstWorld::builder(&path, dir.path())
             .no_fonts()
             .with_local_cache()
             .build(&crate::BundleCancellation::default())
             .unwrap();
-        (directory, world)
+        (dir, world)
     }
+
     #[test]
-    fn srcset_rewrite_keeps_descriptors() {
-        let source = "  first.png 1x, data:image/png;base64,AAAA 2x, third.png 3x";
-        let rewritten = map_url_ranges(source, url_ranges("img", "srcset", source), &mut |url| {
+    fn srcset_rewrite_descriptors() {
+        let src = "  first.png 1x, data:image/png;base64,AAAA 2x, third.png 3x";
+        let rewritten = map_url_ranges(src, url_ranges("img", "srcset", src), &mut |url| {
             Ok::<_, HtmlFragmentError>(Some(if url.starts_with("data:") {
                 url.to_owned()
             } else {
@@ -465,7 +466,7 @@ mod tests {
             }))
         })
         .unwrap()
-        .unwrap_or_else(|| source.to_owned());
+        .unwrap_or_else(|| src.to_owned());
         assert_eq!(
             rewritten,
             "  https://example.test/first.png 1x, data:image/png;base64,AAAA 2x, https://example.test/third.png 3x"
@@ -473,22 +474,22 @@ mod tests {
     }
 
     #[test]
-    fn fragment_export_keeps_document() {
-        let (_directory, world) = world(
+    fn fragment_export_isolated() {
+        let (_dir, world) = world(
             r#"#document("index.html")[
   #html.article(id: "article")[#html.p[Hello #html.strong[world]] #html.a(href: "next/")[Next]]
   #html.p[Outside]
 ]"#,
         );
-        let cancellation = BundleCancellation::default();
-        let compilation = crate::compile_bundle_world(&world, &cancellation).unwrap();
+        let cancel = BundleCancellation::default();
+        let compilation = crate::compile_bundle_world(&world, &cancel).unwrap();
         let page = compilation.documents().next().unwrap();
         let selection = HtmlFragmentSelection::Id("article".into());
         let html = page
             .html_fragment_with_links(
                 &selection,
                 &HtmlFragmentOptions::default(),
-                &cancellation,
+                &cancel,
                 &mut |url, _| Ok(format!("https://example.test/{url}")),
             )
             .unwrap();
@@ -509,20 +510,20 @@ mod tests {
             "the selection is the fragment's root: {html:?}"
         );
         let original = page
-            .html_fragment(&selection, &HtmlFragmentOptions::default(), &cancellation)
+            .html_fragment(&selection, &HtmlFragmentOptions::default(), &cancel)
             .unwrap();
         assert!(original.html.contains("href=\"next/\""), "{original:?}");
         assert!(matches!(
             page.html_fragment(
                 &HtmlFragmentSelection::Id("missing".into()),
                 &HtmlFragmentOptions::default(),
-                &cancellation
+                &cancel
             ),
             Err(HtmlFragmentError::MissingId { .. })
         ));
-        cancellation.cancel();
+        cancel.cancel();
         assert!(
-            page.html_fragment(&selection, &HtmlFragmentOptions::default(), &cancellation)
+            page.html_fragment(&selection, &HtmlFragmentOptions::default(), &cancel)
                 .unwrap_err()
                 .is_cancelled()
         );

@@ -9,9 +9,7 @@ use tola_build::cancellation::BuildCancellation;
 use tola_typst::typst::foundations::PathOrStr;
 use tola_typst::typst::syntax::package::{PackageManifest, PackageSpec};
 use tola_typst::typst::syntax::{FileId, RootedPath, Source, SyntaxKind, VirtualPath, VirtualRoot};
-use tola_typst::{
-    FileResolver, GLOBAL_LIBRARY, PackageFetchPolicy, PackageLocations, SourceBoundary,
-};
+use tola_typst::{FileStore, GLOBAL_LIBRARY, PackageFetchMode, PackageLocations, SourceBoundary};
 use tola_typst_syntax::imports::{ImportQuery, NameGraph, PendingImport};
 use tola_typst_syntax::names::{ImportSource, SourceNames};
 
@@ -316,7 +314,7 @@ pub(super) struct ReachSources<'a> {
     pub(super) view: &'a SourceView,
     pub(super) root: &'a Path,
     pub(super) boundary: &'a SourceBoundary,
-    pub(super) resolver: Option<&'a FileResolver>,
+    pub(super) resolver: Option<&'a FileStore>,
     pub(super) established: &'a [(PendingImport, FileId)],
     pub(super) package_sources: PackageSources,
     pub(super) disk: &'a mut DiskSources,
@@ -421,7 +419,7 @@ fn reachable_target(
     path: &str,
     root: &Path,
     boundary: &SourceBoundary,
-    resolver: Option<&FileResolver>,
+    resolver: Option<&FileStore>,
 ) -> Option<FileId> {
     let target = import_target(file, path, root, resolver)?;
     source_within_boundary(target, root, boundary).then_some(target)
@@ -434,7 +432,7 @@ fn collect_reached_source(
     view: &SourceView,
     root: &Path,
     boundary: &SourceBoundary,
-    resolver: Option<&FileResolver>,
+    resolver: Option<&FileStore>,
     disk: &mut DiskSources,
 ) -> bool {
     if sources.contains_key(&target) {
@@ -467,7 +465,7 @@ fn reached_text(
     boundary: &SourceBoundary,
     physical: Option<&Path>,
     view: &SourceView,
-    resolver: Option<&FileResolver>,
+    resolver: Option<&FileStore>,
 ) -> Option<String> {
     physical
         .and_then(|path| view.named_source(path))
@@ -517,9 +515,9 @@ pub(super) fn source_within_boundary(id: FileId, root: &Path, boundary: &SourceB
 pub(crate) fn file_resolver(
     locations: Option<&PackageLocations>,
     boundary: &SourceBoundary,
-) -> Option<FileResolver> {
+) -> Option<FileStore> {
     locations.map(|locations| {
-        FileResolver::from_package_locations(locations.clone(), PackageFetchPolicy::LocalOnly)
+        FileStore::from_package_locations(locations.clone(), PackageFetchMode::LocalOnly)
             .with_source_boundary(boundary.clone())
     })
 }
@@ -529,7 +527,7 @@ pub(crate) fn import_target(
     file: FileId,
     path: &str,
     root: &Path,
-    resolver: Option<&FileResolver>,
+    resolver: Option<&FileStore>,
 ) -> Option<FileId> {
     if !path.starts_with('@') {
         return Some(PathOrStr::Str(path.into()).resolve(file).ok()?.intern());

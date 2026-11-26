@@ -11,7 +11,7 @@ use typst::syntax::{RootedPath, VirtualPath, VirtualRoot};
 
 use super::slug::route_segments;
 use super::{ContentId, ContentSourceLayout, ContentUnit};
-use crate::config::ResolvedSiteConfig;
+use crate::config::SiteConfig;
 use crate::metadata::SourceMetadata;
 use tola_input::normalize_path;
 
@@ -306,12 +306,9 @@ pub struct SourceSet {
 }
 
 impl SourceSet {
-    pub(crate) fn without_metadata(
-        units: &[ContentUnit],
-        config: &ResolvedSiteConfig,
-    ) -> Result<Self> {
+    pub(crate) fn without_metadata(units: &[ContentUnit], config: &SiteConfig) -> Result<Self> {
         let mut sources = Vec::with_capacity(units.len());
-        let site_root = normalize_path(config.get_root());
+        let site_root = normalize_path(config.root());
         for unit in units {
             let source = unit.source.clone();
             let input = Arc::new(SourceInput {
@@ -414,10 +411,18 @@ impl SourceSet {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use tempfile::TempDir;
+    use typst::foundations::{IntoValue, NativeElement};
+    use typst::model::{EmphElem, StrongElem};
+    use typst::text::TextElem;
+
+    use super::*;
+    use crate::content::ContentSourceLayout;
+
     fn content_units(
-        root: &std::path::Path,
-    ) -> std::result::Result<Vec<crate::content::ContentUnit>, crate::content::ContentDiscoveryError>
-    {
+        root: &Path,
+    ) -> Result<Vec<ContentUnit>, crate::content::ContentDiscoveryError> {
         super::super::discover_from_root(
             root,
             root,
@@ -426,60 +431,43 @@ mod tests {
         )
     }
 
-    use std::fs;
-
-    use tempfile::TempDir;
-
-    use super::*;
-    use crate::content::ContentSourceLayout;
-    use typst::foundations::{IntoValue, NativeElement};
-    use typst::model::{EmphElem, StrongElem};
-    use typst::text::TextElem;
-
     #[test]
     fn descriptor_identity_and_metadata() {
-        let directory = TempDir::new().unwrap();
-        let content = directory.path().join("content/posts/rust");
+        let dir = TempDir::new().unwrap();
+        let content = dir.path().join("content/posts/rust");
         fs::create_dir_all(&content).unwrap();
-        let source = content.join("index.typ");
-        fs::write(&source, "= Rust").unwrap();
+        fs::write(content.join("index.typ"), "= Rust").unwrap();
 
-        let config = crate::config::tests::load_test_config(directory.path(), "");
-        let units = content_units(&directory.path().join("content")).unwrap();
+        let cfg = crate::config::tests::load_test_config(dir.path(), "");
+        let units = content_units(&dir.path().join("content")).unwrap();
         assert_eq!(units[0].layout, ContentSourceLayout::DirectoryIndex);
-        assert_eq!(
-            units[0].root,
-            normalize_path(&directory.path().join("content"))
-        );
+        assert_eq!(units[0].root, normalize_path(&dir.path().join("content")));
         let scanned = BTreeMap::from([(
             units[0].source.clone(),
             Some(SourceMetadataDeclaration {
                 metadata: SourceMetadata::from_dict(
-                    [(
-                        "title".into(),
-                        typst::text::TextElem::packed("Rust").into_value(),
-                    )]
-                    .into_iter()
-                    .collect(),
+                    [("title".into(), TextElem::packed("Rust").into_value())]
+                        .into_iter()
+                        .collect(),
                 ),
-                file: typst::syntax::RootedPath::new(
-                    typst::syntax::VirtualRoot::Project,
-                    typst::syntax::VirtualPath::new("content/posts/rust/index.typ").unwrap(),
+                file: RootedPath::new(
+                    VirtualRoot::Project,
+                    VirtualPath::new("content/posts/rust/index.typ").unwrap(),
                 ),
                 range: 0..0,
             }),
         )]);
 
-        let sources = SourceSet::without_metadata(&units, &config)
+        let srcs = SourceSet::without_metadata(&units, &cfg)
             .unwrap()
             .with_metadata(&scanned);
-        let source = &sources.sources()[0];
-        assert_eq!(source.id().as_path(), Path::new("posts/rust/index.typ"));
+        let src = &srcs.sources()[0];
+        assert_eq!(src.id().as_path(), Path::new("posts/rust/index.typ"));
         assert_eq!(
-            source.input.file.file.vpath().get_with_slash(),
+            src.input.file.file.vpath().get_with_slash(),
             "/content/posts/rust/index.typ"
         );
-        let dict = source.input.to_typst_dict();
+        let dict = src.input.to_typst_dict();
         let path = dict
             .get("file")
             .unwrap()
@@ -499,27 +487,27 @@ mod tests {
     }
 
     #[test]
-    fn percent_paths_keep_source_spelling() {
-        let directory = TempDir::new().unwrap();
-        let content = directory.path().join("content");
+    fn percent_paths_verbatim() {
+        let dir = TempDir::new().unwrap();
+        let content = dir.path().join("content");
         fs::create_dir_all(&content).unwrap();
-        for filename in ["%41.typ", "100%.typ"] {
-            fs::write(content.join(filename), "Document").unwrap();
+        for name in ["%41.typ", "100%.typ"] {
+            fs::write(content.join(name), "Document").unwrap();
         }
-        let config = crate::config::tests::load_test_config(directory.path(), "");
+        let cfg = crate::config::tests::load_test_config(dir.path(), "");
         let units = content_units(&content).unwrap();
-        let sources = SourceSet::without_metadata(&units, &config).unwrap();
-        let files = sources
+        let srcs = SourceSet::without_metadata(&units, &cfg).unwrap();
+        let files: Vec<_> = srcs
             .sources()
             .iter()
-            .map(|source| {
-                let fields = source.input.file.to_typst_dict();
+            .map(|src| {
+                let fields = src.input.file.to_typst_dict();
                 (
-                    source.id().to_string(),
+                    src.id().to_string(),
                     fields.get("route-segments").unwrap().clone(),
                 )
             })
-            .collect::<Vec<_>>();
+            .collect();
         assert_eq!(
             files,
             [
@@ -533,7 +521,7 @@ mod tests {
                 ),
             ]
         );
-        let file = sources.sources()[0]
+        let file = srcs.sources()[0]
             .input
             .file
             .to_typst_dict()
@@ -547,62 +535,47 @@ mod tests {
 
     #[test]
     fn unchanged_metadata_reuses_inputs() {
-        let directory = TempDir::new().unwrap();
-        let content = directory.path().join("content");
+        let dir = TempDir::new().unwrap();
+        let content = dir.path().join("content");
         fs::create_dir_all(&content).unwrap();
-        let source = content.join("post.typ");
-        fs::write(&source, "Post").unwrap();
+        fs::write(content.join("post.typ"), "Post").unwrap();
 
-        let config = crate::config::tests::load_test_config(directory.path(), "");
+        let cfg = crate::config::tests::load_test_config(dir.path(), "");
         let units = content_units(&content).unwrap();
-        let metadata = |content: typst::foundations::Content| {
-            SourceMetadata::from_dict(
-                [("summary".into(), content.into_value())]
-                    .into_iter()
-                    .collect(),
-            )
+        let meta = |c: typst::foundations::Content| {
+            SourceMetadata::from_dict([("summary".into(), c.into_value())].into_iter().collect())
         };
-        let strong = BTreeMap::from([(
-            units[0].source.clone(),
-            Some(SourceMetadataDeclaration {
-                metadata: metadata(StrongElem::new(TextElem::packed("important")).pack()),
-                file: typst::syntax::RootedPath::new(
-                    typst::syntax::VirtualRoot::Project,
-                    typst::syntax::VirtualPath::new("content/post.typ").unwrap(),
-                ),
-                range: 0..0,
-            }),
-        )]);
-        let emphasis = BTreeMap::from([(
-            units[0].source.clone(),
-            Some(SourceMetadataDeclaration {
-                metadata: metadata(EmphElem::new(TextElem::packed("important")).pack()),
-                file: typst::syntax::RootedPath::new(
-                    typst::syntax::VirtualRoot::Project,
-                    typst::syntax::VirtualPath::new("content/post.typ").unwrap(),
-                ),
-                range: 0..0,
-            }),
-        )]);
+        let decl = |c| {
+            BTreeMap::from([(
+                units[0].source.clone(),
+                Some(SourceMetadataDeclaration {
+                    metadata: meta(c),
+                    file: RootedPath::new(
+                        VirtualRoot::Project,
+                        VirtualPath::new("content/post.typ").unwrap(),
+                    ),
+                    range: 0..0,
+                }),
+            )])
+        };
+        let strong = decl(StrongElem::new(TextElem::packed("important")).pack());
+        let emphasis = decl(EmphElem::new(TextElem::packed("important")).pack());
 
-        let sources = SourceSet::without_metadata(&units, &config).unwrap();
-        let first = sources.with_metadata(&strong);
-        let same = sources.with_metadata(&strong);
-        let changed = sources.with_metadata(&emphasis);
-
-        assert_eq!(first.inputs(), same.inputs());
-        assert_ne!(first.inputs(), changed.inputs());
+        let srcs = SourceSet::without_metadata(&units, &cfg).unwrap();
+        let first = srcs.with_metadata(&strong);
+        assert_eq!(first.inputs(), srcs.with_metadata(&strong).inputs());
+        assert_ne!(first.inputs(), srcs.with_metadata(&emphasis).inputs());
     }
 
     #[test]
     fn descriptor_fields_match_runtime() {
-        let directory = TempDir::new().unwrap();
-        let content = directory.path().join("content/posts");
+        let dir = TempDir::new().unwrap();
+        let content = dir.path().join("content/posts");
         fs::create_dir_all(&content).unwrap();
         fs::write(content.join("deep.typ"), "Deep").unwrap();
-        let config = crate::config::tests::load_test_config(directory.path(), "");
-        let units = content_units(&directory.path().join("content")).unwrap();
-        let declarations = BTreeMap::from([(
+        let cfg = crate::config::tests::load_test_config(dir.path(), "");
+        let units = content_units(&dir.path().join("content")).unwrap();
+        let decls = BTreeMap::from([(
             units[0].source.clone(),
             Some(SourceMetadataDeclaration {
                 metadata: SourceMetadata::from_dict(
@@ -610,17 +583,17 @@ mod tests {
                         .into_iter()
                         .collect(),
                 ),
-                file: typst::syntax::RootedPath::new(
-                    typst::syntax::VirtualRoot::Project,
-                    typst::syntax::VirtualPath::new("content/posts/deep.typ").unwrap(),
+                file: RootedPath::new(
+                    VirtualRoot::Project,
+                    VirtualPath::new("content/posts/deep.typ").unwrap(),
                 ),
                 range: 0..0,
             }),
         )]);
-        let sources = SourceSet::without_metadata(&units, &config)
+        let srcs = SourceSet::without_metadata(&units, &cfg)
             .unwrap()
-            .with_metadata(&declarations);
-        let (ordered, by_file, _) = sources.inputs().to_source_records().into_parts();
+            .with_metadata(&decls);
+        let (ordered, by_file, _) = srcs.inputs().to_source_records().into_parts();
 
         fn type_name(kind: SourceDescriptorFieldKind) -> &'static str {
             match kind {
@@ -630,27 +603,27 @@ mod tests {
                 SourceDescriptorFieldKind::Metadata => "dictionary",
             }
         }
-        fn descriptor_fields(value: &Value) -> Vec<(&str, &str)> {
-            match value {
+        fn descriptor_fields(val: &Value) -> Vec<(&str, &str)> {
+            match val {
                 Value::Dict(dict) => dict
                     .iter()
-                    .map(|(name, value)| (name.as_str(), value.ty().short_name()))
+                    .map(|(name, v)| (name.as_str(), v.ty().short_name()))
                     .collect(),
                 other => panic!("a descriptor is a dictionary, not {other:?}"),
             }
         }
 
-        let record = SourceDescriptorField::ALL
+        let record: Vec<_> = SourceDescriptorField::ALL
             .iter()
-            .map(|field| (field.name(), type_name(field.kind())))
-            .collect::<Vec<_>>();
+            .map(|f| (f.name(), type_name(f.kind())))
+            .collect();
         assert_eq!(descriptor_fields(&ordered.at(0, None).unwrap()), record);
 
-        let lexical = SourceDescriptorField::ALL
+        let lexical: Vec<_> = SourceDescriptorField::ALL
             .iter()
-            .filter(|field| field.in_current_source())
-            .map(|field| (field.name(), type_name(field.kind())))
-            .collect::<Vec<_>>();
+            .filter(|f| f.in_current_source())
+            .map(|f| (f.name(), type_name(f.kind())))
+            .collect();
         assert_eq!(
             descriptor_fields(by_file.get("/content/posts/deep.typ").unwrap()),
             lexical

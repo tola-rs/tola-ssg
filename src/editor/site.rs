@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use serde_json::{Value, json};
 
-use tola_build::config::ResolvedSiteConfig;
+use tola_build::config::SiteConfig;
 use tola_input::normalize_existing_prefix;
 use tola_typst::{PackageLocation, PackageLocations};
 
@@ -63,9 +63,9 @@ struct NamedPackageRoot<'a> {
 
 impl EditorDirectory {
     /// The directory of a site that exists: its resolved configuration selects the site's inputs.
-    pub(crate) fn from_config(config: &ResolvedSiteConfig) -> Result<Self> {
+    pub(crate) fn from_config(config: &SiteConfig) -> Result<Self> {
         Self {
-            root: config.get_root().to_path_buf(),
+            root: config.root().to_path_buf(),
             configuration_file: Some(config.config_path().to_path_buf()),
             entry: Some(config.build().entry.clone()),
             font_directories: config.fonts().paths.clone(),
@@ -250,7 +250,7 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn non_utf8_paths_are_rejected() {
+    fn non_utf8_paths_rejected() {
         use std::os::unix::ffi::OsStringExt;
 
         let root = PathBuf::from(std::ffi::OsString::from_vec(vec![b'/', 0xff]));
@@ -258,19 +258,19 @@ mod tests {
     }
 
     #[test]
-    fn discovered_configuration_is_not_named() {
-        let directory = EditorDirectory::initial(Path::new("."), &Default::default()).unwrap();
+    fn discovered_config_not_named() {
+        let dir = EditorDirectory::initial(Path::new("."), &Default::default()).unwrap();
 
-        assert_eq!(directory.server_command().arguments, ["lsp".to_owned()]);
+        assert_eq!(dir.server_command().arguments, ["lsp".to_owned()]);
         assert_eq!(
-            directory.tola_settings()["configPath"],
+            dir.tola_settings()["configPath"],
             serde_json::json!(Path::new(".").join("tola.toml"))
         );
     }
 
     #[test]
-    fn named_config_file_reaches_entry() {
-        let directory = EditorDirectory {
+    fn named_config_reaches_args() {
+        let dir = EditorDirectory {
             root: PathBuf::from("/site"),
             configuration_file: Some(PathBuf::from("/site/alternate.toml")),
             entry: None,
@@ -279,7 +279,7 @@ mod tests {
         };
 
         assert_eq!(
-            directory.server_command().arguments,
+            dir.server_command().arguments,
             [
                 "lsp".to_owned(),
                 "--config".to_owned(),
@@ -288,41 +288,35 @@ mod tests {
         );
     }
 
-    /// A package root this process resolved differently is what the entry has to name.
     #[test]
-    fn declared_package_roots_reach_the_entry() {
-        let directory = tempfile::tempdir().unwrap();
-        let packages = tola_typst::PackageLocations::from_absolute_roots(
-            Some(directory.path().to_path_buf()),
-            None,
-        )
-        .unwrap();
-        let settings = EditorDirectory::initial(Path::new("."), &packages).unwrap();
+    fn declared_pkg_roots_in_args() {
+        let dir = tempfile::tempdir().unwrap();
+        let pkgs =
+            tola_typst::PackageLocations::from_absolute_roots(Some(dir.path().to_path_buf()), None)
+                .unwrap();
+        let editor_dir = EditorDirectory::initial(Path::new("."), &pkgs).unwrap();
 
         assert_eq!(
-            settings.server_command().arguments,
+            editor_dir.server_command().arguments,
             [
                 "lsp".to_owned(),
                 "--package-path".to_owned(),
-                directory.path().to_str().unwrap().to_owned(),
+                dir.path().to_str().unwrap().to_owned(),
             ]
         );
     }
 
-    /// A package root this process resolved differently is what the settings have to name.
     #[test]
-    fn declared_package_roots_reach_the_settings() {
-        let root = tempfile::tempdir().unwrap();
-        let packages = tola_typst::PackageLocations::from_absolute_roots(
-            Some(root.path().to_path_buf()),
-            None,
-        )
-        .unwrap();
-        let settings = EditorDirectory::initial(Path::new("."), &packages)
+    fn declared_pkg_roots_in_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let pkgs =
+            tola_typst::PackageLocations::from_absolute_roots(Some(dir.path().to_path_buf()), None)
+                .unwrap();
+        let settings = EditorDirectory::initial(Path::new("."), &pkgs)
             .unwrap()
             .tola_settings();
 
-        assert_eq!(settings["packagePath"], serde_json::json!(root.path()));
+        assert_eq!(settings["packagePath"], serde_json::json!(dir.path()));
         assert!(settings.get("packageCachePath").is_none(), "{settings}");
     }
 }

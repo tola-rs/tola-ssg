@@ -6,8 +6,8 @@ mod requirements;
 
 pub(crate) use diagnostic::with_diagnostics;
 pub(crate) use fs::{
-    EVENT_DETAIL_CAPACITY, FileChangeBatch, FileChangeSource, ProducerKind, RebuildScope,
-    WatchError, WatchRequirements,
+    EVENT_DETAIL_CAPACITY, EventClaim, FileChangeBatch, FileChangeSource, ProducerKind,
+    RebuildScope, WatchError, WatchRequirements, WatchSelection,
 };
 pub(crate) use requirements::{
     append_observed_paths, append_typst_inputs, watch_requirements_from_observation,

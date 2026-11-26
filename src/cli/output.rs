@@ -266,7 +266,7 @@ impl CommandOutput {
         self.terminal.write_stdout_line(bytes)
     }
 
-    pub(crate) fn record_resolved(
+    pub(crate) fn record_round_result(
         &self,
         round: Option<RoundIdentity<'_>>,
         diagnostic: &Diagnostic,

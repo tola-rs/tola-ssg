@@ -1,7 +1,7 @@
 //! Module declaration types and their validation.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -16,7 +16,7 @@ pub struct ModuleDeclaration {
     #[serde(default, skip_serializing_if = "toml::Table::is_empty")]
     pub options: toml::Table,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub assets: Option<ModuleAssetPolicy>,
+    pub assets: Option<ModuleAssetRules>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icons: Option<crate::icons::Icons>,
 }
@@ -40,34 +40,33 @@ pub struct TarballSource {
 }
 
 impl<'de> Deserialize<'de> for TarballSource {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        Self::try_from(read_fields::<TarballSourceFields, _>(deserializer)?)
-            .map_err(serde::de::Error::custom)
+    fn deserialize<D: serde::Deserializer<'de>>(deser: D) -> Result<Self, D::Error> {
+        Self::try_from(read_fields::<TarballFields, _>(deser)?).map_err(serde::de::Error::custom)
     }
 }
 
 #[derive(Deserialize)]
 #[serde(expecting = "a tarball table with `url` or `path`, and optional `sha256`")]
-struct TarballSourceFields {
+struct TarballFields {
     url: Option<String>,
     path: Option<PathBuf>,
     sha256: Option<tola_input::Sha256Digest>,
 }
 
-impl TryFrom<TarballSourceFields> for TarballSource {
+impl TryFrom<TarballFields> for TarballSource {
     type Error = &'static str;
 
-    fn try_from(fields: TarballSourceFields) -> Result<Self, Self::Error> {
-        let location = match (fields.url, fields.path) {
+    fn try_from(fields: TarballFields) -> Result<Self, Self::Error> {
+        let loc = match (fields.url, fields.path) {
             (Some(url), None) => tola_input::TarballLocation::Url { url },
             (None, Some(path)) if !path.as_os_str().is_empty() => {
                 tola_input::TarballLocation::File { path }
             }
             _ => return Err("choose exactly one nonempty `tarball.url` or `tarball.path`"),
         };
-        location.validate()?;
+        loc.validate()?;
         Ok(Self {
-            location,
+            location: loc,
             sha256: fields.sha256,
         })
     }
@@ -82,7 +81,7 @@ pub struct GitSource {
     #[serde(flatten)]
     pub revision: Option<RemoteRevision>,
     /// The module directory inside the repository; empty selects its root.
-    #[serde(skip_serializing_if = "path_is_empty")]
+    #[serde(skip_serializing_if = "is_empty_path")]
     pub subdir: PathBuf,
 }
 
@@ -108,32 +107,31 @@ impl Default for ModuleDeclaration {
 }
 
 impl<'de> Deserialize<'de> for ModuleDeclaration {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        Self::try_from(read_fields::<ModuleDeclarationFields, _>(deserializer)?)
-            .map_err(serde::de::Error::custom)
+    fn deserialize<D: serde::Deserializer<'de>>(deser: D) -> Result<Self, D::Error> {
+        Self::try_from(read_fields::<DeclFields, _>(deser)?).map_err(serde::de::Error::custom)
     }
 }
 
 #[derive(Deserialize)]
-struct ModuleDeclarationFields {
+struct DeclFields {
     path: Option<PathBuf>,
     #[serde(default, deserialize_with = "optional_table")]
-    git: Option<GitSourceFields>,
+    git: Option<GitFields>,
     #[serde(default, deserialize_with = "optional_table")]
-    tarball: Option<TarballSourceFields>,
+    tarball: Option<TarballFields>,
     builtin: Option<String>,
     options: Option<toml::Table>,
     #[serde(default, deserialize_with = "optional_table")]
-    assets: Option<ModuleAssetFields>,
+    assets: Option<AssetRuleFields>,
     icons: Option<toml::Value>,
 }
 
-impl TryFrom<ModuleDeclarationFields> for ModuleDeclaration {
+impl TryFrom<DeclFields> for ModuleDeclaration {
     type Error = String;
 
-    fn try_from(fields: ModuleDeclarationFields) -> Result<Self, Self::Error> {
-        let mut options = fields.options.unwrap_or_default();
-        crate::options::normalize_options(&mut options).map_err(|error| error.to_string())?;
+    fn try_from(fields: DeclFields) -> Result<Self, Self::Error> {
+        let mut opts = fields.options.unwrap_or_default();
+        crate::options::normalize_options(&mut opts).map_err(|err| err.to_string())?;
         let source = match (fields.path, fields.git, fields.tarball, fields.builtin) {
             (Some(path), None, None, None) if !path.as_os_str().is_empty() => {
                 ModuleSource::Local { path }
@@ -153,13 +151,13 @@ impl TryFrom<ModuleDeclarationFields> for ModuleDeclaration {
         };
         Ok(Self {
             source,
-            options,
+            options: opts,
             assets: fields.assets.map(Into::into),
             icons: fields
                 .icons
                 .map(toml::Value::try_into)
                 .transpose()
-                .map_err(|error: toml::de::Error| error.to_string())?,
+                .map_err(|err: toml::de::Error| err.to_string())?,
         })
     }
 }
@@ -167,28 +165,27 @@ impl TryFrom<ModuleDeclarationFields> for ModuleDeclaration {
 impl ModuleDeclaration {
     /// Check authored fields before other configuration fragments fill in missing fields.
     pub fn validate_fragment(value: &toml::Value) -> Result<(), FragmentError> {
-        let fields = read_fragment::<ModuleDeclarationFields>(value)?;
+        let fields = read_fragment::<DeclFields>(value)?;
         if let Some(icons) = fields.icons {
             crate::icons::Icons::validate_fragment(&icons)
-                .map_err(|error| error.at(FragmentStep::Key("icons".into())))?;
+                .map_err(|err| err.at(FragmentStep::Key("icons".into())))?;
         }
-        if let Some(mut options) = fields.options {
-            crate::options::normalize_options(&mut options)
-                .map_err(|error| error.at(FragmentStep::Key("options".into())))?;
+        if let Some(mut opts) = fields.options {
+            crate::options::normalize_options(&mut opts)
+                .map_err(|err| err.at(FragmentStep::Key("options".into())))?;
         }
         Ok(())
     }
 }
 
 impl<'de> Deserialize<'de> for GitSource {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        Self::try_from(read_fields::<GitSourceFields, _>(deserializer)?)
-            .map_err(serde::de::Error::custom)
+    fn deserialize<D: serde::Deserializer<'de>>(deser: D) -> Result<Self, D::Error> {
+        Self::try_from(read_fields::<GitFields, _>(deser)?).map_err(serde::de::Error::custom)
     }
 }
 
 #[derive(Deserialize)]
-struct GitSourceFields {
+struct GitFields {
     url: Option<String>,
     tag: Option<String>,
     branch: Option<String>,
@@ -196,35 +193,32 @@ struct GitSourceFields {
     subdir: Option<PathBuf>,
 }
 
-impl TryFrom<GitSourceFields> for GitSource {
+impl TryFrom<GitFields> for GitSource {
     type Error = &'static str;
 
-    fn try_from(fields: GitSourceFields) -> Result<Self, Self::Error> {
+    fn try_from(fields: GitFields) -> Result<Self, Self::Error> {
         Ok(Self {
-            url: validate_git(fields.url.ok_or("declare `git.url`")?)?,
-            revision: select_revision(fields.tag, fields.branch, fields.rev)?,
+            url: validate_git_url(fields.url.ok_or("declare `git.url`")?)?,
+            revision: select_rev(fields.tag, fields.branch, fields.rev)?,
             subdir: select_subdir(fields.subdir)?,
         })
     }
 }
 
-/// Whether one module directory inside its repository is unset.
-fn path_is_empty(path: &Path) -> bool {
+fn is_empty_path(path: &Path) -> bool {
     path.as_os_str().is_empty()
 }
 
-/// Validate a repository address: only an `https` or `ssh` address names a fetchable module.
-fn validate_git(git: String) -> std::result::Result<String, &'static str> {
+fn validate_git_url(url: String) -> std::result::Result<String, &'static str> {
     const ADDRESS: &str = "`git.url` must be an `https` or `ssh` address";
-    let parsed = gix::Url::try_from(git.as_str()).map_err(|_| ADDRESS)?;
+    let parsed = gix::Url::try_from(url.as_str()).map_err(|_| ADDRESS)?;
     match parsed.scheme {
-        gix::url::Scheme::Https | gix::url::Scheme::Ssh => Ok(git),
+        gix::url::Scheme::Https | gix::url::Scheme::Ssh => Ok(url),
         _ => Err(ADDRESS),
     }
 }
 
-/// Pick the one revision selector a `git` module declared, if it declared any.
-fn select_revision(
+fn select_rev(
     tag: Option<String>,
     branch: Option<String>,
     rev: Option<String>,
@@ -242,7 +236,6 @@ fn select_revision(
     }
 }
 
-/// Validate the module's directory inside its repository.
 fn select_subdir(subdir: Option<PathBuf>) -> std::result::Result<PathBuf, &'static str> {
     match subdir {
         Some(path) if is_relative_path(&path) => Ok(path),
@@ -253,19 +246,19 @@ fn select_subdir(subdir: Option<PathBuf>) -> std::result::Result<PathBuf, &'stat
 
 /// Project selection and replacement of one module's published assets.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct ModuleAssetPolicy {
+pub struct ModuleAssetRules {
     pub enable: bool,
     pub replace: BTreeMap<String, PathBuf>,
 }
 
 #[derive(Deserialize)]
-struct ModuleAssetFields {
+struct AssetRuleFields {
     enable: Option<bool>,
     replace: Option<BTreeMap<String, PathBuf>>,
 }
 
-impl From<ModuleAssetFields> for ModuleAssetPolicy {
-    fn from(fields: ModuleAssetFields) -> Self {
+impl From<AssetRuleFields> for ModuleAssetRules {
+    fn from(fields: AssetRuleFields) -> Self {
         Self {
             enable: fields.enable.unwrap_or(true),
             replace: fields.replace.unwrap_or_default(),
@@ -273,13 +266,13 @@ impl From<ModuleAssetFields> for ModuleAssetPolicy {
     }
 }
 
-impl<'de> Deserialize<'de> for ModuleAssetPolicy {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        read_fields::<ModuleAssetFields, _>(deserializer).map(Into::into)
+impl<'de> Deserialize<'de> for ModuleAssetRules {
+    fn deserialize<D: serde::Deserializer<'de>>(deser: D) -> Result<Self, D::Error> {
+        read_fields::<AssetRuleFields, _>(deser).map(Into::into)
     }
 }
 
-impl Default for ModuleAssetPolicy {
+impl Default for ModuleAssetRules {
     fn default() -> Self {
         Self {
             enable: true,
@@ -428,33 +421,38 @@ pub fn valid_name(name: &str) -> bool {
 pub fn is_relative_path(path: &Path) -> bool {
     tola_input::validate_relative_path(path).is_ok()
 }
+
+pub(crate) fn is_nonempty_relative_path(path: &Path) -> bool {
+    is_relative_path(path)
+        && path
+            .components()
+            .any(|part| matches!(part, Component::Normal(_)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::fragment::FragmentErrorKind;
 
     #[test]
-    fn git_declaration_round_trips_its_nested_source() {
-        let declaration: ModuleDeclaration = toml::from_str(
+    fn git_decl_roundtrip() {
+        let decl: ModuleDeclaration = toml::from_str(
             r#"git = { url = "https://example.com/theme.git", subdir = "theme", tag = "v1" }
 options = { enabled = true }"#,
         )
         .unwrap();
-        let ModuleSource::Git { git } = &declaration.source else {
-            panic!("Git source")
+        let ModuleSource::Git { git } = &decl.source else {
+            panic!("expected git source")
         };
         assert_eq!(git.subdir, Path::new("theme"));
         assert_eq!(git.revision, Some(RemoteRevision::Tag("v1".into())));
-        let encoded = toml::to_string(&declaration).unwrap();
-        assert_eq!(
-            toml::from_str::<ModuleDeclaration>(&encoded).unwrap(),
-            declaration
-        );
+        let encoded = toml::to_string(&decl).unwrap();
+        assert_eq!(toml::from_str::<ModuleDeclaration>(&encoded).unwrap(), decl);
     }
 
     #[test]
-    fn git_declarations_reject_mixed_sources_and_selectors() {
-        for source in [
+    fn git_decl_rejects_invalid_sources() {
+        for src in [
             r#"git = "https://example.com/theme.git""#,
             "git = { url = 'https://example.com/theme.git' }\ntag = 'v1'",
             "path = 'theme'\ngit = { url = 'https://example.com/theme.git' }",
@@ -462,59 +460,56 @@ options = { enabled = true }"#,
             "git = { url = 'https://example.com/theme.git', subdir = '../outside' }",
             "git = { url = 'https://example.com/theme.git', rev = 'short' }",
         ] {
-            assert!(
-                toml::from_str::<ModuleDeclaration>(source).is_err(),
-                "{source}"
-            );
+            assert!(toml::from_str::<ModuleDeclaration>(src).is_err(), "{src}");
         }
     }
 
     #[test]
-    fn module_fragments_defer_required_fields_and_reject_unknown_nested_keys() {
-        for source in [
+    fn fragment_defers_required_and_rejects_unknown() {
+        for src in [
             "git = { tag = 'v1' }",
             "tarball = { sha256 = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef' }",
             "[options]\n'posted.on' = 2026-11-15",
         ] {
-            let value: toml::Value = toml::from_str(source).unwrap();
-            ModuleDeclaration::validate_fragment(&value).unwrap();
-            assert!(toml::from_str::<ModuleDeclaration>(source).is_err());
+            let val: toml::Value = toml::from_str(src).unwrap();
+            ModuleDeclaration::validate_fragment(&val).unwrap();
+            assert!(toml::from_str::<ModuleDeclaration>(src).is_err());
         }
 
-        let source = "git = { url = 'https://example.org/theme', 'wrong.key' = true }";
-        let value = toml::from_str(source).unwrap();
-        let error = ModuleDeclaration::validate_fragment(&value).unwrap_err();
-        assert!(matches!(error.kind, FragmentErrorKind::UnknownKey));
+        let src = "git = { url = 'https://example.org/theme', 'wrong.key' = true }";
+        let val = toml::from_str(src).unwrap();
+        let err = ModuleDeclaration::validate_fragment(&val).unwrap_err();
+        assert!(matches!(err.kind, FragmentErrorKind::UnknownKey));
         assert_eq!(
-            error.path,
+            err.path,
             [
                 FragmentStep::Key("git".into()),
                 FragmentStep::Key("wrong.key".into()),
             ]
         );
-        assert!(toml::from_str::<ModuleDeclaration>(source).is_err());
+        assert!(toml::from_str::<ModuleDeclaration>(src).is_err());
     }
 
     #[test]
-    fn module_fragment_keeps_written_types() {
-        for (source, path) in [
+    fn fragment_rejects_wrong_types() {
+        for (src, path) in [
             ("git = { tag = 2026-11-15 }", vec!["git", "tag"]),
             ("git = ['https://example.org/theme']", vec!["git"]),
         ] {
-            let value = toml::from_str(source).unwrap();
-            let error = ModuleDeclaration::validate_fragment(&value).unwrap_err();
-            assert!(matches!(error.kind, FragmentErrorKind::InvalidValue(_)));
+            let val = toml::from_str(src).unwrap();
+            let err = ModuleDeclaration::validate_fragment(&val).unwrap_err();
+            assert!(matches!(err.kind, FragmentErrorKind::InvalidValue(_)));
             assert_eq!(
-                error.path,
+                err.path,
                 path.into_iter()
-                    .map(|key| FragmentStep::Key(key.into()))
+                    .map(|k| FragmentStep::Key(k.into()))
                     .collect::<Vec<_>>()
             );
         }
     }
 
     #[test]
-    fn resolves_exactly_one_action() {
+    fn command_action_selects_one() {
         let argv: Command = toml::from_str(r#"argv = ["editor"]"#).unwrap();
         assert_eq!(
             argv.action().unwrap(),
@@ -549,17 +544,14 @@ options = { enabled = true }"#,
     }
 
     #[test]
-    fn rejects_ambiguous_actions() {
-        let ambiguous: Command = toml::from_str("argv = [\"editor\"]\nquery = \"nodes\"").unwrap();
-        assert!(ambiguous.action().is_err());
-
-        let projection: Command =
-            toml::from_str("argv = [\"editor\"]\nprojection = [\"id\"]").unwrap();
-        assert!(projection.action().is_err());
-    }
-
-    #[test]
-    fn rejects_the_removed_kind_field() {
+    fn command_action_rejects_invalid() {
+        for src in [
+            "argv = [\"editor\"]\nquery = \"nodes\"",
+            "argv = [\"editor\"]\nprojection = [\"id\"]",
+        ] {
+            let cmd: Command = toml::from_str(src).unwrap();
+            assert!(cmd.action().is_err(), "{src}");
+        }
         assert!(toml::from_str::<Command>("kind = \"argv\"\nargv = [\"editor\"]").is_err());
     }
 }

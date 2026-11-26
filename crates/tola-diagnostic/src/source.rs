@@ -28,20 +28,17 @@ pub struct SourceRange {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Location {
     pub path: String,
-    /// The file this location addresses, independent of its display spelling.
     #[serde(skip)]
     #[cfg_attr(feature = "json-schema", schemars(skip))]
     pub file: Option<std::path::PathBuf>,
     pub line: Option<usize>,
     pub column: Option<usize>,
-    /// Exact UTF-16 range, when the producer retained a complete source span.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub range: Option<SourceRange>,
     pub source_lines: Vec<SourceLine>,
 }
 
 impl Location {
-    /// Resolve a host file or a project-relative location. A package label is display-only.
     pub fn editor_file(&self, root: &std::path::Path) -> Option<std::path::PathBuf> {
         if let Some(file) = &self.file {
             return Some(root.join(file));
@@ -63,26 +60,23 @@ impl Location {
     }
 }
 
-/// A retained window of one source line.
+/// Retained window of one source line.
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SourceLine {
     pub line: usize,
-    /// Zero-based Unicode scalar column of the first retained character.
     pub start_column: usize,
-    /// Zero-based UTF-16 column of the first retained character.
     pub start_character: usize,
-    /// Whether this window reaches the original line's end.
     pub ends_line: bool,
     pub text: String,
     pub highlight: Option<(usize, usize)>,
 }
 
 impl SourceLine {
-    pub fn new(line: usize, text: impl Into<String>, highlight: Option<(usize, usize)>) -> Self {
+    pub fn new(line: usize, text: impl Into<String>, hl: Option<(usize, usize)>) -> Self {
         assert!(line > 0, "a source line number must be one-based");
         let text = text.into();
-        let highlight = highlight.filter(|&(start, end)| {
+        let highlight = hl.filter(|&(start, end)| {
             start < end
                 && end <= text.len()
                 && text.is_char_boundary(start)
@@ -99,7 +93,6 @@ impl SourceLine {
     }
 }
 
-/// The written line one span covers, with the highlight that points inside it.
 pub struct SourceExcerpt {
     pub line: usize,
     pub column: usize,
@@ -108,102 +101,93 @@ pub struct SourceExcerpt {
 }
 
 impl SourceExcerpt {
-    /// The written line one source span covers, with the highlight that points inside it.
-    pub fn of(source: &str, span: Range<usize>) -> Option<Self> {
+    pub fn of(src: &str, span: Range<usize>) -> Option<Self> {
         if span.start > span.end {
             return None;
         }
 
-        let lines = Lines::new(source);
-        let mut start = source.floor_char_boundary(span.start);
+        let lines = Lines::new(src);
+        let mut start = src.floor_char_boundary(span.start);
         let mut line = lines.byte_to_line(start)?;
-        if start == source.len() && line > 0 && lines.line_to_byte(line)? == start {
+        if start == src.len() && line > 0 && lines.line_to_byte(line)? == start {
             line -= 1;
-            start = source.floor_char_boundary(start - 1);
+            start = src.floor_char_boundary(start - 1);
         }
         let range = lines.line_to_range(line)?;
         let line_start = range.start;
-        let text = source[range].trim_end_matches(typst::syntax::is_newline);
+        let text = src[range].trim_end_matches(typst::syntax::is_newline);
         let line_end = line_start + text.len();
         let start = start.min(line_end);
-        let column = start - line_start;
-        let end = source.ceil_char_boundary(span.end).min(line_end) - line_start;
-        let highlight = if end > column {
-            (column, end)
-        } else if column > 0 {
-            (text.floor_char_boundary(column - 1), column)
+        let col = start - line_start;
+        let end = src.ceil_char_boundary(span.end).min(line_end) - line_start;
+        let highlight = if end > col {
+            (col, end)
+        } else if col > 0 {
+            (text.floor_char_boundary(col - 1), col)
         } else {
             (0, text.chars().next().map_or(0, char::len_utf8))
         };
         Some(Self {
             line: line + 1,
-            column: text[..column].chars().count() + 1,
+            column: text[..col].chars().count() + 1,
             text: text.to_owned(),
             highlight,
         })
     }
 }
 
-/// The exact UTF-16 range one byte span covers, clamped to the text the document holds.
-pub(super) fn source_range(source: &str, span: Range<usize>) -> SourceRange {
-    let lines = Lines::new(source);
+pub(super) fn source_range(src: &str, span: Range<usize>) -> SourceRange {
+    let lines = Lines::new(src);
     SourceRange {
         start: source_position(&lines, span.start),
         end: source_position(&lines, span.end),
     }
 }
 
-/// The zero-based UTF-16 position one byte offset names.
 fn source_position(lines: &Lines<&str>, offset: usize) -> SourcePosition {
-    let source = lines.text();
-    let offset = source.floor_char_boundary(offset);
+    let src = lines.text();
+    let offset = src.floor_char_boundary(offset);
     let line = lines
         .byte_to_line(offset)
         .expect("the offset is in the source");
     let line_start = lines.line_to_byte(line).expect("the offset's line exists");
     SourcePosition {
         line,
-        character: source[line_start..offset]
-            .chars()
-            .map(char::len_utf16)
-            .sum(),
+        character: src[line_start..offset].chars().map(char::len_utf16).sum(),
     }
 }
 
-/// The record for a source whose text the parser rejects.
 pub fn unparsable_source(
     code: DiagnosticCode,
-    source: &str,
+    src: &str,
     text: &str,
     offset: Option<usize>,
 ) -> Diagnostic {
-    let diagnostic = Diagnostic::at_path(
+    let diag = Diagnostic::at_path(
         code,
         Severity::Error,
-        source.to_owned(),
-        format!("`{source}` does not parse as Typst"),
+        src.to_owned(),
+        format!("`{src}` does not parse as Typst"),
     )
     .with_help("Fix the syntax, or keep the file out of the run with `.ignore`");
-    match offset.and_then(|offset| line_column(text, offset)) {
-        Some((line, column)) => diagnostic.with_position(line, column),
-        None => diagnostic,
+    match offset.and_then(|off| line_column(text, off)) {
+        Some((line, col)) => diag.with_position(line, col),
+        None => diag,
     }
 }
 
-/// The record for a source whose bytes are not UTF-8 text the reader can format or analyze.
-pub fn unreadable_source(code: DiagnosticCode, source: &str) -> Diagnostic {
+pub fn unreadable_source(code: DiagnosticCode, src: &str) -> Diagnostic {
     Diagnostic::at_path(
         code,
         Severity::Error,
-        source.to_owned(),
-        format!("Tola could not read `{source}` as UTF-8 text"),
+        src.to_owned(),
+        format!("Tola could not read `{src}` as UTF-8 text"),
     )
 }
 
-/// The one-based line and column a byte offset sits at, when the offset lies inside the text.
 pub fn line_column(text: &str, offset: usize) -> Option<(usize, usize)> {
-    let (line, column) = Lines::new(text).byte_to_line_column(offset)?;
-    Some((line + 1, column + 1))
+    let (line, col) = Lines::new(text).byte_to_line_column(offset)?;
+    Some((line + 1, col + 1))
 }
 
 #[cfg(test)]
@@ -211,13 +195,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rejects_invalid_highlights() {
+    fn invalid_highlights() {
         let valid = SourceLine::new(1, "éx", Some((2, 3)));
-        let inside_character = SourceLine::new(1, "éx", Some((1, 2)));
+        let mid_char = SourceLine::new(1, "éx", Some((1, 2)));
         let empty = SourceLine::new(1, "éx", Some((2, 2)));
 
         assert_eq!(valid.highlight, Some((2, 3)));
-        assert_eq!(inside_character.highlight, None);
+        assert_eq!(mid_char.highlight, None);
         assert_eq!(empty.highlight, None);
     }
 
@@ -229,7 +213,7 @@ mod tests {
     }
 
     #[test]
-    fn excerpt_aligns_highlights() {
+    fn excerpt_highlights() {
         assert!(SourceExcerpt::of("first\nsecond", Range { start: 7, end: 2 }).is_none());
         assert_eq!(SourceExcerpt::of("é", 1..1).unwrap().highlight, (0, 2));
         assert_eq!(SourceExcerpt::of("é", 2..2).unwrap().highlight, (0, 2));

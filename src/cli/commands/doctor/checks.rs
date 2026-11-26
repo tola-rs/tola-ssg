@@ -6,7 +6,7 @@ use crate::editor::{GeneratedDirectory, HeldFile};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
-use tola_build::config::ResolvedSiteConfig;
+use tola_build::config::SiteConfig;
 use tola_build::hooks::{configured_hooks, expand_hook_argument, generated_input_producer};
 use tola_diagnostic::{Diagnostic, Severity};
 
@@ -71,8 +71,8 @@ pub(super) fn diagnose(
     }
 }
 
-fn diagnose_loaded(config: &ResolvedSiteConfig) -> Vec<Diagnostic> {
-    let root = config.get_root();
+fn diagnose_loaded(config: &SiteConfig) -> Vec<Diagnostic> {
+    let root = config.root();
     let mut diagnostics = Vec::new();
     diagnostics.extend(build_input_diagnostic(
         config,
@@ -95,7 +95,7 @@ fn diagnose_loaded(config: &ResolvedSiteConfig) -> Vec<Diagnostic> {
 
     diagnostics.extend(hook_command_diagnostics(config));
 
-    diagnostics.extend(environment_diagnostics(config.get_root()));
+    diagnostics.extend(environment_diagnostics(config.root()));
 
     diagnostics.extend(vendor_diagnostics(config));
     diagnostics.extend(font_diagnostics(config));
@@ -103,14 +103,14 @@ fn diagnose_loaded(config: &ResolvedSiteConfig) -> Vec<Diagnostic> {
 }
 
 fn build_input_diagnostic(
-    config: &ResolvedSiteConfig,
+    config: &SiteConfig,
     path: &Path,
     is_expected: fn(&std::fs::Metadata) -> bool,
     code: tola_diagnostic::DiagnosticCode,
     message: &str,
     help: &str,
 ) -> Option<Diagnostic> {
-    let root = config.get_root();
+    let root = config.root();
     let metadata = path.metadata();
     if metadata.as_ref().is_ok_and(is_expected) {
         return None;
@@ -132,8 +132,8 @@ fn build_input_diagnostic(
     Some(path_diagnostic(code, Severity::Error, root, path, message).with_help(help))
 }
 
-fn hook_command_diagnostics(config: &ResolvedSiteConfig) -> Vec<Diagnostic> {
-    let root = config.get_root();
+fn hook_command_diagnostics(config: &SiteConfig) -> Vec<Diagnostic> {
+    let root = config.root();
     let executable = std::env::current_exe();
     configured_hooks(config.hooks())
         .filter_map(|hook| {
@@ -399,11 +399,11 @@ fn command_exists(command: &OsStr, root: &Path) -> bool {
 }
 
 /// A vendored copy is portable only while it holds real files.
-fn vendor_diagnostics(config: &tola_build::config::ResolvedSiteConfig) -> Vec<Diagnostic> {
+fn vendor_diagnostics(config: &tola_build::config::SiteConfig) -> Vec<Diagnostic> {
     let Some(vendor) = config.vendor().path.as_ref() else {
         return Vec::new();
     };
-    let root = config.get_root();
+    let root = config.root();
     if !vendor.is_dir() {
         return vec![
             path_diagnostic(
@@ -441,11 +441,11 @@ fn vendor_diagnostics(config: &tola_build::config::ResolvedSiteConfig) -> Vec<Di
 /// `static/typst-fonts`, which a site relying on the fonts Tola carries need not create. The
 /// extension rule is the compiler's own, so a directory this reports empty provides no face to a
 /// build either. A directory Tola cannot read is left to the compiler, which reports it there.
-fn font_diagnostics(config: &tola_build::config::ResolvedSiteConfig) -> Vec<Diagnostic> {
+fn font_diagnostics(config: &tola_build::config::SiteConfig) -> Vec<Diagnostic> {
     if !config.declares_font_paths() {
         return Vec::new();
     }
-    let root = config.get_root();
+    let root = config.root();
     let mut diagnostics = Vec::new();
     for (index, directory) in config.fonts().paths.iter().enumerate() {
         if !directory.is_dir() {
@@ -547,14 +547,14 @@ mod tests {
     const MINIMAL_CONFIG: &str = "[build]\nentry = \"site.typ\"\ncontent-dir = \"content\"\n";
 
     #[test]
-    fn pure_scope_reports_selected_package_roots() {
-        let directory = tempdir().unwrap();
-        let path = directory.path().join("tola.toml");
+    fn pure_scope_reports_package_roots() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("tola.toml");
         std::fs::write(&path, MINIMAL_CONFIG).unwrap();
         let reported = diagnose_config(
             &path,
             &crate::cli::TypstPackageArgs {
-                package_path: Some(directory.path().join("host-packages")),
+                package_path: Some(dir.path().join("host-packages")),
                 ..crate::cli::TypstPackageArgs::default()
             },
             tola_input::InputScope::Pure,
@@ -563,52 +563,46 @@ mod tests {
         assert!(
             reported
                 .iter()
-                .any(|diagnostic| diagnostic.code == crate::codes::doctor::PACKAGE_LOCATIONS)
+                .any(|d| d.code == crate::codes::doctor::PACKAGE_LOCATIONS)
         );
     }
 
     #[test]
-    fn refused_package_paths_are_reported_once() {
-        let directory = tempdir().unwrap();
-        let path = directory.path().join("tola.toml");
+    fn refused_package_paths_reported_once() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("tola.toml");
         std::fs::write(&path, MINIMAL_CONFIG).unwrap();
-        let (relative, _) = crate::editor::generated_package_files()
+        let (rel, _) = crate::editor::generated_package_files()
             .into_iter()
             .next()
             .expect("builtin packages provide editor files");
-        // A directory where one generated file belongs: a path Tola will not write, which is not a
-        // file that differs from the sources this Tola ships.
-        std::fs::create_dir_all(directory.path().join(&relative)).unwrap();
-        let displayed = crate::terminal::display_path_as_given(&relative);
+        std::fs::create_dir_all(dir.path().join(&rel)).unwrap();
+        let displayed = crate::terminal::display_path_as_given(&rel);
 
         let reported = diagnose_at(&path);
         let refused = reported
             .iter()
-            .find(|diagnostic| diagnostic.code == crate::codes::doctor::EDITOR_PACKAGES_UNUSABLE)
+            .find(|d| d.code == crate::codes::doctor::EDITOR_PACKAGES_UNUSABLE)
             .expect("a generated package path Tola refuses is reported");
         assert!(
             refused
                 .notes
                 .iter()
-                .any(|note| note.contains(&displayed) && note.contains("is not a file")),
+                .any(|n| n.contains(&displayed) && n.contains("is not a file")),
             "{:?}",
             refused.notes
         );
-        let reported_elsewhere: Vec<&str> = reported
+        let elsewhere: Vec<&str> = reported
             .iter()
-            .filter(|diagnostic| diagnostic.code != crate::codes::doctor::EDITOR_PACKAGES_UNUSABLE)
-            .flat_map(|diagnostic| diagnostic.notes.iter().map(String::as_str))
+            .filter(|d| d.code != crate::codes::doctor::EDITOR_PACKAGES_UNUSABLE)
+            .flat_map(|d| d.notes.iter().map(String::as_str))
             .collect();
         assert!(
-            !reported_elsewhere
-                .iter()
-                .any(|note| note.contains(&displayed)),
-            "the refused path is reported once: {reported_elsewhere:?}"
+            !elsewhere.iter().any(|n| n.contains(&displayed)),
+            "the refused path is reported once: {elsewhere:?}"
         );
     }
 
-    /// The diagnostics `tola doctor` reports for `path`, with `packages` and `scope`, against a
-    /// plain terminal and a fresh cancellation.
     fn diagnose_config(
         path: &Path,
         packages: &crate::cli::TypstPackageArgs,
@@ -634,9 +628,9 @@ mod tests {
     }
 
     #[test]
-    fn missing_build_inputs_use_enabled_generators() {
-        let directory = tempdir().unwrap();
-        let root = directory.path();
+    fn missing_inputs_use_enabled_generators() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
         let path = root.join("tola.toml");
         std::fs::create_dir(root.join("theme")).unwrap();
         std::fs::write(
@@ -650,7 +644,7 @@ generates = ["./generated/pages"]
 "#,
         )
         .unwrap();
-        let config = r#"
+        let cfg = r#"
 [build]
 entry = "generated/pages/site.typ"
 content-dir = "generated/content"
@@ -664,7 +658,7 @@ generates = ["generated/content"]
         for (enabled, severity) in [(true, Severity::Warning), (false, Severity::Error)] {
             std::fs::write(
                 &path,
-                format!("{config}\n[modules.theme.options]\ngenerate-pages = {enabled}\n"),
+                format!("{cfg}\n[modules.theme.options]\ngenerate-pages = {enabled}\n"),
             )
             .unwrap();
             let reported = diagnose_at(&path);
@@ -686,11 +680,11 @@ generates = ["generated/content"]
 
     #[cfg(unix)]
     #[test]
-    fn hook_executables_use_the_site_directory_and_module_placeholders() {
+    fn hook_executables_expand_placeholders() {
         use std::os::unix::fs::PermissionsExt;
 
-        let directory = tempdir().unwrap();
-        let root = directory.path();
+        let dir = tempdir().unwrap();
+        let root = dir.path();
         let path = root.join("tola.toml");
         std::fs::create_dir(root.join("theme")).unwrap();
         std::fs::write(
@@ -714,31 +708,31 @@ argv = ["{module}/tool"]
         )
         .unwrap();
         let script = root.join("site-tool");
-        let module_script = root.join("theme/tool");
-        for file in [&script, &module_script] {
+        let mod_script = root.join("theme/tool");
+        for file in [&script, &mod_script] {
             std::fs::write(file, "#!/bin/sh\nexit 1\n").unwrap();
         }
-        for (site_mode, module_mode, expected) in [
+        for (site_mode, mod_mode, expected) in [
             (0o644, 0o755, "site-tool"),
             (0o755, 0o644, "@module/theme/module-tool"),
         ] {
             std::fs::set_permissions(&script, std::fs::Permissions::from_mode(site_mode)).unwrap();
-            std::fs::set_permissions(&module_script, std::fs::Permissions::from_mode(module_mode))
+            std::fs::set_permissions(&mod_script, std::fs::Permissions::from_mode(mod_mode))
                 .unwrap();
             let reported = diagnose_at(&path);
-            let errors: Vec<_> = reported
+            let errs: Vec<_> = reported
                 .iter()
                 .filter(|d| d.code == crate::codes::doctor::HOOK_COMMAND_MISSING)
                 .collect();
-            assert_eq!(errors.len(), 1, "{errors:?}");
-            assert!(errors[0].message.contains(&format!("`{expected}`")));
+            assert_eq!(errs.len(), 1, "{errs:?}");
+            assert!(errs[0].message.contains(&format!("`{expected}`")));
         }
     }
 
     #[test]
-    fn missing_vendor_directory_is_reported() {
-        let directory = tempdir().unwrap();
-        let path = directory.path().join("tola.toml");
+    fn missing_vendor_reported() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("tola.toml");
         std::fs::write(
             &path,
             "[build]\nentry = \"site.typ\"\ncontent-dir = \"content\"\n[vendor]\npath = \"vendor\"\n",
@@ -748,43 +742,35 @@ argv = ["{module}/tool"]
         let reported = diagnose_at(&path);
         let missing = reported
             .iter()
-            .find(|diagnostic| diagnostic.code == crate::codes::doctor::VENDOR_PATH_MISSING)
+            .find(|d| d.code == crate::codes::doctor::VENDOR_PATH_MISSING)
             .expect("a declared vendor directory that does not exist is reported");
-
         assert_eq!(
-            missing
-                .location
-                .as_ref()
-                .map(|location| location.path.as_str()),
+            missing.location.as_ref().map(|l| l.path.as_str()),
             Some("vendor")
         );
     }
 
     #[cfg(unix)]
     #[test]
-    fn vendored_links_are_reported() {
-        let directory = tempdir().unwrap();
-        let path = directory.path().join("tola.toml");
+    fn vendored_links_reported() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("tola.toml");
         std::fs::write(
             &path,
             "[build]\nentry = \"site.typ\"\ncontent-dir = \"content\"\n[vendor]\npath = \"vendor\"\n",
         )
         .unwrap();
-        std::fs::create_dir_all(directory.path().join("vendor/typst-packages")).unwrap();
-        let link = directory.path().join("vendor/typst-packages/theme");
-        std::os::unix::fs::symlink(directory.path().join("theme-source"), &link).unwrap();
+        std::fs::create_dir_all(dir.path().join("vendor/typst-packages")).unwrap();
+        let link = dir.path().join("vendor/typst-packages/theme");
+        std::os::unix::fs::symlink(dir.path().join("theme-source"), &link).unwrap();
 
         let reported = diagnose_at(&path);
         let linked = reported
             .iter()
-            .find(|diagnostic| diagnostic.code == crate::codes::doctor::VENDOR_LINK)
+            .find(|d| d.code == crate::codes::doctor::VENDOR_LINK)
             .expect("a link inside the vendor directory is reported");
-
         assert_eq!(
-            linked
-                .location
-                .as_ref()
-                .map(|location| location.path.as_str()),
+            linked.location.as_ref().map(|l| l.path.as_str()),
             Some("vendor/typst-packages/theme")
         );
     }

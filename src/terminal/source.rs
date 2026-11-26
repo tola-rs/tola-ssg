@@ -9,12 +9,12 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use tola_typst::FileResolver;
+use tola_typst::FileStore;
 
 /// Site root and package locations one command's diagnostics resolve against.
 pub(crate) struct SourceFiles {
     root: PathBuf,
-    resolver: FileResolver,
+    resolver: FileStore,
     files: Mutex<HashMap<String, Option<Arc<str>>>>,
 }
 
@@ -22,9 +22,9 @@ impl SourceFiles {
     pub(crate) fn new(root: PathBuf, packages: tola_typst::PackageLocations) -> Self {
         Self {
             root,
-            resolver: FileResolver::from_package_locations(
+            resolver: FileStore::from_package_locations(
                 packages,
-                tola_typst::PackageFetchPolicy::LocalOnly,
+                tola_typst::PackageFetchMode::LocalOnly,
             ),
             files: Mutex::new(HashMap::new()),
         }

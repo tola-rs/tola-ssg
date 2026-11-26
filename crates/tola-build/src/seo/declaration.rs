@@ -6,7 +6,7 @@ use typst::syntax::{Span, VirtualPath};
 
 use super::RenderError;
 use crate::cancellation::BuildCancellation;
-use crate::config::ResolvedSiteConfig;
+use crate::config::SiteConfig;
 use tola_address::OutputPath;
 
 #[derive(Debug, thiserror::Error)]
@@ -270,10 +270,7 @@ impl SeoDeclaration {
         Ok(output)
     }
 
-    pub(super) fn require_origin(
-        &self,
-        config: &ResolvedSiteConfig,
-    ) -> Result<(), SeoDeclarationError> {
+    pub(super) fn require_origin(&self, config: &SiteConfig) -> Result<(), SeoDeclarationError> {
         if config.site.origin.is_none() {
             return Err(self
                 .invalid(
@@ -344,7 +341,7 @@ pub(super) fn resolve_document<'a>(
     declaration: &SeoDeclaration,
     value: &Value,
     field: &str,
-    config: &ResolvedSiteConfig,
+    config: &SiteConfig,
     compilation: &'a tola_typst::BundleCompilation,
     cancellation: &BuildCancellation,
 ) -> Result<(DocumentTarget<'a>, Option<TargetAnchor>), RenderError> {

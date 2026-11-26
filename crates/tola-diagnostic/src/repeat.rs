@@ -4,36 +4,34 @@ use std::collections::{HashMap, hash_map::Entry};
 
 use crate::{Diagnostic, DiagnosticCode};
 
-/// Collapse the records that one source mistake produced, naming the pages each reached.
 pub fn collapse_repeated<K: std::hash::Hash + Eq>(
-    diagnostics: impl IntoIterator<Item = (K, Diagnostic, String)>,
+    diags: impl IntoIterator<Item = (K, Diagnostic, String)>,
 ) -> Vec<Diagnostic> {
-    let mut positions: HashMap<K, usize> = HashMap::new();
+    let mut pos: HashMap<K, usize> = HashMap::new();
     let mut groups: Vec<(Diagnostic, Vec<String>)> = Vec::new();
-    for (key, diagnostic, page) in diagnostics {
-        match positions.entry(key) {
-            Entry::Occupied(position) => {
-                let pages = &mut groups[*position.get()].1;
+    for (key, diag, page) in diags {
+        match pos.entry(key) {
+            Entry::Occupied(entry) => {
+                let pages = &mut groups[*entry.get()].1;
                 if !pages.contains(&page) {
                     pages.push(page);
                 }
             }
-            Entry::Vacant(position) => {
-                position.insert(groups.len());
-                groups.push((diagnostic, vec![page]));
+            Entry::Vacant(entry) => {
+                entry.insert(groups.len());
+                groups.push((diag, vec![page]));
             }
         }
     }
     groups
         .into_iter()
-        .map(|(diagnostic, pages)| match pages_note(&pages) {
-            Some(note) => diagnostic.with_note(note),
-            None => diagnostic,
+        .map(|(diag, pages)| match pages_note(&pages) {
+            Some(note) => diag.with_note(note),
+            None => diag,
         })
         .collect()
 }
 
-/// The identity of the source one record names, shared across pages.
 #[derive(PartialEq, Eq, Hash)]
 pub struct ReferenceIdentity {
     code: DiagnosticCode,
@@ -44,19 +42,18 @@ pub struct ReferenceIdentity {
 }
 
 impl ReferenceIdentity {
-    pub fn of(diagnostic: &Diagnostic) -> Self {
-        let location = diagnostic.location.as_ref();
+    pub fn of(diag: &Diagnostic) -> Self {
+        let loc = diag.location.as_ref();
         Self {
-            code: diagnostic.code,
-            path: location.map(|location| location.path.clone()),
-            line: location.and_then(|location| location.line),
-            column: location.and_then(|location| location.column),
-            message: diagnostic.message.clone(),
+            code: diag.code,
+            path: loc.map(|l| l.path.clone()),
+            line: loc.and_then(|l| l.line),
+            column: loc.and_then(|l| l.column),
+            message: diag.message.clone(),
         }
     }
 }
 
-/// One sentence naming the pages a repeated record reached, counting beyond the first three.
 fn pages_note(pages: &[String]) -> Option<String> {
     match pages {
         [] | [_] => None,
@@ -67,10 +64,8 @@ fn pages_note(pages: &[String]) -> Option<String> {
     }
 }
 
-/// How many names a listing names before it counts the rest.
 pub const LISTED_NAMES: usize = 3;
 
-/// Join names the way a sentence reads, naming [`LISTED_NAMES`] and counting the rest.
 pub fn bounded_listing(names: &[String], unit: (&str, &str)) -> String {
     let mut quoted: Vec<_> = names
         .iter()
@@ -78,9 +73,9 @@ pub fn bounded_listing(names: &[String], unit: (&str, &str)) -> String {
         .map(|name| format!("`{name}`"))
         .collect();
     if names.len() > LISTED_NAMES {
-        let remaining = names.len() - LISTED_NAMES;
-        let noun = if remaining == 1 { unit.0 } else { unit.1 };
-        quoted.push(format!("{remaining} more {noun}"));
+        let rem = names.len() - LISTED_NAMES;
+        let noun = if rem == 1 { unit.0 } else { unit.1 };
+        quoted.push(format!("{rem} more {noun}"));
     }
     let Some(last) = quoted.pop() else {
         return String::new();
@@ -98,15 +93,15 @@ mod tests {
     use crate::Severity;
 
     #[test]
-    fn lists_distinct_pages() {
-        let diagnostic = Diagnostic::new(
+    fn distinct_pages() {
+        let diag = Diagnostic::new(
             crate::codes::typst::COMPILE,
             Severity::Warning,
             "missing destination",
         );
         let grouped = collapse_repeated(
             ["index.html", "index.html", "about.html"]
-                .map(|page| (0, diagnostic.clone(), page.to_owned())),
+                .map(|page| (0, diag.clone(), page.to_owned())),
         );
 
         assert_eq!(grouped.len(), 1);

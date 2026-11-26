@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
-use crate::config::ResolvedSiteConfig;
+use crate::config::SiteConfig;
 use crate::metadata::SourceMetadata;
 
 pub use crate::content::ContentDiscoveryError;
@@ -27,7 +27,7 @@ pub enum SourceInspectionError {
 /// Discover selected content sources without evaluating them.
 pub fn content_sources(
     paths: &[PathBuf],
-    config: &ResolvedSiteConfig,
+    config: &SiteConfig,
     resources: &crate::resources::BuildResources,
     cancellation: &crate::cancellation::BuildCancellation,
 ) -> Result<Vec<crate::content::ContentUnit>, SourceInspectionError> {
@@ -95,13 +95,13 @@ impl InspectedSources {
 /// Inspect selected sources and their optional metadata, respecting cancellation.
 pub fn inspect_sources(
     paths: &[std::path::PathBuf],
-    config: &ResolvedSiteConfig,
+    config: &SiteConfig,
     resources: &crate::resources::BuildResources,
     cancellation: &crate::cancellation::BuildCancellation,
 ) -> Result<InspectedSources> {
     cancellation.ensure_active()?;
     let bundle = cancellation.bundle_cancellation();
-    let site = crate::modules::prepared::prepare_site_with_bundle(
+    let site = crate::modules::site::prepare_site_with_bundle(
         config,
         resources.input_mode(),
         &bundle,

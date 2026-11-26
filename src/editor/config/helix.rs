@@ -333,25 +333,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn foreign_mirror_path_is_rewritten() {
-        let source = "[language-server.tola-lsp.config]\npackageSourceDirectory = \"/other/host/packages\"\n";
-        let merged = merge(Some(source), &editor_directory("."), false).unwrap();
-        let value: toml::Value = toml::from_str(&merged).unwrap();
-        let packages = super::super::package_source_directory();
+    fn foreign_mirror_rewritten() {
+        let src = "[language-server.tola-lsp.config]\npackageSourceDirectory = \"/other/host/packages\"\n";
+        let merged = merge(Some(src), &editor_directory("."), false).unwrap();
+        let val: toml::Value = toml::from_str(&merged).unwrap();
+        let pkgs = super::super::package_source_directory();
         assert_eq!(
-            value["language-server"]["tola-lsp"]["config"]["packageSourceDirectory"].as_str(),
-            Some(packages.as_str())
+            val["language-server"]["tola-lsp"]["config"]["packageSourceDirectory"].as_str(),
+            Some(pkgs.as_str())
         );
         assert!(!merged.contains("/other/host"), "{merged}");
     }
 
     #[test]
-    fn discovered_configuration_argument_is_dropped() {
-        let source = "[language-server.tola-lsp]\nargs = [\"lsp\", \"--config\", \"/other/host/tola.toml\"]\n";
-        let merged = merge(Some(source), &editor_directory("."), false).unwrap();
-        let value: toml::Value = toml::from_str(&merged).unwrap();
+    fn discovered_config_arg_dropped() {
+        let src = "[language-server.tola-lsp]\nargs = [\"lsp\", \"--config\", \"/other/host/tola.toml\"]\n";
+        let merged = merge(Some(src), &editor_directory("."), false).unwrap();
+        let val: toml::Value = toml::from_str(&merged).unwrap();
         assert_eq!(
-            value["language-server"]["tola-lsp"]["args"]
+            val["language-server"]["tola-lsp"]["args"]
                 .as_array()
                 .unwrap(),
             &[toml::Value::String("lsp".into())]
@@ -359,23 +359,23 @@ mod tests {
     }
 
     #[test]
-    fn merge_preserves_author_servers() {
-        let source = "# keep\n[language-server.other-typst]\ncommand = '/custom/other-typst'\nargs = ['lsp']\n[[language]]\nname = 'rust'\nlanguage-servers = ['rust-analyzer']\n[[language]]\nname = 'typst'\nlanguage-servers = ['other-typst'] # assistance\n";
-        let merged = merge(Some(source), &editor_directory("."), false).unwrap();
-        let value: toml::Value = toml::from_str(&merged).unwrap();
+    fn merge_keeps_author_servers() {
+        let src = "# keep\n[language-server.other-typst]\ncommand = '/custom/other-typst'\nargs = ['lsp']\n[[language]]\nname = 'rust'\nlanguage-servers = ['rust-analyzer']\n[[language]]\nname = 'typst'\nlanguage-servers = ['other-typst'] # assistance\n";
+        let merged = merge(Some(src), &editor_directory("."), false).unwrap();
+        let val: toml::Value = toml::from_str(&merged).unwrap();
         assert_eq!(
-            value["language-server"]["other-typst"]["command"].as_str(),
+            val["language-server"]["other-typst"]["command"].as_str(),
             Some("/custom/other-typst")
         );
         assert_eq!(
-            value["language-server"]["tola-lsp"]["command"].as_str(),
+            val["language-server"]["tola-lsp"]["command"].as_str(),
             Some("tola")
         );
         assert_eq!(
-            value["language"][0]["language-servers"][0].as_str(),
+            val["language"][0]["language-servers"][0].as_str(),
             Some("rust-analyzer")
         );
-        let servers = value["language"][1]["language-servers"].as_array().unwrap();
+        let servers = val["language"][1]["language-servers"].as_array().unwrap();
         assert_eq!(servers[0]["name"].as_str(), Some("tola-lsp"));
         assert_eq!(servers[1].as_str(), Some("other-typst"));
         assert!(merged.contains("# assistance"));

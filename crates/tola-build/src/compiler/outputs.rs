@@ -7,7 +7,7 @@ use crate::output::graph::{OutputFile, OutputGraphBuilder, OutputGraphError};
 use crate::output::owner::OutputOwner;
 use crate::output::semantics::OutputDeclaration;
 use tola_address::OutputPath;
-use tola_minify::{MinifiedLanguages, MinifyRequest};
+use tola_minify::{MinifiedLanguages, MinifyLanguage};
 
 pub(crate) fn insert_bundle(
     outputs: &mut OutputGraphBuilder,
@@ -53,9 +53,9 @@ fn minify_asset(
     bytes: &tola_typst::BundleBytes,
     languages: MinifiedLanguages,
 ) -> Option<Vec<u8>> {
-    let request = MinifyRequest::for_source(Path::new(path.as_str()), languages)?;
+    let lang = MinifyLanguage::for_source(Path::new(path.as_str()), languages)?;
     let source = std::str::from_utf8(bytes.as_slice()).ok()?;
-    Some(request.minify(source).ok()?.into_bytes())
+    Some(lang.minify(source).ok()?.into_bytes())
 }
 
 fn declaration_for_entry(

@@ -1,45 +1,32 @@
-//! Portable logical identities below one site output root.
+//! Portable logical identities below a site output root.
 
 use std::borrow::Borrow;
 use std::fmt;
 use std::sync::Arc;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
-
 use thiserror::Error;
 
-use super::portable::{is_control_character, validate_portable_segment};
+use super::portable::{is_control_char, validate_portable_segment};
 use super::{PortablePathError, UrlPath, portable_collision_key};
 
-/// The one segment Tola reserves at the top of every published output root.
-///
-/// The build engine reserves this segment for system assets.
+/// Segment reserved at the top of every published output root for system assets.
 pub const RESERVED_ROOT: &str = "_tola";
 
-/// A portable, non-empty file path relative to the site output root.
-///
-/// The path is decoded text: a literal `%` or `#` is a filename character, not URL syntax, and
-/// only [`UrlPath`] renders it for a browser. Its owner determines whether it denotes a file or a
-/// directory tree; a trailing slash never appears in the value.
+/// Portable, non-empty decoded relative file path below the site output root (never ends with `/`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct OutputPath(Arc<str>);
 
 impl Serialize for OutputPath {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(self.as_str())
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(self.as_str())
     }
 }
 
 impl<'de> Deserialize<'de> for OutputPath {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let raw = String::deserialize(deserializer)?;
-        Self::parse(&raw).map_err(|error| de::Error::custom(error.to_string()))
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(d)?;
+        Self::parse(&raw).map_err(|err| de::Error::custom(err.to_string()))
     }
 }
 
@@ -62,46 +49,37 @@ pub enum OutputPathError {
 }
 
 impl OutputPath {
-    /// Parse one decoded relative file path.
-    ///
-    /// The text is a path, never a URL: no percent decoding and no query or fragment interpretation
-    /// happens, so a portable literal `%` or `#` names a file. Structural and portable rules stay:
-    /// the path is relative, non-empty, has no trailing slash, and every segment is a portable
-    /// filename.
-    pub fn parse(decoded_relative: &str) -> Result<Self, OutputPathError> {
-        if decoded_relative.contains('\\') {
+    /// Parse a decoded relative file path without percent-decoding or query/fragment handling.
+    pub fn parse(raw: &str) -> Result<Self, OutputPathError> {
+        if raw.contains('\\') {
             return Err(OutputPathError::Backslash);
         }
-        if decoded_relative.chars().any(is_control_character) {
+        if raw.chars().any(is_control_char) {
             return Err(OutputPathError::Control);
         }
-        if decoded_relative.starts_with('/') {
+        if raw.starts_with('/') {
             return Err(OutputPathError::Absolute);
         }
-        if decoded_relative.is_empty() || decoded_relative.ends_with('/') {
+        if raw.is_empty() || raw.ends_with('/') {
             return Err(OutputPathError::Empty);
         }
 
-        for (index, segment) in decoded_relative.split('/').enumerate() {
-            validate_segment(segment, index == 0)?;
+        for (idx, seg) in raw.split('/').enumerate() {
+            validate_segment(seg, idx == 0)?;
         }
 
-        Ok(Self(Arc::from(decoded_relative)))
+        Ok(Self(Arc::from(raw)))
     }
 
-    /// The logical output file one decoded site-root route names.
-    ///
-    /// A trailing slash names a directory published as its `index.html`; a route without one names
-    /// a file exactly as spelled. `/` is the root directory, so it publishes `index.html`. The
-    /// route is already validated, so this cannot fail.
+    /// Logical output file corresponding to a decoded site-root route (`/` -> `index.html`).
     pub fn from_route(route: &UrlPath) -> Self {
-        let relative = &route.as_str()[1..];
-        if relative.is_empty() {
+        let rel = &route.as_str()[1..];
+        if rel.is_empty() {
             Self(Arc::from("index.html"))
-        } else if relative.ends_with('/') {
-            Self(Arc::from(format!("{relative}index.html")))
+        } else if rel.ends_with('/') {
+            Self(Arc::from(format!("{rel}index.html")))
         } else {
-            Self(Arc::from(relative))
+            Self(Arc::from(rel))
         }
     }
 
@@ -111,12 +89,8 @@ impl OutputPath {
     }
 
     /// Append a validated descendant without reparsing either path.
-    pub fn join(&self, descendant: &Self) -> Self {
-        Self(Arc::from(format!(
-            "{}/{}",
-            self.as_str(),
-            descendant.as_str()
-        )))
+    pub fn join(&self, child: &Self) -> Self {
+        Self(Arc::from(format!("{}/{}", self.as_str(), child.as_str())))
     }
 
     pub fn portable_key(&self) -> Vec<String> {
@@ -131,38 +105,22 @@ impl OutputPath {
     }
 }
 
-/// The decoded site-root route one logical output file is reachable at.
-///
-/// The inverse of [`OutputPath::from_route`] for every output: an exact `index.html` filename
-/// becomes the directory address that contains it (`index.html` is `/`, `x/index.html` is
-/// `/x/`), and every other file keeps its path under `/`. The output is already validated, so
-/// this cannot fail.
+/// Decoded site-root route where `output` is reachable (`x/index.html` -> `/x/`).
 pub fn route_for_output(output: &OutputPath) -> UrlPath {
     asset_directory_index_alias(output).unwrap_or_else(|| asset_url_from_output(output))
 }
 
-/// The exact file URL one logical output is served at.
-///
-/// An `index.html` output is also reachable through the directory route [`route_for_output`]
-/// yields, so this exact address is what distinguishes the file from that route. The output is
-/// already validated, so this cannot fail.
+/// Exact file URL where `output` is served (`x/index.html` -> `/x/index.html`).
 pub fn asset_url_from_output(output: &OutputPath) -> UrlPath {
     UrlPath::from_validated_decoded(format!("/{}", output.as_str()))
 }
 
-/// The output one site-root file URL names, undoing [`asset_url_from_output`].
-///
-/// A directory-shaped URL names no file, so `/` and `/x/` are refused.
+/// Output file named by a site-root file URL, rejecting directory routes (`/` or `/x/`).
 pub fn asset_output_from_url(url: &UrlPath) -> Result<OutputPath, OutputPathError> {
     OutputPath::parse(url.as_str().trim_start_matches('/'))
 }
 
-/// The directory route a published `index.html` file is also reachable through.
-///
-/// The exact file URL is the address an output registers, so an alias lookup keys this extra
-/// route, not the exact URL again. Only an `index.html`-shaped output has a second address:
-/// `x/index.html` yields `/x/` and `index.html` yields `/`, while every other output yields
-/// `None`.
+/// Directory route aliasing an `index.html` output (`index.html` -> `/`, `x/index.html` -> `/x/`).
 pub fn asset_directory_index_alias(output: &OutputPath) -> Option<UrlPath> {
     let route = match output.as_str() {
         "index.html" => "/".to_owned(),
@@ -171,11 +129,9 @@ pub fn asset_directory_index_alias(output: &OutputPath) -> Option<UrlPath> {
     Some(UrlPath::from_validated_decoded(route))
 }
 
-/// Whether a portable collision key names a path in the namespace Tola reserves.
-pub fn portable_key_is_reserved(portable_key: &[String]) -> bool {
-    portable_key
-        .first()
-        .is_some_and(|segment| segment == RESERVED_ROOT)
+/// Return whether a portable collision key falls under [`RESERVED_ROOT`].
+pub fn portable_key_is_reserved(key: &[String]) -> bool {
+    key.first().is_some_and(|seg| seg == RESERVED_ROOT)
 }
 
 impl fmt::Display for OutputPath {
@@ -190,14 +146,14 @@ impl Borrow<str> for OutputPath {
     }
 }
 
-fn validate_segment(segment: &str, first: bool) -> Result<(), OutputPathError> {
-    if segment.is_empty() {
+fn validate_segment(seg: &str, first: bool) -> Result<(), OutputPathError> {
+    if seg.is_empty() {
         return Err(OutputPathError::EmptyComponent);
     }
-    if matches!(segment, "." | "..") {
+    if matches!(seg, "." | "..") {
         return Err(OutputPathError::DotComponent);
     }
-    validate_portable_segment(segment, first)?;
+    validate_portable_segment(seg, first)?;
     Ok(())
 }
 
@@ -206,7 +162,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn invalid_output_paths() {
+    fn invalid_paths() {
         assert_eq!(
             OutputPath::parse("/tags/rust/index.html"),
             Err(OutputPathError::Absolute)
@@ -227,7 +183,7 @@ mod tests {
     }
 
     #[test]
-    fn routes_name_directory_indexes() {
+    fn route_directory_index() {
         for (route, output) in [
             ("/", "index.html"),
             ("/x/", "x/index.html"),
@@ -243,8 +199,7 @@ mod tests {
     }
 
     #[test]
-    fn route_and_output_round_trip() {
-        // `parse` reads the browser spelling, where the filename's literal `%` is escaped.
+    fn route_output_roundtrip() {
         for route in ["/", "/x/", "/x", "/a/b.pdf", "/100%25/"] {
             let route = UrlPath::parse(route).unwrap();
             assert_eq!(route_for_output(&OutputPath::from_route(&route)), route);

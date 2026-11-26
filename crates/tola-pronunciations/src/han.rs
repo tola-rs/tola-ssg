@@ -1,11 +1,6 @@
-//! The code points a generated key is written with.
+//! Han-range guard to skip table initialization on non-CJK text.
 
-/// The CJK ranges a key can be written in: those of the BMP, the whole of the two planes Han
-/// extends into, and the ideographic marks beside them.
-///
-/// The ranges are wider than the Han script on purpose, so a key added under a later Unicode
-/// version still falls inside them. `every_generated_key_carries_han` holds the shipped
-/// tables to the other half of the invariant: their keys stay inside these ranges.
+/// Broad CJK and ideographic ranges covering all generated dictionary keys.
 const HAN: &[(u32, u32)] = &[
     (0x2E80, 0x2FFF),
     (0x3005, 0x3007),
@@ -19,18 +14,14 @@ const HAN: &[(u32, u32)] = &[
     (0x30000, 0x3FFFF),
 ];
 
-/// Whether `text` carries a character a generated key could be written with.
-///
-/// A lookup only rewrites a key it reads from the text itself, so text with none of these
-/// characters holds no key and parses no table.
-pub(crate) fn contains_han(text: &str) -> bool {
-    text.chars().any(is_han)
+pub(crate) fn contains_han(src: &str) -> bool {
+    src.chars().any(is_han)
 }
 
-fn is_han(character: char) -> bool {
-    let point = u32::from(character);
-    let after = HAN.partition_point(|(start, _)| *start <= point);
-    after > 0 && point <= HAN[after - 1].1
+fn is_han(ch: char) -> bool {
+    let cp = u32::from(ch);
+    let idx = HAN.partition_point(|(start, _)| *start <= cp);
+    idx > 0 && cp <= HAN[idx - 1].1
 }
 
 #[cfg(test)]
@@ -39,35 +30,28 @@ mod tests {
 
     use super::is_han;
 
-    /// One committed table, decoded from the frame the generator wrote.
     fn table_text(compressed: &[u8]) -> String {
-        let mut text = Vec::new();
+        let mut buf = Vec::new();
         ruzstd::decoding::StreamingDecoder::new(compressed)
-            .expect("a committed table is a zstd frame")
-            .read_to_end(&mut text)
-            .expect("a committed table decodes");
-        String::from_utf8(text).expect("a generated table is UTF-8")
+            .expect("valid zstd frame")
+            .read_to_end(&mut buf)
+            .expect("table decodes");
+        String::from_utf8(buf).expect("table is UTF-8")
     }
 
-    /// A key the skip missed would be a word the tables never name.
     #[test]
-    fn every_generated_key_carries_han() {
-        for table in [
+    fn generated_keys_carry_han() {
+        for tbl in [
             table_text(include_bytes!("../data/cedict.zst")),
             table_text(include_bytes!("../data/jmdict.zst")),
             table_text(include_bytes!("../data/unihan.zst")),
         ] {
-            for line in table.lines() {
+            for line in tbl.lines() {
                 if line.is_empty() || line.starts_with('#') {
                     continue;
                 }
-                let (key, _) = line
-                    .split_once('\t')
-                    .expect("a generated table names a pronunciation after a tab");
-                assert!(
-                    key.chars().any(is_han),
-                    "the key `{key}` carries no character the skip accepts"
-                );
+                let (key, _) = line.split_once('\t').expect("entry has tab");
+                assert!(key.chars().any(is_han), "key `{key}` outside Han guard");
             }
         }
     }

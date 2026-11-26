@@ -450,7 +450,7 @@ mod tests {
     }
 
     #[test]
-    fn aliases_follow_the_function_binding() {
+    fn entity_binding_aliases() {
         for program in [
             "#import \"/entities.typ\": reference as cite\n#cite(\"QHXS\")",
             "#import \"/entities.typ\" as e\n#e.reference(\"QHXS\")",
@@ -462,10 +462,24 @@ mod tests {
             assert_eq!(found[0].value, "QHXS");
             assert_eq!(&program[found[0].range.clone()], "\"QHXS\"");
         }
+
+        let markup = matching(
+            "#import \"/entities.typ\": reference\n#let cite = reference\n#cite = (address => [])\n#cite(\"QHXS\")",
+            "reference",
+            positional(0),
+        );
+        assert_eq!(values(&markup), ["QHXS"]);
+
+        let ns = matching(
+            "#import \"/entities.typ\" as library\n#let namespace = library\n#namespace.reference(\"FIRST\")\n#namespace.reference(\"QHXS\")",
+            "reference",
+            positional(0),
+        );
+        assert_eq!(values(&ns), ["FIRST", "QHXS"]);
     }
 
     #[test]
-    fn shadowed_functions_not_entity_references() {
+    fn entity_shadowed_and_unknown_args() {
         for program in [
             "#import \"/entities.typ\": reference\n#{ let reference(address) = []; reference(\"QHXS\") }",
             "#import \"/entities.typ\": reference\n#let cite = reference\n#(cite = (address => []))\n#cite(\"QHXS\")",
@@ -477,25 +491,18 @@ mod tests {
                 "{program}"
             );
         }
+        assert!(
+            matching(
+                "#import \"/entities.typ\": pair\n#pair(..unknown, \"QHXS\")",
+                "pair",
+                positional(1)
+            )
+            .is_empty()
+        );
     }
 
     #[test]
-    fn markup_text_not_reassign_callable() {
-        let program = "#import \"/entities.typ\": reference\n#let cite = reference\n#cite = (address => [])\n#cite(\"QHXS\")";
-        let found = matching(program, "reference", positional(0));
-        assert_eq!(found.len(), 1);
-        assert_eq!(found[0].value, "QHXS");
-    }
-
-    #[test]
-    fn alias_calls_keep_the_namespace() {
-        let program = "#import \"/entities.typ\" as library\n#let namespace = library\n#namespace.reference(\"FIRST\")\n#namespace.reference(\"QHXS\")";
-        let found = matching(program, "reference", positional(0));
-        assert_eq!(values(&found), ["FIRST", "QHXS"]);
-    }
-
-    #[test]
-    fn decoded_strings_keep_written_ranges() {
+    fn entity_decoded_string_ranges() {
         let program = "// 雪\n#import \"/entities.typ\": reference\n#reference(\"α\\u{3b2}\\\"\")";
         let found = matching(program, "reference", positional(0));
         assert_eq!(found.len(), 1);
@@ -504,32 +511,26 @@ mod tests {
     }
 
     #[test]
-    fn named_arguments_use_last_value() {
-        let program = "#import \"/entities.typ\": subtree\n\
-                       #let section = subtree.with(address: \"old\")\n\
-                       #section(address: \"new\")[Body]";
-        let found = matching(
-            program,
+    fn entity_argument_binding_positions() {
+        let named = matching(
+            "#import \"/entities.typ\": subtree\n#let section = subtree.with(address: \"old\")\n#section(address: \"new\")[Body]",
             "subtree",
             Parameter::Named {
                 named: "address".into(),
             },
         );
-        assert_eq!(values(&found), ["old", "new"]);
+        assert_eq!(values(&named), ["old", "new"]);
+
+        let partial = matching(
+            "#import \"/entities.typ\": pair\n#let cite = pair.with(\"prefix\")\n#cite(\"first\")\n#pair(..(\"prefix\",), \"second\")",
+            "pair",
+            positional(1),
+        );
+        assert_eq!(values(&partial), ["first", "second"]);
     }
 
     #[test]
-    fn partial_applications_keep_parameter_positions() {
-        let program = "#import \"/entities.typ\": pair\n\
-                       #let cite = pair.with(\"prefix\")\n\
-                       #cite(\"first\")\n\
-                       #pair(..(\"prefix\",), \"second\")";
-        let found = matching(program, "pair", positional(1));
-        assert_eq!(values(&found), ["first", "second"]);
-    }
-
-    #[test]
-    fn rename_covers_literal_partial_applications() {
+    fn entity_partial_application_unresolved() {
         let supported = scanning(
             "#import \"/entities.typ\": reference\n#let cite = reference.with(\"sku:α\")\n#cite()",
             "reference",
@@ -548,11 +549,5 @@ mod tests {
                 "{text}"
             );
         }
-    }
-
-    #[test]
-    fn unknown_not_guess_positional_argument() {
-        let program = "#import \"/entities.typ\": pair\n#pair(..unknown, \"QHXS\")";
-        assert!(matching(program, "pair", positional(1)).is_empty());
     }
 }

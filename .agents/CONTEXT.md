@@ -36,7 +36,7 @@ A successful build exposes one sealed graph. Publication follows validation; no 
 - `extensions/vscode/`, `extensions/zed/` — editor clients.
 - `tools/` — Nushell scripts: `lib/` shared primitives, `release/` publication, `assets/` embedded-resource generators; `ctx.nu` reads these documents by section.
 - `just/` — recipe modules; `justfile` is the entry point.
-- `nix/` — flake wiring, packages, development shell, checks.
+- `nix/` — Nix package derivation.
 - `.agents/` — the development skill, this overview, and design notes.
 - `TOLA-SKILL.md` — the site-author guide served by `tola skill`.
 

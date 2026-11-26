@@ -183,69 +183,41 @@ mod tests {
 
     #[test]
     fn section_boundaries_follow_headings() {
-        let markdown = "# Guide
-Intro
-## Math
-Common
-### Inline
-$x$
-```md
-## Not a section
-```
-> ## Quoted
-
-### Display
-$$
-## Links
-See
-";
-        let sections = sections(markdown);
+        let md = "# Guide\nIntro\n## Math\nCommon\n### Inline\n$x$\n```md\n## Not a section\n```\n> ## Quoted\n\n### Display\n$$\n## Links\nSee\n";
+        let secs = sections(md);
         assert_eq!(
-            sections
-                .iter()
-                .map(|section| section.path.join(" "))
-                .collect::<Vec<_>>(),
+            secs.iter().map(|s| s.path.join(" ")).collect::<Vec<_>>(),
             ["math", "math inline", "math display", "links"]
         );
         assert_eq!(
-            &markdown[sections[0].range.start..sections[0].own_end],
-            "## Math
-Common
-"
+            &md[secs[0].range.start..secs[0].own_end],
+            "## Math\nCommon\n"
         );
-        assert!(markdown[sections[0].range.clone()].contains("### Display"));
-        assert!(!markdown[sections[0].range.clone()].contains("## Links"));
-        assert!(markdown[sections[1].range.clone()].contains("## Not a section"));
+        assert!(md[secs[0].range.clone()].contains("### Display"));
+        assert!(!md[secs[0].range.clone()].contains("## Links"));
+        assert!(md[secs[1].range.clone()].contains("## Not a section"));
     }
 
     #[test]
-    fn heading_paths_scope_repeated_titles() {
-        let markdown = "# Guide
-First
------
-### *Examples*
-One
-## Second
-### Examples
-Two
-";
-        let sections = sections(markdown);
-        assert_eq!(sections[1].path, ["first", "examples"]);
-        assert_eq!(sections[3].path, ["second", "examples"]);
-        assert!(markdown[sections[1].range.clone()].contains("One"));
-        assert!(!markdown[sections[1].range.clone()].contains("Two"));
+    fn heading_paths_scope_duplicates() {
+        let md = "# Guide\nFirst\n-----\n### *Examples*\nOne\n## Second\n### Examples\nTwo\n";
+        let secs = sections(md);
+        assert_eq!(secs[1].path, ["first", "examples"]);
+        assert_eq!(secs[3].path, ["second", "examples"]);
+        assert!(md[secs[1].range.clone()].contains("One"));
+        assert!(!md[secs[1].range.clone()].contains("Two"));
     }
 
     #[test]
-    fn bundled_sections_are_addressable() {
+    fn bundled_sections_addressable() {
         let mut paths = BTreeSet::new();
-        for section in sections(SKILL) {
-            assert!(section.path.iter().all(|part| !part.is_empty()));
-            assert!(paths.insert(section.path.clone()), "{:?}", section.path);
-            let mut arguments = vec!["tola".to_owned(), "skill".to_owned()];
-            arguments.extend(section.path);
+        for sec in sections(SKILL) {
+            assert!(sec.path.iter().all(|part| !part.is_empty()));
+            assert!(paths.insert(sec.path.clone()), "{:?}", sec.path);
+            let mut argv = vec!["tola".to_owned(), "skill".to_owned()];
+            argv.extend(sec.path);
             let crate::cli::Commands::Skill { args, .. } =
-                crate::cli::Cli::try_parse_from(arguments).unwrap().command
+                crate::cli::Cli::try_parse_from(argv).unwrap().command
             else {
                 panic!("expected skill request");
             };
@@ -254,17 +226,17 @@ Two
     }
 
     #[test]
-    fn selection_limits_loaded_content() {
-        let source = "# Guide\nCore\n## Math\nCommon\n### Rendering\nBrowser\n#### SVG\nArtwork\n## Links\nTargets\n";
+    fn selection_limits_content() {
+        let src = "# Guide\nCore\n## Math\nCommon\n### Rendering\nBrowser\n#### SVG\nArtwork\n## Links\nTargets\n";
         let args = SkillArgs {
             sections: vec!["math".into(), "rendering".into()],
             ..Default::default()
         };
-        let overview = requested(source, "tola skill", &args).unwrap();
+        let overview = requested(src, "tola skill", &args).unwrap();
         assert!(overview.contains("Browser"));
         assert!(!overview.contains("Artwork"));
-        let complete = requested(
-            source,
+        let full = requested(
+            src,
             "tola skill",
             &SkillArgs {
                 all: true,
@@ -272,18 +244,18 @@ Two
             },
         )
         .unwrap();
-        assert!(complete.contains("Artwork"));
-        assert!(!complete.contains("Targets"));
-        let index = requested(source, "tola skill", &SkillArgs { list: true, ..args }).unwrap();
-        assert!(index.contains("rendering"));
-        assert!(!index.contains("Browser"));
-        let root = requested(source, "tola skill", &SkillArgs::default()).unwrap();
+        assert!(full.contains("Artwork"));
+        assert!(!full.contains("Targets"));
+        let idx = requested(src, "tola skill", &SkillArgs { list: true, ..args }).unwrap();
+        assert!(idx.contains("rendering"));
+        assert!(!idx.contains("Browser"));
+        let root = requested(src, "tola skill", &SkillArgs::default()).unwrap();
         assert!(root.contains("Core"));
         assert!(root.contains("math"));
         assert!(!root.contains("Common"));
         assert!(
             requested(
-                source,
+                src,
                 "tola skill",
                 &SkillArgs {
                     sections: vec!["math".into(), "missing".into()],

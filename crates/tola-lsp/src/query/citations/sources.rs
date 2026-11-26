@@ -8,7 +8,7 @@ use anyhow::Result;
 use hayagriva::citationberg::LocaleCode;
 use tola_build::cancellation::BuildCancellation;
 use tola_build::check::SourceCompilation;
-use tola_build::config::ResolvedSiteConfig;
+use tola_build::config::SiteConfig;
 use tola_typst::ContentDigest;
 use tola_typst::TypstWorld;
 use tola_typst::typst::World;
@@ -231,7 +231,7 @@ impl Bibliography {
     /// the author saves it.
     pub(super) fn read(
         compilation: &SourceCompilation,
-        config: &ResolvedSiteConfig,
+        config: &SiteConfig,
         open: FileId,
         cache: &mut BibliographyCache,
         cancellation: &BuildCancellation,
@@ -284,7 +284,7 @@ impl Bibliography {
     fn spelled(
         &mut self,
         compilation: &SourceCompilation,
-        config: &ResolvedSiteConfig,
+        config: &SiteConfig,
         open: FileId,
         cache: &mut BibliographyCache,
         cancellation: &BuildCancellation,
@@ -316,7 +316,7 @@ impl Bibliography {
 /// source the editor is answering about.
 pub(super) fn spelled_sources(
     compilation: &SourceCompilation,
-    config: &ResolvedSiteConfig,
+    config: &SiteConfig,
     open: FileId,
     cancellation: &BuildCancellation,
 ) -> Result<Vec<FileId>> {

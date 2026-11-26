@@ -158,13 +158,13 @@ impl HookOutputEmitter {
 
 /// How one hook entry ended; cancellation is neither success nor failure.
 #[derive(Clone, Copy)]
-pub(super) enum HookOutcome {
+pub(super) enum HookStatus {
     Finished,
     Failed,
     Cancelled,
 }
 
-impl HookOutcome {
+impl HookStatus {
     fn classify<T>(outcome: &Result<T>) -> Self {
         match outcome {
             Ok(_) => Self::Finished,
@@ -195,11 +195,11 @@ impl HookEntryReport {
         }
     }
 
-    pub(super) fn finished(self, outcome: HookOutcome) {
+    pub(super) fn finished(self, outcome: HookStatus) {
         let (success, cancelled) = match outcome {
-            HookOutcome::Finished => (true, false),
-            HookOutcome::Failed => (false, false),
-            HookOutcome::Cancelled => (false, true),
+            HookStatus::Finished => (true, false),
+            HookStatus::Failed => (false, false),
+            HookStatus::Cancelled => (false, true),
         };
         tracing::info!(
             target: "tola::hook_status",
@@ -246,7 +246,7 @@ pub(super) fn run_hook_entry<T>(
             .into(),
         ))
     });
-    report.finished(HookOutcome::classify(&outcome));
+    report.finished(HookStatus::classify(&outcome));
     outcome.map_err(|error| {
         if is_cancelled(&error) && cancellation.was_cancelled_directly() {
             error.context(BatchStopped)
@@ -303,7 +303,7 @@ pub(super) fn failed_to_start(
     error: std::io::Error,
 ) -> anyhow::Error {
     let report = HookEntryReport::started(stage, name);
-    report.finished(HookOutcome::Failed);
+    report.finished(HookStatus::Failed);
     hook_command_error(stage, &super::hook_identity(stage, name), error.into())
 }
 

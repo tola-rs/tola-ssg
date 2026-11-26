@@ -190,38 +190,38 @@ mod tests {
     use super::*;
     use typst_html::{HtmlAttr, HtmlTag};
 
-    fn element(tag: &str, attrs: &[(&str, &str)]) -> HtmlElement {
-        let mut element = HtmlElement::new(HtmlTag::intern(tag).unwrap());
-        for (name, value) in attrs {
-            element.attrs.push(HtmlAttr::intern(name).unwrap(), *value);
+    fn elem(tag: &str, attrs: &[(&str, &str)]) -> HtmlElement {
+        let mut el = HtmlElement::new(HtmlTag::intern(tag).unwrap());
+        for (name, val) in attrs {
+            el.attrs.push(HtmlAttr::intern(name).unwrap(), *val);
         }
-        element
+        el
     }
 
     #[test]
-    fn raw_text_element_kinds() {
+    fn raw_text_kinds() {
         assert_eq!(
-            raw_text_kind(&element("style", &[])),
+            raw_text_kind(&elem("style", &[])),
             Some(HtmlRawText::Stylesheet)
         );
         assert_eq!(
-            raw_text_kind(&element("STYLE", &[])),
+            raw_text_kind(&elem("STYLE", &[])),
             Some(HtmlRawText::Stylesheet)
         );
         assert_eq!(
-            raw_text_kind(&element("script", &[])),
+            raw_text_kind(&elem("script", &[])),
             Some(HtmlRawText::Script)
         );
         assert_eq!(
-            raw_text_kind(&element("script", &[("type", "module")])),
+            raw_text_kind(&elem("script", &[("type", "module")])),
             Some(HtmlRawText::Module)
         );
         assert_eq!(
-            raw_text_kind(&element("script", &[("type", "text/JavaScript")])),
+            raw_text_kind(&elem("script", &[("type", "text/JavaScript")])),
             Some(HtmlRawText::Script)
         );
         assert_eq!(
-            raw_text_kind(&element(
+            raw_text_kind(&elem(
                 "script",
                 &[("type", "text/javascript; charset=utf-8")]
             )),

@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use crate::config::ResolvedSiteConfig;
+use crate::config::SiteConfig;
 use crate::output::PageAvailability;
 
 mod index;
@@ -20,7 +20,7 @@ pub use space::{AddressRegistrationError, AddressSpace};
 /// from one build, obtained through [`crate::build::BuildSession::install_revision`].
 /// The application selects which revision is current.
 pub struct SiteRevision {
-    pub(crate) config: Arc<ResolvedSiteConfig>,
+    pub(crate) config: Arc<SiteConfig>,
     pub(crate) outputs: crate::output::revision::OutputRevision,
     pub(crate) index: SiteIndex,
     pub(crate) references: references::References,
@@ -67,7 +67,7 @@ impl SiteRevision {
     ) -> anyhow::Result<crate::output::files::HookOutputFiles> {
         cancellation.ensure_active()?;
         crate::output::files::HookOutputFiles::materialize_revision(
-            self.config.get_root(),
+            self.config.root(),
             &self.outputs,
             cancellation,
         )
@@ -86,7 +86,7 @@ impl SiteRevision {
         )
     }
 
-    pub fn config(&self) -> &Arc<ResolvedSiteConfig> {
+    pub fn config(&self) -> &Arc<SiteConfig> {
         &self.config
     }
 
@@ -128,7 +128,7 @@ mod tests {
         OutputRevision::from_graph(&OutputGraphBuilder::new().finish())
     }
 
-    fn site_revision(config: Arc<ResolvedSiteConfig>, outputs: OutputRevision) -> SiteRevision {
+    fn site_revision(config: Arc<SiteConfig>, outputs: OutputRevision) -> SiteRevision {
         SiteRevision {
             config,
             outputs,
@@ -195,7 +195,7 @@ rerun-on = { include = [\"consume.mjs\"] }
     #[test]
     fn rerun_on_edit_changes_after_publish_dependencies() {
         let site_config = OwnedSiteConfig::new(CONSUMER_CONFIG);
-        let script = site_config.config.get_root().join("consume.mjs");
+        let script = site_config.config.root().join("consume.mjs");
         std::fs::write(&script, "first").unwrap();
         let revision = site_revision(Arc::new(site_config.config.clone()), empty_revision());
         let before = revision

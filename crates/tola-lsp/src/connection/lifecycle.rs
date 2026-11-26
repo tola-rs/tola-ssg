@@ -1,5 +1,4 @@
-//! The handshake and the client settings that shape this connection: the phase it serves, the
-//! workspace it was initialized for, and what a settings change re-reads.
+//! Connection initialization handshake and workspace/client settings updates.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -20,8 +19,6 @@ use crate::sources::OpenSources;
 use super::routing::InvalidNotification;
 use super::{Connection, Phase, Workspace};
 
-/// The settings section a client answers `workspace/configuration` for, which is the only section
-/// Tola reads.
 const SETTINGS_SECTION: &str = "tola";
 
 impl Phase {
@@ -45,7 +42,6 @@ impl Phase {
     }
 }
 
-/// Why the workspace this client named cannot be served.
 #[derive(Debug, thiserror::Error)]
 enum WorkspaceError {
     #[error("Tola serves one workspace folder at a time; open this site in a window of its own")]
@@ -60,138 +56,117 @@ enum WorkspaceError {
 
 impl Workspace {
     fn initialize(
-        parameters: InitializeParams,
+        params: InitializeParams,
     ) -> Result<(Self, Option<Arc<PathBuf>>), WorkspaceError> {
-        let root = initialization_root(&parameters)?;
-        let features = ClientFeatures::new(&parameters.capabilities);
-        let options: InitializationOptions = parameters
+        let root = initialization_root(&params)?;
+        let features = ClientFeatures::new(&params.capabilities);
+        let opts: InitializationOptions = params
             .initialization_options
             .map(serde_json::from_value)
             .transpose()?
             .unwrap_or_default();
-        let check_mode = options.check_mode;
-        let preview_origin = options.preview_origin;
-        let line_folding_only = parameters
+        let line_folding_only = params
             .capabilities
             .text_document
             .as_ref()
-            .and_then(|document| document.folding_range.as_ref())
-            .and_then(|folding| folding.line_folding_only)
+            .and_then(|doc| doc.folding_range.as_ref())
+            .and_then(|f| f.line_folding_only)
             .unwrap_or(false);
-        let routes_as_hints = super::routes_as_hints(&parameters.capabilities);
-        let package_sources = options.package_source_directory.map(|directory| {
-            Arc::new(if directory.is_absolute() {
-                directory
+        let pkg_sources = opts.package_source_directory.map(|dir| {
+            Arc::new(if dir.is_absolute() {
+                dir
             } else {
-                root.join(directory)
+                root.join(dir)
             })
         });
         Ok((
             Self {
                 diagnostics: ClientDiagnostics::new(root.clone()),
                 root,
-                check_mode,
-                source_check_status: options.source_check_status,
-                preview_origin,
+                check_mode: opts.check_mode,
+                source_check_status: opts.source_check_status,
+                preview_origin: opts.preview_origin,
                 line_folding_only,
-                routes_as_hints,
+                routes_as_hints: super::routes_as_hints(&params.capabilities),
                 features,
             },
-            package_sources,
+            pkg_sources,
         ))
     }
 }
 
-fn initialization_root(parameters: &InitializeParams) -> Result<PathBuf, WorkspaceError> {
-    let folders = parameters.workspace_folders.as_deref().unwrap_or_default();
+fn initialization_root(params: &InitializeParams) -> Result<PathBuf, WorkspaceError> {
+    let folders = params.workspace_folders.as_deref().unwrap_or_default();
     if folders.len() > 1 {
         return Err(WorkspaceError::SeveralFolders);
     }
     if let Some(folder) = folders.first() {
-        // The client's own spelling of the root is kept: diagnostics are published back under the
-        // identity the editor opened, while paths are normalized wherever Tola compares them.
+        // Keep the client's spelling of the root for published URIs.
         return crate::uri::to_file_path(folder.uri.as_str()).map_err(WorkspaceError::RootNotLocal);
     }
     std::env::current_dir().map_err(WorkspaceError::UnresolvableDirectory)
 }
 
 impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
-    /// Answer the client's `initialize`: the workspace this connection serves, and everything it
-    /// negotiated from the client's capabilities.
-    pub(super) fn initialize(&mut self, id: RequestId, parameters: InitializeParams) -> Result<()> {
-        // The launch configuration names where the site is served, and it stands in for the site's
-        // own generated state until a settings change names an origin of its own.
-        match Workspace::initialize(parameters) {
-            Ok((workspace, package_sources)) => {
-                self.default_origin = workspace.preview_origin.clone();
-                let reply = protocol::initialize_result(&workspace.features);
-                self.phase = Phase::Initializing(workspace);
-                self.open =
-                    OpenSources::new(&self.source_root()).with_package_sources(package_sources);
+    pub(super) fn initialize(&mut self, id: RequestId, params: InitializeParams) -> Result<()> {
+        match Workspace::initialize(params) {
+            Ok((ws, pkg_sources)) => {
+                self.default_origin = ws.preview_origin.clone();
+                let reply = protocol::initialize_result(&ws.features);
+                self.phase = Phase::Initializing(ws);
+                self.open = OpenSources::new(&self.source_root()).with_package_sources(pkg_sources);
                 self.reply(Response::new_ok(id, reply))
             }
-            Err(error) => {
-                tracing::error!(error = ?error, "the workspace could not be initialized");
-                self.reject(id, ErrorCode::InvalidParams, &error.to_string())
+            Err(err) => {
+                tracing::error!(error = ?err, "the workspace could not be initialized");
+                self.reject(id, ErrorCode::InvalidParams, &err.to_string())
             }
         }
     }
 
-    /// Complete the handshake, whether or not the client's `initialized` body was readable.
-    ///
-    /// `initialized` has nothing Tola reads, so the handshake completes here instead of through
-    /// the document handler: Tola must be ready for the first document even when a client sends this
-    /// notification with an unexpected body.
     pub(super) fn initialized(&mut self) -> Result<()> {
         match std::mem::replace(&mut self.phase, Phase::Uninitialized) {
-            Phase::Initializing(workspace) => {
-                let watched = workspace.features.watched_files_dynamic;
-                self.phase = Phase::Ready(workspace);
+            Phase::Initializing(ws) => {
+                let watched = ws.features.watched_files_dynamic;
+                self.phase = Phase::Ready(ws);
                 self.sources_changed(false)?;
                 if watched {
                     self.watch_sources()?;
                 }
             }
-            // `initialized` before `initialize`, or a second one, changes nothing.
             other => self.phase = other,
         }
         Ok(())
     }
 
-    /// Re-read this client's settings, from the notification itself or from the client.
-    ///
-    /// A notification that has settings has the whole section, as a client states it in its
-    /// own configuration file; one that has none asks the server to read it, which only a
-    /// client answering `workspace/configuration` can. One section is read, and a section a client
-    /// does not hold leaves every setting as it stands.
-    pub(super) fn configured(&mut self, message: Notification) -> Result<()> {
-        let parameters = match message.extract::<lsp_types::DidChangeConfigurationParams>(
+    pub(super) fn configured(&mut self, msg: Notification) -> Result<()> {
+        let params = match msg.extract::<lsp_types::DidChangeConfigurationParams>(
             notification::DidChangeConfiguration::METHOD,
         ) {
-            Ok(parameters) => parameters,
+            Ok(params) => params,
             Err(_) => return self.log_invalid_notification(InvalidNotification::Configuration),
         };
-        let section = parameters
+        let section = params
             .settings
             .get(SETTINGS_SECTION)
-            .unwrap_or(&parameters.settings);
+            .unwrap_or(&params.settings);
         let settings = Settings::read(section);
         if !settings.is_empty() {
             self.settings_pull = None;
             self.apply_settings(settings);
             return Ok(());
         }
-        let Phase::Ready(workspace) = &self.phase else {
+        let Phase::Ready(ws) = &self.phase else {
             return Ok(());
         };
-        if !workspace.features.configuration {
+        if !ws.features.configuration {
             return Ok(());
         }
         let id = self.send_request(
             request::WorkspaceConfiguration::METHOD,
             ConfigurationParams {
                 items: vec![ConfigurationItem {
-                    scope_uri: Some(crate::uri::from_file_path(&workspace.root)?),
+                    scope_uri: Some(crate::uri::from_file_path(&ws.root)?),
                     section: Some(SETTINGS_SECTION.to_owned()),
                 }],
             },
@@ -200,34 +175,32 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
         Ok(())
     }
 
-    /// Apply the settings one shape supplied, leaving every setting it did not name as it stands.
     fn apply_settings(&mut self, settings: Settings) {
-        let Phase::Ready(workspace) = &mut self.phase else {
+        let Phase::Ready(ws) = &mut self.phase else {
             return;
         };
         if let Some(mode) = settings.check_mode {
-            workspace.check_mode = mode;
+            ws.check_mode = mode;
         }
         if let Some(origin) = settings.preview_origin {
             self.named_origin = Some(origin);
         }
     }
 
-    /// Apply what the client answered to a request this connection sent.
-    pub(super) fn response(&mut self, response: Response) -> Result<()> {
-        if self.watchers_registered(&response)? {
+    pub(super) fn response(&mut self, resp: Response) -> Result<()> {
+        if self.watchers_registered(&resp)? {
             return Ok(());
         }
-        if self.semantic_tokens_refreshed(&response)? {
+        if self.semantic_tokens_refreshed(&resp)? {
             return Ok(());
         }
-        if self.progress_created(&response)? {
+        if self.progress_created(&resp)? {
             return Ok(());
         }
-        if self.settings_pull.as_ref() == Some(&response.id) {
+        if self.settings_pull.as_ref() == Some(&resp.id) {
             self.settings_pull = None;
-            if let Ok(sections) = response.response_result
-                && let Some(section) = sections.as_array().and_then(|sections| sections.first())
+            if let Ok(sections) = resp.response_result
+                && let Some(section) = sections.as_array().and_then(|s| s.first())
             {
                 self.apply_settings(Settings::read(section));
             }
@@ -249,19 +222,18 @@ mod tests {
     use serde_json::json;
     use std::time::Instant;
 
-    /// A root that is not this machine's, and two roots at once, are both refused.
     #[test]
-    fn initialization_refuses_roots_it_cannot_serve() {
-        let parameters = |value| serde_json::from_value::<InitializeParams>(value).unwrap();
+    fn initialization_rejects_invalid_roots() {
+        let params = |val| serde_json::from_value::<InitializeParams>(val).unwrap();
         assert!(
-            initialization_root(&parameters(json!({
+            initialization_root(&params(json!({
                 "capabilities":{},
                 "workspaceFolders":[{"uri":"https://example.test/site","name":"site"}],
             })))
             .is_err()
         );
         assert!(
-            initialization_root(&parameters(json!({
+            initialization_root(&params(json!({
                 "capabilities":{},
                 "workspaceFolders":[
                     {"uri":"file:///site","name":"site"},
@@ -271,81 +243,74 @@ mod tests {
             .is_err()
         );
     }
-    /// A document notification that arrives between the `initialize` reply and `initialized` must
-    /// not crash the connection or leave a buffer the handshake never accepted.
+
     #[test]
-    fn notifications_before_initialized_are_dropped() {
-        let mut connection = uninitialized();
-        initialize(&mut connection);
+    fn notifications_before_initialized_dropped() {
+        let mut conn = uninitialized();
+        initialize(&mut conn);
         let uri: Uri = "file:///site/page.typ".parse().unwrap();
-        open_document(&mut connection, &uri, 1, "#let draft = 1");
-        assert!(matches!(connection.phase, Phase::Initializing(_)));
-        assert!(connection.open.source(&uri).is_none());
-        assert!(connection.next_job(Instant::now()).is_none());
-        let _ = connection
+        open_document(&mut conn, &uri, 1, "#let draft = 1");
+        assert!(matches!(conn.phase, Phase::Initializing(_)));
+        assert!(conn.open.source(&uri).is_none());
+        assert!(conn.next_job(Instant::now()).is_none());
+        let _ = conn
             .notification(Notification::new(
                 notification::Initialized::METHOD.into(),
                 json!({}),
             ))
             .unwrap();
-        assert!(matches!(connection.phase, Phase::Ready(_)));
+        assert!(matches!(conn.phase, Phase::Ready(_)));
         assert!(matches!(
-            connection.next_job(Instant::now()),
+            conn.next_job(Instant::now()),
             Some(SourceJob::Check(_))
         ));
     }
-    /// A settings notification that has no settings asks the client for the one section Tola
-    /// reads, and settings the notification itself carries supersede that pull: the answer asked
-    /// for is not read.
+
     #[test]
     fn inline_settings_supersede_pulls() {
         for settings in [
             json!({"checkMode":"onSave"}),
             json!({"tola":{"checkMode":"onSave"}}),
         ] {
-            let mut connection = ready(Vec::new());
-            ready_workspace(&mut connection).features.configuration = true;
-            let _ = connection
+            let mut conn = ready(Vec::new());
+            ready_workspace(&mut conn).features.configuration = true;
+            let _ = conn
                 .notification(Notification::new(
                     notification::DidChangeConfiguration::METHOD.into(),
                     json!({"settings": null}),
                 ))
                 .unwrap();
-            let Message::Request(pulled) = messages(&mut connection).remove(0) else {
+            let Message::Request(pulled) = messages(&mut conn).remove(0) else {
                 panic!("settings request");
             };
-            let _ = connection
+            let _ = conn
                 .notification(Notification::new(
                     notification::DidChangeConfiguration::METHOD.into(),
                     json!({"settings": settings}),
                 ))
                 .unwrap();
-            connection
-                .response(Response::new_ok(
-                    pulled.id,
-                    json!([{
-                        "checkMode": "onType"
-                    }]),
-                ))
-                .unwrap();
-            assert_eq!(connection.workspace().check_mode, CheckMode::OnSave);
+            conn.response(Response::new_ok(
+                pulled.id,
+                json!([{"checkMode": "onType"}]),
+            ))
+            .unwrap();
+            assert_eq!(conn.workspace().check_mode, CheckMode::OnSave);
         }
     }
 
     #[test]
-    fn settings_pulls_name_workspace_scope() {
-        let mut connection = ready(Vec::new());
-        ready_workspace(&mut connection).features.configuration = true;
-        connection
-            .configured(Notification::new(
-                notification::DidChangeConfiguration::METHOD.into(),
-                json!({"settings": null}),
-            ))
-            .unwrap();
-        let Message::Request(pulled) = messages(&mut connection).remove(0) else {
+    fn settings_pull_names_workspace_scope() {
+        let mut conn = ready(Vec::new());
+        ready_workspace(&mut conn).features.configuration = true;
+        conn.configured(Notification::new(
+            notification::DidChangeConfiguration::METHOD.into(),
+            json!({"settings": null}),
+        ))
+        .unwrap();
+        let Message::Request(pulled) = messages(&mut conn).remove(0) else {
             panic!("settings request");
         };
-        let root = crate::uri::from_file_path(&connection.workspace().root).unwrap();
+        let root = crate::uri::from_file_path(&conn.workspace().root).unwrap();
         assert_eq!(pulled.params["items"][0]["scopeUri"], root.as_str());
     }
 }

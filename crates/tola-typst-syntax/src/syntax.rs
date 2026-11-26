@@ -1,7 +1,6 @@
 //! Source selections and literal module dependencies.
 //!
-//! Every selection answers with byte ranges into the exact immutable source whose tree supplied
-//! it, so a caller that holds that source can quote what it selected.
+//! Every selection answers with byte ranges into the exact immutable source whose tree supplied it.
 
 use std::ops::Range;
 use std::path::Path;
@@ -20,11 +19,11 @@ pub struct ModulePath {
 }
 
 /// Literal module dependencies, in source order; expressions require evaluation instead.
-pub fn module_paths(source: &Source) -> Vec<ModulePath> {
+pub fn module_paths(src: &Source) -> Vec<ModulePath> {
     let mut paths = Vec::new();
-    let mut stack = vec![LinkedNode::new(source.root())];
+    let mut stack = vec![LinkedNode::new(src.root())];
     while let Some(node) = stack.pop() {
-        let literal = match node.kind() {
+        let lit = match node.kind() {
             SyntaxKind::ModuleInclude => node
                 .get()
                 .children()
@@ -43,11 +42,11 @@ pub fn module_paths(source: &Source) -> Vec<ModulePath> {
                 continue;
             }
         };
-        if let Some(text) = literal
+        if let Some(text) = lit
             && let Some(written) = node.find(text.span())
         {
             let range = written.range();
-            // An unfinished quote has no closing byte for `ast::Str::get` to remove.
+            // Unclosed string literal has no closing quote for `ast::Str::get`.
             if range.end >= range.start + 2 {
                 paths.push(ModulePath {
                     kind: node.kind(),
@@ -61,13 +60,13 @@ pub fn module_paths(source: &Source) -> Vec<ModulePath> {
     paths
 }
 
-/// The import statement the at is inside.
+/// The import statement the cursor is inside.
 pub struct Import {
     /// The module path string, as the author wrote it.
     pub source: Range<usize>,
-    /// The range completion replaces when the at writes a new item, if it does.
+    /// The range completion replaces when writing a new item, if any.
     pub replacement: Option<Range<usize>>,
-    /// The item the at sits in when it completes one that is already written.
+    /// The item the cursor sits in when completing an existing item.
     pub repair: Option<Range<usize>>,
     /// The module path's own parts, in order.
     pub path: Vec<String>,
@@ -75,7 +74,6 @@ pub struct Import {
     pub imported: Vec<Vec<String>>,
 }
 
-/// The node one import item is written in: the renamed item that carries its alias, or the path.
 fn item_whole<'a>(path: &LinkedNode<'a>) -> LinkedNode<'a> {
     match path.parent() {
         Some(parent) if parent.kind() == SyntaxKind::RenamedImportItem => parent.clone(),
@@ -84,18 +82,18 @@ fn item_whole<'a>(path: &LinkedNode<'a>) -> LinkedNode<'a> {
 }
 
 /// Select import-item paths, not the local names introduced by `as`.
-pub fn import(source: &Source, at: usize) -> Option<Import> {
-    let root = LinkedNode::new(source.root());
+pub fn import(src: &Source, at: usize) -> Option<Import> {
+    let root = LinkedNode::new(src.root());
     let mut node = root.leaf_at(at, Side::Before)?;
     while !node.is::<ast::ModuleImport>() {
         if node.kind().is_trivia()
-            && let Some(previous) = node.prev_sibling()
-            && previous.is::<ast::ModuleImport>()
-            && source.text()[previous.range().end..at]
+            && let Some(prev) = node.prev_sibling()
+            && prev.is::<ast::ModuleImport>()
+            && src.text()[prev.range().end..at]
                 .chars()
                 .all(|ch| matches!(ch, ' ' | '\t'))
         {
-            node = previous;
+            node = prev;
         } else {
             node = node.parent()?.clone();
         }
@@ -117,7 +115,7 @@ pub fn import(source: &Source, at: usize) -> Option<Import> {
         None => None,
     };
     let items_node = items.and_then(|items| node.find(items.span()));
-    let mut selection = Import {
+    let mut sel = Import {
         source: node.find(import.source().span())?.range(),
         replacement: None,
         repair: None,
@@ -131,39 +129,9 @@ pub fn import(source: &Source, at: usize) -> Option<Import> {
             let whole = item_whole(&path);
             if whole.range().start <= at && at <= whole.range().end {
                 active = true;
-                if at <= path.range().end {
-                    for component in path.children() {
-                        if component.kind() == SyntaxKind::Ident {
-                            if component.range().start <= at && at <= component.range().end {
-                                selection.replacement = Some(component.range());
-                                break;
-                            }
-                            if component.range().end < at {
-                                selection.path.push(component.leaf_text().to_string());
-                            }
-                        } else if component.kind() == SyntaxKind::Dot && component.range().end == at
-                        {
-                            selection.replacement = Some(at..at);
-                        }
-                    }
-                }
-                if selection.replacement.is_some() {
-                    let mut repair = whole.range();
-                    if let Some(comma) = whole
-                        .next_sibling()
-                        .filter(|next| next.kind() == SyntaxKind::Comma)
-                    {
-                        repair.end = comma.range().end;
-                    } else if let Some(comma) = whole
-                        .prev_sibling()
-                        .filter(|prev| prev.kind() == SyntaxKind::Comma)
-                    {
-                        repair.start = comma.range().start;
-                    }
-                    selection.repair = Some(repair);
-                }
+                select_import_item(&path, &whole, at, &mut sel);
             } else {
-                selection.imported.push(
+                sel.imported.push(
                     item.path()
                         .iter()
                         .map(|part| part.as_str().into())
@@ -172,34 +140,68 @@ pub fn import(source: &Source, at: usize) -> Option<Import> {
             }
         }
     }
-    if !active {
-        // The import list completes at the colon, before its first item, after its last item, and
-        // after a comma; only a newline ends it. An empty replacement at the cursor lets the client
-        // filter the exports against the word it is writing.
-        let previous = items_node.as_ref().and_then(|items_node| {
-            items_node
-                .children()
-                .rfind(|child| !child.kind().is_trivia() && child.range().end <= at)
-        });
-        let before_items = items_node.as_ref().is_none_or(|items_node| {
-            items_node
-                .children()
-                .find(|child| !child.kind().is_trivia())
-                .is_none_or(|first| at <= first.range().start)
-        });
-        let blank = previous.is_some_and(|previous| {
-            source.text()[previous.range().end..at]
-                .chars()
-                .all(|ch| matches!(ch, ' ' | '\t'))
-        });
-        if at <= colon.range().end || before_items || blank {
-            selection.replacement = Some(at..at);
-        }
+    if !active && at_import_gap(src, &colon, items_node.as_ref(), at) {
+        sel.replacement = Some(at..at);
     }
-    Some(selection)
+    Some(sel)
 }
 
-/// The nearest node at or above `leaf` that `wanted` accepts.
+fn select_import_item(path: &LinkedNode<'_>, whole: &LinkedNode<'_>, at: usize, sel: &mut Import) {
+    if at <= path.range().end {
+        for part in path.children() {
+            if part.kind() == SyntaxKind::Ident {
+                if part.range().start <= at && at <= part.range().end {
+                    sel.replacement = Some(part.range());
+                    break;
+                }
+                if part.range().end < at {
+                    sel.path.push(part.leaf_text().to_string());
+                }
+            } else if part.kind() == SyntaxKind::Dot && part.range().end == at {
+                sel.replacement = Some(at..at);
+            }
+        }
+    }
+    if sel.replacement.is_some() {
+        let mut repair = whole.range();
+        if let Some(comma) = whole
+            .next_sibling()
+            .filter(|next| next.kind() == SyntaxKind::Comma)
+        {
+            repair.end = comma.range().end;
+        } else if let Some(comma) = whole
+            .prev_sibling()
+            .filter(|prev| prev.kind() == SyntaxKind::Comma)
+        {
+            repair.start = comma.range().start;
+        }
+        sel.repair = Some(repair);
+    }
+}
+
+fn at_import_gap(
+    src: &Source,
+    colon: &LinkedNode<'_>,
+    items_node: Option<&LinkedNode<'_>>,
+    at: usize,
+) -> bool {
+    let prev = items_node.and_then(|node| {
+        node.children()
+            .rfind(|child| !child.kind().is_trivia() && child.range().end <= at)
+    });
+    let before_items = items_node.is_none_or(|node| {
+        node.children()
+            .find(|child| !child.kind().is_trivia())
+            .is_none_or(|first| at <= first.range().start)
+    });
+    let blank = prev.is_some_and(|prev| {
+        src.text()[prev.range().end..at]
+            .chars()
+            .all(|ch| matches!(ch, ' ' | '\t'))
+    });
+    at <= colon.range().end || before_items || blank
+}
+
 fn enclosing<'a>(
     leaf: LinkedNode<'a>,
     wanted: impl Fn(&LinkedNode<'a>) -> bool,
@@ -207,13 +209,13 @@ fn enclosing<'a>(
     std::iter::successors(Some(leaf), |node| node.parent().cloned()).find(|node| wanted(node))
 }
 
-/// The member access the at is inside.
+/// The member access the cursor is inside.
 pub struct Member {
     /// The expression the dot reads from.
     pub target: Range<usize>,
     /// The dot and everything the access reaches through.
     pub suffix: Range<usize>,
-    /// The text the at is writing, which completion replaces.
+    /// The text the cursor is writing, which completion replaces.
     pub replacement: Range<usize>,
 }
 
@@ -230,9 +232,9 @@ pub struct ImportedName {
     pub path: Vec<String>,
 }
 
-/// Select the import item whose path the at is inside.
-pub fn imported_name(source: &Source, at: usize) -> Option<ImportedName> {
-    let node = cursor_leaves(source, at)
+/// Select the import item whose path the cursor is inside.
+pub fn imported_name(src: &Source, at: usize) -> Option<ImportedName> {
+    let node = cursor_leaves(src, at)
         .into_iter()
         .flatten()
         .find_map(|leaf| enclosing(leaf, |node| node.cast::<ast::ModuleImport>().is_some()))?;
@@ -241,25 +243,24 @@ pub fn imported_name(source: &Source, at: usize) -> Option<ImportedName> {
         return None;
     };
     let list = node.find(items.span())?;
-    let source = node.find(import.source().span())?.range();
+    let src_range = node.find(import.source().span())?.range();
     for item in items.iter() {
         let path = list.find(item.path().span())?;
         let whole = item_whole(&path);
         if whole.range().start <= at && at <= whole.range().end {
-            // `as` and the new name are the author's own words, not the export's.
             if path.range().start > at || at > path.range().end {
                 return None;
             }
             let mut parts = Vec::new();
-            for component in path
+            for part in path
                 .children()
                 .filter(|node| node.kind() == SyntaxKind::Ident)
             {
-                parts.push(component.leaf_text().to_string());
-                let range = component.range();
+                parts.push(part.leaf_text().to_string());
+                let range = part.range();
                 if range.start <= at && at <= range.end {
                     return Some(ImportedName {
-                        source,
+                        source: src_range,
                         name: range,
                         path: parts,
                     });
@@ -272,10 +273,8 @@ pub fn imported_name(source: &Source, at: usize) -> Option<ImportedName> {
 }
 
 /// The completion edit and the replaced expression are separate ranges.
-pub fn member(source: &Source, at: usize) -> Option<Member> {
-    // A member is completed after its dot or inside its name, so the token ending at the cursor
-    // is the one that decides it.
-    let cursor = LinkedNode::new(source.root()).leaf_at(at, Side::Before)?;
+pub fn member(src: &Source, at: usize) -> Option<Member> {
+    let cursor = LinkedNode::new(src.root()).leaf_at(at, Side::Before)?;
     let (dot, replacement) = if matches!(cursor.kind(), SyntaxKind::Ident | SyntaxKind::MathIdent) {
         (cursor.prev_sibling()?, cursor.range())
     } else {
@@ -310,23 +309,19 @@ pub fn member(source: &Source, at: usize) -> Option<Member> {
     })
 }
 
-/// The unfinished name or label at the at, which completion drops from its query copy.
-pub fn name(source: &Source, at: usize) -> Option<Range<usize>> {
-    let node = LinkedNode::new(source.root()).leaf_at(at, Side::Before)?;
+/// The unfinished name or label at the cursor, which completion drops from its query copy.
+pub fn name(src: &Source, at: usize) -> Option<Range<usize>> {
+    let node = LinkedNode::new(src.root()).leaf_at(at, Side::Before)?;
     match node.kind() {
-        SyntaxKind::Ident => Some(node.range()),
-        // The author's own hash counts as unfinished: `#` alone is not yet a name.
-        SyntaxKind::Hash => Some(node.range()),
-        // An unfinished label is a syntax error inside the expression that carries it, so the
-        // query copy drops that expression.
-        SyntaxKind::Error => Some(dropped(&expression(source, at)?)),
+        SyntaxKind::Ident | SyntaxKind::Hash => Some(node.range()),
+        SyntaxKind::Error => Some(dropped(&expression(src, at)?)),
         _ => None,
     }
 }
 
-/// The `include` statement at the at, whose path the site may not have yet.
-pub fn include_path(source: &Source, at: usize) -> Option<Range<usize>> {
-    let leaf = LinkedNode::new(source.root()).leaf_at(at, Side::Before)?;
+/// The `include` statement at the cursor, whose path the site may not have yet.
+pub fn include_path(src: &Source, at: usize) -> Option<Range<usize>> {
+    let leaf = LinkedNode::new(src.root()).leaf_at(at, Side::Before)?;
     let node = enclosing(leaf, |node| node.kind() == SyntaxKind::ModuleInclude)?;
     Some(dropped(&node))
 }
@@ -341,9 +336,6 @@ pub enum PathBase {
 }
 
 /// The base a call's path arguments resolve from, or `None` when the call takes no path.
-///
-/// A reader names a file the site already holds, from the file that writes it. An asset names the
-/// output the site creates, from the site root. Every other call's strings name nothing.
 pub fn path_base(name: &str) -> Option<PathBase> {
     match name {
         "read" | "json" | "yaml" | "toml" | "csv" | "xml" | "cbor" | "image" | "bibliography" => {
@@ -356,9 +348,8 @@ pub fn path_base(name: &str) -> Option<PathBase> {
 
 /// Decode string content with Typst's escape rules, including unfinished prefixes.
 pub fn string_prefix(raw: &str) -> String {
-    let literal = SyntaxNode::leaf(SyntaxKind::Str, format!("\"{raw}\""));
-    literal
-        .cast::<ast::Str>()
+    let lit = SyntaxNode::leaf(SyntaxKind::Str, format!("\"{raw}\""));
+    lit.cast::<ast::Str>()
         .expect("a string leaf casts to a string literal")
         .get()
         .to_string()
@@ -377,20 +368,20 @@ pub struct PathArgument {
 }
 
 /// The path argument the offset sits inside: a call's string, or an include's path.
-pub fn path_argument(source: &Source, at: usize) -> Option<PathArgument> {
-    let literal = LinkedNode::new(source.root()).leaf_at(at, Side::Before)?;
-    let closed = literal.kind() == SyntaxKind::Str;
-    if !closed && !(literal.kind() == SyntaxKind::Error && literal.leaf_text().starts_with('"')) {
+pub fn path_argument(src: &Source, at: usize) -> Option<PathArgument> {
+    let lit = LinkedNode::new(src.root()).leaf_at(at, Side::Before)?;
+    let closed = lit.kind() == SyntaxKind::Str;
+    if !closed && !(lit.kind() == SyntaxKind::Error && lit.leaf_text().starts_with('"')) {
         return None;
     }
-    let range = literal.range().start + 1..literal.range().end - usize::from(closed);
+    let range = lit.range().start + 1..lit.range().end - usize::from(closed);
     if at < range.start || at > range.end {
         return None;
     }
-    let mut argument = literal;
+    let mut arg = lit;
     let mut in_array = false;
     loop {
-        let parent = argument.parent()?;
+        let parent = arg.parent()?;
         match parent.kind() {
             SyntaxKind::ModuleInclude => {
                 return Some(PathArgument {
@@ -412,39 +403,7 @@ pub fn path_argument(source: &Source, at: usize) -> Option<PathArgument> {
                 } else {
                     path_base(&name)?
                 };
-                let extension = if let Some(named) = argument.cast::<ast::Named>() {
-                    match (name.as_str(), named.name().as_str()) {
-                        ("raw", "theme") if !in_array => Some("tmTheme"),
-                        ("raw", "syntaxes") => Some("sublime-syntax"),
-                        ("bibliography", "style") => {
-                            let value = string_prefix(&source.text()[range.clone()]);
-                            if !value.contains('/')
-                                && Path::new(value.as_str()).extension().is_none()
-                            {
-                                return None;
-                            }
-                            Some("csl")
-                        }
-                        ("bibliography" | "raw", _) => return None,
-                        (_, "path") => None,
-                        _ => return None,
-                    }
-                } else {
-                    if name == "raw"
-                        || argument.kind() == SyntaxKind::Array && name != "bibliography"
-                    {
-                        return None;
-                    }
-                    if parent.children().take(argument.index()).any(|previous| {
-                        matches!(
-                            previous.cast::<ast::Arg>(),
-                            Some(ast::Arg::Pos(_) | ast::Arg::Spread(_))
-                        )
-                    }) {
-                        return None;
-                    }
-                    None
-                };
+                let extension = path_arg_extension(src, &range, parent, &arg, &name, in_array)?;
                 return Some(PathArgument {
                     range,
                     base,
@@ -454,14 +413,49 @@ pub fn path_argument(source: &Source, at: usize) -> Option<PathArgument> {
             }
             SyntaxKind::Array | SyntaxKind::Parenthesized | SyntaxKind::Named => {
                 in_array |= parent.kind() == SyntaxKind::Array;
-                argument = parent.clone();
+                arg = parent.clone();
             }
             _ => return None,
         }
     }
 }
 
-/// The name a callee writes, whether bare or as `module.<name>`.
+fn path_arg_extension(
+    src: &Source,
+    range: &Range<usize>,
+    args: &LinkedNode<'_>,
+    arg: &LinkedNode<'_>,
+    callee: &str,
+    in_array: bool,
+) -> Option<Option<&'static str>> {
+    if let Some(named) = arg.cast::<ast::Named>() {
+        return match (callee, named.name().as_str()) {
+            ("raw", "theme") if !in_array => Some(Some("tmTheme")),
+            ("raw", "syntaxes") => Some(Some("sublime-syntax")),
+            ("bibliography", "style") => {
+                let val = string_prefix(&src.text()[range.clone()]);
+                if !val.contains('/') && Path::new(val.as_str()).extension().is_none() {
+                    return None;
+                }
+                Some(Some("csl"))
+            }
+            ("bibliography" | "raw", _) => None,
+            (_, "path") => Some(None),
+            _ => None,
+        };
+    }
+    if callee == "raw" || (arg.kind() == SyntaxKind::Array && callee != "bibliography") {
+        return None;
+    }
+    let has_prior_pos = args.children().take(arg.index()).any(|prev| {
+        matches!(
+            prev.cast::<ast::Arg>(),
+            Some(ast::Arg::Pos(_) | ast::Arg::Spread(_))
+        )
+    });
+    (!has_prior_pos).then_some(None)
+}
+
 fn callee_name(callee: ast::Expr<'_>) -> Option<String> {
     match callee {
         ast::Expr::Ident(ident) => Some(ident.get().to_string()),
@@ -485,29 +479,22 @@ pub fn dropped(node: &LinkedNode<'_>) -> Range<usize> {
 }
 
 /// The leaves a cursor addresses, the token it opens first.
-///
-/// An editor's cursor sits between characters, so the one the author points at is the character
-/// after it: a byte inside a name names that name, and a byte at its first character sits in the
-/// space before it. A cursor at a name's end points past the name, so the token that ends there is
-/// the second answer rather than none.
-pub fn cursor_leaves(source: &Source, at: usize) -> [Option<LinkedNode<'_>>; 2] {
-    let root = LinkedNode::new(source.root());
+pub fn cursor_leaves(src: &Source, at: usize) -> [Option<LinkedNode<'_>>; 2] {
+    let root = LinkedNode::new(src.root());
     [
         root.leaf_at(at, Side::After),
         root.leaf_at(at, Side::Before),
     ]
 }
 
-/// The leaf the at follows, when the author has not written an expression yet.
-pub fn before(source: &Source, at: usize) -> Option<LinkedNode<'_>> {
-    LinkedNode::new(source.root()).leaf_at(at, Side::Before)
+/// The leaf the cursor follows, when the author has not written an expression yet.
+pub fn before(src: &Source, at: usize) -> Option<LinkedNode<'_>> {
+    LinkedNode::new(src.root()).leaf_at(at, Side::Before)
 }
 
-/// The expression the at is inside, climbing from the leaf it sits in.
-pub fn expression(source: &Source, at: usize) -> Option<LinkedNode<'_>> {
-    // A cursor that opens a token addresses one whose own expression is the widest one enclosing
-    // it, so the expression that covers least is the one the cursor means.
-    let mut node = cursor_leaves(source, at)
+/// The expression the cursor is inside, climbing from the leaf it sits in.
+pub fn expression(src: &Source, at: usize) -> Option<LinkedNode<'_>> {
+    let mut node = cursor_leaves(src, at)
         .into_iter()
         .flatten()
         .filter_map(|node| {
@@ -530,32 +517,31 @@ pub fn expression(source: &Source, at: usize) -> Option<LinkedNode<'_>> {
     Some(node)
 }
 
-/// Whether Tola supplies a package. Tola answers its own semantics only; the standard library,
-/// configured packages, and site files belong to the native Typst language server.
+/// Walks down field accesses, calls, parenthesized groups, and `context` to the root expression.
 pub fn root_expression(node: LinkedNode<'_>) -> LinkedNode<'_> {
-    let mut current = node;
+    let mut cur = node;
     loop {
-        let next = if let Some(access) = current.cast::<ast::FieldAccess>() {
-            current.find(access.target().span())
-        } else if let Some(call) = current.cast::<ast::FuncCall>() {
-            current.find(call.callee().span())
-        } else if let Some(grouped) = current.cast::<ast::Parenthesized>() {
-            current.find(grouped.expr().span())
-        } else if current.kind() == SyntaxKind::Contextual {
-            current.children().next_back()
+        let next = if let Some(access) = cur.cast::<ast::FieldAccess>() {
+            cur.find(access.target().span())
+        } else if let Some(call) = cur.cast::<ast::FuncCall>() {
+            cur.find(call.callee().span())
+        } else if let Some(grouped) = cur.cast::<ast::Parenthesized>() {
+            cur.find(grouped.expr().span())
+        } else if cur.kind() == SyntaxKind::Contextual {
+            cur.children().next_back()
         } else {
             None
         };
         let Some(next) = next else {
-            return current;
+            return cur;
         };
-        current = next;
+        cur = next;
     }
 }
 
-/// The innermost node that covers exactly this byte range.
-pub fn node_at_range<'a>(source: &'a Source, range: &Range<usize>) -> Option<LinkedNode<'a>> {
-    let root = LinkedNode::new(source.root());
+/// The innermost expression node that covers exactly this byte range.
+pub fn node_at_range<'a>(src: &'a Source, range: &Range<usize>) -> Option<LinkedNode<'a>> {
+    let root = LinkedNode::new(src.root());
     let mut node = root.leaf_at(range.end, Side::Before)?;
     loop {
         if node.range() == *range && node.is::<ast::Expr>() {
@@ -565,15 +551,15 @@ pub fn node_at_range<'a>(source: &'a Source, range: &Range<usize>) -> Option<Lin
     }
 }
 
-/// The call the at is inside.
+/// The call the cursor is inside.
 pub struct Call {
     /// The expression being called.
     pub callee: Range<usize>,
     /// The callee and everything the call reaches through.
     pub suffix: Range<usize>,
-    /// The index of the argument the at sits in.
+    /// The index of the argument the cursor sits in.
     pub active_argument: usize,
-    /// The name the argument the at sits in writes, when the argument is a named one.
+    /// The name the argument the cursor sits in writes, when the argument is a named one.
     pub argument_name: Option<Range<usize>>,
     /// What the call calls.
     pub target: CallTarget,
@@ -592,10 +578,9 @@ pub enum CallTarget {
     },
 }
 
-/// The call the at is inside, with the argument it sits in.
-pub fn call(source: &Source, at: usize) -> Option<Call> {
-    let leaf = LinkedNode::new(source.root()).leaf_at(at, Side::Before)?;
-    // The innermost call whose argument list already began at or before the cursor.
+/// The call the cursor is inside, with the argument it sits in.
+pub fn call(src: &Source, at: usize) -> Option<Call> {
+    let leaf = LinkedNode::new(src.root()).leaf_at(at, Side::Before)?;
     let node = enclosing(leaf, |node| {
         node.cast::<ast::FuncCall>()
             .and_then(|call| node.find(call.args().span()))
@@ -622,11 +607,11 @@ pub fn call(source: &Source, at: usize) -> Option<Call> {
     let argument_name = args
         .cast::<ast::Args>()
         .and_then(|arguments| arguments.items().nth(active_argument))
-        .and_then(|argument| match argument {
+        .and_then(|arg| match arg {
             ast::Arg::Named(named) => Some(named.name().span()),
             ast::Arg::Pos(_) | ast::Arg::Spread(_) => None,
         })
-        .and_then(|name| args.find(name))
+        .and_then(|span| args.find(span))
         .map(|name| name.range());
     Some(Call {
         suffix: suffix_start..node.range().end,
@@ -650,16 +635,15 @@ pub fn is_import_path(node: &LinkedNode<'_>) -> bool {
 mod tests {
     use super::*;
 
-    /// The path argument at the offset the text marks, as its text and the base it uses.
     fn argument(marked: &str) -> Option<(String, PathBase)> {
         let at = marked.find('|').expect("an offset marker");
         let text = marked.replace('|', "");
-        let source = Source::detached(text.clone());
-        path_argument(&source, at).map(|argument| (text[argument.range].to_owned(), argument.base))
+        let src = Source::detached(text.clone());
+        path_argument(&src, at).map(|arg| (text[arg.range].to_owned(), arg.base))
     }
 
     #[test]
-    fn path_roles_follow_the_cursor() {
+    fn path_argument_roles() {
         for (marked, expected) in [
             ("#read(\"da|ta.csv\")", Some("data.csv")),
             ("#read(path: \"da|ta.csv\")", Some("data.csv")),
@@ -699,7 +683,7 @@ mod tests {
     }
 
     #[test]
-    fn call_site_declares_its_path_base() {
+    fn path_argument_base() {
         assert_eq!(
             argument("#asset(\"down|loads/file.pdf\", read(\"file.pdf\"))"),
             Some(("downloads/file.pdf".to_owned(), PathBase::Site))
@@ -715,24 +699,17 @@ mod tests {
         assert_eq!(
             argument("#asset(\"downloads/file.pdf\", read(\"fi|le.pdf\"))"),
             Some(("file.pdf".to_owned(), PathBase::File)),
-            "inside the reader call, the reader's own argument is the path"
         );
-        assert_eq!(
-            argument("#image(\"brand.svg\")|"),
-            None,
-            "a call with no path argument names none"
-        );
+        assert_eq!(argument("#image(\"brand.svg\")|"), None);
     }
 
-    /// The name a named argument writes at the cursor, and none where the argument is written
-    /// without one.
     #[test]
-    fn call_names_its_active_named_argument() {
+    fn call_active_named_arg() {
         let marked = "#strong(delta: |300)";
         let at = marked.find('|').expect("an offset marker");
         let text = marked.replace('|', "");
-        let source = Source::detached(text.clone());
-        let named = call(&source, at).expect("the call");
+        let src = Source::detached(text.clone());
+        let named = call(&src, at).expect("the call");
         assert_eq!(
             named.argument_name.map(|name| text[name].to_owned()),
             Some("delta".to_owned())
@@ -740,7 +717,7 @@ mod tests {
 
         let marked = "#strong(|300)";
         let at = marked.find('|').expect("an offset marker");
-        let source = Source::detached(marked.replace('|', ""));
-        assert_eq!(call(&source, at).expect("the call").argument_name, None);
+        let src = Source::detached(marked.replace('|', ""));
+        assert_eq!(call(&src, at).expect("the call").argument_name, None);
     }
 }

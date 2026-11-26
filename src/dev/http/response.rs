@@ -2,7 +2,6 @@
 
 use std::sync::Arc;
 
-use crate::dev::site::{HtmlResponses, InstalledRevision};
 use anyhow::Result;
 use bytes::Bytes;
 use hyper::header::{
@@ -11,13 +10,17 @@ use hyper::header::{
 };
 use hyper::{Method, Request, Response, StatusCode};
 use tola_address::{OutputPath, SiteUrlMount, UrlPath};
-use tola_build::config::ResolvedSiteConfig;
+use tola_build::config::SiteConfig;
+use tola_build::output::PageAvailability;
 use tola_build::output::graph::{OutputFile, OutputKind};
+use tola_build::output::manifest::RevisionId;
 use tola_build::output::revision::OutputRevision;
+use tola_build::output::semantics::ResponseMediaType;
 use tola_diagnostic::Diagnostic;
 
 use super::html::HtmlInjection;
 use crate::dev::reload::transport::ReloadEndpoint;
+use crate::dev::site::{HtmlResponses, InstalledRevision};
 
 #[derive(Debug)]
 enum BodySlices {
@@ -60,7 +63,12 @@ impl ResponseBody {
         }
     }
 
-    fn remaining_slices(&self) -> &[Bytes] {
+    #[cfg(test)]
+    pub(super) fn remaining_slices(&self) -> &[Bytes] {
+        self.slice_window()
+    }
+
+    fn slice_window(&self) -> &[Bytes] {
         let slices = match &self.slices {
             BodySlices::Whole(bytes) => std::slice::from_ref(bytes),
             BodySlices::Fragments(slices) => slices.as_slice(),
@@ -77,7 +85,7 @@ impl ResponseBody {
         let mut slices = std::array::from_fn(|_| Bytes::new());
         let mut count = 0;
         let mut offset = 0;
-        for slice in self.remaining_slices() {
+        for slice in self.slice_window() {
             if offset > end {
                 break;
             }
@@ -104,7 +112,7 @@ impl hyper::body::Body for ResponseBody {
 
     fn poll_frame(
         self: std::pin::Pin<&mut Self>,
-        _context: &mut std::task::Context<'_>,
+        _cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<std::result::Result<hyper::body::Frame<Bytes>, Self::Error>>> {
         let body = self.get_mut();
         let bytes = match &mut body.slices {
@@ -130,105 +138,85 @@ impl hyper::body::Body for ResponseBody {
     }
 }
 
+fn header_str<'a>(req: &'a Request<()>, name: &str) -> Option<&'a str> {
+    req.headers().get(name).and_then(|val| val.to_str().ok())
+}
+
 pub(super) fn respond(
-    request: Request<()>,
+    req: Request<()>,
     site: Option<Arc<InstalledRevision>>,
-    initial_config: &ResolvedSiteConfig,
+    initial_cfg: &SiteConfig,
     reload_endpoint: Option<&ReloadEndpoint>,
     unpublished_html: &HtmlResponses,
 ) -> Response<ResponseBody> {
-    if !matches!(*request.method(), Method::GET | Method::HEAD) {
-        return respond_method_not_allowed(request.method());
+    if !matches!(*req.method(), Method::GET | Method::HEAD) {
+        return respond_method_not_allowed(req.method());
     }
-    let config = site
+    let cfg = site
         .as_ref()
-        .map_or(initial_config, |site| site.config().as_ref());
+        .map_or(initial_cfg, |site| site.config().as_ref());
     if reload_endpoint.is_some()
-        && request.uri().path() == crate::embed::dev::hotreload_browser_path(config.url_mount())
+        && req.uri().path() == crate::embed::dev::hotreload_browser_path(cfg.url_mount())
     {
-        return respond_hotreload_js(request);
+        return respond_hotreload_js(req);
     }
-    let mut response = match site.as_deref() {
-        Some(site) => respond_published(request, site, reload_endpoint),
+    let mut resp = match site.as_deref() {
+        Some(site) => respond_published(req, site, reload_endpoint),
         None => respond_unpublished(
-            request,
-            initial_config.url_mount(),
+            req,
+            initial_cfg.url_mount(),
             reload_endpoint,
             unpublished_html,
         ),
     };
     if let Some(endpoint) = reload_endpoint {
-        response.headers_mut().insert(
+        resp.headers_mut().insert(
             "X-Tola-Reload-Generation",
             HeaderValue::from_str(endpoint.generation())
                 .expect("reload generation is a header value"),
         );
     }
-    response
+    resp
 }
 
 fn respond_published(
-    request: Request<()>,
+    req: Request<()>,
     site: &InstalledRevision,
     reload_endpoint: Option<&ReloadEndpoint>,
 ) -> Response<ResponseBody> {
-    let config = site.config();
-    let mount = config.url_mount();
-    let revision = site.outputs();
-    if request
-        .headers()
-        .get("X-Tola-Hot-Reload")
-        .and_then(|value| value.to_str().ok())
-        == Some("true")
-        && request
-            .headers()
-            .get("X-Tola-Revision")
-            .and_then(|value| value.to_str().ok())
-            != Some(site.manifest().revision().as_str())
+    let cfg = site.config();
+    let mount = cfg.url_mount();
+    let rev = site.outputs();
+    if header_str(&req, "X-Tola-Hot-Reload") == Some("true")
+        && header_str(&req, "X-Tola-Revision") != Some(site.manifest().revision().as_str())
     {
-        return respond_revision_conflict(request.method());
+        return respond_revision_conflict(req.method());
     }
-    let browser_path = match UrlPath::parse(request.uri().path()) {
-        Ok(path) => path,
-        Err(_) => {
-            return text_status_response(
-                request.method(),
-                StatusCode::BAD_REQUEST,
-                "400 Bad Request",
-            );
-        }
+    let Ok(browser_path) = UrlPath::parse(req.uri().path()) else {
+        return text_status_response(req.method(), StatusCode::BAD_REQUEST, "400 Bad Request");
     };
     let Some(route) = mount.strip(&browser_path) else {
-        return respond_not_found(request, mount, revision, reload_endpoint, &site.html);
+        return respond_not_found(req, mount, rev, reload_endpoint, &site.html);
     };
-    if let Some(output) = revision.output(&OutputPath::from_route(&route)) {
+    if let Some(output) = rev.output(&OutputPath::from_route(&route)) {
         return if output.path().as_str() == "404.html" && output.kind() == OutputKind::HtmlDocument
         {
-            respond_not_found(request, mount, revision, reload_endpoint, &site.html)
+            respond_not_found(req, mount, rev, reload_endpoint, &site.html)
         } else {
-            respond_file(
-                request,
-                output,
-                mount,
-                reload_endpoint,
-                revision,
-                &site.html,
-            )
+            respond_file(req, output, mount, reload_endpoint, rev, &site.html)
         };
     }
-    if route.as_str() == "/"
-        && site.page_availability() == tola_build::output::PageAvailability::Empty
-    {
-        let canonical = tola_build::build::no_pages_diagnostic(config);
-        let diagnostic = site
+    if route.as_str() == "/" && site.page_availability() == PageAvailability::Empty {
+        let canonical = tola_build::build::no_pages_diagnostic(cfg);
+        let diag = site
             .diagnostics()
             .iter()
-            .find(|diagnostic| diagnostic.code == tola_diagnostic::codes::site::NO_PAGES)
+            .find(|diag| diag.code == tola_diagnostic::codes::site::NO_PAGES)
             .expect("empty published revisions hold the canonical no-pages diagnostic");
-        debug_assert_eq!(diagnostic, &canonical);
+        debug_assert_eq!(diag, &canonical);
         return respond_welcome(
-            request,
-            diagnostic,
+            req,
+            diag,
             mount,
             reload_endpoint,
             site.manifest().revision(),
@@ -236,70 +224,60 @@ fn respond_published(
             &site.html,
         );
     }
-    respond_not_found(request, mount, revision, reload_endpoint, &site.html)
+    respond_not_found(req, mount, rev, reload_endpoint, &site.html)
 }
 
 fn respond_file(
-    request: Request<()>,
+    req: Request<()>,
     output: &OutputFile,
-    url_mount: &SiteUrlMount,
+    mount: &SiteUrlMount,
     reload_endpoint: Option<&ReloadEndpoint>,
-    revision: &OutputRevision,
+    rev: &OutputRevision,
     html: &HtmlResponses,
 ) -> Response<ResponseBody> {
     let content_type = output.declaration().media_type().as_str();
     if reload_endpoint.is_some() {
-        match requested_representation(&request) {
+        match requested_representation(&req) {
             RequestedRepresentation::Absent => {}
             RequestedRepresentation::Duplicate => {
                 return text_status_response(
-                    request.method(),
+                    req.method(),
                     StatusCode::BAD_REQUEST,
                     "400 Bad Request",
                 );
             }
-            RequestedRepresentation::Value(representation)
-                if !revision
-                    .manifest()
-                    .matches_representation(output.path(), &representation) =>
+            RequestedRepresentation::Value(repr)
+                if !rev.manifest().matches_representation(output.path(), &repr) =>
             {
-                return respond_revision_conflict(request.method());
+                return respond_revision_conflict(req.method());
             }
             RequestedRepresentation::Value(_) => {}
         }
     }
-    let body = published_output_body(
-        request.method(),
-        output,
-        url_mount,
-        reload_endpoint,
-        revision,
-        html,
-    );
-    if request.method() != Method::HEAD
+    let body = published_output_body(req.method(), output, mount, reload_endpoint, rev, html);
+    if req.method() != Method::HEAD
         // No validators are emitted, so an If-Range condition cannot match.
-        && !request.headers().contains_key(IF_RANGE)
-        && let Some(range) = request
+        && !req.headers().contains_key(IF_RANGE)
+        && let Some(range) = req
             .headers()
             .get(RANGE)
-            .and_then(|value| value.to_str().ok())
+            .and_then(|val| val.to_str().ok())
             .and_then(|range| range.strip_prefix("bytes="))
     {
         return respond_range(body, content_type, range);
     }
-    let mut response = respond_bytes(request.method(), StatusCode::OK, Some(content_type), body);
-    response
-        .headers_mut()
+    let mut resp = respond_bytes(req.method(), StatusCode::OK, Some(content_type), body);
+    resp.headers_mut()
         .insert(ACCEPT_RANGES, HeaderValue::from_static("bytes"));
-    response
+    resp
 }
 
 fn published_output_body(
     method: &Method,
     output: &OutputFile,
-    url_mount: &SiteUrlMount,
+    mount: &SiteUrlMount,
     reload_endpoint: Option<&ReloadEndpoint>,
-    revision: &OutputRevision,
+    rev: &OutputRevision,
     html: &HtmlResponses,
 ) -> ResponseBody {
     match reload_endpoint.filter(|_| output.kind() == OutputKind::HtmlDocument) {
@@ -308,10 +286,10 @@ fn published_output_body(
             output.bytes().len(),
             || {
                 HtmlInjection::new(
-                    url_mount,
+                    mount,
                     endpoint,
-                    Some(revision.manifest().revision()),
-                    Some(revision.page_availability()),
+                    Some(rev.manifest().revision()),
+                    Some(rev.page_availability()),
                     Some(output.path()),
                 )
             },
@@ -328,56 +306,55 @@ enum RequestedRepresentation<'a> {
     Duplicate,
 }
 
-fn requested_representation(request: &Request<()>) -> RequestedRepresentation<'_> {
-    let Some(query) = request.uri().query() else {
+fn requested_representation(req: &Request<()>) -> RequestedRepresentation<'_> {
+    let Some(query) = req.uri().query() else {
         return RequestedRepresentation::Absent;
     };
-    let mut representations = url::form_urlencoded::parse(query.as_bytes())
+    let mut reprs = url::form_urlencoded::parse(query.as_bytes())
         .filter(|(name, _)| name == "tola-representation")
-        .map(|(_, value)| value);
-    let Some(representation) = representations.next() else {
+        .map(|(_, val)| val);
+    let Some(repr) = reprs.next() else {
         return RequestedRepresentation::Absent;
     };
-    if representations.next().is_some() {
+    if reprs.next().is_some() {
         return RequestedRepresentation::Duplicate;
     }
-    RequestedRepresentation::Value(representation)
+    RequestedRepresentation::Value(repr)
 }
 
 fn respond_range(body: ResponseBody, content_type: &str, range: &str) -> Response<ResponseBody> {
     let file_size = body.byte_len() as u64;
     let Some((start, end)) = parse_range(range, file_size) else {
-        let mut response = respond_bytes(
+        let mut resp = respond_bytes(
             &Method::GET,
             StatusCode::RANGE_NOT_SATISFIABLE,
             None,
             ResponseBody::whole(Bytes::new()),
         );
-        response.headers_mut().insert(
+        resp.headers_mut().insert(
             CONTENT_RANGE,
             HeaderValue::from_str(&format!("bytes */{file_size}"))
                 .expect("byte range response is a valid header value"),
         );
-        return response;
+        return resp;
     };
     let partial = body
         .within(start as usize, end as usize)
         .expect("a satisfiable range names bytes this body has");
-    let mut response = respond_bytes(
+    let mut resp = respond_bytes(
         &Method::GET,
         StatusCode::PARTIAL_CONTENT,
         Some(content_type),
         partial,
     );
-    response.headers_mut().insert(
+    resp.headers_mut().insert(
         CONTENT_RANGE,
         HeaderValue::from_str(&format!("bytes {start}-{end}/{file_size}"))
             .expect("byte range response is a valid header value"),
     );
-    response
-        .headers_mut()
+    resp.headers_mut()
         .insert(ACCEPT_RANGES, HeaderValue::from_static("bytes"));
-    response
+    resp
 }
 
 fn parse_range(range: &str, file_size: u64) -> Option<(u64, u64)> {
@@ -401,32 +378,25 @@ fn parse_range(range: &str, file_size: u64) -> Option<(u64, u64)> {
 }
 
 fn respond_not_found(
-    request: Request<()>,
+    req: Request<()>,
     mount: &SiteUrlMount,
-    revision: &OutputRevision,
+    rev: &OutputRevision,
     reload_endpoint: Option<&ReloadEndpoint>,
     html: &HtmlResponses,
 ) -> Response<ResponseBody> {
-    let output = revision
+    let output = rev
         .output_by_path_text("404.html")
         .filter(|output| output.kind() == OutputKind::HtmlDocument);
     if let Some(output) = output {
-        let body = published_output_body(
-            request.method(),
-            output,
-            mount,
-            reload_endpoint,
-            revision,
-            html,
-        );
+        let body = published_output_body(req.method(), output, mount, reload_endpoint, rev, html);
         return respond_bytes(
-            request.method(),
+            req.method(),
             StatusCode::NOT_FOUND,
-            Some(tola_build::output::semantics::ResponseMediaType::HTML.as_str()),
+            Some(ResponseMediaType::HTML.as_str()),
             body,
         );
     }
-    text_status_response(request.method(), StatusCode::NOT_FOUND, "404 Not Found")
+    text_status_response(req.method(), StatusCode::NOT_FOUND, "404 Not Found")
 }
 
 fn respond_revision_conflict(method: &Method) -> Response<ResponseBody> {
@@ -440,58 +410,46 @@ fn respond_revision_conflict(method: &Method) -> Response<ResponseBody> {
 fn text_status_response(
     method: &Method,
     status: StatusCode,
-    message: &'static str,
+    msg: &'static str,
 ) -> Response<ResponseBody> {
     respond_bytes(
         method,
         status,
-        Some(tola_build::output::semantics::ResponseMediaType::PLAIN_TEXT.as_str()),
-        ResponseBody::whole(Bytes::from_static(message.as_bytes())),
+        Some(ResponseMediaType::PLAIN_TEXT.as_str()),
+        ResponseBody::whole(Bytes::from_static(msg.as_bytes())),
     )
 }
 
 fn respond_welcome(
-    request: Request<()>,
-    diagnostic: &Diagnostic,
-    url_mount: &SiteUrlMount,
+    req: Request<()>,
+    diag: &Diagnostic,
+    mount: &SiteUrlMount,
     reload_endpoint: Option<&ReloadEndpoint>,
-    revision: &tola_build::output::manifest::RevisionId,
-    page_availability: tola_build::output::PageAvailability,
+    rev: &RevisionId,
+    page_avail: PageAvailability,
     html: &HtmlResponses,
 ) -> Response<ResponseBody> {
     let body = html.welcome(|| {
-    let message = tola_build::html::escape(&diagnostic.message);
-    let help = diagnostic
-        .help
-        .first()
-        .map(|help| tola_build::html::escape(&help.message));
-    let help = help.map_or_else(String::new, |help| format!("<p>{help}</p>"));
-    Bytes::from(format!(
-        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>Tola</title></head><body><p>{message}</p>{help}</body></html>"
-    ))
+        let msg = tola_build::html::escape(&diag.message);
+        let help = diag
+            .help
+            .first()
+            .map(|help| tola_build::html::escape(&help.message))
+            .map_or_else(String::new, |help| format!("<p>{help}</p>"));
+        Bytes::from(format!(
+            "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>Tola</title></head><body><p>{msg}</p>{help}</body></html>"
+        ))
     });
-    respond_generated_html(&request, StatusCode::OK, html, body.clone(), || {
-        reload_endpoint.map(|endpoint| {
-            HtmlInjection::new(
-                url_mount,
-                endpoint,
-                Some(revision),
-                Some(page_availability),
-                None,
-            )
-        })
+    respond_generated_html(&req, StatusCode::OK, html, body.clone(), || {
+        reload_endpoint
+            .map(|endpoint| HtmlInjection::new(mount, endpoint, Some(rev), Some(page_avail), None))
     })
 }
 
-fn respond_hotreload_js(request: Request<()>) -> Response<ResponseBody> {
-    respond_development_runtime(request.method(), crate::embed::dev::hotreload_js())
+fn respond_hotreload_js(req: Request<()>) -> Response<ResponseBody> {
+    respond_development_runtime(req.method(), crate::embed::dev::hotreload_js())
 }
 
-/// The response for the development runtime, or the failure sentence when Tola could not prepare
-/// it.
-///
-/// The failure itself is logged once, where the runtime is prepared; the runtime is never served
-/// unminified.
 fn respond_development_runtime(
     method: &Method,
     runtime: Result<&'static str, &crate::embed::dev::RuntimeMinifyError>,
@@ -500,7 +458,7 @@ fn respond_development_runtime(
         Ok(runtime) => respond_bytes(
             method,
             StatusCode::OK,
-            Some(tola_build::output::semantics::ResponseMediaType::JAVASCRIPT.as_str()),
+            Some(ResponseMediaType::JAVASCRIPT.as_str()),
             ResponseBody::whole(Bytes::from_static(runtime.as_bytes())),
         ),
         Err(_) => text_status_response(
@@ -511,7 +469,6 @@ fn respond_development_runtime(
     }
 }
 
-/// What a site author reads when Tola cannot prepare its own development runtime.
 const RUNTIME_UNAVAILABLE: &str = concat!(
     "Tola could not prepare its development runtime.\n\n",
     "This is a bug in Tola, not in your site. ",
@@ -519,23 +476,23 @@ const RUNTIME_UNAVAILABLE: &str = concat!(
 );
 
 fn respond_unpublished(
-    request: Request<()>,
+    req: Request<()>,
     mount: &SiteUrlMount,
     endpoint: Option<&ReloadEndpoint>,
     html: &HtmlResponses,
 ) -> Response<ResponseBody> {
     let body = html.welcome(|| {
-    let help = if endpoint.is_some() {
-        "Fix the errors and save. This page will reload when the site builds successfully."
-    } else {
-        "Fix the errors, restart `tola dev`, then reload this page."
-    };
-    Bytes::from(format!(
-        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>Build failed — Tola</title></head><body><main><h1>Build failed</h1><p>{help}</p></main></body></html>"
-    ))
+        let help = if endpoint.is_some() {
+            "Fix the errors and save. This page will reload when the site builds successfully."
+        } else {
+            "Fix the errors, restart `tola dev`, then reload this page."
+        };
+        Bytes::from(format!(
+            "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>Build failed — Tola</title></head><body><main><h1>Build failed</h1><p>{help}</p></main></body></html>"
+        ))
     });
     respond_generated_html(
-        &request,
+        &req,
         StatusCode::SERVICE_UNAVAILABLE,
         html,
         body.clone(),
@@ -543,9 +500,8 @@ fn respond_unpublished(
     )
 }
 
-/// A generated page, with the reload runtime when an endpoint exists.
 fn respond_generated_html(
-    request: &Request<()>,
+    req: &Request<()>,
     status: StatusCode,
     html: &HtmlResponses,
     body: Bytes,
@@ -554,32 +510,30 @@ fn respond_generated_html(
     let body = match injection() {
         Some(injection) => {
             html.page(None)
-                .response(request.method(), body.len(), || injection, || body.clone())
+                .response(req.method(), body.len(), || injection, || body.clone())
         }
         None => ResponseBody::whole(body),
     };
     respond_bytes(
-        request.method(),
+        req.method(),
         status,
-        Some(tola_build::output::semantics::ResponseMediaType::HTML.as_str()),
+        Some(ResponseMediaType::HTML.as_str()),
         body,
     )
 }
 
 fn respond_method_not_allowed(method: &Method) -> Response<ResponseBody> {
-    let mut response = text_status_response(
+    let mut resp = text_status_response(
         method,
         StatusCode::METHOD_NOT_ALLOWED,
         "405 Method Not Allowed",
     );
-    response
-        .headers_mut()
+    resp.headers_mut()
         .insert(ALLOW, HeaderValue::from_static("GET, HEAD"));
-    response
+    resp
 }
 
-/// Every development response is fresh, including errors and sessions without reload.
-/// HEAD retains the selected representation length while omitting its body.
+/// Every development response disables caching; HEAD reports length without body bytes.
 pub(super) fn respond_bytes(
     method: &Method,
     status: StatusCode,
@@ -587,816 +541,30 @@ pub(super) fn respond_bytes(
     body: ResponseBody,
 ) -> Response<ResponseBody> {
     let content_length = body.byte_len() as u64;
-    let mut response = Response::new(if method == Method::HEAD {
+    let mut resp = Response::new(if method == Method::HEAD {
         ResponseBody::head_metadata(0)
     } else {
         body
     });
-    *response.status_mut() = status;
-    let headers = response.headers_mut();
+    *resp.status_mut() = status;
+    let hdrs = resp.headers_mut();
     if let Some(content_type) = content_type {
-        headers.insert(
+        hdrs.insert(
             CONTENT_TYPE,
             HeaderValue::from_str(content_type)
                 .expect("validated response media type is a header value"),
         );
     }
-    headers.insert(CONTENT_LENGTH, HeaderValue::from(content_length));
-    headers.insert(
+    hdrs.insert(CONTENT_LENGTH, HeaderValue::from(content_length));
+    hdrs.insert(
         CACHE_CONTROL,
         HeaderValue::from_static("no-store, no-cache, must-revalidate, max-age=0"),
     );
-    headers.insert(PRAGMA, HeaderValue::from_static("no-cache"));
-    headers.insert(EXPIRES, HeaderValue::from_static("0"));
-    response
+    hdrs.insert(PRAGMA, HeaderValue::from_static("no-cache"));
+    hdrs.insert(EXPIRES, HeaderValue::from_static("0"));
+    resp
 }
 
 #[cfg(test)]
-mod tests {
-    use super::super::tests::site_config;
-    use std::fs;
-    use std::path::Path;
-    use std::sync::Arc;
-
-    use bytes::Bytes;
-    use hyper::{Method, Request, Response, StatusCode};
-    use tempfile::TempDir;
-    use tola_address::SiteUrlMount;
-    use tola_build::output::semantics::ResponseMediaType;
-
-    fn request(url: &str) -> Request<()> {
-        request_with_method(Method::GET, url)
-    }
-
-    fn request_with_method(method: Method, url: &str) -> Request<()> {
-        Request::builder().method(method).uri(url).body(()).unwrap()
-    }
-
-    fn request_with_header(
-        method: Method,
-        url: &str,
-        name: &'static str,
-        value: &str,
-    ) -> Request<()> {
-        let mut headers = hyper::HeaderMap::new();
-        headers.insert(
-            hyper::header::HeaderName::from_static(name),
-            hyper::header::HeaderValue::from_str(value).unwrap(),
-        );
-        let mut request = request_with_method(method, url);
-        *request.headers_mut() = headers;
-        request
-    }
-
-    fn reload_endpoint() -> crate::dev::reload::transport::ReloadEndpoint {
-        crate::dev::reload::transport::ReloadEndpoint::new(35729, "test-session", "test-generation")
-    }
-
-    /// The outputs one production build of `program` has, with each asset in `assets` published
-    /// at its path from a source file this call writes.
-    fn site_outputs(
-        program: &str,
-        assets: &[(&str, &str, &[u8])],
-    ) -> tola_build::output::revision::OutputRevision {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path();
-        let files = assets
-            .iter()
-            .map(|(path, source, bytes)| {
-                std::fs::write(root.join(source), bytes).unwrap();
-                format!(
-                    "{{source = {}, url = {}}}",
-                    serde_json::to_string(source).unwrap(),
-                    serde_json::to_string(&format!("/{path}")).unwrap()
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(",\n");
-        let configuration = format!(
-            "[build.minify]\ncss = false\njavascript = false\n[assets]\nfiles = [{files}]\n"
-        );
-        crate::dev::tests::built_outputs(
-            &crate::dev::tests::write_site(root, program, &configuration),
-            tola_build::build::BuildMode::Production,
-        )
-    }
-
-    /// The entry documenting `path` with `body`.
-    fn document_program(path: &str, body: &str) -> String {
-        format!(
-            "#document({})[{body}]",
-            serde_json::to_string(path).unwrap()
-        )
-    }
-
-    fn output<'a>(
-        revision: &'a tola_build::output::revision::OutputRevision,
-        path: &str,
-    ) -> &'a tola_build::output::graph::OutputFile {
-        revision
-            .output(&tola_address::OutputPath::parse(path).unwrap())
-            .unwrap()
-    }
-
-    fn published_response(
-        request: Request<()>,
-        site: &Arc<super::InstalledRevision>,
-        endpoint: Option<&crate::dev::reload::transport::ReloadEndpoint>,
-    ) -> Response<super::ResponseBody> {
-        super::respond_published(request, site, endpoint)
-    }
-
-    fn file_response(
-        request: Request<()>,
-        output: &tola_build::output::graph::OutputFile,
-        revision: &tola_build::output::revision::OutputRevision,
-        endpoint: Option<&crate::dev::reload::transport::ReloadEndpoint>,
-    ) -> Response<super::ResponseBody> {
-        super::respond_file(
-            request,
-            output,
-            &SiteUrlMount::root(),
-            endpoint,
-            revision,
-            &super::HtmlResponses::default(),
-        )
-    }
-
-    #[test]
-    fn unusable_ranges_serve_complete_body() {
-        let revision = site_outputs("", &[("download.bin", "input.bin", b"0123456789")]);
-        let mut conditional =
-            request_with_header(Method::GET, "/download.bin", "range", "bytes=2-5");
-        conditional.headers_mut().insert(
-            hyper::header::IF_RANGE,
-            hyper::header::HeaderValue::from_static("\"previous-revision\""),
-        );
-
-        for request in [
-            conditional,
-            request_with_header(Method::GET, "/download.bin", "range", "items=2-5"),
-        ] {
-            let response =
-                file_response(request, output(&revision, "download.bin"), &revision, None);
-
-            assert_eq!(response.status(), StatusCode::OK);
-            assert_eq!(body_bytes(response.body()).as_ref(), b"0123456789");
-            assert!(
-                !response
-                    .headers()
-                    .contains_key(hyper::header::CONTENT_RANGE)
-            );
-        }
-    }
-
-    /// Every development response answers HEAD with the GET status and the GET body length, and
-    /// no bytes. HEAD also ignores `Range`: the client asked for the whole representation.
-    #[test]
-    fn head_reports_get_length_without_body() {
-        let revision = site_outputs("", &[("media/video.mp4", "input.mp4", b"0123456789")]);
-        let asset = output(&revision, "media/video.mp4");
-        let asset_get = file_response(
-            request("/media/video.mp4"),
-            asset,
-            &revision,
-            Some(&reload_endpoint()),
-        );
-        let asset_head = file_response(
-            request_with_header(Method::HEAD, "/media/video.mp4", "range", "bytes=2-5"),
-            asset,
-            &revision,
-            Some(&reload_endpoint()),
-        );
-        assert_eq!(
-            content_length(file_response(
-                request_with_header(Method::GET, "/media/video.mp4", "range", "bytes=2-5"),
-                asset,
-                &revision,
-                Some(&reload_endpoint()),
-            )),
-            4,
-            "a ranged GET carries only the selected bytes"
-        );
-
-        let page = site_outputs(&document_program("index.html", "Page"), &[]);
-        let page_get = file_response(
-            request("/index.html"),
-            output(&page, "index.html"),
-            &page,
-            Some(&reload_endpoint()),
-        );
-        let page_head = file_response(
-            request_with_method(Method::HEAD, "/index.html"),
-            output(&page, "index.html"),
-            &page,
-            Some(&reload_endpoint()),
-        );
-
-        let runtime_get = super::respond_hotreload_js(request("/hotreload.js"));
-        let runtime_head =
-            super::respond_hotreload_js(request_with_method(Method::HEAD, "/hotreload.js"));
-
-        let error_get =
-            super::text_status_response(&Method::GET, StatusCode::BAD_REQUEST, "400 Bad Request");
-        let error_head =
-            super::text_status_response(&Method::HEAD, StatusCode::BAD_REQUEST, "400 Bad Request");
-
-        assert_eq!(
-            body_bytes(error_get.body()).as_ref(),
-            b"400 Bad Request",
-            "the table's GET rows carry their body"
-        );
-
-        for (get, head) in [
-            (asset_get, asset_head),
-            (page_get, page_head),
-            (runtime_get, runtime_head),
-            (error_get, error_head),
-        ] {
-            assert_eq!(head.status(), get.status());
-            assert!(body_bytes(head.body()).is_empty());
-            assert_eq!(content_length(head), body_bytes(get.body()).len() as u64);
-        }
-    }
-
-    #[test]
-    fn stale_representation_is_rejected() {
-        let revision = site_outputs("", &[("styles/site.css", "input.css", b"body {}")]);
-        let current = output(&revision, "styles/site.css");
-        let representation =
-            tola_build::output::manifest::RepresentationId::from_output(current).to_hex();
-        let accepted = file_response(
-            request(&format!(
-                "/styles/site.css?tola-representation={representation}"
-            )),
-            current,
-            &revision,
-            Some(&reload_endpoint()),
-        );
-        assert_eq!(accepted.status().as_u16(), 200);
-        assert_eq!(body_bytes(accepted.body()).as_ref(), b"body {}");
-
-        let unknown = file_response(
-            request("/styles/site.css?tola-representation=stale"),
-            current,
-            &revision,
-            Some(&reload_endpoint()),
-        );
-        assert_eq!(unknown.status().as_u16(), 409);
-        assert_eq!(
-            body_bytes(unknown.body()).as_ref(),
-            b"the site changed; reload the page"
-        );
-
-        let head = file_response(
-            request_with_method(Method::HEAD, "/styles/site.css?tola-representation=stale"),
-            current,
-            &revision,
-            Some(&reload_endpoint()),
-        );
-        assert_eq!(head.status().as_u16(), 409);
-        assert!(body_bytes(head.body()).is_empty());
-
-        let before = site_outputs("", &[("styles/site", "input.bin", b"body {}")]);
-        let after = site_outputs("", &[("styles/site", "input.css", b"body {}")]);
-        let previous = tola_build::output::manifest::RepresentationId::from_output(output(
-            &before,
-            "styles/site",
-        ))
-        .to_hex();
-        let changed = file_response(
-            request(&format!("/styles/site?tola-representation={previous}")),
-            output(&after, "styles/site"),
-            &after,
-            Some(&reload_endpoint()),
-        );
-        assert_eq!(changed.status().as_u16(), 409);
-        assert_eq!(
-            body_bytes(changed.body()).as_ref(),
-            b"the site changed; reload the page"
-        );
-    }
-
-    #[test]
-    fn user_representation_query_is_ignored() {
-        let revision = site_outputs("", &[("styles/site.css", "input.css", b"body {}")]);
-
-        let response = file_response(
-            request("/styles/site.css?tola-representation=user-value"),
-            output(&revision, "styles/site.css"),
-            &revision,
-            None,
-        );
-
-        assert_eq!(response.status().as_u16(), 200);
-        assert_eq!(body_bytes(response.body()).as_ref(), b"body {}");
-    }
-
-    #[test]
-    fn extensionless_asset_keeps_media_type() {
-        let revision = site_outputs("", &[("styles/app", "input.css", b"body {}")]);
-        let output = output(&revision, "styles/app");
-        let css = ResponseMediaType::CSS;
-
-        for response in [
-            file_response(request("/styles/app"), output, &revision, None),
-            file_response(
-                request_with_method(Method::HEAD, "/styles/app"),
-                output,
-                &revision,
-                None,
-            ),
-            file_response(
-                request_with_header(Method::GET, "/styles/app", "range", "bytes=0-3"),
-                output,
-                &revision,
-                None,
-            ),
-        ] {
-            assert_eq!(
-                response.headers()[hyper::header::CONTENT_TYPE],
-                css.as_str()
-            );
-        }
-    }
-
-    #[test]
-    fn html_without_reload_keeps_bytes() {
-        let revision = site_outputs(&document_program("index.html", "exact"), &[]);
-        let response = file_response(
-            request("/index.html"),
-            output(&revision, "index.html"),
-            &revision,
-            None,
-        );
-
-        assert_eq!(response.status().as_u16(), 200);
-        assert_eq!(
-            body_bytes(response.body()).as_ref(),
-            output(&revision, "index.html").bytes()
-        );
-    }
-
-    #[test]
-    fn duplicate_representation_is_rejected() {
-        let revision = site_outputs("", &[("site.css", "input.css", b"body {}")]);
-        let response = file_response(
-            request("/site.css?tola-representation=first&tola-representation=second"),
-            output(&revision, "site.css"),
-            &revision,
-            Some(&reload_endpoint()),
-        );
-
-        assert_eq!(response.status().as_u16(), 400);
-        assert_eq!(body_bytes(response.body()).as_ref(), b"400 Bad Request");
-    }
-
-    #[test]
-    fn range_spans_injected_slices() {
-        let revision = site_outputs(&document_program("index.html", "Home"), &[]);
-        let endpoint = reload_endpoint();
-        let output = output(&revision, "index.html");
-        let whole = file_response(request("/"), output, &revision, Some(&endpoint));
-        let partial = file_response(
-            request_with_header(Method::GET, "/", "range", "bytes=7-40"),
-            output,
-            &revision,
-            Some(&endpoint),
-        );
-
-        let whole = body_bytes(whole.body());
-        assert_eq!(partial.status().as_u16(), 206);
-        assert_eq!(body_bytes(partial.body()).as_ref(), &whole[7..41]);
-    }
-
-    #[test]
-    fn dev_responses_disable_caching() {
-        let directory = TempDir::new().unwrap();
-        fs::write(directory.path().join("download.txt"), "download").unwrap();
-        let site = published_site(
-            directory.path(),
-            "",
-            "[assets]\nfiles = [{source = \"download.txt\", url = \"/download\"}]",
-        );
-        let config = site.config();
-        let endpoint = reload_endpoint();
-        let unpublished_html = super::HtmlResponses::default();
-        let runtime = crate::embed::dev::hotreload_browser_path(config.url_mount());
-
-        for (request, status) in [
-            (request("/"), StatusCode::OK),
-            (request("/download"), StatusCode::OK),
-            (
-                request_with_header(Method::GET, "/download", "range", "bytes=0-3"),
-                StatusCode::PARTIAL_CONTENT,
-            ),
-            (
-                request_with_header(Method::GET, "/download", "range", "bytes=99-"),
-                StatusCode::RANGE_NOT_SATISFIABLE,
-            ),
-            (request("/missing"), StatusCode::NOT_FOUND),
-            (request(&runtime), StatusCode::OK),
-        ] {
-            let response = super::respond(
-                request,
-                Some(Arc::clone(&site)),
-                config,
-                Some(&endpoint),
-                &unpublished_html,
-            );
-            assert_eq!(response.status(), status);
-            assert!(
-                response.headers()[hyper::header::CACHE_CONTROL]
-                    .to_str()
-                    .unwrap()
-                    .split(',')
-                    .any(|value| value.trim() == "no-store")
-            );
-        }
-
-        let failed = super::respond(
-            request("/"),
-            None,
-            config,
-            Some(&endpoint),
-            &unpublished_html,
-        );
-        assert_eq!(failed.status(), StatusCode::SERVICE_UNAVAILABLE);
-        assert!(
-            failed.headers()[hyper::header::CACHE_CONTROL]
-                .to_str()
-                .unwrap()
-                .split(',')
-                .any(|value| value.trim() == "no-store")
-        );
-    }
-
-    fn content_length(response: Response<super::ResponseBody>) -> u64 {
-        response.headers()["content-length"]
-            .to_str()
-            .unwrap()
-            .parse()
-            .unwrap()
-    }
-
-    /// The bytes one development response has, joined from its slices.
-    fn body_bytes(body: &super::ResponseBody) -> Bytes {
-        body.remaining_slices()
-            .iter()
-            .flat_map(|slice| slice.iter().copied())
-            .collect::<Vec<u8>>()
-            .into()
-    }
-
-    #[test]
-    fn method_not_allowed_declares_methods() {
-        let directory = tempfile::tempdir().unwrap();
-        let config = site_config(directory.path(), "");
-        let response = super::respond(
-            request_with_method(Method::POST, "/"),
-            None,
-            &config,
-            None,
-            &super::HtmlResponses::default(),
-        );
-
-        assert_eq!(response.status().as_u16(), 405);
-        assert_eq!(
-            body_bytes(response.body()).as_ref(),
-            b"405 Method Not Allowed"
-        );
-        assert_eq!(response.headers()[hyper::header::ALLOW], "GET, HEAD");
-    }
-
-    #[test]
-    fn unsatisfiable_range_reports_length() {
-        let revision = site_outputs("", &[("media/video.mp4", "input.mp4", b"0123456789")]);
-        let response = file_response(
-            request_with_header(Method::GET, "/media/video.mp4", "range", "bytes=10-"),
-            output(&revision, "media/video.mp4"),
-            &revision,
-            None,
-        );
-
-        assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
-        assert_eq!(
-            response.headers()[hyper::header::CONTENT_RANGE],
-            "bytes */10"
-        );
-        assert!(body_bytes(response.body()).is_empty());
-        assert_eq!(content_length(response), 0);
-    }
-
-    #[test]
-    fn empty_site_root_serves_welcome() {
-        for (configuration, root_path) in [("", "/"), ("[site]\nbase-path = \"/docs/\"", "/docs/")]
-        {
-            let directory = TempDir::new().unwrap();
-            let site = published_site(directory.path(), "", configuration);
-            let diagnostic = tola_build::build::no_pages_diagnostic(site.config());
-            let endpoint = reload_endpoint();
-            let get = published_response(request(root_path), &site, Some(&endpoint));
-            let head = published_response(
-                request_with_method(Method::HEAD, root_path),
-                &site,
-                Some(&endpoint),
-            );
-
-            assert_eq!(get.status(), StatusCode::OK);
-            assert_eq!(
-                get.headers()[hyper::header::CONTENT_TYPE],
-                ResponseMediaType::HTML.as_str()
-            );
-            let body = body_bytes(get.body());
-            let html = String::from_utf8_lossy(&body);
-            assert!(html.contains(tola_build::html::escape(&diagnostic.message).as_ref()));
-            assert!(html.contains(tola_build::html::escape(&diagnostic.help[0].message).as_ref()));
-            assert!(html.contains("data-tola-runtime"));
-            assert_eq!(head.status(), StatusCode::OK);
-            assert_eq!(
-                head.headers()[hyper::header::CONTENT_TYPE],
-                get.headers()[hyper::header::CONTENT_TYPE]
-            );
-            assert!(body_bytes(head.body()).is_empty());
-            assert_eq!(content_length(head), body.len() as u64);
-        }
-    }
-
-    #[test]
-    fn runtime_preparation_failure_is_reported() {
-        let failure =
-            crate::embed::dev::RuntimeMinifyError::RuntimeSource("deliberate failure".into());
-        let response = super::respond_development_runtime(&Method::GET, Err(&failure));
-
-        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-        let body = String::from_utf8_lossy(&body_bytes(response.body())).into_owned();
-        assert!(
-            body.contains("could not prepare its development runtime"),
-            "{body}"
-        );
-        assert!(
-            !body.contains("deliberate failure"),
-            "the minifier's own message stays in the log"
-        );
-    }
-
-    fn published_site(
-        root: &Path,
-        program: &str,
-        configuration: &str,
-    ) -> Arc<super::InstalledRevision> {
-        let mut session = tola_build::build::BuildSession::new();
-        let (checked, _) = crate::dev::tests::checked_candidate(
-            &mut session,
-            crate::dev::tests::write_site(root, program, configuration),
-            tola_build::build::BuildMode::Production,
-        );
-        Arc::new(super::InstalledRevision::new(Arc::new(
-            session.install_revision(checked, Ok).unwrap(),
-        )))
-    }
-
-    fn published_document(root: &Path, path: &str, body: &str) -> Arc<super::InstalledRevision> {
-        published_site(root, &document_program(path, body), "")
-    }
-
-    #[test]
-    fn exact_paths_and_directory_indexes() {
-        let directory = TempDir::new().unwrap();
-        fs::write(directory.path().join("download.txt"), "download").unwrap();
-        let site = published_site(
-            directory.path(),
-            "#document(\"guide/index.html\")[Guide]\n#document(\"404.html\")[Missing]",
-            "[assets]\nfiles = [{source = \"download.txt\", url = \"/download\"}]",
-        );
-
-        // `guide` without its slash names the file `guide`, which this revision never published;
-        // only the trailing slash names the directory index.
-        for (path, status, output_path) in [
-            ("/guide/", StatusCode::OK, "guide/index.html"),
-            ("/guide/index.html?x=1", StatusCode::OK, "guide/index.html"),
-            ("/guide", StatusCode::NOT_FOUND, "404.html"),
-            ("/download", StatusCode::OK, "download"),
-            ("/missing", StatusCode::NOT_FOUND, "404.html"),
-            ("/404.html", StatusCode::NOT_FOUND, "404.html"),
-        ] {
-            for method in [Method::GET, Method::HEAD] {
-                let response =
-                    published_response(request_with_method(method.clone(), path), &site, None);
-                assert_eq!(response.status(), status, "{method} {path}");
-                assert!(!response.headers().contains_key(hyper::header::LOCATION));
-                if method == Method::HEAD {
-                    assert!(body_bytes(response.body()).is_empty());
-                } else {
-                    assert_eq!(
-                        body_bytes(response.body()).as_ref(),
-                        output(site.outputs(), output_path).bytes()
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn mounted_unicode_route() {
-        let directory = TempDir::new().unwrap();
-        let site = published_site(
-            directory.path(),
-            "#document(\"index.html\")[Home]\n#document(\"release..notes/中文/index.html\")[Guide]",
-            "[site]\nbase-path = \"/文档/\"",
-        );
-
-        let response = published_response(
-            request("/%e6%96%87%e6%a1%a3/release..notes/%e4%b8%ad%e6%96%87/"),
-            &site,
-            None,
-        );
-
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
-            body_bytes(response.body()).as_ref(),
-            output(site.outputs(), "release..notes/中文/index.html").bytes()
-        );
-    }
-
-    fn hot_reload_request_with_method(method: hyper::Method, revision: &str) -> Request<()> {
-        let mut headers = hyper::HeaderMap::new();
-        headers.insert(
-            hyper::header::HeaderName::from_static("x-tola-hot-reload"),
-            hyper::header::HeaderValue::from_static("true"),
-        );
-        headers.insert(
-            hyper::header::HeaderName::from_static("x-tola-revision"),
-            hyper::header::HeaderValue::from_str(revision).unwrap(),
-        );
-        let mut request = Request::builder().method(method).uri("/").body(()).unwrap();
-        *request.headers_mut() = headers;
-        request
-    }
-
-    #[test]
-    fn generation_header_is_public_identity() {
-        let directory = TempDir::new().unwrap();
-        let site = published_document(directory.path(), "index.html", "unchanged");
-        let config = site.config();
-        let first = super::ReloadEndpoint::new(35729, "secret-first", "public-first");
-        let restarted = super::ReloadEndpoint::new(35729, "secret-next", "public-next");
-        let respond = |request, endpoint| {
-            super::respond(
-                request,
-                Some(Arc::clone(&site)),
-                config,
-                Some(endpoint),
-                &super::HtmlResponses::default(),
-            )
-        };
-        let original = respond(request_with_method(Method::HEAD, "/"), &first);
-        let next = respond(request_with_method(Method::HEAD, "/"), &restarted);
-        assert_eq!(original.status(), StatusCode::OK);
-        assert_eq!(next.status(), StatusCode::OK);
-        assert_ne!(
-            original.headers()["X-Tola-Reload-Generation"],
-            next.headers()["X-Tola-Reload-Generation"]
-        );
-        assert!(body_bytes(next.body()).is_empty());
-        assert!(next.headers().values().all(|value| {
-            !value
-                .as_bytes()
-                .windows(b"secret-".len())
-                .any(|part| part == b"secret-")
-        }));
-
-        // Every response has the restart identity, including a failed build, a removed
-        // page, and a fenced hot-reload revision.
-        let unavailable = super::respond(
-            request_with_method(Method::HEAD, "/"),
-            None,
-            config,
-            Some(&restarted),
-            &super::HtmlResponses::default(),
-        );
-        let missing = respond(request_with_method(Method::HEAD, "/removed"), &restarted);
-        let fenced = respond(
-            hot_reload_request_with_method(Method::HEAD, "stale"),
-            &restarted,
-        );
-        let fenced_get = respond(
-            hot_reload_request_with_method(Method::GET, "stale"),
-            &restarted,
-        );
-        assert_eq!(unavailable.status(), StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
-        assert_eq!(fenced.status(), StatusCode::CONFLICT);
-        assert_eq!(fenced_get.status(), StatusCode::CONFLICT);
-        assert_eq!(
-            body_bytes(fenced_get.body()).as_ref(),
-            b"the site changed; reload the page"
-        );
-        for response in [unavailable, missing, fenced] {
-            assert_eq!(
-                response.headers()["X-Tola-Reload-Generation"],
-                next.headers()["X-Tola-Reload-Generation"]
-            );
-            assert!(body_bytes(response.body()).is_empty());
-        }
-    }
-
-    #[test]
-    fn missing_routes_keep_fallback_status() {
-        for (configuration, missing_paths) in [
-            (
-                "",
-                ["/", "/404.html", "/missing", "/index.html", "/nested/"],
-            ),
-            (
-                "[site]\nbase-path = \"/docs/\"",
-                [
-                    "/docs/",
-                    "/docs/404.html",
-                    "/docs/missing",
-                    "/docs/index.html",
-                    "/",
-                ],
-            ),
-        ] {
-            let directory = TempDir::new().unwrap();
-            let site = published_site(
-                directory.path(),
-                "#document(\"404.html\")[Not Found]",
-                configuration,
-            );
-            for path in missing_paths {
-                let get = published_response(request(path), &site, None);
-                let head = published_response(request_with_method(Method::HEAD, path), &site, None);
-
-                assert_eq!(get.status(), StatusCode::NOT_FOUND, "{path}");
-                assert_eq!(
-                    body_bytes(get.body()).as_ref(),
-                    output(site.outputs(), "404.html").bytes(),
-                    "{path}"
-                );
-                assert_eq!(head.status(), StatusCode::NOT_FOUND, "{path}");
-                assert!(body_bytes(head.body()).is_empty(), "{path}");
-                assert_eq!(content_length(head), body_bytes(get.body()).len() as u64);
-            }
-        }
-    }
-
-    #[test]
-    fn asset_404_url_is_ordinary() {
-        let dir = TempDir::new().unwrap();
-        fs::write(dir.path().join("not-found.html"), "ordinary asset").unwrap();
-        let site = published_site(
-            dir.path(),
-            "",
-            "[assets]\nfiles = [{source = \"not-found.html\", url = \"/404.html\"}]",
-        );
-        let request = request("/404.html");
-
-        let response = published_response(request, &site, Some(&reload_endpoint()));
-
-        assert_eq!(response.status().as_u16(), 200);
-        assert_eq!(body_bytes(response.body()).as_ref(), b"ordinary asset");
-    }
-
-    #[test]
-    fn non_html_sites_preserve_route_status() {
-        for program in ["", "#document(\"download.pdf\", format: \"pdf\")[Download]"] {
-            let directory = TempDir::new().unwrap();
-            fs::write(directory.path().join("theme.css"), "body {}").unwrap();
-            let site = published_site(
-                directory.path(),
-                program,
-                "[build.minify]\ncss = false\n[assets]\nfiles = [{ source = \"theme.css\", url = \"/theme.css\" }]",
-            );
-            for (path, status) in [
-                ("/", StatusCode::OK),
-                ("/theme.css", StatusCode::OK),
-                ("/missing", StatusCode::NOT_FOUND),
-            ] {
-                let get = published_response(request(path), &site, None);
-                let head = published_response(request_with_method(Method::HEAD, path), &site, None);
-
-                assert_eq!(get.status(), status, "{program}: {path}");
-                assert_eq!(head.status(), status, "{program}: {path}");
-                assert!(body_bytes(head.body()).is_empty());
-                assert_eq!(content_length(head), body_bytes(get.body()).len() as u64);
-                if path == "/theme.css" {
-                    assert_eq!(body_bytes(get.body()).as_ref(), b"body {}");
-                } else if path == "/missing" {
-                    assert_eq!(body_bytes(get.body()).as_ref(), b"404 Not Found");
-                } else {
-                    let body = body_bytes(get.body());
-                    assert!(
-                        String::from_utf8_lossy(&body).contains(
-                            tola_build::html::escape(
-                                &tola_build::build::no_pages_diagnostic(site.config()).message
-                            )
-                            .as_ref()
-                        )
-                    );
-                }
-            }
-        }
-    }
-}
+#[path = "response_tests.rs"]
+mod tests;

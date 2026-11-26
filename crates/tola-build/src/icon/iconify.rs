@@ -185,27 +185,14 @@ fn registry_failure(
     url: &str,
     source: crate::resources::HttpDownloadError,
 ) -> IconError {
-    use crate::resources::HttpDownloadError;
-    match source {
-        HttpDownloadError::NetworkDenied => IconError::NetworkDenied {
-            namespace: namespace.into(),
-            url: url.into(),
-        },
-        HttpDownloadError::Cancelled(cancelled) => IconError::Cancelled(cancelled),
-        HttpDownloadError::Runtime(source) => IconError::NetworkRuntime(source),
-        HttpDownloadError::WorkerStopped => IconError::NetworkWorker,
-        HttpDownloadError::TooLarge { limit } => IconError::RemoteTooLarge {
-            namespace: namespace.into(),
-            url: url.into(),
-            limit,
-        },
-        source @ HttpDownloadError::Request(_) => IconError::RegistryMetadata {
+    super::remote::map_download_error(namespace, url, source, |source| {
+        IconError::RegistryMetadata {
             namespace: namespace.into(),
             preset: preset.into(),
             url: url.into(),
             source,
-        },
-    }
+        }
+    })
 }
 
 /// The registry's document for one package.

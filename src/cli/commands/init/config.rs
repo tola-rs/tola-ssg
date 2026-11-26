@@ -36,8 +36,8 @@ mod tests {
 
     #[test]
     fn initial_help_targets_resolve() {
+        use crate::help::language::HelpLanguage;
         use crate::help::pages::{page_of, request};
-        use crate::i18n::HelpLanguage;
         let config = config_file("site.typ");
         let commands = config
             .lines()

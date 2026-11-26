@@ -4,7 +4,7 @@ use typst::introspection::Location;
 use typst::syntax::VirtualPath;
 
 use crate::cancellation::BuildCancellation;
-use crate::config::ResolvedSiteConfig;
+use crate::config::SiteConfig;
 use crate::seo::RenderError;
 use crate::seo::declaration::{
     DocumentTarget, SeoDeclaration, SeoDeclarationError, TargetAnchor, resolve_document,
@@ -25,7 +25,7 @@ pub(super) fn resolve_target<'a>(
     value: &Value,
     field: &str,
     output: &OutputPath,
-    config: &ResolvedSiteConfig,
+    config: &SiteConfig,
     compilation: &'a tola_typst::BundleCompilation,
     cancellation: &BuildCancellation,
 ) -> Result<DocumentTarget<'a>, RenderError> {
@@ -80,7 +80,7 @@ fn location_fragment(
     field: &str,
     location: Location,
     output: &OutputPath,
-    config: &ResolvedSiteConfig,
+    config: &SiteConfig,
     compilation: &tola_typst::BundleCompilation,
 ) -> Result<Option<String>, SeoDeclarationError> {
     let introspector = compilation.introspector();

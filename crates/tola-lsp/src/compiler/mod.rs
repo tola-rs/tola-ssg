@@ -27,7 +27,7 @@ pub(crate) mod tests {
     use anyhow::Result;
     use tola_build::BuildResources;
     use tola_build::cancellation::BuildCancellation;
-    use tola_build::config::ResolvedSiteConfig;
+    use tola_build::config::SiteConfig;
     use tola_build::config::loading::{BuildOverrides, load_site_config};
 
     use super::jobs::{SourceInputs, SourceOverrides, UnsavedSource};
@@ -60,7 +60,7 @@ pub(crate) mod tests {
 
     /// A compiler lane answering from one site's configuration, with default build resources.
     pub(crate) fn compiler(
-        configuration: &Arc<ResolvedSiteConfig>,
+        configuration: &Arc<SiteConfig>,
     ) -> SourceCompiler<
         impl FnMut(&Path, &[UnsavedSource], &BuildCancellation) -> Result<ServedWorkspace>,
     > {
@@ -89,7 +89,7 @@ pub(crate) mod tests {
     }
 
     /// The configuration a site below `root` loads from its `tola.toml`, written as `text`.
-    pub(crate) fn site_configuration(root: &Path, text: &str) -> Arc<ResolvedSiteConfig> {
+    pub(crate) fn site_configuration(root: &Path, text: &str) -> Arc<SiteConfig> {
         let path = root.join("tola.toml");
         std::fs::write(&path, text).unwrap();
         Arc::new(

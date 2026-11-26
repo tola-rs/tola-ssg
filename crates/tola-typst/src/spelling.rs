@@ -146,7 +146,7 @@ mod tests {
     }
 
     #[test]
-    fn near_miss_names_its_closest_candidate() {
+    fn closest_near_miss() {
         let candidates = ["site", "document", "address"];
         assert_eq!(closest_of("sitee", &candidates), Some("site"));
         assert_eq!(closest_of("documnt", &candidates), Some("document"));
@@ -158,14 +158,13 @@ mod tests {
             "an exact name needs no fix"
         );
 
-        // Two candidates inside the typo distance still choose the nearer one.
         let close = ["asset", "assert"];
         assert_eq!(closest_of("asert", &close), Some("assert"));
         assert_eq!(closest_of("nothing", &[]), None);
     }
 
     #[test]
-    fn transposition_outranks_substitution() {
+    fn closest_transposition_priority() {
         assert_eq!(closest_of("teh", &["tea", "the"]), Some("the"));
         assert_eq!(
             closest_of("teh", &["the", "tea"]),
@@ -179,7 +178,7 @@ mod tests {
     }
 
     #[test]
-    fn short_names_are_not_corrected() {
+    fn closest_short_ignored() {
         for (written, candidate) in [("x", "y"), ("ab", "cd"), ("", "a")] {
             assert_eq!(
                 closest_of(written, &[candidate]),
@@ -190,7 +189,7 @@ mod tests {
     }
 
     #[test]
-    fn suggestions_require_one_best_spelling() {
+    fn closest_ambiguous_ignored() {
         assert_eq!(closest_of("Site", &["site", "SITE"]), None);
         assert_eq!(closest_of("Title", &["title", "title"]), Some("title"));
         assert_eq!(closest_of("siet", &["site", "siet"]), None);

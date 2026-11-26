@@ -1,24 +1,15 @@
-//! The calls that wrap a value the author has already written.
-//!
-//! A wrap replaces the whole field access, so the author keeps what they wrote and no written name
-//! is left dangling: `#body.al` becomes `#align(center, body)`. Every wrap is a Typst call, so each
-//! one is valid wherever an expression is.
+//! Postfix calls that wrap a written value.
 
-use std::ops::Range as ByteRange;
+use std::ops::Range;
 
 use typst_syntax::{LinkedNode, Side, Source, SyntaxKind};
 
 use crate::edit::Edit;
 
-/// The call one wrap makes.
 struct Call {
-    /// The name the author types after the dot.
     name: &'static str,
-    /// The text the wrap opens with.
     before: &'static str,
-    /// The text the wrap closes with.
     after: &'static str,
-    /// What the wrap does, in the site author's words.
     documentation: &'static str,
 }
 
@@ -78,12 +69,12 @@ const WRAPS: &[Call] = &[
 ];
 
 /// The wraps the value under the cursor accepts.
-pub fn wraps(source: &Source, at: usize) -> Vec<Wrap> {
-    let Some(access) = field(source, at) else {
+pub fn wraps(src: &Source, at: usize) -> Vec<Wrap> {
+    let Some(access) = field(src, at) else {
         return Vec::new();
     };
-    let value = &source.text()[access.value.clone()];
-    let written = &source.text()[access.written];
+    let val = &src.text()[access.value.clone()];
+    let written = &src.text()[access.written];
     WRAPS
         .iter()
         .filter(|call| call.name.starts_with(written))
@@ -92,29 +83,27 @@ pub fn wraps(source: &Source, at: usize) -> Vec<Wrap> {
             documentation: call.documentation,
             edit: Edit {
                 range: access.range.clone(),
-                text: format!("{}{value}{}", call.before, call.after),
+                text: format!("{}{val}{}", call.before, call.after),
                 insertion: Some(call.before.len()),
             },
         })
         .collect()
 }
 
-/// The field access the cursor is inside: the value it stands on, the name written after the dot,
-/// and the access a wrap replaces.
 struct FieldAccess {
-    value: ByteRange<usize>,
-    written: ByteRange<usize>,
-    range: ByteRange<usize>,
+    value: Range<usize>,
+    written: Range<usize>,
+    range: Range<usize>,
 }
 
-fn field(source: &Source, at: usize) -> Option<FieldAccess> {
-    let node = LinkedNode::new(source.root()).leaf_at(at, Side::Before)?;
+fn field(src: &Source, at: usize) -> Option<FieldAccess> {
+    let node = LinkedNode::new(src.root()).leaf_at(at, Side::Before)?;
     if node.kind() != SyntaxKind::Ident {
         return None;
     }
     if node
         .prev_leaf()
-        .is_none_or(|previous| previous.kind() != SyntaxKind::Dot)
+        .is_none_or(|prev| prev.kind() != SyntaxKind::Dot)
     {
         return None;
     }
@@ -133,16 +122,14 @@ fn field(source: &Source, at: usize) -> Option<FieldAccess> {
 mod tests {
     use super::*;
 
-    /// The wrap of `name` at the cursor the text marks.
     fn wrap(marked: &str, name: &str) -> Option<Wrap> {
         let cursor = marked.find('|').expect("a cursor marker");
-        let source = Source::detached(marked.replace('|', ""));
-        wraps(&source, cursor)
+        let src = Source::detached(marked.replace('|', ""));
+        wraps(&src, cursor)
             .into_iter()
             .find(|wrap| wrap.name == name)
     }
 
-    /// The text an author is left with after accepting one wrap.
     fn accepted_text(text: &str, edit: &Edit) -> String {
         let mut accepted = text.to_owned();
         accepted.replace_range(edit.range.clone(), &edit.text);
@@ -150,7 +137,7 @@ mod tests {
     }
 
     #[test]
-    fn wrap_replaces_the_field_access() {
+    fn wrap_replaces_field_access() {
         let align = wrap("#body.al|", "align").expect("the align wrap");
         assert_eq!(
             accepted_text("#body.al", &align.edit),
@@ -166,12 +153,9 @@ mod tests {
     }
 
     #[test]
-    fn partial_name_keeps_the_named_wrap() {
-        let source = Source::detached("#body.ali".to_owned());
-        let names: Vec<&str> = wraps(&source, 7)
-            .into_iter()
-            .map(|wrap| wrap.name)
-            .collect();
+    fn wrap_filters_partial_name() {
+        let src = Source::detached("#body.ali".to_owned());
+        let names: Vec<&str> = wraps(&src, 7).into_iter().map(|wrap| wrap.name).collect();
         assert_eq!(names, ["align"]);
     }
 }

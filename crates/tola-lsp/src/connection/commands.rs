@@ -102,7 +102,7 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
             .configuration
             .as_ref()
             .map_or(workspace.root.as_path(), |configuration| {
-                configuration.get_root()
+                configuration.root()
             });
         tola_build::filesystem::DevServerAddress::read(root)
     }

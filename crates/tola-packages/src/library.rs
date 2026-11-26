@@ -1,8 +1,7 @@
-//! The Typst library the engine compiles each site with, and the host bindings it exposes.
+//! Typst library and `sys.inputs` host bindings for one build.
 //!
-//! The engine supplies every site-specific value through `sys.inputs`, and the packages read them
-//! back from the compilation they run in. A deferred function therefore sees the build it is
-//! evaluated in rather than the state captured when it was exported.
+//! Site-specific values live in `sys.inputs` so deferred functions read the active compilation
+//! rather than state captured when exported.
 
 use std::sync::Arc;
 
@@ -18,17 +17,17 @@ use crate::protocol::{
     SOURCE_RECORDS_BY_FILE_MEMBER, SOURCE_RECORDS_MEMBER,
 };
 
-/// The site-specific values one compilation is bound to; every field takes part in reuse.
+/// Site-specific inputs bound to one compilation.
 pub struct HostInputs {
-    /// The `@tola/site` values the engine resolved from the site configuration.
+    /// `@tola/site` values resolved from the site configuration.
     pub site: Dict,
-    /// Configured module records keyed by the site's module aliases.
+    /// Configured module records keyed by module alias.
     pub modules: Dict,
-    /// Final configured asset URLs, keyed by the declared site-root URL.
+    /// Final configured asset URLs keyed by declared site-root URL.
     pub asset_urls: Dict,
     /// Site-root source paths for exact-file asset declarations, keyed by declared URL.
     pub asset_origins: Dict,
-    /// The ordered source records.
+    /// Ordered source records.
     pub source_records: Array,
     /// Lexical source file views keyed by source path.
     pub source_records_by_file: Dict,
@@ -36,50 +35,34 @@ pub struct HostInputs {
     pub source_origins: Dict,
 }
 
-/// One immutable Typst library, with the host bindings for a single build.
+/// Immutable Typst library with host bindings for a single build.
 pub struct SiteLibrary {
     library: Arc<LazyHash<typst::Library>>,
 }
 
 impl SiteLibrary {
     pub fn new(inputs: HostInputs) -> Self {
-        // The host interface is a module the packages import. Each name is the package-facing
-        // one, and Typst checks the imported names and argument types, so a mismatch is an
-        // ordinary compile error.
         let mut host = native_scope();
         host.define("site", inputs.site);
 
-        // Typst gives a world one channel for compiled-in state: `sys.inputs`. A module value
-        // there is importable by a package, and unlike the global scope it stays unreachable to
-        // an author who does not name this key.
-        let mut values = Dict::new();
-        values.insert(
-            HOST_MODULE.into(),
-            Value::Module(Module::new(HOST_MODULE, host)),
-        );
-        values.insert(
-            SOURCE_RECORDS_MEMBER.into(),
-            inputs.source_records.into_value(),
-        );
-        values.insert(
-            SOURCE_RECORDS_BY_FILE_MEMBER.into(),
-            inputs.source_records_by_file.into_value(),
-        );
-        values.insert(
-            SOURCE_ORIGINS_MEMBER.into(),
-            inputs.source_origins.into_value(),
-        );
-        values.insert(MODULES_MEMBER.into(), inputs.modules.into_value());
-        values.insert(ASSET_URLS_MEMBER.into(), inputs.asset_urls.into_value());
-        values.insert(
-            ASSET_ORIGINS_MEMBER.into(),
-            inputs.asset_origins.into_value(),
-        );
+        // `sys.inputs` keeps the internal host module unreachable unless explicitly imported.
+        let values = crate::dict([
+            (HOST_MODULE, Value::Module(Module::new(HOST_MODULE, host))),
+            (SOURCE_RECORDS_MEMBER, inputs.source_records.into_value()),
+            (
+                SOURCE_RECORDS_BY_FILE_MEMBER,
+                inputs.source_records_by_file.into_value(),
+            ),
+            (SOURCE_ORIGINS_MEMBER, inputs.source_origins.into_value()),
+            (MODULES_MEMBER, inputs.modules.into_value()),
+            (ASSET_URLS_MEMBER, inputs.asset_urls.into_value()),
+            (ASSET_ORIGINS_MEMBER, inputs.asset_origins.into_value()),
+        ]);
 
-        let mut library = tola_typst::create_library_with_inputs(values).into_inner();
-        crate::code_syntaxes::install(&mut library.rules);
+        let mut lib = tola_typst::create_library_with_inputs(values).into_inner();
+        crate::code_syntaxes::install(&mut lib.rules);
         Self {
-            library: Arc::new(library.into()),
+            library: Arc::new(lib.into()),
         }
     }
 
@@ -88,16 +71,13 @@ impl SiteLibrary {
     }
 }
 
-/// The `all-sources` native in the host scope, which `@tola/source` re-exports: the one spelling
-/// the engine and the language server both match against.
+/// Host scope name for `all-sources` re-exported by `@tola/source`.
 pub const ALL_SOURCES: &str = "all-sources";
 
-/// The `current-source` native in the host scope, which `@tola/source` re-exports: the one
-/// spelling the engine and the language server both match against.
+/// Host scope name for `current-source` re-exported by `@tola/source`.
 pub const CURRENT_SOURCE: &str = "current-source";
 
-/// The `tola-meta` native in the host scope, which `@tola/source` re-exports: the one spelling
-/// the engine and the language server both match against.
+/// Host scope name for `tola-meta` re-exported by `@tola/source`.
 pub const TOLA_META: &str = "tola-meta";
 
 pub(crate) fn native_scope() -> Scope {
@@ -179,42 +159,37 @@ pub(crate) fn native_scope() -> Scope {
         host.define(name, Func::from(native));
     }
     super::datalog::define(&mut host);
-    // Theme keys spell the theme name; values are package-anchored paths to the theme files.
     host.define("code-themes", super::code_themes::themes_dict());
     host.define("code-syntaxes", super::code_syntaxes::files());
     host.define("references", super::references::references_func());
     host
 }
 
-/// The browser URL one published output is served from, under the site's deployment mount.
 pub(super) fn browser_output_url(
     engine: &Engine<'_>,
     span: Span,
-    output: &OutputPath,
+    out: &OutputPath,
 ) -> SourceResult<String> {
     Ok(browser_url(
-        &route_for_output(output),
+        &route_for_output(out),
         &site_mount(engine, span)?,
         None,
     ))
 }
 
-/// The deployment mount of the compilation `engine` is running.
 pub(super) fn site_mount(engine: &Engine<'_>, span: Span) -> SourceResult<SiteUrlMount> {
-    let base_path = site_base_path(engine)
+    let base = site_base_path(engine)
         .ok_or("Tola site.base-path is unavailable in this compilation")
         .at(span)?;
-    SiteUrlMount::from_base_path(base_path.as_str())
-        .map_err(|error| error.to_string())
+    SiteUrlMount::from_base_path(base.as_str())
+        .map_err(|err| err.to_string())
         .at(span)
 }
 
-/// The deployment base path for the compilation `engine` is running.
 pub(super) fn site_base_path(engine: &Engine<'_>) -> Option<String> {
-    site_value(engine, "base-path").map(|value| value.as_str().to_owned())
+    site_value(engine, "base-path").map(|val| val.as_str().to_owned())
 }
 
-/// One string member of the `@tola/site` values this compilation is bound to.
 fn site_value<'a>(engine: &Engine<'a>, member: &str) -> Option<&'a Str> {
     let Ok(Value::Module(host)) = sys_inputs(engine)?.get(HOST_MODULE) else {
         return None;
@@ -223,46 +198,37 @@ fn site_value<'a>(engine: &Engine<'a>, member: &str) -> Option<&'a Str> {
         return None;
     };
     match site.get(member) {
-        Ok(Value::Str(value)) => Some(value),
+        Ok(Value::Str(val)) => Some(val),
         _ => None,
     }
 }
 
-/// The `sys.inputs` of the running compilation; a deferred function must reach its own inputs.
 fn sys_inputs<'a>(engine: &Engine<'a>) -> Option<&'a Dict> {
-    let Value::Module(system) = engine.library.global.scope().get("sys")?.read() else {
+    let Value::Module(sys) = engine.library.global.scope().get("sys")?.read() else {
         return None;
     };
-    let Value::Dict(inputs) = system.scope().get("inputs")?.read() else {
+    let Value::Dict(inputs) = sys.scope().get("inputs")?.read() else {
         return None;
     };
     Some(inputs)
 }
 
-/// Configured module records bound to this compilation.
 pub(super) fn module_records<'a>(engine: &Engine<'a>) -> Option<&'a Dict> {
     dict_member(engine, MODULES_MEMBER)
 }
 
-/// The ordered source records of the compilation `engine` is running.
 pub(super) fn source_records<'a>(engine: &Engine<'a>) -> Option<&'a Array> {
-    match sys_inputs(engine)?.get(SOURCE_RECORDS_MEMBER) {
-        Ok(Value::Array(sources)) => Some(sources),
-        _ => None,
-    }
+    crate::dict_array(sys_inputs(engine)?, SOURCE_RECORDS_MEMBER)
 }
 
-/// Lexical source file views of this compilation, keyed by source path.
 pub(super) fn source_records_by_file<'a>(engine: &Engine<'a>) -> Option<&'a Dict> {
     dict_member(engine, SOURCE_RECORDS_BY_FILE_MEMBER)
 }
 
-/// Each source's declaration file and range, keyed by source path.
 pub(super) fn source_origins<'a>(engine: &Engine<'a>) -> Option<&'a Dict> {
     dict_member(engine, SOURCE_ORIGINS_MEMBER)
 }
 
-/// Final asset URLs of the running compilation, keyed by declared URL; a check appends no identity.
 pub(super) fn asset_urls<'a>(engine: &Engine<'a>) -> Option<&'a Dict> {
     dict_member(engine, ASSET_URLS_MEMBER)
 }
@@ -271,10 +237,6 @@ pub(super) fn asset_origins<'a>(engine: &Engine<'a>) -> Option<&'a Dict> {
     dict_member(engine, ASSET_ORIGINS_MEMBER)
 }
 
-/// One dictionary member of the `sys.inputs` this compilation is bound to.
 fn dict_member<'a>(engine: &Engine<'a>, member: &str) -> Option<&'a Dict> {
-    match sys_inputs(engine)?.get(member) {
-        Ok(Value::Dict(value)) => Some(value),
-        _ => None,
-    }
+    crate::dict_dict(sys_inputs(engine)?, member)
 }

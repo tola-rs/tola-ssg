@@ -486,9 +486,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn modules_retained_without_reading_manifest() {
+    fn modules_retained_offline() {
         let site = tempfile::tempdir().unwrap();
-        let config = crate::config::loading::resolve_site_config(
+        let cfg = crate::config::loading::resolve_site_config(
             &site.path().join("tola.toml"),
             "[modules.forest]\npath = \"theme\"\n",
             tola_typst::PackageLocations::default(),
@@ -497,7 +497,7 @@ mod tests {
         .unwrap()
         .into_config();
         assert_eq!(
-            config.modules()["forest"].source,
+            cfg.modules()["forest"].source,
             tola_module::declaration::ModuleSource::Local {
                 path: std::path::PathBuf::from("theme")
             }
@@ -506,31 +506,31 @@ mod tests {
     }
 
     #[test]
-    fn module_roots_protected_from_publication_and_author_hook_replacement() {
+    fn module_roots_protected() {
         let site = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(site.path().join("themes/forest")).unwrap();
-        let config = |extra: &str| format!("[modules.forest]\npath = \"themes/forest\"\n{extra}");
-        let resolve = |source: &str| {
+        let cfg_text = |extra: &str| format!("[modules.forest]\npath = \"themes/forest\"\n{extra}");
+        let resolve = |src: &str| {
             crate::config::loading::resolve_site_config(
                 &site.path().join("tola.toml"),
-                source,
+                src,
                 tola_typst::PackageLocations::default(),
                 &crate::config::loading::BuildOverrides::default(),
             )
         };
-        for output in ["themes", "themes/forest", "themes/forest/output"] {
-            let error =
-                resolve(&config(&format!("[build]\npublish-dir = \"{output}\"\n"))).unwrap_err();
-            assert!(format!("{error:#}").contains("module root"), "{error:#}");
+        for out in ["themes", "themes/forest", "themes/forest/output"] {
+            let err =
+                resolve(&cfg_text(&format!("[build]\npublish-dir = \"{out}\"\n"))).unwrap_err();
+            assert!(format!("{err:#}").contains("module root"), "{err:#}");
         }
-        let error = resolve(&config("[[hooks.before-build]]\nenable = true\nname = \"overwrite\"\nargv = [\"tool\"]\ngenerates = [\"themes/forest\"]\n")).unwrap_err();
-        assert!(format!("{error:#}").contains("module root"), "{error:#}");
-        assert!(resolve(&config("[[hooks.before-build]]\nenable = false\nname = \"off\"\nargv = [\"tool\"]\ngenerates = [\"themes/forest/data\"]\n")).is_ok());
+        let err = resolve(&cfg_text("[[hooks.before-build]]\nenable = true\nname = \"overwrite\"\nargv = [\"tool\"]\ngenerates = [\"themes/forest\"]\n")).unwrap_err();
+        assert!(format!("{err:#}").contains("module root"), "{err:#}");
+        assert!(resolve(&cfg_text("[[hooks.before-build]]\nenable = false\nname = \"off\"\nargv = [\"tool\"]\ngenerates = [\"themes/forest/data\"]\n")).is_ok());
     }
 
     #[cfg(unix)]
     #[test]
-    fn symlinked_root_protected_physical_identity() {
+    fn module_symlink_root_protected() {
         use std::os::unix::fs::symlink;
         let site = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(site.path().join("actual/forest")).unwrap();
@@ -539,21 +539,21 @@ mod tests {
             site.path().join("theme-link"),
         )
         .unwrap();
-        let source = "[modules.forest]\npath = \"theme-link\"\n[build]\npublish-dir = \"actual\"\n";
-        let error = crate::config::loading::resolve_site_config(
+        let src = "[modules.forest]\npath = \"theme-link\"\n[build]\npublish-dir = \"actual\"\n";
+        let err = crate::config::loading::resolve_site_config(
             &site.path().join("tola.toml"),
-            source,
+            src,
             tola_typst::PackageLocations::default(),
             &crate::config::loading::BuildOverrides::default(),
         )
         .unwrap_err();
-        assert!(format!("{error:#}").contains("module root"), "{error:#}");
+        assert!(format!("{err:#}").contains("module root"), "{err:#}");
     }
 
     #[test]
-    fn settings_validate_without_site() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().join("site");
+    fn settings_validate_headless() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("site");
         let parsed = ConfigSource::parse(
             &root.join("tola.toml"),
             "[site]\norigin = \"https://example.com\"\nlanguage = \"zh-CN\"\n",
@@ -564,49 +564,46 @@ mod tests {
         .unwrap();
 
         parsed.validate_settings().unwrap();
-
         assert!(!root.exists());
     }
 
     #[test]
-    fn refused_settings_still_name_their_line() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().join("site");
+    fn refused_settings_cite_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("site");
         let path = root.join("tola.toml");
-        for (source, field) in [
+        for (src, field) in [
             ("[site]\nlanguage = \"english\"\n", "site.language"),
             ("[site]\norigin = \"example.com\"\n", "site.origin"),
             ("[build]\nentry = \"../entry.typ\"\n", "build.entry"),
         ] {
-            let parsed = ConfigSource::parse(&path, source, InputScope::Online)
+            let parsed = ConfigSource::parse(&path, src, InputScope::Online)
                 .unwrap()
                 .decode_site()
                 .unwrap();
-            let error = parsed.validate_settings().unwrap_err();
-            let diagnostics = crate::config::tests::attached_diagnostics(&error);
+            let err = parsed.validate_settings().unwrap_err();
+            let diag = crate::config::tests::attached_diagnostics(&err);
 
             assert!(
-                diagnostics.iter().any(|diagnostic| {
-                    diagnostic.severity == tola_diagnostic::Severity::Error
-                        && diagnostic.notes.iter().any(|note| note.as_str() == field)
-                        && diagnostic
-                            .location
+                diag.iter().any(|d| {
+                    d.severity == tola_diagnostic::Severity::Error
+                        && d.notes.iter().any(|n| n.as_str() == field)
+                        && d.location
                             .as_ref()
-                            .is_some_and(|location| location.path.ends_with("tola.toml"))
+                            .is_some_and(|loc| loc.path.ends_with("tola.toml"))
                 }),
-                "{source}: {diagnostics:?}"
+                "{src}: {diag:?}"
             );
             assert!(!root.exists());
         }
     }
 
-    /// Every declared path documents itself, so hover answers for the whole file.
     #[test]
-    fn every_declared_path_documents_itself() {
-        for path in field_paths().map(|field| field.as_str()) {
-            let documentation = field_documentation(path);
+    fn declared_paths_documented() {
+        for path in field_paths().map(|f| f.as_str()) {
+            let doc = field_documentation(path);
             assert!(
-                documentation.is_some_and(|documentation| !documentation.is_empty()),
+                doc.is_some_and(|d| !d.is_empty()),
                 "`{path}` has no documentation"
             );
         }

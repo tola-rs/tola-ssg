@@ -1,4 +1,4 @@
-//! VP8 intra prediction search and reconstruction for one macroblock.
+//! VP8 intra mode search and macroblock reconstruction.
 
 use fearless_simd::Simd;
 
@@ -14,7 +14,6 @@ use crate::reconstruction::{Plane, Reconstruction};
 use crate::token::{CoefficientPlane, MacroblockContexts, TokenCosts};
 use crate::{transform, trellis, vp8};
 
-// Each YUV420 chroma sample represents a 2×2 luma cell.
 const CHROMA_SAMPLE_AREA: u64 = 4;
 const SUBBLOCK_SIDE: usize = 4;
 const BLOCKS_PER_ROW: usize = MACROBLOCK_SIDE / SUBBLOCK_SIDE;
@@ -31,7 +30,7 @@ pub(super) struct Quantizer<S> {
 }
 
 #[derive(Clone, Copy)]
-enum Quantization {
+enum QuantMethod {
     Nearest,
     Trellis,
 }
@@ -73,30 +72,30 @@ impl<S: Simd> Quantizer<S> {
 
     fn block(
         &self,
-        coefficients: &[i32; 16],
+        coeff: &[i32; 16],
         plane: CoefficientPlane,
-        context: usize,
-        method: Quantization,
+        ctx: usize,
+        quant: QuantMethod,
     ) -> [i16; 16] {
-        match method {
-            Quantization::Nearest => {
-                let matrix = match plane {
+        match quant {
+            QuantMethod::Nearest => {
+                let mat = match plane {
                     CoefficientPlane::LumaAc | CoefficientPlane::Luma => &self.luma,
                     CoefficientPlane::LumaDc => &self.luma_dc,
                     CoefficientPlane::Chroma => &self.chroma,
                 };
-                let mut levels = matrix.quantize(self.simd, coefficients);
+                let mut levels = mat.quantize(self.simd, coeff);
                 if matches!(plane, CoefficientPlane::LumaAc) {
                     levels[0] = 0;
                 }
                 levels
             }
-            Quantization::Trellis => self.trellis.quantize(coefficients, plane, context),
+            QuantMethod::Trellis => self.trellis.quantize(coeff, plane, ctx),
         }
     }
 
-    fn score(&self, distortion: u64, rate: impl FnOnce() -> u64) -> u64 {
-        distortion * 256
+    fn score(&self, sse: u64, rate: impl FnOnce() -> u64) -> u64 {
+        sse * 256
             + if self.lambda == 0 {
                 0
             } else {
@@ -105,211 +104,180 @@ impl<S: Simd> Quantizer<S> {
     }
 }
 
-/// Mean 4x4 luma activity above which the intra4 search is expected to win often enough
-/// to run first. Both orders use exact bounds, so this only changes how much work the
-/// macroblock search performs; selected modes and output bytes are unaffected.
-///
-/// Calibrated between the smooth photograph (about 970) and gallery-1 (about 2840), with
-/// enough headroom that smooth sources stay on the intra16-first order.
+// Both orders use exact bounds; only search work changes, not output bytes.
 const INTRA4_ACTIVITY_THRESHOLD: u64 = 1200;
-
-/// Macroblock rows and columns sampled when classifying source activity.
 const ACTIVITY_GRID: usize = 8;
 
-/// Whether this source is textured enough to search intra4 before intra16.
-///
-/// Integer content measure over sampled macroblocks; independent of quality and timing.
-pub(super) fn prefers_intra4<S: Simd>(simd: S, source: RgbaFrame<'_>) -> bool {
+pub(super) fn prefers_intra4<S: Simd>(simd: S, src: RgbaFrame<'_>) -> bool {
     let stride = MACROBLOCK_SIDE;
-    let columns = source.columns();
-    let rows = source.rows();
-    let step_x = columns.div_ceil(ACTIVITY_GRID);
+    let cols = src.columns();
+    let rows = src.rows();
+    let step_x = cols.div_ceil(ACTIVITY_GRID);
     let step_y = rows.div_ceil(ACTIVITY_GRID);
     let mut activity = 0u64;
-    let mut samples = 0u64;
-    for macroblock_y in (0..rows).step_by(step_y) {
-        for macroblock_x in (0..columns).step_by(step_x) {
-            let luma = source.luma_block(simd, macroblock_x, macroblock_y);
-            for block in 0..BLOCKS_PER_ROW * BLOCKS_PER_ROW {
-                let (x, y) = subblock_offset(block);
+    let mut count = 0u64;
+    for mb_y in (0..rows).step_by(step_y) {
+        for mb_x in (0..cols).step_by(step_x) {
+            let luma = src.luma_block(simd, mb_x, mb_y);
+            for blk in 0..BLOCKS_PER_ROW * BLOCKS_PER_ROW {
+                let (x, y) = subblock_offset(blk);
                 let start = y * stride + x;
                 for row in 0..SUBBLOCK_SIDE {
                     let row_start = start + row * stride;
-                    let pixels = &luma[row_start..row_start + SUBBLOCK_SIDE];
-                    for pair in pixels.windows(2) {
+                    for pair in luma[row_start..row_start + SUBBLOCK_SIDE].windows(2) {
                         activity += u64::from(pair[0].abs_diff(pair[1]));
                     }
                 }
-                for column in 0..SUBBLOCK_SIDE {
-                    let mut previous = luma[start + column];
+                for col in 0..SUBBLOCK_SIDE {
+                    let mut prev = luma[start + col];
                     for row in 1..SUBBLOCK_SIDE {
-                        let value = luma[start + row * stride + column];
-                        activity += u64::from(value.abs_diff(previous));
-                        previous = value;
+                        let val = luma[start + row * stride + col];
+                        activity += u64::from(val.abs_diff(prev));
+                        prev = val;
                     }
                 }
             }
-            samples += 1;
+            count += 1;
         }
     }
-    activity / samples >= INTRA4_ACTIVITY_THRESHOLD
+    activity / count >= INTRA4_ACTIVITY_THRESHOLD
 }
 
-struct Intra16Candidate {
+struct Intra16Cand {
     dc: [i16; 16],
     ac: [[i16; 16]; 16],
-    pixels: [u8; 256],
+    px: [u8; 256],
 }
 
-struct ChromaCandidate {
+struct ChromaCand {
     levels: [[i16; 16]; 4],
-    pixels: [u8; 64],
+    px: [u8; 64],
     sse: u64,
 }
 
-fn luma_block_samples(source: &YuvRow, column: usize) -> [[u8; 16]; 16] {
-    let stride = source.y_stride();
-    let x = column * MACROBLOCK_SIDE;
-    std::array::from_fn(|block| {
-        let (block_x, block_y) = subblock_offset(block);
-        sample_block(&source.y, stride, x + block_x, block_y)
+fn luma_block_samples(src: &YuvRow, col: usize) -> [[u8; 16]; 16] {
+    let stride = src.y_stride();
+    let x = col * MACROBLOCK_SIDE;
+    std::array::from_fn(|blk| {
+        let (bx, by) = subblock_offset(blk);
+        sample_block(&src.y, stride, x + bx, by)
     })
 }
 
-fn chroma_block_samples(source: &YuvRow, column: usize) -> [[u8; 64]; 2] {
-    let stride = source.chroma_stride();
-    let x = column * CHROMA_SIDE;
-    [&source.u, &source.v].map(|plane| plane_block(plane, stride, x))
+fn chroma_block_samples(src: &YuvRow, col: usize) -> [[u8; 64]; 2] {
+    let stride = src.chroma_stride();
+    let x = col * CHROMA_SIDE;
+    [&src.u, &src.v].map(|plane| plane_block(plane, stride, x))
 }
 
-/// Copy one 8×8 plane into its contiguous lane layout. Each source row is contiguous, so
-/// this costs eight 8-byte copies rather than four 4×4-block gathers.
 fn plane_block(plane: &[u8], stride: usize, x: usize) -> [u8; 64] {
-    let mut block = [0u8; 64];
-    for (row, pixels) in block.as_chunks_mut::<8>().0.iter_mut().enumerate() {
+    let mut blk = [0u8; 64];
+    for (row, dst) in blk.as_chunks_mut::<8>().0.iter_mut().enumerate() {
         let start = row * stride + x;
-        pixels.copy_from_slice(&plane[start..start + 8]);
+        dst.copy_from_slice(&plane[start..start + 8]);
     }
-    block
+    blk
 }
 
-/// One intra16 prediction and the transforms retained for its refinement.
 #[derive(Default)]
-struct Intra16Prediction {
+struct Intra16Pred {
     blocks: [[u8; 16]; 16],
-    coefficients: [[i32; 16]; 16],
-    dc_coefficients: [i32; 16],
+    coeff: [[i32; 16]; 16],
+    dc_coeff: [i32; 16],
 }
 
-impl Intra16Prediction {
-    fn predict(&mut self, sample_sums: &[i32; 16], edges: &predict::Edges<16>, mode: u8) {
-        let pixels = predict::luma_block(mode, edges);
-        let dc_grid = std::array::from_fn(|block| {
-            let (x, y) = subblock_offset(block);
-            let prediction = sample_block(&pixels, MACROBLOCK_SIDE, x, y);
-            let sum = sample_sums[block] - block_sum(&prediction);
-            self.blocks[block] = prediction;
-            // The forward DCT's DC term is (8 * sum + 7) >> 4, exactly sum >> 1.
+impl Intra16Pred {
+    fn predict(&mut self, sums: &[i32; 16], edges: &predict::Edges<16>, mode: u8) {
+        let px = predict::luma_block(mode, edges);
+        let dc_grid = std::array::from_fn(|blk| {
+            let (x, y) = subblock_offset(blk);
+            let pred = sample_block(&px, MACROBLOCK_SIDE, x, y);
+            let sum = sums[blk] - block_sum(&pred);
+            self.blocks[blk] = pred;
+            // Forward DCT DC term is (8 * sum + 7) >> 4 == sum >> 1.
             sum >> 1
         });
-        self.dc_coefficients = transform::forward_wht(&dc_grid);
+        self.dc_coeff = transform::forward_wht(&dc_grid);
     }
 }
 
-/// One chroma plane's prediction and batched forward transform.
-struct ChromaPrediction<S: Simd> {
-    pixels: [u8; 64],
-    coefficients: transform::BlockLanes<S>,
+struct ChromaPred<S: Simd> {
+    px: [u8; 64],
+    coeff: transform::BlockLanes<S>,
 }
 
-impl<S: Simd> ChromaPrediction<S> {
-    fn new(simd: S, samples: &[u8; 64], edges: &predict::Edges<8>, mode: u8) -> Self {
-        let pixels = predict::chroma_block(mode, edges);
-        let coefficients = transform::forward_dct_8x8_lanes(simd, samples, &pixels);
-        Self {
-            pixels,
-            coefficients,
-        }
+impl<S: Simd> ChromaPred<S> {
+    fn new(simd: S, src: &[u8; 64], edges: &predict::Edges<8>, mode: u8) -> Self {
+        let px = predict::chroma_block(mode, edges);
+        let coeff = transform::forward_dct_8x8_lanes(simd, src, &px);
+        Self { px, coeff }
     }
 }
 
-/// The selected chroma mode and the prediction its levels were quantized against.
 struct ChromaWinner<S: Simd> {
     mode: u8,
-    planes: [ChromaCandidate; 2],
-    predictions: [ChromaPrediction<S>; 2],
+    planes: [ChromaCand; 2],
+    preds: [ChromaPred<S>; 2],
 }
 
-/// Both quantizers reconstruct against the prediction that produced these coefficients.
 #[derive(Clone, Copy)]
-struct BlockPrediction {
+struct BlockPred {
     mode: u8,
-    pixels: [u8; 16],
-    coefficients: [i32; 16],
+    px: [u8; 16],
+    coeff: [i32; 16],
 }
 
-struct BlockCandidate {
-    prediction: BlockPrediction,
+struct BlockCand {
+    pred: BlockPred,
     levels: [i16; 16],
-    pixels: [u8; 16],
+    px: [u8; 16],
     sse: u64,
     score: u64,
     mode_cost: u64,
     rate: u64,
 }
 
-struct Intra4Candidate {
+struct Intra4Cand {
     levels: [[i16; 16]; 16],
     modes: [u8; 16],
-    pixels: [u8; 256],
+    px: [u8; 256],
     sse: u64,
-    // Sum of the selected blocks' token rates for the subblock plane.
     rate: u64,
 }
 
 pub(super) fn search_macroblock<S: Simd>(
-    source: &YuvRow,
-    reconstructed: &mut Reconstruction,
-    quantizer: &Quantizer<S>,
-    neighbors: MacroblockContexts,
-    contexts: &vp8::BmodeContexts,
-    (macroblock_x, macroblock_y): (usize, usize),
+    src: &YuvRow,
+    recon: &mut Reconstruction,
+    q: &Quantizer<S>,
+    ctx: MacroblockContexts,
+    bmodes: &vp8::BmodeContexts,
+    pos: (usize, usize),
     intra4_first: bool,
 ) -> DenseMacroblock {
     // Chroma keeps the empty Intra16 luma rate in its rounding, including for Intra4.
-    let (zero_luma_rate, zero_chroma_rate) = if quantizer.lambda == 0 {
+    let (empty_y_rate, empty_uv_rate) = if q.lambda == 0 {
         (0, 0)
     } else {
-        neighbors.empty_rates(&quantizer.costs)
+        ctx.empty_rates(&q.costs)
     };
-    let column = source.local_column(macroblock_x);
-    let position = (macroblock_x, macroblock_y);
-    let search = MacroblockSearch {
-        quantizer,
-        neighbors,
-        position,
-    };
+    let col = src.local_column(pos.0);
+    let search = MbSearch { q, ctx, pos };
     let luma = search.luma(
-        &luma_block_samples(source, column),
-        &reconstructed.y,
-        contexts,
-        zero_chroma_rate,
+        &luma_block_samples(src, col),
+        &recon.y,
+        bmodes,
+        empty_uv_rate,
         intra4_first,
     );
-    commit_pixels(
-        &mut reconstructed.y,
-        position,
-        MACROBLOCK_SIDE,
-        &luma.pixels,
-    );
+    commit_pixels(&mut recon.y, pos, MACROBLOCK_SIDE, &luma.px);
 
     let (chroma_mode, [u, v]) = search.chroma(
-        &chroma_block_samples(source, column),
-        [&reconstructed.u, &reconstructed.v],
-        zero_luma_rate,
+        &chroma_block_samples(src, col),
+        [&recon.u, &recon.v],
+        empty_y_rate,
     );
-    commit_pixels(&mut reconstructed.u, position, CHROMA_SIDE, &u.pixels);
-    commit_pixels(&mut reconstructed.v, position, CHROMA_SIDE, &v.pixels);
+    commit_pixels(&mut recon.u, pos, CHROMA_SIDE, &u.px);
+    commit_pixels(&mut recon.v, pos, CHROMA_SIDE, &v.px);
     DenseMacroblock {
         luma: luma.mode,
         y2: luma.y2,
@@ -320,192 +288,164 @@ pub(super) fn search_macroblock<S: Simd>(
     }
 }
 
-struct MacroblockSearch<'a, S> {
-    quantizer: &'a Quantizer<S>,
-    neighbors: MacroblockContexts,
-    position: (usize, usize),
+struct MbSearch<'a, S> {
+    q: &'a Quantizer<S>,
+    ctx: MacroblockContexts,
+    pos: (usize, usize),
 }
 
 struct LumaChoice {
     mode: Luma,
     y2: [i16; 16],
-    pixels: [u8; 256],
+    px: [u8; 256],
     levels: [[i16; 16]; 16],
 }
 
-impl<S: Simd> MacroblockSearch<'_, S> {
+impl<S: Simd> MbSearch<'_, S> {
     fn luma(
         &self,
-        samples: &[[u8; 16]; 16],
-        reconstructed: &Plane,
-        contexts: &vp8::BmodeContexts,
-        zero_chroma_rate: u64,
+        src: &[[u8; 16]; 16],
+        recon: &Plane,
+        bmodes: &vp8::BmodeContexts,
+        empty_uv_rate: u64,
         intra4_first: bool,
     ) -> LumaChoice {
-        let (macroblock_x, macroblock_y) = self.position;
-        let quantizer = self.quantizer;
-        let neighbors = self.neighbors;
-        let lambda = quantizer.lambda;
-        let luma_edges = predict::Edges::luma(reconstructed, macroblock_x, macroblock_y);
-        let sample_sums = std::array::from_fn(|block| block_sum(&samples[block]));
-        let mut predictions: [Intra16Prediction; 2] = Default::default();
+        let (mb_x, mb_y) = self.pos;
+        let q = self.q;
+        let ctx = self.ctx;
+        let edges = predict::Edges::luma(recon, mb_x, mb_y);
+        let sums = std::array::from_fn(|blk| block_sum(&src[blk]));
+        let mut preds: [Intra16Pred; 2] = Default::default();
         let mut winner = 0;
-        predictions[winner].predict(&sample_sums, &luma_edges, DC);
-        let (mut best_luma, mut best_luma_score) = score_intra16(
-            samples,
-            &mut predictions[winner],
-            quantizer,
-            neighbors,
-            Quantization::Nearest,
+        preds[winner].predict(&sums, &edges, DC);
+        let (mut best_i16, mut best_score) = score_intra16(
+            src,
+            &mut preds[winner],
+            q,
+            ctx,
+            QuantMethod::Nearest,
             u64::MAX,
-            zero_chroma_rate + vp8::i16_mode_cost(DC),
+            empty_uv_rate + vp8::i16_mode_cost(DC),
         )
         .expect("the first luma mode has no score limit");
-        let mut luma_mode = DC;
+        let mut i16_mode = DC;
         for mode in [VERTICAL, HORIZONTAL, TRUE_MOTION] {
-            let fixed_rate = zero_chroma_rate + vp8::i16_mode_cost(mode);
-            if quantizer.score(0, || fixed_rate) >= best_luma_score {
+            let fixed = empty_uv_rate + vp8::i16_mode_cost(mode);
+            if q.score(0, || fixed) >= best_score {
                 continue;
             }
             let trial = 1 - winner;
-            predictions[trial].predict(&sample_sums, &luma_edges, mode);
-            if let Some((candidate, score)) = score_intra16(
-                samples,
-                &mut predictions[trial],
-                quantizer,
-                neighbors,
-                Quantization::Nearest,
-                best_luma_score,
-                fixed_rate,
+            preds[trial].predict(&sums, &edges, mode);
+            if let Some((cand, score)) = score_intra16(
+                src,
+                &mut preds[trial],
+                q,
+                ctx,
+                QuantMethod::Nearest,
+                best_score,
+                fixed,
             ) {
-                best_luma = candidate;
-                best_luma_score = score;
-                luma_mode = mode;
+                best_i16 = cand;
+                best_score = score;
+                i16_mode = mode;
                 winner = trial;
             }
         }
 
         let score_i4 = |limit: u64| {
-            search_intra4(
-                samples,
-                reconstructed,
-                quantizer,
-                neighbors,
-                contexts,
-                self.position,
-                limit,
-            )
-            .map(|i4| {
-                let score = quantizer.score(i4.sse, || {
-                    i4.rate + zero_chroma_rate + contexts.i4_mode_cost(macroblock_x, &i4.modes)
+            search_intra4(src, recon, q, ctx, bmodes, self.pos, limit).map(|i4| {
+                let score = q.score(i4.sse, || {
+                    i4.rate + empty_uv_rate + bmodes.i4_mode_cost(mb_x, &i4.modes)
                 });
                 (i4, score)
             })
         };
         let mut intra4 = if intra4_first {
-            score_i4(best_luma_score)
+            score_i4(best_score)
         } else {
             None
         };
-        if lambda != 0 {
-            // Intra16 wins an exact tie. When Intra4 was searched first, its score plus one
-            // bounds the strict refinement without excluding that tie.
-            let limit = intra4.as_ref().map_or(best_luma_score, |(_, score)| {
-                best_luma_score.min(score.saturating_add(1))
+        if q.lambda != 0 {
+            // Intra16 wins ties; +1 keeps exact ties when Intra4 ran first.
+            let limit = intra4.as_ref().map_or(best_score, |(_, score)| {
+                best_score.min(score.saturating_add(1))
             });
             if let Some((refined, score)) = score_intra16(
-                samples,
-                &mut predictions[winner],
-                quantizer,
-                neighbors,
-                Quantization::Trellis,
+                src,
+                &mut preds[winner],
+                q,
+                ctx,
+                QuantMethod::Trellis,
                 limit,
-                zero_chroma_rate + vp8::i16_mode_cost(luma_mode),
+                empty_uv_rate + vp8::i16_mode_cost(i16_mode),
             ) {
-                best_luma = refined;
-                best_luma_score = score;
+                best_i16 = refined;
+                best_score = score;
             }
         }
         if !intra4_first {
-            intra4 = score_i4(best_luma_score);
+            intra4 = score_i4(best_score);
         }
 
-        if let Some((intra4, score)) = intra4
-            && score < best_luma_score
+        if let Some((i4, score)) = intra4
+            && score < best_score
         {
             return LumaChoice {
-                mode: Luma::Intra4 {
-                    modes: intra4.modes,
-                },
+                mode: Luma::Intra4 { modes: i4.modes },
                 y2: [0; 16],
-                pixels: intra4.pixels,
-                levels: intra4.levels,
+                px: i4.px,
+                levels: i4.levels,
             };
         }
         LumaChoice {
-            mode: Luma::Intra16 { mode: luma_mode },
-            y2: best_luma.dc,
-            pixels: best_luma.pixels,
-            levels: best_luma.ac,
+            mode: Luma::Intra16 { mode: i16_mode },
+            y2: best_i16.dc,
+            px: best_i16.px,
+            levels: best_i16.ac,
         }
     }
 
     fn chroma(
         &self,
-        samples: &[[u8; 64]; 2],
-        reconstructed: [&Plane; 2],
-        zero_luma_rate: u64,
-    ) -> (u8, [ChromaCandidate; 2]) {
-        let (x, y) = self.position;
-        let quantizer = self.quantizer;
-        let neighbors = self.neighbors;
-        let edges = reconstructed.map(|plane| predict::Edges::chroma(plane, x, y));
-        let candidate_score = |[u, v]: &[ChromaCandidate; 2], distortion, fixed_rate| {
-            quantizer.score(distortion, || {
-                let mut neighbors = neighbors;
-                fixed_rate + neighbors.chroma_cost(&quantizer.costs, &u.levels, &v.levels)
+        src: &[[u8; 64]; 2],
+        recon: [&Plane; 2],
+        empty_y_rate: u64,
+    ) -> (u8, [ChromaCand; 2]) {
+        let (x, y) = self.pos;
+        let q = self.q;
+        let ctx = self.ctx;
+        let edges = recon.map(|plane| predict::Edges::chroma(plane, x, y));
+        let score_uv = |[u, v]: &[ChromaCand; 2], sse, fixed| {
+            q.score(sse, || {
+                let mut ctx = ctx;
+                fixed + ctx.chroma_cost(&q.costs, &u.levels, &v.levels)
             })
         };
         let mut best = None;
         let mut best_score = u64::MAX;
         for mode in [DC, VERTICAL, HORIZONTAL, TRUE_MOTION] {
-            let fixed_rate = zero_luma_rate + vp8::chroma_mode_cost(mode);
-            if quantizer.score(0, || fixed_rate) >= best_score {
+            let fixed = empty_y_rate + vp8::chroma_mode_cost(mode);
+            if q.score(0, || fixed) >= best_score {
                 continue;
             }
-            let u_prediction = ChromaPrediction::new(quantizer.simd, &samples[0], &edges[0], mode);
-            let u = quantize_chroma_plane(
-                &samples[0],
-                &u_prediction,
-                quantizer,
-                neighbors,
-                0,
-                Quantization::Nearest,
-            );
-            // V's distortion and both token rates are nonnegative.
-            if quantizer.score(u.sse * CHROMA_SAMPLE_AREA, || fixed_rate) >= best_score {
+            let u_pred = ChromaPred::new(q.simd, &src[0], &edges[0], mode);
+            let u = quantize_chroma_plane(&src[0], &u_pred, q, ctx, 0, QuantMethod::Nearest);
+            if q.score(u.sse * CHROMA_SAMPLE_AREA, || fixed) >= best_score {
                 continue;
             }
-            let v_prediction = ChromaPrediction::new(quantizer.simd, &samples[1], &edges[1], mode);
-            let v = quantize_chroma_plane(
-                &samples[1],
-                &v_prediction,
-                quantizer,
-                neighbors,
-                1,
-                Quantization::Nearest,
-            );
-            let distortion = (u.sse + v.sse) * CHROMA_SAMPLE_AREA;
-            if quantizer.score(distortion, || fixed_rate) >= best_score {
+            let v_pred = ChromaPred::new(q.simd, &src[1], &edges[1], mode);
+            let v = quantize_chroma_plane(&src[1], &v_pred, q, ctx, 1, QuantMethod::Nearest);
+            let sse = (u.sse + v.sse) * CHROMA_SAMPLE_AREA;
+            if q.score(sse, || fixed) >= best_score {
                 continue;
             }
             let planes = [u, v];
-            let score = candidate_score(&planes, distortion, fixed_rate);
+            let score = score_uv(&planes, sse, fixed);
             if score < best_score {
                 best = Some(ChromaWinner {
                     mode,
                     planes,
-                    predictions: [u_prediction, v_prediction],
+                    preds: [u_pred, v_pred],
                 });
                 best_score = score;
             }
@@ -513,22 +453,15 @@ impl<S: Simd> MacroblockSearch<'_, S> {
         let ChromaWinner {
             mode,
             mut planes,
-            predictions,
+            preds,
         } = best.expect("four chroma modes were tried");
-        if quantizer.lambda != 0 {
-            let refined = std::array::from_fn(|plane| {
-                quantize_chroma_plane(
-                    &samples[plane],
-                    &predictions[plane],
-                    quantizer,
-                    neighbors,
-                    plane,
-                    Quantization::Trellis,
-                )
+        if q.lambda != 0 {
+            let refined = std::array::from_fn(|p| {
+                quantize_chroma_plane(&src[p], &preds[p], q, ctx, p, QuantMethod::Trellis)
             });
-            let distortion = (refined[0].sse + refined[1].sse) * CHROMA_SAMPLE_AREA;
-            let fixed_rate = zero_luma_rate + vp8::chroma_mode_cost(mode);
-            if candidate_score(&refined, distortion, fixed_rate) < best_score {
+            let sse = (refined[0].sse + refined[1].sse) * CHROMA_SAMPLE_AREA;
+            let fixed = empty_y_rate + vp8::chroma_mode_cost(mode);
+            if score_uv(&refined, sse, fixed) < best_score {
                 planes = refined;
             }
         }
@@ -537,204 +470,183 @@ impl<S: Simd> MacroblockSearch<'_, S> {
 }
 
 fn search_intra4<S: Simd>(
-    samples: &[[u8; 16]; 16],
-    reconstructed: &Plane,
-    quantizer: &Quantizer<S>,
-    mut neighbors: MacroblockContexts,
-    contexts: &vp8::BmodeContexts,
-    (macroblock_x, macroblock_y): (usize, usize),
+    src: &[[u8; 16]; 16],
+    recon: &Plane,
+    q: &Quantizer<S>,
+    mut ctx: MacroblockContexts,
+    bmodes: &vp8::BmodeContexts,
+    (mb_x, mb_y): (usize, usize),
     score_limit: u64,
-) -> Option<Intra4Candidate> {
-    let x = macroblock_x * MACROBLOCK_SIDE;
-    let y = macroblock_y * MACROBLOCK_SIDE;
+) -> Option<Intra4Cand> {
+    let x = mb_x * MACROBLOCK_SIDE;
+    let y = mb_y * MACROBLOCK_SIDE;
     let mut levels = [[0i16; 16]; 16];
     let mut modes = [0u8; 16];
-    let mut pixels = [0u8; 256];
+    let mut px = [0u8; 256];
     let mut sse = 0u64;
     let mut rate = 0u64;
     let mut score = 0u64;
 
-    for block in 0..16 {
-        let mut best: Option<BlockCandidate> = None;
-        let block_samples = &samples[block];
-        let context = neighbors.y(block);
-        let borders = subblock_borders(reconstructed, &pixels, (x, y), block);
+    for blk in 0..16 {
+        let mut best: Option<BlockCand> = None;
+        let blk_src = &src[blk];
+        let blk_ctx = ctx.y(blk);
+        let borders = subblock_borders(recon, &px, (x, y), blk);
 
         for mode in [B_DC, B_TM, B_VE, B_HE, B_LD, B_RD, B_VR, B_VL, B_HD, B_HU] {
-            let limit = best.as_ref().map_or(u64::MAX, |previous| previous.score);
-            let mode_cost = contexts.mode_cost(macroblock_x, block, &modes, mode);
-            // The mode's cost is a floor on its score: every residual rate is nonnegative.
-            if quantizer.lambda * mode_cost / 256 >= limit {
+            let limit = best.as_ref().map_or(u64::MAX, |prev| prev.score);
+            let mode_cost = bmodes.mode_cost(mb_x, blk, &modes, mode);
+            if q.lambda * mode_cost / 256 >= limit {
                 continue;
             }
-            let pixels = borders.block(mode);
-            let prediction = BlockPrediction {
+            let pred_px = borders.block(mode);
+            let pred = BlockPred {
                 mode,
-                pixels,
-                coefficients: residual_coefficients(quantizer.simd, block_samples, &pixels),
+                px: pred_px,
+                coeff: residual_coefficients(q.simd, blk_src, &pred_px),
             };
-            if let Some(candidate) = analyze_subblock(SubblockInputs {
-                quantizer,
-                samples: block_samples,
-                prediction: &prediction,
+            if let Some(cand) = analyze_subblock(SubblockInputs {
+                q,
+                src: blk_src,
+                pred: &pred,
                 mode_cost,
-                context,
-                method: Quantization::Nearest,
-                previous_levels: None,
-                score_limit: limit,
+                ctx: blk_ctx,
+                quant: QuantMethod::Nearest,
+                prev_levels: None,
+                limit,
             }) {
-                best = Some(candidate);
+                best = Some(cand);
             }
         }
 
-        let mut candidate = best.expect("ten subblock modes were tried");
-        // The winning nearest mode was scored under these same contexts; its own cost is
-        // still a floor on any trellis refinement of it.
-        if quantizer.lambda != 0
-            && quantizer.lambda * candidate.mode_cost / 256 < candidate.score
+        let mut cand = best.expect("ten subblock modes were tried");
+        if q.lambda != 0
+            && q.lambda * cand.mode_cost / 256 < cand.score
             && let Some(refined) = analyze_subblock(SubblockInputs {
-                quantizer,
-                samples: block_samples,
-                prediction: &candidate.prediction,
-                mode_cost: candidate.mode_cost,
-                context,
-                method: Quantization::Trellis,
-                previous_levels: Some(&candidate.levels),
-                score_limit: candidate.score,
+                q,
+                src: blk_src,
+                pred: &cand.pred,
+                mode_cost: cand.mode_cost,
+                ctx: blk_ctx,
+                quant: QuantMethod::Trellis,
+                prev_levels: Some(&cand.levels),
+                limit: cand.score,
             })
         {
-            candidate = refined;
+            cand = refined;
         }
-        // Remaining distortion and token costs cannot reduce this completed-block bound.
-        score += candidate.score;
+        score += cand.score;
         if score >= score_limit {
             return None;
         }
-        modes[block] = candidate.prediction.mode;
-        levels[block] = candidate.levels;
-        neighbors.set_y(block, candidate.levels != [0; 16]);
-        sse += candidate.sse;
-        rate += candidate.rate;
-        store_subblock(&mut pixels, block, &candidate.pixels);
+        modes[blk] = cand.pred.mode;
+        levels[blk] = cand.levels;
+        ctx.set_y(blk, cand.levels != [0; 16]);
+        sse += cand.sse;
+        rate += cand.rate;
+        store_subblock(&mut px, blk, &cand.px);
     }
 
-    Some(Intra4Candidate {
+    Some(Intra4Cand {
         levels,
         modes,
-        pixels,
+        px,
         sse,
         rate,
     })
 }
 
 fn subblock_borders(
-    reconstructed: &Plane,
-    pixels: &[u8; 256],
+    recon: &Plane,
+    px: &[u8; 256],
     (x, y): (usize, usize),
-    block: usize,
+    blk: usize,
 ) -> predict::Borders {
-    let (dx, dy) = subblock_offset(block);
-    let block_x = x + dx;
-    let block_y = y + dy;
-    let sample = |column: usize, row: usize| {
-        if column >= x && column < x + MACROBLOCK_SIDE && row >= y && row < y + MACROBLOCK_SIDE {
-            pixels[(row - y) * MACROBLOCK_SIDE + column - x]
+    let (dx, dy) = subblock_offset(blk);
+    let bx = x + dx;
+    let by = y + dy;
+    let sample = |col: usize, row: usize| {
+        if col >= x && col < x + MACROBLOCK_SIDE && row >= y && row < y + MACROBLOCK_SIDE {
+            px[(row - y) * MACROBLOCK_SIDE + col - x]
         } else {
-            reconstructed.sample(column, row)
+            recon.sample(col, row)
         }
     };
-    let corner = if block_y == 0 {
+    let corner = if by == 0 {
         127
-    } else if block_x == 0 {
+    } else if bx == 0 {
         129
     } else {
-        sample(block_x - 1, block_y - 1)
+        sample(bx - 1, by - 1)
     };
     let mut left = [129; 4];
-    if block_x > 0 {
-        for (row, value) in left.iter_mut().enumerate() {
-            *value = sample(block_x - 1, block_y + row);
+    if bx > 0 {
+        for (row, v) in left.iter_mut().enumerate() {
+            *v = sample(bx - 1, by + row);
         }
     }
     let mut top = [127; 8];
-    if block_y > 0 {
-        for (column, value) in top[..4].iter_mut().enumerate() {
-            *value = sample(block_x + column, block_y - 1);
+    if by > 0 {
+        for (col, v) in top[..4].iter_mut().enumerate() {
+            *v = sample(bx + col, by - 1);
         }
-        // Rightmost subblocks retain the macroblock's original above-right edge.
+        // Rightmost subblocks keep the macroblock's original above-right edge.
         let above_right_y = if dx + SUBBLOCK_SIDE == MACROBLOCK_SIDE {
             y.checked_sub(1)
         } else {
-            Some(block_y - 1)
+            Some(by - 1)
         };
         if let Some(row) = above_right_y {
-            for (column, value) in top[4..].iter_mut().enumerate() {
-                *value = sample(
-                    (block_x + 4 + column).min(reconstructed.frame_stride() - 1),
-                    row,
-                );
+            for (col, v) in top[4..].iter_mut().enumerate() {
+                *v = sample((bx + 4 + col).min(recon.frame_stride() - 1), row);
             }
         }
     }
     predict::Borders::new(&top, &left, corner)
 }
 
-/// The scoring inputs of one subblock candidate.
 struct SubblockInputs<'a, S: Simd> {
-    quantizer: &'a Quantizer<S>,
-    samples: &'a [u8; 16],
-    prediction: &'a BlockPrediction,
+    q: &'a Quantizer<S>,
+    src: &'a [u8; 16],
+    pred: &'a BlockPred,
     mode_cost: u64,
-    context: usize,
-    method: Quantization,
-    previous_levels: Option<&'a [i16; 16]>,
-    score_limit: u64,
+    ctx: usize,
+    quant: QuantMethod,
+    prev_levels: Option<&'a [i16; 16]>,
+    limit: u64,
 }
 
-fn analyze_subblock<S: Simd>(inputs: SubblockInputs<'_, S>) -> Option<BlockCandidate> {
+fn analyze_subblock<S: Simd>(inputs: SubblockInputs<'_, S>) -> Option<BlockCand> {
     let SubblockInputs {
-        quantizer,
-        samples,
-        prediction,
+        q,
+        src,
+        pred,
         mode_cost,
-        context,
-        method,
-        previous_levels,
-        score_limit,
+        ctx,
+        quant,
+        prev_levels,
+        limit,
     } = inputs;
-    let levels = quantizer.block(
-        &prediction.coefficients,
-        CoefficientPlane::Luma,
-        context,
-        method,
-    );
-    // Equal levels score exactly like the candidate they came from, so a refinement (which
-    // must strictly improve) can stop before reconstructing and rewinding its rate.
-    if previous_levels.is_some_and(|previous| previous == &levels) {
+    let levels = q.block(&pred.coeff, CoefficientPlane::Luma, ctx, quant);
+    if prev_levels.is_some_and(|prev| prev == &levels) {
         return None;
     }
-    let coefficients =
-        quantize::dequantize_block(&levels, quantizer.factors.y_dc, quantizer.factors.y_ac);
-    let residual = transform::inverse_dct(quantizer.simd, &coefficients);
-    let (pixels, sse) =
-        transform::reconstruct_sse(quantizer.simd, samples, &prediction.pixels, &residual);
-    // Residual rate is nonnegative; preserve the combined rounding only for the full score.
-    if sse * 256 + quantizer.lambda * mode_cost / 256 >= score_limit {
+    let coeff = quantize::dequantize_block(&levels, q.factors.y_dc, q.factors.y_ac);
+    let res = transform::inverse_dct(q.simd, &coeff);
+    let (px, sse) = transform::reconstruct_sse(q.simd, src, &pred.px, &res);
+    if sse * 256 + q.lambda * mode_cost / 256 >= limit {
         return None;
     }
-    // The macroblock's exact score reuses this rate instead of walking the block again.
-    let rate = if quantizer.lambda == 0 {
+    let rate = if q.lambda == 0 {
         0
     } else {
-        quantizer
-            .costs
-            .block(&levels, CoefficientPlane::Luma, context)
+        q.costs.block(&levels, CoefficientPlane::Luma, ctx)
     };
-    let score = quantizer.score(sse, || mode_cost + rate);
-    (score < score_limit).then_some(BlockCandidate {
-        prediction: *prediction,
+    let score = q.score(sse, || mode_cost + rate);
+    (score < limit).then_some(BlockCand {
+        pred: *pred,
         levels,
-        pixels,
+        px,
         sse,
         score,
         mode_cost,
@@ -742,181 +654,146 @@ fn analyze_subblock<S: Simd>(inputs: SubblockInputs<'_, S>) -> Option<BlockCandi
     })
 }
 
-/// Quantizes one intra16 prediction, returning its exact score when that score beats
-/// `score_limit`. Distortion and rate are accumulated as blocks complete, so a mode that
-/// cannot win stops before quantizing the rest.
 fn score_intra16<S: Simd>(
-    samples: &[[u8; 16]; 16],
-    prediction: &mut Intra16Prediction,
-    quantizer: &Quantizer<S>,
-    mut neighbors: MacroblockContexts,
-    method: Quantization,
-    score_limit: u64,
+    src: &[[u8; 16]; 16],
+    pred: &mut Intra16Pred,
+    q: &Quantizer<S>,
+    mut ctx: MacroblockContexts,
+    quant: QuantMethod,
+    limit: u64,
     fixed_rate: u64,
-) -> Option<(Intra16Candidate, u64)> {
-    let factors = quantizer.factors;
+) -> Option<(Intra16Cand, u64)> {
+    let factors = q.factors;
 
-    let y2_levels = quantizer.block(
-        &prediction.dc_coefficients,
-        CoefficientPlane::LumaDc,
-        neighbors.y2(),
-        method,
-    );
+    let y2_levels = q.block(&pred.dc_coeff, CoefficientPlane::LumaDc, ctx.y2(), quant);
     let y2 = transform::inverse_wht(&quantize::dequantize_block(
         &y2_levels,
         factors.y2_dc,
         factors.y2_ac,
     ));
 
-    let mut rate = if quantizer.lambda == 0 {
+    let mut rate = if q.lambda == 0 {
         0
     } else {
-        quantizer
-            .costs
-            .block(&y2_levels, CoefficientPlane::LumaDc, neighbors.y2())
+        q.costs
+            .block(&y2_levels, CoefficientPlane::LumaDc, ctx.y2())
     };
     let mut levels = [[0i16; 16]; 16];
-    let mut pixels = [0u8; 256];
+    let mut px = [0u8; 256];
     let mut sse = 0u64;
     let mut score = 0;
-    for (block, samples) in samples.iter().enumerate() {
-        let context = neighbors.y(block);
-        if matches!(method, Quantization::Nearest) {
-            prediction.coefficients[block] =
-                residual_coefficients(quantizer.simd, samples, &prediction.blocks[block]);
+    for (blk, blk_src) in src.iter().enumerate() {
+        let blk_ctx = ctx.y(blk);
+        if matches!(quant, QuantMethod::Nearest) {
+            pred.coeff[blk] = residual_coefficients(q.simd, blk_src, &pred.blocks[blk]);
         }
-        let block_levels = quantizer.block(
-            &prediction.coefficients[block],
-            CoefficientPlane::LumaAc,
-            context,
-            method,
-        );
-        let mut coefficients =
-            quantize::dequantize_block(&block_levels, factors.y_dc, factors.y_ac);
-        coefficients[0] = y2[block];
-        let residual = transform::inverse_dct(quantizer.simd, &coefficients);
-        let (rebuilt, error) = transform::reconstruct_sse(
-            quantizer.simd,
-            samples,
-            &prediction.blocks[block],
-            &residual,
-        );
-        sse += error;
-        if quantizer.lambda != 0 {
-            rate += quantizer
+        let blk_levels = q.block(&pred.coeff[blk], CoefficientPlane::LumaAc, blk_ctx, quant);
+        let mut coeff = quantize::dequantize_block(&blk_levels, factors.y_dc, factors.y_ac);
+        coeff[0] = y2[blk];
+        let res = transform::inverse_dct(q.simd, &coeff);
+        let (rebuilt, err) = transform::reconstruct_sse(q.simd, blk_src, &pred.blocks[blk], &res);
+        sse += err;
+        if q.lambda != 0 {
+            rate += q
                 .costs
-                .block(&block_levels, CoefficientPlane::LumaAc, context);
+                .block(&blk_levels, CoefficientPlane::LumaAc, blk_ctx);
         }
-        // Remaining distortion and token rate cannot lower a completed-block score.
-        score = sse * 256 + quantizer.lambda * (rate + fixed_rate) / 256;
-        if score >= score_limit {
+        score = sse * 256 + q.lambda * (rate + fixed_rate) / 256;
+        if score >= limit {
             return None;
         }
-        levels[block] = block_levels;
-        neighbors.set_y(block, block_levels != [0; 16]);
-        store_subblock(&mut pixels, block, &rebuilt);
+        levels[blk] = blk_levels;
+        ctx.set_y(blk, blk_levels != [0; 16]);
+        store_subblock(&mut px, blk, &rebuilt);
     }
 
     Some((
-        Intra16Candidate {
+        Intra16Cand {
             dc: y2_levels,
             ac: levels,
-            pixels,
+            px,
         },
         score,
     ))
 }
 
-fn block_sum(samples: &[u8; 16]) -> i32 {
-    samples.iter().map(|&sample| i32::from(sample)).sum()
+fn block_sum(src: &[u8; 16]) -> i32 {
+    src.iter().map(|&px| i32::from(px)).sum()
 }
 
 fn quantize_chroma_plane<S: Simd>(
-    samples: &[u8; 64],
-    prediction: &ChromaPrediction<S>,
-    quantizer: &Quantizer<S>,
-    mut neighbors: MacroblockContexts,
+    src: &[u8; 64],
+    pred: &ChromaPred<S>,
+    q: &Quantizer<S>,
+    mut ctx: MacroblockContexts,
     plane: usize,
-    method: Quantization,
-) -> ChromaCandidate {
-    let matrix = &quantizer.chroma;
-    let (candidate_levels, levels) = match method {
-        Quantization::Nearest => {
-            let levels = matrix.quantize_lanes(quantizer.simd, &prediction.coefficients);
+    quant: QuantMethod,
+) -> ChromaCand {
+    let mat = &q.chroma;
+    let (cand_levels, levels) = match quant {
+        QuantMethod::Nearest => {
+            let levels = mat.quantize_lanes(q.simd, &pred.coeff);
             (transform::block_levels(&levels), levels)
         }
-        Quantization::Trellis => {
-            // Each plane's context depends on its previous block. Dequantization and
-            // reconstruction are batched again once all four levels are available.
-            let coefficients = transform::block_coefficients(&prediction.coefficients);
+        QuantMethod::Trellis => {
+            let coeff = transform::block_coefficients(&pred.coeff);
             let mut levels = [[0i16; 16]; 4];
-            for block in 0..4 {
-                let context = if plane == 0 {
-                    neighbors.u(block)
-                } else {
-                    neighbors.v(block)
-                };
-                levels[block] = quantizer.block(
-                    &coefficients[block],
-                    CoefficientPlane::Chroma,
-                    context,
-                    method,
-                );
-                let nonzero = levels[block] != [0; 16];
+            for blk in 0..4 {
+                let blk_ctx = if plane == 0 { ctx.u(blk) } else { ctx.v(blk) };
+                levels[blk] = q.block(&coeff[blk], CoefficientPlane::Chroma, blk_ctx, quant);
+                let nz = levels[blk] != [0; 16];
                 if plane == 0 {
-                    neighbors.set_u(block, nonzero);
+                    ctx.set_u(blk, nz);
                 } else {
-                    neighbors.set_v(block, nonzero);
+                    ctx.set_v(blk, nz);
                 }
             }
-            (levels, transform::levels_to_lanes(quantizer.simd, &levels))
+            (levels, transform::levels_to_lanes(q.simd, &levels))
         }
     };
-    let dequantized = matrix.dequantize_lanes(quantizer.simd, &levels);
-    let residual = transform::inverse_dct_lanes(quantizer.simd, &dequantized);
-    let (pixels, block_sse) =
-        transform::reconstruct_8x8(quantizer.simd, samples, &prediction.pixels, &residual);
-    ChromaCandidate {
-        levels: candidate_levels,
-        pixels,
-        sse: block_sse.into_iter().sum(),
+    let dequant = mat.dequantize_lanes(q.simd, &levels);
+    let res = transform::inverse_dct_lanes(q.simd, &dequant);
+    let (px, blk_sse) = transform::reconstruct_8x8(q.simd, src, &pred.px, &res);
+    ChromaCand {
+        levels: cand_levels,
+        px,
+        sse: blk_sse.into_iter().sum(),
     }
 }
 
 fn sample_block(plane: &[u8], stride: usize, x: usize, y: usize) -> [u8; 16] {
-    let mut block = [0u8; 16];
-    for (row, chunk) in block.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+    let mut blk = [0u8; 16];
+    for (row, dst) in blk.as_chunks_mut::<4>().0.iter_mut().enumerate() {
         let start = (y + row) * stride + x;
-        chunk.copy_from_slice(&plane[start..start + 4]);
+        dst.copy_from_slice(&plane[start..start + 4]);
     }
-    block
+    blk
 }
 
-fn subblock_offset(block: usize) -> (usize, usize) {
+fn subblock_offset(blk: usize) -> (usize, usize) {
     (
-        block % BLOCKS_PER_ROW * SUBBLOCK_SIDE,
-        block / BLOCKS_PER_ROW * SUBBLOCK_SIDE,
+        blk % BLOCKS_PER_ROW * SUBBLOCK_SIDE,
+        blk / BLOCKS_PER_ROW * SUBBLOCK_SIDE,
     )
 }
 
-fn store_subblock(plane: &mut [u8; 256], block: usize, pixels: &[u8; 16]) {
-    let (x, y) = subblock_offset(block);
-    for (row, pixels) in pixels.as_chunks::<SUBBLOCK_SIDE>().0.iter().enumerate() {
+fn store_subblock(plane: &mut [u8; 256], blk: usize, px: &[u8; 16]) {
+    let (x, y) = subblock_offset(blk);
+    for (row, src) in px.as_chunks::<SUBBLOCK_SIDE>().0.iter().enumerate() {
         let start = (y + row) * MACROBLOCK_SIDE + x;
-        plane[start..start + SUBBLOCK_SIDE].copy_from_slice(pixels);
+        plane[start..start + SUBBLOCK_SIDE].copy_from_slice(src);
     }
 }
 
-fn residual_coefficients<S: Simd>(simd: S, samples: &[u8; 16], prediction: &[u8; 16]) -> [i32; 16] {
-    let residual =
-        std::array::from_fn(|index| i32::from(samples[index]) - i32::from(prediction[index]));
-    transform::forward_dct(simd, &residual)
+fn residual_coefficients<S: Simd>(simd: S, src: &[u8; 16], pred: &[u8; 16]) -> [i32; 16] {
+    let res = std::array::from_fn(|i| i32::from(src[i]) - i32::from(pred[i]));
+    transform::forward_dct(simd, &res)
 }
 
-fn commit_pixels(plane: &mut Plane, (x, y): (usize, usize), side: usize, pixels: &[u8]) {
+fn commit_pixels(plane: &mut Plane, (x, y): (usize, usize), side: usize, px: &[u8]) {
     let x = x * side;
     let y = y * side;
-    for (row, pixels) in pixels.chunks_exact(side).enumerate() {
-        plane.write(y + row, x, pixels);
+    for (row, src) in px.chunks_exact(side).enumerate() {
+        plane.write(y + row, x, src);
     }
 }
