@@ -2,7 +2,7 @@
 
 基于 Typst 的静态网站生成器。
 
-[官网](https://tola.build) · [English](<README.md>)
+[官网](https://tola.build) · [English](<README.md>) · [Türkçe](<README-tr.md>)
 
 ## 帮助
 
