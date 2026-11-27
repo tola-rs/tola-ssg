@@ -63,9 +63,13 @@ pub(super) fn run(
     listener.set_nonblocking(true)?;
     let mut key = [0; 32];
     getrandom::fill(&mut key).map_err(|_| anyhow!("create the Nu hook request key"))?;
+    let mut environment = super::call_environment(hook.scope, &hook.context, hook.temp_dir)?;
+    for (name, value) in crate::cli::color::captured_child_environment() {
+        environment.insert(name.into(), Some(value));
+    }
     let invocation = Invocation {
         directory: hook.config.root().to_owned(),
-        environment: super::call_environment(hook.scope, &hook.context, hook.temp_dir)?,
+        environment,
         libraries,
         dependencies,
         path: hook.path.to_owned(),
