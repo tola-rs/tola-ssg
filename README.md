@@ -2,7 +2,7 @@
 
 A Typst-based static site generator.
 
-[Website](https://tola.build) · [中文](<README-zh.md>)
+[Website](https://tola.build) · [中文](<README-zh.md>) · [Türkçe](<README-tr.md>)
 
 ## Help
 
