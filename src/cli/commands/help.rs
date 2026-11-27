@@ -1,4 +1,4 @@
-//! `tola help`: offline reference pages, batch catalog export, and interactive browser.
+//! `tola help`: offline reference pages, full reference export, and interactive browser.
 
 use std::collections::BTreeMap;
 
@@ -33,15 +33,15 @@ pub(in crate::cli) fn run(
 
     if args.all {
         destination::start(output, &cancellation.token())?;
-        let catalog = pages::catalog(language)?;
+        let reference = pages::reference(language)?;
         return match args.format {
-            HelpFormat::Json => write_json(&catalog, args.pretty, output),
+            HelpFormat::Json => write_json(&reference, args.pretty, output),
             HelpFormat::Markdown => {
-                output.write_stdout(render::markdown_catalog(&catalog, language))
+                output.write_stdout(render::markdown_reference(&reference, language))
             }
             HelpFormat::Text => {
-                let rendered = render::terminal_catalog(
-                    &catalog,
+                let rendered = render::terminal_reference(
+                    &reference,
                     language,
                     output.terminal().stdout_columns(),
                     output.terminal().stdout_uses_color(),
@@ -175,7 +175,7 @@ fn group_name(category: HelpCategory, language: HelpLanguage) -> &'static str {
 }
 
 fn collect(language: HelpLanguage, columns: usize, color: bool) -> Result<Vec<InteractivePage>> {
-    let catalog = pages::catalog(language)?;
+    let reference = pages::reference(language)?;
     let mut collected = Vec::new();
 
     let push = |collected: &mut Vec<InteractivePage>,
@@ -199,7 +199,7 @@ fn collect(language: HelpLanguage, columns: usize, color: bool) -> Result<Vec<In
         PageId::Overview,
         overview_name(language).into(),
         None,
-        HelpPage::Overview(catalog.overview),
+        HelpPage::Overview(reference.overview),
     );
     for category in [
         HelpCategory::Config,
@@ -216,7 +216,7 @@ fn collect(language: HelpLanguage, columns: usize, color: bool) -> Result<Vec<In
             page,
         );
     }
-    for config in catalog.config {
+    for config in reference.config {
         let id = PageId::Config {
             section: config.section.clone(),
         };
@@ -229,7 +229,7 @@ fn collect(language: HelpLanguage, columns: usize, color: bool) -> Result<Vec<In
             HelpPage::Config(config),
         );
     }
-    for package in catalog.packages {
+    for package in reference.packages {
         let id = PageId::Package {
             name: package.name.clone(),
         };
@@ -242,7 +242,7 @@ fn collect(language: HelpLanguage, columns: usize, color: bool) -> Result<Vec<In
             HelpPage::Package(package),
         );
     }
-    for script in catalog.scripts {
+    for script in reference.scripts {
         let id = PageId::Script {
             name: script.name.clone(),
         };

@@ -16,9 +16,9 @@ pub(crate) enum HelpPage {
     Script(ScriptPage),
 }
 
-/// Complete offline reference catalog for one language (`tola help --all`).
+/// Complete offline reference for one language (`tola help --all`).
 #[derive(Clone, Debug, Serialize)]
-pub(crate) struct HelpCatalog {
+pub(crate) struct HelpReference {
     pub kind: &'static str,
     pub language: &'static str,
     pub overview: OverviewPage,

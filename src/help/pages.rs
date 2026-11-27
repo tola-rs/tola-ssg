@@ -1,4 +1,4 @@
-//! Assemble typed `HelpPage` and `HelpCatalog` values from code schemas and `.typ` docs.
+//! Assemble typed `HelpPage` and `HelpReference` values from code schemas and `.typ` docs.
 
 use std::sync::LazyLock;
 
@@ -19,7 +19,7 @@ use super::docs;
 use super::language::HelpLanguage;
 use super::markup::Markup;
 use super::model::{
-    CategoryEntry, ConfigChild, ConfigKey, ConfigPage, HelpCatalog, HelpCategory, HelpPage,
+    CategoryEntry, ConfigChild, ConfigKey, ConfigPage, HelpCategory, HelpPage, HelpReference,
     IndexEntry, IndexPage, LinkTarget, OverviewPage, PackageExport, PackageMethod, PackagePage,
     PageId, Parameter, RelatedItem,
 };
@@ -180,7 +180,7 @@ pub(crate) fn page_of(id: &PageId, language: HelpLanguage) -> Result<HelpPage> {
 }
 
 /// Every reference page for one language in canonical order (`tola help --all`).
-pub(crate) fn catalog(language: HelpLanguage) -> Result<HelpCatalog> {
+pub(crate) fn reference(language: HelpLanguage) -> Result<HelpReference> {
     let overview = overview_page(language);
     let mut config = Vec::new();
     for table in indexed_config_tables() {
@@ -195,8 +195,8 @@ pub(crate) fn catalog(language: HelpLanguage) -> Result<HelpCatalog> {
     for script in super::scripts::builtins() {
         scripts.push(super::scripts::page(script.name, None, language)?);
     }
-    Ok(HelpCatalog {
-        kind: "catalog",
+    Ok(HelpReference {
+        kind: "reference",
         language: language.tag(),
         overview,
         config,
@@ -205,7 +205,7 @@ pub(crate) fn catalog(language: HelpLanguage) -> Result<HelpCatalog> {
     })
 }
 
-/// Tables listed in the config index and catalog (omits single-child transparent containers like `[typst]`).
+/// Tables listed in the config index and full reference (omits single-child transparent containers like `[typst]`).
 fn indexed_config_tables() -> impl Iterator<Item = &'static ConfigTable> {
     TABLES
         .iter()
@@ -931,11 +931,11 @@ mod tests {
     }
 
     #[test]
-    fn catalog_serializes_for_both_languages() {
+    fn reference_serializes_for_both_languages() {
         for lang in [HelpLanguage::English, HelpLanguage::SimplifiedChinese] {
-            let full = catalog(lang).unwrap();
+            let full = reference(lang).unwrap();
             let json = serde_json::to_value(&full).unwrap();
-            assert_eq!(json["kind"], "catalog");
+            assert_eq!(json["kind"], "reference");
             assert_eq!(json["language"], lang.tag());
             assert!(!full.config.is_empty());
             assert!(!full.packages.is_empty());

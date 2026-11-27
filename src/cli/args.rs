@@ -526,7 +526,7 @@ pub struct HelpArgs {
     #[arg(value_name = "TARGET", num_args = 0..)]
     pub targets: Vec<String>,
 
-    /// Output the complete reference catalog (all configuration tables, packages, and scripts).
+    /// Output the complete reference (all configuration tables, packages, and scripts).
     #[arg(long, conflicts_with_all = ["targets", "interactive"])]
     pub all: bool,
 

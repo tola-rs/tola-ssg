@@ -11,6 +11,7 @@ use syntect::parsing::{Scope, SyntaxDefinition, SyntaxSet, SyntaxSetBuilder};
 use typst_library::text::RAW_SYNTAXES;
 use typst_syntax::{LinkedNode, SyntaxKind};
 
+mod signature;
 mod theme;
 pub use theme::ThemeChoice;
 
@@ -104,6 +105,21 @@ pub fn highlight<'a>(src: &'a str, lang: &str, choice: ThemeChoice) -> Highlight
     }
 }
 
+/// Compute terminal styles for a Typst API signature or value declaration.
+pub fn highlight_typst_signature<'a>(src: &'a str, choice: ThemeChoice) -> Highlighted<'a> {
+    let mut runs = Vec::new();
+    let terminal_colors = choice == ThemeChoice::Terminal;
+    if let Some(th) = theme::theme_of(choice) {
+        let hl = Highlighter::new(th);
+        signature::collect(src, th, &hl, &mut runs);
+    }
+    Highlighted {
+        src,
+        runs,
+        terminal_colors,
+    }
+}
+
 /// Sanitize source for a terminal preview and paint the whole result.
 pub fn render(src: &str, lang: &str, choice: ThemeChoice) -> String {
     let src = sanitize(src);
@@ -139,6 +155,7 @@ fn collect(
         &mut Vec::new(),
         off,
         runs,
+        false,
     );
 }
 
@@ -177,7 +194,8 @@ fn collect_syntect(
     }
 }
 
-fn walk_typst(
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn walk_typst(
     node: &LinkedNode<'_>,
     src: &str,
     th: &Theme,
@@ -185,8 +203,11 @@ fn walk_typst(
     scopes: &mut Vec<Scope>,
     off: usize,
     runs: &mut Vec<(Range<usize>, Style)>,
+    skip_invalid: bool,
 ) {
-    let scope = typst_syntax::highlight(node).and_then(|tag| Scope::new(tag.tm_scope()).ok());
+    let scope = typst_syntax::highlight(node)
+        .filter(|tag| !skip_invalid || !tag.tm_scope().starts_with("invalid"))
+        .and_then(|tag| Scope::new(tag.tm_scope()).ok());
     scopes.extend(scope);
 
     if node.kind() == SyntaxKind::Raw
@@ -214,7 +235,7 @@ fn walk_typst(
         }
     } else {
         for child in node.children() {
-            walk_typst(&child, src, th, hl, scopes, off, runs);
+            walk_typst(&child, src, th, hl, scopes, off, runs, skip_invalid);
         }
     }
 

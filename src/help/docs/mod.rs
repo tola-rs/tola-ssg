@@ -10,7 +10,7 @@ use super::markup::{
 };
 
 type Pair<T> = (T, T);
-type Catalog<T> = BTreeMap<&'static str, Pair<T>>;
+type DocMap<T> = BTreeMap<&'static str, Pair<T>>;
 
 static OVERVIEW: LazyLock<Pair<OverviewDoc>> = LazyLock::new(|| {
     (
@@ -21,7 +21,7 @@ static OVERVIEW: LazyLock<Pair<OverviewDoc>> = LazyLock::new(|| {
     )
 });
 
-macro_rules! pair_catalog {
+macro_rules! doc_map {
     ($dir:literal, $parser:ident, $($name:literal),+ $(,)?) => {
         [
             $(
@@ -47,8 +47,8 @@ macro_rules! pair_catalog {
     };
 }
 
-static CONFIG: LazyLock<Catalog<ConfigDoc>> = LazyLock::new(|| {
-    pair_catalog!(
+static CONFIG: LazyLock<DocMap<ConfigDoc>> = LazyLock::new(|| {
+    doc_map!(
         "config",
         parse_config,
         "assets",
@@ -74,8 +74,8 @@ static CONFIG: LazyLock<Catalog<ConfigDoc>> = LazyLock::new(|| {
     )
 });
 
-static PACKAGES: LazyLock<Catalog<PackageDoc>> = LazyLock::new(|| {
-    pair_catalog!(
+static PACKAGES: LazyLock<DocMap<PackageDoc>> = LazyLock::new(|| {
+    doc_map!(
         "packages",
         parse_package,
         "address",
@@ -98,8 +98,8 @@ static PACKAGES: LazyLock<Catalog<PackageDoc>> = LazyLock::new(|| {
     )
 });
 
-static SCRIPTS: LazyLock<Catalog<ScriptDoc>> =
-    LazyLock::new(|| pair_catalog!("scripts", parse_script, "context", "diagnostic", "image",));
+static SCRIPTS: LazyLock<DocMap<ScriptDoc>> =
+    LazyLock::new(|| doc_map!("scripts", parse_script, "context", "diagnostic", "image",));
 
 fn pick<T>(pair: &Pair<T>, language: HelpLanguage) -> &T {
     match language {

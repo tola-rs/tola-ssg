@@ -1,4 +1,4 @@
-//! Terminal and Markdown rendering directly from typed `HelpPage` and `HelpCatalog` models.
+//! Terminal and Markdown rendering directly from typed `HelpPage` and `HelpReference` models.
 
 use std::fmt::Write as _;
 use std::ops::Range;
@@ -8,7 +8,7 @@ use unicode_width::UnicodeWidthStr;
 use super::language::HelpLanguage;
 use super::markup::{Block, Inline, Markup};
 use super::model::{
-    ConfigPage, Example, HelpCatalog, HelpPage, IndexPage, OverviewPage, PackageExport,
+    ConfigPage, Example, HelpPage, HelpReference, IndexPage, OverviewPage, PackageExport,
     PackagePage, Parameter, RelatedItem, ScriptPage,
 };
 use crate::terminal::text::{Style, StyledText};
@@ -35,9 +35,9 @@ pub(crate) fn terminal(
     output
 }
 
-/// Render an entire catalog (`tola help --all`) to terminal text.
-pub(crate) fn terminal_catalog(
-    catalog: &HelpCatalog,
+/// Render the complete reference (`tola help --all`) to terminal text.
+pub(crate) fn terminal_reference(
+    reference: &HelpReference,
     language: HelpLanguage,
     columns: Option<usize>,
     color: bool,
@@ -48,16 +48,16 @@ pub(crate) fn terminal_catalog(
         language,
         blocks: Vec::new(),
     };
-    renderer.overview(&catalog.overview);
-    for page in &catalog.config {
+    renderer.overview(&reference.overview);
+    for page in &reference.config {
         renderer.rule();
         renderer.config(page);
     }
-    for page in &catalog.packages {
+    for page in &reference.packages {
         renderer.rule();
         renderer.package(page);
     }
-    for page in &catalog.scripts {
+    for page in &reference.scripts {
         renderer.rule();
         renderer.script(page);
     }
@@ -78,19 +78,19 @@ pub(crate) fn markdown(page: &HelpPage, language: HelpLanguage) -> String {
     out
 }
 
-/// Render an entire catalog (`tola help --all --format markdown`) to Markdown.
-pub(crate) fn markdown_catalog(catalog: &HelpCatalog, language: HelpLanguage) -> String {
+/// Render the complete reference (`tola help --all --format markdown`) to Markdown.
+pub(crate) fn markdown_reference(reference: &HelpReference, language: HelpLanguage) -> String {
     let mut out = String::new();
-    write_markdown_overview(&mut out, &catalog.overview, language);
-    for page in &catalog.config {
+    write_markdown_overview(&mut out, &reference.overview, language);
+    for page in &reference.config {
         out.push_str("\n---\n\n");
         write_markdown_config(&mut out, page, language);
     }
-    for page in &catalog.packages {
+    for page in &reference.packages {
         out.push_str("\n---\n\n");
         write_markdown_package(&mut out, page, language);
     }
-    for page in &catalog.scripts {
+    for page in &reference.scripts {
         out.push_str("\n---\n\n");
         write_markdown_script(&mut out, page, language);
     }
@@ -306,8 +306,7 @@ impl TerminalRenderer {
 
     fn package_export(&mut self, export: &PackageExport) {
         self.heading(2, &format!("{} - {}", export.name, export.kind));
-        self.blocks
-            .push(self.code("typst-code", &export.declaration, ""));
+        self.blocks.push(self.signature(&export.declaration));
         if !export.summary.is_empty() {
             self.markup(&export.summary, 0);
         }
@@ -320,8 +319,7 @@ impl TerminalRenderer {
         }
         for method in &export.methods {
             self.heading(3, &format!("`{}`", method.name));
-            self.blocks
-                .push(self.code("typst-code", &method.declaration, ""));
+            self.blocks.push(self.signature(&method.declaration));
             self.markup(&method.receiver_note, 0);
             if !method.summary.is_empty() {
                 self.markup(&method.summary, 0);
@@ -590,34 +588,23 @@ impl TerminalRenderer {
         .join("\n")
     }
 
-    fn code(&self, language: &str, source: &str, indent: &str) -> String {
-        let language = match language.split_whitespace().next() {
-            Some("typc") => "typ",
-            Some(lang) => lang,
-            None => "",
-        };
-        let theme = if self.color {
+    fn highlight_theme(&self) -> tola_highlight::ThemeChoice {
+        if self.color {
             tola_highlight::ThemeChoice::Terminal
         } else {
             tola_highlight::ThemeChoice::Plain
-        };
-        let text = tola_highlight::highlight(source, language, theme);
-        let mut rendered = String::new();
-        let mut offset = 0;
-        for line in source.split_inclusive('\n') {
-            let end = offset + line.strip_suffix('\n').unwrap_or(line).len();
-            rendered.push_str(indent);
-            rendered.push_str("  ");
-            text.paint(offset..end, &mut rendered);
-            if line.ends_with('\n') {
-                rendered.push('\n');
-            }
-            offset += line.len();
         }
-        if rendered.ends_with('\n') {
-            rendered.pop();
-        }
-        rendered
+    }
+
+    fn signature(&self, source: &str) -> String {
+        let text = tola_highlight::highlight_typst_signature(source, self.highlight_theme());
+        paint_code_lines(source, &text, "")
+    }
+
+    fn code(&self, language: &str, source: &str, indent: &str) -> String {
+        let language = language.split_whitespace().next().unwrap_or_default();
+        let text = tola_highlight::highlight(source, language, self.highlight_theme());
+        paint_code_lines(source, &text, indent)
     }
 
     fn table(&self, headers: &[Vec<Inline>], rows: &[Vec<Vec<Inline>>], indent: &str) -> String {
@@ -988,7 +975,7 @@ fn write_markdown_package(out: &mut String, page: &PackagePage, language: HelpLa
             out.push_str("---\n\n");
         }
         writeln!(out, "## {} - {}\n", export.name, export.kind).unwrap();
-        out.push_str(&code_block("typst-code", &export.declaration));
+        out.push_str(&code_block("typc", &export.declaration));
         out.push('\n');
         if !export.summary.is_empty() {
             write_markdown_blocks(out, &export.summary.blocks, "", 2);
@@ -1005,7 +992,7 @@ fn write_markdown_package(out: &mut String, page: &PackagePage, language: HelpLa
         }
         for method in &export.methods {
             writeln!(out, "### `{}`\n", method.name).unwrap();
-            out.push_str(&code_block("typst-code", &method.declaration));
+            out.push_str(&code_block("typc", &method.declaration));
             out.push('\n');
             write_markdown_blocks(out, &method.receiver_note.blocks, "", 3);
             out.push('\n');
@@ -1025,6 +1012,29 @@ fn write_markdown_package(out: &mut String, page: &PackagePage, language: HelpLa
         }
         write_markdown_related(out, &export.related, 3, language);
     }
+}
+
+fn paint_code_lines(
+    source: &str,
+    highlighted: &tola_highlight::Highlighted<'_>,
+    indent: &str,
+) -> String {
+    let mut rendered = String::new();
+    let mut offset = 0;
+    for line in source.split_inclusive('\n') {
+        let end = offset + line.strip_suffix('\n').unwrap_or(line).len();
+        rendered.push_str(indent);
+        rendered.push_str("  ");
+        highlighted.paint(offset..end, &mut rendered);
+        if line.ends_with('\n') {
+            rendered.push('\n');
+        }
+        offset += line.len();
+    }
+    if rendered.ends_with('\n') {
+        rendered.pop();
+    }
+    rendered
 }
 
 fn write_markdown_script(out: &mut String, page: &ScriptPage, language: HelpLanguage) {
