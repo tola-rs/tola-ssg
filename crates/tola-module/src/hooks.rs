@@ -650,9 +650,7 @@ fn eval_participation(
     })
 }
 
-fn topological_modules<'a>(
-    modules: &'a BTreeMap<String, LoadedModule>,
-) -> Vec<(&'a str, &'a LoadedModule)> {
+fn topological_modules(modules: &BTreeMap<String, LoadedModule>) -> Vec<(&str, &LoadedModule)> {
     let mut ordered = Vec::with_capacity(modules.len());
     let mut visited = BTreeSet::new();
     fn visit<'a>(

@@ -124,7 +124,7 @@ pub(in crate::cli) fn run(
     };
     let acquired =
         tola_module::bundle::acquire_with_lock(&ctx, site_root, config.modules(), &mut lock)
-            .map_err(|error| refresh_failed(error))?;
+            .map_err(refresh_failed)?;
     let modules = acquired
         .modules
         .into_iter()

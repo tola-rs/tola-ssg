@@ -158,26 +158,14 @@ struct DeclFields {
 }
 
 impl DeclFields {
-    fn parse_parts(
-        self,
-        allow_enabled_by: bool,
-    ) -> Result<
-        (
-            ModuleSource,
-            Option<crate::options::OptionPath>,
-            toml::Table,
-            Option<ModuleAssetRules>,
-            Option<crate::icons::Icons>,
-        ),
-        String,
-    > {
+    fn parse(self, allow_enabled_by: bool) -> Result<ChildModuleDeclaration, String> {
         if !allow_enabled_by && self.enabled_by.is_some() {
             return Err(
                 "`enabled-by` is only allowed on child modules inside `tola-module.toml`".into(),
             );
         }
-        let mut opts = self.options.unwrap_or_default();
-        crate::options::normalize_options(&mut opts).map_err(|err| err.to_string())?;
+        let mut options = self.options.unwrap_or_default();
+        crate::options::normalize_options(&mut options).map_err(|err| err.to_string())?;
         let source = match (self.path, self.git, self.tarball) {
             (Some(path), None, None) if !path.as_os_str().is_empty() => {
                 ModuleSource::Local { path }
@@ -197,7 +185,13 @@ impl DeclFields {
             .map(toml::Value::try_into)
             .transpose()
             .map_err(|err: toml::de::Error| err.to_string())?;
-        Ok((source, self.enabled_by, opts, assets, icons))
+        Ok(ChildModuleDeclaration {
+            source,
+            enabled_by: self.enabled_by,
+            options,
+            assets,
+            icons,
+        })
     }
 }
 
@@ -205,28 +199,17 @@ impl TryFrom<DeclFields> for ModuleDeclaration {
     type Error = String;
 
     fn try_from(fields: DeclFields) -> Result<Self, Self::Error> {
-        let (source, _, options, assets, icons) = fields.parse_parts(false)?;
-        Ok(Self {
-            source,
-            options,
-            assets,
-            icons,
-        })
+        fields
+            .parse(false)
+            .map(ChildModuleDeclaration::into_module_declaration)
     }
 }
 
 impl<'de> Deserialize<'de> for ChildModuleDeclaration {
     fn deserialize<D: serde::Deserializer<'de>>(deser: D) -> Result<Self, D::Error> {
-        let fields = read_fields::<DeclFields, _>(deser)?;
-        let (source, enabled_by, options, assets, icons) =
-            fields.parse_parts(true).map_err(serde::de::Error::custom)?;
-        Ok(Self {
-            source,
-            enabled_by,
-            options,
-            assets,
-            icons,
-        })
+        read_fields::<DeclFields, _>(deser)?
+            .parse(true)
+            .map_err(serde::de::Error::custom)
     }
 }
 

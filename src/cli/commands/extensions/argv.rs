@@ -107,11 +107,21 @@ pub(super) fn complete_report(
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(unix)]
-    use crate::cli::external::{CommandExit, run as run_process};
-    use std::collections::BTreeMap;
-    use std::path::PathBuf;
+    use crate::cli::external::CommandExit;
     use tola_build::report::ReportSources;
+
+    fn exit_status(code: u32) -> std::process::ExitStatus {
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
+            std::process::ExitStatus::from_raw((code as i32) << 8)
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::ExitStatusExt;
+            std::process::ExitStatus::from_raw(code)
+        }
+    }
 
     fn report_channel(severity: &str) -> ReportChannel {
         let reports = ReportChannel::new("command:catalog.scan", ReportSources::new()).unwrap();
@@ -141,18 +151,15 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn process_exit_survives_reports() {
-        use std::os::unix::process::ExitStatusExt;
-
         let out = super::super::super::testing::buffered_output();
         for invalid in [false, true] {
             let reports = report_channel("warning");
             if invalid {
                 std::fs::write(reports.path(), b"partial report").unwrap();
             }
-            let done = Err(CommandExit(std::process::ExitStatus::from_raw(37 << 8)).into());
+            let done = Err(CommandExit(exit_status(37)).into());
             let err = complete_report(done, reports, &out).unwrap_err();
             assert_eq!(
                 err.downcast_ref::<CommandExit>().unwrap().0.code(),
@@ -172,55 +179,62 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[test]
-    fn expanded_argv_reaches_process() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        let mod_dir = root.join("module with spaces");
-        std::fs::create_dir(&mod_dir).unwrap();
-        let mod_cmds = ModuleCommands {
-            name: "notes".into(),
-            root: mod_dir.clone(),
-            manifest: PathBuf::from("/module with spaces/tola-module.toml"),
-            commands: BTreeMap::new(),
-            initializer: None,
-            options: Default::default(),
-        };
-        let record = root.join("arguments.txt");
-        let script = mod_dir.join("record.sh");
-        std::fs::write(
-            &script,
-            "record=\"$1\"\nshift\nprintf '%s\\n' \"$@\" > \"$record\"\nexit 37\n",
-        )
-        .unwrap();
-        let argv = vec![
-            "sh".into(),
-            "{module}/record.sh".into(),
-            "{project}/arguments.txt".into(),
-        ];
-        let reports = ReportChannel::new("command:notes.record", ReportSources::new()).unwrap();
-        let cmd = process_command(
-            &argv,
-            &["a title".into(), "--".into(), "$(literal)".into()],
-            Site {
-                root: root.to_owned(),
-                config_path: root.join("tola.toml"),
-                content_root: root.join("content"),
-            },
-            &mod_cmds,
-            InputScope::Offline,
-            &reports,
-        )
-        .unwrap();
-        let err = run_process(cmd, &crate::cancellation::Cancellation::default()).unwrap_err();
-        assert_eq!(
-            err.downcast_ref::<CommandExit>().unwrap().0.code(),
-            Some(37)
-        );
-        let recorded = std::fs::read_to_string(&record).unwrap();
-        assert_eq!(
-            recorded.lines().collect::<Vec<_>>(),
-            ["a title", "--", "$(literal)"]
-        );
+    mod unix_tests {
+        use super::*;
+        use crate::cli::external::run as run_process;
+        use std::collections::BTreeMap;
+        use std::path::PathBuf;
+
+        #[test]
+        fn expanded_argv_reaches_process() {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path();
+            let mod_dir = root.join("module with spaces");
+            std::fs::create_dir(&mod_dir).unwrap();
+            let mod_cmds = ModuleCommands {
+                name: "notes".into(),
+                root: mod_dir.clone(),
+                manifest: PathBuf::from("/module with spaces/tola-module.toml"),
+                commands: BTreeMap::new(),
+                initializer: None,
+                options: Default::default(),
+            };
+            let record = root.join("arguments.txt");
+            let script = mod_dir.join("record.sh");
+            std::fs::write(
+                &script,
+                "record=\"$1\"\nshift\nprintf '%s\\n' \"$@\" > \"$record\"\nexit 37\n",
+            )
+            .unwrap();
+            let argv = vec![
+                "sh".into(),
+                "{module}/record.sh".into(),
+                "{project}/arguments.txt".into(),
+            ];
+            let reports = ReportChannel::new("command:notes.record", ReportSources::new()).unwrap();
+            let cmd = process_command(
+                &argv,
+                &["a title".into(), "--".into(), "$(literal)".into()],
+                Site {
+                    root: root.to_owned(),
+                    config_path: root.join("tola.toml"),
+                    content_root: root.join("content"),
+                },
+                &mod_cmds,
+                InputScope::Offline,
+                &reports,
+            )
+            .unwrap();
+            let err = run_process(cmd, &crate::cancellation::Cancellation::default()).unwrap_err();
+            assert_eq!(
+                err.downcast_ref::<CommandExit>().unwrap().0.code(),
+                Some(37)
+            );
+            let recorded = std::fs::read_to_string(&record).unwrap();
+            assert_eq!(
+                recorded.lines().collect::<Vec<_>>(),
+                ["a title", "--", "$(literal)"]
+            );
+        }
     }
 }

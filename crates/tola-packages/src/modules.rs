@@ -34,7 +34,6 @@ fn lookup(engine: &Engine, name: &str, span: Span) -> SourceResult<Dict> {
     lookup_record(engine, name, span)?
         .ok_or_else(|| {
             typst::diag::eco_format!("module `{name}` is not configured for this compilation")
-                .into()
         })
         .map_err(|msg: typst::diag::EcoString| {
             typst::diag::At::at(Err::<Dict, _>(msg), span).unwrap_err()

@@ -190,7 +190,7 @@ impl Command for HostCommand {
                     return Err(err("get-module requires a loaded site".into()));
                 }
                 let name: Option<String> = call.opt(engine, stack, 0)?;
-                let found = match name {
+                match name {
                     Some(name) => if name.contains('/') {
                         None
                     } else if let Some(parent) = &host.module {
@@ -210,8 +210,7 @@ impl Command for HostCommand {
                             err(format!("no configured module is named `{current}`"))
                         })?
                     }
-                };
-                found
+                }
             }
             Operation::Hook => {
                 if call.has_flag(engine, stack, "rerun-on-digest")? {
