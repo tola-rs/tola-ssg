@@ -213,6 +213,8 @@ jobs:
     needs: [validate, checks, packages, build]
     permissions:
       contents: write
+    outputs:
+      published: ${{ steps.publish.outputs.published }}
     env:
       RELEASE_TAG: ${{ needs.validate.outputs.tag }}
       RELEASE_MODE: ${{ needs.validate.outputs.mode }}
@@ -245,6 +247,7 @@ jobs:
             --mode "$RELEASE_MODE" \
             --output "$RELEASE_NOTES"
       - name: Publish the verified release
+        id: publish
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_ARCHIVES: ${{ runner.temp }}/release-archives
@@ -263,3 +266,17 @@ jobs:
             --mode "$RELEASE_MODE" \
             --archives "$RELEASE_ARCHIVES" \
             "${notes[@]}"
+          published="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq '.isDraft | not')"
+          printf 'published=%s\n' "$published" >> "$GITHUB_OUTPUT"
+
+  mirror:
+    name: Mirror the published release
+    if: github.repository == 'tola-rs/tola-ssg' && needs.release.outputs.published == 'true'
+    needs: [validate, release]
+    uses: ./.github/workflows/mirror-release.yml
+    with:
+      tag: ${{ needs.validate.outputs.tag }}
+    secrets:
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}

@@ -1,0 +1,58 @@
+name: Mirror release
+run-name: Mirror ${{ inputs.tag }} to R2
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published release tag to mirror (for example v0.8.3).
+        required: true
+        type: string
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
+    secrets:
+      R2_ACCESS_KEY_ID:
+        required: true
+      R2_SECRET_ACCESS_KEY:
+        required: true
+      R2_ENDPOINT:
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mirror-release-r2
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    name: Upload GitHub release assets to R2
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - uses: hustcer/setup-nu@eacad52a4634c4f8d17a94916f93be6856861b9c # v3.29
+        with:
+          version: 0.117.0
+      - name: Verify and upload the published files
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT }}
+          AWS_DEFAULT_REGION: auto
+          AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+          AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+        run: |
+          set -euo pipefail
+          : "${AWS_ACCESS_KEY_ID:?Set the R2_ACCESS_KEY_ID Actions secret}"
+          : "${AWS_SECRET_ACCESS_KEY:?Set the R2_SECRET_ACCESS_KEY Actions secret}"
+          : "${AWS_ENDPOINT_URL:?Set the R2_ENDPOINT Actions secret}"
+          nu tools/release/mirror.nu "$RELEASE_TAG" "$RUNNER_TEMP/tola-release"
