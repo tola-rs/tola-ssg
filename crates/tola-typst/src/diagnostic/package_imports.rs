@@ -20,6 +20,16 @@ impl PackageImporters {
         self.files.get(package).map_or(&[], Vec::as_slice)
     }
 
+    /// Any packages within `namespace` directly imported by site files.
+    pub(crate) fn importing_namespace(&self, namespace: &str) -> Vec<(&str, &[String])> {
+        let prefix = format!("@{namespace}/");
+        self.files
+            .iter()
+            .filter(|(package, _)| package.starts_with(&prefix))
+            .map(|(package, files)| (package.as_str(), files.as_slice()))
+            .collect()
+    }
+
     /// `packages` limits navigation hints to packages this compilation actually read.
     pub(crate) fn collect(
         sources: impl IntoIterator<Item = (String, Source)>,

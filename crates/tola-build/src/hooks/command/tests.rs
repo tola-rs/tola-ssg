@@ -74,9 +74,10 @@ fn hook_environment_scene() {
     let cfg = root.join("custom/config.toml");
     let content = root.join("custom/content");
     let origin = ModuleHookOrigin {
-        name: "notes".into(),
+        name: "notes".parse().unwrap(),
         root: root.join("module"),
         manifest: root.join("module/tola-module.toml"),
+        owner: tola_module::ModuleOwner::Site,
         options_json: br#"{"search":true}"#.to_vec(),
     };
     let is_module = std::env::var("TOLA_HOOK_SCENE_MODULE").unwrap() == "yes";

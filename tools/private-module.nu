@@ -291,7 +291,7 @@ def no-git-check [ctx, root] {
   mkdir $path
   let override_url = $env.TOLA_FIXTURE_PUBLIC_URL?
   let module = if $override_url == null {
-    {url: "https://github.com/tola-rs/tola-ssg.git", subdir: "modules/nu-helpers"}
+    {url: "https://github.com/tola-rs/tola-ssg.git", subdir: "modules/resize-images"}
   } else {
     {url: $override_url, subdir: ""}
   }

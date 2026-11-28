@@ -14,7 +14,7 @@ fn caller_alias(id: FileId) -> Option<String> {
     }
 }
 
-fn lookup(engine: &Engine, name: &str, span: Span) -> SourceResult<Dict> {
+fn lookup_record(engine: &Engine, name: &str, span: Span) -> SourceResult<Option<Dict>> {
     let Some(modules) = super::library::module_records(engine) else {
         bail!(
             span,
@@ -22,15 +22,23 @@ fn lookup(engine: &Engine, name: &str, span: Span) -> SourceResult<Dict> {
         );
     };
     let Ok(val) = modules.get(name) else {
-        bail!(
-            span,
-            "module `{name}` is not configured for this compilation"
-        );
+        return Ok(None);
     };
     match val {
-        Value::Dict(dict) => Ok(dict.clone()),
+        Value::Dict(dict) => Ok(Some(dict.clone())),
         _ => bail!(span, "Tola received an invalid module record"),
     }
+}
+
+fn lookup(engine: &Engine, name: &str, span: Span) -> SourceResult<Dict> {
+    lookup_record(engine, name, span)?
+        .ok_or_else(|| {
+            typst::diag::eco_format!("module `{name}` is not configured for this compilation")
+                .into()
+        })
+        .map_err(|msg: typst::diag::EcoString| {
+            typst::diag::At::at(Err::<Dict, _>(msg), span).unwrap_err()
+        })
 }
 
 #[func]
@@ -45,19 +53,34 @@ pub(super) fn get_module(
 ) -> SourceResult<Dict> {
     let name = args.eat::<Str>()?;
     args.take().finish()?;
-    let alias = match name {
-        Some(name) => name.to_string(),
+    let caller = span.id().and_then(caller_alias);
+    match name {
+        Some(name) => {
+            let name = name.as_str();
+            if name.contains('/') {
+                bail!(
+                    span,
+                    "module `{name}` is not configured for this compilation"
+                );
+            }
+            if let Some(parent) = &caller {
+                let scoped = format!("{parent}/{name}");
+                if let Some(record) = lookup_record(engine, &scoped, span)? {
+                    return Ok(record);
+                }
+            }
+            lookup(engine, name, span)
+        }
         None => {
-            let Some(alias) = span.id().and_then(caller_alias) else {
+            let Some(alias) = caller else {
                 bail!(
                     span,
                     "`get-module()` must be called from a configured module package"
                 );
             };
-            alias
+            lookup(engine, &alias, span)
         }
-    };
-    lookup(engine, &alias, span)
+    }
 }
 
 #[cfg(test)]

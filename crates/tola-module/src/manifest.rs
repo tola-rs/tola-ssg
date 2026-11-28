@@ -10,16 +10,19 @@ use tola_input::{FilePatterns, InputMode, InputScope, RelativePathError, validat
 
 use crate::action::Action;
 use crate::declaration::{
-    Assets, Command, CommandAction, CommandActionError, Entry, Initializer, ModuleDeclaration,
-    ModuleSource, Parameter, Query, valid_name,
+    Assets, ChildModuleDeclaration, Command, CommandAction, CommandActionError, Entry, Initializer,
+    ModuleDeclaration, ModuleSource, Parameter, Query, valid_name, valid_scoped_name,
 };
 use crate::hooks;
+use crate::identity::{ModuleCapability, ModuleId, TolaVersion, derive_capabilities};
 use crate::module_set::ManifestStamp;
 
 /// Declarations in a module's `tola-module.toml`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct Manifest {
+    #[serde(default)]
+    pub min_tola_version: Option<TolaVersion>,
     #[serde(default)]
     pub typst: Option<TypstInputs>,
     #[serde(default)]
@@ -38,9 +41,29 @@ pub struct Manifest {
     pub init: Option<Initializer>,
     #[serde(default)]
     pub hooks: hooks::ModuleHooks,
+    #[serde(default)]
+    pub modules: BTreeMap<String, ChildModuleDeclaration>,
     #[serde(default, deserialize_with = "crate::options::deserialize_options")]
     pub options: toml::Table,
     pub pack: Option<FilePatterns>,
+}
+
+impl Manifest {
+    /// Capabilities derived from this manifest's declared sections.
+    pub fn capabilities(&self) -> Vec<ModuleCapability> {
+        derive_capabilities(
+            self.build.is_some(),
+            self.typst.as_ref(),
+            self.nu.is_some(),
+            self.assets.as_ref(),
+            &self.icons,
+            &self.hooks,
+            !self.commands.is_empty(),
+            !self.queries.is_empty(),
+            self.init.is_some(),
+            !self.modules.is_empty(),
+        )
+    }
 }
 
 /// Typst library entry and compiler fonts supplied by a module.
@@ -65,7 +88,7 @@ pub struct ModuleDeclarations {
 /// A configured module's Nu entry, without preparing its Typst or build inputs.
 #[derive(Debug)]
 pub struct NuModule {
-    pub name: String,
+    pub name: ModuleId,
     pub root: PathBuf,
     pub manifest: PathBuf,
     pub entry: Option<PathBuf>,
@@ -233,6 +256,14 @@ pub enum ManifestError {
         #[source]
         source: CommandActionError,
     },
+    #[error("module `{module}` requires Tola >= {required} (current: {current})")]
+    MinTolaVersion {
+        module: String,
+        required: String,
+        current: String,
+    },
+    #[error("`{child}` is not a usable sub-module name in module `{module}`")]
+    ChildModuleName { module: String, child: String },
     #[error("Tola could not read the initializer's module directory")]
     InitializerRoot {
         #[source]
@@ -278,7 +309,7 @@ fn read_manifest(
     sources: &[(PathBuf, Arc<str>)],
     overrides: Option<&toml::Table>,
 ) -> std::result::Result<ReadManifest, ManifestError> {
-    if !valid_name(name) {
+    if !valid_scoped_name(name) {
         return Err(ManifestError::Namespace {
             name: name.to_owned(),
         });
@@ -607,6 +638,7 @@ fn locate_field(
 }
 
 fn validate_manifest(name: &str, manifest: &Manifest) -> Result<(), ManifestError> {
+    validate_min_tola_version(name, manifest.min_tola_version.as_ref())?;
     manifest
         .icons
         .validate()
@@ -655,6 +687,44 @@ fn validate_manifest(name: &str, manifest: &Manifest) -> Result<(), ManifestErro
     validate_queries(name, manifest, &relative)?;
     validate_query_parameters(name, manifest)?;
     validate_commands(name, manifest, &relative)?;
+    validate_child_modules(name, manifest, &relative)?;
+    Ok(())
+}
+
+fn validate_min_tola_version(
+    name: &str,
+    required: Option<&TolaVersion>,
+) -> Result<(), ManifestError> {
+    let Some(required) = required else {
+        return Ok(());
+    };
+    let current = TolaVersion::current();
+    if current < *required {
+        return Err(ManifestError::MinTolaVersion {
+            module: name.to_owned(),
+            required: required.to_string(),
+            current: current.to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_child_modules(
+    name: &str,
+    manifest: &Manifest,
+    relative: &dyn Fn(&Path, String) -> Result<(), ManifestError>,
+) -> Result<(), ManifestError> {
+    for (child_name, child) in &manifest.modules {
+        if !valid_name(child_name) {
+            return Err(ManifestError::ChildModuleName {
+                module: name.to_owned(),
+                child: child_name.clone(),
+            });
+        }
+        if let ModuleSource::Local { path } = &child.source {
+            relative(path, format!("modules.{child_name}.path"))?;
+        }
+    }
     Ok(())
 }
 
@@ -822,5 +892,51 @@ mod tests {
             Err(ManifestError::ManifestRead { source, .. })
                 if source.kind() == std::io::ErrorKind::InvalidData
         ));
+    }
+
+    #[test]
+    fn min_tola_version_enforced() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tola-module.toml");
+        let cur = env!("CARGO_PKG_VERSION");
+
+        std::fs::write(&path, format!("min-tola-version = '{cur}'\n")).unwrap();
+        let loaded = read_one(
+            dir.path(),
+            "docs",
+            dir.path().to_owned(),
+            InputMode::new(InputScope::Online, false),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            loaded
+                .manifest
+                .min_tola_version
+                .as_ref()
+                .map(ToString::to_string)
+                .as_deref(),
+            Some(cur)
+        );
+
+        std::fs::write(&path, "min-tola-version = '999.0.0'\n").unwrap();
+        let too_high = read_one(
+            dir.path(),
+            "docs",
+            dir.path().to_owned(),
+            InputMode::new(InputScope::Online, false),
+            &[],
+        );
+        assert!(too_high.is_err());
+
+        std::fs::write(&path, "min-tola-version = 'not-a-version'\n").unwrap();
+        let invalid = read_one(
+            dir.path(),
+            "docs",
+            dir.path().to_owned(),
+            InputMode::new(InputScope::Online, false),
+            &[],
+        );
+        assert!(invalid.is_err());
     }
 }

@@ -271,7 +271,7 @@ fn answer_argument(
                 return Ok(Some(SourceReply::Rename(Some(WorkspaceEdit::default()))));
             }
             if !answers.answered.insert((
-                scope.module.name.clone(),
+                scope.module.name.as_str().to_owned(),
                 scope.query_name.to_owned(),
                 arg.value.clone(),
                 arg.range.start,

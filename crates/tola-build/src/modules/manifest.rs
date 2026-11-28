@@ -41,11 +41,13 @@ pub fn read_nu_modules(
                     false,
                 )?;
             }
+            let id = tola_module::ModuleId::parse(&name)
+                .map_err(|_| ManifestError::Namespace { name: name.clone() })?;
             let root = loaded.root;
             Ok((
-                name.clone(),
+                name,
                 NuModule {
-                    name,
+                    name: id,
                     manifest: loaded.path,
                     root,
                     entry,

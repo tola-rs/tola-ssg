@@ -508,4 +508,50 @@ mod tests {
         fs::write(site.project.join("main.typ"), "#import \"@tola-modules/forester:0.0.0\" as a\n#import \"@tola-modules/other:0.0.0\" as b\n#metadata(a.value + b.value)<result>").unwrap();
         assert_eq!(result(&site.world(files, Arc::default())), 14.into_value());
     }
+
+    #[test]
+    fn tola_deps_isolated_from_project() {
+        let site = Site::new();
+        let dep_dir = site.module.with_file_name("helper-dep");
+        fs::create_dir(&dep_dir).unwrap();
+        fs::write(dep_dir.join("lib.typ"), "#let secret = \"ok\"").unwrap();
+        fs::write(
+            site.module.join("lib.typ"),
+            "#import \"@tola-deps/helper:0.0.0\": secret\n#let value = secret",
+        )
+        .unwrap();
+
+        let parent = site.package();
+        let dep = LocalPackage::new(
+            "@tola-deps/helper:0.0.0".parse().unwrap(),
+            &dep_dir,
+            VirtualPath::new("lib.typ").unwrap(),
+        )
+        .unwrap();
+        let files = FileStore::new().with_local_packages(Arc::new(
+            LocalPackages::new([parent, dep], ["tola-modules", "tola-deps"]).unwrap(),
+        ));
+
+        fs::write(
+            site.project.join("main.typ"),
+            "#import \"@tola-modules/forester:0.0.0\": value\n#metadata(value)<result>",
+        )
+        .unwrap();
+        assert_eq!(
+            result(&site.world(files.clone(), Arc::default())),
+            "ok".into_value()
+        );
+
+        fs::write(
+            site.project.join("main.typ"),
+            "#import \"@tola-deps/helper:0.0.0\": secret\n#metadata(secret)<result>",
+        )
+        .unwrap();
+        let err = crate::compile_bundle_world(
+            &site.world(files, Arc::default()),
+            &BundleCancellation::default(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("tola-deps"), "{err}");
+    }
 }

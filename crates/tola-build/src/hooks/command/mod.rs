@@ -91,7 +91,7 @@ pub(super) struct HookCall<'a> {
 
 impl HookCall<'_> {
     fn context(&self, cache: &Path, temp: &Path) -> Result<crate::context::Context> {
-        use crate::context::{Context, Hook, Module, Site};
+        use crate::context::{Context, Hook, Module, Owner, Site};
 
         let outputs = match self.directories {
             HookDirectories::GenerateOutputs { outputs, .. } => outputs.to_vec(),
@@ -108,10 +108,14 @@ impl HookCall<'_> {
         });
         if let Some(origin) = self.origin {
             ctx.module = Some(Module {
-                name: origin.name.clone(),
+                name: origin.name.as_str().to_owned(),
                 root: origin.root.clone(),
                 manifest: origin.manifest.clone(),
                 options: Some(serde_json::from_slice(&origin.options_json)?),
+            });
+            ctx.owner = Some(Owner {
+                root: origin.owner.root(self.site.root).to_owned(),
+                module: origin.owner.module_name().map(str::to_owned),
             });
         }
         ctx.hook = Some(Hook {
@@ -383,7 +387,7 @@ pub fn expand_hook_argument(
     if let Some(origin) = origin {
         bindings.extend([
             ("{module}", origin.root.as_os_str()),
-            ("{name}", OsStr::new(&origin.name)),
+            ("{name}", OsStr::new(origin.name.as_str())),
         ]);
     } else {
         for marker in ["{module}", "{name}"] {

@@ -1,4 +1,4 @@
-use tola [nu-helpers syntax-highlight]
+use tola [terminal syntax-highlight]
 
 def value-browser [input: record] {
     let view = if $input.value == null {
@@ -15,7 +15,7 @@ def value-browser [input: record] {
 def main [input_json: path, result_json: path] {
     let input = open --raw $input_json | from json
     let result = if 'rows' in $input {
-        let picked = ($input.rows | nu-helpers pick --title $input.title --preview {|row|
+        let picked = ($input.rows | terminal pick --title $input.title --preview {|row|
             $row | to json --indent 2 | syntax-highlight json --theme terminal
         })
         if ($picked | is-empty) {

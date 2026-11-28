@@ -322,6 +322,53 @@ mod tests {
     }
 
     #[test]
+    fn scoped_child_module_lookup() {
+        let pkg: tola_typst::PackageSpec = "@tola-modules/docs:0.0.0".parse().unwrap();
+        let pkg_file = |path: &str| {
+            FileId::new(RootedPath::new(
+                VirtualRoot::Package(pkg.clone()),
+                VirtualPath::new(path).unwrap(),
+            ))
+        };
+        let mut inputs = empty_inputs();
+        inputs.modules.insert(
+            "docs".into(),
+            Value::Dict(crate::dict([("name", Value::Str("docs".into()))])),
+        );
+        inputs.modules.insert(
+            "docs/tailwind".into(),
+            Value::Dict(crate::dict([("name", Value::Str("docs/tailwind".into()))])),
+        );
+        let library = SiteLibrary::new(inputs).shared();
+
+        let mut ok_files = file_map(&[(
+            "main.typ",
+            "#import \"@tola-modules/docs:0.0.0\": tw\n#assert.eq(tw.name, \"docs/tailwind\")\n",
+        )]);
+        ok_files.insert(
+            pkg_file("/typst.toml"),
+            b"[package]\nname=\"docs\"\nversion=\"0.0.0\"\nentrypoint=\"lib.typ\"\n".to_vec(),
+        );
+        ok_files.insert(
+            pkg_file("/lib.typ"),
+            b"#import \"@tola/module:0.0.0\": get-module\n#let tw = get-module(\"tailwind\")\n"
+                .to_vec(),
+        );
+        let ok_scan = scan_world_observed(&virtual_site(ok_files, Arc::clone(&library)), []);
+        assert!(ok_scan.result().is_ok(), "{:?}", ok_scan.result().err());
+
+        let direct_files = file_map(&[(
+            "main.typ",
+            "#import \"@tola/module:0.0.0\": get-module\n#let _ = get-module(\"docs/tailwind\")\n",
+        )]);
+        assert!(
+            scan_world_observed(&virtual_site(direct_files, library), [])
+                .result()
+                .is_err()
+        );
+    }
+
+    #[test]
     fn module_lookup_errors() {
         for (expr, expected) in [
             (

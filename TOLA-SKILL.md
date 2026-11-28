@@ -770,7 +770,7 @@ Run it with `tola nu greet.nu "Tola author" --upper`, expose it as a module comm
 | `use tola get-assets` | Configured asset snapshot in post-discovery hooks (`--module`, `--include`, `--exclude`) |
 | `use tola get-init` | Initializer source and output/target directories |
 | `use tola diagnostic` | `make`, `submit`, and `render` diagnostics |
-| `use tola nu-helpers` | Interactive table picker (`pick`) |
+| `use tola terminal` | Interactive table picker (`pick`) |
 | `use tola syntax-highlight` | Terminal syntax highlighting for previews |
 | `use tola image` | Image `metadata` and `resize` (supports raster and SVG inputs) |
 | `use tola-modules ALIAS` | Public Nu exports of a configured module |
@@ -796,10 +796,10 @@ Keep Tola Nu scripts clean, portable, and side-effect-safe:
 
 ### TUI
 
-Use `nu-helpers pick` for interactive author commands (never inside unattended build hooks):
+Use `terminal pick` for interactive author commands (never inside unattended build hooks):
 
 ```nu
-use tola [nu-helpers syntax-highlight]
+use tola [terminal syntax-highlight]
 
 let rows = [
   {name: "Guide", file: "content/guide.typ"}
@@ -808,7 +808,7 @@ let rows = [
 
 let picked = (
   $rows
-  | nu-helpers pick --columns [name] --fuzzy
+  | terminal pick --columns [name] --fuzzy
       --preview {|row| open --raw $row.file | syntax-highlight typst }
 )
 if ($picked | is-not-empty) { $picked | first }

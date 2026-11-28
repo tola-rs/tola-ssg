@@ -76,7 +76,7 @@ impl EntityQueries {
         }
         let declaration = &module.queries[query_name];
         let entry_id =
-            tola_module::bundle::package_path(&module.name, &declaration.entry)?.intern();
+            tola_module::bundle::package_path(module.name.as_str(), &declaration.entry)?.intern();
         if let std::collections::hash_map::Entry::Vacant(slot) = self.entries.entry(entry_id) {
             let session = QuerySession::new(
                 Arc::clone(

@@ -32,6 +32,7 @@ def runner-issues [argv: list<string>] {
 
 def check-options [options: record] {
     let fields = [[key type expected];
+        [input string 'a relative path within the owner directory']
         [minify bool 'true or false']
         [cache bool 'true or false']
         [toolchain string 'a version or digest string']
@@ -41,6 +42,13 @@ def check-options [options: record] {
             {key: $field.key, reason: $"must be ($field.expected)", hint: null}
         }
     })
+    let input_val = $options.input
+    let input_issues = if ($input_val | describe) == 'string' {
+        let trimmed = ($input_val | str trim)
+        if $trimmed == '' or ($trimmed | str starts-with '/') or ($trimmed | str starts-with '\') or ('..' in ($trimmed | path split)) {
+            [{key: 'input', reason: 'must be a nonempty relative path within the owner directory', hint: null}]
+        } else { [] }
+    } else { [] }
     let runner = $options.runner
     let runner_issues = if $runner == 'auto' {
         []
@@ -51,7 +59,7 @@ def check-options [options: record] {
     } else {
         runner-issues $runner
     }
-    $scalar_issues | append $runner_issues
+    $scalar_issues | append $input_issues | append $runner_issues
 }
 
 def executable [name: string] {
@@ -107,7 +115,8 @@ def compile-css [context: record, argv: list<string>, stylesheet: string, output
 
 def compile-hook [context: record, argv: list<string>] {
     let hook = $context.hook
-    let stylesheet = ($context.site.root | path join styles tailwind.css)
+    let owner_root = ($context.owner?.root? | default $context.site.root)
+    let stylesheet = ($owner_root | path join $context.module.options.input)
     let output = ($hook.outputDir | path join $hook.outputs.0.file)
     mkdir ($output | path dirname)
 

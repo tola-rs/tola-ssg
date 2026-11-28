@@ -20,6 +20,7 @@ For custom CSS, create `styles/tailwind.css` starting with `@import "tailwindcss
 
 | Option | Default | Meaning |
 | --- | --- | --- |
+| `input` | `"styles/tailwind.css"` | CSS entry file relative to the owning site or module directory |
 | `runner` | `"auto"` | `"auto"` (`node_modules/.bin/tailwindcss`, then `tailwindcss` on `PATH`) or a command array such as `["bunx", "--no-install", "@tailwindcss/cli"]` |
 | `minify` | `false` | Minify CSS (applies in `dev` too) |
 | `dev` | `"run"` | `"run"`, `"reuse"`, or `"skip"` in `tola dev` |

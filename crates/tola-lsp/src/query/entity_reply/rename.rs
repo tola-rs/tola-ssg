@@ -351,7 +351,7 @@ fn refuse_shared_definition(
         if src.text() != def.src.text() {
             return Ok(Some(NameQueryError::ConflictingSourceText));
         }
-        let literals = match module_package(pkgs, &module.name)? {
+        let literals = match module_package(pkgs, module.name.as_str())? {
             Some(pkg) => {
                 let bindings = entity_bindings(&mut sem, pkg, module, query)?;
                 definition_ranges(&src, &mut sem, &bindings, &entity.id)?

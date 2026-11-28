@@ -232,7 +232,7 @@ impl HookId {
         declared_name: Option<&str>,
     ) -> Self {
         Self {
-            module: origin.map(|origin| origin.name.clone()),
+            module: origin.map(|origin| origin.name.as_str().to_owned()),
             name: declared_name.unwrap_or(name).to_owned(),
         }
     }
@@ -652,9 +652,10 @@ mod tests {
         let mut hook = OutputCommandConfig {
             argv: Some(vec!["program".into()]),
             origin: Some(ModuleHookOrigin {
-                name: "notes".into(),
+                name: "notes".parse().unwrap(),
                 root: root.path().join("module"),
                 manifest: root.path().join("module/tola-module.toml"),
+                owner: tola_module::ModuleOwner::Site,
                 options_json: br#"{"search":true}"#.to_vec(),
             }),
             ..Default::default()

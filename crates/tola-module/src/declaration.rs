@@ -21,6 +21,37 @@ pub struct ModuleDeclaration {
     pub icons: Option<crate::icons::Icons>,
 }
 
+/// A private child module declared inside another module's manifest.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct ChildModuleDeclaration {
+    #[serde(flatten)]
+    pub source: ModuleSource,
+    #[serde(
+        default,
+        rename = "enabled-by",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub enabled_by: Option<crate::options::OptionPath>,
+    #[serde(default, skip_serializing_if = "toml::Table::is_empty")]
+    pub options: toml::Table,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assets: Option<ModuleAssetRules>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icons: Option<crate::icons::Icons>,
+}
+
+impl ChildModuleDeclaration {
+    /// Project this child declaration into a plain module declaration without its parent toggle.
+    pub fn into_module_declaration(self) -> ModuleDeclaration {
+        ModuleDeclaration {
+            source: self.source,
+            options: self.options,
+            assets: self.assets,
+            icons: self.icons,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum ModuleSource {
@@ -113,6 +144,7 @@ impl<'de> Deserialize<'de> for ModuleDeclaration {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "kebab-case")]
 struct DeclFields {
     path: Option<PathBuf>,
     #[serde(default, deserialize_with = "optional_table")]
@@ -120,19 +152,35 @@ struct DeclFields {
     #[serde(default, deserialize_with = "optional_table")]
     tarball: Option<TarballFields>,
     builtin: Option<String>,
+    enabled_by: Option<crate::options::OptionPath>,
     options: Option<toml::Table>,
     #[serde(default, deserialize_with = "optional_table")]
     assets: Option<AssetRuleFields>,
     icons: Option<toml::Value>,
 }
 
-impl TryFrom<DeclFields> for ModuleDeclaration {
-    type Error = String;
-
-    fn try_from(fields: DeclFields) -> Result<Self, Self::Error> {
-        let mut opts = fields.options.unwrap_or_default();
+impl DeclFields {
+    fn parse_parts(
+        self,
+        allow_enabled_by: bool,
+    ) -> Result<
+        (
+            ModuleSource,
+            Option<crate::options::OptionPath>,
+            toml::Table,
+            Option<ModuleAssetRules>,
+            Option<crate::icons::Icons>,
+        ),
+        String,
+    > {
+        if !allow_enabled_by && self.enabled_by.is_some() {
+            return Err(
+                "`enabled-by` is only allowed on child modules inside `tola-module.toml`".into(),
+            );
+        }
+        let mut opts = self.options.unwrap_or_default();
         crate::options::normalize_options(&mut opts).map_err(|err| err.to_string())?;
-        let source = match (fields.path, fields.git, fields.tarball, fields.builtin) {
+        let source = match (self.path, self.git, self.tarball, self.builtin) {
             (Some(path), None, None, None) if !path.as_os_str().is_empty() => {
                 ModuleSource::Local { path }
             }
@@ -149,15 +197,41 @@ impl TryFrom<DeclFields> for ModuleDeclaration {
             (None, None, None, Some(_)) => return Err("`builtin` must not be empty".into()),
             _ => return Err("choose exactly one of `path`, `git`, `tarball`, or `builtin`".into()),
         };
+        let assets = self.assets.map(Into::into);
+        let icons = self
+            .icons
+            .map(toml::Value::try_into)
+            .transpose()
+            .map_err(|err: toml::de::Error| err.to_string())?;
+        Ok((source, self.enabled_by, opts, assets, icons))
+    }
+}
+
+impl TryFrom<DeclFields> for ModuleDeclaration {
+    type Error = String;
+
+    fn try_from(fields: DeclFields) -> Result<Self, Self::Error> {
+        let (source, _, options, assets, icons) = fields.parse_parts(false)?;
         Ok(Self {
             source,
-            options: opts,
-            assets: fields.assets.map(Into::into),
-            icons: fields
-                .icons
-                .map(toml::Value::try_into)
-                .transpose()
-                .map_err(|err: toml::de::Error| err.to_string())?,
+            options,
+            assets,
+            icons,
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for ChildModuleDeclaration {
+    fn deserialize<D: serde::Deserializer<'de>>(deser: D) -> Result<Self, D::Error> {
+        let fields = read_fields::<DeclFields, _>(deser)?;
+        let (source, enabled_by, options, assets, icons) =
+            fields.parse_parts(true).map_err(serde::de::Error::custom)?;
+        Ok(Self {
+            source,
+            enabled_by,
+            options,
+            assets,
+            icons,
         })
     }
 }
@@ -415,6 +489,11 @@ pub fn valid_name(name: &str) -> bool {
     let mut bytes = name.bytes();
     bytes.next().is_some_and(|b| b.is_ascii_lowercase())
         && bytes.all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+/// Whether `name` is one alias or slash-separated scoped aliases (`parent/child`).
+pub fn valid_scoped_name(name: &str) -> bool {
+    !name.is_empty() && name.split('/').all(valid_name)
 }
 
 /// Whether `path` is a nonempty spelling of plain path segments: no `..`, root, or prefix.

@@ -377,7 +377,7 @@ impl QueryCompilation {
             .strip_prefix(&format!("{}.", module.name))
             .with_context(|| format!("query `{name}` must belong to module `{}`", module.name))?;
         ensure!(
-            self.site.prepared().modules.get(&module.name) == Some(module)
+            self.site.prepared().modules.get(module.name.as_str()) == Some(module)
                 && module.queries.get(local) == Some(declaration),
             "the declaration of query `{name}` changed; run the query again"
         );
@@ -385,7 +385,8 @@ impl QueryCompilation {
             declaration.has_entities(),
             "query `{name}` declares no references or definitions"
         );
-        let entry = tola_module::bundle::package_path(&module.name, &declaration.entry)?.intern();
+        let entry =
+            tola_module::bundle::package_path(module.name.as_str(), &declaration.entry)?.intern();
         ensure!(
             self.site.entry_file() == Some(entry),
             "query `{name}` uses a different entry file"

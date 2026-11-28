@@ -9,7 +9,8 @@ use serde::{Deserialize, Serialize};
 use tola_input::{FilePatterns, FileSelection};
 
 use crate::bundle::{HookEntry, HookParticipation, HooksContribution};
-use crate::module_set::LoadedModule;
+use crate::identity::ModuleId;
+use crate::module_set::{LoadedModule, ModuleOwner};
 use crate::watch::HookWatchInputs;
 
 /// Hooks grouped by the event that runs them.
@@ -121,6 +122,13 @@ impl ModuleHooks {
             .filter_map(|hook| Some((hook.stage, hook.name, hook.nu.as_deref()?)))
     }
 
+    pub(crate) fn is_empty(&self) -> bool {
+        self.before_build.is_empty()
+            && self.generate_outputs.is_empty()
+            && self.after_publish.is_empty()
+            && self.before_pack.is_empty()
+    }
+
     fn build_hooks(&self) -> impl Iterator<Item = Hook<'_>> {
         self.before_build
             .iter()
@@ -145,12 +153,13 @@ pub struct RerunOn {
     pub exclude: Vec<RerunPath>,
 }
 
-/// One path or glob relative to its declaring root or explicitly to the project.
+/// One path or glob relative to its declaring root, its owner, or explicitly to the project.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(untagged, deny_unknown_fields)]
 pub enum RerunPath {
     Relative(String),
     Project { project: String },
+    Owner { owner: String },
 }
 
 fn has_forbidden_marker(text: &str) -> bool {
@@ -162,7 +171,9 @@ fn has_forbidden_marker(text: &str) -> bool {
 impl RerunPath {
     fn pattern(&self) -> &str {
         match self {
-            Self::Relative(pat) | Self::Project { project: pat } => pat,
+            Self::Relative(pat) | Self::Project { project: pat } | Self::Owner { owner: pat } => {
+                pat
+            }
         }
     }
 
@@ -212,6 +223,9 @@ impl RerunOn {
             RerunPath::Project { project } => RerunPath::Project {
                 project: project.replace("{name}", alias),
             },
+            RerunPath::Owner { owner } => RerunPath::Owner {
+                owner: owner.replace("{name}", alias),
+            },
         };
         Self {
             include: self.include.iter().map(expand).collect(),
@@ -228,25 +242,44 @@ impl RerunOn {
         origin: Option<&ModuleHookOrigin>,
     ) -> Result<RerunSelection> {
         let mod_origin = origin.map(|o| (o.name.as_str(), o.root.as_path()));
-        self.compile_at(site_root, mod_origin)
+        let owner = origin.map(|o| &o.owner);
+        self.compile_at(site_root, mod_origin, owner)
     }
 
     fn compile_at(
         &self,
         site_root: &Path,
         module: Option<(&str, &Path)>,
+        owner: Option<&ModuleOwner>,
     ) -> Result<RerunSelection> {
         let mut site_pats = FilePatterns::default();
         let mut mod_pats = FilePatterns::default();
-        for (pats, site, local) in [
-            (&self.include, &mut site_pats.include, &mut mod_pats.include),
-            (&self.exclude, &mut site_pats.exclude, &mut mod_pats.exclude),
+        let mut owner_pats = FilePatterns::default();
+        let owner_module = owner.and_then(|o| match o {
+            ModuleOwner::Site => None,
+            ModuleOwner::Module { id, root } => Some((id.as_str(), root.as_path())),
+        });
+        for (pats, site, local, owned) in [
+            (
+                &self.include,
+                &mut site_pats.include,
+                &mut mod_pats.include,
+                &mut owner_pats.include,
+            ),
+            (
+                &self.exclude,
+                &mut site_pats.exclude,
+                &mut mod_pats.exclude,
+                &mut owner_pats.exclude,
+            ),
         ] {
             for pat in pats {
-                if module.is_some() && matches!(pat, RerunPath::Relative(_)) {
-                    local.push(pat.pattern().to_owned());
-                } else {
-                    site.push(pat.pattern().to_owned());
+                match pat {
+                    RerunPath::Relative(p) if module.is_some() => local.push(p.clone()),
+                    RerunPath::Owner { owner: p } if owner_module.is_some() => {
+                        owned.push(p.clone())
+                    }
+                    _ => site.push(pat.pattern().to_owned()),
                 }
             }
         }
@@ -254,6 +287,9 @@ impl RerunOn {
         compile_scope(site_root, site_pats, None, &mut scopes)?;
         if let Some((alias, root)) = module {
             compile_scope(root, mod_pats, Some(alias), &mut scopes)?;
+        }
+        if let Some((owner_alias, owner_root)) = owner_module {
+            compile_scope(owner_root, owner_pats, Some(owner_alias), &mut scopes)?;
         }
         Ok(RerunSelection { scopes })
     }
@@ -553,7 +589,7 @@ pub fn declared_generated_inputs(
             let producer = format!("@module/{}/{}", module.name, hook.name);
             hook.generates
                 .iter()
-                .map(move |path| (producer.clone(), expand_path(path, &module.name)))
+                .map(move |path| (producer.clone(), expand_path(path, module.name.as_str())))
         })
 }
 
@@ -573,8 +609,12 @@ pub(crate) fn watch_inputs(
         if !hook.rerun_on.include.is_empty() {
             let sel = hook
                 .rerun_on
-                .expand(&module.name)
-                .compile_at(project_root, Some((&module.name, &module.root)))
+                .expand(module.name.as_str())
+                .compile_at(
+                    project_root,
+                    Some((module.name.as_str(), &module.root)),
+                    Some(&module.owner),
+                )
                 .with_context(|| format!("the `{}` hook in module `{}`", hook.name, module.name))?;
             inputs.rerun_watches.push(crate::watch::RerunWatch {
                 name: hook.name.to_owned(),
@@ -584,7 +624,7 @@ pub(crate) fn watch_inputs(
             });
         }
         for path in hook.generates {
-            let path = expand_path(path, &module.name);
+            let path = expand_path(path, module.name.as_str());
             relative(&path, "generates")?;
             inputs.generated_paths.push(project_root.join(path));
         }
@@ -610,20 +650,49 @@ fn eval_participation(
     })
 }
 
-/// Evaluate module hook conditions and prepare declarations in module alias order.
+fn topological_modules<'a>(
+    modules: &'a BTreeMap<String, LoadedModule>,
+) -> Vec<(&'a str, &'a LoadedModule)> {
+    let mut ordered = Vec::with_capacity(modules.len());
+    let mut visited = BTreeSet::new();
+    fn visit<'a>(
+        alias: &'a str,
+        modules: &'a BTreeMap<String, LoadedModule>,
+        visited: &mut BTreeSet<&'a str>,
+        ordered: &mut Vec<(&'a str, &'a LoadedModule)>,
+    ) {
+        let Some(module) = modules.get(alias) else {
+            return;
+        };
+        if !visited.insert(alias) {
+            return;
+        }
+        for child_scoped in module.child_aliases.values() {
+            visit(child_scoped.as_str(), modules, visited, ordered);
+        }
+        ordered.push((alias, module));
+    }
+    for alias in modules.keys() {
+        visit(alias, modules, &mut visited, &mut ordered);
+    }
+    ordered
+}
+
+/// Evaluate module hook conditions and prepare declarations in dependency-first order.
 pub fn hook_stages(
     project_root: &Path,
     modules: &BTreeMap<String, LoadedModule>,
 ) -> Result<HooksContribution> {
     let mut out = HooksContribution::default();
-    for (alias, module) in modules {
+    for (alias, module) in topological_modules(modules) {
         for hook in module.hooks.build_hooks() {
             let name = format!("@module/{alias}/{}", hook.name);
             let participation = eval_participation(alias, hook, &module.options)?;
             let origin = ModuleHookOrigin {
-                name: alias.clone(),
+                name: module.name.clone(),
                 root: module.root.clone(),
                 manifest: module.manifest.clone(),
+                owner: module.owner.clone(),
                 options_json: serde_json::to_vec(&module.options)?,
             };
             let rerun_on = hook.rerun_on.expand(alias);
@@ -665,9 +734,10 @@ pub fn hook_stages(
 /// The module whose manifest supplied a hook, retained by the execution plan.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModuleHookOrigin {
-    pub name: String,
+    pub name: ModuleId,
     pub root: PathBuf,
     pub manifest: PathBuf,
+    pub owner: ModuleOwner,
     pub options_json: Vec<u8>,
 }
 
@@ -821,5 +891,107 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn rerun_owner_and_dependency_hook_order() {
+        use super::{RerunOn, RerunPath, hook_stages};
+        use crate::identity::{ModuleAlias, ModuleId};
+        use crate::module_set::{LoadedModule, ModuleOwner};
+        use std::collections::BTreeMap;
+
+        let dir = tempfile::tempdir().unwrap();
+        let site_root = dir.path();
+        let docs_root_raw = site_root.join("docs");
+        std::fs::create_dir_all(&docs_root_raw).unwrap();
+        let docs_root = docs_root_raw.canonicalize().unwrap();
+        let tw_root = docs_root.join("tw");
+
+        let origin = super::ModuleHookOrigin {
+            name: ModuleId::parse("docs/tailwind").unwrap(),
+            root: tw_root.clone(),
+            manifest: tw_root.join("tola-module.toml"),
+            owner: ModuleOwner::Module {
+                id: ModuleId::parse("docs").unwrap(),
+                root: docs_root.clone(),
+            },
+            options_json: b"{}".to_vec(),
+        };
+        let sel = RerunOn {
+            include: vec![RerunPath::Owner {
+                owner: "styles".into(),
+            }],
+            exclude: Vec::new(),
+        }
+        .compile(site_root, Some(&origin))
+        .unwrap();
+        assert!(sel.matches(&docs_root.join("styles/site.css")));
+        assert!(!sel.matches(&site_root.join("styles/site.css")));
+
+        let child_hooks: ModuleHooks =
+            toml::from_str("[[before-build]]\nname = 'tw'\nargv = ['tw']\n").unwrap();
+        let parent_hooks: ModuleHooks =
+            toml::from_str("[[before-build]]\nname = 'doc'\nargv = ['doc']\n").unwrap();
+        let mut child_aliases = BTreeMap::new();
+        child_aliases.insert(
+            ModuleAlias::parse("z").unwrap(),
+            ModuleId::parse("a/z").unwrap(),
+        );
+        let modules = BTreeMap::from([
+            (
+                "a".to_owned(),
+                LoadedModule {
+                    name: ModuleId::parse("a").unwrap(),
+                    root: docs_root.clone(),
+                    manifest: docs_root.join("tola-module.toml"),
+                    owner: ModuleOwner::Site,
+                    source: None,
+                    manifest_evidence: None,
+                    min_tola_version: None,
+                    typst: None,
+                    nu: None,
+                    build: None,
+                    assets: None,
+                    icons: Default::default(),
+                    queries: BTreeMap::new(),
+                    commands: BTreeMap::new(),
+                    initializer: None,
+                    hooks: parent_hooks,
+                    modules: BTreeMap::new(),
+                    child_aliases,
+                    options: Default::default(),
+                },
+            ),
+            (
+                "a/z".to_owned(),
+                LoadedModule {
+                    name: ModuleId::parse("a/z").unwrap(),
+                    root: tw_root.clone(),
+                    manifest: tw_root.join("tola-module.toml"),
+                    owner: ModuleOwner::Module {
+                        id: ModuleId::parse("a").unwrap(),
+                        root: docs_root,
+                    },
+                    source: None,
+                    manifest_evidence: None,
+                    min_tola_version: None,
+                    typst: None,
+                    nu: None,
+                    build: None,
+                    assets: None,
+                    icons: Default::default(),
+                    queries: BTreeMap::new(),
+                    commands: BTreeMap::new(),
+                    initializer: None,
+                    hooks: child_hooks,
+                    modules: BTreeMap::new(),
+                    child_aliases: BTreeMap::new(),
+                    options: Default::default(),
+                },
+            ),
+        ]);
+        let contrib = hook_stages(site_root, &modules).unwrap();
+        let names: Vec<_> = contrib.entries().iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["@module/a/z/tw", "@module/a/doc"]);
     }
 }

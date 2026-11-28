@@ -208,6 +208,10 @@ impl SiteBuild {
         self.mode
     }
 
+    pub fn prepared_modules(&self) -> &tola_module::bundle::ModuleBundle {
+        &self.modules
+    }
+
     /// Check this build using both the attempt's cancellation and the caller's.
     pub fn ensure_fresh(&self, cancellation: &BuildCancellation) -> Result<()> {
         let freshness = self.freshness(cancellation)?;

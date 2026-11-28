@@ -101,22 +101,35 @@ pub(in crate::cli) fn run(
         .filter(|(alias, _)| !roots.contains_key(*alias))
         .map(|(alias, source)| (alias.clone(), source.clone()))
         .collect();
+    let bundle_cancel = tola_typst::BundleCancellation::from_flag(token.signal_flag());
     roots.extend(tola_module::inputs::record_module_roots(
         site_root,
         mode,
         vendor,
         &remaining,
         &mut lock,
-        &tola_typst::BundleCancellation::from_flag(token.signal_flag()),
+        &bundle_cancel,
     )?);
-    let modules = tola_module::module_set::load_modules_with_roots(
+    if update.names.is_empty() {
+        for entry in lock.modules.values_mut() {
+            clear_child_locks(entry);
+        }
+    }
+    let ctx = tola_module::bundle::Context {
         site_root,
-        config.modules(),
-        &roots,
         mode,
-        &[],
-    )
-    .map_err(|error| refresh_failed(error.into()))?;
+        vendor,
+        cancellation: &bundle_cancel,
+        sources: &[],
+    };
+    let acquired =
+        tola_module::bundle::acquire_with_lock(&ctx, site_root, config.modules(), &mut lock)
+            .map_err(|error| refresh_failed(error))?;
+    let modules = acquired
+        .modules
+        .into_iter()
+        .map(|(alias, item)| (alias, item.module))
+        .collect();
     tola_build::modules::apply_module_icons(&mut config, &modules)?;
     for name in &update.names {
         ensure!(
@@ -343,6 +356,10 @@ fn selected_icons(
     Ok(selected)
 }
 
+fn clear_child_locks(entry: &mut LockedModule) {
+    entry.children_mut().clear();
+}
+
 fn module_value(module: &LockedModule) -> String {
     match module {
         LockedModule::Git { commit, .. } => short_commit(commit).into(),
@@ -361,6 +378,7 @@ fn module_change(before: Option<&LockedModule>, after: &LockedModule) -> String 
                 revision,
                 commit,
                 tree_sha256,
+                ..
             }),
             LockedModule::Git {
                 git: new_git,
@@ -368,6 +386,7 @@ fn module_change(before: Option<&LockedModule>, after: &LockedModule) -> String 
                 revision: new_revision,
                 commit: new_commit,
                 tree_sha256: new_tree,
+                ..
             },
         ) => {
             if commit != new_commit {
@@ -410,11 +429,13 @@ fn module_change(before: Option<&LockedModule>, after: &LockedModule) -> String 
                 tarball,
                 tarball_sha256,
                 tree_sha256,
+                ..
             }),
             LockedModule::Tarball {
                 tarball: new_tarball,
                 tarball_sha256: new_digest,
                 tree_sha256: new_tree,
+                ..
             },
         ) => {
             if tarball_sha256 != new_digest {
@@ -485,6 +506,7 @@ mod tests {
             revision: Some(LockedRevision::Rev(commit.clone())),
             commit,
             tree_sha256: Sha256Digest::of_bytes(b"theme"),
+            modules: BTreeMap::new(),
         };
         assert!(!pinned(&git, None));
         assert!(pinned(&git, Some(&locked)));

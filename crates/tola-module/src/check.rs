@@ -13,10 +13,19 @@ use crate::module_set::validate_module_path;
 /// Read and check a module directory without loading or executing its programs.
 pub fn check(directory: &Path) -> Result<()> {
     let loaded = read(directory)?;
-    check_loaded(&loaded)
+    let mut visited = std::collections::BTreeSet::from([loaded.root.clone()]);
+    check_loaded_with_visited(&loaded, &mut visited)
 }
 
 pub(crate) fn check_loaded(loaded: &ReadManifest) -> Result<()> {
+    let mut visited = std::collections::BTreeSet::from([loaded.root.clone()]);
+    check_loaded_with_visited(loaded, &mut visited)
+}
+
+fn check_loaded_with_visited(
+    loaded: &ReadManifest,
+    visited: &mut std::collections::BTreeSet<std::path::PathBuf>,
+) -> Result<()> {
     let manifest = &loaded.manifest;
     let root = &loaded.root;
     if let Some(pack) = &manifest.pack {
@@ -78,6 +87,37 @@ pub(crate) fn check_loaded(loaded: &ReadManifest) -> Result<()> {
         let key = format!("hooks.before-pack ({}).nu", hook.name);
         let action = hook.action().map_err(anyhow::Error::msg)?;
         check_action(root, &key, &action)?;
+    }
+    check_children(root, manifest, visited)?;
+    Ok(())
+}
+
+fn check_children(
+    root: &Path,
+    manifest: &crate::manifest::Manifest,
+    visited: &mut std::collections::BTreeSet<std::path::PathBuf>,
+) -> Result<()> {
+    for (alias, child) in &manifest.modules {
+        match &child.source {
+            crate::ModuleSource::Local { path } => {
+                check_path(root, &format!("modules.{alias}.path"), path, true)?;
+                let child_root = root.join(path).canonicalize()?;
+                anyhow::ensure!(
+                    visited.insert(child_root.clone()),
+                    "`tola-module.toml` `modules.{alias}` creates a module cycle"
+                );
+                let child_loaded = read(&child_root)?;
+                check_loaded_with_visited(&child_loaded, visited)?;
+                visited.remove(&child_root);
+            }
+            crate::ModuleSource::Builtin { builtin } => {
+                anyhow::ensure!(
+                    crate::BuiltinModule::named(builtin).is_some(),
+                    "`tola-module.toml` `modules.{alias}.builtin` names unknown built-in module `{builtin}`"
+                );
+            }
+            crate::ModuleSource::Git { .. } | crate::ModuleSource::Tarball { .. } => {}
+        }
     }
     Ok(())
 }

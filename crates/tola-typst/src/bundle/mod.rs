@@ -132,6 +132,21 @@ pub fn compile_bundle_world(
     if let Err(error) = cancellation.ensure_active() {
         return Err(BundleCompileFailure::new(accessed, error));
     }
+    if let Some((pkg, files)) = importers
+        .importing_namespace("tola-deps")
+        .into_iter()
+        .next()
+    {
+        return Err(BundleCompileFailure::new(
+            accessed,
+            CompileError::Input {
+                message: format!(
+                    "`{pkg}` is a private module dependency and cannot be imported by site files ({})",
+                    files.join(", ")
+                ),
+            },
+        ));
+    }
     Ok(BundleCompilation {
         bundle,
         original_bodies: OnceLock::new(),

@@ -1,4 +1,5 @@
 [options]
+input = "styles/tailwind.css"
 runner = "auto"
 minify = false
 dev = "run"
@@ -8,8 +9,8 @@ toolchain = ""
 [options.watch]
 include = [
   "cache.nu",
-  { project = "styles" },
-  { project = "tools" },
+  { owner = "styles" },
+  { owner = "tools" },
   { project = "package.json" },
   { project = "package-lock.json" },
   { project = "pnpm-lock.yaml" },

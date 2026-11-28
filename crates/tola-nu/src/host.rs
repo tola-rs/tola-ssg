@@ -190,13 +190,28 @@ impl Command for HostCommand {
                     return Err(err("get-module requires a loaded site".into()));
                 }
                 let name: Option<String> = call.opt(engine, stack, 0)?;
-                let name = name.as_ref().or(host.module.as_ref()).ok_or_else(|| {
-                    err("get-module requires a module alias or a current module".into())
-                })?;
-                host.modules
-                    .get(name)
-                    .cloned()
-                    .ok_or_else(|| err(format!("no configured module is named `{name}`")))?
+                let found = match name {
+                    Some(name) => if name.contains('/') {
+                        None
+                    } else if let Some(parent) = &host.module {
+                        host.modules
+                            .get(&format!("{parent}/{name}"))
+                            .or_else(|| host.modules.get(&name))
+                            .cloned()
+                    } else {
+                        host.modules.get(&name).cloned()
+                    }
+                    .ok_or_else(|| err(format!("no configured module is named `{name}`")))?,
+                    None => {
+                        let current = host.module.as_ref().ok_or_else(|| {
+                            err("get-module requires a module alias or a current module".into())
+                        })?;
+                        host.modules.get(current).cloned().ok_or_else(|| {
+                            err(format!("no configured module is named `{current}`"))
+                        })?
+                    }
+                };
+                found
             }
             Operation::Hook => {
                 if call.has_flag(engine, stack, "rerun-on-digest")? {

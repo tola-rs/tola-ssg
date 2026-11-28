@@ -1,12 +1,12 @@
-# Nu Helpers
+# Terminal
 
 Pick values from a searchable terminal table.
 
 ```nu
-use tola nu-helpers
+use tola terminal
 
 [{id: 1, name: Guide} {id: 2, name: Notes}]
-| nu-helpers pick --columns [name] --multi
+| terminal pick --columns [name] --multi
 ```
 
 Use `/` to filter, Enter to pick, and `q` to cancel. With `--multi`, Space toggles

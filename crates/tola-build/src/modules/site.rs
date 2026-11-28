@@ -106,6 +106,7 @@ impl LoadedSite {
                 .prepared
                 .modules
                 .get(alias)
+                .filter(|module| module.owner.is_site())
                 .with_context(|| format!("the entry module `{alias}` was not acquired"))?;
             let build = module
                 .build
@@ -121,14 +122,19 @@ impl LoadedSite {
         select_module_fonts(
             Arc::make_mut(&mut config),
             scope,
-            contribution.prepared.modules.iter().map(|(alias, module)| {
-                let fonts = module
-                    .typst
-                    .as_ref()
-                    .map(|typst| typst.fonts.as_slice())
-                    .unwrap_or_default();
-                (alias.as_str(), module.root.as_path(), fonts)
-            }),
+            contribution
+                .prepared
+                .modules
+                .iter()
+                .filter(|(_, module)| module.owner.is_site())
+                .map(|(alias, module)| {
+                    let fonts = module
+                        .typst
+                        .as_ref()
+                        .map(|typst| typst.fonts.as_slice())
+                        .unwrap_or_default();
+                    (alias.as_str(), module.root.as_path(), fonts)
+                }),
         )?;
         apply_module_icons(Arc::make_mut(&mut config), &contribution.prepared.modules)?;
         Ok(Self {
@@ -181,7 +187,7 @@ impl LoadedSite {
         {
             tola_module::module_set::validate_module_path(
                 self.root(),
-                &module.name,
+                module.name.as_str(),
                 &module.root,
                 Path::new(id.vpath().get_without_slash()),
                 false,
@@ -190,10 +196,12 @@ impl LoadedSite {
         Ok(())
     }
 
+    /// Site-declared modules in alias order, excluding private child dependencies.
     pub fn loaded_modules(&self) -> impl Iterator<Item = (&str, &tola_module::LoadedModule)> {
         self.prepared()
             .modules
             .iter()
+            .filter(|(_, module)| module.owner.is_site())
             .map(|(alias, module)| (alias.as_str(), module))
     }
 
@@ -214,6 +222,9 @@ pub fn apply_module_icons(
         .collections
         .retain(|name, _| !name.starts_with("modules/"));
     for (alias, module) in modules {
+        if !module.owner.is_site() {
+            continue;
+        }
         let replacements = config.modules()[alias].icons.clone();
         let replacements = replacements.as_ref();
         for name in replacements

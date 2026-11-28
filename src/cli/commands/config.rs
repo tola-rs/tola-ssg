@@ -21,8 +21,43 @@ use crate::cli::args::InspectConfigMode;
 struct ModuleDocument<'a> {
     root: &'a Path,
     manifest: &'a Path,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    min_tola_version: Option<&'a tola_module::TolaVersion>,
+    capabilities: Vec<tola_module::ModuleCapability>,
     library: Option<PathBuf>,
     build_entry: Option<PathBuf>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    modules: BTreeMap<String, ModuleDocument<'a>>,
+}
+
+fn module_document<'a>(
+    module: &'a tola_module::LoadedModule,
+    all: &'a BTreeMap<String, tola_module::LoadedModule>,
+) -> ModuleDocument<'a> {
+    let children = module
+        .child_aliases
+        .iter()
+        .filter_map(|(sub_alias, scoped)| {
+            all.get(scoped.as_str())
+                .map(|child| (sub_alias.as_str().to_owned(), module_document(child, all)))
+        })
+        .collect();
+    ModuleDocument {
+        root: module.root.as_path(),
+        manifest: module.manifest.as_path(),
+        min_tola_version: module.min_tola_version.as_ref(),
+        capabilities: module.capabilities(),
+        library: module
+            .typst
+            .as_ref()
+            .and_then(|typst| typst.entry.as_ref())
+            .map(|entry| module.root.join(entry)),
+        build_entry: module
+            .build
+            .as_ref()
+            .map(|entry| module.root.join(&entry.entry)),
+        modules: children,
+    }
 }
 
 #[derive(Serialize)]
@@ -93,26 +128,10 @@ pub(super) fn value(
     )?;
     tola_build::build::install_hooks(&mut prepared, &request.resources)?;
     let config = &prepared;
+    let all_modules = &config.prepared().modules;
     let modules = config
         .loaded_modules()
-        .map(|(alias, module)| {
-            (
-                alias.to_owned(),
-                ModuleDocument {
-                    root: module.root.as_path(),
-                    manifest: module.manifest.as_path(),
-                    library: module
-                        .typst
-                        .as_ref()
-                        .and_then(|typst| typst.entry.as_ref())
-                        .map(|entry| module.root.join(entry)),
-                    build_entry: module
-                        .build
-                        .as_ref()
-                        .map(|entry| module.root.join(&entry.entry)),
-                },
-            )
-        })
+        .map(|(alias, module)| (alias.to_owned(), module_document(module, all_modules)))
         .collect();
     let document = ConfigDocument {
         config: config.config_path(),

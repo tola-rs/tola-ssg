@@ -5,7 +5,7 @@ use typst::foundations::{Dict, IntoValue, Value};
 use typst::syntax::{RootedPath, VirtualRoot};
 
 use crate::asset::{AssetUrls, ModuleAssetInput};
-use tola_module::bundle::{ModuleBundle, package_path, virtual_path};
+use tola_module::bundle::{ModuleBundle, dep_package_path, package_path, virtual_path};
 
 /// Record every selected module's manifest root and file as an exact input.
 pub(crate) fn observe_manifests(
@@ -33,14 +33,29 @@ pub(crate) fn observe_manifests(
 pub(crate) fn contexts(prepared: &ModuleBundle, urls: &AssetUrls) -> Result<Dict> {
     let mut assets = std::collections::BTreeMap::<&str, (Dict, Dict)>::new();
     for (asset, address) in urls.module_assets() {
-        let path = match &asset.input {
-            ModuleAssetInput::Module(path) => package_path(&asset.alias, path)?,
-            ModuleAssetInput::Project(path) => {
-                RootedPath::new(VirtualRoot::Project, virtual_path(path)?)
-            }
-        };
         let (files, addresses) = assets.entry(&asset.alias).or_default();
-        files.insert(asset.name.as_str().into(), path.into_value());
+        match &asset.input {
+            ModuleAssetInput::Module(path) => {
+                if let Some(module) = prepared.modules.get(&asset.alias) {
+                    if module.owner.is_site() {
+                        let pkg_path = package_path(&asset.alias, path)?;
+                        files.insert(asset.name.as_str().into(), pkg_path.into_value());
+                    } else if module
+                        .typst
+                        .as_ref()
+                        .and_then(|t| t.entry.as_ref())
+                        .is_some()
+                    {
+                        let pkg_path = dep_package_path(module.name.leaf(), path)?;
+                        files.insert(asset.name.as_str().into(), pkg_path.into_value());
+                    }
+                }
+            }
+            ModuleAssetInput::Project(path) => {
+                let pkg_path = RootedPath::new(VirtualRoot::Project, virtual_path(path)?);
+                files.insert(asset.name.as_str().into(), pkg_path.into_value());
+            }
+        }
         addresses.insert(asset.name.as_str().into(), address.into_value());
     }
     let enabled = prepared

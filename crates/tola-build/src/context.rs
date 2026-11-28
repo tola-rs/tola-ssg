@@ -22,6 +22,8 @@ pub struct Context {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub module: Option<Module>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner: Option<Owner>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub hook: Option<Hook>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub init: Option<Init>,
@@ -59,6 +61,14 @@ pub struct Module {
 
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct Owner {
+    pub root: PathBuf,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub module: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Hook {
     pub name: String,
     pub stage: String,
@@ -91,6 +101,7 @@ impl Context {
             input_scope: scope.map(|scope| scope.as_str().to_owned()),
             site: None,
             module: None,
+            owner: None,
             hook: None,
             init: None,
             report_path: None,

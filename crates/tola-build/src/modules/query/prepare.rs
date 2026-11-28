@@ -78,7 +78,7 @@ fn prepare_module_query(
     let selected_mod = configured
         .prepared()
         .modules
-        .get(&module.name)
+        .get(module.name.as_str())
         .with_context(|| {
             format!(
                 "Tola could not find the configuration of module `{}`",

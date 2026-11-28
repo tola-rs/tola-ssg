@@ -27,18 +27,15 @@ use tola_nu::{BuiltinModule, InvocationContext, Runtime, ScriptModule, SourceOve
 use crate::cli::args::NuArgs;
 
 pub(in crate::cli) const BUILTIN_MODULES: &[BuiltinModule] = &[BuiltinModule {
-    name: "nu-helpers",
+    name: "terminal",
     summary: "Pick original values from a searchable table",
     executable: false,
     entry: "mod.nu",
     sources: &[
-        (
-            "mod.nu",
-            include_bytes!("../../../modules/nu-helpers/mod.nu"),
-        ),
+        ("mod.nu", include_bytes!("../../../modules/terminal/mod.nu")),
         (
             "pick.nu",
-            include_bytes!("../../../modules/nu-helpers/pick.nu"),
+            include_bytes!("../../../modules/terminal/pick.nu"),
         ),
     ],
 }];
@@ -343,9 +340,11 @@ fn runtime_inputs(
     let mut libraries = Vec::new();
     for module in modules.values() {
         dependencies.push(module.manifest.clone());
-        if let Some(entry) = &module.entry {
+        if module.name.is_top_level()
+            && let Some(entry) = &module.entry
+        {
             libraries.push(ScriptModule {
-                alias: module.name.clone(),
+                alias: module.name.as_str().to_owned(),
                 root: module.root.clone(),
                 entry: entry.clone(),
                 manifest: module.manifest.clone(),
@@ -639,7 +638,7 @@ pub(crate) fn hook_runner() -> tola_build::hooks::HookRunner {
                 modules.insert(
                     name.clone(),
                     NuModule {
-                        name: name.clone(),
+                        name: module.name.clone(),
                         root: module.root.clone(),
                         manifest: module.manifest.clone(),
                         entry: module.nu.as_ref().map(|nu| nu.entry.clone()),
@@ -746,7 +745,7 @@ pub(super) fn run_action(
     call.hook = CallContext::read()?.and_then(|parent| parent.hook);
     call.site = Some(config.as_ref().into());
     call.module = Some(Module {
-        name: module.name.clone(),
+        name: module.name.to_string(),
         root: module.root.clone(),
         manifest: module.manifest.clone(),
         options: Some(serde_json::to_value(&module.options)?),
@@ -1054,7 +1053,7 @@ mod tests {
         let script = root.join("pick.nu");
         std::fs::write(
             &script,
-            "use std/assert\nuse tola nu-helpers\nassert equal ([] | nu-helpers pick) []\n",
+            "use std/assert\nuse tola terminal\nassert equal ([] | terminal pick) []\n",
         )
         .unwrap();
         assert_eq!(rt.run_embedded(&script, &[]).unwrap(), 0);

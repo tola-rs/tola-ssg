@@ -5,7 +5,50 @@ use std::path::{Path, PathBuf};
 
 use tola_input::InputMode;
 
-use crate::declaration::{Assets, Command, Entry, Initializer, ModuleDeclaration, Query};
+use crate::declaration::{
+    Assets, ChildModuleDeclaration, Command, Entry, Initializer, ModuleDeclaration, ModuleSource,
+    Query,
+};
+use crate::identity::{ModuleAlias, ModuleCapability, ModuleId, TolaVersion, derive_capabilities};
+
+/// Who owns a module instance and supplies `owner.root` for its declarations.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum ModuleOwner {
+    #[default]
+    Site,
+    Module {
+        id: ModuleId,
+        root: PathBuf,
+    },
+}
+
+impl ModuleOwner {
+    /// Whether this module was declared directly by the site's `tola.toml`.
+    pub fn is_site(&self) -> bool {
+        matches!(self, Self::Site)
+    }
+
+    /// The owning module's validated identity, or `None` when owned by the site.
+    pub fn module_id(&self) -> Option<&ModuleId> {
+        match self {
+            Self::Site => None,
+            Self::Module { id, .. } => Some(id),
+        }
+    }
+
+    /// The owning module's scoped name, or `None` when owned by the site.
+    pub fn module_name(&self) -> Option<&str> {
+        self.module_id().map(ModuleId::as_str)
+    }
+
+    /// Physical root directory of this module's owner.
+    pub fn root<'a>(&'a self, site_root: &'a Path) -> &'a Path {
+        match self {
+            Self::Site => site_root,
+            Self::Module { root, .. } => root.as_path(),
+        }
+    }
+}
 
 /// The paths and exact bytes from which a module manifest was parsed.
 #[derive(Debug, Clone)]
@@ -83,13 +126,16 @@ impl ManifestStamp {
 }
 
 /// A module and the manifest that supplied its declarations.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct LoadedModule {
-    pub name: String,
+    pub name: ModuleId,
     pub root: PathBuf,
     pub manifest: PathBuf,
+    pub owner: ModuleOwner,
+    pub source: Option<ModuleSource>,
     /// Evidence captured from the exact manifest bytes parsed for this module.
     pub manifest_evidence: Option<ManifestStamp>,
+    pub min_tola_version: Option<TolaVersion>,
     pub typst: Option<crate::manifest::TypstInputs>,
     pub nu: Option<Entry>,
     pub build: Option<Entry>,
@@ -99,7 +145,27 @@ pub struct LoadedModule {
     pub commands: BTreeMap<String, Command>,
     pub initializer: Option<Initializer>,
     pub hooks: crate::hooks::ModuleHooks,
+    pub modules: BTreeMap<String, ChildModuleDeclaration>,
+    pub child_aliases: BTreeMap<ModuleAlias, ModuleId>,
     pub options: toml::Table,
+}
+
+impl LoadedModule {
+    /// Capabilities derived from this module's declared sections.
+    pub fn capabilities(&self) -> Vec<ModuleCapability> {
+        derive_capabilities(
+            self.build.is_some(),
+            self.typst.as_ref(),
+            self.nu.is_some(),
+            self.assets.as_ref(),
+            &self.icons,
+            &self.hooks,
+            !self.commands.is_empty(),
+            !self.queries.is_empty(),
+            self.initializer.is_some(),
+            !self.modules.is_empty(),
+        )
+    }
 }
 
 /// A module path Tola could not read, or one that leaves its module.
@@ -221,14 +287,20 @@ pub fn load_modules_with_roots(
     crate::manifest::read_selected(site_root, declarations, roots, mode, sources)?
         .into_iter()
         .map(|(name, loaded)| {
+            let id = ModuleId::parse(&name)
+                .map_err(|_| crate::manifest::ManifestError::Namespace { name: name.clone() })?;
+            let source = declarations.get(&name).map(|d| d.source.clone());
             let manifest = loaded.manifest;
             Ok((
-                name.clone(),
+                name,
                 LoadedModule {
-                    name,
+                    name: id,
                     root: loaded.root,
                     manifest: loaded.path,
+                    owner: ModuleOwner::Site,
+                    source,
                     manifest_evidence: Some(loaded.evidence),
+                    min_tola_version: manifest.min_tola_version,
                     typst: manifest.typst,
                     nu: manifest.nu,
                     build: manifest.build,
@@ -238,6 +310,8 @@ pub fn load_modules_with_roots(
                     commands: manifest.commands,
                     initializer: manifest.init,
                     hooks: manifest.hooks,
+                    modules: manifest.modules,
+                    child_aliases: BTreeMap::new(),
                     options: loaded.options,
                 },
             ))

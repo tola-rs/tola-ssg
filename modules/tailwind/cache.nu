@@ -31,6 +31,7 @@ export def cache-key [context: record, argv: list<string>, stylesheet: string] {
         input-scope: $context.inputScope
         node-env: $env.NODE_ENV?
         toolchain: $options.toolchain
+        input: $options.input
         minify: $options.minify
         stylesheet: (if $custom { open --raw $stylesheet | hash sha256 })
         html: (html-digests $context.hook.inputDir)

@@ -207,7 +207,7 @@ struct SelectedInputs {
 
 /// One remote module directory `tola vendor` freezes below `modules/`.
 struct SelectedModule {
-    alias: String,
+    alias: tola_module::ModuleId,
     source: PathBuf,
 }
 
@@ -261,17 +261,16 @@ fn select_inputs(
         );
     }
     let mut modules = Vec::new();
-    for (alias, source) in site.module_roots() {
-        let declaration = &config.modules()[alias];
-        if matches!(
-            declaration.source,
-            tola_module::ModuleSource::Local { .. } | tola_module::ModuleSource::Builtin { .. }
+    for module in site.prepared_modules().modules.values() {
+        if !matches!(
+            module.source,
+            Some(tola_module::ModuleSource::Git { .. } | tola_module::ModuleSource::Tarball { .. })
         ) {
             continue;
         }
         modules.push(SelectedModule {
-            alias: alias.to_owned(),
-            source: source.to_owned(),
+            alias: module.name.clone(),
+            source: module.root.clone(),
         });
     }
     Ok(SelectedInputs {
@@ -482,11 +481,8 @@ impl VendorCopy<'_> {
     fn modules(&mut self, modules: &[SelectedModule]) -> Result<()> {
         for module in modules {
             self.cancellation.ensure_active()?;
-            let destination = self
-                .replacement
-                .candidate_root()
-                .join("modules")
-                .join(&module.alias);
+            let destination =
+                tola_module::vendor_module_dir(&self.replacement.candidate_root(), &module.alias);
             self.directory(&module.source, &destination, &mut Vec::new())?;
         }
         Ok(())
@@ -842,6 +838,7 @@ mod tests {
                 subdir: PathBuf::new(),
                 commit: "a".repeat(40),
                 tree_sha256: tree_sha256(&frozen).unwrap(),
+                modules: BTreeMap::new(),
             },
         );
         lock.commit(&root, &InputLock::default()).unwrap();

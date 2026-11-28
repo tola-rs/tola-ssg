@@ -186,6 +186,9 @@ pub enum LockedModule {
         commit: String,
         /// Digest of the materialized module directory.
         tree_sha256: Sha256Digest,
+        /// Private child modules locked under this module.
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        modules: BTreeMap<String, LockedModule>,
     },
     /// Local module inside the site directory.
     Local {
@@ -193,12 +196,18 @@ pub enum LockedModule {
         path: PathBuf,
         /// Digest of the module directory.
         tree_sha256: Sha256Digest,
+        /// Private child modules locked under this module.
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        modules: BTreeMap<String, LockedModule>,
     },
     /// Downloaded or local module archive and its expanded contents.
     Tarball {
         tarball: TarballLocation,
         tarball_sha256: Sha256Digest,
         tree_sha256: Sha256Digest,
+        /// Private child modules locked under this module.
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        modules: BTreeMap<String, LockedModule>,
     },
 }
 
@@ -269,6 +278,24 @@ impl LockedModule {
             Self::Git { tree_sha256, .. }
             | Self::Local { tree_sha256, .. }
             | Self::Tarball { tree_sha256, .. } => *tree_sha256,
+        }
+    }
+
+    /// Private child modules locked under this module.
+    pub fn children(&self) -> &BTreeMap<String, LockedModule> {
+        match self {
+            Self::Git { modules, .. }
+            | Self::Local { modules, .. }
+            | Self::Tarball { modules, .. } => modules,
+        }
+    }
+
+    /// Mutable private child modules locked under this module.
+    pub fn children_mut(&mut self) -> &mut BTreeMap<String, LockedModule> {
+        match self {
+            Self::Git { modules, .. }
+            | Self::Local { modules, .. }
+            | Self::Tarball { modules, .. } => modules,
         }
     }
 }
@@ -374,6 +401,8 @@ struct RawModule {
     tree_sha256: Option<String>,
     tarball: Option<TarballLocation>,
     tarball_sha256: Option<String>,
+    #[serde(default)]
+    modules: BTreeMap<String, RawModule>,
 }
 
 impl RawModule {
@@ -387,6 +416,10 @@ impl RawModule {
                 alias: alias.to_owned(),
             },
         )?;
+        let modules = convert_map(self.modules, |child_alias, child| {
+            let scoped = format!("{alias}/{child_alias}");
+            child.into_locked(&scoped)
+        })?;
         match (self.git, self.path, self.tarball) {
             (Some(git), None, None) => {
                 if self.tarball_sha256.is_some() {
@@ -426,6 +459,7 @@ impl RawModule {
                     subdir,
                     commit,
                     tree_sha256,
+                    modules,
                 })
             }
             (None, Some(path), None) => {
@@ -444,7 +478,11 @@ impl RawModule {
                         alias: alias.to_owned(),
                     });
                 }
-                Ok(LockedModule::Local { path, tree_sha256 })
+                Ok(LockedModule::Local {
+                    path,
+                    tree_sha256,
+                    modules,
+                })
             }
             (None, None, Some(tarball)) => {
                 if self.revision.is_some() || self.commit.is_some() || self.subdir.is_some() {
@@ -472,6 +510,7 @@ impl RawModule {
                     tarball,
                     tarball_sha256,
                     tree_sha256,
+                    modules,
                 })
             }
             (None, None, None) => Err(LockError::ModuleSourceMissing {
@@ -599,4 +638,51 @@ fn legacy_error(text: &str) -> Option<LockError> {
         return Some(LockError::Legacy);
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nested_module_lock_roundtrip_and_empty_omitted() {
+        let mut lock = InputLock::default();
+        let digest = Sha256Digest::of_bytes(b"mod");
+        let child_digest = Sha256Digest::of_bytes(b"child");
+        let mut children = BTreeMap::new();
+        children.insert(
+            "helper".to_owned(),
+            LockedModule::Git {
+                git: "https://example.org/helper.git".into(),
+                revision: Some(LockedRevision::Tag("v1".into())),
+                subdir: PathBuf::new(),
+                commit: "0123456789abcdef0123456789abcdef01234567".into(),
+                tree_sha256: child_digest,
+                modules: BTreeMap::new(),
+            },
+        );
+        lock.modules.insert(
+            "docs".to_owned(),
+            LockedModule::Local {
+                path: PathBuf::from("theme"),
+                tree_sha256: digest,
+                modules: children,
+            },
+        );
+        lock.modules.insert(
+            "plain".to_owned(),
+            LockedModule::Local {
+                path: PathBuf::from("plain"),
+                tree_sha256: digest,
+                modules: BTreeMap::new(),
+            },
+        );
+
+        let encoded = lock.to_toml().unwrap();
+        assert!(encoded.contains("[modules.docs.modules.helper]"));
+        assert!(!encoded.contains("[modules.plain.modules]"));
+
+        let decoded = InputLock::parse(&encoded).unwrap();
+        assert_eq!(decoded, lock);
+    }
 }
