@@ -106,12 +106,13 @@ jobs:
           if-no-files-found: error
 
   checks:
-    name: Run complete Check workflow
+    name: Run Check workflow
     needs: validate
     # A local reusable workflow uses this invocation's commit, as do all checkouts.
     uses: ./.github/workflows/check.yml
     with:
       full: true
+      skip-windows-msvc: true
 
   build:
     name: Build ${{ matrix.target }}

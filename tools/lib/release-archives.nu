@@ -35,8 +35,30 @@ export const LICENSE_FILES = [
     {name: 'THIRD-PARTY-GRAMMARS.txt', path: 'crates/tola-highlight/THIRD-PARTY-GRAMMARS.txt'}
 ]
 
+def run-site-command [executable: path, ...args: string] {
+    let result = (^$executable ...$args | complete)
+    if $result.exit_code != 0 {
+        let command = ($args | str join ' ')
+        error make { msg: $"tola ($command) failed \(($result.exit_code)\): (($result.stdout + $result.stderr) | str trim)" }
+    }
+}
+
+def verify-site [executable: path, directory: path] {
+    let site = ($directory | path join 'starter site')
+    run-site-command $executable init $site '--pure'
+    let text = 'Hello from the release archive'
+    $text | save ($site | path join 'content' 'index.typ')
+    cd $site
+    run-site-command $executable build '--pure'
+    let page = ($site | path join 'public' 'index.html')
+    if not ($page | path exists) or not (open --raw $page | str contains $text) {
+        error make { msg: 'tola build did not publish the starter page in public/index.html' }
+    }
+    print 'Verified a starter site build with the packaged executable'
+}
+
 # Check the archive on any host, and run the executable when requested.
-export def verify-binary-archive [archive: path, binary: string, version: string, run: bool] {
+export def verify-binary-archive [archive: path, binary: string, version: string, run: bool, --build-site] {
     check-archive $archive $binary
     let stage = (mktemp --directory)
     try {
@@ -53,6 +75,9 @@ export def verify-binary-archive [archive: path, binary: string, version: string
             let reported = ($report.stdout | lines | first | default '' | str trim)
             if $reported != $"tola ($version)" {
                 error make { msg: $"($binary) reports '($reported)', expected 'tola ($version)'" }
+            }
+            if $build_site {
+                verify-site $executable $stage
             }
         }
     } finally {

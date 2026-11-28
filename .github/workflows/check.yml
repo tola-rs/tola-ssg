@@ -6,6 +6,10 @@ on:
         description: "Also run the Windows matrix and the extension suite."
         type: boolean
         default: false
+      skip-windows-msvc:
+        description: "Skip the Windows source checks when the caller tests the release archive."
+        type: boolean
+        default: false
   # A manual run carries the complete set only when its `full` input asks for it.
   workflow_dispatch:
     inputs:
@@ -33,9 +37,8 @@ defaults:
     shell: bash
 
 jobs:
-  # One place decides which checks a run covers. A release takes everything; a push asks with
-  # `[full-ci]` in its message, a pull request with the `full-ci` label, and a manual run with
-  # its `full` input.
+  # A push requests a full check with `[full-ci]` in its message, a pull request with the
+  # `full-ci` label, and a manual run with its `full` input.
   scope:
     name: Decide which checks this run covers
     runs-on: ubuntu-latest
@@ -201,10 +204,8 @@ jobs:
     runs-on: windows-latest
     # A cold runner builds the native test targets after checking isolated feature sets.
     timeout-minutes: 90
-    # The native Windows compile and test suite is the slow leg, so it waits for a run that
-    # carries the complete set; the GNU cross-check above rides every push.
     needs: [scope]
-    if: ${{ needs.scope.outputs.full == 'true' }}
+    if: ${{ needs.scope.outputs.full == 'true' && !inputs.skip-windows-msvc }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:

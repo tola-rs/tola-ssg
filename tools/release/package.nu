@@ -65,7 +65,7 @@ def "main build" [target?: string, --output: directory = 'release'] {
     try {
         let staged = ($stage | path join (archive-name $name $plain))
         create-archive $binary $staged $specification
-        verify-binary-archive $staged $specification.binary $version (matches-host $specification)
+        verify-binary-archive $staged $specification.binary $version (matches-host $specification) --build-site=($specification.system == 'windows')
         require-archive-destination $archive
         mv --force $staged $archive
     } finally {
