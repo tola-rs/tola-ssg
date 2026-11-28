@@ -110,12 +110,6 @@ fn check_children(
                 check_loaded_with_visited(&child_loaded, visited)?;
                 visited.remove(&child_root);
             }
-            crate::ModuleSource::Builtin { builtin } => {
-                anyhow::ensure!(
-                    crate::BuiltinModule::named(builtin).is_some(),
-                    "`tola-module.toml` `modules.{alias}.builtin` names unknown built-in module `{builtin}`"
-                );
-            }
             crate::ModuleSource::Git { .. } | crate::ModuleSource::Tarball { .. } => {}
         }
     }

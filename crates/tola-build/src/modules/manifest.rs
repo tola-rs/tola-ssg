@@ -121,10 +121,7 @@ pub fn read_available_declarations(
             continue;
         };
         if scope == InputScope::Pure
-            && !matches!(
-                &declaration.source,
-                ModuleSource::Local { .. } | ModuleSource::Builtin { .. }
-            )
+            && !matches!(&declaration.source, ModuleSource::Local { .. })
             && !vendor_modules
                 .as_ref()
                 .is_some_and(|dir| root.starts_with(dir))

@@ -75,7 +75,7 @@ fn run_nu(
         format!("before-pack hook `{name}`"),
         ReportSources::new(),
     );
-    let runtime = super::nu::prepare_runtime(vec![], vec![], invocation, vec![])?
+    let runtime = tola_nu::Runtime::for_invocation(vec![], vec![], invocation)?
         .with_cancellation(cancelled.signal_flag())
         .with_host(tola_nu::Host {
             submit_diagnostics: Some(submit),

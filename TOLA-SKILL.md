@@ -6,7 +6,7 @@
 | Write content in Typst (headings, math, code, links) | `tola skill writing` |
 | Configure metadata, pages, HTML/CSS, navigation, assets, or SEO | `tola skill site` |
 | Install or update a theme or module | `tola skill modules use` |
-| Use built-in modules (`resize-images`, `tailwind`) | `tola skill modules built-in` |
+| Use official modules (`resize-images`, `tailwind`) | `tola skill modules official` |
 | Customize a theme | `tola skill modules theme customization` |
 | Create a theme, library, query, or author command | `tola skill modules create` |
 | Write a Nu script or interactive author tool | `tola skill scripts` |
@@ -316,7 +316,7 @@ Choose the right path for each image:
 - **Compiler-rendered content** (PDF or inline Typst graphics): native `image("...")`.
 - **Published original**: declare under `[assets]` and render `html.img(src: asset-url(...))`.
 - **On-demand derivatives and responsive `<picture>`/`srcset`**: use `@tola/image:0.0.0`. Pass an input path or raw bytes (never an asset URL); resolve relative paths with `path(...)` before handing them to helpers in another file. Returned URLs already include `base-path`. Supply `sizes` for non-full-width responsive images. `resize-image` requires an explicit raster format for SVG inputs; responsive helpers refuse SVG. See `tola help "@tola/image"`.
-- **Batch resizing of `[assets]` images**: use the built-in `resize-images` module (`tola skill modules built-in`).
+- **Batch resizing of `[assets]` images**: use the official `resize-images` module (`tola skill modules official`).
 
 Keep private originals outside `[assets]` trees, since declared originals are always published even if you also create resized variants.
 
@@ -348,11 +348,11 @@ A module is a directory with `tola-module.toml`. It can supply any combination o
 
 Each site assigns an instance alias under `[modules.ALIAS]`. Never hard-code an alias inside module code — one module can be mounted under multiple aliases with different options.
 
-Start with `tola skill modules use` to install a module, `tola skill modules built-in` for official built-in modules, `tola skill modules create` to write a library, or `tola skill modules theme --all` to build a theme.
+Start with `tola skill modules use` to install a module, `tola skill modules official` for official modules, `tola skill modules create` to write a library, or `tola skill modules theme --all` to build a theme.
 
 ### Use
 
-Register each module under `[modules.ALIAS]` in `tola.toml` using exactly one source: `path`, `tarball`, `git`, or `builtin`.
+Register each module under `[modules.ALIAS]` in `tola.toml` using `path`, `tarball`, or `git` as its sole source.
 
 ```toml
 [build]
@@ -367,7 +367,6 @@ Content and templates import its Typst library from `@tola-modules/notes:0.0.0`,
 - **`path`**: Relative to `tola.toml` (or absolute; `--pure` requires paths inside the site).
 - **`tarball`**: `{ url = "https://..." }` or `{ path = "downloads/theme.zip" }`, with optional 64-hex `sha256`. Supports `.tar.gz`, `.tar.zst`, and `.zip` with one outer directory containing `tola-module.toml` directly inside. Downloading does not run module build scripts, so use prepared release archives.
 - **`git`**: `{ url = "...", tag | branch | rev, subdir = "..." }`. Pick at most one of `tag`, `branch`, or full-commit `rev` (omitting all selects the default branch). HTTPS uses your Git credential helper; SSH / `git@host:path` uses your SSH config and agent.
-- **`builtin`**: Official modules embedded in Tola (`"resize-images"`, `"tailwind"`). See `tola skill modules built-in`.
 
 Keep `tola.lock` committed so builds use the same resolved inputs. Run `tola update ALIAS` after changing a source or to refresh a moving branch/archive (and `tola vendor --refresh` if vendoring).
 
@@ -379,9 +378,9 @@ Keep `tola.lock` committed so builds use the same resolved inputs. Run `tola upd
 
 See `tola help "[modules]"`.
 
-### Built-in
+### Official
 
-Tola ships ready-to-use modules under `builtin = "..."` that stay in sync with your Tola version. To fork and customize one, copy its files into your site and switch `builtin` to `path`.
+Load the official modules from `tola-rs/modules` with `git`. Use `subdir` to select a module and commit `tola.lock` to pin the fetched revision.
 
 #### Resize images
 
@@ -392,7 +391,7 @@ Resizes JPEG, PNG, and WebP images declared in `[assets]` and caches each size s
 trees = [{ source = "photos", url-prefix = "/gallery" }]
 
 [modules.resize-images]
-builtin = "resize-images"
+git = { url = "https://github.com/tola-rs/modules.git", subdir = "resize-images" }
 
 [modules.resize-images.options]
 include = ["photos/**"]
@@ -411,7 +410,7 @@ Compiles Tailwind CSS v4 from the HTML pages Tola renders:
 
 ```toml
 [modules.tailwind]
-builtin = "tailwind"
+git = { url = "https://github.com/tola-rs/modules.git", subdir = "tailwind" }
 
 [modules.tailwind.options]
 runner = "auto" # or e.g. ["bunx", "--no-install", "@tailwindcss/cli"]
@@ -419,7 +418,7 @@ minify = false
 dev = "run"     # "run", "reuse", or "skip"
 ```
 
-Link the generated stylesheet in `<head>` with `output-url("_tola-modules/tailwind/tailwind.css")` (using your module alias). Add `styles/tailwind.css` starting with `@import "tailwindcss" source(none);` for custom CSS or `@source` directives. For a launcher or custom stylesheet, set `toolchain` to bust the cross-run disk cache when dependencies change.
+Install the Tailwind CSS v4 CLI. Automatic lookup checks the declaring module's `node_modules/.bin`, the site's `node_modules/.bin`, and `PATH`, in that order. Link the generated stylesheet in `<head>` with `output-url("_tola-modules/tailwind/tailwind.css")` using your module alias. Add `styles/tailwind.css` for custom CSS or `@source` directives. Set `toolchain` to identify dependencies that a lockfile does not cover.
 
 ### Create
 

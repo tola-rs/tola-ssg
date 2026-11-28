@@ -1,5 +1,5 @@
 #show: config(
-  summary: [Attach local, Git, tarball, or built-in Tola modules under site-chosen aliases.],
+  summary: [Attach local, Git, or tarball modules under site-chosen aliases.],
   related: ("@tola/module", "[hooks]", "[options]", "[vendor]"),
 )
 
@@ -12,7 +12,6 @@ Choose exactly one source per alias:
 - `path`: Local directory (relative to the site root, or absolute when allowed by the input scope; must stay inside the site under `--pure` and outside `build.publish-dir`).
 - `git`: `{ url = "...", tag | branch | rev = "...", subdir = "..." }`. Supports `https://`, `ssh://`, and `git@host:path`. Uses your local Git credential helper or SSH configuration; credentials are never written to `tola.lock`.
 - `tarball`: `{ url = "https://..." }` or `{ path = "..." }`, with optional 64-hex `sha256`. Supports `.tar.gz`, `.tar.zst`, and ZIP archives containing one top-level directory with `tola-module.toml`.
-- `builtin`: Bundled Tola modules shipped with the binary (`"resize-images"`, `"tailwind"`).
 
 Run `tola update <alias>` after changing a source or to update locked commits; run `tola vendor --refresh` when vendoring. Input flags control resolution: `--locked` keeps `tola.lock` unchanged while allowing downloads, `--offline` forbids network access, and `--pure` restricts builds to in-site sources and vendored copies.
 
@@ -28,7 +27,7 @@ Run `tola update <alias>` after changing a source or to update locked commits; r
 - Modules may expose author commands (`[commands.<name>]` in `tola-module.toml`, invoked as `tola <alias> <command>`), built-in guides (`skill = "GUIDE.md"`), and site initializers (`[init]`, invoked via `tola init <dir> --from <source> --alias <alias>`).
 - Run `tola module pack` and `tola module check` when preparing a module for distribution.
 
-#example(title: [Configure a built-in module and a local theme with options])[
+#example(title: [Configure the official Tailwind module and a local theme with options])[
   ```toml
   [modules.theme]
   path = "theme"
@@ -37,6 +36,6 @@ Run `tola update <alias>` after changing a source or to update locked commits; r
   title = "Field Notes"
 
   [modules.tailwind]
-  builtin = "tailwind"
+  git = { url = "https://github.com/tola-rs/modules.git", subdir = "tailwind" }
   ```
 ]

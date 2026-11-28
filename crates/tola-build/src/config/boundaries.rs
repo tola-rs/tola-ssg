@@ -161,9 +161,6 @@ pub(super) fn module_input_paths(schema: &SiteConfigSchema, root: &Path) -> Vec<
         .flat_map(|(name, module)| {
             let mut paths = match &module.source {
                 tola_module::ModuleSource::Local { path } => vec![root.join(path)],
-                tola_module::ModuleSource::Builtin { .. } => {
-                    vec![tola_input::layout::modules(root)]
-                }
                 tola_module::ModuleSource::Git { .. }
                 | tola_module::ModuleSource::Tarball { .. } => {
                     let vendor = schema.vendor.path.as_deref().unwrap_or(Path::new("vendor"));
@@ -213,9 +210,7 @@ pub(crate) fn overlapping_module_root<'a>(
                         identity.logical_path()
                             == tola_input::lexical_path_identity(&root.join(path))
                     }
-                    ModuleSource::Git { .. }
-                    | ModuleSource::Tarball { .. }
-                    | ModuleSource::Builtin { .. } => false,
+                    ModuleSource::Git { .. } | ModuleSource::Tarball { .. } => false,
                 });
         (!writable).then_some(module.as_path())
     })

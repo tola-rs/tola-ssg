@@ -5,7 +5,6 @@ mod archive;
 pub mod arguments;
 
 pub mod assets;
-mod builtin;
 pub mod bundle;
 pub mod check;
 pub mod checkout;
@@ -28,7 +27,6 @@ pub mod watch;
 
 pub use action::Action;
 pub use arguments::expand_argument;
-pub use builtin::{BuiltinModule, install_builtin_modules};
 pub use bundle::{
     Acquired, AcquiredModule, AssetContribution, Context as PrepareContext, Contribution,
     EntrySelection, HookEntry, HooksContribution, ModuleBundle, ModuleEntry, acquire,

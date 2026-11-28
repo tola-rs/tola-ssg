@@ -22,38 +22,9 @@ use tola_build::config::ConfigSource;
 use tola_build::modules::{nu_font_options, read_nu_modules};
 use tola_input::{FilePatterns, InputMode, InputScope};
 use tola_module::manifest::NuModule;
-use tola_nu::{BuiltinModule, InvocationContext, Runtime, ScriptModule, SourceOverlay, serve_lsp};
+use tola_nu::{InvocationContext, Runtime, ScriptModule, SourceOverlay, serve_lsp};
 
 use crate::cli::args::NuArgs;
-
-pub(in crate::cli) const BUILTIN_MODULES: &[BuiltinModule] = &[BuiltinModule {
-    name: "terminal",
-    summary: "Pick original values from a searchable table",
-    executable: false,
-    entry: "mod.nu",
-    sources: &[
-        ("mod.nu", include_bytes!("../../../modules/terminal/mod.nu")),
-        (
-            "pick.nu",
-            include_bytes!("../../../modules/terminal/pick.nu"),
-        ),
-    ],
-}];
-
-pub(super) fn prepare_runtime(
-    modules: Vec<ScriptModule>,
-    dependencies: Vec<PathBuf>,
-    context: InvocationContext,
-    overlays: Vec<SourceOverlay>,
-) -> Result<Runtime> {
-    Ok(Runtime::for_invocation_with_builtins(
-        modules,
-        dependencies,
-        context,
-        overlays,
-        BUILTIN_MODULES,
-    )?)
-}
 
 pub(in crate::cli) fn run(args: &NuArgs, input_scope: Option<&str>) -> ExitCode {
     match execute(args, input_scope) {
@@ -462,10 +433,13 @@ fn prepare_invocation(
         inherited.svg_fonts = Some(Ok(Arc::new(tola_typst::FontStore::with_options(
             tola_typst::FontOptions::new().with_system_fonts(resources.include_system_fonts()),
         ))));
-        return Ok(
-            prepare_runtime(Vec::new(), Vec::new(), context, overlays.to_vec())?
-                .with_host(inherited)?,
-        );
+        return Ok(Runtime::for_invocation_with_overlays(
+            Vec::new(),
+            Vec::new(),
+            context,
+            overlays.to_vec(),
+        )?
+        .with_host(inherited)?);
     };
     if let Some(alias) = alias {
         let module = site
@@ -496,7 +470,8 @@ fn prepare_invocation(
                 .any(|file| file.path() == path && is_overlaid(path))
         });
     }
-    let runtime = prepare_runtime(libraries, dependencies, context, overlays.to_vec())?;
+    let runtime =
+        Runtime::for_invocation_with_overlays(libraries, dependencies, context, overlays.to_vec())?;
     if let Some(source) = site.config.source() {
         ensure!(
             source.sources().iter().all(|file| is_overlaid(file.path())
@@ -754,14 +729,13 @@ pub(super) fn run_action(
         diagnostic::collector(format!("command:{alias}.{command}"), ReportSources::new());
     let temporary = tempfile::tempdir().context("could not prepare the module command context")?;
     let (libraries, dependencies) = runtime_inputs(&config, &modules);
-    let runtime = prepare_runtime(
+    let runtime = Runtime::for_invocation(
         libraries,
         dependencies,
         InvocationContext {
             directory: directory.to_owned(),
             environment: call_environment(scope, &call, temporary.path())?,
         },
-        Vec::new(),
     )?
     .with_host(Host {
         site: Some(site_record(&config)),

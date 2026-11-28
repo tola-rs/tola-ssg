@@ -91,7 +91,7 @@ pub(in crate::cli) fn run(
                 };
                 let _ = status(output, verb, format_args!("{alias} ({archive})"));
             }
-            ModuleSource::Local { .. } | ModuleSource::Builtin { .. } => {}
+            ModuleSource::Local { .. } => {}
         },
     )
     .map_err(|error| refresh_failed(error.into()))?;
@@ -310,10 +310,6 @@ fn refreshable(
             ModuleSource::Local { .. } => ensure!(
                 names.is_empty(),
                 "module `{alias}` is a local directory; it is site source and is never refreshed"
-            ),
-            ModuleSource::Builtin { .. } => ensure!(
-                names.is_empty(),
-                "module `{alias}` ships with Tola; update Tola to change its version"
             ),
             ModuleSource::Git { git } if pinned(git, lock.modules.get(alias)) => {}
             ModuleSource::Git { .. } | ModuleSource::Tarball { .. } => {

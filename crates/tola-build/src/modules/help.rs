@@ -7,8 +7,8 @@ Use `path` for a local module. Relative paths start at the site root. With `--pu
 the module must be inside the site. A site `before-build` hook can generate inputs in
 such a module. Keep the module directory separate from the publish directory.
 
-Choose one of `path`, `git`, `tarball`, or `builtin`. This executable supplies
-`builtin = "resize-images"` and `builtin = "tailwind"`.
+Choose one of `path`, `git`, or `tarball`. The official `resize-images` and `tailwind`
+modules use `git` sources in the `tola-rs/modules` repository.
 
 A `tarball` table has exactly one
 HTTPS `url` or local file `path`, plus optional `sha256` as 64 hexadecimal digits. Relative
@@ -80,7 +80,7 @@ Publish `photos/` at `/gallery/` and choose which images to resize by their sour
 trees = [{ source = "photos", url-prefix = "/gallery" }]
 
 [modules.resize-images]
-builtin = "resize-images"
+git = { url = "https://github.com/tola-rs/modules.git", subdir = "resize-images" }
 
 [modules.resize-images.options]
 include = ["photos/**"]
@@ -99,15 +99,15 @@ at least 1200 pixels wide.
 
 ```toml
 [modules.tailwind]
-builtin = "tailwind"
+git = { url = "https://github.com/tola-rs/modules.git", subdir = "tailwind" }
 
 [modules.tailwind.options]
 minify = true
 # runner = ["deno", "task", "tailwind"]
 ```
 
-The module finds an installed Tailwind CSS v4 CLI in the site's `node_modules/.bin`
-or on `PATH`. Set `runner` to run a project task or wrapper. It receives the module's
+The module looks for a Tailwind CSS v4 CLI in the declaring module's `node_modules/.bin`,
+then the site's `node_modules/.bin`, then `PATH`. Set `runner` to run a project task or wrapper. It receives the module's
 Tailwind arguments and exits after one compilation. The module scans rendered HTML
 and publishes `_tola-modules/tailwind/tailwind.css`. Link it with `output-url`.
 Add `styles/tailwind.css` to set Tailwind options or scan additional sources. List

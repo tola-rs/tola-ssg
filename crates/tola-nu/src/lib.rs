@@ -100,6 +100,16 @@ pub const BUILTIN_MODULES: &[BuiltinModule] = &[
             ),
         ],
     },
+    BuiltinModule {
+        name: "terminal",
+        summary: "Pick original values from a searchable table",
+        executable: false,
+        entry: "mod.nu",
+        sources: &[
+            ("mod.nu", include_bytes!("../nu/terminal/mod.nu")),
+            ("pick.nu", include_bytes!("../nu/terminal/pick.nu")),
+        ],
+    },
 ];
 
 /// One prepared Nu environment for CLI evaluation or LSP service.
@@ -167,23 +177,11 @@ impl Runtime {
         context: InvocationContext,
         overlays: Vec<SourceOverlay>,
     ) -> Result<Self> {
-        Self::for_invocation_with_builtins(modules, dependencies, context, overlays, &[])
-    }
-
-    /// Prepare an invocation with additional built-in modules supplied by the application.
-    pub fn for_invocation_with_builtins(
-        modules: Vec<ScriptModule>,
-        dependencies: Vec<PathBuf>,
-        context: InvocationContext,
-        overlays: Vec<SourceOverlay>,
-        builtins: &[BuiltinModule],
-    ) -> Result<Self> {
         if !(context.directory.is_absolute() && context.directory.is_dir()) {
             return Err(NuError::InvocationDirectory);
         }
         let sources = collect_overlays(overlays)?;
         let overlay_paths = sources.keys().cloned().collect();
-        let builtins = BUILTIN_MODULES.iter().chain(builtins);
         let binding_paths: Vec<_> = modules
             .iter()
             .flat_map(|m| [m.root.join(&m.entry), m.manifest.clone()])
@@ -195,12 +193,17 @@ impl Runtime {
             initialize_engine(false, &context).map_err(|()| NuError::Engine)?;
         let supplied: Vec<_> = sources.values().cloned().collect();
         let host = Arc::new(OnceLock::new());
-        let (entries, native_module) =
-            load_modules(&mut engine, builtins.clone(), &configured, &supplied, &host)?;
+        let (entries, native_module) = load_modules(
+            &mut engine,
+            BUILTIN_MODULES.iter(),
+            &configured,
+            &supplied,
+            &host,
+        )?;
         let (used_sources, missing_sources) =
             collect_used_sources(&engine, &sources, &configured, &mut captured)?;
         let dependencies: Vec<_> = captured.into_values().collect();
-        let origins = collect_origins(&configured, builtins, &used_sources);
+        let origins = collect_origins(&configured, BUILTIN_MODULES.iter(), &used_sources);
         let runtime = Self {
             engine,
             native_module,

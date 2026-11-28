@@ -194,11 +194,11 @@ mod tests {
         let mut tbl: toml::Table = toml::from_str(
             r#"
 [modules.one]
-builtin = "tailwind"
+path = "tailwind"
 options = { option = "tailwind" }
 
 [modules.two]
-builtin = "tailwind"
+path = "tailwind"
 [modules.two.options]
 minify = { option = "css.minify" }
 nested = [{ option = "css.entry" }]

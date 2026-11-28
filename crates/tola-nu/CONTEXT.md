@@ -15,7 +15,7 @@ Embedded Nushell runtime for Tola: virtual built-in libraries, configured site m
 
 ## Embedded sources
 
-`nu/` contains the built-in diagnostic and image libraries; the binary supplies `terminal` from `modules/terminal/`. The root `tola` module exports host commands, `query`, and `syntax-highlight`. Built-in sources import Rust commands from `tola-native`, bound during parsing.
+`nu/` contains the built-in `context`, `diagnostic`, `image`, and `terminal` libraries. The root `tola` module exports these libraries alongside host commands, `query`, and `syntax-highlight`. Built-in sources import Rust commands from `tola-native`, bound during parsing.
 
 ## Invariants
 

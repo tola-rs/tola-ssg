@@ -162,11 +162,10 @@ pub(super) fn generate(
                 directory: candidate.clone(),
                 environment: super::super::nu::call_environment(scope, &call, &workspace)?,
             };
-            let runtime = super::super::nu::prepare_runtime(
+            let runtime = tola_nu::Runtime::for_invocation(
                 Vec::new(),
                 vec![initializer.manifest.clone()],
                 context,
-                Vec::new(),
             )?
             .with_host(super::super::nu::call_host(Some(&call))?)?
             .with_cancellation(cancellation.token().signal_flag());
@@ -352,7 +351,7 @@ fn register_source(text: &str, alias: &str, source: &ModuleSource) -> Result<Str
         .or_insert(toml_edit::Item::Table(toml_edit::Table::new()))
         .as_table_like_mut()
         .context("initializer module must be a table")?;
-    for key in ["path", "git", "tarball", "builtin"] {
+    for key in ["path", "git", "tarball"] {
         module.remove(key);
     }
     let fields = toml_edit::ser::to_document(source)?;
@@ -376,7 +375,7 @@ fn relocate_source(
             TarballLocation::File { path } => (path, false),
             TarballLocation::Url { .. } => return Ok(source),
         },
-        ModuleSource::Git { .. } | ModuleSource::Builtin { .. } => return Ok(source),
+        ModuleSource::Git { .. } => return Ok(source),
     };
     ensure!(
         !tola_input::normalize_existing_prefix(&target.join(&*path))

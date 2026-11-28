@@ -521,20 +521,17 @@ mod tests {
     use tola_input::InputScope;
 
     #[test]
-    fn recursive_acquire_builtin_child_and_enabled_by() {
-        static TEST_BUILTINS: &[crate::BuiltinModule] = &[crate::BuiltinModule {
-            name: "tailwind",
-            files: &[(
-                "tola-module.toml",
-                b"[options]\ninput = 'styles/tailwind.css'\nminify = false\n",
-            )],
-        }];
-        let _ = crate::install_builtin_modules(TEST_BUILTINS);
-
+    fn recursive_acquire_child_and_enabled_by() {
         let dir = tempfile::tempdir().unwrap();
         let site_root = dir.path();
         let docs_dir = site_root.join("theme");
-        fs::create_dir(&docs_dir).unwrap();
+        let child_dir = docs_dir.join("tailwind");
+        fs::create_dir_all(&child_dir).unwrap();
+        fs::write(
+            child_dir.join("tola-module.toml"),
+            "[options]\ninput = 'styles/tailwind.css'\nminify = false\n",
+        )
+        .unwrap();
         fs::write(
             docs_dir.join("tola-module.toml"),
             r#"
@@ -542,7 +539,7 @@ mod tests {
 styles = true
 
 [modules.tailwind]
-builtin = "tailwind"
+path = "tailwind"
 enabled-by = "styles"
 
 [modules.tailwind.options]

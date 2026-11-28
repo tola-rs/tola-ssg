@@ -204,14 +204,13 @@ pub(super) fn run_worker(path: &Path) -> Result<i32> {
     );
     let address = invocation.address;
     let key = invocation.key;
-    let runtime = super::prepare_runtime(
+    let runtime = tola_nu::Runtime::for_invocation(
         invocation.libraries,
         invocation.dependencies,
         InvocationContext {
             directory: invocation.directory,
             environment: invocation.environment,
         },
-        Vec::new(),
     )?
     .with_host(Host {
         site: invocation.site,

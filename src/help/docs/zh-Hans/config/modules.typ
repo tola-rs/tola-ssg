@@ -1,5 +1,5 @@
 #show: config(
-  summary: [按自定义别名引入本地、Git、压缩包或内置 Tola 模块。],
+  summary: [按自定义别名引入本地目录、Git 仓库或压缩包中的模块。],
   related: ("@tola/module", "[hooks]", "[options]", "[vendor]"),
 )
 
@@ -7,12 +7,11 @@
 
 = 模块来源
 
-每个别名从以下四种来源中任选其一：
+每个别名从以下三种来源中任选其一：
 
 - `path`：本地目录（相对站点根目录，或在输入范围允许时使用绝对路径；`--pure` 要求位于站点内，且始终不能与 `build.publish-dir` 重叠）。
 - `git`：`{ url = "...", tag | branch | rev = "...", subdir = "..." }`。支持 `https://`、`ssh://` 与 `git@host:path`，沿用本机 Git 凭据助手或 SSH 配置，不在 `tola.lock` 中保存凭据。
 - `tarball`：`{ url = "https://..." }` 或 `{ path = "..." }`，可选 64 位十六进制 `sha256`。支持 `.tar.gz`、`.tar.zst` 与 ZIP，归档内须包含单个外层目录且 `tola-module.toml` 位于其中。
-- `builtin`：随 Tola 二进制内置的模块（`"resize-images"`、`"tailwind"`）。
 
 修改来源或更新锁定版本时运行 `tola update <alias>`；使用 vendor 时再运行 `tola vendor --refresh`。输入标志行为：`--locked` 保持 `tola.lock` 不变但允许下载已锁定依赖；`--offline` 禁止联网；`--pure` 仅允许使用站点内源码与 vendor 副本。
 
@@ -28,7 +27,7 @@
 - 模块可在 `tola-module.toml` 中声明作者命令（`[commands.<name>]`，以 `tola <alias> <command>` 调用）、文档指南（`skill = "GUIDE.md"`）和站点初始化器（`[init]`，以 `tola init <dir> --from <source> --alias <alias>` 调用）。
 - 发布模块前可用 `tola module pack` 与 `tola module check` 打包和校验。
 
-#example(title: [配置本地主题模块与内置模块])[
+#example(title: [配置本地主题与官方 Tailwind 模块])[
   ```toml
   [modules.theme]
   path = "theme"
@@ -37,6 +36,6 @@
   title = "Typst 笔记"
 
   [modules.tailwind]
-  builtin = "tailwind"
+  git = { url = "https://github.com/tola-rs/modules.git", subdir = "tailwind" }
   ```
 ]

@@ -19,35 +19,5 @@ mod tree;
 mod writes;
 
 fn main() -> std::process::ExitCode {
-    tola_module::install_builtin_modules(&[
-        tola_module::BuiltinModule {
-            name: "resize-images",
-            files: &[
-                (
-                    "tola-module.toml",
-                    include_bytes!("../modules/resize-images/tola-module.toml"),
-                ),
-                (
-                    "resize.nu",
-                    include_bytes!("../modules/resize-images/resize.nu"),
-                ),
-            ],
-        },
-        tola_module::BuiltinModule {
-            name: "tailwind",
-            files: &[
-                (
-                    "tola-module.toml",
-                    include_bytes!("../modules/tailwind/tola-module.toml"),
-                ),
-                (
-                    "compile.nu",
-                    include_bytes!("../modules/tailwind/compile.nu"),
-                ),
-                ("cache.nu", include_bytes!("../modules/tailwind/cache.nu")),
-            ],
-        },
-    ])
-    .expect("embedded site modules have valid paths");
     cli::run(&std::env::args_os().collect::<Vec<_>>())
 }

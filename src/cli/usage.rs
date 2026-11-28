@@ -231,10 +231,7 @@ fn emit_page(
 
 fn append_builtin_nu(help: &mut String) {
     help.push_str("\nBuilt-in Nu libraries:\n");
-    let modules = tola_nu::BUILTIN_MODULES
-        .iter()
-        .chain(super::commands::nu::BUILTIN_MODULES);
-    for module in modules.clone() {
+    for module in tola_nu::BUILTIN_MODULES {
         help.push_str(&format!(
             "  use tola {:<12} {}\n",
             module.name, module.summary
@@ -242,7 +239,10 @@ fn append_builtin_nu(help: &mut String) {
     }
     help.push_str("  use tola syntax-highlight  Highlight source text for terminal previews\n");
     help.push_str("\nBuilt-in scripts:\n");
-    for module in modules.filter(|module| module.executable) {
+    for module in tola_nu::BUILTIN_MODULES
+        .iter()
+        .filter(|module| module.executable)
+    {
         help.push_str(&format!("  tola nu @tola-scripts/{} --help\n", module.name));
     }
 }

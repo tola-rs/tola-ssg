@@ -289,13 +289,9 @@ def no-git-check [ctx, root] {
   let path = ($root | path join "no-git-bin")
   mkdir $home
   mkdir $path
-  let override_url = $env.TOLA_FIXTURE_PUBLIC_URL?
-  let module = if $override_url == null {
-    {url: "https://github.com/tola-rs/tola-ssg.git", subdir: "modules/resize-images"}
-  } else {
-    {url: $override_url, subdir: ""}
-  }
-  write-site $site $module.url {} $module.subdir false
+  let url = ($env.TOLA_FIXTURE_PUBLIC_URL? | default "https://github.com/tola-rs/modules.git")
+  let subdir = ($env.TOLA_FIXTURE_PUBLIC_SUBDIR? | default "resize-images")
+  write-site $site $url {} $subdir false
   let result = (run-tola $ctx $site $home "update" "" {PATH: $path})
   if ($result.exit_code != 0) { print $result.stderr; fail "no git" "public fetch failed" }
   if not (($site | path join "tola.lock") | path exists) { fail "no git" "public fetch wrote no lock" }
